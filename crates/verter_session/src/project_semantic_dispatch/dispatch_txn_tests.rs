@@ -221,6 +221,7 @@ fn flow_return_key() -> FlowReturnKey {
             policy: crate::semantic_query::FlowReturnPolicy {
                 nullability: crate::semantic_query::NullabilityPolicy::Strict,
                 no_implicit_any: true,
+                use_unknown_in_catch_variables: true,
             },
         },
         result_contract: super::super::flow_solve::flow_return_result_contract_id(),
@@ -746,6 +747,7 @@ fn nearest_relate_walks_past_flow_frames_to_the_nearest_relation_ancestor() {
             policy: crate::semantic_query::FlowReturnPolicy {
                 nullability: crate::semantic_query::NullabilityPolicy::Strict,
                 no_implicit_any: true,
+                use_unknown_in_catch_variables: true,
             },
         },
         result_contract: super::super::flow_solve::flow_return_result_contract_id(),
@@ -997,6 +999,7 @@ fn flow_demand_carriers_default_none_and_round_trip() {
             policy: FlowReturnPolicy {
                 nullability: NullabilityPolicy::Strict,
                 no_implicit_any: true,
+                use_unknown_in_catch_variables: true,
             },
         },
         demand: ReturnProjectionDemand::whole_return(),
@@ -1111,6 +1114,7 @@ fn zero_obligation_demand_never_converges_or_seals() {
             policy: FlowReturnPolicy {
                 nullability: NullabilityPolicy::Strict,
                 no_implicit_any: true,
+                use_unknown_in_catch_variables: true,
             },
         },
         demand: ReturnProjectionDemand::whole_return(),

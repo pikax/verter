@@ -891,6 +891,28 @@ fn four_policy_host() -> VerterHost {
     )
 }
 
+/// Four projects over the `catch`-variable axis, under the four root
+/// names of [`four_policy_host`]: `strict`; `strict` off; `strict` with
+/// `useUnknownInCatchVariables` off; `strict` off with
+/// `useUnknownInCatchVariables` on.
+fn catch_policy_host() -> VerterHost {
+    VerterHost::new_standalone_with_tsconfig_projects(
+        HostConfig::default(),
+        &[
+            (STRICT_ROOT, r#"{ "compilerOptions": { "strict": true } }"#),
+            (LOOSE_ROOT, r#"{ "compilerOptions": { "strict": false } }"#),
+            (
+                STRICT_IMPLICIT_ROOT,
+                r#"{ "compilerOptions": { "strict": true, "useUnknownInCatchVariables": false } }"#,
+            ),
+            (
+                LOOSE_IMPLICIT_ROOT,
+                r#"{ "compilerOptions": { "strict": false, "useUnknownInCatchVariables": true } }"#,
+            ),
+        ],
+    )
+}
+
 /// Every `(symbol, strict, off, strict without noImplicitAny, off without
 /// noImplicitAny)` row of `table` for `file` upserted into the four
 /// projects of [`four_policy_host`], as the mismatch list.
@@ -6997,6 +7019,1838 @@ fn uninitialized_locals_read_the_checkers_auto_type() {
         "uninitialized.ts",
         UNINITIALIZED_SOURCE,
         UNINITIALIZED_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+const ASSIGNMENT_VALUE_SOURCE: &str = r#"
+export function ternaryAssignLit(c: boolean) { let x: string | number = 1; return c ? (x = "s") : 0; }
+export function ternaryAssignBoth(c: boolean) { let x: string | number = 1; return c ? (x = "s") : (x = 2); }
+export function ternaryAssignAfter(c: boolean) { let x: string | number = 1; c ? (x = "s") : 0; return x; }
+export function ternaryAssignConst(c: boolean) { let x: string | number = 1; const v = c ? (x = "s") : 0; return v; }
+export function ternaryAssignLet(c: boolean) { let x: string | number = 1; let v = c ? (x = "s") : 0; return v; }
+export function ternaryAssignArr(c: boolean) { let x: string | number = 1; return [c ? (x = "s") : 0]; }
+export function assignRet() { let x: string | number = 1; return (x = "s"); }
+export function assignConst() { let x: string | number = 1; const v = (x = "s"); return v; }
+export function assignLet() { let x: string | number = 1; let v = (x = "s"); return v; }
+export function assignArr() { let x: string | number = 1; return [(x = "s")]; }
+export function assignObj() { let x: string | number = 1; return { v: (x = "s") }; }
+export function assignParen(c: boolean) { let x: string | number = 1; return c ? ((x = "s")) : 1; }
+export function assignAnd(c: boolean) { let x: string | number = 1; return c && (x = "s"); }
+export function assignOr(c: string) { let x: string | number = 1; return c || (x = "s"); }
+export function assignNullish(c: string | null) { let x: string | number = 1; return c ?? (x = "s"); }
+export function assignNum(c: boolean) { let x: number | string = "a"; return c ? (x = 1) : "z"; }
+export function assignDeclLit(c: boolean) { let x: "a" | "b" = "a"; return c ? (x = "b") : 0; }
+export function assignDeclLitConst(c: boolean) { let x: "a" | "b" = "a"; const v = c ? (x = "b") : 0; return v; }
+export function assignNested(c: boolean, d: boolean) { let x: string | number = 1; return c ? (d ? (x = "s") : 1) : 0; }
+export function assignSpread() { let x: string | number = 1; return [...[(x = "s")]]; }
+export function assignParam(p: string | number, c: boolean) { return c ? (p = "s") : 0; }
+export function c1() { let x: string | number = 1; const v = (x = "s"); return v; }
+export function c2() { let x: any = 1; const v = (x = "s"); return v; }
+export function c3() { let x: unknown = 1; const v = (x = "s"); return v; }
+export function c4() { let x: "s" | number = 1; const v = (x = "s"); return v; }
+export function c5() { let x = "a"; const v = (x = "s"); return v; }
+export function c6(c: boolean) { let x: string | number = 1; const v = c ? (x = "s") : "t"; return v; }
+export function c7(c: boolean) { let x: string | number = 1; const v = c ? (x = "s") : (x = "t"); return v; }
+export function c8() { let x: string | number = 1; const v = (x = "s"); const w = v; return [w]; }
+export function c9() { let x: string | number = 1; const v = (x = "s"); let w = v; return w; }
+export function c10() { let x: string | number = 1; const v = (x = "s"); return v === "s"; }
+export function c12() { let x: string | number = 1; const v = [(x = "s")] as const; return v; }
+export function c15(c: boolean) { let x: string | number = 1; return c ? (x = "s") : (x = "s"); }
+export function c16() { let x: string | number = 1; const v = x = "s"; return v; }
+export function c17() { let x; const v = (x = "s"); return v; }
+export function c18(c: boolean) { let x; return c ? (x = "s") : 0; }
+export function b1() { const v = "s"; return v; }
+export function b2(c: boolean) { const v = c ? "s" : 0; return v; }
+export function b3() { let x: string | number = 1; x = "s"; return x; }
+export function b4() { let x: string | number = 1; const v = (x = "s"); return [v]; }
+export function b5() { const v = ("s"); return v; }
+export function b6() { let x: string | number = 1; const v = (x = "s"); return { v }; }
+export function b7(c: boolean) { let x: string | number = 1; const v = c ? (x = "s") : 0; return [v]; }
+export function b8(c: boolean) { const v = c ? "s" : 0; return [v]; }
+export function b9() { let x: string | number = 1; const v = (x = "s"); const o = { a: v }; return o; }
+export function b11() { let x: string | number = 1; const v = (x = "s"); const w: "s" = v; return w; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`ASSIGNMENT_VALUE_SOURCE`], each the lane's spelling of the
+/// checker's TypeScript 7.0.2 answer (the checker's print follows each
+/// row's `//`).
+const ASSIGNMENT_VALUE_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "s" | 0
+    (
+        "ternaryAssignLit",
+        "\"s\" | 0",
+        "\"s\" | 0",
+        "\"s\" | 0",
+        "\"s\" | 0",
+    ),
+    // "s" | 2
+    (
+        "ternaryAssignBoth",
+        "\"s\" | 2",
+        "\"s\" | 2",
+        "\"s\" | 2",
+        "\"s\" | 2",
+    ),
+    // string | number
+    (
+        "ternaryAssignAfter",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // "s" | 0
+    (
+        "ternaryAssignConst",
+        "\"s\" | 0",
+        "\"s\" | 0",
+        "\"s\" | 0",
+        "\"s\" | 0",
+    ),
+    // string | number
+    (
+        "ternaryAssignLet",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // (string | number)[]
+    (
+        "ternaryAssignArr",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+    ),
+    // string
+    ("assignRet", "string", "string", "string", "string"),
+    // string
+    ("assignConst", "string", "string", "string", "string"),
+    // string
+    ("assignLet", "string", "string", "string", "string"),
+    // string[]
+    ("assignArr", "string[]", "string[]", "string[]", "string[]"),
+    // { v: string; }
+    (
+        "assignObj",
+        "{ v: string }",
+        "{ v: string }",
+        "{ v: string }",
+        "{ v: string }",
+    ),
+    // "s" | 1
+    (
+        "assignParen",
+        "\"s\" | 1",
+        "\"s\" | 1",
+        "\"s\" | 1",
+        "\"s\" | 1",
+    ),
+    // "s" | false / "" | "s" / "s" | false / "" | "s"
+    (
+        "assignAnd",
+        "\"s\" | false",
+        "\"\" | \"s\"",
+        "\"s\" | false",
+        "\"\" | \"s\"",
+    ),
+    // string
+    ("assignOr", "string", "string", "string", "string"),
+    // string
+    ("assignNullish", "string", "string", "string", "string"),
+    // "z" | 1
+    (
+        "assignNum",
+        "\"z\" | 1",
+        "\"z\" | 1",
+        "\"z\" | 1",
+        "\"z\" | 1",
+    ),
+    // "b" | 0
+    (
+        "assignDeclLit",
+        "\"b\" | 0",
+        "\"b\" | 0",
+        "\"b\" | 0",
+        "\"b\" | 0",
+    ),
+    // "b" | 0
+    (
+        "assignDeclLitConst",
+        "\"b\" | 0",
+        "\"b\" | 0",
+        "\"b\" | 0",
+        "\"b\" | 0",
+    ),
+    // "s" | 0 | 1
+    (
+        "assignNested",
+        "\"s\" | 0 | 1",
+        "\"s\" | 0 | 1",
+        "\"s\" | 0 | 1",
+        "\"s\" | 0 | 1",
+    ),
+    // string[]
+    (
+        "assignSpread",
+        "string[]",
+        "string[]",
+        "string[]",
+        "string[]",
+    ),
+    // "s" | 0
+    (
+        "assignParam",
+        "\"s\" | 0",
+        "\"s\" | 0",
+        "\"s\" | 0",
+        "\"s\" | 0",
+    ),
+    // string
+    ("c1", "string", "string", "string", "string"),
+    // string
+    ("c2", "string", "string", "string", "string"),
+    // string
+    ("c3", "string", "string", "string", "string"),
+    // string
+    ("c4", "string", "string", "string", "string"),
+    // string
+    ("c5", "string", "string", "string", "string"),
+    // "s" | "t"
+    (
+        "c6",
+        "\"s\" | \"t\"",
+        "\"s\" | \"t\"",
+        "\"s\" | \"t\"",
+        "\"s\" | \"t\"",
+    ),
+    // "s" | "t"
+    (
+        "c7",
+        "\"s\" | \"t\"",
+        "\"s\" | \"t\"",
+        "\"s\" | \"t\"",
+        "\"s\" | \"t\"",
+    ),
+    // string[]
+    ("c8", "string[]", "string[]", "string[]", "string[]"),
+    // string
+    ("c9", "string", "string", "string", "string"),
+    // boolean
+    ("c10", "boolean", "boolean", "boolean", "boolean"),
+    // readonly ["s"]
+    (
+        "c12",
+        "readonly [\"s\"]",
+        "readonly [\"s\"]",
+        "readonly [\"s\"]",
+        "readonly [\"s\"]",
+    ),
+    // string
+    ("c15", "string", "string", "string", "string"),
+    // string
+    ("c16", "string", "string", "string", "string"),
+    // string
+    ("c17", "string", "string", "string", "string"),
+    // "s" | 0
+    ("c18", "\"s\" | 0", "\"s\" | 0", "\"s\" | 0", "\"s\" | 0"),
+    // string
+    ("b1", "string", "string", "string", "string"),
+    // "s" | 0
+    ("b2", "\"s\" | 0", "\"s\" | 0", "\"s\" | 0", "\"s\" | 0"),
+    // string
+    ("b3", "string", "string", "string", "string"),
+    // string[]
+    ("b4", "string[]", "string[]", "string[]", "string[]"),
+    // string
+    ("b5", "string", "string", "string", "string"),
+    // { v: string; }
+    (
+        "b6",
+        "{ v: string }",
+        "{ v: string }",
+        "{ v: string }",
+        "{ v: string }",
+    ),
+    // (string | number)[]
+    (
+        "b7",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+    ),
+    // (string | number)[]
+    (
+        "b8",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+    ),
+    // { a: string; }
+    (
+        "b9",
+        "{ a: string }",
+        "{ a: string }",
+        "{ a: string }",
+        "{ a: string }",
+    ),
+    // "s"
+    ("b11", "\"s\"", "\"s\"", "\"s\"", "\"s\""),
+];
+
+const CONDITION_WRITE_SOURCE: &str = r#"
+export function andWriteIf(c: boolean) { let x: string | number = 1; if (c && (x = "s")) { return x; } return x; }
+export function andWriteIfElse(c: boolean) { let x: string | number = 1; if (c && (x = "s")) { return 0; } return x; }
+export function orWriteIf(c: boolean) { let x: string | number = 1; if (c || (x = "s")) { return x; } return true; }
+export function orWriteIfElse(c: boolean) { let x: string | number = 1; if (c || (x = "s")) { return 0; } return x; }
+export function plainWriteIf() { let x: string | number = 1; if ((x = "s")) { return x; } return x; }
+export function plainWriteIfEmpty() { let x: string | number = 1; if ((x = "")) { return x; } return x; }
+export function writeIfAfter(c: boolean) { let x: string | number = 1; if (c && (x = "s")) { } return x; }
+export function writeCompare(c: boolean) { let x: string | number = 1; if ((x = "s") === "s") { return x; } return x; }
+export function writeNotIf(c: boolean) { let x: string | number = 1; if (!(c && (x = "s"))) { return x; } return 0; }
+export function writeTypeofIf(c: boolean) { let x: string | number = 1; if (typeof (x = "s") === "string") { return x; } return 0; }
+export function nestedAndOr(c: boolean, d: boolean) { let x: string | number | boolean = 1; if ((c && (x = "s")) || (d && (x = true))) { return x; } return x; }
+export function andAssign(c: boolean) { let x: string | number = 1; let d = c; d &&= (x = "s") === "s"; return x; }
+export function orAssignOther(c: boolean) { let x: string | number = 1; let d = c; d ||= (x = "s") === "s"; return x; }
+export function nullishAssignWrite(c: string | undefined) { let x: string | number = 1; let d = c; d ??= (x = "s"); return x; }
+export function compareStmt() { let x: string | number = 1; (x = "s") === "s"; return x; }
+export function compareInAnd(c: boolean) { let x: string | number = 1; c && (x = "s") === "s"; return x; }
+export function plainOther() { let x: string | number = 1; let d: unknown; d = (x = "s"); return x; }
+export function plainOtherCmp() { let x: string | number = 1; let d: unknown; d = (x = "s") === "s"; return x; }
+export function nullishOther(c: string | undefined) { let x: string | number = 1; let d = c; d ??= (x = "s"); return x; }
+export function andOtherCmp(c: boolean) { let x: string | number = 1; let d = c; d &&= (x = "s") === "s"; return x; }
+export function andOtherPlain(c: boolean) { let x: string | number = 1; let d: unknown = c; d &&= (x = "s"); return x; }
+export function andOtherRet(c: boolean) { let x: string | number = 1; let d: unknown = c; d &&= (x = "s"); return d; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`CONDITION_WRITE_SOURCE`], each the lane's spelling of the
+/// checker's TypeScript 7.0.2 answer (the checker's print follows each
+/// row's `//`).
+const CONDITION_WRITE_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string | number
+    (
+        "andWriteIf",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number
+    (
+        "andWriteIfElse",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number | true
+    (
+        "orWriteIf",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | 0
+    (
+        "orWriteIfElse",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+    ),
+    // string
+    ("plainWriteIf", "string", "string", "string", "string"),
+    // string
+    ("plainWriteIfEmpty", "string", "string", "string", "string"),
+    // string | number
+    (
+        "writeIfAfter",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string
+    ("writeCompare", "string", "string", "string", "string"),
+    // string | number
+    (
+        "writeNotIf",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | 0
+    (
+        "writeTypeofIf",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+    ),
+    // string | number | true
+    (
+        "nestedAndOr",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | number
+    (
+        "andAssign",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number
+    (
+        "orAssignOther",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number
+    (
+        "nullishAssignWrite",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string
+    ("compareStmt", "string", "string", "string", "string"),
+    // string | number
+    (
+        "compareInAnd",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string
+    ("plainOther", "string", "string", "string", "string"),
+    // string
+    ("plainOtherCmp", "string", "string", "string", "string"),
+    // string | number
+    (
+        "nullishOther",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number
+    (
+        "andOtherCmp",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number
+    (
+        "andOtherPlain",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // unknown
+    ("andOtherRet", "unknown", "unknown", "unknown", "unknown"),
+];
+
+const ELEMENT_KEY_SOURCE: &str = r#"
+type A = { k: "a" | "b"; j: "a" | "b"; 0: "a" | "b" };
+type R = Record<string, string | number>;
+declare function key(): "k";
+export function recConstKey(r: R) { const k = "x"; r[k] = 1; return r[k]; }
+export function aParamKeyLit(a: A, k: "k") { a[k] = "b"; return a[k]; }
+export function aParamKeyUnion(a: A, k: "k" | "j") { a[k] = "b"; return a[k]; }
+export function aParamKeyWritten(a: A, k: "k") { k = "k"; a[k] = "b"; return a[k]; }
+export function aLetKey(a: A) { let k: "k" = "k"; a[k] = "b"; return a[k]; }
+export function aLetKeyWrittenAfter(a: A) { let k: "k" = "k"; a[k] = "b"; k = "k"; return a[k]; }
+export function aConstCallKey(a: A) { const k = key(); a[k] = "b"; return a[k]; }
+export function aDotThenKey(a: A, k: "k") { a.k = "b"; return a[k]; }
+export function aKeyThenOther(a: A, k: "k" | "j") { a.k = "b"; a[k] = "a"; return a.k; }
+export function aNumKey(a: A, i: 0) { a[i] = "b"; return a[i]; }
+export function aParamKeyInvalidates(a: A, k: "k" | "j") { a.k = "b"; a[k] = "a"; return a.j; }
+export function arrIdxWrite(xs: (string | number)[], i: number) { xs[i] = 1; return xs[i]; }
+export function arrIdxWriteLit(xs: (string | number)[], i: number) { xs[0] = 1; xs[i] = "s"; return xs[0]; }
+export function aKeyWrittenBetween(a: A, k: "k" | "j", j: "k" | "j") { a[k] = "b"; k = j; return a[k]; }
+export function aDotThenParamKeyRead(a: A, k: "k") { a.k = "b"; const v = a[k]; return v; }
+export function aConstKeyThenDot(a: A) { const k = "k"; a.k = "b"; return a[k]; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`ELEMENT_KEY_SOURCE`], each the lane's spelling of the
+/// checker's TypeScript 7.0.2 answer (the checker's print follows each
+/// row's `//`).
+const ELEMENT_KEY_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number
+    ("recConstKey", "number", "number", "number", "number"),
+    // "b"
+    ("aParamKeyLit", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "b"
+    ("aParamKeyUnion", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "a" | "b"
+    (
+        "aParamKeyWritten",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+    ),
+    // "b"
+    ("aLetKey", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "a" | "b"
+    (
+        "aLetKeyWrittenAfter",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+    ),
+    // "b"
+    ("aConstCallKey", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "a" | "b"
+    (
+        "aDotThenKey",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+    ),
+    // "b"
+    ("aKeyThenOther", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "b"
+    ("aNumKey", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "a" | "b"
+    (
+        "aParamKeyInvalidates",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+    ),
+    // number
+    ("arrIdxWrite", "number", "number", "number", "number"),
+    // number
+    ("arrIdxWriteLit", "number", "number", "number", "number"),
+    // "a" | "b"
+    (
+        "aKeyWrittenBetween",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+    ),
+    // "a" | "b"
+    (
+        "aDotThenParamKeyRead",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+    ),
+    // "b"
+    ("aConstKeyThenDot", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+];
+
+const STATEMENT_CALL_SOURCE: &str = r#"
+type O = { x: 0 | 1; y: "a" | "b" };
+declare function assertIsB(v: unknown): asserts v is "b";
+declare const obj: { m(): void; n(v: unknown): asserts v is "b" };
+export function memberMethodCall(o: O & { m(): void }) { o.y = "b"; o.m(); return o.y; }
+export function methodCallNoWrite(o: O & { m(): void }) { o.m(); return o.y; }
+export function methodCallParamRead(o: O & { m(): void }, p: string | number) { o.m(); return p; }
+export function memberClosureCall(o: O) { const f = () => {}; o.y = "b"; f(); return o.y; }
+export function closureCallNoWrite(o: O) { const f = () => {}; f(); return o.y; }
+export function closureWritesLocal(o: O) { let z: string | number = 1; const f = () => { z = "s"; }; f(); return z; }
+export function closureWritesMember(o: O) { const f = () => { o.y = "a"; }; o.y = "b"; f(); return o.y; }
+export function methodCallOnOther(o: O, q: { m(): void }) { o.y = "b"; q.m(); return o.y; }
+export function globalMethodCall(o: O) { o.y = "b"; obj.m(); return o.y; }
+export function assertsFree(o: O) { assertIsB(o.y); return o.y; }
+export function methodCallOnLocal(o: O) { const q = { m() {} }; o.y = "b"; q.m(); return o.y; }
+export function methodReturnValueDiscard(o: O & { m(): number }) { o.y = "b"; o.m(); return o.y; }
+export function memberNarrowGuardThenCall(o: O & { m(): void }) { if (o.y === "b") { o.m(); return o.y; } return "z"; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`STATEMENT_CALL_SOURCE`], each the lane's spelling of the
+/// checker's TypeScript 7.0.2 answer (the checker's print follows each
+/// row's `//`).
+const STATEMENT_CALL_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "b"
+    ("memberMethodCall", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "a" | "b"
+    (
+        "methodCallNoWrite",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+    ),
+    // string | number
+    (
+        "methodCallParamRead",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // "b"
+    ("memberClosureCall", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "a" | "b"
+    (
+        "closureCallNoWrite",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+    ),
+    // number
+    ("closureWritesLocal", "number", "number", "number", "number"),
+    // "b"
+    ("closureWritesMember", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "b"
+    ("methodCallOnOther", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "b"
+    ("globalMethodCall", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "b"
+    ("assertsFree", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "b"
+    ("methodCallOnLocal", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "b"
+    (
+        "methodReturnValueDiscard",
+        "\"b\"",
+        "\"b\"",
+        "\"b\"",
+        "\"b\"",
+    ),
+    // "b" | "z"
+    (
+        "memberNarrowGuardThenCall",
+        "\"b\" | \"z\"",
+        "\"b\" | \"z\"",
+        "\"b\" | \"z\"",
+        "\"b\" | \"z\"",
+    ),
+];
+
+const CORRELATED_SOURCE: &str = r#"
+type U = { kind: "a"; v: string } | { kind: "b"; v: number };
+type T = ["a", string] | ["b", number];
+export function objConst(o: U) { const { kind, v } = o; if (kind === "a") return v; return true; }
+export function objConstElse(o: U) { const { kind, v } = o; if (kind === "a") return 0; return v; }
+export function objLet(o: U) { let { kind, v } = o; if (kind === "a") return v; return true; }
+export function objLetAssigned(o: U) { let { kind, v } = o; if (kind === "a") { return v; } kind = "b"; return true; }
+export function objConstParamReassigned(o: U, p: U) { const { kind, v } = o; o = p; if (kind === "a") return v; return true; }
+export function arrConst(t: T) { const [k, v] = t; if (k === "a") return v; return true; }
+export function arrLet(t: T) { let [k, v] = t; if (k === "a") return v; return true; }
+export function paramArrDestr([k, v]: T) { if (k === "a") return v; return true; }
+export function objTypeof(o: U) { const { kind, v } = o; if (typeof v === "string") return kind; return true; }
+export function objNe(o: U) { const { kind, v } = o; if (kind !== "a") return v; return true; }
+export function objRename(o: U) { const { kind: k, v: w } = o; if (k === "a") return w; return true; }
+export function objNested(o: { p: U }) { const { p: { kind, v } } = o; if (kind === "a") return v; return true; }
+export function objDefault(o: U) { const { kind, v = 5 } = o; if (kind === "a") return v; return true; }
+export function objRest(o: U) { const { kind, ...rest } = o; if (kind === "a") return rest; return true; }
+export function objVar(o: U) { var { kind, v } = o; if (kind === "a") return v; return true; }
+export function objTruthy(o: { ok: true; v: string } | { ok: false; v: number }) { const { ok, v } = o; if (ok) return v; return true; }
+export function objNonUnion(o: { kind: "a" | "b"; v: string | number }) { const { kind, v } = o; if (kind === "a") return v; return true; }
+export function objFromCall(f: () => U) { const { kind, v } = f(); if (kind === "a") return v; return true; }
+export function forOfCorr(xs: U[]) { for (const { kind, v } of xs) { if (kind === "a") return v; } return true; }
+type M = { k1: "x"; k2: "p"; v: 1 } | { k1: "y"; k2: "q"; v: 2 } | { k1: "x"; k2: "q"; v: 3 };
+type B = { ok: true; v: string } | { ok: false; v: number };
+type N = { kind: "s"; v: string } | { kind: 1; v: number };
+export function orGuard(o: U, c: boolean) { const { kind, v } = o; if (c || kind === "a") return v; return true; }
+export function andGuard(o: U, c: boolean) { const { kind, v } = o; if (c && kind === "a") return v; return true; }
+export function earlyReturn(o: U) { const { kind, v } = o; if (kind === "b") return true; return v; }
+export function multiDisc(o: M) { const { k1, k2, v } = o; if (k1 === "x" && k2 === "p") return v; return 0; }
+export function multiDiscJoin(o: M, c: boolean) { const { k1, k2, v } = o; if (c) { if (k1 !== "x" || k2 !== "p") return 0; } else { if (k1 !== "y") return 0; } return v; }
+export function crossDisc(o: M) { const { k1, k2 } = o; if (k2 === "p") return k1; return 0; }
+export function truthyDisc(o: B) { const { ok, v } = o; if (!ok) return v; return 0; }
+export function typeofDisc(o: N) { const { kind, v } = o; if (typeof kind === "string") return v; return true; }
+export function sourceAlias(o: U) { const { kind } = o; if (kind === "a") return o.v; return true; }
+export function sourceAliasMember(o: { u: U }) { const { kind } = o.u; if (kind === "a") return o.u.v; return true; }
+export function sourceAliasNonDisc(o: U) { const { v } = o; if (typeof v === "string") return o.kind; return true; }
+export function sourceAliasAnnotated(o: U) { const { kind }: U = o; if (kind === "a") return o.v; return true; }
+export function sourceAliasLet(o: U) { let { kind } = o; if (kind === "a") return o.v; return true; }
+export function reassignedSource(o: U, p: U) { const { kind } = o; o = p; if (kind === "a") return o.v; return true; }
+export function narrowedElemThenDisc(o: { kind: "a"; v: string | null } | { kind: "b"; v: number }) { const { kind, v } = o; if (v !== null && kind === "a") return v; return true; }
+export function nestedCorr(o: { p: U }) { const { p: { kind, v } } = o; if (kind === "a") return v; return true; }
+export function loopCorr(xs: U[]) { for (const { kind, v } of xs) { if (kind === "b") continue; return v; } return true; }
+export function inElem(o: { kind: "a"; v: { x: 1 } } | { kind: "b"; v: { y: 2 } }) { const { kind, v } = o; if ("x" in v) return kind; return true; }
+export function paramArrUnassigned([k, v]: ["a", string] | ["b", number]) { if (k === "a") return v; return true; }
+export function paramArrAssigned([k, v]: ["a", string] | ["b", number]) { if (k === "a") { return v; } v = 1; return true; }
+export function paramObjNested({ p: { kind, v } }: { p: U }) { if (kind === "a") return v; return true; }
+export function discLoose(o: U) { const { kind, v } = o; if (kind == "a") return v; return true; }
+export function discWithDefaultSibling(o: U) { const { kind = "a", v } = o; if (kind === "a") return v; return true; }
+export function singleElem(o: U) { const { kind } = o; if (kind === "a") return kind; return true; }
+export function tupDisc(t: T) { if (t[0] === "a") return t[1]; return true; }
+export function tupDiscNe(t: T) { if (t[0] !== "a") return t[1]; return true; }
+export function arrConstNe(t: T) { const [k, v] = t; if (k !== "a") return v; return true; }
+export function arrConstK(t: T) { const [k, v] = t; if (v === 1) return k; return true; }
+export function typeofMember(o: N) { if (typeof o.kind === "string") return o.v; return true; }
+export function typeofMemberNe(o: N) { if (typeof o.kind !== "string") return o.v; return true; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`CORRELATED_SOURCE`], each the lane's spelling of the
+/// checker's TypeScript 7.0.2 answer (the checker's print follows each
+/// row's `//`).
+const CORRELATED_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string | true
+    (
+        "objConst",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // number
+    ("objConstElse", "number", "number", "number", "number"),
+    // string | number | true
+    (
+        "objLet",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | number | true
+    (
+        "objLetAssigned",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | true
+    (
+        "objConstParamReassigned",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true
+    (
+        "arrConst",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | number | true
+    (
+        "arrLet",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | true
+    (
+        "paramArrDestr",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // "a" | "b" | true
+    (
+        "objTypeof",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+    ),
+    // number | true
+    (
+        "objNe",
+        "number | true",
+        "number | true",
+        "number | true",
+        "number | true",
+    ),
+    // string | true
+    (
+        "objRename",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true
+    (
+        "objNested",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | number | true
+    (
+        "objDefault",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // true | { v: string; } | { v: number; }
+    (
+        "objRest",
+        "true | { v: number } | { v: string }",
+        "true | { v: number } | { v: string }",
+        "true | { v: number } | { v: string }",
+        "true | { v: number } | { v: string }",
+    ),
+    // string | number | true
+    (
+        "objVar",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | true
+    (
+        "objTruthy",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | number | true
+    (
+        "objNonUnion",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | true
+    (
+        "objFromCall",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true
+    (
+        "forOfCorr",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | number | true
+    (
+        "orGuard",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | true
+    (
+        "andGuard",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true
+    (
+        "earlyReturn",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // 0 | 1
+    ("multiDisc", "0 | 1", "0 | 1", "0 | 1", "0 | 1"),
+    // 0 | 1 | 2
+    (
+        "multiDiscJoin",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+    ),
+    // "x" | 0
+    (
+        "crossDisc",
+        "\"x\" | 0",
+        "\"x\" | 0",
+        "\"x\" | 0",
+        "\"x\" | 0",
+    ),
+    // number / string | number / number / string | number
+    (
+        "truthyDisc",
+        "number",
+        "number | string",
+        "number",
+        "number | string",
+    ),
+    // string | true
+    (
+        "typeofDisc",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true
+    (
+        "sourceAlias",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true
+    (
+        "sourceAliasMember",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // "a" | "b" | true
+    (
+        "sourceAliasNonDisc",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+    ),
+    // string | number | true
+    (
+        "sourceAliasAnnotated",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | number | true
+    (
+        "sourceAliasLet",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | true
+    (
+        "reassignedSource",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true
+    (
+        "narrowedElemThenDisc",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true
+    (
+        "nestedCorr",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true
+    (
+        "loopCorr",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // "a" | "b" | true
+    (
+        "inElem",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+    ),
+    // string | true
+    (
+        "paramArrUnassigned",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | number | true
+    (
+        "paramArrAssigned",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | true
+    (
+        "paramObjNested",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true
+    (
+        "discLoose",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | number | true
+    (
+        "discWithDefaultSibling",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // "a" | true
+    (
+        "singleElem",
+        "\"a\" | true",
+        "\"a\" | true",
+        "\"a\" | true",
+        "\"a\" | true",
+    ),
+    // string | true
+    (
+        "tupDisc",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // number | true
+    (
+        "tupDiscNe",
+        "number | true",
+        "number | true",
+        "number | true",
+        "number | true",
+    ),
+    // number | true
+    (
+        "arrConstNe",
+        "number | true",
+        "number | true",
+        "number | true",
+        "number | true",
+    ),
+    // "a" | "b" | true
+    (
+        "arrConstK",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+    ),
+    // string | true
+    (
+        "typeofMember",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // number | true
+    (
+        "typeofMemberNe",
+        "number | true",
+        "number | true",
+        "number | true",
+        "number | true",
+    ),
+];
+
+const RETURN_PREDICATE_SOURCE: &str = r#"
+export function elemRoArr(xs: readonly boolean[], i: number) { return xs[i]; }
+export function arrIdx(xs: boolean[], i: number) { return xs[i]; }
+export function elemLit(xs: boolean[]) { return xs[0]; }
+export function tupleElem(t: [boolean, string]) { return t[0]; }
+export function paramBool(b: boolean) { return b; }
+export function paramBoolNot(b: boolean) { return !b; }
+export function andElem(xs: boolean[], x: string | number) { return typeof x === "string" && xs[0]; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`RETURN_PREDICATE_SOURCE`], each the lane's spelling of the
+/// checker's TypeScript 7.0.2 answer (the checker's print follows each
+/// row's `//`).
+const RETURN_PREDICATE_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // boolean
+    ("elemRoArr", "boolean", "boolean", "boolean", "boolean"),
+    // boolean
+    ("arrIdx", "boolean", "boolean", "boolean", "boolean"),
+    // boolean
+    ("elemLit", "boolean", "boolean", "boolean", "boolean"),
+    // boolean
+    ("tupleElem", "boolean", "boolean", "boolean", "boolean"),
+    // boolean
+    ("paramBool", "boolean", "boolean", "boolean", "boolean"),
+    // boolean
+    ("paramBoolNot", "boolean", "boolean", "boolean", "boolean"),
+    // boolean
+    ("andElem", "boolean", "boolean", "boolean", "boolean"),
+];
+
+const CATCH_SOURCE: &str = r#"
+export function catchRet() { try { return 1; } catch (e) { return e; } }
+export function catchTypeof() { try { return 1; } catch (e) { if (typeof e === "string") return e; return 0; } }
+export function catchAnyAnn() { try { return 1; } catch (e: any) { return e; } }
+export function catchUnknownAnn() { try { return 1; } catch (e: unknown) { return e; } }
+export function catchAssign() { try { return 1; } catch (e) { e = "s"; return e; } }
+export function catchNoBinding() { try { return 1; } catch { return "c"; } }
+export function catchClosure() { try { return 1; } catch (e) { const f = () => e; return f(); } }
+export function catchTruthy() { try { return 1; } catch (e) { if (e) return e; return 0; } }
+export function catchEq() { try { return 1; } catch (e) { if (e === "x") return e; return 0; } }
+"#;
+
+/// `(symbol, strict, strict off, strict without useUnknownInCatchVariables,
+/// strict off with useUnknownInCatchVariables)` for [`CATCH_SOURCE`] in
+/// the projects of [`catch_policy_host`], each the lane's spelling of the
+/// checker's TypeScript 7.0.2 answer (the checker's print follows each
+/// row's `//`).
+const CATCH_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // unknown / any / any / unknown
+    ("catchRet", "unknown", "any", "any", "unknown"),
+    // string | 0 | 1
+    (
+        "catchTypeof",
+        "0 | 1 | string",
+        "0 | 1 | string",
+        "0 | 1 | string",
+        "0 | 1 | string",
+    ),
+    // any
+    ("catchAnyAnn", "any", "any", "any", "any"),
+    // unknown
+    (
+        "catchUnknownAnn",
+        "unknown",
+        "unknown",
+        "unknown",
+        "unknown",
+    ),
+    // unknown / any / any / unknown
+    ("catchAssign", "unknown", "any", "any", "unknown"),
+    // "c" | 1
+    (
+        "catchNoBinding",
+        "\"c\" | 1",
+        "\"c\" | 1",
+        "\"c\" | 1",
+        "\"c\" | 1",
+    ),
+    // unknown / any / any / unknown
+    ("catchClosure", "unknown", "any", "any", "unknown"),
+    // {} / any / any / unknown
+    ("catchTruthy", "{  }", "any", "any", "unknown"),
+    // "x" | 0 | 1 / any / any / "x" | 0 | 1
+    ("catchEq", "\"x\" | 0 | 1", "any", "any", "\"x\" | 0 | 1"),
+];
+
+/// The value of a value-position `=` is its right-hand side's type, fresh
+/// literals included (`checkAssignmentOperator` returns `rightType`), never
+/// the target's assignment-reduced type: `c ? (x = "s") : 0` is `"s" | 0`
+/// where the declared `string | number` target reads `string`, a lone
+/// `return (x = "s")` widens to `string`, a `let` or a mutable slot widens
+/// the fresh literal, and `as const` keeps it.
+#[test]
+fn assignment_values_are_their_right_hand_side() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "assignment-values.ts",
+        ASSIGNMENT_VALUE_SOURCE,
+        ASSIGNMENT_VALUE_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// A write inside an `if` test runs on the checker's flow graph: the test's
+/// operands thread as a condition, each edge carrying the writes and
+/// narrowings of the operands it ran through, into the consequent (every
+/// true edge) and the alternate (every false edge); an operand of a
+/// comparison, a `typeof` or a `!` runs before it. The right-hand side of
+/// a write no demanded read selects still runs its own writes
+/// (`d &&= (x = "s") === "s"`).
+#[test]
+fn writes_in_conditions_follow_the_checkers_flow_graph() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "condition-writes.ts",
+        CONDITION_WRITE_SOURCE,
+        CONDITION_WRITE_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// An element access `o[k]` whose key reads a binding is the reference the
+/// checker's `isMatchingReference` names: a `const` key of one literal type
+/// is the member it spells (`o.k`), a key binding no write reaches is one
+/// reference wherever it reads that binding (never `o.k`, whatever its
+/// literal type), and a key some write reaches matches no reference. A
+/// write to it narrows exactly that reference, reduced against the indexed
+/// access of the object's type.
+#[test]
+fn element_access_references_follow_the_checkers_key_identity() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "element-keys.ts",
+        ELEMENT_KEY_SOURCE,
+        ELEMENT_KEY_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// A statement call's effects signature is the checker's
+/// `getEffectsSignature` over `getTypeOfDottedName`: a callee rooted at a
+/// parameter or local without an annotation has no explicit type, and an
+/// annotated or module-level dotted callee whose signatures neither assert
+/// nor return `never` leaves every narrowing standing — a member write's
+/// included.
+#[test]
+fn statement_calls_keep_narrowings_their_callee_cannot_change() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "statement-calls.ts",
+        STATEMENT_CALL_SOURCE,
+        STATEMENT_CALL_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Destructured elements narrow as the checker's destructured
+/// discriminated unions (`getNarrowedTypeOfSymbol`): in a `const`
+/// declaration, a `const` loop pattern or a parameter pattern none of whose
+/// bindings is assigned, a pattern of two or more elements over a union
+/// correlates its elements that have no default and no rest spread — a
+/// test of a discriminant element narrows the pattern's parent and every
+/// sibling reads its member of it. A top-level element of an unannotated
+/// `const` destructuring of a narrowable reference aliases that
+/// reference's member (`const { kind } = o` narrows `o`). A `typeof` test
+/// of a discriminant member narrows its parent.
+#[test]
+fn destructured_discriminants_narrow_their_siblings_and_source() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(&host, "correlated.ts", CORRELATED_SOURCE, CORRELATED_TABLE);
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// A `catch` variable's type is its annotation, else `unknown` under
+/// `useUnknownInCatchVariables` (which `strict` sets) and `any` without
+/// it; an assignment to it narrows nothing, and guards narrow it as any
+/// binding.
+#[test]
+fn catch_variables_follow_use_unknown_in_catch_variables() {
+    let host = catch_policy_host();
+    let mismatches = matrix_mismatches(&host, "catch.ts", CATCH_SOURCE, CATCH_TABLE);
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// A `boolean` return infers a type predicate only when its test narrows a
+/// parameter; an element access by a key that names no member (`xs[i]`)
+/// narrows no parameter, so it infers none.
+#[test]
+fn element_reads_infer_no_return_predicate() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "return-predicates.ts",
+        RETURN_PREDICATE_SOURCE,
+        RETURN_PREDICATE_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Correlated destructured narrowings the lane does not carry degrade
+/// rather than publish the unnarrowed sibling. Measured on TypeScript
+/// 7.0.2, every project: `closureRead` is `string | true` (a closure an
+/// arm creates reads the sibling the test narrowed) and `objSwitch` is
+/// `string | true` (a `switch` over a discriminant element narrows its
+/// siblings); the lane answers both with the typed gap.
+#[test]
+fn correlated_narrowings_the_lane_does_not_carry_degrade() {
+    let host = four_policy_host();
+    let source = "type U = { kind: \"a\"; v: string } | { kind: \"b\"; v: number };\n\
+        export function closureRead(o: U) { const { kind, v } = o; if (kind === \"a\") { const f = () => v; return f(); } return true; }\n\
+        export function objSwitch(o: U) { const { kind, v } = o; switch (kind) { case \"a\": return v; } return true; }\n";
+    for root in [
+        STRICT_ROOT,
+        LOOSE_ROOT,
+        STRICT_IMPLICIT_ROOT,
+        LOOSE_IMPLICIT_ROOT,
+    ] {
+        let canonical = format!("{root}/correlated-gaps.ts");
+        upsert(&host, &canonical, source);
+        for (symbol, gap) in [
+            ("closureRead", "ClosureCapture"),
+            ("objSwitch", "GuardNarrowing"),
+        ] {
+            let observed = observe(&host, &canonical, symbol);
+            assert!(
+                observed.ends_with(&format!("[degraded Some(FlowGap({gap}))]")),
+                "{canonical} `{symbol}`: {observed}"
+            );
+        }
+    }
+}
+
+/// The object rest of a parameter with a method member keeps it a METHOD
+/// (TypeScript 7.0.2 prints `{ m(x: string): void; }`): the rest's member
+/// carries the source member's method kind and signature, as the whole
+/// parameter publishes. This suite's spelling prints every method member
+/// as a property, the whole parameter's included, so only the print
+/// differs from the checker's.
+#[test]
+fn object_rest_keeps_a_method_member_a_method() {
+    let host = four_policy_host();
+    let canonical = format!("{STRICT_ROOT}/rest-method.ts");
+    upsert(
+        &host,
+        &canonical,
+        "export function objRestMethod(o: { a: number; m(x: string): void }) { const { a, ...r } = o; return r; }\n\
+         export function objWhole(o: { a: number; m(x: string): void }) { return o; }\n",
+    );
+    let graph = host.project_type_store().semantic_graph();
+    let member = |symbol: &str| {
+        let carrier = host.get_flow_return_type_with_audit(
+            &identity(&canonical, symbol),
+            ReturnProjectionDemand::whole_return(),
+        );
+        let result = carrier.as_result().expect("a flow-return value");
+        assert!(
+            result.degradation().is_none(),
+            "{symbol}: {:?}",
+            result.degradation()
+        );
+        let data = graph.node_data(result.return_type()).expect("a live node");
+        let SemanticNodeData::Object(surface) = data.as_ref() else {
+            panic!("{symbol}: an object return");
+        };
+        surface
+            .positive_members()
+            .iter()
+            .find(|member| member.key.as_string() == Some("m"))
+            .map(|member| (member.method_kind, answer_text(&host, member.value)))
+            .expect("the member `m`")
+    };
+    let rest = member("objRestMethod");
+    assert!(rest.0.is_some(), "the rest's `m` is a method: {rest:?}");
+    assert_eq!(rest, member("objWhole"));
+}
+
+const CORRELATED_INSTANCEOF_SOURCE: &str = r#"
+class K { k = 1; }
+export function instanceofElem(o: { kind: "a"; v: K } | { kind: "b"; v: string }) { const { kind, v } = o; if (v instanceof K) return kind; return true; }
+export function instMember(o: { v: K; k: 1 } | { v: string; k: 2 }) { if (o.v instanceof K) return o.k; return true; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`CORRELATED_INSTANCEOF_SOURCE`], each the lane's spelling of the
+/// checker's TypeScript 7.0.2 answer (the checker's print follows each
+/// row's `//`).
+const CORRELATED_INSTANCEOF_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "a" | "b" | true
+    (
+        "instanceofElem",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+        "\"a\" | \"b\" | true",
+    ),
+    // 1 | 2 | true
+    (
+        "instMember",
+        "1 | 2 | true",
+        "1 | 2 | true",
+        "1 | 2 | true",
+        "1 | 2 | true",
+    ),
+];
+
+const LITERAL_ROOT_SOURCE: &str = r#"
+export function litProp() { return ({ a: 1 }).a; }
+export function litPropStr() { return ({ a: "s", b: 2 }).a; }
+export function litGetter() { return ({ get v() { return 1; } }).v; }
+export function litGetterAnn() { return ({ get v(): string { return "s"; } }).v; }
+export function litMethodCall() { return ({ m() { return true; } }).m(); }
+export function litParam(p: string) { return ({ a: p }).a; }
+export function litNested() { return ({ o: { x: 1 } }).o.x; }
+export function litSpread(o: { a: boolean }) { return ({ ...o, b: 1 }).a; }
+export function litOtherMember() { return ({ a: 1, b: "s" }).b; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`LITERAL_ROOT_SOURCE`], each the lane's spelling of the
+/// checker's TypeScript 7.0.2 answer (the checker's print follows each
+/// row's `//`).
+const LITERAL_ROOT_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number
+    ("litProp", "number", "number", "number", "number"),
+    // string
+    ("litPropStr", "string", "string", "string", "string"),
+    // number
+    ("litGetter", "number", "number", "number", "number"),
+    // string
+    ("litGetterAnn", "string", "string", "string", "string"),
+    // boolean
+    ("litMethodCall", "boolean", "boolean", "boolean", "boolean"),
+    // string
+    ("litParam", "string", "string", "string", "string"),
+    // number
+    ("litNested", "number", "number", "number", "number"),
+    // boolean
+    ("litSpread", "boolean", "boolean", "boolean", "boolean"),
+    // string
+    ("litOtherMember", "string", "string", "string", "string"),
+];
+
+const OPEN_ASSIGNMENT_VALUE_SOURCE: &str = r#"
+export function assignChain() { let x: string | number = 1; let y: string | number = 2; return (x = y = "s"); }
+export function assignCompound() { let x = 1; return (x += 2); }
+export function assignCompoundStr() { let x = "a"; return (x += "b"); }
+export function assignLogical(c: string | number) { let x = c; return (x ||= "s"); }
+export function assignTemplate() { let x: string | number = 1; return `${(x = "s")}`; }
+export function assignCall(f: (v: string) => void) { let x: string | number = 1; f((x = "s")); return x; }
+export function assignMember(o: { y: string }) { return (o.y = "s"); }
+export function assignMemberTernary(o: { y: string }, c: boolean) { return c ? (o.y = "s") : 0; }
+export function c11() { let x: string | number = 1; return (x = "s") as "s"; }
+export function c13() { let x: string | number = 1; const v = (x = "s"); type T = typeof v; const t: T = "s"; return t; }
+export function c19(o: { y: string | number }) { const v = (o.y = "s"); return v; }
+export function c20(o: { y: string | number }, c: boolean) { const v = c ? (o.y = "s") : 0; return v; }
+export function b10() { let x: string | number = 1; const v = (x = "s"); return v satisfies string; }
+export function b12() { let y = "s" as const; let x: string | number = 1; const v = (x = y); return v; }
+export function b13() { let x: string | number = 1; return x = "s", x; }
+export function capLetObj() { let x; x = 1; return { get v() { return x; } }.v; }
+export function litWrite() { let x: string | number = 1; const v = ({ a: (x = "s") }).a; return [v, x]; }
+export function litConstAs() { return ({ a: 1 } as const).a; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`OPEN_ASSIGNMENT_VALUE_SOURCE`]: the checker's TypeScript 7.0.2
+/// answer in the lane's spelling (the checker's print follows each row's
+/// `//`).
+const OPEN_ASSIGNMENT_VALUE_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string
+    ("assignChain", "string", "string", "string", "string"),
+    // number
+    ("assignCompound", "number", "number", "number", "number"),
+    // string
+    ("assignCompoundStr", "string", "string", "string", "string"),
+    // string | number
+    (
+        "assignLogical",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string
+    ("assignTemplate", "string", "string", "string", "string"),
+    // string
+    ("assignCall", "string", "string", "string", "string"),
+    // string
+    ("assignMember", "string", "string", "string", "string"),
+    // "s" | 0
+    (
+        "assignMemberTernary",
+        "\"s\" | 0",
+        "\"s\" | 0",
+        "\"s\" | 0",
+        "\"s\" | 0",
+    ),
+    // "s"
+    ("c11", "\"s\"", "\"s\"", "\"s\"", "\"s\""),
+    // "s"
+    ("c13", "\"s\"", "\"s\"", "\"s\"", "\"s\""),
+    // string
+    ("c19", "string", "string", "string", "string"),
+    // "s" | 0
+    ("c20", "\"s\" | 0", "\"s\" | 0", "\"s\" | 0", "\"s\" | 0"),
+    // string
+    ("b10", "string", "string", "string", "string"),
+    // "s"
+    ("b12", "\"s\"", "\"s\"", "\"s\"", "\"s\""),
+    // string
+    ("b13", "string", "string", "string", "string"),
+    // number / number / any / any
+    ("capLetObj", "number", "number", "any", "any"),
+    // string[]
+    ("litWrite", "string[]", "string[]", "string[]", "string[]"),
+    // 1
+    ("litConstAs", "1", "1", "1", "1"),
+];
+
+const OPEN_CONDITION_WRITE_SOURCE: &str = r#"
+export function plainWriteIfParam(p: string) { let x: string | number = 1; if ((x = p)) { return x; } return x; }
+export function writeWhile(c: boolean) { let x: string | number = 1; while (c && (x = "s")) { return x; } return x; }
+export function writeTernaryTest(c: boolean) { let x: string | number = 1; return (c && (x = "s")) ? x : 0; }
+export function nullishWriteIf(c: string | null) { let x: string | number = 1; if (c ?? (x = "s")) { return x; } return 0; }
+export function forTest() { let x: string | number = 1; for (; (x = "s"); ) { return x; } return x; }
+export function doWhileTest(c: boolean) { let x: string | number = 1; do { } while (c && (x = "s")); return x; }
+export function cmpValue() { let x: string | number = 1; const b = (x = "s") === "s"; return [b, x]; }
+export function cmpRet() { let x: string | number = 1; return (x = "s") === "s"; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`OPEN_CONDITION_WRITE_SOURCE`]: the checker's TypeScript 7.0.2
+/// answer in the lane's spelling (the checker's print follows each row's
+/// `//`).
+const OPEN_CONDITION_WRITE_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string
+    ("plainWriteIfParam", "string", "string", "string", "string"),
+    // string | number
+    (
+        "writeWhile",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | 0
+    (
+        "writeTernaryTest",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+    ),
+    // string | number
+    (
+        "nullishWriteIf",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string
+    ("forTest", "string", "string", "string", "string"),
+    // string | number
+    (
+        "doWhileTest",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // (string | boolean)[]
+    (
+        "cmpValue",
+        "(boolean | string)[]",
+        "(boolean | string)[]",
+        "(boolean | string)[]",
+        "(boolean | string)[]",
+    ),
+    // boolean
+    ("cmpRet", "boolean", "boolean", "boolean", "boolean"),
+];
+
+const OPEN_ELEMENT_KEY_SOURCE: &str = r#"
+type A = { k: "a" | "b"; j: "a" | "b"; 0: "a" | "b" };
+type R = Record<string, string | number>;
+declare function key(): "k";
+export function recParamKey(r: R, k: string) { r[k] = 1; return r[k]; }
+export function recLetKey(r: R) { let k = "x"; r[k] = 1; return r[k]; }
+export function recLetKeyWritten(r: R, s: string) { let k = "x"; k = s; r[k] = 1; return r[k]; }
+export function aConstKeyDot(a: A) { const k = "k"; a[k] = "b"; return a.k; }
+export function recWriteOther(r: R, k: string) { r.x = 1; r[k] = "s"; return r.x; }
+export function aParamKeyRead(a: A, k: "k") { if (a[k] === "b") return a[k]; return "z"; }
+export function aParamKeyGuardDot(a: A, k: "k") { if (a[k] === "b") return a.k; return "z"; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`OPEN_ELEMENT_KEY_SOURCE`]: the checker's TypeScript 7.0.2
+/// answer in the lane's spelling (the checker's print follows each row's
+/// `//`).
+const OPEN_ELEMENT_KEY_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number
+    ("recParamKey", "number", "number", "number", "number"),
+    // number
+    ("recLetKey", "number", "number", "number", "number"),
+    // string | number
+    (
+        "recLetKeyWritten",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // "b"
+    ("aConstKeyDot", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // number
+    ("recWriteOther", "number", "number", "number", "number"),
+    // "b" | "z"
+    (
+        "aParamKeyRead",
+        "\"b\" | \"z\"",
+        "\"b\" | \"z\"",
+        "\"b\" | \"z\"",
+        "\"b\" | \"z\"",
+    ),
+    // "a" | "b" | "z"
+    (
+        "aParamKeyGuardDot",
+        "\"a\" | \"b\" | \"z\"",
+        "\"a\" | \"b\" | \"z\"",
+        "\"a\" | \"b\" | \"z\"",
+        "\"a\" | \"b\" | \"z\"",
+    ),
+];
+
+const OPEN_NARROWING_SOURCE: &str = r#"
+type O = { x: 0 | 1; y: "a" | "b" };
+declare function assertIsB(v: unknown): asserts v is "b";
+declare const obj: { m(): void; n(v: unknown): asserts v is "b" };
+export function assertsMethod(o: O) { obj.n(o.y); return o.y; }
+type U = { kind: "a"; v: string } | { kind: "b"; v: number };
+type T = ["a", string] | ["b", number];
+export function paramDestr({ kind, v }: U) { if (kind === "a") return v; return true; }
+export function paramDestrAssigned({ kind, v }: U) { if (kind === "a") { return v; } v = 1; return true; }
+export function objSwitch(o: U) { const { kind, v } = o; switch (kind) { case "a": return v; } return true; }
+export function objGeneric<X extends U>(o: X) { const { kind, v } = o; if (kind === "a") return v; return true; }
+type M = { k1: "x"; k2: "p"; v: 1 } | { k1: "y"; k2: "q"; v: 2 } | { k1: "x"; k2: "q"; v: 3 };
+type B = { ok: true; v: string } | { ok: false; v: number };
+type N = { kind: "s"; v: string } | { kind: 1; v: number };
+export function closureRead(o: U) { const { kind, v } = o; if (kind === "a") { const f = () => v; return f(); } return true; }
+export function localBool(xs: boolean[]) { const b = xs[0]; return b; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`OPEN_NARROWING_SOURCE`]: the checker's TypeScript 7.0.2
+/// answer in the lane's spelling (the checker's print follows each row's
+/// `//`).
+const OPEN_NARROWING_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "b"
+    ("assertsMethod", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // string | true
+    (
+        "paramDestr",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | number | true
+    (
+        "paramDestrAssigned",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | true
+    (
+        "objSwitch",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true
+    (
+        "objGeneric",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true
+    (
+        "closureRead",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // boolean
+    ("localBool", "boolean", "boolean", "boolean", "boolean"),
+];
+
+/// An `instanceof` test of a destructured element or of a member narrows
+/// only the tested reference: its member is no discriminant of the parent
+/// (a class instance is not a unit type), so the siblings and the parent
+/// keep every arm.
+#[test]
+fn instanceof_tests_of_non_discriminant_members_narrow_only_themselves() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "correlated-instanceof.ts",
+        CORRELATED_INSTANCEOF_SOURCE,
+        CORRELATED_INSTANCEOF_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// A member read or a member call directly off an object literal
+/// (`({ a: 1 }).a`, `({ get v() { return 1 } }).v`, `({ m() {} }).m()`)
+/// reads the literal's member type — a property's widened value, a
+/// getter's return — exactly as a read off a named object does.
+#[test]
+fn member_reads_off_an_object_literal_read_its_member_type() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "literal-roots.ts",
+        LITERAL_ROOT_SOURCE,
+        LITERAL_ROOT_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Assignment values the lane does not yet read (it degrades them): a
+/// chained or compound assignment's value, a write inside a call argument,
+/// a template or a comparison, a member write's value, `as const` and
+/// `satisfies` over an assignment, a comma operand, an object-literal root
+/// holding a write or under `as const`, and a getter reading an auto-typed
+/// `let` (the closure-read rule). Each row is the checker's answer.
+#[test]
+#[ignore = "waits for the checker's value of chained, compound, member and wrapped assignments"]
+fn open_assignment_values_match_the_checker() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "open-assignment-values.ts",
+        OPEN_ASSIGNMENT_VALUE_SOURCE,
+        OPEN_ASSIGNMENT_VALUE_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Condition writes the lane does not yet apply: a write in a loop test or
+/// a conditional expression's test, an `if (x = p)` test (which narrows
+/// both `x` and `p` on each edge), a `??` test, and a comparison holding a
+/// write in value position. Each row is the checker's answer.
+#[test]
+#[ignore = "waits for writes in loop and conditional-expression tests and in value-position comparisons"]
+fn open_condition_writes_match_the_checker() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "open-condition-writes.ts",
+        OPEN_CONDITION_WRITE_SOURCE,
+        OPEN_CONDITION_WRITE_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Element-access references the lane does not yet read: an index-signature
+/// object's declared element (`Record<string, T>`), a guard over an element
+/// access by a key binding, and a `const` key naming the dotted member it
+/// spells after a keyed write. Each row is the checker's answer.
+#[test]
+#[ignore = "waits for index-signature element reads and guards over keyed element accesses"]
+fn open_element_keys_match_the_checker() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "open-element-keys.ts",
+        OPEN_ELEMENT_KEY_SOURCE,
+        OPEN_ELEMENT_KEY_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Narrowings the lane does not yet carry: an assertion method call, a flat
+/// destructured parameter's correlated elements, a `switch` over a
+/// destructured discriminant, a destructured generic parameter, a closure
+/// reading a correlated sibling, and a `boolean` return of a local
+/// initialized from an element read. Each row is the checker's answer.
+#[test]
+#[ignore = "waits for assertion methods, flat-parameter and switch correlation, and closure reads of correlated siblings"]
+fn open_narrowings_match_the_checker() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "open-narrowings.ts",
+        OPEN_NARROWING_SOURCE,
+        OPEN_NARROWING_TABLE,
     );
     assert!(
         mismatches.is_empty(),

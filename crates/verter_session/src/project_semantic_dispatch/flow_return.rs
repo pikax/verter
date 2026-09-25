@@ -5011,6 +5011,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             owner,
             nullability: key.context.policy.nullability,
             no_implicit_any: key.context.policy.no_implicit_any,
+            use_unknown_in_catch_variables: key.context.policy.use_unknown_in_catch_variables,
             params: &params,
             param_names: &ir.params,
             binder_env: &binder_env,
@@ -5037,6 +5038,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }),
             pending_statement_gap: None,
             pattern_write_definition: None,
+            correlated_groups: Vec::new(),
+            guard_aliases: rustc_hash::FxHashMap::default(),
             auto_typed_locals: rustc_hash::FxHashSet::default(),
             circular_inferred: rustc_hash::FxHashSet::default(),
             unwidened_views: rustc_hash::FxHashMap::default(),
@@ -6311,6 +6314,7 @@ fn collect_assignment_spans(
             }
             crate::flow_slice_content::SliceStatement::Gap(_)
             | crate::flow_slice_content::SliceStatement::Assertion { .. }
+            | crate::flow_slice_content::SliceStatement::CallEffect { .. }
             | crate::flow_slice_content::SliceStatement::Break { .. }
             | crate::flow_slice_content::SliceStatement::Continue { .. }
             | crate::flow_slice_content::SliceStatement::Throw
@@ -7037,6 +7041,7 @@ fn slice_statements_have_non_subject_return<'a>(
         SliceStatement::Gap(_)
         | SliceStatement::Assignment { .. }
         | SliceStatement::Assertion { .. }
+        | SliceStatement::CallEffect { .. }
         | SliceStatement::Break { .. }
         | SliceStatement::Continue { .. }
         | SliceStatement::CompoundAssignment { .. }
@@ -7147,6 +7152,10 @@ mod class_expression;
 #[path = "flow_return_operators.rs"]
 mod operators;
 
+#[path = "flow_return_call_effects.rs"]
+mod call_effects;
+#[path = "flow_return_correlation.rs"]
+mod correlation;
 #[path = "flow_return_destructure.rs"]
 mod destructure;
 
@@ -7246,6 +7255,9 @@ struct FlowEvaluator<'d, 'b> {
     /// unannotated `let` / `var` of the auto-typed form is auto-typed or
     /// declared as its initializer's widened type.
     no_implicit_any: bool,
+    /// The function's project `useUnknownInCatchVariables`: an
+    /// unannotated `catch` variable is `unknown`, else `any`.
+    use_unknown_in_catch_variables: bool,
     /// The checker's AUTO-TYPED locals (`noImplicitAny` on, an unannotated
     /// `let` / `var` with no initializer or a bare `null` / free
     /// `undefined` one), by canonical subject — a fact of the declaration.
@@ -7272,6 +7284,14 @@ struct FlowEvaluator<'d, 'b> {
     /// The value site of the destructuring assignment whose targets are
     /// being written — the definition each target's write records.
     pattern_write_definition: Option<verter_semantic::analysis::flow::SkeletonExprSiteId>,
+    /// The correlated destructuring patterns this evaluation bound
+    /// ([`correlation::CorrelatedGroup`]). Owned by the evaluator, dropped
+    /// with it.
+    correlated_groups: Vec<correlation::CorrelatedGroup>,
+    /// What a test of each destructured element also narrows, by the
+    /// element's canonical subject ([`correlation::GuardAlias`]). Owned by
+    /// the evaluator, dropped with it.
+    guard_aliases: rustc_hash::FxHashMap<FlowProductSubject, Vec<correlation::GuardAlias>>,
     /// COMPLETED calls in this frame that closed with fresh-preserved
     /// literal deposits, recorded by their authored call-site span — the
     /// call-SITE identity a consuming position matches against, never the
@@ -8988,6 +9008,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 freshness,
                 definition,
                 span,
+                ..
             } = write
             else {
                 continue;
@@ -10085,6 +10106,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         write: &crate::flow_slice_content::SliceMemberWrite,
     ) {
         let declared = self.member_declared_node(target);
+        self.apply_member_write_declared(target, write, declared);
+    }
+
+    /// [`Self::apply_member_write`] against the reference's declared
+    /// (unnarrowed) type `declared`.
+    pub(super) fn apply_member_write_declared(
+        &mut self,
+        target: &crate::flow_slice_content::SliceNarrowSubject,
+        write: &crate::flow_slice_content::SliceMemberWrite,
+        declared: Option<SemanticNodeId>,
+    ) {
         let (node, fresh_literal) = match write {
             // A declared type that is not a union is the reference's type
             // whatever is assigned: the value is evaluated only for the
@@ -11184,7 +11216,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         start: &FlowLayerState,
         region: &crate::flow_slice_content::SliceRegion,
-        catch_param: Option<SkeletonBindingId>,
+        catch_param: Option<(
+            SkeletonBindingId,
+            Option<&crate::flow_slice_content::GatedType>,
+        )>,
         collect_throws: bool,
     ) -> Result<(Vec<FlowContribution>, FlowLayerState, FlowClauseWrites), FlowReturnFailure> {
         let write_observation = self.products.observe_writes();
@@ -11195,22 +11230,47 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let return_base = self.return_edges.len();
         let saved_collect = self.collect_throw_points;
         self.collect_throw_points = collect_throws;
-        if let Some(param) = catch_param.filter(|param| {
+        if let Some((param, declared)) = catch_param.filter(|(param, _)| {
             self.products
                 .contains_subject(&FlowProductSubject::Local(*param))
         }) {
-            self.record_scope_shadow(&FlowProductSubject::Local(param));
-            // The catch parameter is `unknown` under the checker's strict
-            // default (`useUnknownInCatchVariables`): bound so a read
-            // resolves to the honest primitive instead of a free-name miss.
-            let unknown = self
-                .dispatch
-                .graph()
-                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+            let subject = FlowProductSubject::Local(param);
+            self.record_scope_shadow(&subject);
+            // The catch variable's declared type is its annotation (`any`
+            // or `unknown`), else `unknown` under the project's
+            // `useUnknownInCatchVariables` and `any` without it; an
+            // assignment to it narrows nothing (a declared type that is
+            // not a union).
+            let declared = match declared {
+                Some(declared)
+                    if !declared
+                        .shadowed()
+                        .iter()
+                        .any(|name| self.owner_scope_answers_name(name)) =>
+                {
+                    self.lower_body_type(declared.ty())
+                }
+                Some(_) => super::flow_return_callee::unmodeled_position_marker(self.dispatch),
+                None => self
+                    .dispatch
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(
+                        if self.use_unknown_in_catch_variables {
+                            PrimitiveKind::Unknown
+                        } else {
+                            PrimitiveKind::Any
+                        },
+                    )),
+            };
+            self.set_declared_local(
+                &subject,
+                crate::flow_slice_content::SliceBindingKind::Let,
+                Some(declared),
+            );
             self.bind_local(
-                &FlowProductSubject::Local(param),
-                crate::flow_slice_content::SliceBindingKind::Const,
-                unknown,
+                &subject,
+                crate::flow_slice_content::SliceBindingKind::Let,
+                declared,
                 None,
                 false,
             );
@@ -12202,6 +12262,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.push_narrowing(&subject, node);
             }
         }
+        self.apply_guard_aliases(guard, positive);
     }
 
     /// The union-of-facts reading of a disjunction: each disjunct's
@@ -12419,6 +12480,88 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// dropping such an arm would fabricate a dead branch and silently
     /// lose that branch's return contributor.
     fn narrow_typeof(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        kind: crate::flow_slice_content::SliceTypeofKind,
+        negated: bool,
+    ) -> GuardNarrowing {
+        let leaf = self.narrow_typeof_reference(subject, kind, negated);
+        if let GuardNarrowing::Narrowed(_, narrowed) = &leaf {
+            self.narrow_parent_by_discriminant(subject, *narrowed);
+        }
+        leaf
+    }
+
+    /// A test over a member path narrows its PARENT when the member is a
+    /// discriminant of it (the checker's `narrowTypeByDiscriminant`, as
+    /// `narrowTypeByTypeof` applies it): the parent keeps the arms whose
+    /// member is comparable to the member's narrowed type.
+    fn narrow_parent_by_discriminant(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        narrowed: SemanticNodeId,
+    ) {
+        let Some((last, prefix)) = subject.path.split_last() else {
+            return;
+        };
+        let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
+            root: subject.root.clone(),
+            path: Arc::from(prefix.to_vec().into_boxed_slice()),
+        };
+        let Some(parent) = self.subject_current_node(&parent_subject) else {
+            return;
+        };
+        match self.is_discriminant_property(parent, last) {
+            Some(true) => {}
+            Some(false) => return,
+            None => {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+                return;
+            }
+        }
+        let never = self.is_never_node(narrowed);
+        let last: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(last)].into_boxed_slice());
+        let mut undecided = false;
+        let filtered = self.narrow_arms_by(&parent_subject, |this, arm| {
+            let member = this.project_segments_navigate(arm, &last)?;
+            if never || this.is_never_node(member) {
+                return Some(false);
+            }
+            Some(match this.comparable(narrowed, member) {
+                super::relation::ComparabilityVerdict::Disjoint(_) => false,
+                super::relation::ComparabilityVerdict::Overlaps => true,
+                super::relation::ComparabilityVerdict::Undecided => {
+                    undecided = true;
+                    true
+                }
+            })
+        });
+        if undecided {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        match filtered {
+            ArmFilter::Unchanged => {}
+            ArmFilter::Narrowed(node) => self.push_narrowing(&parent_subject, node),
+            ArmFilter::NoSurvivor => {
+                let never = self.never_node();
+                self.push_narrowing(&parent_subject, never);
+            }
+        }
+    }
+
+    fn is_never_node(&self, node: SemanticNodeId) -> bool {
+        matches!(
+            self.dispatch.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+        )
+    }
+
+    /// [`Self::narrow_typeof`] of the tested reference itself.
+    fn narrow_typeof_reference(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         kind: crate::flow_slice_content::SliceTypeofKind,
@@ -15351,6 +15494,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 }
                             }
                         });
+                    // A destructured element aliasing a narrowing is carried
+                    // by guards only: its switch takes the typed gap.
+                    if let Some(subject) = discriminant {
+                        self.degrade_unaliased_test(subject);
+                    }
                     let mut chain_end: Option<FlowLayerState> = None;
                     let mut last_end: Option<FlowLayerState> = None;
                     let mut last_falls = false;
@@ -15629,7 +15777,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let (catch_contributors, catch_end, written) = match self.eval_try_clause(
                             &catch_start,
                             &catch.region,
-                            catch.binding,
+                            catch
+                                .binding
+                                .map(|binding| (binding, catch.declared.as_ref())),
                             finally.is_some(),
                         ) {
                             Ok(clause) => clause,
@@ -16083,9 +16233,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                 },
                 crate::flow_slice_content::SliceStatement::MemberWrite {
-                    target, write, ..
+                    target,
+                    key: None,
+                    write,
+                    ..
                 } => {
                     self.apply_member_write(target, write);
+                }
+                crate::flow_slice_content::SliceStatement::MemberWrite {
+                    target,
+                    key: Some(key),
+                    write,
+                    ..
+                } => {
+                    self.apply_keyed_member_write(target, key, write);
                 }
                 crate::flow_slice_content::SliceStatement::DestructureAssign {
                     pattern,
@@ -16100,6 +16261,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     init,
                     declared,
                     annotated,
+                    correlated,
+                    source,
                 } => {
                     self.eval_destructure(
                         pattern,
@@ -16107,6 +16270,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         init.as_ref(),
                         declared.as_ref(),
                         *annotated,
+                        *correlated,
+                        source.as_ref(),
                     );
                 }
                 crate::flow_slice_content::SliceStatement::Throw => {
@@ -16614,6 +16779,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             self.apply_write(target, marker, true, *definition, false, false);
                         }
                     }
+                }
+                crate::flow_slice_content::SliceStatement::CallEffect { callee, call } => {
+                    self.settle_call_effect(callee, *call);
                 }
                 crate::flow_slice_content::SliceStatement::Assertion { subject, target } => {
                     // A same-file assertion call: the narrowing fact lives
@@ -17360,6 +17528,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 owner: self.owner,
                 nullability: self.nullability,
                 no_implicit_any: self.no_implicit_any,
+                use_unknown_in_catch_variables: self.use_unknown_in_catch_variables,
                 params: &params,
                 param_names: nested_params,
                 binder_env: &binder_env,
@@ -17382,6 +17551,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 degradation: None,
                 pending_statement_gap: None,
                 pattern_write_definition: None,
+                correlated_groups: Vec::new(),
+                guard_aliases: rustc_hash::FxHashMap::default(),
                 auto_typed_locals: rustc_hash::FxHashSet::default(),
                 circular_inferred: rustc_hash::FxHashSet::default(),
                 unwidened_views: rustc_hash::FxHashMap::default(),
@@ -18036,6 +18207,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 freshness,
                 definition,
                 span,
+                widen,
             } => {
                 // THE applied write at VALUE position — the R2 source-order
                 // rule. The write applies IN EVALUATION ORDER: a read
@@ -18047,9 +18219,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // unsound and stays rejected). The pre-scanned verdict, if
                 // the statement carried one, is REUSED — the right-hand
                 // side never evaluates twice. The expression's own value is
-                // the written (assignment-reduced) node.
-                self.eval_value_assignment(target, value, freshness, *definition, *span)
-                    .0
+                // the right-hand side's type, not the written
+                // (assignment-reduced) node.
+                match self.eval_assignment_value(target, value, freshness, *definition, *span) {
+                    Positional::Value(node) if *widen => {
+                        let fresh = self.operator_fresh_values(expr, node);
+                        Positional::Value(widen_values_within(
+                            self.dispatch,
+                            node,
+                            &fresh,
+                            self.nullability,
+                        ))
+                    }
+                    other => other,
+                }
             }
             crate::flow_slice_content::SliceExpr::NestedFunctionValue {
                 function,
@@ -18116,7 +18299,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 object,
                 index,
                 reference,
-            } => self.eval_element_access(object, index, reference.as_ref()),
+                key,
+            } => self.eval_element_access(object, index, reference.as_ref().zip(key.as_ref())),
             crate::flow_slice_content::SliceExpr::Update { target, .. } => self.eval_update(target),
             crate::flow_slice_content::SliceExpr::NonNull { operand } => {
                 self.eval_non_null(operand)

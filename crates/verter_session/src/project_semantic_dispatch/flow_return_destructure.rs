@@ -44,6 +44,8 @@ impl FlowEvaluator<'_, '_> {
         init: Option<&SliceExpr>,
         declared: Option<&crate::flow_slice_content::GatedType>,
         annotated: bool,
+        correlated: bool,
+        source: Option<&crate::flow_slice_content::SliceNarrowSubject>,
     ) {
         self.prescan_statement_value_writes(init);
         if let Some(declared) = declared {
@@ -62,10 +64,12 @@ impl FlowEvaluator<'_, '_> {
                 Some(self.lower_body_type(declared.ty()))
             };
             self.bind_pattern(pattern, ElementValue::of(parent), kind, true);
+            self.register_destructured_aliases(pattern, parent, correlated, source);
             return;
         }
         let Some(init) = init else {
             self.bind_pattern(pattern, ElementValue::of(None), kind, false);
+            self.register_destructured_aliases(pattern, None, correlated, source);
             return;
         };
         if annotated {
@@ -77,6 +81,7 @@ impl FlowEvaluator<'_, '_> {
                 Positional::Hold | Positional::Unmodeled => None,
             };
             self.bind_pattern(pattern, ElementValue::of(parent), kind, true);
+            self.register_destructured_aliases(pattern, parent, correlated, source);
             return;
         }
         if let (
@@ -129,6 +134,7 @@ impl FlowEvaluator<'_, '_> {
             Positional::Hold | Positional::Unmodeled => None,
         };
         self.bind_pattern(pattern, ElementValue::of(parent), kind, false);
+        self.register_destructured_aliases(pattern, parent, correlated, source);
     }
 
     /// [`crate::flow_slice_content::SliceStatement::DestructureAssign`]: the
@@ -166,6 +172,10 @@ impl FlowEvaluator<'_, '_> {
         kind: SliceBindingKind,
     ) {
         self.bind_pattern(pattern, ElementValue::of(Some(element)), kind, false);
+        // A `const` loop pattern correlates its elements.
+        if kind == SliceBindingKind::Const {
+            self.register_destructured_aliases(pattern, Some(element), true, None);
+        }
     }
 
     /// Bind one pattern from its parent value. A parent this frame could
@@ -394,7 +404,7 @@ impl FlowEvaluator<'_, '_> {
     /// An object pattern property's type: the parent's member through the
     /// shared member-read projection (a declared-optional member includes
     /// `undefined`); `any` of `any`.
-    fn pattern_property(
+    pub(super) fn pattern_property(
         &mut self,
         parent: SemanticNodeId,
         key: &Arc<str>,
@@ -413,10 +423,15 @@ impl FlowEvaluator<'_, '_> {
     /// An array pattern position's type: a tuple's element, an array's or
     /// a string's element type — the checker's indexed access by the
     /// position's numeric literal type; `any` of `any`.
-    fn pattern_position(&mut self, parent: SemanticNodeId, index: usize) -> Option<SemanticNodeId> {
+    pub(super) fn pattern_position(
+        &mut self,
+        parent: SemanticNodeId,
+        index: usize,
+    ) -> Option<SemanticNodeId> {
         if self.is_any(parent) {
             return Some(parent);
         }
+        let parent = self.dispatch.resolved_reduction_view(parent);
         let arms = self
             .dispatch
             .union_arms_of(parent)
@@ -424,6 +439,7 @@ impl FlowEvaluator<'_, '_> {
         let graph = self.dispatch.graph();
         let mut values = Vec::with_capacity(arms.len());
         for arm in arms {
+            let arm = self.dispatch.resolved_reduction_view(arm);
             let data = graph.node_data(arm);
             let value = match data.as_deref()? {
                 SemanticNodeData::Primitive(PrimitiveKind::String)
@@ -467,6 +483,7 @@ impl FlowEvaluator<'_, '_> {
         if self.is_any(parent) {
             return Some(parent);
         }
+        let parent = self.dispatch.resolved_reduction_view(parent);
         if let Some(arms) = self.dispatch.union_arms_of(parent) {
             let arms = arms.to_vec();
             let mut rests = Vec::with_capacity(arms.len());

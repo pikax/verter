@@ -335,7 +335,7 @@ export function r5MutualA(c: boolean) {
 
 export function r5MutualB(c: boolean) {
   let z = 1;
-  if ((z = 2)) {}
+  while ((z = 2)) { break; }
   return r5MutualA(!!z);
 }
 

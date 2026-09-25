@@ -405,6 +405,21 @@ pub enum SliceStatement {
         /// an assertion signature with no type predicate).
         target: Option<GatedType>,
     },
+    /// A statement call whose callee is a dotted name this half cannot
+    /// settle alone (`o.m();`, `obj.run();`): the checker's
+    /// `getEffectsSignature` reads the callee's explicit type, and an
+    /// `asserts` signature narrows what follows while a `never` return
+    /// ends the path. The evaluator reads the callee's call signatures
+    /// (`SignaturesOfType`): none asserting and none returning `never`
+    /// leaves the path as it is; anything else takes the typed
+    /// guard-narrowing gap.
+    CallEffect {
+        /// The callee's type source.
+        callee: SliceEffectCallee,
+        /// The call expression's absolute span — the call obligation a
+        /// settled callee discharges.
+        call: verter_span::Span,
+    },
     /// A nested block, as its own region.
     Block(SliceRegion),
     /// A `break` whose target an enclosing modelled construct absorbs
@@ -459,8 +474,14 @@ pub enum SliceStatement {
     /// type (`getAssignmentReducedType`), a read of a longer path under
     /// it reads its declared type again, and a call never invalidates it.
     MemberWrite {
-        /// The written reference (a non-empty path).
+        /// The written reference (a non-empty path) — the OBJECT's
+        /// reference when `key` is present.
         target: SliceNarrowSubject,
+        /// The key of a computed write `o[k] = v` reading a frame binding:
+        /// the written reference is `target` extended by the member or
+        /// identity segment the key spells, and a key spelling none writes
+        /// no reference.
+        key: Option<SliceWriteKey>,
         /// The target member expression's span, in this frame's
         /// coordinates — the identity the write-effect ledger matches
         /// against (the skeleton records a member write there).
@@ -491,6 +512,18 @@ pub enum SliceStatement {
         /// destructured parameter's annotation): an element's default then
         /// only removes the member's `undefined`.
         annotated: bool,
+        /// Whether the pattern's elements are CORRELATED — a `const`
+        /// declaration, or a parameter none of whose pattern bindings is
+        /// assigned (the checker's `getNarrowedTypeOfSymbol`): a test of one
+        /// element narrows the pattern's parent union, and every sibling
+        /// reads its member of the narrowed parent.
+        correlated: bool,
+        /// The narrowable reference a `const` declarator without an
+        /// annotation destructures (`const { kind } = o`): a test of one
+        /// of its top-level elements narrows that reference as a test of
+        /// its member does (the checker's destructured discriminant
+        /// alias).
+        source: Option<SliceNarrowSubject>,
     },
     /// A `throw`: terminates the region path without contributing a
     /// return arm. The marker lets the evaluator capture the state at the
@@ -915,6 +948,9 @@ pub enum SliceSwitchTest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceCatchClause {
     pub binding: Option<SkeletonBindingId>,
+    /// The catch parameter's annotation (`catch (e: unknown)`,
+    /// `catch (e: any)`), lowered through the frame gate.
+    pub declared: Option<GatedType>,
     /// The catch parameter's binding name, when authored as a plain
     /// identifier.
     pub param: Option<Arc<str>>,
@@ -1437,16 +1473,18 @@ pub enum SliceExpr {
     /// An element access whose key this frame evaluates (`xs[i]`): the
     /// value is the checker's indexed access of the object's type by the
     /// key's type for an array, tuple or string object, `any` for an `any`
-    /// object, and a flow gap for any other object. When the object is a narrowable reference and the key a
-    /// read of a binding the frame never writes, a key of one string or
-    /// numeric literal type names the member reference a narrowing may
-    /// stand on (`const k = "k"; a[k]` reads the narrowing of `a.k`).
+    /// object, and a flow gap for any other object. When the object is a
+    /// narrowable reference and the key a read of a frame binding, the
+    /// access is the reference [`SliceElementKey`] identifies, and reads
+    /// the narrowing standing on it.
     ElementAccess {
         object: Box<SliceExpr>,
         index: Box<SliceExpr>,
-        /// The object's narrowable reference, when the key reads a binding
-        /// the frame never writes.
+        /// The object's narrowable reference, when the key reads a frame
+        /// binding.
         reference: Option<SliceNarrowSubject>,
+        /// The key binding's reference identity, beside `reference`.
+        key: Option<SliceElementKey>,
     },
     /// A logical expression (`a && b`, `a || b`, `a ?? b`) whose operands
     /// read this frame: the right operand is evaluated only on the edge the
@@ -1582,7 +1620,50 @@ pub enum SliceExpr {
         /// The right-hand side's top-level freshness shape, aligned with
         /// the statement twin.
         freshness: SliceFreshness,
+        /// Whether the expression's value sits in a mutable slot (an array
+        /// element, an object member): its fresh literals widen there.
+        widen: bool,
     },
+}
+
+/// The reference identity of an element access `o[k]` whose key reads a
+/// frame binding `k` — the checker's `isMatchingReference` over element
+/// accesses: a `const` key of one string or numeric literal type names the
+/// member it spells (`const k = "k"; o[k]` is `o.k`), and a key binding no
+/// write reaches (`const`, or a parameter or local never assigned) makes
+/// `o[k]` one reference wherever it reads that same binding, distinct from
+/// every named member (`o[k]` over `k: "k"` is not `o.k`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceElementKey {
+    /// Whether the key binding is `const`.
+    pub constant: bool,
+    /// The key binding's identity segment (U+0000, then the frame anchor
+    /// and the binding's index — no property name spells it), `None`
+    /// for a key binding some write reaches: that access matches no
+    /// reference at all.
+    pub identity: Option<Arc<str>>,
+}
+
+/// The computed key of a member write `o[k] = v` whose key reads a frame
+/// binding ([`SliceStatement::MemberWrite`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceWriteKey {
+    /// The key's lowered read.
+    pub value: Box<SliceExpr>,
+    /// The reference identity it spells.
+    pub key: SliceElementKey,
+}
+
+/// Where a statement call's callee type comes from
+/// ([`SliceStatement::CallEffect`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceEffectCallee {
+    /// A static member path of an annotated parameter or local: the
+    /// declared type the checker's `getTypeOfDottedName` reads.
+    Declared(SliceNarrowSubject),
+    /// Any other dotted name (a module or global binding, a nested
+    /// function declaration): its value.
+    Value(Box<SliceExpr>),
 }
 
 /// One class expression's body, lowered for the evaluator's class
@@ -2705,6 +2786,17 @@ pub(crate) fn build_flow_slice_content(
         nested_free_writes: FxHashSet::default(),
         active_guard_bindings: Vec::new(),
         active_guard_subjects: Vec::new(),
+        condition_guard_bindings: None,
+        open_value_rooted_reads: 0,
+        aliased_bindings: rustc_hash::FxHashMap::default(),
+        annotated_params: node
+            .params()
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, param)| param.type_annotation.is_some())
+            .map(|(ordinal, _)| ordinal as u32)
+            .collect(),
         break_targets: Vec::new(),
         loop_direct_labels: Vec::new(),
         pending_loop_labels: Vec::new(),
@@ -2717,6 +2809,7 @@ pub(crate) fn build_flow_slice_content(
         lowerer.unsafe_invoked_closure_effects =
             lowerer.index_unsafe_invoked_closure_effects(&body.statements);
         lowerer.nested_free_writes = lowerer.build_nested_free_writes();
+        lowerer.record_parameter_pattern_aliases(&node.params().items);
     }
     let region = if selection.is_none() {
         SliceRegion {
@@ -2816,7 +2909,15 @@ pub(crate) fn build_flow_slice_content(
             let Some(lowered) = lowerer.lower_pattern(pattern) else {
                 continue;
             };
+            let correlated = !lowered.bindings().iter().any(|(binding, _)| {
+                lowerer.binding_is_written(*binding)
+                    || lowerer
+                        .nested_free_writes
+                        .contains(&lowerer.bindings.canonical_local(*binding))
+            });
             entry.push(SliceStatement::Destructure {
+                correlated,
+                source: None,
                 pattern: lowered,
                 kind: SliceBindingKind::Let,
                 init: Some(SliceExpr::ParamValue {
@@ -3071,10 +3172,19 @@ fn discarded_value_holds_write(expression: &Expression<'_>) -> bool {
             ) || assignment
                 .left
                 .as_member_expression()
-                .and_then(member_target_chain)
-                .is_some())
+                .is_some_and(member_write_shape))
         }
-        void @ Expression::UnaryExpression(_) => void_write_assignment(void).is_some(),
+        void @ Expression::UnaryExpression(unary)
+            if unary.operator == oxc_ast::ast::UnaryOperator::Void =>
+        {
+            void_write_assignment(void).is_some()
+        }
+        // An operator's operands run before it: `(x = v) === w`,
+        // `typeof (x = v)`, `!(x = v)`.
+        Expression::UnaryExpression(unary) => discarded_value_holds_write(&unary.argument),
+        Expression::BinaryExpression(binary) => {
+            discarded_value_holds_write(&binary.left) || discarded_value_holds_write(&binary.right)
+        }
         Expression::ConditionalExpression(conditional) => {
             discarded_value_holds_write(&conditional.consequent)
                 || discarded_value_holds_write(&conditional.alternate)
@@ -3299,8 +3409,13 @@ fn nullish_guard_of(subject: SliceNarrowSubject) -> SliceGuard {
 /// The property an element-access KEY names without evaluating anything:
 /// a string literal names its value, a numeric literal its canonical JS
 /// spelling (`a[1]` and `a["1"]` are one property).
+///
+/// A string key opening with U+0000 is not modelled: that prefix spells a
+/// key binding's identity segment ([`SliceElementKey::identity`]), which no
+/// property name may collide with.
 fn literal_member_key(key: &Expression<'_>) -> Option<Arc<str>> {
     match unwrap_parenthesized(key) {
+        Expression::StringLiteral(literal) if literal.value.starts_with('\u{0}') => None,
         Expression::StringLiteral(literal) => Some(Arc::from(literal.value.as_str())),
         Expression::NumericLiteral(literal) => Some(Arc::from(
             crate::semantic_query::index_key::js_number_to_string(literal.value).as_str(),
@@ -3337,6 +3452,19 @@ fn literal_member_chain<'a>(
 
 /// The root and literal path of a member WRITE target (`o.y`, `o.p["q"]`,
 /// `a[0]`) — [`literal_member_chain`] for an assignment target.
+/// Whether a member expression has the shape of a modelled member write
+/// target: a static or literal-keyed chain ([`member_target_chain`]), or
+/// such a chain's object read by an identifier key.
+fn member_write_shape(member: &oxc_ast::ast::MemberExpression<'_>) -> bool {
+    member_target_chain(member).is_some()
+        || matches!(
+            member,
+            oxc_ast::ast::MemberExpression::ComputedMemberExpression(computed)
+                if matches!(unwrap_parenthesized(&computed.expression), Expression::Identifier(_))
+                    && literal_member_chain(&computed.object).is_some()
+        )
+}
+
 fn member_target_chain<'a>(
     member: &'a oxc_ast::ast::MemberExpression<'a>,
 ) -> Option<(&'a oxc_ast::ast::IdentifierReference<'a>, Vec<Arc<str>>)> {
@@ -3352,6 +3480,17 @@ fn member_target_chain<'a>(
     let (root, mut path) = literal_member_chain(object)?;
     path.push(name);
     Some((root, path))
+}
+
+/// Whether a member access's object is a flow VALUE with no reference
+/// behind it: a `new` expression or an object literal, or a static member
+/// chain rooted at one.
+fn value_rooted_member_object(object: &Expression<'_>) -> bool {
+    match unwrap_parenthesized(object) {
+        Expression::NewExpression(_) | Expression::ObjectExpression(_) => true,
+        Expression::StaticMemberExpression(member) => value_rooted_member_object(&member.object),
+        _ => false,
+    }
 }
 
 /// Unwrap a parenthesized expression (the IIFE callee shape).
@@ -3840,6 +3979,7 @@ fn widen_mutable_slot_literals(value: SliceExpr) -> SliceExpr {
             operand,
             widen: true,
         },
+        assignment @ SliceExpr::Assignment { .. } => widen_assignment_value(assignment),
         SliceExpr::Union { arms, guard } => SliceExpr::Union {
             arms: Arc::from(
                 arms.iter()
@@ -3847,6 +3987,9 @@ fn widen_mutable_slot_literals(value: SliceExpr) -> SliceExpr {
                         SliceExpr::Type(leaf) => SliceExpr::Type(leaf.clone().map_ty(
                             verter_semantic::analysis::type_eval_build::widen_shallow_literal,
                         )),
+                        assignment @ SliceExpr::Assignment { .. } => {
+                            widen_assignment_value(assignment.clone())
+                        }
                         other => other.clone(),
                     })
                     .collect::<Vec<_>>()
@@ -3855,6 +3998,30 @@ fn widen_mutable_slot_literals(value: SliceExpr) -> SliceExpr {
             guard,
         },
         value => value,
+    }
+}
+
+/// A value-position `=` write whose value lands in a mutable slot: the
+/// right-hand side's fresh literals widen there (`[(x = "s")]` is
+/// `string[]`), while the write itself keeps the literal.
+fn widen_assignment_value(assignment: SliceExpr) -> SliceExpr {
+    match assignment {
+        SliceExpr::Assignment {
+            target,
+            definition,
+            span,
+            value,
+            freshness,
+            widen: _,
+        } => SliceExpr::Assignment {
+            target,
+            definition,
+            span,
+            value,
+            freshness,
+            widen: true,
+        },
+        other => other,
     }
 }
 
@@ -4945,7 +5112,8 @@ impl CaptureScope {
                                 SkeletonBindingKind::Const
                                     | SkeletonBindingKind::Let
                                     | SkeletonBindingKind::Var
-                            )))
+                            ))
+                        || (!fact.destructured && fact.kind == SkeletonBindingKind::CatchParam))
                 {
                     NameBinding::Captured
                 } else {
@@ -5510,6 +5678,21 @@ struct Lowerer<'a> {
     nested_free_writes: FxHashSet<SkeletonBindingId>,
     active_guard_bindings: Vec<SkeletonBindingId>,
     active_guard_subjects: Vec<FlowBindingRef>,
+    /// The guard bindings of every branch a condition lowering pushes,
+    /// collected while an `if` test holding a write lowers as a
+    /// condition — the arms it guards then capture every guarded reading.
+    condition_guard_bindings: Option<Vec<SkeletonBindingId>>,
+    /// How many member reads off an object-literal root enclose the
+    /// lowering: the planner tracks such a read as ONE reference site, so
+    /// every value of the literal it reads through is selected with it.
+    open_value_rooted_reads: u32,
+    /// The bindings a test of each destructured element also narrows
+    /// ([`Self::record_aliased_bindings`]), by the element's canonical
+    /// binding. Owned by the lowering, dropped with it.
+    aliased_bindings: rustc_hash::FxHashMap<SkeletonBindingId, Arc<[SkeletonBindingId]>>,
+    /// The ordinals of the parameters with an authored type annotation —
+    /// the ones whose type the checker's `getTypeOfDottedName` reads.
+    annotated_params: FxHashSet<u32>,
     /// The stack of breakable constructs whose bodies are currently being
     /// lowered (innermost last): `None` for a `switch`, `Some(label)` for
     /// a labeled statement. A `break` resolves against this stack — an
@@ -5567,8 +5750,10 @@ impl Lowerer<'_> {
     /// slice. Body lowering always carries a selection; None is reserved
     /// for signature-only preparation, whose body remains empty.
     fn value_span_selected(&self, span: oxc_span::Span) -> bool {
-        self.selection
-            .is_none_or(|selection| selection.value_span(self.rebase(span)))
+        self.open_value_rooted_reads > 0
+            || self
+                .selection
+                .is_none_or(|selection| selection.value_span(self.rebase(span)))
     }
 
     /// Whether a binding slot (identified by its binding-identifier
@@ -5923,6 +6108,94 @@ impl Lowerer<'_> {
         if !bindings.contains(&local) {
             bindings.push(local);
         }
+        // A test of a destructured element also narrows the references it
+        // aliases (its correlated siblings, its destructured source).
+        if let Some(aliased) = self.aliased_bindings.get(&local) {
+            for binding in aliased.iter() {
+                if !bindings.contains(binding) {
+                    bindings.push(*binding);
+                }
+            }
+        }
+    }
+
+    /// Record the bindings a destructured declaration's elements alias
+    /// ([`SliceStatement::Destructure`]'s `correlated` and `source`): a
+    /// test of one element narrows its siblings and the source, so a
+    /// closure an arm creates over any of them captures a guarded reading.
+    fn record_aliased_bindings(
+        &mut self,
+        pattern: &SlicePattern,
+        correlated: bool,
+        source: Option<&SliceNarrowSubject>,
+    ) {
+        let elements: Vec<SkeletonBindingId> = pattern
+            .bindings()
+            .iter()
+            .map(|(binding, _)| self.bindings.canonical_local(*binding))
+            .collect();
+        let mut aliased: Vec<SkeletonBindingId> = if correlated {
+            elements.clone()
+        } else {
+            Vec::new()
+        };
+        if let Some(source) = source {
+            let mut source_bindings = Vec::new();
+            match &source.root {
+                SliceNarrowRoot::Param { binding, .. }
+                | SliceNarrowRoot::Local {
+                    binding: FlowBindingRef::Local(binding),
+                    ..
+                } => source_bindings.push(self.bindings.canonical_local(*binding)),
+                SliceNarrowRoot::Local { .. } => {}
+            }
+            aliased.extend(source_bindings);
+        }
+        if aliased.is_empty() {
+            return;
+        }
+        let aliased: Arc<[SkeletonBindingId]> = Arc::from(aliased.into_boxed_slice());
+        for element in elements {
+            self.aliased_bindings.insert(element, Arc::clone(&aliased));
+        }
+    }
+
+    /// [`Self::record_aliased_bindings`] for every destructured parameter
+    /// the entry prologue binds as a pattern, ahead of the body: the
+    /// pattern correlates its elements when none of them is assigned.
+    fn record_parameter_pattern_aliases(&mut self, params: &[oxc_ast::ast::FormalParameter<'_>]) {
+        for param in params {
+            let pattern = match &param.pattern {
+                BindingPattern::AssignmentPattern(assignment) => &assignment.left,
+                other => other,
+            };
+            if matches!(pattern, BindingPattern::BindingIdentifier(_))
+                || param_pattern_is_flat(pattern)
+            {
+                continue;
+            }
+            let mut spans = Vec::new();
+            collect_pattern_identifier_spans(pattern, &mut spans);
+            let bindings: Vec<SkeletonBindingId> = spans
+                .iter()
+                .filter_map(|span| match self.binding_at(*span) {
+                    Some(FlowBindingRef::Local(binding)) => {
+                        Some(self.bindings.canonical_local(binding))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let assigned = bindings.iter().any(|binding| {
+                self.binding_is_written(*binding) || self.nested_free_writes.contains(binding)
+            });
+            if assigned || bindings.is_empty() {
+                continue;
+            }
+            let aliased: Arc<[SkeletonBindingId]> = Arc::from(bindings.clone().into_boxed_slice());
+            for binding in bindings {
+                self.aliased_bindings.insert(binding, Arc::clone(&aliased));
+            }
+        }
     }
 
     fn predicate_subject_binding(&self, test: &Expression<'_>) -> Option<FlowBindingRef> {
@@ -6215,6 +6488,8 @@ impl Lowerer<'_> {
             {
                 NameBinding::Local(None)
             }
+            // A plain `catch` variable is bound at the clause's entry.
+            SkeletonBindingKind::CatchParam if !fact.destructured => NameBinding::Local(None),
             SkeletonBindingKind::NestedFunction => NameBinding::NestedFunction,
             _ => NameBinding::Unmodeled,
         }
@@ -6328,6 +6603,16 @@ impl Lowerer<'_> {
                     // enclosing switch / labeled statement passes through.
                     may_break.extend(child.may_break);
                     out.push(SliceStatement::Block(child.region));
+                }
+                Statement::IfStatement(if_stmt) if discarded_value_holds_write(&if_stmt.test) => {
+                    let lowered = self.lower_if_with_test_writes(if_stmt);
+                    can_fall_through = lowered
+                        .region
+                        .can_fall_through
+                        .reaches_end(CompletionDischarge::RegionComposition);
+                    hit_unsupported = lowered.hit_unsupported;
+                    may_break.extend(lowered.may_break);
+                    out.extend(lowered.region.statements.iter().cloned());
                 }
                 Statement::IfStatement(if_stmt) => {
                     // The evaluator never consumes the test's VALUE, so no
@@ -6736,7 +7021,17 @@ impl Lowerer<'_> {
                         let region = self.lower_region(&handler.body.body);
                         hit_unsupported |= region.hit_unsupported;
                         clause_may_break.extend(region.may_break);
+                        let declared = handler.param.as_ref().and_then(|param| {
+                            param.type_annotation.as_ref().map(|annotation| {
+                                self.gate(
+                                    lower_ts_type(&annotation.type_annotation, self.source),
+                                    param.pattern.span(),
+                                    &[],
+                                )
+                            })
+                        });
                         Box::new(SliceCatchClause {
+                            declared,
                             binding: handler.param.as_ref().and_then(|param| {
                                 match &param.pattern {
                                     BindingPattern::BindingIdentifier(id) => {
@@ -7142,6 +7437,11 @@ impl Lowerer<'_> {
                             | VariableDeclarationKind::Using
                             | VariableDeclarationKind::AwaitUsing => SliceBindingKind::Const,
                         };
+                        self.record_aliased_bindings(
+                            &pattern,
+                            kind == SliceBindingKind::Const,
+                            None,
+                        );
                         (pattern, kind)
                     }),
                     _ => None,
@@ -7367,15 +7667,19 @@ impl Lowerer<'_> {
             // declaration — the name still resolves either
             // way, and a destructured discriminant aliases
             // exactly as a whole-binding one does.
-            self.record_narrowing_aliases(&decl.kind, declarator);
+            if matches!(declarator.id, BindingPattern::BindingIdentifier(_)) {
+                self.record_narrowing_aliases(&decl.kind, declarator);
+            }
             let BindingPattern::BindingIdentifier(id) = &declarator.id else {
                 // A modelled destructuring pattern whose demand selected
                 // one of its bindings binds each element from the
-                // declarator's annotation or initializer.
+                // declarator's annotation or initializer — and the
+                // evaluator carries the narrowings its elements alias.
                 if let Some(statement) = self.lower_destructuring_declarator(declarator, kind) {
                     out.push(statement);
                     continue;
                 }
+                self.record_narrowing_aliases(&decl.kind, declarator);
                 // Any other destructuring declarator binds nothing this
                 // half models — but the initializer still RUNS at the
                 // statement, so its effects take the same fail-closed
@@ -7550,12 +7854,30 @@ impl Lowerer<'_> {
                 },
             )
         });
+        let correlated = kind == SliceBindingKind::Const;
+        let source = if correlated && declarator.type_annotation.is_none() {
+            declarator.init.as_ref().and_then(|init| {
+                matches!(
+                    unwrap_parenthesized(init),
+                    Expression::Identifier(_)
+                        | Expression::StaticMemberExpression(_)
+                        | Expression::ComputedMemberExpression(_)
+                )
+                .then(|| self.narrow_subject_of(init))
+                .flatten()
+            })
+        } else {
+            None
+        };
+        self.record_aliased_bindings(&pattern, correlated, source.as_ref());
         Some(SliceStatement::Destructure {
             pattern,
             kind,
             init,
             declared,
             annotated: false,
+            correlated,
+            source,
         })
     }
 
@@ -7810,6 +8132,11 @@ impl Lowerer<'_> {
         let guard = match self.classify_guard(argument) {
             GuardDisposition::Modeled(guard) => *guard,
             GuardDisposition::NoNarrowing => SliceGuard::None,
+            // A test this vocabulary cannot express still infers no
+            // predicate when it provably narrows no parameter.
+            GuardDisposition::Unexpressible if !self.test_may_narrow_parameter(argument) => {
+                SliceGuard::None
+            }
             GuardDisposition::Unexpressible => return Some(ReturnPredicateTest::Unexpressible),
         };
         if self.holds_unprovable_narrowing_call(argument) {
@@ -7819,6 +8146,91 @@ impl Lowerer<'_> {
             guard: Box::new(guard),
             parameters,
         })
+    }
+
+    /// Whether a test could narrow a PARAMETER itself — the only
+    /// references an inferred predicate talks about. The checker narrows a
+    /// reference the test names and, through a discriminant member access,
+    /// that access's object: so a parameter is narrowed only by a test of
+    /// the parameter, of one member access directly on it (a static name, a
+    /// literal key, or a `const` binding's literal key), of an alias local,
+    /// or of a call. A member chain of two or more steps, or an element
+    /// access by a key that names no member (a parameter or `let` key),
+    /// narrows no parameter. Conservative: any form not listed may.
+    fn test_may_narrow_parameter(&self, test: &Expression<'_>) -> bool {
+        match unwrap_reference_transparent(test) {
+            Expression::UnaryExpression(unary) => self.test_may_narrow_parameter(&unary.argument),
+            Expression::LogicalExpression(logical) => {
+                self.test_may_narrow_parameter(&logical.left)
+                    || self.test_may_narrow_parameter(&logical.right)
+            }
+            Expression::BinaryExpression(binary) => {
+                self.test_may_narrow_parameter(&binary.left)
+                    || self.test_may_narrow_parameter(&binary.right)
+            }
+            Expression::BooleanLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::StringLiteral(_)
+            | Expression::NullLiteral(_)
+            | Expression::BigIntLiteral(_) => false,
+            Expression::Identifier(identifier) => {
+                !matches!(
+                    self.classify_occurrence(identifier.span),
+                    NameBinding::Free | NameBinding::NestedFunction
+                ) || self
+                    .narrowing_alias_locals
+                    .contains(identifier.name.as_str())
+            }
+            Expression::ComputedMemberExpression(member) => {
+                let key_names_member = literal_member_key(&member.expression).is_some()
+                    || match unwrap_parenthesized(&member.expression) {
+                        Expression::Identifier(key) => !matches!(
+                            self.binding_at(key.span),
+                            Some(FlowBindingRef::Local(binding))
+                                if self.skeleton.binding(self.bindings.canonical_local(binding)).kind
+                                    != SkeletonBindingKind::Const
+                        ),
+                        _ => true,
+                    };
+                (key_names_member && self.object_is_parameter(&member.object))
+                    || self.key_may_narrow_parameter(&member.expression)
+            }
+            Expression::StaticMemberExpression(member) => self.object_is_parameter(&member.object),
+            _ => true,
+        }
+    }
+
+    /// Whether an element-access key is itself a test that could narrow a
+    /// parameter — a key is evaluated, never tested, so only a key holding
+    /// a call can.
+    fn key_may_narrow_parameter(&self, key: &Expression<'_>) -> bool {
+        verter_semantic::analysis::flow::expression_contains_call(key)
+    }
+
+    /// Whether an expression names a parameter binding itself (through the
+    /// reference-transparent wrappers) — or an alias local, which may
+    /// stand for one.
+    fn object_is_parameter(&self, object: &Expression<'_>) -> bool {
+        match unwrap_reference_transparent(object) {
+            Expression::Identifier(identifier) => {
+                matches!(
+                    self.classify_occurrence(identifier.span),
+                    NameBinding::Param(_) | NameBinding::Local(Some(_))
+                ) || self
+                    .narrowing_alias_locals
+                    .contains(identifier.name.as_str())
+                    || matches!(
+                        self.binding_at(identifier.span),
+                        Some(FlowBindingRef::Local(binding))
+                            if self.skeleton.binding(self.bindings.canonical_local(binding)).kind
+                                == SkeletonBindingKind::Param
+                    )
+            }
+            Expression::StaticMemberExpression(_)
+            | Expression::ComputedMemberExpression(_)
+            | Expression::PrivateFieldExpression(_) => false,
+            _ => true,
+        }
     }
 
     /// Whether a returned expression holds a call whose result could
@@ -8865,6 +9277,88 @@ impl Lowerer<'_> {
         }
     }
 
+    /// The checker's effects signature of a statement call whose callee
+    /// the closed-declaration rule could not settle
+    /// (`getEffectsSignature` over `getTypeOfDottedName`): a callee that
+    /// is not a dotted name, or a dotted name rooted at a parameter or
+    /// local WITHOUT an authored annotation, has no explicit type, so the
+    /// call neither asserts nor ends the path. A dotted name rooted at an
+    /// annotated parameter or local reads its declared member type, and one
+    /// rooted at a module binding, a global or a nested function
+    /// declaration its value — both settled by the evaluator. A `this` or
+    /// `super` root, a free closed declaration (already decided) and an
+    /// unmodelled binding stay unprovable.
+    fn effect_callee(&mut self, call: &oxc_ast::ast::CallExpression<'_>) -> EffectCallee {
+        let mut path: Vec<Arc<str>> = Vec::new();
+        let mut cursor = unwrap_parenthesized(&call.callee);
+        let root = loop {
+            match cursor {
+                Expression::StaticMemberExpression(member) => {
+                    path.push(Arc::from(member.property.name.as_str()));
+                    cursor = unwrap_parenthesized(&member.object);
+                }
+                Expression::Identifier(root) => break root,
+                Expression::ThisExpression(_) | Expression::Super(_) => {
+                    return EffectCallee::Unprovable;
+                }
+                Expression::PrivateFieldExpression(_) => return EffectCallee::Unprovable,
+                _ => return EffectCallee::Inert,
+            }
+        };
+        path.reverse();
+        let name = root.name.as_str();
+        let declared = |this: &mut Self, ordinal: Option<u32>| {
+            this.narrow_root(name, root.span, ordinal)
+                .map(|root| {
+                    EffectCallee::Settle(SliceEffectCallee::Declared(SliceNarrowSubject {
+                        root,
+                        path: Arc::from(path.clone().into_boxed_slice()),
+                    }))
+                })
+                .unwrap_or(EffectCallee::Unprovable)
+        };
+        match self.classify_occurrence(root.span) {
+            NameBinding::Param(ordinal) => {
+                if self.annotated_params.contains(&ordinal) {
+                    declared(self, Some(ordinal))
+                } else {
+                    EffectCallee::Inert
+                }
+            }
+            NameBinding::Local(_) | NameBinding::Captured => {
+                let annotated = match self.binding_at(root.span) {
+                    Some(FlowBindingRef::Local(binding)) => {
+                        let fact = self
+                            .skeleton
+                            .binding(self.bindings.canonical_local(binding));
+                        if fact.kind == SkeletonBindingKind::Param {
+                            return EffectCallee::Unprovable;
+                        }
+                        fact.annotation_span.is_some() && !fact.destructured
+                    }
+                    _ => return EffectCallee::Unprovable,
+                };
+                if annotated {
+                    declared(self, None)
+                } else {
+                    EffectCallee::Inert
+                }
+            }
+            NameBinding::Free if self.closed_callee_declaration(name).is_some() => {
+                EffectCallee::Unprovable
+            }
+            NameBinding::Free | NameBinding::NestedFunction => {
+                EffectCallee::Settle(SliceEffectCallee::Value(Box::new(self.lower_expr(
+                    &call.callee,
+                    ExprMode::BindingInit {
+                        preserve_literal: true,
+                    },
+                ))))
+            }
+            NameBinding::Unmodeled => EffectCallee::Unprovable,
+        }
+    }
+
     /// Whether a closed same-file callee provably COMPLETES — the proof a
     /// statement-position call needs before the path may continue past
     /// it.
@@ -9315,10 +9809,32 @@ impl Lowerer<'_> {
                         Some(SliceStatement::ThrowPoint)
                     }
                     StatementCallEffect::NeverReturns => Some(SliceStatement::Throw),
-                    StatementCallEffect::Unprovable => {
-                        self.control_test_gap = true;
-                        Some(SliceStatement::ThrowPoint)
-                    }
+                    StatementCallEffect::Unprovable => match self.effect_callee(call) {
+                        EffectCallee::Inert => {
+                            self.decided_above_call_spans.push(call.span.into());
+                            Some(SliceStatement::ThrowPoint)
+                        }
+                        EffectCallee::Settle(callee) => Some(SliceStatement::Block(SliceRegion {
+                            statements: Arc::from(
+                                vec![
+                                    SliceStatement::ThrowPoint,
+                                    SliceStatement::CallEffect {
+                                        callee,
+                                        call: call.span.into(),
+                                    },
+                                ]
+                                .into_boxed_slice(),
+                            ),
+                            can_fall_through: NormalCompletion::minted(
+                                true,
+                                CompletionConstruction::SynthesizedRegion,
+                            ),
+                        })),
+                        EffectCallee::Unprovable => {
+                            self.control_test_gap = true;
+                            Some(SliceStatement::ThrowPoint)
+                        }
+                    },
                 }
             }
             other => self.scan_unmodeled_statement_effects(other),
@@ -9384,7 +9900,7 @@ impl Lowerer<'_> {
         member: &oxc_ast::ast::MemberExpression<'_>,
         assignment: &oxc_ast::ast::AssignmentExpression<'_>,
     ) -> Option<SliceStatement> {
-        let target = self.member_write_subject(member)?;
+        let (target, key) = self.member_write_subject(member)?;
         self.selection?
             .value_site(self.rebase(assignment.right.span()))?;
         let value = self.lower_expr(
@@ -9395,6 +9911,7 @@ impl Lowerer<'_> {
         );
         Some(SliceStatement::MemberWrite {
             target,
+            key,
             span: self.rebase(member.span()),
             write: SliceMemberWrite::Assign {
                 value: Box::new(value),
@@ -9408,7 +9925,31 @@ impl Lowerer<'_> {
     fn member_write_subject(
         &mut self,
         member: &oxc_ast::ast::MemberExpression<'_>,
-    ) -> Option<SliceNarrowSubject> {
+    ) -> Option<(SliceNarrowSubject, Option<SliceWriteKey>)> {
+        // A computed key reading a frame binding: the object's reference,
+        // extended at evaluation by the segment the key spells.
+        if let oxc_ast::ast::MemberExpression::ComputedMemberExpression(computed) = member {
+            if literal_member_key(&computed.expression).is_none() {
+                let key = self.element_key(&computed.expression)?;
+                let object = self.narrow_subject_of(&computed.object)?;
+                if !self.member_root_is_frame_binding(&object) {
+                    return None;
+                }
+                let value = self.lower_expr(
+                    &computed.expression,
+                    ExprMode::BindingInit {
+                        preserve_literal: true,
+                    },
+                );
+                return Some((
+                    object,
+                    Some(SliceWriteKey {
+                        value: Box::new(value),
+                        key,
+                    }),
+                ));
+            }
+        }
         let (root, path) = member_target_chain(member)?;
         let name = root.name.as_str();
         let root = match self.classify_occurrence(root.span) {
@@ -9422,9 +9963,51 @@ impl Lowerer<'_> {
                 return None
             }
         };
-        Some(SliceNarrowSubject {
-            root,
-            path: Arc::from(path.into_boxed_slice()),
+        Some((
+            SliceNarrowSubject {
+                root,
+                path: Arc::from(path.into_boxed_slice()),
+            },
+            None,
+        ))
+    }
+
+    /// Whether a narrowable reference is rooted at a parameter or a
+    /// modelable local of this frame (captured ones included) — the roots
+    /// a member write narrows.
+    fn member_root_is_frame_binding(&self, subject: &SliceNarrowSubject) -> bool {
+        matches!(
+            subject.root,
+            SliceNarrowRoot::Param { .. } | SliceNarrowRoot::Local { .. }
+        )
+    }
+
+    /// The reference identity of an element-access key reading a frame
+    /// binding ([`SliceElementKey`]). `None` for any other key.
+    fn element_key(&self, key: &Expression<'_>) -> Option<SliceElementKey> {
+        let Expression::Identifier(key) = unwrap_parenthesized(key) else {
+            return None;
+        };
+        let Some(FlowBindingRef::Local(binding)) = self.binding_at(key.span) else {
+            return None;
+        };
+        let canonical = self.bindings.canonical_local(binding);
+        let kind = self.skeleton.binding(canonical).kind;
+        if !matches!(
+            kind,
+            SkeletonBindingKind::Const
+                | SkeletonBindingKind::Let
+                | SkeletonBindingKind::Var
+                | SkeletonBindingKind::Param
+        ) {
+            return None;
+        }
+        let assigned =
+            self.binding_is_written(binding) || self.nested_free_writes.contains(&canonical);
+        Some(SliceElementKey {
+            constant: kind == SkeletonBindingKind::Const && !assigned,
+            identity: (!assigned)
+                .then(|| Arc::from(format!("\u{0}{}:{}", self.anchor, canonical.index()))),
         })
     }
 
@@ -9433,9 +10016,10 @@ impl Lowerer<'_> {
         &mut self,
         member: &oxc_ast::ast::MemberExpression<'_>,
     ) -> Option<SliceStatement> {
-        let target = self.member_write_subject(member)?;
+        let (target, key) = self.member_write_subject(member)?;
         Some(SliceStatement::MemberWrite {
             target,
+            key,
             span: self.rebase(member.span()),
             write: SliceMemberWrite::Compound,
         })
@@ -9551,6 +10135,7 @@ impl Lowerer<'_> {
             span,
             value: Box::new(value),
             freshness: expression_freshness(&assignment.right),
+            widen: false,
         })
     }
 
@@ -9697,6 +10282,116 @@ impl Lowerer<'_> {
         self.inert_write_spans.extend(dead);
     }
 
+    /// An `if` statement whose test holds a write (`if (c && (x = "s"))`),
+    /// lowered on the checker's flow graph: the test threads as a
+    /// condition ([`Self::lower_condition`]) whose true and false edges
+    /// break to two labels, so the consequent's entry joins every true
+    /// edge and the alternate's every false edge — each edge carrying the
+    /// writes and narrowings of the operands it ran through — and a
+    /// third label joins the two arms' ends:
+    ///
+    /// ```text
+    /// end: { false: { true: { <condition> } <consequent> break end; } <alternate> }
+    /// ```
+    ///
+    /// The labels are not identifiers, so no authored `break` names them.
+    fn lower_if_with_test_writes(
+        &mut self,
+        if_stmt: &oxc_ast::ast::IfStatement<'_>,
+    ) -> LoweredRegion {
+        let at = if_stmt.span.start;
+        let true_label: Arc<str> = Arc::from(format!("#if-true@{at}"));
+        let false_label: Arc<str> = Arc::from(format!("#if-false@{at}"));
+        let end_label: Arc<str> = Arc::from(format!("#if-end@{at}"));
+        let region = |statements: Vec<SliceStatement>, falls: bool| SliceRegion {
+            statements: Arc::from(statements.into_boxed_slice()),
+            can_fall_through: NormalCompletion::minted(
+                falls,
+                CompletionConstruction::SynthesizedRegion,
+            ),
+        };
+        let break_to = |label: &Arc<str>| {
+            let label = Arc::clone(label);
+            move |_: &mut Self, out: &mut Vec<SliceStatement>| {
+                out.push(SliceStatement::Break {
+                    target: Some(Arc::clone(&label)),
+                });
+            }
+        };
+        let on_true = break_to(&true_label);
+        let on_false = break_to(&false_label);
+        let outer_collect = self.condition_guard_bindings.replace(Vec::new());
+        let mut condition = Vec::new();
+        self.lower_condition(
+            &if_stmt.test,
+            &on_true,
+            &on_false,
+            DiscardedContext::Statement,
+            &mut condition,
+        );
+        let guard_bindings = std::mem::replace(&mut self.condition_guard_bindings, outer_collect)
+            .unwrap_or_default();
+        if let Some(outer) = self.condition_guard_bindings.as_mut() {
+            outer.extend(guard_bindings.iter().copied());
+        }
+        let mut prefix = Vec::new();
+        if std::mem::take(&mut self.control_test_gap) {
+            prefix.push(SliceStatement::Gap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        let active_guard_base = self.active_guard_bindings.len();
+        self.active_guard_bindings
+            .extend(guard_bindings.iter().copied());
+        let consequent = self.lower_arm(&if_stmt.consequent);
+        let alternate = if_stmt
+            .alternate
+            .as_ref()
+            .map(|alternate| self.lower_arm(alternate));
+        self.active_guard_bindings.truncate(active_guard_base);
+        let consequent_falls = consequent
+            .region
+            .can_fall_through
+            .reaches_end(CompletionDischarge::RegionComposition);
+        let alternate_falls = alternate.as_ref().is_none_or(|alternate| {
+            alternate
+                .region
+                .can_fall_through
+                .reaches_end(CompletionDischarge::RegionComposition)
+        });
+        let mut may_break = consequent.may_break;
+        let mut hit_unsupported = consequent.hit_unsupported;
+        let true_block = SliceStatement::Labeled {
+            label: true_label,
+            body: Box::new(region(condition, false)),
+        };
+        let mut false_body = vec![true_block];
+        false_body.extend(consequent.region.statements.iter().cloned());
+        if consequent_falls {
+            false_body.push(SliceStatement::Break {
+                target: Some(Arc::clone(&end_label)),
+            });
+        }
+        let mut end_body = vec![SliceStatement::Labeled {
+            label: false_label,
+            body: Box::new(region(false_body, false)),
+        }];
+        if let Some(alternate) = alternate {
+            may_break.extend(alternate.may_break);
+            hit_unsupported |= alternate.hit_unsupported;
+            end_body.extend(alternate.region.statements.iter().cloned());
+        }
+        prefix.push(SliceStatement::Labeled {
+            label: end_label,
+            body: Box::new(region(end_body, alternate_falls)),
+        });
+        LoweredRegion {
+            region: region(prefix, consequent_falls || alternate_falls),
+            hit_unsupported,
+            may_break,
+        }
+    }
+
     /// Lower `test` as a CONDITION whose true edge runs `on_true` and whose
     /// false edge runs `on_false`, exactly as the binder's
     /// `bindCondition` threads a condition: a `&&` / `||` test threads its
@@ -9735,6 +10430,14 @@ impl Lowerer<'_> {
                 } else {
                     on_false(self, out);
                 }
+            }
+            // `!t` is `t` with its edges exchanged (`bindCondition` over
+            // a prefix `!`).
+            Expression::UnaryExpression(unary)
+                if unary.operator == oxc_ast::ast::UnaryOperator::LogicalNot
+                    && discarded_value_holds_write(&unary.argument) =>
+            {
+                self.lower_condition(&unary.argument, on_false, on_true, context, out);
             }
             other => {
                 if discarded_value_holds_write(other) {
@@ -9790,7 +10493,7 @@ impl Lowerer<'_> {
             .modeled_assignment_statement(assignment)
         {
             Some(statement) => out.push(statement),
-            None => this.scan_discarded_effects(expression, context, out),
+            None => this.lower_unmodeled_write_effects(assignment, expression, context, out),
         };
         let nothing = |_: &mut Self, _: &mut Vec<SliceStatement>| {};
         if assignment.operator == oxc_ast::ast::AssignmentOperator::LogicalOr {
@@ -9825,6 +10528,9 @@ impl Lowerer<'_> {
         let active_guard_base = self.active_guard_bindings.len();
         let active_guard_subject_base = self.active_guard_subjects.len();
         let guard_bindings = self.guard_bindings(&guard, oxc_span::Span::default());
+        if let Some(collected) = self.condition_guard_bindings.as_mut() {
+            collected.extend(guard_bindings.iter().copied());
+        }
         let guard_name = test.and_then(|test| self.predicate_subject_binding(test));
         self.active_guard_bindings
             .extend(guard_bindings.iter().copied());
@@ -9878,6 +10584,30 @@ impl Lowerer<'_> {
         }
     }
 
+    /// The effects of a binding write this frame does not apply — its
+    /// target unmodelled, or its value selected by no demanded read (the
+    /// write-effect ledger decides whether the write itself degrades): its
+    /// right-hand side still runs first, so a write the right-hand side
+    /// holds (`d = (x = "s")`, `d &&= (x = "s") === "s"`) applies in
+    /// order. Every other shape takes the effect scan of `context`.
+    fn lower_unmodeled_write_effects(
+        &mut self,
+        assignment: &oxc_ast::ast::AssignmentExpression<'_>,
+        expression: &Expression<'_>,
+        context: DiscardedContext,
+        out: &mut Vec<SliceStatement>,
+    ) {
+        if matches!(
+            assignment.left,
+            oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(_)
+        ) && discarded_value_holds_write(&assignment.right)
+        {
+            self.lower_discarded_effects(&assignment.right, context, out);
+        } else {
+            self.scan_discarded_effects(expression, context, out);
+        }
+    }
+
     /// Lower the EFFECTS of a value nothing consumes — an expression
     /// statement, or a declarator initializer the demand did not select —
     /// into statements the evaluator applies in evaluation order, when the
@@ -9906,11 +10636,23 @@ impl Lowerer<'_> {
             Expression::AssignmentExpression(assignment) => {
                 match self.modeled_assignment_statement(assignment) {
                     Some(statement) => out.push(statement),
-                    None => self.scan_discarded_effects(expression, context, out),
+                    None => {
+                        self.lower_unmodeled_write_effects(assignment, expression, context, out)
+                    }
                 }
             }
             Expression::LogicalExpression(logical) => {
                 self.lower_logical_effects(logical, context, out);
+            }
+            // An operator's operands run in source order before it.
+            Expression::UnaryExpression(unary)
+                if unary.operator != oxc_ast::ast::UnaryOperator::Void =>
+            {
+                self.lower_discarded_effects(&unary.argument, context, out);
+            }
+            Expression::BinaryExpression(binary) => {
+                self.lower_discarded_effects(&binary.left, context, out);
+                self.lower_discarded_effects(&binary.right, context, out);
             }
             // The one `void` form that holds a write: `void (x = v)`.
             // Any other `void` operand is scanned whole, under the leaf
@@ -10231,15 +10973,18 @@ impl Lowerer<'_> {
                         );
                     }
                 }
-                // A member call on a constructed value: the object is a
-                // flow value, never a leaf answer.
+                // A member call on a constructed value or an object
+                // literal: the object is a flow value, never a leaf answer.
                 if let Expression::StaticMemberExpression(member) =
                     unwrap_parenthesized(&call.callee)
                 {
-                    if let Expression::NewExpression(_) = unwrap_parenthesized(&member.object) {
+                    if value_rooted_member_object(&member.object) {
+                        self.open_value_rooted_reads += 1;
+                        let object = self.lower_expr(&member.object, mode);
+                        self.open_value_rooted_reads -= 1;
                         return SliceExpr::Call(
                             SliceCall::OnValue {
-                                object: Box::new(self.lower_expr(&member.object, mode)),
+                                object: Box::new(object),
                                 member: Arc::from(member.property.name.as_str()),
                             },
                             call_site(call),
@@ -10281,15 +11026,16 @@ impl Lowerer<'_> {
                     },
                 }
             }
-            // A member read off a constructed value (`new C().p`).
+            // A member read off a constructed value or an object literal
+            // (`new C().p`, `({ a: 1 }).a`, `({ o: { x: 1 } }).o.x`).
             Expression::StaticMemberExpression(member)
-                if matches!(
-                    unwrap_parenthesized(&member.object),
-                    Expression::NewExpression(_)
-                ) =>
+                if value_rooted_member_object(&member.object) =>
             {
+                self.open_value_rooted_reads += 1;
+                let object = self.lower_expr(&member.object, mode);
+                self.open_value_rooted_reads -= 1;
                 SliceExpr::MemberOf {
-                    object: Box::new(self.lower_expr(&member.object, mode)),
+                    object: Box::new(object),
                     member: Arc::from(member.property.name.as_str()),
                 }
             }
@@ -10722,23 +11468,18 @@ impl Lowerer<'_> {
                 ),
             },
             Expression::ComputedMemberExpression(member) => {
-                // A key read from a binding this frame never writes is a
-                // constant reference: the access names the member its
-                // literal type spells.
-                let key_is_constant = match unwrap_parenthesized(&member.expression) {
-                    Expression::Identifier(key) => matches!(
-                        self.binding_at(key.span),
-                        Some(FlowBindingRef::Local(binding)) if !self.binding_is_written(binding)
-                    ),
-                    _ => false,
-                };
-                let reference = key_is_constant
-                    .then(|| self.narrow_subject_of(&member.object))
-                    .flatten();
+                // A key read from a frame binding makes the access the
+                // reference its identity spells ([`SliceElementKey`]).
+                let key = self.element_key(&member.expression);
+                let reference = key
+                    .as_ref()
+                    .and_then(|_| self.narrow_subject_of(&member.object));
+                let key = key.filter(|_| reference.is_some());
                 SliceExpr::ElementAccess {
                     object: Box::new(self.lower_expr(&member.object, operand_mode)),
                     index: Box::new(self.lower_expr(&member.expression, operand_mode)),
                     reference,
+                    key,
                 }
             }
             Expression::LogicalExpression(logical) => {
@@ -11881,6 +12622,18 @@ fn param_type_forbids_correlation(ty: &TypeExpr) -> bool {
         TypeExpr::Intersection(arms) => arms.iter().all(param_type_forbids_correlation),
         _ => false,
     }
+}
+
+/// How a statement call's effects signature is settled
+/// ([`Lowerer::effect_callee`]).
+enum EffectCallee {
+    /// The callee has no explicit type: the call neither asserts nor ends
+    /// the path.
+    Inert,
+    /// The evaluator reads the callee's signatures.
+    Settle(SliceEffectCallee),
+    /// Neither half can settle it: the typed guard-narrowing gap.
+    Unprovable,
 }
 
 /// What ONE STATEMENT-POSITION call establishes.

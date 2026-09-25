@@ -1392,6 +1392,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "789109d5d44af0ccaca4dbb6d68a61b4743d596611a77da7de289567965c47ae",
     ),
     (
+        "N37_destructured_local_discriminant",
+        "d65694c949429fa0ab838075c25cd81dd1a34ac4a4a9cf522d7c5099612649e8",
+    ),
+    (
         "N47_correlated_tuple_discriminant",
         "1ce11d1e05e74c645ddac49f9d1510dea8e4e601eb9e2277536a7c3f9a2343ef",
     ),
@@ -3334,8 +3338,16 @@ mod corpus_suite {
                  trailing `;` terminator",
             ),
             (
+                "N37_destructured_local_discriminant",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
+            ),
+            (
                 "N47_correlated_tuple_discriminant",
-                "checker prints `{ v: string; }`; the renderer spells the same                  surface `{ v: string }` — object members print without the                  trailing `;` terminator",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
             ),
             (
                 "N48_closure_narrows_captured_binding",
@@ -5062,11 +5074,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
     ),
     (
-        "N37_destructured_local_discriminant",
-        Owner::U6NarrowLattice,
-        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
-    ),
-    (
         "N39_instanceof_imported_class",
         Owner::U6NarrowTypeof,
         "member Union carrying Opaque(Miss) beside DeclRef(Box) — no Miss variant in the recursive expectation vocabulary",
@@ -5231,7 +5238,6 @@ const OPEN_DEBTS: &[&str] = &[
     "N34_non_null_asserted_property_discriminant",
     "N35_const_aliased_condition",
     "N36_aliased_discriminant",
-    "N37_destructured_local_discriminant",
     "N39_instanceof_imported_class",
     "N41_instanceof_member_expression_constructor",
     "N42_comma_sequence_guard",
@@ -5351,7 +5357,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // warm), so the row is parked against its narrowing block. D10
     // closed N88's unknown-key intersection (the Record mint), moving
     // this owner to 25 matching.
-    (Owner::U6NarrowLattice, 38, 26, 12),
+    (Owner::U6NarrowLattice, 38, 27, 11),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     // A `new` and a tagged template resolve to the instance: C02, C04, C08,

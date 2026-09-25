@@ -168,7 +168,7 @@ export function subCompoundParamWrite(x: string | number) {
 }
 
 export function subLogicalParamWrite(x: string | number) {
-  if ((x = "s")) {}
+  while ((x = "s")) { break; }
   return x;
 }
 
@@ -2363,8 +2363,8 @@ fn flow_return_compound_write_applies_the_base_type() {
 
 /// Unapplied write effects (defect B rail): a whole-slot write the
 /// evaluator has NO evaluation-order application for — a write inside
-/// an `if` TEST (`if ((x = "s")) {}`), which neither the statement nor
-/// the expression application arm models — MUST fail closed as the
+/// a `while` TEST (`while ((x = "s")) { break; }`), which neither the
+/// statement, the expression nor the `if`-test application models — MUST fail closed as the
 /// `UnappliedWriteEffect` DEGRADED SUCCESS: a usable value, ReturnOnly,
 /// never warm-admitted. (The plain-`=` statement and expression positions
 /// APPLY their writes in source/evaluation order — see
@@ -3769,10 +3769,11 @@ const SCC_CANONICAL: &str = "/ws/flow-scc.ts";
 /// Two mutual components. `scCleanA`/`scCleanB` close cleanly (both
 /// members admit warm); `scDegradedA`/`scDegradedB` carry an unapplied
 /// write effect, so the whole component is a degraded success —
-/// `ReturnOnly`, never warm. The write sits in an `if` test: a plain
-/// `=` or compound write at statement position, and a write inside a
-/// logical operand, are applied by the evaluator and stay clean, so the
-/// degradation fixture rides the test position nobody applies.
+/// `ReturnOnly`, never warm. The write sits in a `while` test: a plain
+/// `=` or compound write at statement position, a write inside a
+/// logical operand and one inside an `if` test are applied by the
+/// evaluator and stay clean, so the degradation fixture rides the
+/// loop-test position nobody applies.
 const SCC_FIXTURE: &str = r#"
 export function scCleanA(c: boolean) {
   if (c) return 1;
@@ -3791,7 +3792,7 @@ export function scDegradedA(c: boolean) {
 
 export function scDegradedB(c: boolean) {
   let z = 1;
-  if ((z = 2)) {}
+  while ((z = 2)) { break; }
   return scDegradedA(!!z);
 }
 
@@ -10075,16 +10076,12 @@ fn flow_return_unused_catch_parameter_does_not_poison_selected_writes() {
         ),
         verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
     );
-    // Catch-root value lowering remains an established typed gap; keeping
-    // its selected bootstrap must not claim support or warm admission.
-    assert!(matches!(
-        flow_source_probe("function makeProps(){try{throw 0;}catch(e){return e;}}"),
-        FlowSourceProbe::Value {
-            degradation: Some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition),
-            candidates: 0,
-            ..
-        }
-    ));
+    // A read of the catch variable is its declared type: `unknown` under
+    // the default `useUnknownInCatchVariables`.
+    assert_eq!(
+        expect_clean_flow_value("function makeProps(){try{throw 0;}catch(e){return e;}}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Unknown),
+    );
 }
 
 #[test]

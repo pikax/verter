@@ -1217,6 +1217,25 @@ fn guard_gap_count(node: &SliceContent) -> usize {
         .count()
 }
 
+/// The statement calls the body defers to the evaluator's effects
+/// signature ([`SliceStatement::CallEffect`]), top-level or in a
+/// top-level block.
+fn call_effect_count(node: &SliceContent) -> usize {
+    node.body
+        .statements
+        .iter()
+        .map(|statement| match statement {
+            SliceStatement::CallEffect { .. } => 1,
+            SliceStatement::Block(region) => region
+                .statements
+                .iter()
+                .filter(|statement| matches!(statement, SliceStatement::CallEffect { .. }))
+                .count(),
+            _ => 0,
+        })
+        .sum()
+}
+
 /// The guard of the body's first top-level `if` statement.
 ///
 /// Gap COUNT cannot discriminate a modeled fact from a proved-inert one
@@ -3096,11 +3115,27 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
             "a `const` alias of a discriminant read, tested by equality",
             "function f(x: { kind: \"a\"; a: 1 } | { kind: \"b\"; b: 2 }) { const kind = x.kind; if (kind === \"a\") { return x } return 0 }",
         ),
-        (
-            "a destructured discriminant alias",
-            "function f(x: { kind: \"a\"; a: 1 } | { kind: \"b\"; b: 2 }) { const { kind } = x; if (kind === \"a\") { return x } return 0 }",
-        ),
     ];
+    // A modelled destructuring declaration carries its aliases to the
+    // evaluator instead: the element narrows the destructured source.
+    let node = content_for(
+        &format!(
+            "{IS_STRING}function f(x: {{ kind: \"a\"; a: 1 }} | {{ kind: \"b\"; b: 2 }}) {{ const {{ kind }} = x; if (kind === \"a\") {{ return x }} return 0 }}"
+        ),
+        "f",
+    );
+    assert_eq!(guard_gap_count(&node), 0, "{node:?}");
+    assert!(
+        node.body.statements.iter().any(|statement| matches!(
+            statement,
+            SliceStatement::Destructure {
+                correlated: true,
+                source: Some(_),
+                ..
+            }
+        )),
+        "a destructured discriminant alias carries its source: {node:?}"
+    );
     for (case, source) in alias_gapped {
         let node = content_for(&format!("{IS_STRING}{source}"), "f");
         assert_eq!(
@@ -3323,11 +3358,13 @@ fn reference_transparent_wrappers_around_a_whole_test_keep_its_narrowing_fact() 
 /// the path, so the statements after it contribute nothing. The callee
 /// must therefore be PROVEN — a closed same-file declaration whose
 /// authored return is not an assertion signature and which provably
-/// completes. Everything else degrades; a proven `never` callee is
-/// MODELED as the terminator it is.
+/// completes, or a dotted-name callee whose type the evaluator reads
+/// (`getEffectsSignature`). A closed callee that may assert or never
+/// complete degrades; a proven `never` callee is MODELED as the
+/// terminator it is.
 #[test]
 fn statement_position_calls_are_proven_or_degrade() {
-    let gapped = [
+    let settled = [
         (
             "an imported callee",
             "import { touch } from \"./touch\";\n\
@@ -3343,6 +3380,16 @@ fn statement_position_calls_are_proven_or_degrade() {
             "export {};\nconst api = { touch(): void {} };\n\
              function f(x: string | number) { api.touch(); return x }",
         ),
+    ];
+    for (case, source) in settled {
+        let node = content_for(source, "f");
+        assert_eq!(
+            (guard_gap_count(&node), call_effect_count(&node)),
+            (0, 1),
+            "{case}: the evaluator settles the callee's effects signature: {node:?}"
+        );
+    }
+    let gapped = [
         (
             "a closed callee that may never complete",
             "export {};\nfunction touch() { throw new Error() }\n\
@@ -4489,10 +4536,21 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
             "a class-hidden write in an expression statement",
             "export {};\nfunction f(x: string | number) { void (class { static { x = \"s\"; } }); return x }",
         ),
-        // The statement's OWN callee is unproven in both of these: an
-        // imported binding and a member callee each have a
-        // checker-visible signature set this file cannot enumerate, so
-        // either could assert about a frame binding or never return.
+    ];
+    for (case, source) in gapped {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the effect-bearing statement takes the typed gap: {node:?}"
+        );
+    }
+
+    // The statement's OWN callee is a dotted name in both of these: an
+    // imported binding and a member callee each have a checker-visible
+    // signature set this file cannot enumerate, so the evaluator reads the
+    // callee's signatures for an assertion or a `never` return.
+    let settled = [
         (
             "an imported callee in statement position",
             "import { touch } from \"./touch\";\n\
@@ -4504,12 +4562,12 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
              function f(x: string | number) { console.log(x); return x }",
         ),
     ];
-    for (case, source) in gapped {
+    for (case, source) in settled {
         let node = content_for(source, "f");
         assert_eq!(
-            guard_gap_count(&node),
-            1,
-            "{case}: the effect-bearing statement takes the typed gap: {node:?}"
+            (guard_gap_count(&node), call_effect_count(&node)),
+            (0, 1),
+            "{case}: the evaluator settles the callee's effects signature: {node:?}"
         );
     }
 

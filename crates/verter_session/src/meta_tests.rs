@@ -2217,7 +2217,7 @@ fn a_degraded_success_with_a_usable_value_still_gates_the_enclosing_result() {
             "/src/C2.vue",
             r#"<script setup lang="ts">
 function makeProps(seed: string) {
-  if ((seed = "y")) {}
+  while ((seed = "y")) { break; }
   return { label: seed }
 }
 defineProps<ReturnType<typeof makeProps>>()
@@ -3534,10 +3534,11 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
 /// are ordinary TypeScript that the previous implementation compiled
 /// correctly.
 ///
-/// The fixtures ride assignments inside an `if` test (`if ((v = 2)) {}`): a
-/// plain `=`, a compound write at statement position and a write inside a
-/// logical operand are applied by the evaluator and verified, so the
-/// unverified class is exercised through the test position nobody applies
+/// The fixtures ride assignments inside a `while` test
+/// (`while ((v = 2)) { break; }`): a plain `=`, a compound write at statement
+/// position, a write inside a logical operand and one inside an `if` test are
+/// applied by the evaluator and verified, so the unverified class is
+/// exercised through the loop-test position nobody applies
 /// (the destructured-parameter row included — its plain element binding is
 /// modelled, so it too needs the test form to stay unverified).
 ///
@@ -3563,17 +3564,17 @@ fn an_unverified_flow_return_publishes_its_member_set_with_validation_off() {
     const ROWS: &[(&str, &str, &[&str])] = &[
         (
             "/src/W1Param.vue",
-            "function makeProps(seed: string) { if ((seed = \"y\")) {} return { label: seed } }",
+            "function makeProps(seed: string) { while ((seed = \"y\")) { break; } return { label: seed } }",
             &["label"],
         ),
         (
             "/src/W2CondVar.vue",
-            "function makeProps(k: boolean) { var v = 1; if (k) { if ((v = 2)) {} } return { label: \"x\", n: v } }",
+            "function makeProps(k: boolean) { var v = 1; if (k) { while ((v = 2)) { break; } } return { label: \"x\", n: v } }",
             &["label", "n"],
         ),
         (
             "/src/W3Destructure.vue",
-            "function makeProps({ seed }: {seed: string}) { if ((seed = \"y\")) {} return { label: seed, n: 1 } }",
+            "function makeProps({ seed }: {seed: string}) { while ((seed = \"y\")) { break; } return { label: seed, n: 1 } }",
             &["label", "n"],
         ),
     ];

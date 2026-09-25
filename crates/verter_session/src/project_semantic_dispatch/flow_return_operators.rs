@@ -86,7 +86,10 @@ impl FlowEvaluator<'_, '_> {
         &mut self,
         object: &SliceExpr,
         index: &SliceExpr,
-        reference: Option<&SliceNarrowSubject>,
+        reference: Option<(
+            &SliceNarrowSubject,
+            &crate::flow_slice_content::SliceElementKey,
+        )>,
     ) -> Positional<SemanticNodeId> {
         let object = match self.eval_expr(object) {
             Positional::Value(node) => node,
@@ -96,19 +99,10 @@ impl FlowEvaluator<'_, '_> {
             Positional::Value(node) => node,
             other => return other,
         };
-        if let Some(reference) = reference {
-            let name: Option<Arc<str>> = match self.dispatch.graph().node_data(index).as_deref() {
-                Some(SemanticNodeData::Literal(LiteralValue::String(value))) => {
-                    Some(Arc::from(value.as_str()))
-                }
-                Some(SemanticNodeData::Literal(LiteralValue::Number(value))) => Some(Arc::from(
-                    crate::semantic_query::index_key::js_number_to_string(*value).as_str(),
-                )),
-                _ => None,
-            };
-            if let Some(name) = name {
+        if let Some((reference, key)) = reference {
+            if let Some(segment) = self.element_segment(index, key) {
                 let mut path = reference.path.to_vec();
-                path.push(name);
+                path.push(segment);
                 let subject = SliceNarrowSubject {
                     root: reference.root.clone(),
                     path: Arc::from(path.into_boxed_slice()),
@@ -118,31 +112,7 @@ impl FlowEvaluator<'_, '_> {
                 }
             }
         }
-        // A numeric position of an array, a tuple or a string: the checker's
-        // indexed access by the key's type. Any other object reads a
-        // member by a computed key (an index signature, a mapped type),
-        // which this lane leaves at the typed gap.
-        let positional = self.operand_arms(object).into_iter().all(|arm| {
-            matches!(
-                self.dispatch
-                    .graph()
-                    .node_data(self.dispatch.resolved_reduction_view(arm))
-                    .as_deref(),
-                Some(
-                    SemanticNodeData::Array { .. }
-                        | SemanticNodeData::Tuple { .. }
-                        | SemanticNodeData::Primitive(PrimitiveKind::String)
-                        | SemanticNodeData::Literal(LiteralValue::String(_))
-                )
-            )
-        }) && self.is_numeric_key(index);
-        let value = if self.is_any_node(object) {
-            Some(object)
-        } else if positional {
-            self.positional_element(object, index)
-        } else {
-            None
-        };
+        let value = self.element_type(object, index);
         match value {
             Some(node)
                 if !matches!(
@@ -159,6 +129,128 @@ impl FlowEvaluator<'_, '_> {
                 Positional::Unmodeled
             }
         }
+    }
+
+    /// The segment an element-access key spells under its object's
+    /// reference ([`crate::flow_slice_content::SliceElementKey`]): a
+    /// `const` key of one string or numeric literal type names that
+    /// member, any other unassigned key its identity segment.
+    pub(super) fn element_segment(
+        &self,
+        index: SemanticNodeId,
+        key: &crate::flow_slice_content::SliceElementKey,
+    ) -> Option<Arc<str>> {
+        if key.constant {
+            let name: Option<Arc<str>> = match self.dispatch.graph().node_data(index).as_deref() {
+                Some(SemanticNodeData::Literal(LiteralValue::String(value)))
+                    if !value.starts_with('\u{0}') =>
+                {
+                    Some(Arc::from(value.as_str()))
+                }
+                Some(SemanticNodeData::Literal(LiteralValue::Number(value))) => Some(Arc::from(
+                    crate::semantic_query::index_key::js_number_to_string(*value).as_str(),
+                )),
+                _ => None,
+            };
+            if name.is_some() {
+                return name;
+            }
+        }
+        key.identity.clone()
+    }
+
+    /// A computed write `o[k] = v` whose key reads a frame binding: the
+    /// written reference is the object's extended by the key's segment,
+    /// reduced against the checker's indexed access of the object's type
+    /// by the key's type. A key spelling no segment (a key binding some
+    /// write reaches) writes no reference: the right-hand side still runs.
+    pub(super) fn apply_keyed_member_write(
+        &mut self,
+        target: &SliceNarrowSubject,
+        key: &crate::flow_slice_content::SliceWriteKey,
+        write: &crate::flow_slice_content::SliceMemberWrite,
+    ) {
+        let index = match self.eval_expr(&key.value) {
+            Positional::Value(node) => Some(node),
+            Positional::Hold | Positional::Unmodeled => None,
+        };
+        let segment = index.and_then(|index| self.element_segment(index, &key.key));
+        let Some(segment) = segment else {
+            if let crate::flow_slice_content::SliceMemberWrite::Assign { value, .. } = write {
+                self.prescan_statement_value_writes(Some(value));
+                let holds_before = self.holds.len();
+                let _ = self.eval_expr(value);
+                self.holds.truncate(holds_before);
+            }
+            if index.is_none() {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    FlowGap::UnmodeledExpression,
+                ));
+            }
+            return;
+        };
+        let declared = match (self.reference_node(target, true), index) {
+            (Some(object), Some(index)) => self.element_type(object, index),
+            _ => None,
+        };
+        let mut path = target.path.to_vec();
+        path.push(segment);
+        let written = SliceNarrowSubject {
+            root: target.root.clone(),
+            path: Arc::from(path.into_boxed_slice()),
+        };
+        self.apply_member_write_declared(&written, write, declared);
+    }
+
+    /// The checker's indexed access of `object` by `index` where this lane
+    /// reads it: `any` for an `any` object, a numeric position of an
+    /// array, a tuple or a string, and the named members a key of string or
+    /// numeric literal types spells. `None` for any other access (an index
+    /// signature, a mapped type).
+    fn element_type(
+        &mut self,
+        object: SemanticNodeId,
+        index: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        if self.is_any_node(object) {
+            return Some(object);
+        }
+        // A numeric position of an array, a tuple or a string: the checker's
+        // indexed access by the key's type.
+        let positional = self.operand_arms(object).into_iter().all(|arm| {
+            matches!(
+                self.dispatch
+                    .graph()
+                    .node_data(self.dispatch.resolved_reduction_view(arm))
+                    .as_deref(),
+                Some(
+                    SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Tuple { .. }
+                        | SemanticNodeData::Primitive(PrimitiveKind::String)
+                        | SemanticNodeData::Literal(LiteralValue::String(_))
+                )
+            )
+        }) && self.is_numeric_key(index);
+        if positional {
+            return self.positional_element(object, index);
+        }
+        // A key of string or numeric literal types reads the members it
+        // names; a key of any other type (an index-signature read) is not
+        // read here.
+        let mut members = Vec::new();
+        for key in self.operand_arms(index) {
+            let name: Arc<str> = match self.dispatch.graph().node_data(key).as_deref() {
+                Some(SemanticNodeData::Literal(LiteralValue::String(value))) => {
+                    Arc::from(value.as_str())
+                }
+                Some(SemanticNodeData::Literal(LiteralValue::Number(value))) => Arc::from(
+                    crate::semantic_query::index_key::js_number_to_string(*value).as_str(),
+                ),
+                _ => return None,
+            };
+            members.push(self.project_member_path(object, std::slice::from_ref(&name))?);
+        }
+        (!members.is_empty()).then(|| self.union(&members))
     }
 
     /// [`SliceExpr::Update`]: the value is the unary numeric result over
@@ -580,10 +672,8 @@ impl FlowEvaluator<'_, '_> {
         self.decided(result)
     }
 
-    /// A logical operand's value. An assignment operand's
-    /// value is its right-hand side's own type (`c && (x = "s")` is
-    /// `"s" | false`), not the target's reduced type; where that value is
-    /// not kept apart from the write, the position takes the typed gap.
+    /// A logical operand's value: an assignment operand is read as
+    /// [`Self::eval_assignment_value`] reads it.
     fn eval_operand_value(&mut self, operand: &SliceExpr) -> Positional<SemanticNodeId> {
         let SliceExpr::Assignment {
             target,
@@ -591,11 +681,29 @@ impl FlowEvaluator<'_, '_> {
             freshness,
             definition,
             span,
+            ..
         } = operand
         else {
             return self.eval_expr(operand);
         };
-        match self.eval_value_assignment(target, value, freshness, *definition, *span) {
+        self.eval_assignment_value(target, value, freshness, *definition, *span)
+    }
+
+    /// The value of a value-position `=` write, applied in evaluation
+    /// order: the checker's `rightType`, the right-hand side's own type
+    /// (`c ? (x = "s") : 0` is `"s" | 0` and `c && (x = "s")` is
+    /// `"s" | false`), never the target's assignment-reduced type. Where
+    /// that value is not kept apart from the write, the position takes the
+    /// typed gap.
+    pub(super) fn eval_assignment_value(
+        &mut self,
+        target: &crate::flow_slice_content::SliceNarrowSubject,
+        value: &SliceExpr,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        span: verter_semantic::analysis::flow::FrameSpan,
+    ) -> Positional<SemanticNodeId> {
+        match self.eval_value_assignment(target, value, freshness, definition, span) {
             (Positional::Value(_), Some(assigned)) => Positional::Value(
                 self.dispatch
                     .erase_nullable_members(assigned, self.nullability),
@@ -867,6 +975,27 @@ impl FlowEvaluator<'_, '_> {
     }
 
     fn collect_operator_fresh_literals(&self, expr: &SliceExpr, out: &mut Vec<SemanticNodeId>) {
+        match expr {
+            // A value-position `=` is its right-hand side's type, fresh
+            // literals included.
+            SliceExpr::Assignment {
+                value, freshness, ..
+            } => {
+                self.collect_fresh_leaves(value, freshness, out);
+                return;
+            }
+            // A conditional's assignment arms carry their own fresh
+            // literals (its bare literal arms are the lowering's).
+            SliceExpr::Union { arms, .. } => {
+                for arm in arms.iter() {
+                    if matches!(arm, SliceExpr::Assignment { .. }) {
+                        self.collect_operator_fresh_literals(arm, out);
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
         let SliceExpr::Logical {
             left,
             right,
@@ -883,11 +1012,41 @@ impl FlowEvaluator<'_, '_> {
                         out.push(self.lower_body_type(leaf.ty()));
                     }
                 }
-                nested @ SliceExpr::Logical { .. } => {
+                nested @ (SliceExpr::Logical { .. } | SliceExpr::Assignment { .. }) => {
                     self.collect_operator_fresh_literals(nested, out)
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// The fresh literal leaves of `expr` under its freshness mirror: a
+    /// fresh literal leaf, each fresh arm of a conditional, and the fresh
+    /// literals of a nested value-position write or logical operator.
+    fn collect_fresh_leaves(
+        &self,
+        expr: &SliceExpr,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+        out: &mut Vec<SemanticNodeId>,
+    ) {
+        use crate::flow_slice_content::SliceFreshness;
+        match (expr, freshness) {
+            (SliceExpr::Type(leaf), SliceFreshness::Fresh) => {
+                if let verter_type_expr::TypeExpr::Literal(_) = leaf.ty() {
+                    out.push(self.lower_body_type(leaf.ty()));
+                }
+            }
+            (SliceExpr::Union { arms, .. }, SliceFreshness::PerArm(verdicts))
+                if arms.len() == verdicts.len() =>
+            {
+                for (arm, verdict) in arms.iter().zip(verdicts.iter()) {
+                    self.collect_fresh_leaves(arm, verdict, out);
+                }
+            }
+            (nested @ (SliceExpr::Assignment { .. } | SliceExpr::Logical { .. }), _) => {
+                self.collect_operator_fresh_literals(nested, out)
+            }
+            _ => {}
         }
     }
 }
