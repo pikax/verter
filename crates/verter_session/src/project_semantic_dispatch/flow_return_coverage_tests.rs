@@ -2182,8 +2182,17 @@ fn an_instantiated_return_keeps_a_nested_clause_of_the_same_name() {
     let TypeExpr::Object(constructor) = &value else {
         panic!("`wk` is a constructor type: {value:?}");
     };
-    let [verter_type_expr::ObjectMember::ConstructSignature(construct)] =
-        constructor.properties.as_slice()
+    // Beside its construct signature a class's constructor type carries
+    // its `prototype` property.
+    let signatures: Vec<&verter_type_expr::ObjectMember> = constructor
+        .properties
+        .iter()
+        .filter(|member| {
+            !matches!(member, verter_type_expr::ObjectMember::Property(property)
+                if property.key == "prototype".into())
+        })
+        .collect();
+    let [verter_type_expr::ObjectMember::ConstructSignature(construct)] = signatures.as_slice()
     else {
         panic!("`wk` has one construct signature: {value:?}");
     };

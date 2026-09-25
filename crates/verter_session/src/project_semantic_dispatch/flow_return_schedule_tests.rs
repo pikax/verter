@@ -1762,7 +1762,16 @@ fn constructor_of_its_own_t(member: &TypeExpr) -> bool {
     let TypeExpr::Object(constructor) = member else {
         return false;
     };
-    let [ObjectMember::ConstructSignature(construct)] = constructor.properties.as_slice() else {
+    // Beside its construct signature a class's constructor type carries
+    // its `prototype` property.
+    let signatures: Vec<&ObjectMember> = constructor
+        .properties
+        .iter()
+        .filter(|member| {
+            !matches!(member, ObjectMember::Property(property) if property.key == "prototype".into())
+        })
+        .collect();
+    let [ObjectMember::ConstructSignature(construct)] = signatures.as_slice() else {
         return false;
     };
     let Some(TypeExpr::Object(instance)) = construct.return_type.as_deref() else {
