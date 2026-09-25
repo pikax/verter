@@ -60,3 +60,37 @@ fn a_1000_long_indexed_access_chain_lowers_on_the_default_stack() {
     let failures = mismatches(&nested_box(1), &[(reads.as_str(), "R")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// `type Pick<T> = T extends 0 ? "c0" : T extends 1 ? "c1" : … : "none"`,
+/// `links` conditionals chained through their false branches.
+fn conditional_chain(links: usize) -> String {
+    let mut body = String::new();
+    for link in 0..links {
+        body.push_str(&format!("T extends {link} ? \"c{link}\" : "));
+    }
+    format!("type Pick<T> = {body}\"none\";\n")
+}
+
+/// A conditional chained 320 deep through its false branches resolves on
+/// the default test stack.
+///
+/// Measured on TypeScript 7.0.2 (all four settings): over the 320-link
+/// chain, `Pick<319>` is `"c319"` and `Pick<-1>` is `"none"`; over a
+/// 160-link chain, `Pick<159>` is `"c159"`.
+#[test]
+fn a_320_deep_conditional_chain_resolves_on_the_default_stack() {
+    let failures = mismatches(
+        &conditional_chain(320),
+        &[("Pick<319>", "\"c319\""), ("Pick<-1>", "\"none\"")],
+    );
+    let shorter = mismatches(&conditional_chain(160), &[("Pick<159>", "\"c159\"")]);
+    assert!(
+        failures.is_empty() && shorter.is_empty(),
+        "{}",
+        failures
+            .into_iter()
+            .chain(shorter)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}

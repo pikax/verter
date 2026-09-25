@@ -252,7 +252,22 @@ Recorded plainly so no reader mistakes absence for a pass:
   side of a relation, and
   `a_1000_long_indexed_access_chain_lowers_on_the_default_stack`, the
   checker's `R`). A conditional, mapped, function, `typeof` or import type
-  still costs one native level per nesting. What still recurses per
+  still costs one native level per nesting there. The carrier-only
+  locator-shape lowering (`lower_locator_shape_node`,
+  `project_semantic_dispatch/locator_shape.rs`), which interns every
+  declaration body's authored shape, lowers the same positions — its
+  reference arguments planned through `plan_locator_ref_head` — and a
+  conditional's check, `extends` clause and branches (the clause and the
+  true branch under the binder frames the conditional declares) from an
+  explicit stack too. A conditional chained through its false branches
+  recursed there once per link, about 18 KiB per link unoptimized: a
+  160-link chain overflowed the default test stack. A 320-link chain
+  resolves now (`type_syntax_depth_tests.rs` →
+  `a_320_deep_conditional_chain_resolves_on_the_default_stack`, the
+  checker's `"c319"`, `"none"` and, over 160 links, `"c159"`); the
+  deepest remaining recursion over such a chain is the oxc-AST-to-`TypeExpr`
+  conversion (`verter_type_expr_oxc::lower_ts_type`, on the declaration
+  lowering workers), about 4.6 KiB per link. What still recurses per
   structural level is the relation engine: relating two nested
   applications (`[D] extends [Box<…<number>>]`) opens one inline relation
   frame per level (`execute_relate_inline` → `reduce_relation` → …
