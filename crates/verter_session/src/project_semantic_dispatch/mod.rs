@@ -4219,6 +4219,8 @@ mod differential_global_library_tests;
 #[cfg(test)]
 mod differential_harness_tests;
 #[cfg(test)]
+mod differential_literal_tests;
+#[cfg(test)]
 mod differential_module_tests;
 #[cfg(test)]
 mod differential_narrowing_tests;
