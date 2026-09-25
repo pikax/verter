@@ -168,7 +168,7 @@ export function subCompoundParamWrite(x: string | number) {
 }
 
 export function subLogicalParamWrite(x: string | number) {
-  x ||= "s";
+  if ((x = "s")) {}
   return x;
 }
 
@@ -2362,9 +2362,9 @@ fn flow_return_compound_write_applies_the_base_type() {
 }
 
 /// Unapplied write effects (defect B rail): a whole-slot write the
-/// evaluator has NO evaluation-order application for — the LOGICAL
-/// assignment (`x ||= "s"`), which neither the statement nor the
-/// expression application arm models — MUST fail closed as the
+/// evaluator has NO evaluation-order application for — a write inside
+/// an `if` TEST (`if ((x = "s")) {}`), which neither the statement nor
+/// the expression application arm models — MUST fail closed as the
 /// `UnappliedWriteEffect` DEGRADED SUCCESS: a usable value, ReturnOnly,
 /// never warm-admitted. (The plain-`=` statement and expression positions
 /// APPLY their writes in source/evaluation order — see
@@ -3769,10 +3769,10 @@ const SCC_CANONICAL: &str = "/ws/flow-scc.ts";
 /// Two mutual components. `scCleanA`/`scCleanB` close cleanly (both
 /// members admit warm); `scDegradedA`/`scDegradedB` carry an unapplied
 /// write effect, so the whole component is a degraded success —
-/// `ReturnOnly`, never warm. The write is a LOGICAL assignment: a plain
-/// `=` or compound write at statement position is applied by the
-/// evaluator and stays clean, so the degradation fixture rides the
-/// operator form nobody applies.
+/// `ReturnOnly`, never warm. The write sits in an `if` test: a plain
+/// `=` or compound write at statement position, and a write inside a
+/// logical operand, are applied by the evaluator and stay clean, so the
+/// degradation fixture rides the test position nobody applies.
 const SCC_FIXTURE: &str = r#"
 export function scCleanA(c: boolean) {
   if (c) return 1;
@@ -3791,7 +3791,7 @@ export function scDegradedA(c: boolean) {
 
 export function scDegradedB(c: boolean) {
   let z = 1;
-  z ||= 2;
+  if ((z = 2)) {}
   return scDegradedA(!!z);
 }
 

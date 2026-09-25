@@ -4804,9 +4804,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `UnappliedWriteEffect` degradation: the evaluation still
         // returns its usable value, but the result is a DEGRADED SUCCESS
         // — `ReturnOnly`, never warm-admitted. A projection-path write
-        // (`x.a = v`) never retypes the binding itself and stays clean;
-        // a write whose target slot is neither a parameter nor
-        // value-selected cannot be observed by the demanded value.
+        // (`x.a = v`, `x[k] = v`) narrows the member reference it names,
+        // so one whose value the slice selected degrades exactly as a
+        // whole-slot write does unless it is applied; a write whose value
+        // no demanded read selects, or whose target slot is neither a
+        // parameter nor value-selected, cannot be observed by the demanded
+        // value.
         //
         // A whole-binding `=` write at STATEMENT position the content
         // half lowered as an assignment is APPLIED by the evaluator in
@@ -4825,12 +4828,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
             lowered.effects.iter().any(|effect| {
                 let FlowEffect::Write {
-                    target, path, span, ..
+                    target,
+                    path,
+                    span,
+                    value,
+                    ..
                 } = effect
                 else {
                     return false;
                 };
-                if !path.is_empty() {
+                if !path.is_empty() && value.is_none() {
                     return false;
                 }
                 if applied_write_spans.contains(span) {
@@ -5029,10 +5036,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .then_some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition)
                 }),
             pending_statement_gap: None,
+            pattern_write_definition: None,
             auto_typed_locals: rustc_hash::FxHashSet::default(),
             circular_inferred: rustc_hash::FxHashSet::default(),
             unwidened_views: rustc_hash::FxHashMap::default(),
-            conditional_arm_nesting: 0,
             call_fresh_literal_returns: Vec::new(),
             break_exits: Vec::new(),
             return_edges: Vec::new(),
@@ -6244,6 +6251,9 @@ fn collect_assignment_spans(
                     if let Some(bound) = element.binding.as_ref() {
                         out.insert(bound.span);
                     }
+                    if let Some((pattern, _)) = element.pattern.as_ref() {
+                        out.extend(pattern.bindings().into_iter().filter_map(|(_, span)| span));
+                    }
                     if include_expression_writes {
                         collect_expression_write_spans(&element.iterable, out);
                     }
@@ -6251,6 +6261,29 @@ fn collect_assignment_spans(
             }
             crate::flow_slice_content::SliceStatement::CompoundAssignment { span, .. } => {
                 out.insert(*span);
+            }
+            crate::flow_slice_content::SliceStatement::Destructure { init, .. } => {
+                if include_expression_writes {
+                    if let Some(init) = init {
+                        collect_expression_write_spans(init, out);
+                    }
+                }
+            }
+            crate::flow_slice_content::SliceStatement::DestructureAssign {
+                pattern, value, ..
+            } => {
+                out.extend(pattern.target_spans());
+                if include_expression_writes {
+                    collect_expression_write_spans(value, out);
+                }
+            }
+            crate::flow_slice_content::SliceStatement::MemberWrite { span, write, .. } => {
+                out.insert(*span);
+                if let (true, crate::flow_slice_content::SliceMemberWrite::Assign { value, .. }) =
+                    (include_expression_writes, write)
+                {
+                    collect_expression_write_spans(value, out);
+                }
             }
             crate::flow_slice_content::SliceStatement::Unreachable(unreachable) => {
                 collect_assignment_spans(unreachable, out, include_expression_writes);
@@ -6299,7 +6332,9 @@ fn collect_expression_write_spans(
     out: &mut rustc_hash::FxHashSet<verter_semantic::analysis::flow::FrameSpan>,
 ) {
     for write in expression_write_tree(expr) {
-        if let crate::flow_slice_content::SliceExpr::Assignment { span, .. } = write {
+        if let crate::flow_slice_content::SliceExpr::Assignment { span, .. }
+        | crate::flow_slice_content::SliceExpr::Update { span, .. } = write
+        {
             out.insert(*span);
         }
     }
@@ -6355,6 +6390,24 @@ fn expression_write_tree(
             SliceExpr::Satisfies { operand, .. } | SliceExpr::Void { operand, .. } => {
                 walk(operand, out)
             }
+            SliceExpr::Arithmetic { operands, .. } => {
+                for operand in operands.iter() {
+                    walk(operand, out);
+                }
+            }
+            SliceExpr::ElementAccess { object, index, .. } => {
+                walk(object, out);
+                walk(index, out);
+            }
+            SliceExpr::Update { .. } => out.push(expr),
+            SliceExpr::NonNull { operand } => walk(operand, out),
+            SliceExpr::Logical { left, right, .. } => {
+                walk(left, out);
+                walk(right, out);
+            }
+            SliceExpr::Not { operand, .. } => walk(operand, out),
+            SliceExpr::MemberOf { object, .. } => walk(object, out),
+            SliceExpr::Call(SliceCall::OnValue { object, .. }, _) => walk(object, out),
             SliceExpr::Call(SliceCall::Nested(function_value), _) => {
                 walk(function_value, out);
             }
@@ -6987,6 +7040,9 @@ fn slice_statements_have_non_subject_return<'a>(
         | SliceStatement::Break { .. }
         | SliceStatement::Continue { .. }
         | SliceStatement::CompoundAssignment { .. }
+        | SliceStatement::MemberWrite { .. }
+        | SliceStatement::Destructure { .. }
+        | SliceStatement::DestructureAssign { .. }
         | SliceStatement::Yield { .. }
         | SliceStatement::Throw
         | SliceStatement::ThrowPoint
@@ -7087,6 +7143,12 @@ impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
 
 #[path = "flow_return_class.rs"]
 mod class_expression;
+
+#[path = "flow_return_operators.rs"]
+mod operators;
+
+#[path = "flow_return_destructure.rs"]
+mod destructure;
 
 #[path = "flow_return_schedule.rs"]
 pub(super) mod schedule;
@@ -7207,10 +7269,9 @@ struct FlowEvaluator<'d, 'b> {
     /// evaluation takes precedence. Expression gaps remain immediate because
     /// they identify the unmodelled value position itself.
     pending_statement_gap: Option<crate::semantic_query::FlowGap>,
-    /// How many `if` arms enclose the statement being evaluated. A plain
-    /// block NEVER increments it — a block executes unconditionally, so a
-    /// `var` it declares has exactly one reaching definition.
-    conditional_arm_nesting: u32,
+    /// The value site of the destructuring assignment whose targets are
+    /// being written — the definition each target's write records.
+    pattern_write_definition: Option<verter_semantic::analysis::flow::SkeletonExprSiteId>,
     /// COMPLETED calls in this frame that closed with fresh-preserved
     /// literal deposits, recorded by their authored call-site span — the
     /// call-SITE identity a consuming position matches against, never the
@@ -7665,6 +7726,13 @@ enum NarrowingLedgerEntry {
     /// Every fact rooted at `root` was dropped — what a write to the
     /// binding does to the facts about the value it replaced.
     Cleared { root: FlowProductSubject },
+    /// Every fact rooted at `root` on a path strictly longer than `path`
+    /// under it was dropped — what a write to the member reference `path`
+    /// does to the facts about the value it replaced.
+    ClearedBelow {
+        root: FlowProductSubject,
+        path: Arc<[Arc<str>]>,
+    },
 }
 
 /// The guard facts a ledger WINDOW leaves standing, in write order.
@@ -7703,6 +7771,12 @@ fn standing_narrowings(
             } => standing.push((root, subject, *node)),
             NarrowingLedgerEntry::Cleared { root } => {
                 standing.retain(|(candidate, _, _)| *candidate != root);
+            }
+            NarrowingLedgerEntry::ClearedBelow { root, path } => {
+                standing.retain(|(candidate, subject, _)| {
+                    *candidate != root
+                        || !(subject.path.len() > path.len() && subject.path.starts_with(path))
+                });
             }
         }
     }
@@ -7862,6 +7936,16 @@ fn reestablish_narrowings(
 /// about the SAME position replaces the earlier one. `fresh_literal` is
 /// the compared literal a literal equality took from the compared value
 /// ([`FlowNarrowingFact::fresh_literal`]).
+/// The number a member NAME spells when it is a canonical numeric string
+/// (`"0"`, `"1.5"`) — the names a numeric index reads.
+fn numeric_member_name(name: &str) -> Option<f64> {
+    if !name.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
+        return None;
+    }
+    let value: f64 = name.parse().ok()?;
+    (crate::semantic_query::index_key::js_number_to_string(value) == name).then_some(value)
+}
+
 fn push_narrowing_into(
     products: &mut FlowProductStore,
     root: &FlowProductSubject,
@@ -9091,6 +9175,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.products.runtime_declared_type(binding)
     }
 
+    /// Whether `binding` is the checker's AUTO-TYPED variable in this frame
+    /// (`noImplicitAny` on, an unannotated `let` / `var` with no initializer
+    /// or a bare `null` / `undefined` one).
+    pub(super) fn is_auto_typed_local(&self, binding: &FlowProductSubject) -> bool {
+        self.auto_typed_locals
+            .contains(&self.canonical_runtime_subject(binding))
+    }
+
     fn local_assignment(&self, binding: &FlowProductSubject) -> DefiniteAssignmentProduct {
         self.products.assignment(binding)
     }
@@ -9313,8 +9405,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .unwrap_or(&frame_algebra);
         #[cfg(not(test))]
         let algebra = &frame_algebra;
-        let products: smallvec::SmallVec<[&FlowProductStore; 4]> =
-            incoming.iter().map(|state| &state.products).collect();
+        let folded = self.fold_partial_root_narrowings(incoming);
+        let products: smallvec::SmallVec<[&FlowProductStore; 4]> = match folded.as_ref() {
+            Some(folded) => folded.iter().collect(),
+            None => incoming.iter().map(|state| &state.products).collect(),
+        };
         #[cfg(test)]
         let products = {
             let mut products = products;
@@ -9346,6 +9441,120 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .push(observed.observation.into_inner());
         }
         joined
+    }
+
+    /// The predecessors of a merge point with every binding NARROWED on
+    /// some of them but not all folded into those predecessors' reaching
+    /// types: the checker's branch label unions the reference's type on
+    /// each antecedent, and on a narrowing antecedent that type is the
+    /// narrowed one (`if (x === 1) {} else { x = 2 }` over `x: 1 | 2 | 3`
+    /// is `1 | 2` past the `if`). `None` when no binding is narrowed on
+    /// only part of the predecessors — the product join is then exact.
+    fn fold_partial_root_narrowings(
+        &self,
+        incoming: &[&FlowLayerState],
+    ) -> Option<Vec<FlowProductStore>> {
+        let root_fact = |products: &FlowProductStore, subject: &FlowProductSubject| {
+            products.narrowing(subject).and_then(|product| {
+                product
+                    .facts()
+                    .iter()
+                    .find(|fact| fact.path.is_empty())
+                    .cloned()
+            })
+        };
+        let mut partial: Vec<FlowProductSubject> = Vec::new();
+        for state in incoming {
+            for subject in state
+                .products
+                .subjects_in(super::flow_solve::FlowDomain::Narrowing)
+            {
+                if partial.contains(&subject) {
+                    continue;
+                }
+                let Some(fact) = root_fact(&state.products, &subject) else {
+                    continue;
+                };
+                if incoming.iter().any(|other| {
+                    root_fact(&other.products, &subject)
+                        .is_none_or(|other| other.narrowed_to != fact.narrowed_to)
+                }) {
+                    partial.push(subject);
+                }
+            }
+        }
+        // A fold that cannot change the merged set is skipped: when every
+        // member a narrowing predecessor's unnarrowed value has beyond its
+        // narrowed one is read on some predecessor anyway, the union of
+        // the unnarrowed values IS the union of the edges' types.
+        let arms = |node: SemanticNodeId| -> Vec<SemanticNodeId> {
+            self.dispatch
+                .union_arms_of(node)
+                .map_or_else(|| vec![node], |arms| arms.to_vec())
+        };
+        partial.retain(|subject| {
+            let edge_arms: Vec<SemanticNodeId> = incoming
+                .iter()
+                .flat_map(|state| {
+                    match root_fact(&state.products, subject) {
+                        Some(fact) => Some(fact.narrowed_to),
+                        None => state.products.reaching(subject),
+                    }
+                    .map(arms)
+                    .unwrap_or_default()
+                })
+                .collect();
+            incoming.iter().any(|state| {
+                let (Some(fact), Some(reaching)) = (
+                    root_fact(&state.products, subject),
+                    state.products.reaching(subject),
+                ) else {
+                    return false;
+                };
+                let narrowed = arms(fact.narrowed_to);
+                arms(reaching)
+                    .into_iter()
+                    .any(|arm| !narrowed.contains(&arm) && !edge_arms.contains(&arm))
+            })
+        });
+        if partial.is_empty() {
+            return None;
+        }
+        Some(
+            incoming
+                .iter()
+                .map(|state| {
+                    let mut products = state.products.clone();
+                    for subject in &partial {
+                        let Some(fact) = root_fact(&products, subject) else {
+                            continue;
+                        };
+                        if products.reaching_type(subject).is_none() {
+                            continue;
+                        }
+                        let fresh = (fact.fresh_literal == Some(fact.narrowed_to))
+                            .then_some(WideningMembership::All);
+                        products.set_reaching_type(
+                            subject,
+                            ReachingTypeProduct::of(fact.narrowed_to).with_widening(fresh),
+                        );
+                        let kept: Vec<FlowNarrowingFact> = products
+                            .narrowing(subject)
+                            .map(|product| {
+                                product
+                                    .facts()
+                                    .iter()
+                                    .filter(|fact| !fact.path.is_empty())
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        products.set_narrowing(subject, NarrowingProduct::new(kept));
+                    }
+                    products
+                })
+                .collect(),
+        )
     }
 
     fn bind_local(
@@ -9384,8 +9593,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .key(super::flow_solve::FlowDomain::ReachingValue, binding)
                 .map(|key| key.node()),
         };
+        // A `var` declarator's initializer defines the binding on the path
+        // evaluating it, conditional arm or not: the reading on that path
+        // is exact, and a join where some predecessor never ran the
+        // declarator raises the conditional-definition refusal
+        // ([`Self::join_continuations`]).
         let single_path = if kind == crate::flow_slice_content::SliceBindingKind::Var {
-            self.conditional_arm_nesting > 0
+            false
         } else {
             self.products.assignment(binding).single_path()
         };
@@ -9741,6 +9955,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if let Some(literal) = self.fresh_narrowed_literal(expr, node) {
             return vec![literal];
         }
+        let operator_fresh = self.operator_fresh_values(expr, node);
+        if !operator_fresh.is_empty() {
+            return operator_fresh;
+        }
         if let crate::flow_slice_content::SliceExpr::Local {
             binding,
             name: _,
@@ -9850,6 +10068,104 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         node
     }
 
+    /// Apply one member-path write ([`crate::flow_slice_content::SliceStatement::MemberWrite`]):
+    /// the checker narrows the written reference (`getTypeAtFlowAssignment`)
+    /// to the assigned value reduced against the reference's declared type
+    /// when that type is a union, and to the declared type otherwise; a
+    /// compound write reduces the declared type's BASE type. Every fact
+    /// standing on a longer path under the reference dies — its parent
+    /// value was replaced — while facts on the reference's prefixes and
+    /// siblings survive, and no call ever invalidates the fact. A value
+    /// this frame cannot type, or a reference whose declared type does
+    /// not project, stands as the typed unmodelled marker, never as the
+    /// declared type.
+    fn apply_member_write(
+        &mut self,
+        target: &crate::flow_slice_content::SliceNarrowSubject,
+        write: &crate::flow_slice_content::SliceMemberWrite,
+    ) {
+        let declared = self.member_declared_node(target);
+        let (node, fresh_literal) = match write {
+            // A declared type that is not a union is the reference's type
+            // whatever is assigned: the value is evaluated only for the
+            // writes it performs.
+            crate::flow_slice_content::SliceMemberWrite::Assign { value, .. }
+                if declared
+                    .is_some_and(|declared| self.dispatch.union_arms_of(declared).is_none()) =>
+            {
+                if !expression_write_tree(value).is_empty() {
+                    self.prescan_statement_value_writes(Some(value));
+                    let holds_before = self.holds.len();
+                    let _ = self.eval_expr(value);
+                    self.holds.truncate(holds_before);
+                }
+                (declared, None)
+            }
+            crate::flow_slice_content::SliceMemberWrite::Assign { value, freshness } => {
+                self.prescan_statement_value_writes(Some(value));
+                let holds_before = self.holds.len();
+                let outcome = self.eval_expr(value);
+                self.holds.truncate(holds_before);
+                match (outcome, declared) {
+                    (Positional::Value(value), Some(declared)) => {
+                        let reduced = match self.dispatch.union_arms_of(declared) {
+                            Some(arms) => self.assignment_reduced_union(declared, &arms, value),
+                            None => declared,
+                        };
+                        // A FRESH boolean literal the reduction keeps stays
+                        // fresh (`getAssignmentReducedType` maps kept
+                        // constituents to their fresh literal types).
+                        let fresh =
+                            matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh)
+                                && matches!(
+                                    self.dispatch.graph().node_data(reduced).as_deref(),
+                                    Some(SemanticNodeData::Literal(
+                                        crate::semantic_query::LiteralValue::Boolean(_)
+                                    ))
+                                );
+                        (Some(reduced), fresh.then_some(reduced))
+                    }
+                    // A callee hold settles on a later pass, exactly as
+                    // the whole-binding write's does.
+                    (Positional::Hold, _) => return,
+                    (Positional::Value(_) | Positional::Unmodeled, _) => (None, None),
+                }
+            }
+            crate::flow_slice_content::SliceMemberWrite::Compound => {
+                match declared.map(|declared| self.base_type_of_literal(declared)) {
+                    Some(base) if self.dispatch.union_arms_of(base).is_none() => (Some(base), None),
+                    // A union base is reduced by the operation's result,
+                    // which this write does not evaluate.
+                    _ => (None, None),
+                }
+            }
+        };
+        let node = node.unwrap_or_else(|| self.unmodeled_position());
+        let Some(root) = self.resolved_narrow_subject(&target.root) else {
+            return;
+        };
+        if let Some(product) = self.products.narrowing(&root) {
+            let kept: Vec<FlowNarrowingFact> = product
+                .facts()
+                .iter()
+                .filter(|fact| {
+                    !(fact.path.len() > target.path.len() && fact.path.starts_with(&target.path))
+                })
+                .cloned()
+                .collect();
+            if kept.len() != product.facts().len() {
+                self.products
+                    .set_narrowing(&root, NarrowingProduct::new(kept));
+            }
+        }
+        self.narrowing_writes
+            .push(NarrowingLedgerEntry::ClearedBelow {
+                root,
+                path: Arc::clone(&target.path),
+            });
+        self.push_narrowing_with_fresh_literal(target, node, fresh_literal);
+    }
+
     /// [`Self::bind_written_with`] carrying no literal widening.
     fn bind_written(
         &mut self,
@@ -9899,8 +10215,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
             crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+                // A write defines a conditional-definition-policy binding
+                // on the path executing it — inside a conditional arm or a
+                // loop body too: a read on that path observes exactly the
+                // written value (`let x; if (c) { x = 1; return x }` is
+                // `number`). Only a JOIN a never-assigning predecessor
+                // reaches raises the refusal
+                // ([`Self::join_continuations`]).
                 let single_path = if self.uses_conditional_definition_policy(binding) {
-                    self.conditional_arm_nesting > 0
+                    false
                 } else {
                     self.products.assignment(binding).single_path()
                 };
@@ -9920,6 +10243,78 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     degraded,
                     definition,
                 );
+            }
+        }
+    }
+
+    /// Apply one VALUE-position `=` write ([`crate::flow_slice_content::SliceExpr::Assignment`])
+    /// in evaluation order, reusing the statement pre-scan's verdict: the
+    /// written (assignment-reduced) node, and the right-hand side's own
+    /// value before the reduction and widening — the assignment
+    /// expression's type, `checkAssignmentOperator`'s right operand —
+    /// when it is kept apart from the write.
+    fn eval_value_assignment(
+        &mut self,
+        target: &crate::flow_slice_content::SliceNarrowSubject,
+        value: &crate::flow_slice_content::SliceExpr,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        span: verter_semantic::analysis::flow::FrameSpan,
+    ) -> (Positional<SemanticNodeId>, Option<SemanticNodeId>) {
+        let declared = self.target_declared_node(target).is_some();
+        let holds_before = self.holds.len();
+        let widening_nullish = self.widening_nullish_value(value, freshness);
+        let memo = self.expression_write_nodes.remove(&span);
+        let outcome = match memo {
+            Some(outcome) => outcome,
+            None => self.eval_write_rhs(target, value, freshness),
+        };
+        match outcome {
+            Positional::Value(node) => {
+                self.holds.truncate(holds_before);
+                let written = self.apply_write(
+                    target,
+                    node,
+                    false,
+                    definition,
+                    widening_nullish,
+                    matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh),
+                );
+                // Without a declared type the evaluation widened exactly
+                // the right-hand side's FRESH positions: a bare literal's
+                // own type is re-read from the literal (it has no
+                // effects), a pinned value is the evaluated one, and a
+                // mixed tree is not kept apart.
+                let assigned = match (declared, freshness) {
+                    (true, _)
+                    | (
+                        false,
+                        crate::flow_slice_content::SliceFreshness::Pinned
+                        | crate::flow_slice_content::SliceFreshness::WideningNullish,
+                    ) => Some(node),
+                    (false, crate::flow_slice_content::SliceFreshness::Fresh) => {
+                        match self.eval_expr(value) {
+                            Positional::Value(literal) => Some(literal),
+                            Positional::Hold | Positional::Unmodeled => None,
+                        }
+                    }
+                    (false, crate::flow_slice_content::SliceFreshness::PerArm(_)) => None,
+                };
+                (Positional::Value(written), assigned)
+            }
+            Positional::Hold => {
+                self.holds.truncate(holds_before);
+                (Positional::Hold, None)
+            }
+            Positional::Unmodeled => {
+                self.holds.truncate(holds_before);
+                let marker = super::flow_return_callee::unmodeled_position_marker(self.dispatch);
+                (
+                    Positional::Value(
+                        self.apply_write(target, marker, true, definition, false, false),
+                    ),
+                    None,
+                )
             }
         }
     }
@@ -10192,7 +10587,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         lowered: &crate::flow_slice_content::SliceLoop,
         head: &FlowLayerState,
-        element: Option<(&crate::flow_slice_content::SliceLoopBinding, SemanticNodeId)>,
+        element: Option<(&crate::flow_slice_content::SliceLoopElement, SemanticNodeId)>,
     ) -> Result<LoopPass, FlowReturnFailure> {
         use crate::flow_slice_content::SliceLoopTest;
         let break_base = self.break_exits.len();
@@ -10220,16 +10615,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.apply_guard_scoped(guard, true);
         }
         if let Some((element, node)) = element {
-            let subject = FlowProductSubject::Local(element.binding);
-            if element.kind != crate::flow_slice_content::SliceBindingKind::Var {
-                self.record_scope_shadow(&subject);
+            if let Some(element) = element.binding.as_ref() {
+                let subject = FlowProductSubject::Local(element.binding);
+                if element.kind != crate::flow_slice_content::SliceBindingKind::Var {
+                    self.record_scope_shadow(&subject);
+                }
+                self.set_declared_local(&subject, element.kind, Some(node));
+                self.bind_local(&subject, element.kind, node, None, false);
+            } else if let Some((pattern, kind)) = element.pattern.as_ref() {
+                self.bind_loop_pattern(pattern, node, *kind);
             }
-            self.set_declared_local(&subject, element.kind, Some(node));
-            self.bind_local(&subject, element.kind, node, None, false);
         }
-        self.conditional_arm_nesting += 1;
         let (result, body_falls) = self.eval_region(&lowered.body);
-        self.conditional_arm_nesting -= 1;
         let contributors = result?;
         let shadows =
             self.split_scope_shadows_close_exits(shadow_base, break_base, return_base, throw_base);
@@ -10304,11 +10701,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         element: &'l crate::flow_slice_content::SliceLoopElement,
     ) -> Option<(
-        &'l crate::flow_slice_content::SliceLoopBinding,
+        &'l crate::flow_slice_content::SliceLoopElement,
         SemanticNodeId,
     )> {
         let outcome = self.eval_expr(&element.iterable);
-        let bound = element.binding.as_ref()?;
+        if element.binding.is_none() && element.pattern.is_none() {
+            return None;
+        }
+        let bound = element;
         let source = self.settle(outcome);
         let graph = self.dispatch.graph();
         let node = source.and_then(|source| {
@@ -10324,8 +10724,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .union_arms_of(source)
                 .map_or_else(|| vec![source], |arms| arms.to_vec());
             let mut elements: Vec<SemanticNodeId> = Vec::new();
+            // An array, a tuple or a string iterates its elements; any
+            // other iterable through the iterator protocol.
             for member in members {
-                elements.extend(self.spread_element_types(member)?);
+                match self.spread_element_types(member) {
+                    Some(types) => elements.extend(types),
+                    None => elements.push(self.iterated_type(member)?),
+                }
             }
             Some(self.union(&elements))
         });
@@ -10459,8 +10864,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     });
                 }
             }
-            let inherited =
-                entry.assignment(&subject).single_path() || self.conditional_arm_nesting > 0;
+            let inherited = entry.assignment(&subject).single_path();
             let single_path = if defined_on_every_path {
                 inherited
             } else {
@@ -11356,13 +11760,41 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
     ) -> Option<SemanticNodeId> {
+        self.reference_node(subject, true)
+    }
+
+    /// The DECLARED type of a member reference at this point — what the
+    /// checker reduces a write to it against: the reference's parent read
+    /// through every narrowing standing on it, the terminal member
+    /// projected with the member-read rule, and no narrowing of the
+    /// reference itself (`getFlowTypeOfAccessExpression`'s declared
+    /// property type).
+    fn member_declared_node(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+    ) -> Option<SemanticNodeId> {
+        self.reference_node(subject, false)
+    }
+
+    /// [`Self::subject_current_node`], reading a narrowing of the exact
+    /// path only when `exact` is set.
+    fn reference_node(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        exact: bool,
+    ) -> Option<SemanticNodeId> {
         // The longest narrowed prefix of the path is what a read of the
         // subject sees, so the guard starts from it: a narrow on the ROOT
         // is visible from a member-path fact (`u.kind === "a"` narrows
         // `u`, and a later `typeof u.v` reads the narrowed root before
         // projecting), and a narrow on the member itself is visible to the
         // next test of that member (`o.k !== undefined && o.k !== null`).
-        for prefix_len in (1..=subject.path.len()).rev() {
+        let longest = if exact {
+            subject.path.len()
+        } else {
+            subject.path.len().saturating_sub(1)
+        };
+        for prefix_len in (1..=longest).rev() {
             let prefix = crate::flow_slice_content::SliceNarrowSubject {
                 root: subject.root.clone(),
                 path: Arc::from(subject.path[..prefix_len].to_vec().into_boxed_slice()),
@@ -11441,6 +11873,62 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// member path — the projection half of
     /// [`Self::project_segments_navigate`].
     fn project_path_navigate(
+        &mut self,
+        base: SemanticNodeId,
+        segments: &[Arc<str>],
+    ) -> Option<SemanticNodeId> {
+        // A NUMERIC name (`t[1]`, `xs["0"]`) that no member declares is
+        // read through the numeric index — a tuple's element, an array's
+        // element type — exactly as the checker's indexed access of the
+        // name's numeric literal type.
+        if segments
+            .iter()
+            .any(|segment| numeric_member_name(segment).is_some())
+        {
+            let mut current = base;
+            for segment in segments {
+                let member = self.project_member_path(current, std::slice::from_ref(segment))?;
+                current = match numeric_member_name(segment) {
+                    Some(value)
+                        if matches!(
+                            self.dispatch.graph().node_data(member).as_deref(),
+                            Some(SemanticNodeData::Opaque(_))
+                        ) =>
+                    {
+                        let index = self.dispatch.graph().intern_node(SemanticNodeData::Literal(
+                            crate::semantic_query::LiteralValue::Number(value),
+                        ));
+                        self.indexed_access(current, index)?
+                    }
+                    _ => member,
+                };
+            }
+            return Some(current);
+        }
+        self.project_member_path(base, segments)
+    }
+
+    /// The type of `base[index]` for an index TYPE — the shared
+    /// `IndexedAccess` authority.
+    fn indexed_access(
+        &mut self,
+        base: SemanticNodeId,
+        index: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        match self.dispatch.execute_type_node(
+            crate::semantic_query::SemanticQueryKey::IndexedAccess {
+                base,
+                index: crate::semantic_query::IndexKey::Computed(index),
+                mode: crate::semantic_query::ProjectionMode::Navigate,
+            },
+        ) {
+            crate::semantic_query::QueryResult::Value(output) => Some(output.value),
+            _ => None,
+        }
+    }
+
+    /// The member-name walk of [`Self::project_path_navigate`].
+    pub(super) fn project_member_path(
         &mut self,
         base: SemanticNodeId,
         segments: &[Arc<str>],
@@ -12334,6 +12822,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return crate::semantic_query::TruthinessInhabitance::Undecided;
             }
         };
+        // With `strictNullChecks` off every type but `never` carries the
+        // checker's `Falsy` fact (`NonEmptyStringFacts`, `TrueFacts`,
+        // `ObjectFacts` and the rest all include it), so the falsy edge
+        // keeps every arm: `if (!x)` over `x: "a" | ""` reads `"a" | ""`.
+        if negated && !self.nullability.is_strict() {
+            return if matches!(
+                self.dispatch.graph().node_data(settled).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+            ) {
+                crate::semantic_query::TruthinessInhabitance::No
+            } else {
+                crate::semantic_query::TruthinessInhabitance::Yes
+            };
+        }
         let domain = self.dispatch.classify_truthiness_domain_read(settled).value;
         if negated {
             domain.falsy
@@ -14090,6 +14592,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 WideningMembership::Partial(Arc::from([literal]))
             });
         }
+        let fresh = self.operator_fresh_values(init, node);
+        if fresh.contains(&node) {
+            return Some(WideningMembership::All);
+        }
+        if !fresh.is_empty() {
+            return Some(WideningMembership::Partial(Arc::from(
+                fresh.into_boxed_slice(),
+            )));
+        }
         None
     }
 
@@ -14633,7 +15144,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 fresh_literal |= self
                                     .fresh_call_return_for(expr, node)
                                     .is_some_and(|call| call.values.contains(&node))
-                                    || self.fresh_narrowed_literal(expr, node) == Some(node);
+                                    || self.fresh_narrowed_literal(expr, node) == Some(node)
+                                    || self.operator_fresh_values(expr, node).contains(&node);
                                 if let Some(test) = predicate_test {
                                     self.infer_return_predicate(test, node);
                                 }
@@ -14687,7 +15199,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let break_base = self.break_exits.len();
                     let return_base = self.return_edges.len();
                     let throw_base = self.throw_points.len();
-                    self.conditional_arm_nesting += 1;
                     self.apply_guard_scoped(guard, true);
                     let (consequent_result, consequent_falls) = self.eval_region(consequent);
                     // Close the arm's lexical scope BEFORE snapshotting its
@@ -14707,7 +15218,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let consequent_contributors = match consequent_result {
                         Ok(contributors) => contributors,
                         Err(failure) => {
-                            self.conditional_arm_nesting -= 1;
                             return (
                                 Err(failure),
                                 region
@@ -14738,7 +15248,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let alternate_contributors = match alternate_result {
                             Ok(contributors) => contributors,
                             Err(failure) => {
-                                self.conditional_arm_nesting -= 1;
                                 return (
                                     Err(failure),
                                     region
@@ -14757,7 +15266,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         self.restore_narrowings(narrow_mark.clone());
                         (products, true)
                     };
-                    self.conditional_arm_nesting -= 1;
                     self.restore_arm_entry(&entry_products);
                     self.join_arm_writes(
                         &consequent_products,
@@ -15574,6 +16082,33 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         self.bind_written(target, marker, true, None, false);
                     }
                 },
+                crate::flow_slice_content::SliceStatement::MemberWrite {
+                    target, write, ..
+                } => {
+                    self.apply_member_write(target, write);
+                }
+                crate::flow_slice_content::SliceStatement::DestructureAssign {
+                    pattern,
+                    value,
+                    definition,
+                } => {
+                    self.eval_destructure_assign(pattern, value, *definition);
+                }
+                crate::flow_slice_content::SliceStatement::Destructure {
+                    pattern,
+                    kind,
+                    init,
+                    declared,
+                    annotated,
+                } => {
+                    self.eval_destructure(
+                        pattern,
+                        *kind,
+                        init.as_ref(),
+                        declared.as_ref(),
+                        *annotated,
+                    );
+                }
                 crate::flow_slice_content::SliceStatement::Throw => {
                     // A throw point the enclosing `try`'s catch / finally
                     // is entered from — then the path ends here.
@@ -16608,6 +17143,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 {
                     self.seed_destructured_param_element(&parent);
                 }
+                // An AUTO-TYPED `var` (`noImplicitAny` on, no annotation, no
+                // initializer or a bare `null` / `undefined` one): a closure
+                // never reads a `var` at its creation point, so the read
+                // reaches the declaration and takes its declared type — the
+                // checker's auto type, read as `any` (TS7005).
+                if value_demanded
+                    && self.binding_layer(&parent) == FlowBindingLayer::Function
+                    && self.is_auto_typed_local(&parent)
+                {
+                    let any = self
+                        .dispatch
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+                    return PreparedFlowCaptureInput {
+                        subject: FlowProductSubject::Captured(identity.clone()),
+                        value_demanded,
+                        assignment: self.products.assignment(&parent).with_single_path(false),
+                        deferred_write: None,
+                        reaching: Some(ReachingTypeProduct::of(any)),
+                        declared: Some(any),
+                    };
+                }
                 PreparedFlowCaptureInput {
                     subject: FlowProductSubject::Captured(identity.clone()),
                     value_demanded,
@@ -16824,10 +17381,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 yield_contributions: Vec::new(),
                 degradation: None,
                 pending_statement_gap: None,
+                pattern_write_definition: None,
                 auto_typed_locals: rustc_hash::FxHashSet::default(),
                 circular_inferred: rustc_hash::FxHashSet::default(),
                 unwidened_views: rustc_hash::FxHashMap::default(),
-                conditional_arm_nesting: 0,
                 call_fresh_literal_returns: Vec::new(),
                 break_exits: Vec::new(),
                 return_edges: Vec::new(),
@@ -17317,9 +17874,30 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 if self.node_is_semantic_any(node) {
                     return Positional::Value(node);
                 }
+                // A narrowing standing on a link's reference is what the
+                // link reads (`o.y = "b"; return o?.y` is `"b"`), exactly
+                // as for the dotted spelling.
+                let narrow_root = match root.as_ref() {
+                    crate::flow_slice_content::SliceExpr::Param { ordinal, binding } => {
+                        Some(crate::flow_slice_content::SliceNarrowRoot::Param {
+                            ordinal: *ordinal,
+                            binding: *binding,
+                        })
+                    }
+                    crate::flow_slice_content::SliceExpr::Local {
+                        binding,
+                        name,
+                        captured: false,
+                        ..
+                    } => Some(crate::flow_slice_content::SliceNarrowRoot::Local {
+                        name: Arc::clone(name),
+                        binding: binding.clone(),
+                    }),
+                    _ => None,
+                };
                 let mut current = node;
                 let mut adds_undefined = false;
-                for (name, optional) in links.iter() {
+                for (index, (name, optional)) in links.iter().enumerate() {
                     if *optional {
                         match self.strip_nullish_arms_for_optional_read(current) {
                             NullishStrip::Unchanged => {}
@@ -17335,6 +17913,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 ));
                             }
                         }
+                    }
+                    if let Some(narrowed) = narrow_root.as_ref().and_then(|root| {
+                        self.narrowed_read(&crate::flow_slice_content::SliceNarrowSubject {
+                            root: root.clone(),
+                            path: links[..=index]
+                                .iter()
+                                .map(|(name, _)| Arc::clone(name))
+                                .collect(),
+                        })
+                    }) {
+                        current = narrowed;
+                        continue;
                     }
                     let Some(member) =
                         self.project_path_navigate(current, std::slice::from_ref(name))
@@ -17458,43 +18048,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // the statement carried one, is REUSED — the right-hand
                 // side never evaluates twice. The expression's own value is
                 // the written (assignment-reduced) node.
-                let holds_before = self.holds.len();
-                let widening_nullish = self.widening_nullish_value(value, freshness);
-                let memo = self.expression_write_nodes.remove(span);
-                let outcome = match memo {
-                    Some(outcome) => outcome,
-                    None => self.eval_write_rhs(target, value, freshness),
-                };
-                match outcome {
-                    Positional::Value(node) => {
-                        self.holds.truncate(holds_before);
-                        Positional::Value(self.apply_write(
-                            target,
-                            node,
-                            false,
-                            *definition,
-                            widening_nullish,
-                            matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh),
-                        ))
-                    }
-                    Positional::Hold => {
-                        self.holds.truncate(holds_before);
-                        Positional::Hold
-                    }
-                    Positional::Unmodeled => {
-                        self.holds.truncate(holds_before);
-                        let marker =
-                            super::flow_return_callee::unmodeled_position_marker(self.dispatch);
-                        Positional::Value(self.apply_write(
-                            target,
-                            marker,
-                            true,
-                            *definition,
-                            false,
-                            false,
-                        ))
-                    }
-                }
+                self.eval_value_assignment(target, value, freshness, *definition, *span)
+                    .0
             }
             crate::flow_slice_content::SliceExpr::NestedFunctionValue {
                 function,
@@ -17552,6 +18107,74 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 match self.eval_expr(operand) {
                     Positional::Value(_) | Positional::Unmodeled => self.eval_expr(value),
                     Positional::Hold => Positional::Hold,
+                }
+            }
+            crate::flow_slice_content::SliceExpr::Arithmetic { operator, operands } => {
+                self.eval_arithmetic(*operator, operands)
+            }
+            crate::flow_slice_content::SliceExpr::ElementAccess {
+                object,
+                index,
+                reference,
+            } => self.eval_element_access(object, index, reference.as_ref()),
+            crate::flow_slice_content::SliceExpr::Update { target, .. } => self.eval_update(target),
+            crate::flow_slice_content::SliceExpr::NonNull { operand } => {
+                self.eval_non_null(operand)
+            }
+            crate::flow_slice_content::SliceExpr::MemberOf { object, member } => {
+                let object = match self.eval_expr(object) {
+                    Positional::Value(node) => node,
+                    other => return other,
+                };
+                match self.project_segments_navigate(object, std::slice::from_ref(member)) {
+                    Some(node)
+                        if !matches!(
+                            self.dispatch.graph().node_data(node).as_deref(),
+                            Some(SemanticNodeData::Opaque(_))
+                        ) =>
+                    {
+                        Positional::Value(node)
+                    }
+                    _ => {
+                        self.record_degradation(FlowReturnDegradation::FlowGap(
+                            crate::semantic_query::FlowGap::UnmodeledExpression,
+                        ));
+                        Positional::Unmodeled
+                    }
+                }
+            }
+            crate::flow_slice_content::SliceExpr::ParamValue { ordinal } => {
+                match self.params.get(*ordinal as usize).copied() {
+                    Some(node) => Positional::Value(node),
+                    None => Positional::Unmodeled,
+                }
+            }
+            crate::flow_slice_content::SliceExpr::Logical {
+                operator,
+                left,
+                right,
+                guard,
+                right_reachable,
+                widen,
+                ..
+            } => match self.eval_logical(*operator, left, right, guard, *right_reachable) {
+                Positional::Value(node) if *widen => {
+                    let fresh = self.operator_fresh_values(expr, node);
+                    Positional::Value(widen_values_within(
+                        self.dispatch,
+                        node,
+                        &fresh,
+                        self.nullability,
+                    ))
+                }
+                other => other,
+            },
+            crate::flow_slice_content::SliceExpr::Not { operand, widen } => {
+                match self.eval_not(operand) {
+                    Positional::Value(node) if *widen => {
+                        Positional::Value(widen_literal_node(self.dispatch, node))
+                    }
+                    other => other,
                 }
             }
             crate::flow_slice_content::SliceExpr::Awaited { operand } => {
@@ -18545,6 +19168,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                 }
                 self.call_return_of_callee_node(callee_node, site)
+            }
+            crate::flow_slice_content::SliceCall::OnValue { object, member } => {
+                // `new C().m()`: the member of the constructed value is the
+                // callee, resolved through the executor (receiver included)
+                // exactly like a frame-rooted member callee, else through
+                // the one call sink.
+                let object = match self.eval_expr(object) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
+                };
+                let Some(callee) = self
+                    .project_path_navigate(object, std::slice::from_ref(member))
+                    .filter(|callee| {
+                        !matches!(
+                            self.dispatch.graph().node_data(*callee).as_deref(),
+                            Some(SemanticNodeData::Opaque(_))
+                        )
+                    })
+                else {
+                    return self.degraded_unrepresentable_callee();
+                };
+                if let Some(value) = self.eval_call_via_resolve_call(callee, site) {
+                    return value;
+                }
+                self.call_return_of_callee_node(callee, site)
             }
             crate::flow_slice_content::SliceCall::Construct(constructor) => {
                 // `new C(…)` — the checker's `resolveNewExpression`: the

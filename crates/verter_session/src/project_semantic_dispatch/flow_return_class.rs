@@ -433,6 +433,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     ) -> Option<SemanticNodeId> {
         match self.local_declared(binding) {
             Some(declared) => Some(declared),
+            // An auto-typed local's declared type is the checker's auto
+            // type, read as `any` wherever the flow reaches no assignment.
+            None if self.is_auto_typed_local(binding) => Some(
+                self.dispatch
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
+            ),
             None => self.read_local(binding),
         }
     }

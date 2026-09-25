@@ -296,10 +296,6 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
             "optionalCallMemberRead",
             FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
         ),
-        (
-            "binaryOverCall",
-            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
-        ),
     ] {
         let outcome = evaluate(&host, POS_CANONICAL, name)
             .unwrap_or_else(|| panic!("{name} must produce a value"));
@@ -511,4 +507,28 @@ fn a_wide_union_with_no_miss_is_clean_and_warm_at_every_arm_count() {
             );
         });
     }
+}
+
+/// An arithmetic operation over a CALL types by the operator's rule over
+/// the call's resolved return: `fs() + "y"` over `fs(): string` is
+/// `string` (TypeScript 7.0.2: `binaryOverCall()` is `{ label: string;
+/// made: string; }`), clean — the call rides the call rails as an operand,
+/// never the shallow pass's fallback.
+#[test]
+fn an_arithmetic_member_over_a_call_types_by_its_operator() {
+    let host = make_pos_host();
+    let outcome = evaluate(&host, POS_CANONICAL, "binaryOverCall")
+        .expect("binaryOverCall must produce a value");
+    assert_eq!(outcome.degradation, None, "binaryOverCall is modelled");
+    with_dispatch(&host, |dispatch| {
+        let made = member(dispatch, outcome.node, "made");
+        assert!(
+            matches!(
+                dispatch.graph().node_data(made).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            ),
+            "binaryOverCall: `made` is `string`, got {:?}",
+            dispatch.graph().node_data(made)
+        );
+    });
 }

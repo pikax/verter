@@ -335,7 +335,7 @@ export function r5MutualA(c: boolean) {
 
 export function r5MutualB(c: boolean) {
   let z = 1;
-  z ||= 2;
+  if ((z = 2)) {}
   return r5MutualA(!!z);
 }
 
@@ -1418,14 +1418,12 @@ export function ncUse(k: boolean) {
 // the callee's clause is instantiated and an overload group reached
 // through one degrades exactly as it does at a bare call.
 //
-// A call in a LOGICAL / NULLISH operand, under a non-null assertion, or
-// as a MEMBER BASE does NOT: those forms are `Leaf` to the shared
-// descent, and the shallow leaf pass answers each of them `any` BEFORE
-// the call-carrier gate can refuse anything. They publish
-// `Primitive(Any)` cleanly and warm — under the checker's answer, never
-// over it, and never the callee's raw return carrier — and the rows
-// below assert exactly that, so a change that starts routing any of them
-// through the call sink has to say so here.
+// A call in a LOGICAL / NULLISH operand is one too: the logical
+// expression's operands are flow values, so the call rides the call
+// rails. A call under a non-null assertion or as a MEMBER BASE is not:
+// those forms are `Leaf` to the shared descent, and the rows below
+// assert they fail closed, so a change that starts routing either of
+// them through the call sink has to say so here.
 //
 // A call in a SEQUENCE's value operand is the one composite spelling
 // that DOES route to the call sink (D7): the sequence's value is its
@@ -2051,12 +2049,6 @@ fn function_return(expr: &TypeExpr) -> &TypeExpr {
 fn flow_return_unmodelable_local_binding_never_falls_through_to_file_scope() {
     let host = make_r5_host();
     for name in [
-        // A destructuring declarator element (`const { a } = …`).
-        "r5DestructuredConst",
-        // A NESTED destructured formal parameter (`({ b: { c } }: …)`)
-        // — plain and aliased object-pattern elements are modelled,
-        // nested patterns are not.
-        "r5DestructuredParamNested",
         // A local `class` declaration's name.
         "r5LocalClass",
         // A hoisted nested function declaration's name read as a value.
@@ -2072,10 +2064,15 @@ fn flow_return_unmodelable_local_binding_never_falls_through_to_file_scope() {
 
 /// A destructured object-pattern parameter element binds its annotation
 /// member — plain (`{ b }`) and aliased (`{ b: renamed }`) spellings
-/// alike. TypeScript 7.0.2: both are `number`.
+/// alike, a nested pattern (`({ b: { c } }: …)`) through each level, and
+/// a destructuring declarator element (`const { a } = { a: 1 }`) its
+/// initializer's member — never the file-scope bait of the same name.
+/// TypeScript 7.0.2: every one is `number`.
 #[test]
 fn flow_return_destructured_param_element_binds_the_annotation_member() {
     let host = make_r5_host();
+    assert_clean_warm(&host, "r5DestructuredConst", number());
+    assert_clean_warm(&host, "r5DestructuredParamNested", number());
     assert_clean_warm(&host, "r5DestructuredParam", number());
     assert_clean_warm(&host, "r5DestructuredParamAliased", number());
 }
@@ -2203,18 +2200,24 @@ fn flow_return_using_declaration_is_block_scoped_not_a_hoisted_var() {
 // ──────────────────────────────────────────────────────────────────────
 
 /// Reading a local for a CALL folds the same membership flags a value
-/// read does: a conditionally-defined `var` degrades, and a binding
-/// whose initializer failed degrades. Before the fix the call site took
-/// the bound node WITHOUT the flags, so
-/// `r5CallOnConditionalVar` published the literal `1` clean and warm
-/// where TypeScript 7.0.2 says `1 | 2`.
+/// read does: a binding whose initializer failed degrades. A `var`
+/// redeclaring a parameter inside an arm (`r5CallOnConditionalVar`) is
+/// defined on every path — the arm's initializer, else the parameter —
+/// so the call reads the join of the two signatures: TypeScript 7.0.2
+/// says `1 | 2` (published in its `VerterStableV1` order).
 #[test]
 fn flow_return_call_on_binding_folds_the_read_membership_flags() {
     let host = make_r5_host();
-    assert_degraded(
+    assert_clean_warm(
         &host,
         "r5CallOnConditionalVar",
-        crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+        TypeExpr::Union(Arc::from(
+            vec![
+                TypeExpr::Literal(verter_type_expr::LiteralValue::Number(2.0)),
+                TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0)),
+            ]
+            .into_boxed_slice(),
+        )),
     );
     assert_degraded(
         &host,
@@ -5794,9 +5797,13 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 ///
 /// ```text
 ///                    checker           published here
-/// tnAmbLogical       "TA" | true       fails closed ← composes a call
-/// tnAmbNullish       "TA"              fails closed ← composes a call
-/// tnGenericLogical   string | true     fails closed ← composes a call
+/// tnAmbLogical       "TA" | true       "TA" | true  ← exact: a logical
+/// tnAmbNullish       "TA"              "TA"            expression's
+/// tnGenericLogical   string | true     string | true   operands are flow
+///                                                     values, the call
+///                                                     rides the call
+///                                                     rails — asserted
+///                                                     in their own test
 /// tnGenericMember    string            fails closed ← composes a call
 /// tnAmbSequence      "TA"              "TA"         ← D7: the sequence's
 ///                                                     value operand IS
@@ -5820,8 +5827,8 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 /// ```
 ///
 /// Mutation recipe: dropping the `embeds_any && composes` half of
-/// `leaf_answer_is_fabricated_at_a_call_position` flips the four
-/// composing rows back to a warm `Primitive(Any)` with `degradation:
+/// `leaf_answer_is_fabricated_at_a_call_position` flips the
+/// composing row back to a warm `Primitive(Any)` with `degradation:
 /// None`; dropping `SequenceExpression` / the type-carrier recursion
 /// from `value_is_unmodeled_call` flips the `tnAmbNonNull` call-position
 /// row the same way (the `tnAmbSequence` row left this table at D7 and
@@ -5836,14 +5843,7 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
 
     // The COMPOSING forms: a join / projection over a call the substrate
     // has no arm for. The pass fabricated an `any`; it is not published.
-    for name in [
-        "tnAmbLogical",
-        "tnAmbNullish",
-        "tnGenericLogical",
-        "tnGenericMember",
-    ] {
-        assert_fails_closed(&host, name);
-    }
+    assert_fails_closed(&host, "tnGenericMember");
 
     // The CALL POSITIONS: the form's own value is the call's return, and
     // the substrate has no arm for it. `any` is not published.
@@ -6155,43 +6155,16 @@ fn undefined_identifier_publishes_the_undefined_primitive() {
     );
 }
 
-/// A call in a LOGICAL operand FAILS CLOSED where it must publish the
-/// operand union.
+/// A call in a LOGICAL operand publishes the checker's logical result over
+/// the operand types: the operands are flow values, so the call rides the
+/// call rails (overload choice included) and the result is the left's
+/// truthy part beside the right for `||`, the left's non-nullable part
+/// beside the right for `??`.
 ///
-/// `k || tnAmb("a")` used to answer `Primitive(Any)` cleanly and warm —
-/// the shallow pass's per-expression fallback (`_ => Ok(Primitive(Any))`)
-/// surfaced as a value. It no longer publishes: the leaf gate refuses an
-/// answer that embeds `any` when the expression's value COMPOSES over a
-/// call with no structural arm, so the position carries the typed
-/// unresolved marker and the result is a degraded success admitting
-/// nothing.
-///
-/// That closes the fabricated-value half. The CAPABILITY half is still
-/// open, and is what this row pins.
-///
-/// OWNER: the SHALLOW PASS (`verter_semantic::analysis::type_eval_build`
-/// per-expression lowering) under `U6.VALUE_INFERENCE` — not the flow
-/// rail, which owns only what happens to an answer the shallow pass
-/// produced. The green counterpart
-/// (`flow_return_leaf_answered_call_forms_publish_any_not_a_carrier`)
-/// pins the fail-closed disposition; this row pins the answer it must
-/// eventually give.
-///
-/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
-/// --ignoreConfig`): `tnAmbLogical(k)` is `"TA" | true`. (The `"TA"` half
-/// additionally needs argument-driven overload resolution —
-/// `U6.CALL_RESOLVE` — so this row does not close until both land.)
-///
-/// Verbatim failure, un-ignored on this tree:
-///
-/// ```text
-/// assertion `left == right` failed: tnAmbLogical must evaluate clean
-///   left: Some(UnmodeledPosition)
-///  right: None
-/// ```
-#[ignore = "owned by U6.VALUE_INFERENCE (the shallow pass's `_ => Ok(Primitive(Any))` \
-            per-expression fallback) plus U6.CALL_RESOLVE for the overload half: a call in a \
-            logical operand must publish the operand union, not the typed unresolved marker"]
+/// Oracle (TypeScript 7.0.2 `tsc --declaration --emitDeclarationOnly`,
+/// every `strictNullChecks` × `noImplicitAny` setting): `tnAmbLogical(k)`
+/// is `"TA" | true`, `tnAmbNullish(k)` is `"TA"`, `tnGenericLogical(k)` is
+/// `string | true`. The union is published in its `VerterStableV1` order.
 #[test]
 fn call_in_a_logical_operand_publishes_the_operand_union() {
     let host = make_r5_host();
@@ -6200,12 +6173,13 @@ fn call_in_a_logical_operand_publishes_the_operand_union() {
         "tnAmbLogical",
         TypeExpr::Union(Arc::from(
             vec![
-                string_lit("TA"),
                 TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(true)),
+                string_lit("TA"),
             ]
             .into_boxed_slice(),
         )),
     );
+    assert_clean_warm(&host, "tnAmbNullish", string_lit("TA"));
 }
 
 // ──────────────────────────────────────────────────────────────────────

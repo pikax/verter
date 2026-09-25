@@ -22,10 +22,11 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
-    FlowSliceSelection, ReturnPredicateTest, SliceBindingKind, SliceCall, SliceCallSite,
-    SliceContent, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral, SliceLoopBinding,
-    SliceLoopTest, SliceNarrowRoot, SliceNarrowSubject, SliceObjectEntry, SliceObjectMember,
-    SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind, SliceUnsupported,
+    FlowSliceSelection, ReturnPredicateTest, SliceArithmetic, SliceBindingKind, SliceCall,
+    SliceCallSite, SliceContent, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral,
+    SliceLoopBinding, SliceLoopTest, SliceNarrowRoot, SliceNarrowSubject, SliceObjectEntry,
+    SliceObjectMember, SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind,
+    SliceUnsupported,
 };
 
 /// The MEMBER entries of a structural object literal, in authored order.
@@ -3034,8 +3035,8 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
             "export {};\nfunction f(x: string | number) { if (null ?? (typeof x === \"string\")) { return x } return 0 }",
         ),
         (
-            "an equality over a computed discriminant access",
-            "export {};\nfunction f(x: { kind: \"a\"; a: 1 } | { kind: \"b\"; b: 2 }) { if (x[\"kind\"] === \"a\") { return x } return 0 }",
+            "an equality over a discriminant access keyed by a `const`",
+            "export {};\nfunction f(x: { kind: \"a\"; a: 1 } | { kind: \"b\"; b: 2 }) { const k = \"kind\"; if (x[k] === \"a\") { return x } return 0 }",
         ),
         (
             "a truthiness test of an optional discriminant access",
@@ -3273,7 +3274,7 @@ fn reference_transparent_wrappers_around_a_whole_test_keep_its_narrowing_fact() 
     // survives the wrapper in both directions.
     let node = content_for(
         "export {};\ntype A = { kind: \"a\" }; type B = { kind: \"b\" };\n\
-         function f(x: A | B) { if ((x[\"kind\"] === \"a\")!) { return x } return 0 }",
+         function f(x: A | B) { const k = \"kind\"; if ((x[k] === \"a\")!) { return x } return 0 }",
         "f",
     );
     assert_eq!(
@@ -4275,7 +4276,8 @@ fn object_return_spread_of_a_frame_binding_reads_the_frame_binding() {
     assert_eq!(member.key.static_name(), Some("x"));
 }
 
-/// @ai-generated - arrow expression body lowers to a single return of the expression
+/// @ai-generated - arrow expression body lowers to a single return of the expression, an
+/// arithmetic operation over a parameter read
 #[test]
 fn arrow_expression_body_is_single_return() {
     let node = content_for("export const double = (x: number) => x * 2;\n", "double");
@@ -4284,21 +4286,33 @@ fn arrow_expression_body_is_single_return() {
         !node.can_fall_through.reaches_end_for_assertion(),
         "an expression body always returns"
     );
+    let [SliceStatement::Return {
+        argument: Some(SliceExpr::Arithmetic { operator, operands }),
+        freshness: SliceFreshness::Pinned,
+        predicate_test,
+    }] = node.body.statements.as_ref()
+    else {
+        panic!(
+            "a binary expression over a frame read is an arithmetic operation: {:?}",
+            node.body.statements
+        );
+    };
+    assert_eq!(*operator, SliceArithmetic::Numeric);
+    assert!(
+        matches!(
+            operands.as_ref(),
+            [SliceExpr::Param { ordinal: 0, .. }, SliceExpr::Type(_)]
+        ),
+        "the operands are flow expressions: {operands:?}"
+    );
+    // Arithmetic narrows nothing, so no parameter can be a predicate
+    // subject.
     assert_eq!(
-        node.body.statements.as_ref(),
-        &[SliceStatement::Return {
-            argument: Some(SliceExpr::Gap(
-                crate::semantic_query::FlowGap::UnmodeledExpression
-            )),
-            freshness: SliceFreshness::Pinned,
-            // Arithmetic narrows nothing, so no parameter can be a
-            // predicate subject.
-            predicate_test: Some(ReturnPredicateTest::Guard {
-                guard: Box::new(SliceGuard::None),
-                parameters: Arc::from(vec![0].into_boxed_slice()),
-            }),
-        }],
-        "a binary expression is an unmodelled leaf, not semantic any"
+        predicate_test,
+        &Some(ReturnPredicateTest::Guard {
+            guard: Box::new(SliceGuard::None),
+            parameters: Arc::from(vec![0].into_boxed_slice()),
+        })
     );
 }
 
@@ -5062,7 +5076,7 @@ fn composition_with_one_unexpressible_operand_degrades_the_whole_test_to_none() 
     for (op, test) in [("&&", "&&"), ("||", "||")] {
         let source = format!(
             "export {{}};\ntype A = {{ kind: \"a\" }}; type B = {{ kind: \"b\" }};\n\
-             function f(x: A | B) {{ if (typeof x === \"object\" {test} x[\"kind\"] === \"a\") {{ return x }} return 0 }}"
+             function f(x: A | B) {{ const k = \"kind\"; if (typeof x === \"object\" {test} x[k] === \"a\") {{ return x }} return 0 }}"
         );
         let node = content_for(&source, "f");
         assert!(

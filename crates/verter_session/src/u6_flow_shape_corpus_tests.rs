@@ -1392,6 +1392,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "789109d5d44af0ccaca4dbb6d68a61b4743d596611a77da7de289567965c47ae",
     ),
     (
+        "N47_correlated_tuple_discriminant",
+        "1ce11d1e05e74c645ddac49f9d1510dea8e4e601eb9e2277536a7c3f9a2343ef",
+    ),
+    (
         "N49_closure_narrows_own_parameter",
         "7c3c9f675623866d1625c5ddbda540c416b751080fcefc6983d9c8c97e9ee4f0",
     ),
@@ -3331,7 +3335,7 @@ mod corpus_suite {
             ),
             (
                 "N47_correlated_tuple_discriminant",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | Opaque(UnmodeledPosition)) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same                  surface `{ v: string }` — object members print without the                  trailing `;` terminator",
             ),
             (
                 "N48_closure_narrows_captured_binding",
@@ -5103,6 +5107,11 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         Owner::U6NarrowTypeof,
         "member Union — the published value EQUALS the checker, so a recursive pin would assert a divergence this KnownOwed row does not have",
     ),
+    (
+        "X101_optional_chain_nullish_coalesce",
+        Owner::U6ValueInference,
+        "member Union — the published value EQUALS the checker behind the typed guard-narrowing gap, so a recursive pin would assert a divergence this KnownOwed row does not have",
+    ),
 ];
 
 /// Burn-down ceiling of [`SHALLOW_PINNED_ROWS`]. Lower freely as rows
@@ -5227,7 +5236,6 @@ const OPEN_DEBTS: &[&str] = &[
     "N41_instanceof_member_expression_constructor",
     "N42_comma_sequence_guard",
     "N43_boolean_wrapped_guard",
-    "N47_correlated_tuple_discriminant",
     "N48_closure_narrows_captured_binding",
     "N50_sequence_discriminant_test",
     // Predicate / assertion CALL TARGETS the guard rail does not accept: an
@@ -5343,7 +5351,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // warm), so the row is parked against its narrowing block. D10
     // closed N88's unknown-key intersection (the Record mint), moving
     // this owner to 25 matching.
-    (Owner::U6NarrowLattice, 38, 25, 13),
+    (Owner::U6NarrowLattice, 38, 26, 12),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     // A `new` and a tagged template resolve to the instance: C02, C04, C08,

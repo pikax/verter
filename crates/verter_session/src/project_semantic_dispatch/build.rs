@@ -5365,24 +5365,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// The global `TemplateStringsArray` type — a tagged template's first
-    /// argument — read from `canonical`'s `owner` scope.
-    ///
-    /// The checker types the template strings with its GLOBAL type, so a
-    /// same-named declaration or import in the call's own scope does not
-    /// rename them. A scope that binds no such name resolves the bare
-    /// reference exactly like an authored reference to the global (the
-    /// program's global declaration, else the unresolved lib carrier every
-    /// reference in the scope shares); a scope that shadows it reads the
-    /// program's global declaration from its own file, and has no answer
-    /// when the program declares none.
+    /// argument — read from `canonical`'s `owner` scope
+    /// ([`Self::global_named_type`]).
     pub(super) fn global_template_strings_array(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
     ) -> Option<SemanticNodeId> {
-        const NAME: &str = "TemplateStringsArray";
+        self.global_named_type(canonical, owner, "TemplateStringsArray")
+    }
+
+    /// The GLOBAL type named `name` a compiler-internal operation reads (the
+    /// template strings array, the symbol constructor the iterator protocol
+    /// keys by), read from `canonical`'s `owner` scope.
+    ///
+    /// The checker reads its GLOBAL type, so a same-named declaration or
+    /// import in the operation's own scope does not rename it. A scope that
+    /// binds no such name resolves the bare reference exactly like an
+    /// authored reference to the global (the program's global declaration,
+    /// else the unresolved lib carrier every reference in the scope
+    /// shares); a scope that shadows it reads the program's global
+    /// declaration from its own file, and has no answer when the program
+    /// declares none.
+    pub(super) fn global_named_type(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &'static str,
+    ) -> Option<SemanticNodeId> {
         let reference = verter_type_expr::TypeExpr::Ref {
-            name: Arc::from(NAME),
+            name: Arc::from(name),
             type_arguments: Arc::from(Vec::new().into_boxed_slice()),
         };
         let payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
@@ -5395,12 +5407,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             canonical,
             owner,
             payload.as_ref(),
-            NAME,
+            name,
         )
         .is_some();
         let global;
         let (scope_canonical, scope_owner) = if shadowed {
-            global = self.first_global_declaration(NAME)?;
+            global = self.first_global_declaration(name)?;
             (global.canonical_id.as_ref(), global.owner)
         } else {
             (canonical, owner)
