@@ -1173,6 +1173,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                         substitution,
                                         return_type: _,
                                         fresh_literal_returns,
+                                        recovery_diagnostic,
                                     } => ResolveCallSelection::Selected {
                                         selected,
                                         selected_signature:
@@ -1181,6 +1182,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                             ),
                                         substitution,
                                         fresh_literal_returns: fresh_literal_returns.to_vec(),
+                                        recovery_diagnostic,
                                     },
                                     ResolvedCallResult::DynamicAny { .. } => {
                                         ResolveCallSelection::DynamicAny
@@ -1220,6 +1222,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // signature list, in list order: the first applicable candidate
         // wins. A union callee arrives as its common or synthesized union
         // signatures, so there is no per-arm acceptance here.
+        let mut only_candidate = None;
         for (position, candidate) in visible.iter().enumerate() {
             let Some(kind) = bucket_kind(candidate.node) else {
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
@@ -1253,8 +1256,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.abandon_call_sessions_since(session_watermark);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
             }
-            match self.check_call_candidate(key, candidate, raw_candidate, &arguments, &mut budget)
-            {
+            match self.check_call_candidate(
+                key,
+                candidate,
+                raw_candidate,
+                &arguments,
+                &mut budget,
+                false,
+            ) {
+                CandidateVerdict::Selected(result) => return CandidateVerdict::Selected(result),
+                CandidateVerdict::Mismatch => {}
+                CandidateVerdict::Degraded(failure) => {
+                    if failure == ResolveCallFailure::Budget {
+                        self.abandon_call_sessions_since(session_watermark);
+                    }
+                    return CandidateVerdict::Degraded(failure);
+                }
+            }
+            if visible.len() == 1 {
+                only_candidate = Some((candidate, raw_candidate));
+            }
+        }
+        // Every candidate of the bucket was a definite mismatch. A call with
+        // ONE candidate continues with it as the checker's error-recovery
+        // candidate (`getCandidateForOverloadFailure` picks the only one,
+        // re-inferred from the arguments), carrying the diagnostic the
+        // checker reports.
+        if let Some((candidate, raw_candidate)) = only_candidate {
+            if !budget.start_candidate() {
+                self.abandon_call_sessions_since(session_watermark);
+                return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
+            }
+            match self.check_call_candidate(
+                key,
+                candidate,
+                raw_candidate,
+                &arguments,
+                &mut budget,
+                true,
+            ) {
                 CandidateVerdict::Selected(result) => return CandidateVerdict::Selected(result),
                 CandidateVerdict::Mismatch => {}
                 CandidateVerdict::Degraded(failure) => {
@@ -1265,8 +1305,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
-        // Every candidate of the bucket was a definite mismatch.
         CandidateVerdict::Degraded(ResolveCallFailure::NoApplicableOverload)
+    }
+
+    /// Whether an eager argument is a GENERIC function value. The checker's
+    /// error-recovery inference skips such an argument
+    /// (`SkipGenericFunctions`) where applicability inference instantiates
+    /// it, so a candidate recovering over one does not re-infer what this
+    /// executor inferred.
+    fn arguments_hold_a_generic_function(&self, arguments: &[CallArgument]) -> bool {
+        arguments
+            .iter()
+            .filter(|argument| !argument.context_sensitive)
+            .any(
+                |argument| match self.shared_signature_nodes(argument.node, SignatureKind::Call) {
+                    super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                        nodes.iter().any(|node| {
+                            matches!(
+                                self.graph().node_data(*node).as_deref(),
+                                Some(SemanticNodeData::Signature { type_parameters, .. })
+                                    if !type_parameters.is_empty()
+                            )
+                        })
+                    }
+                    super::signature_discovery::SharedSignatureNodes::Incomplete(_) => true,
+                },
+            )
     }
 
     /// Demand the ordered candidates of the callee's `bucket`, instantiated
@@ -1526,6 +1590,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         raw_candidate: &SignatureRef,
         arguments: &[CallArgument],
         budget: &mut CallResolutionBudget,
+        recovery: bool,
     ) -> CandidateVerdict {
         let graph = self.graph();
         let consumer = crate::semantic_query::ResolveCallConsumer::witness();
@@ -1607,10 +1672,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if indefinite && !supports_indefinite {
             return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
         }
-        if !indefinite && arguments.len() < required {
-            return CandidateVerdict::Mismatch;
+        let too_few = !indefinite && arguments.len() < required;
+        let too_many = maximum.is_some_and(|maximum| arguments.len() > maximum);
+        // The diagnostic the checker reports for this candidate when it is
+        // the call's error-recovery candidate (`recovery`): the first
+        // failure applicability meets. An applicable candidate has none.
+        let mut failure: Option<crate::semantic_query::CheckerDiagnosticCode> = None;
+        if too_few || too_many {
+            // Only a non-generic candidate recovers past an argument-count
+            // mismatch: it infers nothing from the arguments applicability
+            // never related.
+            if !recovery || !visible_type_params.is_empty() {
+                return CandidateVerdict::Mismatch;
+            }
+            // "Expected at least N" needs an EFFECTIVE rest: an array rest,
+            // or a tuple rest with a rest element. A fixed-length tuple rest
+            // counts exactly (TS2554).
+            let effective_rest = match rest.map(|rest| &rest.shape) {
+                None => false,
+                Some(RestShape::Array(_)) => true,
+                Some(RestShape::Tuple(elements)) => elements.iter().any(|element| element.rest),
+                Some(RestShape::GenericTuple(_) | RestShape::Unresolved) => {
+                    return CandidateVerdict::Mismatch;
+                }
+            };
+            failure = Some(if too_few && effective_rest {
+                crate::semantic_query::CheckerDiagnosticCode::ArgumentCountAtLeast
+            } else {
+                crate::semantic_query::CheckerDiagnosticCode::ArgumentCount
+            });
         }
-        if maximum.is_some_and(|maximum| arguments.len() > maximum) {
+        let arguments = if failure.is_some() {
+            &arguments[..0]
+        } else {
+            arguments
+        };
+        if recovery
+            && !visible_type_params.is_empty()
+            && self.arguments_hold_a_generic_function(arguments)
+        {
             return CandidateVerdict::Mismatch;
         }
 
@@ -1763,6 +1863,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             match step {
                 RelationStep::Assignable { .. } => {}
+                // A non-generic candidate infers nothing here, so its
+                // error-recovery reading needs no complete relation pass.
+                RelationStep::NotAssignable if recovery && visible_type_params.is_empty() => {
+                    failure.get_or_insert(
+                        crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
+                    );
+                }
                 RelationStep::NotAssignable => {
                     return self.reject_call_candidate(session_id, &checkpoint)
                 }
@@ -1829,7 +1936,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let clause_len = inputs.len();
         for (position, input) in inputs.into_iter().enumerate() {
             let bound = if !input.candidates.is_empty() {
-                self.relation_combine_candidates(&input.candidates, input.variance)
+                match input.variance {
+                    VariancePhase::Covariant => self
+                        .call_common_supertype(&input.candidates)
+                        .unwrap_or_else(|| {
+                            self.relation_combine_candidates(&input.candidates, input.variance)
+                        }),
+                    _ => self.relation_combine_candidates(&input.candidates, input.variance),
+                }
             } else {
                 uninferred_positions.push(position);
                 defaults
@@ -1953,6 +2067,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .collect(),
         );
 
+        // An inference that violates its parameter's constraint is, in the
+        // checker's `getInferredType`, replaced by the default when that
+        // satisfies the constraint and by the constraint otherwise; the
+        // arguments then fail against it. Applicability rejects the
+        // candidate outright; its error-recovery reading takes the
+        // replacement.
+        let mut clamped: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
         for decl in raw_type_params.iter() {
             let Some(bound) = substitution
                 .bindings()
@@ -1968,6 +2089,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     own_return_function.as_ref(),
                 ) {
                     Ok(Some(true)) => {}
+                    Ok(Some(false)) if recovery && key.explicit_type_args.is_empty() => {
+                        let default = decl
+                            .default
+                            .map(|default| self.substitute_canonical(default, &substitution));
+                        let default_satisfies = match default {
+                            Some(default) => matches!(
+                                decided_call_relation(
+                                    self.call_relation(
+                                        default, constraint, default, budget, false, false,
+                                    ),
+                                    own_return_function.as_ref(),
+                                ),
+                                Ok(Some(true))
+                            ),
+                            None => false,
+                        };
+                        clamped.push((
+                            decl.param,
+                            default.filter(|_| default_satisfies).unwrap_or(constraint),
+                        ));
+                    }
                     Ok(Some(false)) => return self.reject_call_candidate(session_id, &checkpoint),
                     Ok(None) => deferred_for_relation_scc = true,
                     Err(failure) => {
@@ -1977,6 +2119,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
+        let substitution = if clamped.is_empty() {
+            substitution
+        } else {
+            let rebound = CanonicalTypeSubstitution::new(
+                substitution
+                    .bindings()
+                    .iter()
+                    .map(|(param, bound)| {
+                        (
+                            *param,
+                            clamped
+                                .iter()
+                                .find_map(|(clamped, replacement)| {
+                                    (clamped == param).then_some(*replacement)
+                                })
+                                .unwrap_or(*bound),
+                        )
+                    })
+                    .collect(),
+            );
+            CanonicalTypeSubstitution::new(
+                rebound
+                    .bindings()
+                    .iter()
+                    .map(|(param, bound)| (*param, self.substitute_canonical(*bound, &rebound)))
+                    .collect(),
+            )
+        };
 
         if let (Some(receiver_param), Some(receiver)) = (receiver_param, call_receiver) {
             let target = self.substitute_canonical(receiver_param.ty, &substitution);
@@ -2061,6 +2231,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 own_return_function.as_ref(),
             ) {
                 Ok(Some(true)) => {}
+                Ok(Some(false)) if recovery => {
+                    failure.get_or_insert(
+                        crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
+                    );
+                }
                 Ok(Some(false)) => return self.reject_call_candidate(session_id, &checkpoint),
                 Ok(None) => deferred_for_relation_scc = true,
                 Err(failure) => {
@@ -2070,6 +2245,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
+        // An error-recovery reading answers only for a candidate that did
+        // fail, on decided relations alone.
+        if recovery && (failure.is_none() || deferred_for_relation_scc) {
+            self.abandon_session(session_id);
+            return CandidateVerdict::Mismatch;
+        }
         let ordered_args = raw_type_params
             .iter()
             .map(|decl| {
@@ -2395,6 +2576,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 selected_signature,
                 substitution,
                 fresh_literal_returns,
+                recovery_diagnostic: failure.map(|code| crate::semantic_query::CheckerDiagnostic {
+                    code,
+                    operation: crate::semantic_query::CheckerDiagnosticOperation::CallResolution,
+                }),
             },
             concrete_seeds,
             holds,
@@ -3006,6 +3191,120 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
             .collect();
         any_widened.then(|| CanonicalTypeSubstitution::new(widened_bindings))
+    }
+
+    /// A call's covariant inference from several candidates (the checker's
+    /// `getCommonSupertype` in `getCovariantInference`): the leftmost
+    /// candidate no later one is a supertype of, with each candidate's
+    /// `null` / `undefined` set aside under `strictNullChecks` and added
+    /// back to the answer — `takes(u)` over `((x: unknown) => x is A) |
+    /// ((x: unknown) => x is B)` infers `A`, where a conditional type's
+    /// `infer` unions its candidates. Literals of one base primitive
+    /// union (`"a" | "b"`). `None` — the union the caller falls back to
+    /// — when a candidate is an object literal's fresh type, an array or a
+    /// tuple (the checker first unions object and array LITERAL candidates,
+    /// a provenance an array node does not carry) or a subtype relation is
+    /// undecided. A declared object type is an ordinary candidate: `two(x,
+    /// y)` over `A` and `B` infers `A`.
+    fn call_common_supertype(&self, candidates: &[SemanticNodeId]) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let mut ordered: Vec<SemanticNodeId> = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if !ordered.iter().any(|kept| {
+                crate::semantic_query::stable_key::provably_equal(graph, *kept, *candidate)
+            }) {
+                ordered.push(*candidate);
+            }
+        }
+        if let [only] = ordered.as_slice() {
+            return Some(*only);
+        }
+        let strict = self.relation_strict_config().strict_null_checks;
+        let is_nullish = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        };
+        let mut nullish: Vec<SemanticNodeId> = Vec::new();
+        let mut primary: Vec<SemanticNodeId> = Vec::with_capacity(ordered.len());
+        for candidate in &ordered {
+            let arms: Vec<SemanticNodeId> = match graph.node_data(*candidate).as_deref() {
+                Some(SemanticNodeData::Union(arms)) => arms.iter().copied().collect(),
+                _ => vec![*candidate],
+            };
+            if arms
+                .iter()
+                .any(|arm| match graph.node_data(*arm).as_deref() {
+                    // An object LITERAL's candidate is fresh; a declared object
+                    // type's is not, and takes part like any other.
+                    Some(SemanticNodeData::Object(_)) => {
+                        self.freshness_for_source_node(*arm) == FreshnessKey::Fresh
+                    }
+                    Some(
+                        SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Tuple { .. }
+                        | SemanticNodeData::ObjectSpreadProgram(_),
+                    ) => true,
+                    _ => false,
+                })
+            {
+                return None;
+            }
+            if strict && arms.iter().any(|arm| is_nullish(*arm)) {
+                let kept: Vec<SemanticNodeId> = arms
+                    .iter()
+                    .copied()
+                    .filter(|arm| !is_nullish(*arm))
+                    .collect();
+                nullish.extend(arms.iter().copied().filter(|arm| is_nullish(*arm)));
+                if kept.is_empty() {
+                    continue;
+                }
+                primary.push(self.intern_normalized_union_or_intersection(&kept, true));
+            } else {
+                primary.push(*candidate);
+            }
+        }
+        let literal_base = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Literal(value)) => Some(std::mem::discriminant(value)),
+            _ => None,
+        };
+        let supertype = match primary.as_slice() {
+            [] => None,
+            [first, rest @ ..]
+                if literal_base(*first).is_some()
+                    && rest
+                        .iter()
+                        .all(|other| literal_base(*other) == literal_base(*first)) =>
+            {
+                Some(self.intern_normalized_union_or_intersection(&primary, true))
+            }
+            [first, rest @ ..] => {
+                let mut supertype = *first;
+                for candidate in rest {
+                    match self.execute_relate_pair_kind(
+                        supertype,
+                        *candidate,
+                        crate::semantic_query::RelationKind::Subtype,
+                    ) {
+                        RelationStep::Assignable { .. } => supertype = *candidate,
+                        RelationStep::NotAssignable => {}
+                        _ => return None,
+                    }
+                }
+                Some(supertype)
+            }
+        };
+        let mut members: Vec<SemanticNodeId> = supertype.into_iter().collect();
+        members.extend(nullish);
+        match members.as_slice() {
+            [] => None,
+            [only] => Some(*only),
+            _ => Some(self.intern_normalized_union_or_intersection(&members, true)),
+        }
     }
 
     pub(super) fn call_inference_candidate(

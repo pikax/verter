@@ -737,6 +737,12 @@ pub struct FunctionBodySkeleton {
     pub yield_sites: Arc<[SkeletonExprSiteId]>,
     /// The assignment / kill summary, in source order.
     pub writes: Arc<[SkeletonWrite]>,
+    /// The bindings this frame declares that a nested callable ASSIGNS
+    /// whole, at any depth ([`FunctionProgramEntry::descendant_assignments`]).
+    /// With the whole-binding entries of [`Self::writes`] it is every
+    /// assignment the checker's `isSymbolAssigned` reads; a closure that
+    /// only reads a binding, or writes one of its members, adds nothing.
+    pub closure_assignments: Arc<[SkeletonBindingId]>,
 }
 
 /// The authored kind of one function body — the `async` and `generator`
@@ -1115,6 +1121,12 @@ fn prepare_function_body_skeleton(
     let mut bindings =
         FlowBindingMap::build(&skeleton, &entry.bindings, &entry.key, entry.span.start)?;
     bindings.prepare_occurrences(entry)?;
+    skeleton.closure_assignments = entry
+        .descendant_assignments
+        .iter()
+        .filter_map(|identity| bindings.local(identity))
+        .collect::<Vec<_>>()
+        .into();
     for (ordinal, binding) in Arc::make_mut(&mut skeleton.bindings).iter_mut().enumerate() {
         binding.runtime_binding = binding
             .kind
@@ -1878,16 +1890,21 @@ impl<'entry> SkeletonBuilder<'entry> {
                 self.record_member_write_target(MemberRef::Private(member), certainty, value);
             }
             AssignmentTarget::TSAsExpression(as_expression) => {
-                self.record_expression_write_target(&as_expression.expression, certainty, value);
+                self.record_expression_write_target(
+                    &as_expression.expression,
+                    true,
+                    certainty,
+                    value,
+                );
             }
             AssignmentTarget::TSSatisfiesExpression(satisfies) => {
-                self.record_expression_write_target(&satisfies.expression, certainty, value);
+                self.record_expression_write_target(&satisfies.expression, true, certainty, value);
             }
             AssignmentTarget::TSNonNullExpression(non_null) => {
-                self.record_expression_write_target(&non_null.expression, certainty, value);
+                self.record_expression_write_target(&non_null.expression, false, certainty, value);
             }
             AssignmentTarget::TSTypeAssertion(assertion) => {
-                self.record_expression_write_target(&assertion.expression, certainty, value);
+                self.record_expression_write_target(&assertion.expression, true, certainty, value);
             }
             AssignmentTarget::ArrayAssignmentTarget(array) => {
                 for element in array.elements.iter().flatten() {
@@ -2047,13 +2064,42 @@ impl<'entry> SkeletonBuilder<'entry> {
 
     /// A TS-carrier-wrapped write target (`(x as T) = v`): unwrap to the
     /// inner identifier / member target.
+    /// Record the write through a wrapped target. `asserted` says a type
+    /// assertion (`as`, `satisfies`, `<T>`) already wraps it. Parentheses
+    /// and a non-null assertion keep the wrapped binding assigned (`x! =
+    /// v` retypes `x`); an assertion between the binding and the written
+    /// position does not (`(x as T) = v` neither assigns nor narrows `x`:
+    /// the checker's `getAssignmentTargetKind` and `isNarrowableReference`
+    /// both stop at an assertion), so no write of the binding is recorded.
     fn record_expression_write_target(
         &mut self,
-        expression: &Expression<'_>,
+        mut expression: &Expression<'_>,
+        mut asserted: bool,
         certainty: SkeletonWriteCertainty,
         value: Option<SkeletonExprSiteId>,
     ) {
-        match unwrap_expression_carriers(expression) {
+        loop {
+            expression = match expression {
+                Expression::ParenthesizedExpression(inner) => &inner.expression,
+                Expression::TSNonNullExpression(inner) => &inner.expression,
+                Expression::TSInstantiationExpression(inner) => &inner.expression,
+                Expression::TSAsExpression(inner) => {
+                    asserted = true;
+                    &inner.expression
+                }
+                Expression::TSSatisfiesExpression(inner) => {
+                    asserted = true;
+                    &inner.expression
+                }
+                Expression::TSTypeAssertion(inner) => {
+                    asserted = true;
+                    &inner.expression
+                }
+                _ => break,
+            };
+        }
+        match expression {
+            Expression::Identifier(_) if asserted => {}
             Expression::Identifier(identifier) => {
                 let name = self.intern(identifier.name.as_str());
                 self.push_write(
@@ -2148,6 +2194,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             return_sites: Arc::from(self.return_sites.into_boxed_slice()),
             yield_sites: Arc::from(self.yield_sites.into_boxed_slice()),
             writes: Arc::from(self.writes.into_boxed_slice()),
+            closure_assignments: Arc::from([]),
         }
     }
 }
@@ -2647,6 +2694,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
             SimpleAssignmentTarget::TSAsExpression(inner) => {
                 self.record_expression_write_target(
                     &inner.expression,
+                    true,
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
@@ -2654,6 +2702,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
             SimpleAssignmentTarget::TSSatisfiesExpression(inner) => {
                 self.record_expression_write_target(
                     &inner.expression,
+                    true,
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
@@ -2661,6 +2710,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
             SimpleAssignmentTarget::TSNonNullExpression(inner) => {
                 self.record_expression_write_target(
                     &inner.expression,
+                    false,
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
@@ -2668,6 +2718,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
             SimpleAssignmentTarget::TSTypeAssertion(inner) => {
                 self.record_expression_write_target(
                     &inner.expression,
+                    true,
                     SkeletonWriteCertainty::Definite,
                     None,
                 );

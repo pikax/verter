@@ -20,8 +20,8 @@ use crate::types::HostConfig;
 use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
 use crate::VerterHost;
 
-const STRICT_ROOT: &str = "/strict";
-const LOOSE_ROOT: &str = "/loose";
+pub(super) const STRICT_ROOT: &str = "/strict";
+pub(super) const LOOSE_ROOT: &str = "/loose";
 
 /// One host carrying two projects that differ ONLY in `strictNullChecks`.
 fn two_policy_host() -> VerterHost {
@@ -59,7 +59,7 @@ fn identity(canonical: &str, symbol: &str) -> verter_type_expr::facts::FlowFunct
 }
 
 /// A host whose two projects both hold `source` as `main.ts`.
-fn host_with(source: &str) -> VerterHost {
+pub(super) fn host_with(source: &str) -> VerterHost {
     let host = two_policy_host();
     for root in [STRICT_ROOT, LOOSE_ROOT] {
         crate::u6_flow_shape_corpus_tests::upsert(
@@ -72,10 +72,107 @@ fn host_with(source: &str) -> VerterHost {
     host
 }
 
+/// The lib file the lib-environment tests register.
+const LIB_FILE: &str = "lib.values.d.ts";
+
+/// The pinned lib's own declarations of the global values the
+/// lib-environment tests read (`lib.es5.d.ts` and `lib.es2015.core.d.ts`),
+/// each interface narrowed to the members read.
+const LIB_VALUES: &str = r#"
+interface ArrayLike<T> {
+    readonly length: number;
+    readonly [n: number]: T;
+}
+interface ArrayConstructor {
+    isArray(arg: any): arg is any[];
+    from<T>(arrayLike: ArrayLike<T>): T[];
+    from<T, U>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => U, thisArg?: any): U[];
+    of<T>(...items: T[]): T[];
+}
+declare var Array: ArrayConstructor;
+interface ObjectConstructor {
+    keys(o: object): string[];
+}
+declare var Object: ObjectConstructor;
+interface Math {
+    readonly PI: number;
+    max(...values: number[]): number;
+}
+declare var Math: Math;
+interface JSON {
+    parse(text: string, reviver?: (this: any, key: string, value: any) => any): any;
+    stringify(value: any, replacer?: (this: any, key: string, value: any) => any, space?: string | number): string;
+    stringify(value: any, replacer?: (number | string)[] | null, space?: string | number): string;
+}
+declare var JSON: JSON;
+interface NumberConstructor {
+    isFinite(number: unknown): boolean;
+}
+declare var Number: NumberConstructor;
+"#;
+
+/// [`host_with`] whose two projects each register [`LIB_VALUES`] as their
+/// lib environment.
+pub(super) fn host_with_lib(source: &str) -> VerterHost {
+    host_with_lib_source(source, LIB_VALUES)
+}
+
+/// [`host_with`] whose two projects each register `lib` as their lib
+/// environment.
+pub(super) fn host_with_lib_source(source: &str, lib: &str) -> VerterHost {
+    let host = host_with(source);
+    let workspace = host.workspace();
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        let project = host
+            .resolve_project_for_canonical(&format!("{root}/main.ts"))
+            .expect("the fixture file belongs to its project");
+        verter_workspace::WorkspaceAccess::register_ambient_lib(
+            workspace.as_ref(),
+            verter_workspace::AmbientLibSpec {
+                project_id: Some(project),
+                canonical_id: Arc::from(LIB_FILE),
+                source: Arc::from(lib),
+            },
+        )
+        .expect("the lib registers against its project");
+        let key = verter_workspace::WorkspaceRead::project_stable_key(workspace.as_ref(), project)
+            .expect("the project has a stable key");
+        let virtual_id = verter_workspace::ambient_virtual_canonical_id(key, LIB_FILE);
+        let _ = host
+            .upsert(crate::types::UpsertRequest {
+                canonical_id: None,
+                input_id: virtual_id.to_string(),
+                source: Arc::from(lib),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("the lib serves");
+    }
+    host
+}
+
+/// The checker diagnostics riding `symbol`'s whole-return answer in
+/// `root`'s copy.
+pub(super) fn checker_diagnostics(
+    host: &VerterHost,
+    root: &str,
+    symbol: &str,
+) -> Vec<crate::semantic_query::CheckerDiagnostic> {
+    let carrier = host.get_flow_return_type_with_audit(
+        &identity(&format!("{root}/main.ts"), symbol),
+        ReturnProjectionDemand::whole_return(),
+    );
+    carrier
+        .as_result()
+        .unwrap_or_else(|error| panic!("`{symbol}` in {root} produced no value: {error:?}"))
+        .checker_diagnostics()
+        .to_vec()
+}
+
 /// The whole-return answer of `symbol` in `root`'s copy through the public
 /// audited flow-return boundary: its degradation and the live node, handed
 /// to `read` while the graph is pinned.
-fn observe<R>(
+pub(super) fn observe<R>(
     host: &VerterHost,
     root: &str,
     symbol: &str,
@@ -98,7 +195,7 @@ fn observe<R>(
 
 /// `symbol`'s answer in `root` is COMPLETE and is the checker's `printed`
 /// function type — predicate included, or its absence.
-fn assert_prints(host: &VerterHost, root: &str, symbol: &str, printed: &str) {
+pub(super) fn assert_prints(host: &VerterHost, root: &str, symbol: &str, printed: &str) {
     let expected = checker_syntax::parse(printed).expect("checker print parses");
     observe(host, root, symbol, |dispatch, degradation, node| {
         assert!(
@@ -112,7 +209,7 @@ fn assert_prints(host: &VerterHost, root: &str, symbol: &str, printed: &str) {
 /// `function`'s OWN answer in `root` DEGRADES: the checker may infer a
 /// predicate the flow lane cannot compute, so no predicate-less signature
 /// publishes complete.
-fn assert_degrades(host: &VerterHost, root: &str, function: &str) {
+pub(super) fn assert_degrades(host: &VerterHost, root: &str, function: &str) {
     observe(host, root, function, |dispatch, degradation, node| {
         assert!(
             degradation.is_some(),
@@ -124,7 +221,7 @@ fn assert_degrades(host: &VerterHost, root: &str, function: &str) {
 
 /// `function`'s OWN answer in `root` is complete: a wrapper reading the
 /// function's signature does not inherit the function's own degradation.
-fn assert_complete(host: &VerterHost, root: &str, function: &str) {
+pub(super) fn assert_complete(host: &VerterHost, root: &str, function: &str) {
     observe(host, root, function, |dispatch, degradation, node| {
         assert!(
             degradation.is_none(),
@@ -147,7 +244,7 @@ fn lone_signature(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) 
 /// `symbol`'s answer in `root` is complete and carries exactly the
 /// predicate of the checker's `printed` function type (or none) beside a
 /// `boolean` return. Its parameter types are not compared.
-fn assert_predicate(host: &VerterHost, root: &str, symbol: &str, printed: &str) {
+pub(super) fn assert_predicate(host: &VerterHost, root: &str, symbol: &str, printed: &str) {
     use checker_syntax::{CheckerPredicate, CheckerPredicateSubject, CheckerType};
     let CheckerType::Function {
         predicate: expected,
@@ -261,11 +358,36 @@ export function looseNotNull(x: string | null | undefined) { return x != null; }
 export function looseLit(x: string | number) { return x == "a"; }
 export function viaLocal(x: unknown) { const r = typeof x === "string"; return r; }
 export function eqParams(x: string, y: string) { return x === y; }
+export function closureRead(x: unknown) { const g = () => x; return typeof x === "string"; }
+export function closureMemberWrite(x: { a: number } | string) { const g = () => { if (typeof x === "object") x.a = 1; }; return typeof x === "string"; }
 export function nestedArrow() { return (x: string | number) => typeof x === "number"; }
 export function nestedFn() { return function (x: Foo | Bar) { return x.kind === "bar"; }; }
 export function nestedMulti() { return (x: unknown) => { if (x) return true; return typeof x === "string"; }; }
 export const obj = { isS(x: unknown) { return typeof x === "string"; } };
 export function sigObjMethod() { return obj.isS; }
+export function paramListAssigns(x: string | number, cb: () => void = () => { x = 1; }) { return typeof x === "string"; }
+export function paramListShadows(x: string | number, cb: (x: number) => void = (x: number) => { x = 1; }) { return typeof x === "string"; }
+export function classMethodAssigns(x: string | number) { class C { m() { x = 1; } } return typeof x === "string"; }
+export function classCtorAssigns(x: string | number) { class C { constructor() { x = 1; } } return typeof x === "string"; }
+export function classGetterAssigns(x: string | number) { class C { get g() { x = 1; return 1; } } return typeof x === "string"; }
+export function classFieldAssigns(x: string | number) { const C = class { v = (x = 1); }; return typeof x === "string"; }
+export function classStaticBlockAssigns(x: string | number) { class C { static { x = 1; } } return typeof x === "string"; }
+export function classStaticFieldAssigns(x: string | number) { class C { static s = (x = 1); } return typeof x === "string"; }
+export function classHeritageAssigns(x: string | number) { class C extends (x = 1, Cls) { } return typeof x === "string"; }
+export function classMethodArrowAssigns(x: string | number) { class C { m() { const f = () => { x = 1; }; } } return typeof x === "string"; }
+export function classMethodReads(x: string | number) { class C { m() { return x; } } return typeof x === "string"; }
+export function classMethodParamShadows(x: string | number) { class C { m(x: number) { x = 1; } } return typeof x === "string"; }
+export function classMethodVarShadows(x: string | number) { class C { m() { if (x) { var x = 2; } x = 1; } } return typeof x === "string"; }
+export function classMethodCatchShadows(x: string | number) { class C { m() { try { } catch (x) { x = 1; } } } return typeof x === "string"; }
+export function asAssign(x: string | number) { (x as any) = 1; return typeof x === "string"; }
+export function closureAsAssign(x: string | number) { const f = () => { (<any>x) = 1; }; return typeof x === "string"; }
+export function closureSatisfiesAssign(x: string | number) { const f = () => { (x satisfies any) = 1; }; return typeof x === "string"; }
+export function closureDestructureAsAssign(x: string | number) { const f = () => { [(x as any)] = [1]; }; return typeof x === "string"; }
+export function closureAsIncrement(x: number | string) { const f = () => { (x as number)++; }; return typeof x === "string"; }
+export function closureNonNullAsIncrement(x: number | string) { const f = () => { (x as number)!++; }; return typeof x === "string"; }
+export function closureAsCompound(x: number | string) { const f = () => { (x as any) += 1; }; return typeof x === "string"; }
+export function closureNonNullAssign(x: string | number) { const f = () => { x! = 1; }; return typeof x === "string"; }
+export function closureParenAssign(x: string | number) { const f = () => { (x) = 1; }; return typeof x === "string"; }
 "#;
 
 /// The source with a `sig_NAME` wrapper appended for every function.
@@ -463,6 +585,112 @@ const INFERS: &[(&str, &str, &str)] = &[
         "(x: { a: string; } | { b: number; }) => x is { a: string; }",
         "(x: { a: string; } | { b: number; }) => x is { a: string; }",
     ),
+    (
+        "looseNull",
+        "(x: string | null | undefined) => x is null | undefined",
+        "(x: string) => boolean",
+    ),
+    (
+        "hasKind",
+        "(x: Foo | Bar | number) => x is Bar",
+        "(x: Foo | Bar | number) => x is Bar",
+    ),
+    (
+        "orIn",
+        "(x: Foo | Bar | number) => x is number | Foo",
+        "(x: Foo | Bar | number) => x is number | Foo",
+    ),
+    (
+        "viaLocal",
+        "(x: unknown) => x is string",
+        "(x: unknown) => x is string",
+    ),
+    // A call to an EXPORTED same-file guard resolves through the export's
+    // value, whose augmentations (none here) would merge into it.
+    (
+        "wrapExported",
+        "(x: unknown) => x is Foo",
+        "(x: unknown) => x is Foo",
+    ),
+    // A closure that only reads the parameter, or writes one of its
+    // members, does not assign it.
+    (
+        "closureRead",
+        "(x: unknown) => x is string",
+        "(x: unknown) => x is string",
+    ),
+    (
+        "closureMemberWrite",
+        "(x: { a: number; } | string) => x is string",
+        "(x: { a: number; } | string) => x is string",
+    ),
+    // A class or a parameter-list callable that only reads the parameter,
+    // or assigns its OWN binding of the name (a parameter, a hoisted
+    // `var`, a catch parameter), does not assign it.
+    (
+        "classMethodReads",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "classMethodParamShadows",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "classMethodVarShadows",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "classMethodCatchShadows",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "paramListShadows",
+        "(x: string | number, cb?: (x: number) => void) => x is string",
+        "(x: string | number, cb?: (x: number) => void) => x is string",
+    ),
+    // A write through a type assertion (`(x as T) = v`, `(<T>x) = v`,
+    // `(x satisfies T) = v`, a destructuring element, an update or a
+    // compound assignment) assigns nothing: the checker's assignment
+    // target walk stops at the assertion.
+    (
+        "asAssign",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "closureAsAssign",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "closureSatisfiesAssign",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "closureDestructureAsAssign",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "closureAsIncrement",
+        "(x: number | string) => x is string",
+        "(x: number | string) => x is string",
+    ),
+    (
+        "closureNonNullAsIncrement",
+        "(x: number | string) => x is string",
+        "(x: number | string) => x is string",
+    ),
+    (
+        "closureAsCompound",
+        "(x: number | string) => x is string",
+        "(x: number | string) => x is string",
+    ),
 ];
 
 /// Every measured inference, in both null policies.
@@ -474,6 +702,7 @@ fn an_unannotated_boolean_return_infers_the_checker_type_predicate() {
         assert_complete(&host, STRICT_ROOT, name);
         assert_complete(&host, LOOSE_ROOT, name);
         assert_prints(&host, STRICT_ROOT, &format!("sig_{name}"), strict);
+        assert_prints(&host, LOOSE_ROOT, &format!("sig_{name}"), loose);
         assert_predicate(&host, LOOSE_ROOT, &format!("sig_{name}"), loose);
     }
 }
@@ -507,6 +736,23 @@ const DECLINES: &[(&str, &str)] = &[
     ("literalTrue", "(x: unknown) => boolean"),
     ("annotated", "(x: unknown) => boolean"),
     ("noParams", "() => boolean"),
+    ("eqParams", "(x: string, y: string) => boolean"),
+    // An assignment anywhere in the function assigns the parameter: in a
+    // class's method, constructor, accessor or initializer (a callable
+    // nested in one included), or in a parameter-list callable. A
+    // non-null assertion or parentheses around the target still assign.
+    (
+        "paramListAssigns",
+        "(x: string | number, cb?: () => void) => boolean",
+    ),
+    ("classMethodAssigns", "(x: string | number) => boolean"),
+    ("classCtorAssigns", "(x: string | number) => boolean"),
+    ("classGetterAssigns", "(x: string | number) => boolean"),
+    ("classFieldAssigns", "(x: string | number) => boolean"),
+    ("classStaticFieldAssigns", "(x: string | number) => boolean"),
+    ("classMethodArrowAssigns", "(x: string | number) => boolean"),
+    ("closureNonNullAssign", "(x: string | number) => boolean"),
+    ("closureParenAssign", "(x: string | number) => boolean"),
 ];
 
 #[test]
@@ -517,8 +763,8 @@ fn inference_declines_wherever_the_checker_declines() {
         for root in [STRICT_ROOT, LOOSE_ROOT] {
             assert_complete(&host, root, name);
             assert_predicate(&host, root, &format!("sig_{name}"), printed);
+            assert_prints(&host, root, &format!("sig_{name}"), printed);
         }
-        assert_prints(&host, STRICT_ROOT, &format!("sig_{name}"), printed);
     }
     // An implicit return: `boolean | undefined` under strict null checks,
     // and still no predicate where the loose join erases to `boolean`.
@@ -534,6 +780,25 @@ fn inference_declines_wherever_the_checker_declines() {
         "sig_implicitEnd",
         "(x: unknown) => boolean",
     );
+}
+
+/// An assignment a class makes while it is EVALUATED — in a static block
+/// or its heritage expression — assigns the parameter too, so no
+/// predicate is inferred (measured on 7.0.2 under both null policies:
+/// `(x: string | number) => boolean`). The function's own answer stays
+/// behind the typed gap the enclosing flow keeps for a write it does not
+/// apply.
+#[test]
+fn a_class_evaluation_assignment_declines_the_predicate() {
+    let names = ["classStaticBlockAssigns", "classHeritageAssigns"];
+    let host = host_with(&source_with_wrappers(&names));
+    for name in names {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            let printed = "(x: string | number) => boolean";
+            assert_predicate(&host, root, &format!("sig_{name}"), printed);
+            assert_prints(&host, root, &format!("sig_{name}"), printed);
+        }
+    }
 }
 
 /// A function VALUE returned from a body infers its own predicate. Measured
@@ -558,28 +823,13 @@ fn a_returned_function_value_infers_its_own_predicate() {
 
 /// A returned test the guard vocabulary cannot read DEGRADES a `boolean`
 /// return rather than publishing it predicate-less. Measured on 7.0.2:
-/// `Array.isArray(x)` over `string | string[]` is `x is string[]`, a call
-/// handing the parameter to an EXPORTED same-file guard (whose signature
-/// set this file cannot close) is `x is Foo`, `typeof x === "object" &&
-/// "s" in x` over `Foo | Bar |
-/// number` is `x is Bar` and `typeof x === "number" || "n" in x` over it
-/// is `x is number | Foo` (a `typeof` test does not classify interface
-/// arms), an aliased condition `const r = typeof x === "string"; return
-/// r` is `x is string`, and `x === y` over two parameters is `boolean` — a
-/// reference comparison this vocabulary does not carry either way.
+/// `Array.isArray(x)` over `string | string[]` is `x is string[]` — a
+/// call whose callee value (the lib's `Array`, which this host registers
+/// no lib to declare) does not resolve.
 #[test]
 fn an_unreadable_returned_test_degrades_the_boolean_return() {
     let host = host_with(SOURCE);
-    for name in [
-        "isArr",
-        "wrapExported",
-        "hasKind",
-        "orIn",
-        "viaLocal",
-        "eqParams",
-    ] {
-        assert_degrades(&host, STRICT_ROOT, name);
-    }
+    assert_degrades(&host, STRICT_ROOT, "isArr");
 }
 
 /// The inferred predicate is a real part of the signature: the relation

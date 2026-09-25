@@ -579,25 +579,28 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
         )) => Some(*diagnostic),
         _ => None,
     };
-    let matched_diagnostic =
-        match (row.diagnostic, live_diagnostic) {
-            (Some(recorded), Some(live)) => {
-                let recovery = dispatch.graph().intern_node(
-                    crate::semantic_query::SemanticNodeData::Primitive(live.recovery()),
-                );
-                let recorded_recovery =
-                    checker_syntax::parse(recorded.recovery).unwrap_or_else(|err| {
-                        panic!(
-                            "{}: recorded recovery `{}` does not parse ({err})",
-                            row.id, recorded.recovery
-                        )
-                    });
-                live.code.code() == recorded.code
-                    && live.code.message() == recorded.message
-                    && checker_syntax::matches_node(&dispatch, recovery, &recorded_recovery, 0)
-            }
-            _ => false,
-        };
+    let matched_diagnostic = match (row.diagnostic, live_diagnostic) {
+        (Some(recorded), Some(live)) => {
+            let recovery =
+                dispatch
+                    .graph()
+                    .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+                        live.recovery()
+                            .expect("an error-type diagnostic continues with its recovery"),
+                    ));
+            let recorded_recovery =
+                checker_syntax::parse(recorded.recovery).unwrap_or_else(|err| {
+                    panic!(
+                        "{}: recorded recovery `{}` does not parse ({err})",
+                        row.id, recorded.recovery
+                    )
+                });
+            live.code.code() == recorded.code
+                && live.code.message() == recorded.message
+                && checker_syntax::matches_node(&dispatch, recovery, &recorded_recovery, 0)
+        }
+        _ => false,
+    };
     LiveProbeOutcome {
         matched_checker,
         matched_checker_in_order,

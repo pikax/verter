@@ -500,6 +500,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
         // request's owning project, not the first workspace file.
         let request_canonical = crate::request_context::current_request_canonical();
         let Some(contributions) = d.collect_augmentation_contributions(
+            super::build::AugmentationContribution::TypeBody,
             crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
             name,
             type_arguments,

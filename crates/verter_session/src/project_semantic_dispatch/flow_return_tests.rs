@@ -6632,16 +6632,16 @@ fn foreign_flow_value_provenance_is_rejected() {
 
 /// A call in an `if`/ternary TEST is a narrowing CONTROL: when the
 /// callee is a same-file OVERLOADED type predicate, signature selection
-/// decides which predicate target narrows, and this substrate performs
-/// no overload/applicability resolution for the guard channel. Taking
-/// the first declaration's target narrows WRONG (`pred`'s first overload
-/// says `x is string` where the checker selects `x is number`), and
-/// certifying that call as decided-above would launder the wrong narrow
-/// warm. Required: the overloaded predicate establishes NO narrow (both
-/// arms keep the unnarrowed parameter), and the demand finalizes
-/// unproven — zero candidates, never warm.
+/// decides which predicate target narrows. Taking the first
+/// declaration's target narrows WRONG (`pred`'s first overload says `x
+/// is string`), so the guard reads the predicate of the overload the
+/// call executor SELECTS: `(x: string)` does not accept `string |
+/// number`, the second overload's `x is number` narrows, and
+/// `makeProps` returns `number | false` (measured on 7.0.2). The call's
+/// evidence is recorded at guard application, so the demand proves and
+/// warms.
 #[test]
-fn overloaded_same_file_predicate_never_self_certifies_control_call() {
+fn overloaded_same_file_predicate_narrows_through_the_selected_overload() {
     const PRED_CANONICAL: &str = "/ws/overloaded-predicate.ts";
     const PRED_FIXTURE: &str = r#"
 function pred(x: string): x is string;
@@ -6680,9 +6680,9 @@ export function makeProps(x: string | number) {
              consequent — the number arm survives, got {expr:?}"
         );
         assert!(
-            has_primitive(verter_type_expr::PrimitiveName::String),
-            "no narrow is established at all for an overloaded predicate, \
-             got {expr:?}"
+            !has_primitive(verter_type_expr::PrimitiveName::String),
+            "the selected overload's `x is number` narrows the string arm \
+             away, got {expr:?}"
         );
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
@@ -6702,9 +6702,8 @@ export function makeProps(x: string | number) {
             dispatch
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "an overloaded predicate call in a control test carries no \
-             evaluator evidence and must never warm"
+            1,
+            "the selected overload's narrow is evidence-backed and warms"
         );
     });
 }
@@ -6859,6 +6858,52 @@ fn assert_control_callee_gaps_unwarmed(
     );
 }
 
+/// Assert that `name`'s control call narrows through the callee's own
+/// resolved signature: the join carries `false` and exactly the
+/// `present` primitive arms, none of the `absent` ones, is complete, and
+/// warms.
+fn assert_control_callee_narrows_warm(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+    present: &[verter_type_expr::PrimitiveName],
+    absent: &[verter_type_expr::PrimitiveName],
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("{name}: the join is a union, got {expr:?}");
+    };
+    let has = |primitive: verter_type_expr::PrimitiveName| {
+        arms.iter()
+            .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive))
+    };
+    for primitive in present {
+        assert!(
+            has(*primitive),
+            "{name}: the {primitive:?} arm survives, got {expr:?}"
+        );
+    }
+    for primitive in absent {
+        assert!(
+            !has(*primitive),
+            "{name}: the {primitive:?} arm is narrowed away, got {expr:?}"
+        );
+    }
+    assert_eq!(result.degradation(), None, "{name}: the narrow is complete");
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        1,
+        "{name}: the evidence-backed control call warms"
+    );
+}
+
 /// Assert that a class-evaluation-time WRITE to a frame binding never
 /// seals the unnarrowed superset warm: the join keeps BOTH arms of the
 /// unnarrowed `string | number` parameter, the demand carries the typed
@@ -6957,14 +7002,13 @@ function pick(x: string | number) {
 /// A MODULE file's EXPORTED function is augmentable: a `declare module
 /// "./main"` block in any file merges further call signatures into the
 /// export symbol, and the checker resolves even the SAME-FILE call of an
-/// `export`-modified declaration through that merged symbol. The
-/// augmenter here adds a predicate overload to both exported callees.
-/// The lowering context cannot enumerate augmenters, so an exported
-/// callee is never a certified control call and never a selected
-/// predicate: both demands keep the unnarrowed join, carry the typed
-/// gap, and hold zero candidates.
+/// `export`-modified declaration through that merged symbol, trying the
+/// augmenting block's overloads first. Here the augmenter adds a predicate
+/// overload to both exported callees: `make` returns `number | false` and
+/// `pick` `string | false` on 7.0.2, each narrowed by the augmenting
+/// predicate, complete and warm.
 #[test]
-fn exported_module_function_control_callee_never_self_certifies() {
+fn exported_module_function_control_callee_resolves_through_its_augmentations() {
     const MAIN_CANONICAL: &str = "/ws/module-merge/main.ts";
     const MAIN_FIXTURE: &str = r#"
 export function check(x: string | number): boolean {
@@ -6998,8 +7042,104 @@ declare module "./main" {
     upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
     upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "make");
-        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "pick");
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            MAIN_CANONICAL,
+            "make",
+            &[verter_type_expr::PrimitiveName::Number],
+            &[verter_type_expr::PrimitiveName::String],
+        );
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            MAIN_CANONICAL,
+            "pick",
+            &[verter_type_expr::PrimitiveName::String],
+            &[verter_type_expr::PrimitiveName::Number],
+        );
+    });
+}
+
+/// An IMPORTED function guard is another module's export, and a `declare
+/// module` block in any file adds overloads to it: here `augment.ts`
+/// adds `x is string` beside the module's own `x is number`, and the
+/// checker tries the augmenting (later) declaration first, so `pick`
+/// returns `string | false` on 7.0.2 — whatever order the files load in.
+/// The served value is the merged overload set, so the guard narrows
+/// through the augmenting predicate, complete and warm.
+#[test]
+fn imported_function_guard_narrows_through_its_augmentations() {
+    const GUARDS_CANONICAL: &str = "/ws/import-merge/guards.ts";
+    const GUARDS_FIXTURE: &str = r#"
+export function isNum(x: string | number): x is number {
+  return typeof x === "number";
+}
+"#;
+    const AUG_CANONICAL: &str = "/ws/import-merge/augment.ts";
+    const AUG_FIXTURE: &str = r#"
+import "./guards";
+declare module "./guards" {
+  export function isNum(x: string | number): x is string;
+}
+"#;
+    const MAIN_CANONICAL: &str = "/ws/import-merge/main.ts";
+    const MAIN_FIXTURE: &str = r#"
+import { isNum } from "./guards";
+export function pick(x: string | number) {
+  if (isNum(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, GUARDS_CANONICAL, GUARDS_FIXTURE);
+    upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            MAIN_CANONICAL,
+            "pick",
+            &[verter_type_expr::PrimitiveName::String],
+            &[verter_type_expr::PrimitiveName::Number],
+        );
+    });
+}
+
+/// A call to an EXPORTED function reads the export's merged overload set
+/// whichever file makes it: `augment.ts` adds `conv(x: string): 1` beside
+/// the module's own `conv(x: string): number`, and the checker tries the
+/// augmenting declaration first, so `viaCall` (in the module) and
+/// `viaImport` (importing it) both return `1` on 7.0.2, complete.
+#[test]
+fn a_call_to_an_augmented_export_resolves_through_the_merged_overloads() {
+    const MAIN_CANONICAL: &str = "/ws/call-merge/main.ts";
+    const MAIN_FIXTURE: &str = "export function conv(x: string): number { return 1; }\n\
+                                export function viaCall(x: string) { return conv(x); }\n";
+    const AUG_CANONICAL: &str = "/ws/call-merge/augment.ts";
+    const AUG_FIXTURE: &str = "import \"./main\";\n\
+                               declare module \"./main\" {\n  export function conv(x: string): 1;\n}\n";
+    const USE_CANONICAL: &str = "/ws/call-merge/use.ts";
+    const USE_FIXTURE: &str = "import { conv } from \"./main\";\n\
+                               export function viaImport(x: string) { return conv(x); }\n";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
+    upsert_ts(&host, USE_CANONICAL, USE_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        for (canonical, name) in [(MAIN_CANONICAL, "viaCall"), (USE_CANONICAL, "viaImport")] {
+            let result = flow_result_value(dispatch, whole_return_key(dispatch, canonical, name));
+            let expr = host
+                .project_node_to_type_expr_for_test(result.return_type())
+                .expect("return node must project to TypeExpr");
+            assert_eq!(
+                expr,
+                verter_type_expr::TypeExpr::number_literal(1.0),
+                "{name}: the augmenting overload answers first"
+            );
+            assert_eq!(result.degradation(), None, "{name}: the call is complete");
+        }
     });
 }
 
@@ -7084,8 +7224,8 @@ function makeTop(x: string | number) {
 /// and the predicate is a tautology, so `f` returns `string | number |
 /// boolean`. Resolving `T` through the CALLER's environment binds the
 /// unrelated owner-scope alias `type T = number` and narrows `string`
-/// away. The demand keeps the unnarrowed join, carries the typed gap, and
-/// holds zero candidates.
+/// away. The guard reads the predicate of the signature the call executor
+/// instantiates, so both arms survive, complete and warm.
 #[test]
 fn generic_predicate_target_never_resolves_in_the_caller_environment() {
     const CANONICAL: &str = "/ws/generic-predicate/main.ts";
@@ -7103,7 +7243,17 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            CANONICAL,
+            "f",
+            &[
+                verter_type_expr::PrimitiveName::String,
+                verter_type_expr::PrimitiveName::Number,
+            ],
+            &[],
+        );
     });
 }
 
@@ -8013,9 +8163,9 @@ fn assert_instanceof_class_arms_gap_unwarmed(
 /// number` is assignable to a type parameter, the target itself is
 /// assignable to the subject, so the narrow becomes `T` and `f` publishes
 /// `T | boolean` where the checker says `number | boolean` — complete and
-/// warm. The channel refuses a target the caller frame rebinds: the
-/// demand keeps the unnarrowed join, carries the typed gap, and holds
-/// zero candidates.
+/// warm. The guard reads the predicate from the callee's own signature,
+/// whose `T` is the module alias: the join is the checker's `number |
+/// false`, complete and warm.
 #[test]
 fn generic_caller_binder_never_captures_a_predicate_target() {
     const CANONICAL: &str = "/ws/caller-binder-predicate/main.ts";
@@ -8033,7 +8183,14 @@ function f<T extends number>(x: string | number, _t: T) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            CANONICAL,
+            "f",
+            &[verter_type_expr::PrimitiveName::Number],
+            &[verter_type_expr::PrimitiveName::String],
+        );
     });
 }
 
@@ -8110,13 +8267,12 @@ function inherited(x: C | B) {
 }
 
 /// A DISCARDED sequence operand's assertion call narrows everything after
-/// it: `(assertString(x), x)` is `string` in the checker. Lowering only
-/// the last operand and blanket-certifying the discarded call
-/// decided-above published the unnarrowed `string | number` complete and
-/// warm. The discarded assertion is unprovable here: the demand keeps the
-/// unnarrowed join, carries the typed gap, and holds zero candidates.
+/// it: the checker enters the comma operand into control flow, so
+/// `(assertString(x), x)` is `string`. The assertion applies ahead of the
+/// sequence's value. Measured on 7.0.2 (`--strict`, and without
+/// `strictNullChecks`): `f` returns `string`.
 #[test]
-fn discarded_sequence_assertion_never_certifies_decided_above() {
+fn discarded_sequence_assertion_narrows_the_value() {
     const CANONICAL: &str = "/ws/discarded-assertion/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8130,7 +8286,7 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", false);
     });
 }
 
@@ -8344,6 +8500,84 @@ fn assert_object_read_gaps_unwarmed(
     );
 }
 
+/// `name`'s read of `x` (the whole return, or its object's `x` member when
+/// `member` is set) is `string` and the answer is complete: an entered
+/// `asserts x is string` call applied before the read.
+fn assert_entered_assertion_narrows_the_read(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+    member: bool,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key);
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let read = if member {
+        object_prop(&expr, "x")
+    } else {
+        &expr
+    };
+    assert_eq!(
+        read,
+        &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "{name}: the asserted read is `string`, got {expr:?}"
+    );
+    assert_eq!(
+        result.degradation(),
+        None,
+        "{name}: the applied assertion leaves the read complete"
+    );
+}
+
+/// `name`'s read of `x` (the whole return, or its object's `x` member when
+/// `member` is set) keeps the declared `string | number` exactly, and the
+/// answer is complete: a call the checker never enters into control flow
+/// narrows nothing.
+fn assert_never_entered_call_keeps_the_read(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+    member: bool,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key);
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let read = if member {
+        object_prop(&expr, "x")
+    } else {
+        &expr
+    };
+    let verter_type_expr::TypeExpr::Union(arms) = read else {
+        panic!("{name}: the read of `x` is the declared union, got {expr:?}");
+    };
+    assert_eq!(
+        arms.len(),
+        2,
+        "{name}: exactly the declared arms, got {expr:?}"
+    );
+    for primitive in [
+        verter_type_expr::PrimitiveName::String,
+        verter_type_expr::PrimitiveName::Number,
+    ] {
+        assert!(
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+            "{name}: the {primitive:?} arm survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        None,
+        "{name}: a never-entered call leaves the read complete"
+    );
+}
+
 /// A class DECLARATION statement is not transparent: its static block
 /// runs at class evaluation — in THIS frame, at the statement — so the
 /// assertion in `class C { static { assertString(x); } }` narrows `x` to
@@ -8375,16 +8609,13 @@ function f(x: string | number) {
     });
 }
 
-/// A COMPUTED member key evaluates at class definition — the enclosing
-/// frame — so the assertion in `class C { [assertString(x)]() {} }`
-/// narrows `x` for every read that follows in the checker. Guarding the
-/// key with the class body blanket-certified the call decided-above and
-/// the unnarrowed superset sealed complete and warm. The key takes the
-/// same-frame discipline: the unprovable assertion keeps the return's
-/// read of `x` unnarrowed, the demand carries the typed `GuardNarrowing`
-/// gap, and the family slot holds zero candidates.
+/// A COMPUTED member key evaluates at class definition, but the checker
+/// never enters a call there into control flow, so the assertion in
+/// `class C { [assertString(x)]() {} }` narrows nothing. Measured on 7.0.2
+/// (`--strict`, and without `strictNullChecks`): `f` returns `string |
+/// number`, complete.
 #[test]
-fn class_declaration_computed_key_call_never_seals_unnarrowed() {
+fn class_declaration_computed_key_call_narrows_nothing() {
     const CANONICAL: &str = "/ws/class-decl-computed-key/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8399,18 +8630,17 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_never_entered_call_keeps_the_read(dispatch, &host, CANONICAL, "f", false);
     });
 }
 
-/// A member DECORATOR evaluates at class definition — the enclosing
-/// frame — so the assertion in `class C { @assertString(x) m() {} }`
-/// narrows `x` for every read that follows in the checker. The same
-/// same-frame discipline applies: the unprovable assertion keeps the
-/// return's read of `x` unnarrowed, the demand carries the typed
-/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// A member DECORATOR evaluates at class definition, but the checker
+/// never enters a call there into control flow, so the assertion in
+/// `class C { @assertString(x) m() {} }` narrows nothing. Measured on
+/// 7.0.2 (`--strict`, and without `strictNullChecks`): `f` returns
+/// `string | number`, complete.
 #[test]
-fn class_declaration_member_decorator_call_never_seals_unnarrowed() {
+fn class_declaration_member_decorator_call_narrows_nothing() {
     const CANONICAL: &str = "/ws/class-decl-member-decorator/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8425,19 +8655,17 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_never_entered_call_keeps_the_read(dispatch, &host, CANONICAL, "f", false);
     });
 }
 
-/// A STATIC auto-accessor initializer runs at class evaluation — the
-/// enclosing frame — exactly as a static property initializer does, so
-/// the assertion in `class C { static accessor p = assertString(x); }`
-/// narrows `x` for every read that follows in the checker. The same
-/// same-frame discipline applies: the unprovable assertion keeps the
-/// return's read of `x` unnarrowed, the demand carries the typed
-/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// A STATIC auto-accessor initializer runs at class evaluation, but the
+/// checker never enters a call there into control flow, so the assertion
+/// in `class C { static accessor p = assertString(x); }` narrows nothing.
+/// Measured on 7.0.2 (`--strict`, and without `strictNullChecks`): `f`
+/// returns `string | number`, complete.
 #[test]
-fn class_declaration_static_accessor_initializer_never_seals_unnarrowed() {
+fn class_declaration_static_accessor_initializer_call_narrows_nothing() {
     const CANONICAL: &str = "/ws/class-decl-static-accessor/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8452,7 +8680,7 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_never_entered_call_keeps_the_read(dispatch, &host, CANONICAL, "f", false);
     });
 }
 
@@ -8510,13 +8738,14 @@ function f(x: string | number) {
     });
 }
 
-/// A parser-legal TS wrapper does not launder a write: `((x) as any) =
-/// "s"` and `(x as any)++` retype the frame binding exactly as the bare
-/// forms do. The wrapped target takes the same typed gap — the later
-/// read keeps the unnarrowed join and the family slot holds zero
-/// candidates.
+/// A write through a type assertion assigns nothing: the checker's
+/// assignment-target walk and narrowable reference both stop at an
+/// assertion, so `((x) as any) = "s"` in a static block leaves `x` as
+/// declared. Measured on 7.0.2 (`--strict`, and without
+/// `strictNullChecks`): `f` returns `string | number`. The read is that
+/// declared type, complete — no unapplied write stands behind it.
 #[test]
-fn class_declaration_wrapped_write_never_seals_unnarrowed() {
+fn class_declaration_asserted_write_keeps_the_declared_type() {
     const CANONICAL: &str = "/ws/class-decl-wrapped-write/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8529,21 +8758,41 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_class_evaluation_write_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key);
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("f: the read is the declared union, got {expr:?}");
+        };
+        assert_eq!(arms.len(), 2, "f: exactly the declared arms, got {expr:?}");
+        for primitive in [
+            verter_type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::Number,
+        ] {
+            assert!(
+                arms.iter()
+                    .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+                "f: the {primitive:?} arm survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            None,
+            "f: an asserted write retypes nothing, so the read is complete"
+        );
     });
 }
-
 /// An UNSELECTED binding's initializer never lowers — but it still runs at
 /// the statement: the discarded assertion of `const unused =
-/// (assertString(x), 0)` narrows `x` to `string` in the checker for every
-/// read that follows. The demand plan pruned the position (the binding is
-/// never read), so no call obligation existed, and no scanner saw it —
-/// the return's read of `x` could seal complete and warm at the unnarrowed
-/// `string | number`. The elided position takes the same fail-closed
-/// discipline: the read keeps the unnarrowed join, the demand carries the
-/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// (assertString(x), 0)` is a comma operand the checker enters into
+/// control flow, so it narrows `x` to `string` for every read that
+/// follows. The scan of the elided position collects it and applies it
+/// once the initializer has run. Measured on 7.0.2 (`--strict`, and
+/// without `strictNullChecks`): `f` returns `{ x: string; }`.
 #[test]
-fn unselected_initializer_assertion_never_seals_unnarrowed() {
+fn unselected_initializer_assertion_narrows_the_read() {
     const CANONICAL: &str = "/ws/unselected-init-assertion/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8558,18 +8807,18 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", true);
     });
 }
 
 /// A DESTRUCTURING declarator never lowers (it is not a simple local
 /// reaching definition) — but its initializer still runs at the statement,
-/// so the assertion in `const { a } = (assertString(x), { a: 0 })` narrows
-/// `x` for the checker while nothing here modeled or scanned it. The same
-/// typed `GuardNarrowing` gap applies: the read stays unnarrowed and the
-/// family slot holds zero candidates.
+/// and the assertion in `const { a } = (assertString(x), { a: 0 })` is a
+/// comma operand the checker enters into control flow: it applies once
+/// the initializer has run. Measured on 7.0.2 (`--strict`, and without
+/// `strictNullChecks`): `f` returns `{ x: string; }`.
 #[test]
-fn destructuring_initializer_assertion_never_seals_unnarrowed() {
+fn destructuring_initializer_assertion_narrows_the_read() {
     const CANONICAL: &str = "/ws/destructuring-init-assertion/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8584,20 +8833,18 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", true);
     });
 }
 
 /// An enum declaration is not transparent: every member initializer
-/// evaluates in THIS frame at the statement, so the assertion in `enum E {
-/// A = (assertString(x), 1) }` narrows `x` for every read that follows in
-/// the checker. The declaration lowered as a no-op — no obligation, no
-/// scanner — so the unnarrowed superset could seal complete and warm. The
-/// same fail-closed discipline applies: the read of `x` keeps the
-/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap, and
-/// the family slot holds zero candidates.
+/// evaluates in THIS frame at the statement, and the assertion in `enum E {
+/// A = (assertString(x), 1) }` is a comma operand the checker enters into
+/// control flow, so it narrows `x` for every read that follows; it applies
+/// once the initializer has run. Measured on 7.0.2 (`--strict`, and
+/// without `strictNullChecks`): `f` returns `{ x: string; }`.
 #[test]
-fn enum_member_initializer_assertion_never_seals_unnarrowed() {
+fn enum_member_initializer_assertion_narrows_the_read() {
     const CANONICAL: &str = "/ws/enum-init-assertion/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8612,7 +8859,7 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", true);
     });
 }
 
@@ -8774,16 +9021,13 @@ function f(x: "a" | "b" | "c") {
     });
 }
 
-/// An expression statement that is neither a modeled write nor a bare
-/// assertion call still EXECUTES: the discarded sequence operand of
-/// `(assertString(x), 0);` narrows `x` to `string` in the checker for the
-/// read that follows, while no content lowered for it and no obligation
-/// reached it — the return's read of `x` could seal complete and warm at
-/// the unnarrowed `string | number`. The statement takes the fail-closed
-/// scan: the read keeps the unnarrowed join, the demand carries the typed
-/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// Every operand of a statement-position comma sequence is entered into
+/// control flow: the discarded operand of `(assertString(x), 0);` narrows
+/// `x` to `string` for the read that follows, exactly as the bare call
+/// statement does. Measured on 7.0.2 (`--strict`, and without
+/// `strictNullChecks`): `f` returns `{ x: string; }`.
 #[test]
-fn expression_statement_discarded_assertion_never_seals_unnarrowed() {
+fn expression_statement_discarded_assertion_narrows_the_read() {
     const CANONICAL: &str = "/ws/expression-statement-discarded-assertion/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8798,7 +9042,7 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", true);
     });
 }
 
@@ -8917,16 +9161,12 @@ function f(x: string | number) {
     });
 }
 
-/// A type carrier folds a non-object operand into ONE shallow-pass answer
-/// without visiting it, so a direct assertion call under the carrier —
-/// `(assertString(x) as void)` — never reaches a structural arm and would
-/// be blanket-certified decided-above while the checker narrows every read
-/// that follows. The call takes the per-callee certification instead: an
-/// `asserts` callee is unprovable, so the later read of `x` keeps the
-/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap, and
-/// the family slot holds zero candidates.
+/// A call a type carrier wraps directly — `(assertString(x) as void)` —
+/// is never entered into control flow, so it narrows nothing. Measured on
+/// 7.0.2 (`--strict`, and without `strictNullChecks`): `f` returns `{ y:
+/// void; x: string | number; }`, and the read of `x` is complete.
 #[test]
-fn leaf_carrier_wrapped_assertion_never_certifies_decided_above() {
+fn leaf_carrier_wrapped_assertion_narrows_nothing() {
     const CANONICAL: &str = "/ws/carrier-wrapped-assertion/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8941,7 +9181,7 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_never_entered_call_keeps_the_read(dispatch, &host, CANONICAL, "f", true);
     });
 }
 
@@ -11017,6 +11257,20 @@ fn flow_return_reunion_keeps_the_surviving_arms_in_source_order() {
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
         )),
         "…with the `string` constituent alongside it: {second:?}"
+    );
+}
+
+/// `L & K` is assignable to `L` and `L` is not assignable to the
+/// intersection (it lacks `k`), so the reunion absorbs the intersection
+/// arm: `makeProps` returns `L` on 7.0.2, complete.
+#[test]
+fn flow_return_reunion_absorbs_an_intersection_arm_into_its_supertype() {
+    let script = "class K { readonly k = \"k\" }\nclass L { readonly l = \"l\" }\ndeclare const anL: L\nfunction makeProps(x: L | null) { if (x instanceof K) { return x } return anL }";
+    let (expr, degradation) = flow_expr_for_script(script);
+    assert_eq!(degradation, None, "the decided reduction is complete");
+    assert!(
+        matches!(&expr, verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "L"),
+        "the intersection arm is absorbed into `L`: {expr:?}"
     );
 }
 

@@ -1080,6 +1080,10 @@ fn parameter_written(
                 FunctionReferenceBinding::Resolved(written) => written == binding,
                 _ => false,
             },
+            // An asserted target writes no binding.
+            verter_semantic::analysis::function_program::FunctionWriteTarget::Asserted {
+                ..
+            } => false,
             verter_semantic::analysis::function_program::FunctionWriteTarget::Unsupported {
                 ..
             } => true,

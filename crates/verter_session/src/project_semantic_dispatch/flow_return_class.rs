@@ -716,15 +716,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// A read under [`Self::declared_reads`]: the binding's annotation when
-    /// it has one, else its reaching value — never a narrow.
+    /// it has one, `any` for an auto-typed local (the checker's declared
+    /// type there is its auto type, read as `any`: `let y; y = 1; fail();
+    /// return y` is `any`), else its reaching value — never a narrow.
     pub(super) fn declared_local_read(
         &mut self,
         binding: &FlowProductSubject,
     ) -> Option<SemanticNodeId> {
-        match self.local_declared(binding) {
-            Some(declared) => Some(declared),
-            None => self.read_local(binding),
+        if let Some(declared) = self.local_declared(binding) {
+            return Some(declared);
         }
+        if self
+            .auto_typed_locals
+            .contains(&self.canonical_runtime_subject(binding))
+        {
+            return Some(
+                self.dispatch
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
+            );
+        }
+        self.read_local(binding)
     }
 
     /// What a computed class member key names.

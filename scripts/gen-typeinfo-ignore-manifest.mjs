@@ -3528,10 +3528,9 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "TypeOf",
         "FlowReturn",
         "LowerLocator",
-        "ClassifyTruthinessDomain",
         "SignaturesOfType",
       ],
-      consumed_mechanisms: ["QueryValueDomainFoundation", "CanonicalTypeAlgebraClosure"],
+      consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
         "lifted by U6.FLOW_RETURN_SUBSTRATE: `ReturnType<typeof bodyReturn>` solves the two-return-site body through the demand-sliced FlowReturn dispatch to the exact per-arm union (`as const` discriminants preserved, `value` widened to `number`), proven against the checked-in tsgo oracle snapshot via oracle::run_row",
     },

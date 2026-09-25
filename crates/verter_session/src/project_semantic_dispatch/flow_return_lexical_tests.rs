@@ -1414,18 +1414,16 @@ export function ncUse(k: boolean) {
 }
 
 // ── Call forms reached through a COMPOSITE expression ─────────────────
-// A call in a TERNARY arm is a call: the branch has a structural arm, so
-// the callee's clause is instantiated and an overload group reached
-// through one degrades exactly as it does at a bare call.
+// A call in a TERNARY arm or a `&&` / `||` operand is a call: the form
+// has a structural arm, so the callee's clause is instantiated and an
+// overload group reached through one degrades exactly as it does at a
+// bare call.
 //
-// A call in a LOGICAL / NULLISH operand, under a non-null assertion, or
-// as a MEMBER BASE does NOT: those forms are `Leaf` to the shared
-// descent, and the shallow leaf pass answers each of them `any` BEFORE
-// the call-carrier gate can refuse anything. They publish
-// `Primitive(Any)` cleanly and warm — under the checker's answer, never
-// over it, and never the callee's raw return carrier — and the rows
-// below assert exactly that, so a change that starts routing any of them
-// through the call sink has to say so here.
+// A call in a NULLISH operand, under a non-null assertion, or as a
+// MEMBER BASE does NOT: those forms are `Leaf` to the shared descent, and
+// the leaf gate refuses the `any` the shallow pass would answer for each
+// of them — the rows below assert exactly that, so a change that starts
+// routing any of them through the call sink has to say so here.
 //
 // A call in a SEQUENCE's value operand is the one composite spelling
 // that DOES route to the call sink (D7): the sequence's value is its
@@ -5403,21 +5401,11 @@ fn flow_return_method_position_overload_groups_resolve_by_arguments() {
 /// ctArrow:         () => number
 /// ```
 ///
-/// Four rows carry a recorded divergence from that oracle, all of them
-/// shape-level and none of them a leak:
-///
-/// - `ctObjBoth` publishes two structurally identical arms where the
-///   checker publishes one. Union dedup is by interned NODE id and two
-///   object literals at different spans intern distinct nodes; the
-///   `if` / `return` twin dedups the same way (`arms.contains`), so this
-///   is a property of the whole rail, not of the branch join.
-/// - `ctObjDisjoint` publishes no `?: undefined` normalization.
-/// - `ctNestedTernary` publishes a NESTED union
-///   (`Union([Union([2, { a }]), 3])`);
-///   `intern_normalized_union_or_intersection` sorts and dedups but does
-///   not flatten a union arm.
-/// - `ctIdent` publishes `boolean | 2` where the checker narrows the
-///   consequent to `true`.
+/// One row carries a recorded, shape-level divergence from that oracle,
+/// and it is not a leak: `ctObjDisjoint` publishes no `?: undefined`
+/// normalization. Every other row matches, `ctObjBoth` as one arm,
+/// `ctNestedTernary` flattened, `ctObjEmpty` subtype-reduced to `{}` and
+/// `ctIdent` narrowed to `true` by the truthiness test.
 ///
 /// Mutation recipe: dispositioning `ObjectExpression` as
 /// `ValueDescent::Leaf` in the classifier flips every object row to a
@@ -5456,7 +5444,7 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
         // alone; every row renders its members in `VerterStableV1`
         // (fingerprint, exact) order, not authored order.
         ("ctArray", "number[]"),
-        ("ctIdent", "boolean|2"),
+        ("ctIdent", "true|2"),
         ("ctNull", "null|1"),
         ("ctArrow", "()=>number"),
     ] {
@@ -5483,6 +5471,7 @@ fn shape_of(ty: &TypeExpr) -> String {
             }
         }
         TypeExpr::Literal(verter_type_expr::LiteralValue::String(s)) => format!("\"{s}\""),
+        TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(value)) => value.to_string(),
         TypeExpr::Primitive(name) => format!("{name:?}").to_lowercase(),
         // A nested union arm is PARENTHESISED: the substrate does not
         // flatten one, and a spelling that silently joined it would hide
@@ -5795,9 +5784,12 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 ///
 /// ```text
 ///                    checker           published here
-/// tnAmbLogical       "TA" | true       fails closed ← composes a call
+/// tnAmbLogical       "TA" | true       "TA" | true  ← a logical operand
+///                                                     rides the call sink
+///                                                     (asserted in
+///                                                     `call_in_a_logical_operand_publishes_the_operand_union`)
 /// tnAmbNullish       "TA"              fails closed ← composes a call
-/// tnGenericLogical   string | true     fails closed ← composes a call
+/// tnGenericLogical   string | true     string | true ← the same
 /// tnGenericMember    string            fails closed ← composes a call
 /// tnAmbSequence      "TA"              "TA"         ← D7: the sequence's
 ///                                                     value operand IS
@@ -5806,14 +5798,10 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 ///                                                     rails — asserted
 ///                                                     in its own test
 /// tnAmbNonNull       "TA"              fails closed ← call position
-/// tnAmbAs            "TA"              "TA"         ← exact value, but
-///                                                     DEGRADED and never
-///                                                     warm: the folded
-///                                                     call's callee is an
-///                                                     exported overload
-///                                                     pair, unprovable
-///                                                     under the per-callee
-///                                                     certification
+/// tnAmbAs            "TA"              "TA"         ← exact: the call the
+///                                                     carrier wraps is
+///                                                     never entered into
+///                                                     control flow
 /// tnStrTernary       "a" | "b"         "a" | "b"    ← exact
 /// tnGenericBare      string            string       ← exact: the explicit
 ///                                                     type argument
@@ -5837,12 +5825,7 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
 
     // The COMPOSING forms: a join / projection over a call the substrate
     // has no arm for. The pass fabricated an `any`; it is not published.
-    for name in [
-        "tnAmbLogical",
-        "tnAmbNullish",
-        "tnGenericLogical",
-        "tnGenericMember",
-    ] {
+    for name in ["tnAmbNullish", "tnGenericMember"] {
         assert_fails_closed(&host, name);
     }
 
@@ -5858,23 +5841,10 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     // above from "everything answers `any`".
     //
     // `tnAmbAs`: the carrier pins the value — `"TA"` is the carrier's own
-    // exact answer, and the call's result is genuinely discarded — but the
-    // call under the carrier is certified decided-above ONLY when the
-    // callee provably establishes no narrowing, and `tnAmb` is an
-    // EXPORTED, OVERLOADED ambient pair: its checker-visible signature set
-    // is not enumerable from this file (a merged `declare module` overload
-    // could carry an `asserts` predicate). The value still publishes
-    // exact, DEGRADED through the typed guard-narrowing gap, never warm.
-    let tn_amb_as = r5_eval(&host, "tnAmbAs").expect("tnAmbAs must produce a value");
-    assert_eq!(tn_amb_as.ty, string_lit("TA"), "tnAmbAs return type");
-    assert_eq!(
-        tn_amb_as.degradation,
-        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            crate::semantic_query::FlowGap::GuardNarrowing
-        )),
-        "tnAmbAs: the unprovable carrier-folded call degrades to the typed gap"
-    );
-    assert_eq!(tn_amb_as.candidates, 0, "tnAmbAs never warms");
+    // exact answer — and the call it wraps is never entered into control
+    // flow, so whatever its signature set holds, it narrows nothing: the
+    // value publishes exact, clean and warm.
+    assert_clean_warm(&host, "tnAmbAs", string_lit("TA"));
     assert_clean_warm(
         &host,
         "tnStrTernary",
@@ -6156,43 +6126,13 @@ fn undefined_identifier_publishes_the_undefined_primitive() {
     );
 }
 
-/// A call in a LOGICAL operand FAILS CLOSED where it must publish the
-/// operand union.
-///
-/// `k || tnAmb("a")` used to answer `Primitive(Any)` cleanly and warm —
-/// the shallow pass's per-expression fallback (`_ => Ok(Primitive(Any))`)
-/// surfaced as a value. It no longer publishes: the leaf gate refuses an
-/// answer that embeds `any` when the expression's value COMPOSES over a
-/// call with no structural arm, so the position carries the typed
-/// unresolved marker and the result is a degraded success admitting
-/// nothing.
-///
-/// That closes the fabricated-value half. The CAPABILITY half is still
-/// open, and is what this row pins.
-///
-/// OWNER: the SHALLOW PASS (`verter_semantic::analysis::type_eval_build`
-/// per-expression lowering) under `U6.VALUE_INFERENCE` — not the flow
-/// rail, which owns only what happens to an answer the shallow pass
-/// produced. The green counterpart
-/// (`flow_return_leaf_answered_call_forms_publish_any_not_a_carrier`)
-/// pins the fail-closed disposition; this row pins the answer it must
-/// eventually give.
-///
-/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
-/// --ignoreConfig`): `tnAmbLogical(k)` is `"TA" | true`. (The `"TA"` half
-/// additionally needs argument-driven overload resolution —
-/// `U6.CALL_RESOLVE` — so this row does not close until both land.)
-///
-/// Verbatim failure, un-ignored on this tree:
-///
-/// ```text
-/// assertion `left == right` failed: tnAmbLogical must evaluate clean
-///   left: Some(UnmodeledPosition)
-///  right: None
-/// ```
-#[ignore = "owned by U6.VALUE_INFERENCE (the shallow pass's `_ => Ok(Primitive(Any))` \
-            per-expression fallback) plus U6.CALL_RESOLVE for the overload half: a call in a \
-            logical operand must publish the operand union, not the typed unresolved marker"]
+/// A call in a LOGICAL operand publishes the operand union: `k ||
+/// f(…)` is the left's possibly-truthy part joined with the call's
+/// resolved value, the call riding the ONE call sink as any other value
+/// operand does. Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
+/// --ignoreConfig`): `tnAmbLogical(k)` is `"TA" | true` (the overload the
+/// argument selects) and `tnGenericLogical(k)` is `string | true`. The
+/// union prints in the canonical member order.
 #[test]
 fn call_in_a_logical_operand_publishes_the_operand_union() {
     let host = make_r5_host();
@@ -6201,8 +6141,19 @@ fn call_in_a_logical_operand_publishes_the_operand_union() {
         "tnAmbLogical",
         TypeExpr::Union(Arc::from(
             vec![
-                string_lit("TA"),
                 TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(true)),
+                string_lit("TA"),
+            ]
+            .into_boxed_slice(),
+        )),
+    );
+    assert_clean_warm(
+        &host,
+        "tnGenericLogical",
+        TypeExpr::Union(Arc::from(
+            vec![
+                TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(true)),
+                TypeExpr::Primitive(PrimitiveName::String),
             ]
             .into_boxed_slice(),
         )),

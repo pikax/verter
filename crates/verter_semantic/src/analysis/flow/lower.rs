@@ -294,6 +294,9 @@ pub fn lower_slice_plan(
                     expression_origins.push(expr);
                 }
             }
+            // A parameter origin selects the binding's facts, never a
+            // value the IR materializes.
+            SliceOrigin::Parameter(_) => {}
         }
     }
     returns.sort_by_key(|entry| entry.ordinal);

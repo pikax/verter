@@ -98,6 +98,8 @@ pub(crate) mod connected_demand;
 pub(crate) mod cycle_gate;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
+#[cfg(test)]
+mod flow_narrowing_parity_tests;
 pub(crate) mod locator_shape;
 pub(crate) mod locator_view;
 mod locator_view_worklist;

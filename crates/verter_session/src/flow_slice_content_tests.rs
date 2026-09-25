@@ -1048,7 +1048,9 @@ fn control_callee_certification_requires_provable_module_local_closure() {
     );
 
     // A module whose callees are EXPORTED (declaration spelling and
-    // specifier spelling): augmentable, so neither closure is provable.
+    // specifier spelling): augmentable, so neither closure is certified
+    // locally — both control calls resolve through the export's value,
+    // which merges every augmenting block, and take no gap.
     for exported in [
         format!("export {PREDICATE}\nexport {BOOLEAN}\n{BODY}"),
         format!("{PREDICATE}\n{BOOLEAN}\nexport {{ isStr, check as verify }};\n{BODY}"),
@@ -1062,8 +1064,8 @@ fn control_callee_certification_requires_provable_module_local_closure() {
         );
         assert_eq!(
             gap_count(&node),
-            2,
-            "both control tests gap for exported callees: {exported}"
+            0,
+            "both control tests resolve through the exported callees' values: {exported}"
         );
         assert!(
             node.decided_above_call_spans.is_empty(),
@@ -1254,12 +1256,13 @@ fn ternary_return_guard(node: &SliceContent) -> SliceGuard {
 /// is T`) or a formal parameter (`x is typeof y`) — is instantiated by the
 /// CALL: the checker binds `T` to the argument's `string | number` (a
 /// tautology here), never to the owner scope's unrelated `type T =
-/// number`. This half performs no call-site inference, and the caller's
-/// environment cannot resolve such a target, so the predicate channel
-/// refuses it: the control test lowers behind the typed gap and nothing
-/// is certified, for the guard spelling and the `asserts x is T`
-/// statement spelling alike. A generic callee whose target is closed over
-/// the module scope (`x is string`) keeps its guard.
+/// number`. The caller's environment cannot resolve such a target, so
+/// the closed-predicate channel never mints it: the test lowers as a
+/// [`SliceGuard::CallPredicate`] the evaluator resolves through the
+/// call's own instantiated signature, and nothing is certified. The
+/// `asserts x is T` statement spelling has no such route and lowers
+/// behind the typed gap. A generic callee whose target is closed over the
+/// module scope (`x is string`) keeps its guard.
 #[test]
 fn predicate_target_over_callee_bindings_never_resolves_in_the_caller_environment() {
     const CALLER: &str = "function f(x: string | number) { if (isSame(x)) return x; return false }";
@@ -1276,10 +1279,14 @@ fn predicate_target_over_callee_bindings_never_resolves_in_the_caller_environmen
             "a call-instantiated predicate target is never minted as a guard \
              (`{callee}`): {node:?}"
         );
+        assert!(
+            matches!(if_guard(&node), SliceGuard::CallPredicate { .. }),
+            "the call's own signature carries the predicate (`{callee}`): {node:?}"
+        );
         assert_eq!(
             guard_gap_count(&node),
-            1,
-            "the control test gaps (`{callee}`): {node:?}"
+            0,
+            "the control test is modeled (`{callee}`): {node:?}"
         );
         assert!(
             node.decided_above_call_spans.is_empty(),
@@ -1483,11 +1490,12 @@ fn region_guard_gap_count(region: &SliceRegion) -> usize {
 /// `type T` / `class T`, a local value under a `typeof y` root) would
 /// rebind to the WRONG declaration: `isNum(x): x is T` over `type T =
 /// number` narrows `number | string` to `number` in the checker, and to
-/// the caller's `T extends number` here. The channel refuses every such
-/// target — guard and `asserts` spellings alike — and the position takes
-/// the typed gap. A caller binding an UNRELATED name, or a value-only
-/// local of the same name (a `const T` never shadows a type), keeps the
-/// guard.
+/// the caller's `T extends number` here. The closed-predicate channel
+/// never mints such a target: the guard spelling lowers as a
+/// [`SliceGuard::CallPredicate`] whose target the evaluator reads from
+/// the callee's own signature, and the `asserts` spelling takes the
+/// typed gap. A caller binding an UNRELATED name, or a value-only local
+/// of the same name (a `const T` never shadows a type), keeps the guard.
 #[test]
 fn predicate_target_over_caller_bindings_never_resolves_in_the_caller_environment() {
     const PRELUDE: &str = "export {};\ntype T = number;\nconst y = 1;\n\
@@ -1522,10 +1530,14 @@ fn predicate_target_over_caller_bindings_never_resolves_in_the_caller_environmen
             0,
             "{case}: a target the caller frame rebinds is never minted as a guard: {node:?}"
         );
+        assert!(
+            matches!(if_guard(&node), SliceGuard::CallPredicate { .. }),
+            "{case}: the call's own signature carries the predicate: {node:?}"
+        );
         assert_eq!(
             guard_gap_count(&node),
-            1,
-            "{case}: the control test gaps: {node:?}"
+            0,
+            "{case}: the control test is modeled: {node:?}"
         );
         assert!(
             node.decided_above_call_spans.is_empty(),
@@ -1546,8 +1558,8 @@ fn predicate_target_over_caller_bindings_never_resolves_in_the_caller_environmen
     );
     assert_eq!(
         region_guard_gap_count(&nested.body),
-        1,
-        "the nested control test gaps: {enclosing:?}"
+        0,
+        "the nested control test reads the callee's own signature: {enclosing:?}"
     );
     assert!(
         enclosing.decided_above_call_spans.is_empty(),
@@ -1700,15 +1712,35 @@ fn instanceof_constructor_with_symbol_has_instance_never_narrows_to_the_class_in
 /// same-file `function` declaration whose return annotation is not an
 /// `asserts` predicate (an unannotated declaration cannot be an assertion
 /// — assertion signatures are never inferred). Every other discarded call
-/// is unprovable: never certified, and the statement takes the typed gap.
+/// is unprovable: never certified, and the statement takes the typed gap
+/// — except a closed same-file assertion, which the checker enters into
+/// control flow and this half applies ahead of the value (measured on
+/// 7.0.2: `(assertString(x), x)` is `string`, and `c ? (assertString(x),
+/// x) : x` is `string | number`).
 #[test]
 fn discarded_sequence_operand_calls_are_never_blanket_certified() {
-    let refused = [
+    let applied = [
         (
             "a closed same-file assertion",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { return (assertString(x), x) }",
         ),
+        (
+            "a closed assertion nested in a ternary arm",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(c: boolean, x: string | number) { return c ? (assertString(x), x) : x }",
+        ),
+    ];
+    for (case, source) in applied {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: the applied assertion mints no gap: {node:?}"
+        );
+    }
+
+    let refused = [
         (
             "an imported callee",
             "import { touch } from \"./touch\";\n\
@@ -1723,11 +1755,6 @@ fn discarded_sequence_operand_calls_are_never_blanket_certified() {
             "a member callee",
             "export {};\ndeclare const o: { touch(): void };\n\
              function f(x: string | number) { return (o.touch(), x) }",
-        ),
-        (
-            "a closed assertion nested in a ternary arm",
-            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
-             function f(c: boolean, x: string | number) { return c ? (assertString(x), x) : x }",
         ),
     ];
     for (case, source) in refused {
@@ -1744,8 +1771,9 @@ fn discarded_sequence_operand_calls_are_never_blanket_certified() {
     }
 
     // A provably non-narrowing OUTER call is certified on its own
-    // account; the unprovable assertion nested in its argument is not,
-    // and still gaps the statement.
+    // account, and the assertion nested in its argument is never entered
+    // into control flow (TypeScript 7.0.2: `(touch(assertString(x)), x)`
+    // is `string | number`), so it is decided above too.
     let nested_source = "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
                          function touch(_v: unknown) {}\n\
                          function f(x: string | number) { return (touch(assertString(x)), x) }";
@@ -1757,13 +1785,13 @@ fn discarded_sequence_operand_calls_are_never_blanket_certified() {
         .collect();
     assert_eq!(
         certified_texts,
-        ["touch(assertString(x))"],
-        "only the outer non-narrowing call is certified: {nested:?}"
+        ["assertString(x)", "touch(assertString(x))"],
+        "the outer call and the never-entered nested one are decided above: {nested:?}"
     );
     assert_eq!(
         guard_gap_count(&nested),
-        1,
-        "the nested assertion gaps the statement: {nested:?}"
+        0,
+        "the nested assertion narrows nothing: {nested:?}"
     );
 
     let certified = [
@@ -2026,34 +2054,27 @@ fn leaf_nested_control_position_calls_are_never_blanket_certified() {
     }
 }
 
-/// An assertion call hides in a leaf-lowered VALUE position whenever a
-/// type carrier folds the whole form without visiting it: `(assertString(x)
-/// as void)` is `void` to the shallow pass, and the carrier arm keeps the
-/// whole-carrier leaf lowering for a non-object operand — so the call never
-/// reaches a structural arm and would be blanket-certified decided-above
-/// while the checker narrows every read that follows. The rightmost operand
-/// of a folded sequence is the same leak one position over: `((0,
-/// assertString(x)) as unknown)` discards nothing syntactically, but the
-/// assertion still runs. Both take the per-callee certification: only a
-/// provably non-asserting callee certifies; anything else gaps the
-/// enclosing statement.
+/// A type carrier folds the whole form into one leaf without visiting it,
+/// so the calls under it are sorted by the checker's entry rule. A call
+/// the carrier wraps directly (`(assertString(x) as void)`) is never
+/// entered into control flow and narrows nothing (TypeScript 7.0.2: `x`
+/// stays `string | number`), so it is decided above. A call that is a
+/// comma operand under the carrier (`((0, assertString(x)) as unknown)`)
+/// IS entered — the checker narrows `x` to `string` there — so it takes
+/// the per-callee certification: only a provably non-asserting callee
+/// certifies; anything else gaps the enclosing statement.
 #[test]
 fn leaf_carrier_wrapped_assertion_calls_are_never_blanket_certified() {
     let refused = [
-        (
-            "a closed same-file assertion under a carrier",
-            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
-             function f(x: string | number) { const y = (assertString(x) as void); return { y, x } }",
-        ),
         (
             "a closed same-file assertion as a folded sequence's LAST operand",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { const y = ((0, assertString(x)) as unknown); return { y, x } }",
         ),
         (
-            "an imported callee under a carrier",
+            "an imported callee as a folded sequence's LAST operand",
             "import { touch } from \"./touch\";\n\
-             function f(x: string | number) { const y = (touch() as void); return { y, x } }",
+             function f(x: string | number) { const y = ((0, touch()) as void); return { y, x } }",
         ),
     ];
     for (case, source) in refused {
@@ -2070,6 +2091,16 @@ fn leaf_carrier_wrapped_assertion_calls_are_never_blanket_certified() {
     }
 
     let certified = [
+        (
+            "a closed same-file assertion the carrier wraps directly",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { const y = (assertString(x) as void); return { y, x } }",
+        ),
+        (
+            "an imported callee the carrier wraps directly",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { const y = (touch() as void); return { y, x } }",
+        ),
         (
             "a closed unannotated same-file callee under a carrier",
             "export {};\nfunction touch() {}\n\
@@ -2305,16 +2336,16 @@ fn class_declaration_statement_calls_take_enclosing_frame_discipline() {
 /// initializers: a COMPUTED member key (`class { [key()]() {} }`), a
 /// member's DECORATORS (`@dec method() {}`), and a STATIC auto-accessor
 /// initializer (`static accessor p = expr`) all run in the enclosing
-/// frame at class evaluation. Guarding them with the class body
-/// blanket-certified their calls decided-above while the checker narrows
-/// what follows. Each takes the same same-frame discipline: certified
-/// only when the callee provably establishes no narrowing, otherwise the
-/// typed gap. Deferred positions (a method body, an INSTANCE
+/// frame at class evaluation. None of them is entered into control flow,
+/// so a call there narrows nothing (TypeScript 7.0.2: an `asserts` callee
+/// in a computed key, a member decorator or a static auto-accessor
+/// initializer leaves `x` as `string | number`), and each is decided above
+/// with no gap. Deferred positions (a method body, an INSTANCE
 /// auto-accessor initializer at construction) keep the nested-frame
 /// blanket treatment.
 #[test]
 fn class_definition_phase_positions_take_enclosing_frame_discipline() {
-    let refused = [
+    let not_entered = [
         (
             "a computed method key",
             "import { touch } from \"./touch\";\n\
@@ -2341,16 +2372,17 @@ fn class_definition_phase_positions_take_enclosing_frame_discipline() {
              function f(x: string | number) { return (class { static accessor p = touch(); } as object) }",
         ),
     ];
-    for (case, source) in refused {
+    for (case, source) in not_entered {
         let node = content_for(source, "f");
-        assert!(
-            node.decided_above_call_spans.is_empty(),
-            "{case}: an unprovable class-definition call is never certified: {node:?}"
+        assert_eq!(
+            node.decided_above_call_spans.len(),
+            1,
+            "{case}: a class-definition call is never entered, so it is decided above: {node:?}"
         );
         assert_eq!(
             guard_gap_count(&node),
-            1,
-            "{case}: the statement takes the typed gap: {node:?}"
+            0,
+            "{case}: it mints no gap: {node:?}"
         );
     }
 
@@ -2448,8 +2480,10 @@ fn discarded_operand_calls_stop_at_nested_frames() {
 /// the enclosing statement's typed gap: a degraded success, never a
 /// silently certified superset. Deferred bodies (a method runs when
 /// called, an instance property initializer at construction) keep the
-/// nested-frame blanket treatment, and a write to a binding the frame
-/// does NOT own stays silent.
+/// nested-frame blanket treatment; a write the checker never applies to
+/// the enclosing flow (in a member's computed key or a property
+/// initializer, or through a type assertion) and a write to a binding the
+/// frame does NOT own stay silent.
 #[test]
 fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
     let gapped = [
@@ -2462,14 +2496,6 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
             "export {};\nfunction f(x: string | number) { class B {} class C extends (x = \"s\", B) {} return x }",
         ),
         (
-            "a static property initializer assignment",
-            "export {};\nfunction f(x: string | number) { class C { static p = (x = \"s\"); } return x }",
-        ),
-        (
-            "a computed key assignment",
-            "export {};\nfunction f(x: string | number) { class C { [(x = \"s\")]() {} } return x }",
-        ),
-        (
             "a static block compound write",
             "export {};\nfunction f(x: string | number) { class C { static { x += 1; } } return x }",
         ),
@@ -2480,14 +2506,6 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
         (
             "a class-expression static block assignment",
             "export {};\nfunction f(x: string | number) { return (class { static { x = \"s\"; } } as object) }",
-        ),
-        (
-            "a TS-wrapped assignment target",
-            "export {};\nfunction f(x: string | number) { class C { static { ((x) as any) = \"s\"; } } return x }",
-        ),
-        (
-            "a TS-wrapped update target",
-            "export {};\nfunction f(x: number | undefined) { class C { static { (x as any)++; } } return x }",
         ),
         (
             "a static block destructuring assignment",
@@ -2526,6 +2544,39 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
         );
     }
 
+    // Measured on 7.0.2 (`--strict`, and without `strictNullChecks`):
+    // each of these returns the unnarrowed `x` (`string | number`; the
+    // update `number | undefined` under strict null checks) — a member's
+    // computed key and a property initializer sit in the member's own
+    // control-flow container, and a write through a type assertion
+    // assigns nothing.
+    let not_retyping = [
+        (
+            "a static property initializer assignment",
+            "export {};\nfunction f(x: string | number) { class C { static p = (x = \"s\"); } return x }",
+        ),
+        (
+            "a computed method key assignment",
+            "export {};\nfunction f(x: string | number) { class C { [(x = \"s\")]() {} } return x }",
+        ),
+        (
+            "a type-asserted assignment target",
+            "export {};\nfunction f(x: string | number) { class C { static { ((x) as any) = \"s\"; } } return x }",
+        ),
+        (
+            "a type-asserted update target",
+            "export {};\nfunction f(x: number | undefined) { class C { static { (x as any)++; } } return x }",
+        ),
+    ];
+    for (case, source) in not_retyping {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: a write that retypes nothing mints no gap: {node:?}"
+        );
+    }
+
     let clean = [
         (
             "a static-block-local write",
@@ -2550,8 +2601,8 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
 /// statement: the initializer of a destructuring declarator, the
 /// initializer of a binding the demand slice did not value-select, and
 /// every enum member initializer all run in THIS frame. An assertion call
-/// or a whole-binding write there narrows / retypes every read that
-/// follows in the checker while neither the obligation plan (the slice
+/// that is a comma operand there, or a whole-binding write, narrows /
+/// retypes every read that follows in the checker while neither the obligation plan (the slice
 /// pruned the position) nor a scanner saw it — the unnarrowed superset
 /// would seal complete and warm. Each position takes the same fail-closed
 /// discipline the class-declaration arm applies: an effect that is not
@@ -2560,16 +2611,14 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
 /// stays silent — the elision optimization is unchanged.
 #[test]
 fn elided_declaration_position_effects_take_the_typed_gap() {
-    let gapped = [
+    // A closed same-file assertion that is a comma operand there is
+    // entered into control flow and applied once the position has run
+    // (measured on 7.0.2: each leaves `x` as `string`).
+    let applied = [
         (
             "an assertion in an unselected binding's initializer",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { const unused = (assertString(x), 0); return x }",
-        ),
-        (
-            "an imported callee with a frame-owned subject in an unselected initializer",
-            "import { check } from \"./check\";\n\
-             function f(x: string | number) { const unused = (check(x), 0); return x }",
         ),
         (
             "an assertion in a destructuring declarator's initializer",
@@ -2577,18 +2626,32 @@ fn elided_declaration_position_effects_take_the_typed_gap() {
              function f(x: string | number) { const { a } = (assertString(x), { a: 0 }); return x }",
         ),
         (
-            "a write in a destructuring declarator's initializer",
-            "export {};\nfunction f(x: string | number) { const [a] = (x = \"s\", [0]); return x }",
-        ),
-        (
             "an assertion in an enum member initializer",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { enum E { A = (assertString(x), 1) } return x }",
         ),
+    ];
+    for (case, source) in applied {
+        let node = content_for(source, "f");
+        assert_eq!(guard_gap_count(&node), 0, "{case}: {node:?}");
+        assert!(
+            node.body
+                .statements
+                .iter()
+                .any(|statement| matches!(statement, SliceStatement::Assertion { .. })),
+            "{case}: the assertion applies after the position: {node:?}"
+        );
+    }
+
+    let gapped = [
         (
-            "an imported callee with a frame-owned subject in an enum member initializer",
+            "an imported callee with a frame-owned subject in an unselected initializer",
             "import { check } from \"./check\";\n\
-             function f(x: string | number) { enum E { A = check(x) } return x }",
+             function f(x: string | number) { const unused = (check(x), 0); return x }",
+        ),
+        (
+            "a write in a destructuring declarator's initializer",
+            "export {};\nfunction f(x: string | number) { const [a] = (x = \"s\", [0]); return x }",
         ),
         (
             "a write in an enum member initializer",
@@ -2638,6 +2701,11 @@ fn elided_declaration_position_effects_take_the_typed_gap() {
             "a call whose only argument is not a reference",
             "import { check } from \"./check\";\n\
              function f(x: string | number) { const unused = (check(1), 0); return x }",
+        ),
+        (
+            "a call an enum member initializer is (never entered into control flow)",
+            "import { check } from \"./check\";\n\
+             function f(x: string | number) { enum E { A = check(x) } return x }",
         ),
         (
             "a nested-frame call in an unselected initializer stays deferred",
@@ -2974,20 +3042,16 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
         "export {};\nfunction isString(x: unknown): x is string { return true }\n";
     let gapped = [
         (
-            "a strict equality against a represented local",
-            "export {};\nfunction f(x: \"a\" | \"b\") { const k = \"a\"; if (x === k) { return x } return 0 }",
+            "an equality whose reference operand is a member path",
+            "export {};\nfunction f(x: { kind: \"a\" } | { kind: \"b\" }, y: \"a\") { if (x.kind === y) { return x } return 0 }",
         ),
         (
-            "a strict equality between two parameters",
-            "export {};\nfunction f(x: \"a\" | \"b\", y: \"a\") { if (x === y) { return x } return 0 }",
+            "an equality against a call's value",
+            "export {};\ndeclare function g(): \"a\";\nfunction f(x: \"a\" | \"b\") { if (x === g()) { return x } return 0 }",
         ),
         (
             "a `typeof` compared against a represented local",
             "export {};\nfunction f(x: string | number) { const k = \"string\"; if (typeof x === k) { return x } return 0 }",
-        ),
-        (
-            "a loose equality between two parameters",
-            "export {};\nfunction f(x: \"a\" | \"b\", y: \"a\") { if (x == y) { return x } return 0 }",
         ),
         (
             "an `in` test whose key is not a literal",
@@ -3006,10 +3070,6 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
             "export {};\nfunction f(x: string | number, y: string) { if ((x = y)) { return x } return 0 }",
         ),
         (
-            "a truthiness test whose value is a sequence's last operand",
-            "export {};\nfunction f(x: string | number) { if ((0, x)) { return x } return 0 }",
-        ),
-        (
             "a truthiness test whose value is either branch of a conditional",
             "export {};\nfunction f(x: string | number, b: boolean) { if (b ? x : 0) { return x } return 0 }",
         ),
@@ -3020,10 +3080,6 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
         (
             "a guard wrapped in a negated boolean comparison",
             "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\") !== false) { return x } return 0 }",
-        ),
-        (
-            "a sequence whose value is a guard",
-            "export {};\nfunction f(x: string | number) { if ((0, typeof x === \"string\")) { return x } return 0 }",
         ),
         (
             "a conditional whose branch is a guard",
@@ -3067,14 +3123,43 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
         );
     }
 
+    // The checker narrows the reference a comma sequence's LAST operand
+    // is (`narrowType` reads a comma's right operand; measured on 7.0.2:
+    // `if ((0, x)) return x` over `string | undefined` is `string`), which
+    // this half carries as the guard of that operand.
+    let comma = content_for(
+        "export {};\nfunction f(x: string | number) { if ((0, x)) { return x } return 0 }",
+        "f",
+    );
+    assert_eq!(
+        guard_gap_count(&comma),
+        0,
+        "the comma test is modeled: {comma:?}"
+    );
+    assert!(
+        matches!(if_guard(&comma), SliceGuard::Truthy { .. }),
+        "the last operand's truthiness is the guard: {comma:?}"
+    );
+    let comma_guard = content_for(
+        "export {};\nfunction f(x: string | number) { if ((0, typeof x === \"string\")) { return x } return 0 }",
+        "f",
+    );
+    assert_eq!(
+        guard_gap_count(&comma_guard),
+        0,
+        "a comma whose last operand is a guard is modeled: {comma_guard:?}"
+    );
+    assert!(
+        matches!(if_guard(&comma_guard), SliceGuard::Typeof { .. }),
+        "the last operand's `typeof` is the guard: {comma_guard:?}"
+    );
+
     // TypeScript preserves a narrowing FACT through a `const` alias, so
     // the truthiness of the alias is not the whole narrowing: the alias
-    // re-establishes whatever its initializer decided. The initializer
-    // classification is syntactic — a call is included because a
-    // predicate callee is indistinguishable from any other at this
-    // altitude — and a `let` / `var` alias is NOT preserved by the
-    // checker, so it stays silent.
-    let alias_gapped = [
+    // re-establishes whatever its initializer decided, and the guard
+    // carries that fact beside the alias's own truthiness. A `let` /
+    // `var` alias is NOT preserved by the checker, so it stays silent.
+    let alias_modeled = [
         (
             "a `const` alias of a predicate call",
             "function f(x: string | number) { const c = isString(x); if (c) { return x } return 0 }",
@@ -3100,12 +3185,12 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
             "function f(x: { kind: \"a\"; a: 1 } | { kind: \"b\"; b: 2 }) { const { kind } = x; if (kind === \"a\") { return x } return 0 }",
         ),
     ];
-    for (case, source) in alias_gapped {
+    for (case, source) in alias_modeled {
         let node = content_for(&format!("{IS_STRING}{source}"), "f");
         assert_eq!(
             guard_gap_count(&node),
-            1,
-            "{case}: the aliased narrowing fact takes the typed gap: {node:?}"
+            0,
+            "{case}: the aliased narrowing fact is modeled: {node:?}"
         );
     }
 
@@ -3122,6 +3207,22 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
         (
             "the modeled literal-equality guard",
             "export {};\nfunction f(x: 1 | 2) { if (x === 1) { return x } return 0 }",
+        ),
+        (
+            "the modeled loose equality against `null`",
+            "export {};\nfunction f(x: string | null) { if (x == null) { return 0 } return x }",
+        ),
+        (
+            "the modeled strict equality against a represented local",
+            "export {};\nfunction f(x: \"a\" | \"b\") { const k = \"a\"; if (x === k) { return x } return 0 }",
+        ),
+        (
+            "the modeled strict equality between two parameters",
+            "export {};\nfunction f(x: \"a\" | \"b\", y: \"a\") { if (x === y) { return x } return 0 }",
+        ),
+        (
+            "the modeled loose equality against a literal",
+            "export {};\nfunction f(x: string | number) { if (x == 1) { return x } return 0 }",
         ),
         (
             "the modeled `in` guard",
@@ -4493,8 +4594,8 @@ fn locator_miss_is_typed_none() {
 /// The expression-statement fallthrough — every shape that is neither a
 /// modeled whole-binding write nor a bare assertion call — still EXECUTES
 /// at the statement: a discarded sequence operand (`(assertString(x),
-/// 0);`), a comma operand inside a `void`, a template interpolation, a call's ARGUMENT
-/// (`touch((assertString(x), 0));`), and an assignment the modeled arm
+/// 0);`), a comma operand inside a `void`, a comma operand in a call's
+/// ARGUMENT (`touch((assertString(x), 0));`), and an assignment the modeled arm
 /// refused (a member target, or a right-hand side the slice did not
 /// select) can all carry an `asserts` narrowing of a frame-owned binding,
 /// and a class subtree hides a write from the skeleton entirely. Each
@@ -4508,7 +4609,12 @@ fn locator_miss_is_typed_none() {
 /// `string | number`).
 #[test]
 fn unmodeled_expression_statement_effects_take_the_typed_gap() {
-    let gapped = [
+    // A closed same-file assertion the checker enters into control flow —
+    // a comma operand, also inside a `void`, a right operand a literal
+    // `true` always runs, a member write's or an unselected assignment's
+    // right-hand side — applies once the statement has run (measured on
+    // 7.0.2: each leaves `x` as `string`).
+    let applied = [
         (
             "a discarded sequence operand",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
@@ -4520,20 +4626,9 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
              function f(x: string | number) { void (assertString(x), 0); return x }",
         ),
         (
-            "a template interpolation",
-            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
-             function f(x: string | number) { `${assertString(x)}`; return x }",
-        ),
-        (
-            "a logical right operand",
+            "a logical right operand under a literal `true`",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { true && (assertString(x), true); return x }",
-        ),
-        (
-            "a call argument",
-            "import { touch } from \"./touch\";\n\
-             function assertString(x: unknown): asserts x is string {}\n\
-             function f(x: string | number) { touch((assertString(x), 0)); return x }",
         ),
         (
             "a member-write statement's right-hand side",
@@ -4544,6 +4639,23 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
             "an assignment right-hand side the slice did not select",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { let y = 0; y = (assertString(x), 1); return x }",
+        ),
+    ];
+    for (case, source) in applied {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: the entered assertion applies: {node:?}"
+        );
+    }
+
+    let gapped = [
+        (
+            "a call argument",
+            "import { touch } from \"./touch\";\n\
+             function assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { touch((assertString(x), 0)); return x }",
         ),
         (
             "a class-hidden write in an expression statement",
@@ -4573,8 +4685,8 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
         );
     }
 
-    // A throw argument evaluates before the region ends — its effect gaps
-    // AHEAD of the throw inside the try block's region.
+    // A throw argument evaluates before the region ends — its entered
+    // assertion applies AHEAD of the throw inside the try block's region.
     let thrown = content_for(
         "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
          function f(x: string | number) { try { throw (assertString(x), \"e\"); } catch { return x; } return x }",
@@ -4588,8 +4700,15 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
     };
     assert_eq!(
         region_guard_gap_count(block),
-        1,
-        "an assertion in a throw argument takes the typed gap ahead of the throw: {thrown:?}"
+        0,
+        "an assertion in a throw argument applies ahead of the throw: {thrown:?}"
+    );
+    assert!(
+        matches!(
+            block.statements.as_ref(),
+            [SliceStatement::Assertion { .. }, SliceStatement::Throw]
+        ),
+        "the assertion precedes the throw: {thrown:?}"
     );
 
     let silent = [
@@ -4605,6 +4724,11 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
         (
             "a compound write the ledger already covers",
             "export {};\nfunction f(x: number) { x += 1; return x }",
+        ),
+        (
+            "an assertion call in a template interpolation (never entered)",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { `${assertString(x)}`; return x }",
         ),
         (
             "an assertion call that is a `void` operand",
@@ -5299,7 +5423,7 @@ fn ternary_guard_shares_the_if_authority_for_a_modeled_and_an_unexpressible_test
     assert_eq!(guard_gap_count(&modeled), 0, "{modeled:?}");
 
     let unexpressible = content_for(
-        "export {};\nfunction f(x: \"a\" | \"b\") { const k = \"a\"; return x === k ? x : 0 }",
+        "export {};\nfunction f(x: { k: \"a\" } | { k: \"b\" }) { const k = \"a\"; return x.k === k ? x : 0 }",
         "f",
     );
     let guard = ternary_return_guard(&unexpressible);
@@ -5393,7 +5517,7 @@ fn loop_test_lowers_through_the_guard_classifier_for_both_a_modeled_and_an_unexp
 #[test]
 fn guard_narrowing_gap_lands_immediately_ahead_of_the_construct_never_inside_an_arm_or_clause() {
     let if_node = content_for(
-        "export {};\nfunction f(x: \"a\" | \"b\") { let n = 0; const k = \"a\"; if (x === k) { return x; } return n; }",
+        "export {};\nfunction f(x: { k: \"a\" } | { k: \"b\" }) { let n = 0; const k = \"a\"; if (x.k === k) { return x; } return n; }",
         "f",
     );
     let statements = &if_node.body.statements;

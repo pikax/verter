@@ -454,6 +454,10 @@ pub(crate) struct Row {
     /// Upserted at `<dir>/<id>__aux.ts` (Vue lane) and imported from the
     /// script as `./<id>__aux`.
     pub(crate) aux: &'static str,
+    /// The lib environment the flow lanes register for the row's project —
+    /// the pinned lib's own declarations of the globals the script reads —
+    /// or `""` for the standalone host, which registers none.
+    pub(crate) lib: &'static str,
     /// The authored script body — spliced verbatim into `<script setup>`,
     /// into the `.svelte` instance script, and into the flow-lane `.ts`.
     pub(crate) script: &'static str,
@@ -499,6 +503,7 @@ impl Row {
     pub(crate) const BLANK: Row = Row {
         id: "",
         aux: "",
+        lib: "",
         script: "",
         macro_call: "defineProps<ReturnType<typeof makeProps>>()",
         option_key: "props: ",
@@ -798,8 +803,15 @@ fn member_shapes(
 /// measurement (the body-only evaluation of an annotated function) is
 /// unspellable here.
 fn drive_flow(row: &Row, function: &str) -> MeasuredFlow {
-    let host = make_host();
     let dir = "/ws";
+    let host = u6_flow_expect_tests::host_with_lib_environment(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        dir,
+        row.lib,
+    );
     if !row.aux.is_empty() {
         upsert(
             &host,
@@ -1376,12 +1388,32 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "82864336129b447c34bf97d99dd936464a993c1c7a6112ab35892ffa151ca93c",
     ),
     (
+        "N35_const_aliased_condition",
+        "5de702a6ad460827850fe5e90f738200c166bc56e11e1159b229f4c35aa47b82",
+    ),
+    (
+        "N36_aliased_discriminant",
+        "8c244056779f2cb44c43349b0082320f0efd95cb3d410cc91a01fa87de05c62d",
+    ),
+    (
+        "N42_comma_sequence_guard",
+        "57f6e26bb13bb3afd43ac27f75179c1234a052f4f81e6c8fdff086cd3dae356b",
+    ),
+    (
+        "N50_sequence_discriminant_test",
+        "fb8a33d2bbe3ab90c2ff5c2553907745533496c9bd5de8a5722d587846a764b2",
+    ),
+    (
         "N38_postfix_non_null_wrapped_guard",
         "ea4d706da28a3e569aefa75f45af245cd496d8a55295927c5b7d9d9d58bfabe8",
     ),
     (
         "N40_as_wrapped_guard",
         "c641157ff36c975ad319a9643cbbf6f2e1e6f9a31a0c5dc09122d66502bdf4a3",
+    ),
+    (
+        "N43_boolean_wrapped_guard",
+        "96ee3d5b3c846ebc2b7f14e3b32a4d18bb2d63a6496634f5ed677cd4c6b61c71",
     ),
     (
         "N44_typeof_over_unknown",
@@ -1680,8 +1712,20 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "76fa69e05ef1bc843a3d649da249b426144ad4a8f37a93c8265d4be987b3a66d",
     ),
     (
+        "N56_arrow_predicate_annotated_binding",
+        "5e13ff7e34b9b95087901ab09fc4cfae178a35dd8917d03768936bbe9bb63a17",
+    ),
+    (
+        "N57_object_literal_method_predicate",
+        "1a7a008543c33588fdc711d0c618ca58b995167b8dcfee51d602192da9768760",
+    ),
+    (
         "N58_predicate_targets_second_parameter",
         "67937178ac7fa11755183b7de413da72c13210550a6606d39e40cd8e160a87b9",
+    ),
+    (
+        "N59_generic_predicate_instantiated_at_call",
+        "839f9a8c43d6651273c69a500548408423cb6b9c3fe7596f9b9288929423ef70",
     ),
     (
         "N63_two_discriminants_conjunction",
@@ -1720,8 +1764,28 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "64a93578211c164bb4f545454879b4d63be0bace35905d5f22e30629b66ea1f8",
     ),
     (
+        "N74_array_isarray_true_arm",
+        "d3f24af47b2bfb575169c57dfefa30077d2e845bb986358655c8799705ec5bb9",
+    ),
+    (
+        "N75_array_isarray_false_arm",
+        "638eb3f957d92967262fd244a3041aa0419137852c1d404813eb7c8f0eb092e1",
+    ),
+    (
         "N78_strict_not_undefined_keeps_null",
         "501aee0440f7bfb526a1235fe6e75f55e6e9d314f31cded0cca0ca22c0bd497e",
+    ),
+    (
+        "N79_equality_against_const_literal_binding",
+        "eb56597a228aabd93fbf494bc076733f79373f3edbd5437724e8477a901b3cef",
+    ),
+    (
+        "N80_equality_against_const_literal_target_narrows",
+        "bbd96b82015e965e899aa3a69e6b9cc5365210c8cfdd219e6612ea6593e7c34b",
+    ),
+    (
+        "N81_equality_against_let_widened_target_does_not_narrow",
+        "5cf45a21bc89978a7f1faae587adcb5745d563d5c2a5c9c3b9fd95890189d0b9",
     ),
     (
         "N82_falsy_branch_keeps_empty_string_literal",
@@ -2443,7 +2507,7 @@ mod corpus_suite {
                 ),
             };
 
-            let host = u6_flow_expect_tests::make_audit_host();
+            let host = u6_flow_expect_tests::make_audit_host_with_lib("/wb", row.lib);
             // The same canonical directory the expect/boundary lane measures under
             // (`drive_expect_boundary`): authored carriers key by logical source-unit
             // identity, so a row's exact public output pin holds for ONE canonical
@@ -2987,7 +3051,7 @@ mod corpus_suite {
     #[test]
     fn corpus_expect_and_boundary_lane() {
         use super::u6_flow_expect_tests::{
-            check_boundary, check_boundary_refusal, drive_expect_boundary,
+            check_boundary, check_boundary_refusal, drive_expect_boundary_with_lib,
         };
         let dump = dump_mode();
         let mut failures = Vec::new();
@@ -3024,7 +3088,9 @@ mod corpus_suite {
                 Expect::Node(node) => Some(node),
                 Expect::Skip => None,
             };
-            let measured = drive_expect_boundary(row.aux, row.id, row.script, function, expected);
+            let measured = drive_expect_boundary_with_lib(
+                row.aux, row.lib, row.id, row.script, function, expected,
+            );
             if dump {
                 println!(
                     "EXPECT {} => node {:?}  degr {:?}  cold1 {}  fc1 {}  fc2 {}  cold2 {}  \
@@ -3123,7 +3189,7 @@ mod corpus_suite {
     /// stale-failing.
     #[test]
     fn checker_column_cross_validates_against_live_rendering() {
-        use super::u6_flow_expect_tests::drive_expect_boundary;
+        use super::u6_flow_expect_tests::drive_expect_boundary_with_lib;
         /// Deep-pinned rows whose `checker` text IS renderer syntax.
         const RENDER_COMPARABLE: &[&str] = &[
             "N106_declared_intersection_keeps_literal",
@@ -3307,7 +3373,9 @@ mod corpus_suite {
             ),
             (
                 "N27_switch_true_guard_dispatch",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
             ),
             (
                 "N28_switch_typeof_dispatch",
@@ -3323,7 +3391,31 @@ mod corpus_suite {
             ),
             (
                 "N35_const_aliased_condition",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
+            ),
+            (
+                "N36_aliased_discriminant",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
+            ),
+            (
+                "N50_sequence_discriminant_test",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
+            ),
+            (
+                "N37_destructured_local_discriminant",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
+            ),
+            (
+                "N43_boolean_wrapped_guard",
+                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(number | string) }`",
             ),
             (
                 "N42_comma_sequence_guard",
@@ -3390,15 +3482,17 @@ mod corpus_suite {
             ),
             (
                 "N56_arrow_predicate_annotated_binding",
-                "checker prints `{ v: string | A; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(DeclRef(A) | DeclRef(B) | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string | A; }`; the renderer spells the same node `{ v: Union(DeclRef(A) | string) }`",
             ),
             (
                 "N57_object_literal_method_predicate",
-                "checker prints `{ v: string | A; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(DeclRef(A) | DeclRef(B) | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string | A; }`; the renderer spells the same node `{ v: Union(DeclRef(A) | string) }`",
             ),
             (
                 "N59_generic_predicate_instantiated_at_call",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(unknown | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
             ),
             (
                 "N60_class_method_assertion_narrows",
@@ -3443,16 +3537,24 @@ mod corpus_suite {
                 "checker prints `{ v: string | undefined; }`; the renderer spells the same node `{ v: Union(string | undefined) }`",
             ),
             (
+                "N75_array_isarray_false_arm",
+                "checker prints `{ v: number; }`; the renderer spells the same node `{ v: number }`",
+            ),
+            (
                 "N78_strict_not_undefined_keeps_null",
                 "checker prints `{ v: string | null; }`; the renderer spells the same node `{ v: Union(string | null) }`",
             ),
             (
                 "N79_equality_against_const_literal_binding",
-                "checker prints `{ v: 5 | 15; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(5 | 10 | 15) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: 5 | 15; }`; the renderer spells the same node `{ v: Union(15 | 5) }`",
             ),
             (
                 "N80_equality_against_const_literal_target_narrows",
-                "checker prints `{ v: \"a\"; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(\"a\" | \"b\") }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: \"a\"; }`; the renderer spells the same node `{ v: \"a\" }`",
+            ),
+            (
+                "N81_equality_against_let_widened_target_does_not_narrow",
+                "checker prints `{ v: \"a\" | \"b\"; }`; the renderer spells the same node `{ v: Union(\"a\" | \"b\") }`",
             ),
             (
                 "N82_falsy_branch_keeps_empty_string_literal",
@@ -3787,7 +3889,9 @@ mod corpus_suite {
                 ));
                 continue;
             };
-            let measured = drive_expect_boundary(row.aux, row.id, row.script, function, None);
+            let measured = drive_expect_boundary_with_lib(
+                row.aux, row.lib, row.id, row.script, function, None,
+            );
             let rendered = measured.rendered.as_deref();
             if comparable && rendered != Some(row.checker) {
                 failures.push(format!(
@@ -3847,7 +3951,9 @@ mod corpus_suite {
     /// extend the parser deliberately; never exempt silently.
     #[test]
     fn deep_pinned_rows_semantic_equality_follows_their_verdict() {
-        use super::u6_flow_expect_tests::{checker_syntax, render_node, with_live_flow_node};
+        use super::u6_flow_expect_tests::{
+            checker_syntax, render_node, with_live_flow_node_with_lib,
+        };
         let mut failures = Vec::new();
         for row in CORPUS {
             if !matches!(row.expect, Expect::Node(_)) {
@@ -3868,8 +3974,9 @@ mod corpus_suite {
                     continue;
                 }
             };
-            let (matches, rendered) = with_live_flow_node(
+            let (matches, rendered) = with_live_flow_node_with_lib(
                 row.aux,
+                row.lib,
                 &format!("{}__sem", row.id),
                 row.script,
                 function,
@@ -5063,16 +5170,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
     ),
     (
-        "N36_aliased_discriminant",
-        Owner::U6NarrowLattice,
-        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
-    ),
-    (
-        "N37_destructured_local_discriminant",
-        Owner::U6NarrowLattice,
-        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
-    ),
-    (
         "N39_instanceof_imported_class",
         Owner::U6NarrowTypeof,
         "member Union carrying Opaque(Miss) beside DeclRef(Box) — no Miss variant in the recursive expectation vocabulary",
@@ -5083,35 +5180,9 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member Union carrying Opaque(Miss) beside DeclRef(Box) — no Miss variant in the recursive expectation vocabulary",
     ),
     (
-        "N43_boolean_wrapped_guard",
-        Owner::U6NarrowTypeof,
-        "the member Union EQUALS the checker, so a deep pin would have to be MatchesChecker while the result is a typed ReturnOnly; the KnownOwed note and the member pin carry the divergence",
-    ),
-    (
-        "N50_sequence_discriminant_test",
-        Owner::U6NarrowLattice,
-        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
-    ),
-    (
         "N61_unannotated_const_assertion_does_not_narrow",
         Owner::U6NarrowSubstitution,
         "member Union — the published value EQUALS the checker, so a recursive pin would assert the divergence this KnownOwed row records does not exist",
-    ),
-    (
-        // `Array.isArray` is not applied as a predicate on either edge.
-    "N74_array_isarray_true_arm",
-        Owner::U6NarrowTypeof,
-        "member Union carrying Array(number) — no Array variant in the recursive expectation vocabulary",
-    ),
-    (
-        "N75_array_isarray_false_arm",
-        Owner::U6NarrowTypeof,
-        "member Union carrying Array(number) — no Array variant in the recursive expectation vocabulary",
-    ),
-    (
-        "N81_equality_against_let_widened_target_does_not_narrow",
-        Owner::U6NarrowTypeof,
-        "member Union — the published value EQUALS the checker, so a recursive pin would assert a divergence this KnownOwed row does not have",
     ),
 ];
 
@@ -5138,7 +5209,7 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 /// undeclared-call rows, whose members spell the typed marker and so need no
 /// shallow entry.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 76;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 69;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -5225,25 +5296,14 @@ const OPEN_DEBTS: &[&str] = &[
     "N32_optional_chain_property_discriminant",
     "N33_computed_property_discriminant",
     "N34_non_null_asserted_property_discriminant",
-    "N35_const_aliased_condition",
-    "N36_aliased_discriminant",
-    "N37_destructured_local_discriminant",
     "N39_instanceof_imported_class",
     "N41_instanceof_member_expression_constructor",
-    "N42_comma_sequence_guard",
-    "N43_boolean_wrapped_guard",
     "N47_correlated_tuple_discriminant",
-    "N50_sequence_discriminant_test",
-    // Predicate / assertion CALL TARGETS the guard rail does not accept: an
-    // arrow-expression binding, an object-literal method, a class method, an
-    // annotated `const`, and a generic predicate instantiated at the call
-    // site. Each publishes the unnarrowed union as a typed ReturnOnly. The
-    // two `does_not_narrow` rows are the paired over-narrow CONTROLS: their
-    // published value is already correct and only the admission is owed, so
-    // a repair must leave their surfaces alone.
-    "N56_arrow_predicate_annotated_binding",
-    "N57_object_literal_method_predicate",
-    "N59_generic_predicate_instantiated_at_call",
+    // Assertion CALL TARGETS the statement rail does not accept: a class
+    // method and an annotated `const`. Each publishes the unnarrowed union
+    // as a typed ReturnOnly. The `does_not_narrow` row is the paired
+    // over-narrow CONTROL: its published value is already correct and only
+    // the admission is owed, so a repair must leave its surface alone.
     "N60_class_method_assertion_narrows",
     "N61_unannotated_const_assertion_does_not_narrow",
     "N62_annotated_const_assertion_narrows",
@@ -5255,11 +5315,6 @@ const OPEN_DEBTS: &[&str] = &[
     "N69_in_operator_const_literal_key",
     "N70_in_operator_numeric_key",
     "N72_typeof_function_guard",
-    "N74_array_isarray_true_arm",
-    "N75_array_isarray_false_arm",
-    "N79_equality_against_const_literal_binding",
-    "N80_equality_against_const_literal_target_narrows",
-    "N81_equality_against_let_widened_target_does_not_narrow",
     // Evolving `let` bindings, the `never`-default switch admission, the
     // `??` short circuit, index-signature reads, and a closure created
     // inside a narrowed arm.
@@ -5334,11 +5389,13 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6FlowReturnSubstrate, 67, 59, 2),
     // A `typeof` test over an `unknown` / `any` arm substitutes the kind's
     // implied type (N44, N46), and a comparison value is `boolean`, so the
-    // `let`-aliased condition control (N84) publishes complete, a loose
-    // `== null` selects both nullish members (N76), and a nested body
-    // narrows a captured binding by its own guard (N48): 34 matching, 14
-    // parked.
-    (Owner::U6NarrowTypeof, 48, 34, 14),
+    // `let`-aliased condition control (N84) publishes complete. A `const`
+    // alias carries its condition's fact (N35), a call handing no
+    // narrowable reference is certified inert (N43), a loose `== null`
+    // selects both nullish arms (N76), a test behind a comma sequence is
+    // its last operand (N42), and a nested body narrows a captured binding
+    // by its own guard (N48): 42 match.
+    (Owner::U6NarrowTypeof, 48, 42, 6),
     // The `instanceof` arm rule: derivation decided by class heritage on
     // both edges (the subclass arm survives, the base arm downcasts, the
     // negated edge drops the tested class's family) with nullish
@@ -5349,11 +5406,16 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // deep measurement showed the dead contributor SURVIVES (wrong-and-
     // warm), so the row is parked against its narrowing block. D10
     // closed N88's unknown-key intersection (the Record mint), moving
-    // this owner to 25 matching. A predicate over a captured binding
-    // narrows inside the invoked body, dropping N25's dead contributor:
-    // 26 matching, 12 parked.
-    (Owner::U6NarrowLattice, 38, 26, 12),
-    (Owner::U6NarrowSubstitution, 12, 6, 6),
+    // this owner to 25 matching. A `const` alias of a discriminant, read
+    // or destructured, is a discriminant of its object (N36, N37), a
+    // discriminant behind a comma sequence is its last operand (N50), and
+    // a predicate over a captured binding narrows inside the invoked body,
+    // dropping N25's dead contributor: 29.
+    (Owner::U6NarrowLattice, 38, 29, 9),
+    // A call's predicate is read from its callee's resolved signature —
+    // an arrow bound to a `const`, an object-literal method, a generic
+    // instantiated at the call (N56, N57, N59): 9 match.
+    (Owner::U6NarrowSubstitution, 12, 9, 3),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     // A `new` and a tagged template resolve to the instance: C02, C04, C08,
     // C11 and C12 and their tagged-template twins C18, C19, C21, C23 and C24

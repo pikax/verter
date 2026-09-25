@@ -35,7 +35,7 @@ use super::flow_graph::{
     FlowEdgeClass, FlowEdgeKind, FlowNodeId, FunctionFlowGraph, PathWriteSource,
 };
 use super::{
-    FlowNameId, FunctionBodySkeleton, SkeletonExprSiteId, SkeletonPathSegment,
+    FlowNameId, FunctionBodySkeleton, SkeletonBindingId, SkeletonExprSiteId, SkeletonPathSegment,
     SkeletonReturnSiteId, SkeletonWriteCertainty,
 };
 
@@ -139,6 +139,12 @@ pub enum SliceOrigin {
     Return(SkeletonReturnSiteId),
     /// An arbitrary tracked expression site.
     Expr(SkeletonExprSiteId),
+    /// A parameter whose flow facts the demand observes at the return:
+    /// the type predicate the checker infers from a function's single
+    /// return reads EVERY parameter's narrowed type there, whether or not
+    /// the returned value reads it. Planned on the effect frontier — the
+    /// binding's facts stay live, its value is never materialized.
+    Parameter(SkeletonBindingId),
 }
 
 /// One segment of the demanded projection path, resolved against the
@@ -175,13 +181,55 @@ impl SliceDemand {
     /// of its return type), and each demanded key resolved against the
     /// skeleton's interned name table (a table lookup — not a body walk; a
     /// key the body never mentions stays [`DemandSegment::Foreign`]).
+    ///
+    /// The WHOLE return of a plain function whose one `return` carries a
+    /// value that is not an object literal may be a type predicate over
+    /// any identifier parameter nothing reassigns
+    /// (`getTypePredicateFromBody`), so each such parameter is an origin
+    /// too ([`SliceOrigin::Parameter`]). "Nothing" is the checker's
+    /// `isSymbolAssigned`: this frame's own whole writes and every
+    /// assignment a nested callable makes
+    /// ([`FunctionBodySkeleton::closure_assignments`]). A closure that
+    /// only reads the parameter, or writes one of its members, leaves it
+    /// an origin.
     #[must_use]
     pub fn for_return_projection(skeleton: &FunctionBodySkeleton, path: &[Arc<str>]) -> Self {
-        let origins: Vec<SliceOrigin> = (0..skeleton.return_sites.len())
+        let mut origins: Vec<SliceOrigin> = (0..skeleton.return_sites.len())
             .filter_map(|index| u32::try_from(index).ok())
             .map(|index| SliceOrigin::Return(SkeletonReturnSiteId::from_index(index)))
             .chain(skeleton.yield_sites.iter().copied().map(SliceOrigin::Expr))
             .collect();
+        let may_infer_predicate = path.is_empty()
+            && skeleton.kind == super::FunctionBodyKind::Plain
+            && matches!(
+                skeleton.return_sites.as_ref(),
+                [only] if only.argument.is_some_and(|argument| !matches!(
+                    skeleton.expr_sites[argument.index()].shape,
+                    super::SkeletonExprShape::ObjectLiteral { .. }
+                ))
+            );
+        if may_infer_predicate {
+            let reassigned =
+                |binding: SkeletonBindingId| {
+                    let local = super::FlowBindingRef::Local(binding);
+                    skeleton.writes.iter().any(|write| {
+                        write.path.is_empty() && write.binding.as_ref() == Some(&local)
+                    }) || skeleton.closure_assignments.contains(&binding)
+                };
+            origins.extend(
+                skeleton
+                    .bindings
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, binding)| {
+                        binding.kind == super::SkeletonBindingKind::Param && !binding.destructured
+                    })
+                    .filter_map(|(index, _)| u32::try_from(index).ok())
+                    .map(SkeletonBindingId::from_index)
+                    .filter(|binding| !reassigned(*binding))
+                    .map(SliceOrigin::Parameter),
+            );
+        }
         let segments: Vec<DemandSegment> = path
             .iter()
             .map(|name| match skeleton.name_id(name) {
@@ -345,11 +393,19 @@ impl<'g> ReturnPathPeeker<'g> {
         }
 
         for origin in demand.origins.iter() {
-            let node = match origin {
-                SliceOrigin::Return(id) => self.graph.return_site_node(*id),
-                SliceOrigin::Expr(id) => self.graph.expr_site_node(*id),
-            };
-            state.worklist.push(WorkItem::Value { node, path });
+            match origin {
+                SliceOrigin::Return(id) => state.worklist.push(WorkItem::Value {
+                    node: self.graph.return_site_node(*id),
+                    path,
+                }),
+                SliceOrigin::Expr(id) => state.worklist.push(WorkItem::Value {
+                    node: self.graph.expr_site_node(*id),
+                    path,
+                }),
+                SliceOrigin::Parameter(id) => state.worklist.push(WorkItem::Effect {
+                    node: self.graph.binding_node(*id),
+                }),
+            }
         }
 
         while let Some(item) = state.worklist.pop() {

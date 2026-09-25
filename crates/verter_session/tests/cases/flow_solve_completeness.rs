@@ -2782,12 +2782,14 @@ fn flow_demand_handle_fails_closed_on_a_foreign_runtime() {
 // ── Retained-selection provenance ───────────────────────────────────────
 
 /// A smaller matched-demand foreign body: its retained selection's node
-/// ids stay in range of the richer fixture's graph, so a foreign-graph
-/// selection fails on PROVENANCE (the minted slice identity), never on
-/// bounds and never on a panic.
+/// ids stay in range of the richer fixture's graph, and its single return
+/// is an object literal like the fixture's (so neither demand selects a
+/// parameter for an inferred predicate), so a foreign-graph selection
+/// fails on PROVENANCE (the minted slice identity), never on the demand,
+/// on bounds, or on a panic.
 const SMALLER_FIXTURE_SOURCE: &str = r#"
 function smaller(a) {
-  return a;
+  return { a };
 }
 "#;
 
@@ -2865,8 +2867,8 @@ fn demand_planner_rejects_a_selection_of_another_demand() {
 
 /// A selection referencing a node id outside the bound graph is a typed
 /// planning error — never a panic on the graph-local id space. (The
-/// smaller fixture's graph has 4 nodes; the richer fixture's selection
-/// reaches node 6.)
+/// richer fixture's selection reaches node 6, past the smaller fixture's
+/// graph.)
 #[test]
 fn demand_planner_rejects_an_out_of_range_selection_node() {
     let fixture = flow_graph_fixture_for_tests(SMALLER_FIXTURE_SOURCE, 11);

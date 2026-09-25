@@ -744,6 +744,9 @@ pub(crate) enum ResolveCallSelection {
         /// literal the caller's return position widens, and every listed
         /// deposit widens at the caller's value (member) positions.
         fresh_literal_returns: Vec<SemanticNodeId>,
+        /// The diagnostic of an error-recovery winner (see
+        /// [`ResolvedCallResult::Selected`]).
+        recovery_diagnostic: Option<crate::semantic_query::CheckerDiagnostic>,
     },
     DynamicAny,
 }
@@ -772,6 +775,7 @@ impl ResolveCallSelection {
                 selected_signature,
                 substitution,
                 fresh_literal_returns,
+                recovery_diagnostic,
             } => ResolvedCallResult::Selected {
                 selected: selected.clone(),
                 selected_signature: match selected_signature {
@@ -783,6 +787,7 @@ impl ResolveCallSelection {
                 substitution: substitution.clone(),
                 return_type,
                 fresh_literal_returns: std::sync::Arc::from(fresh_literal_returns.as_slice()),
+                recovery_diagnostic: *recovery_diagnostic,
             },
             Self::DynamicAny => ResolvedCallResult::DynamicAny { return_type },
         }
@@ -820,8 +825,9 @@ pub(crate) struct ResolveCallPendingState {
 pub(crate) enum PendingObligationDomain {
     /// Relation deferral state.
     Relate(RelationPendingState),
-    /// Flow-return deferral state.
-    FlowReturn(FlowReturnPendingState),
+    /// Flow-return deferral state (boxed: the evaluated result it carries
+    /// dwarfs the relation domain).
+    FlowReturn(Box<FlowReturnPendingState>),
     /// ResolveCall deferral state (boxed: the union-selection payload
     /// makes this by far the largest domain).
     ResolveCall(Box<ResolveCallPendingState>),

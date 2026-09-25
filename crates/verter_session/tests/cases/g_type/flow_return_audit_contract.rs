@@ -311,10 +311,12 @@ fn whole() -> ReturnProjectionDemand {
 /// The audit record must explain WHY a request came back partial, not
 /// only THAT it did.
 ///
-/// An `instanceof` guard over an unenumerable subject (`unknown`) retains a
-/// superset and records the typed guard-narrowing gap, so the value is
-/// usable but never warm: both calls recompute cold. Each record must
-/// name that reason. The `string | number` control classifies every arm,
+/// A `switch (true)` dispatch on a `typeof` case, a form the guard
+/// vocabulary does not carry, retains a superset and records the typed
+/// guard-narrowing gap, so the value is usable but never warm: both calls
+/// recompute cold. Each record must name that reason. The `string | number`
+/// control classifies every arm, so it reports NO partiality and its second
+/// call is a warm hit.| number` control classifies every arm,
 /// so it reports NO partiality and its second call is a warm hit.
 ///
 /// Discrimination: against a payload that carries only the three
@@ -328,8 +330,8 @@ fn flow_return_audit_explains_partial_cold_recompute() {
     upsert(
         &host,
         canonical,
-        "class C { m(): number { return 1; } }\n\
-         export function gapped(x: unknown) { if (x instanceof C) return x; return 0; }\n\
+        "export {};\n\
+         export function gapped(x: string | number) { switch (true) { case typeof x === \"string\": return x; } return 0; }\n\
          export function complete(x: string | number) { if (typeof x === \"string\") return x; return 0; }\n",
     );
 
@@ -468,8 +470,8 @@ fn partiality_projection_does_not_change_admission_or_warmth() {
         complete_warm: bool,
     }
 
-    let source = "class C { m(): number { return 1; } }\n\
-                  export function gapped(x: unknown) { if (x instanceof C) return x; return 0; }\n\
+    let source = "export {};\n\
+                  export function gapped(x: string | number) { switch (true) { case typeof x === \"string\": return x; } return 0; }\n\
                   export function complete(x: string | number) { if (typeof x === \"string\") return x; return 0; }\n";
     let canonical = "/w/flow-audit-partiality-equiv.ts";
 

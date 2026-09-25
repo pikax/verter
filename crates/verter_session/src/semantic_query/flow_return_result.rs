@@ -125,6 +125,13 @@ pub struct FlowReturnResult {
     /// generator body takes a wrap, and only a plain function infers a
     /// predicate.
     facet: FunctionKindFacet,
+    /// The diagnostics the checker reports for the body's own calls that
+    /// no candidate applies to, each answered by the checker's
+    /// error-recovery candidate: the value IS the checker's answer, and
+    /// these ride with it so it is never a silent success. They are the
+    /// body's own — a caller of this function reads its signature, not
+    /// its errors. Every rebuild carries them.
+    checker_diagnostics: std::sync::Arc<[super::CheckerDiagnostic]>,
 }
 
 /// What a function's authored kind adds to its body join — see
@@ -217,7 +224,25 @@ impl FlowReturnResult {
             degradation,
             fresh_literal_arms: retained_fresh_literal_arms(graph, return_type, fresh_literal_arms),
             facet: FunctionKindFacet::None,
+            checker_diagnostics: std::sync::Arc::from([]),
         }
+    }
+
+    /// The diagnostics riding with the value (see the field).
+    #[must_use]
+    pub fn checker_diagnostics(&self) -> &std::sync::Arc<[super::CheckerDiagnostic]> {
+        &self.checker_diagnostics
+    }
+
+    /// Attach the diagnostics the evaluation recorded — or carry a
+    /// rebuilt value's source diagnostics over.
+    #[must_use]
+    pub(crate) fn with_checker_diagnostics(
+        mut self,
+        diagnostics: std::sync::Arc<[super::CheckerDiagnostic]>,
+    ) -> Self {
+        self.checker_diagnostics = diagnostics;
+        self
     }
 
     /// The whole-function return type.
@@ -287,7 +312,8 @@ impl FlowReturnResult {
     /// BODY-join transformation (widening, substitution), and the wrap
     /// materializes over the rebuilt body at publication. An inferred
     /// predicate carries forward too; a substitution that maps the return
-    /// maps the predicate's target itself.
+    /// maps the predicate's target itself. The checker diagnostics carry
+    /// forward untouched.
     #[must_use]
     pub(crate) fn with_return_type(
         &self,
@@ -303,6 +329,7 @@ impl FlowReturnResult {
         );
         Self {
             facet: self.facet,
+            checker_diagnostics: std::sync::Arc::clone(&self.checker_diagnostics),
             ..rebuilt
         }
     }

@@ -6,12 +6,9 @@
 //! whose `canonical_id` is the project-scoped ambient virtual id
 //! (`ambient:/<tag>/<canonical>`).
 //!
-//! The full session-side scheduler submission (lazy parse → analysis →
-//! type lowering) is intentionally deferred to a follow-up: this stops
-//! at the symbol-resolution and dep-recording infrastructure, and the
-//! bare-name resolver is the first caller. The signature below is
-//! fixed; later work extends it to issue the scheduler request
-//! internally.
+//! The caller re-roots its query at the returned identity in the ambient
+//! lib file, whose own scope serves the declaration (a `typeof` of a free
+//! global value reads `declare var Array: ArrayConstructor;` there).
 
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_semantic::resolver_core::ProjectStableKey;
@@ -30,8 +27,7 @@ use crate::resolver_core::ResolverContext;
 ///   virtual id, so the recorded fact reaches the ambient `WholeHash`
 ///   arm on warm-read validation through the live `StoreView`.
 ///
-/// First production caller is the bare-name resolver fallback.
-#[allow(dead_code)]
+/// The `typeof` builder calls it for a value name its file does not bind.
 pub(crate) fn resolve_ambient_global(
     ctx: &dyn ResolverContext,
     consumer_canonical: &str,

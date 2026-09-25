@@ -4418,11 +4418,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         contributors: Vec<SemanticNodeId>,
         results: &mut Vec<SemanticNodeId>,
     ) {
-        if contributors.len() >= 2
+        let ordered = contributors.len() >= 2
             && contributors
                 .iter()
-                .any(|v| value_may_contribute_call_signatures(self.graph(), *v))
-        {
+                .any(|v| value_may_contribute_call_signatures(self.graph(), *v));
+        if let Some(distributed) = self.distribute_union_contributors(&contributors, ordered) {
+            results.push(distributed);
+        } else if ordered {
             // Overload-ordered carrier: a deliberate bypass of the
             // canonical (commutative) authority — reordering is
             // checker-observable through overload selection. The
@@ -4439,6 +4441,35 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     .intern_normalized_union_or_intersection(&contributors, false),
             );
         }
+    }
+
+    /// A member read through an intersection is the intersection of its
+    /// constituents' member types (`createUnionOrIntersectionProperty`),
+    /// which the checker DISTRIBUTES when one of them is a union:
+    /// `{ v: Foo | Bar } & { v: Foo }` reads `v` as `Foo`, the `Bar & Foo`
+    /// combination collapsing on its conflicting discriminant.
+    fn distribute_union_contributors(
+        &self,
+        contributors: &[SemanticNodeId],
+        ordered: bool,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let factors: Vec<Vec<SemanticNodeId>> = contributors
+            .iter()
+            .map(|node| match graph.node_data(*node).as_deref() {
+                Some(SemanticNodeData::Union(arms)) => arms.iter().copied().collect(),
+                _ => vec![*node],
+            })
+            .collect();
+        if factors.iter().all(|arms| arms.len() < 2) {
+            return None;
+        }
+        let nullability = crate::semantic_query::NullabilityPolicy::from_strict_null_checks(
+            self.dispatch.relation_strict_config().strict_null_checks,
+        );
+        self.dispatch
+            .distribute_intersection(&factors, contributors, nullability, ordered)
+            .map(|distributed| distributed.node)
     }
 
     /// Iterative empty-path-terminal expander. Union / Intersection
