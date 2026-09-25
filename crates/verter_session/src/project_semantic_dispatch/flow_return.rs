@@ -15431,6 +15431,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let mut survivors = Vec::with_capacity(arms.len() + 1);
         let mut dropped = false;
         for arm in arms {
+            // With `strictNullChecks` off `true` carries the `Falsy` fact
+            // too (`TrueFacts`), so the falsy edge keeps `boolean` whole.
+            if is_boolean(&arm) && negated && !self.nullability.is_strict() {
+                survivors.push(arm);
+                continue;
+            }
             if is_boolean(&arm) {
                 survivors.push(graph.intern_node(SemanticNodeData::Literal(
                     crate::semantic_query::LiteralValue::Boolean(!negated),

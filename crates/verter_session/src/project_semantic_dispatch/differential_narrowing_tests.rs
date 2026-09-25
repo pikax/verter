@@ -619,6 +619,9 @@ export function tr3(x: "" | "a" | 0 | 1 | null) { if (x) return x; throw 0; }
 export function tr3Else(x: "" | "a" | 0 | 1 | null) { if (x) throw 0; return x; }
 export function tr4(x: boolean) { if (x) return x; throw 0; }
 export function tr4Else(x: boolean) { if (x) throw 0; return x; }
+export function tr4Mixed(x: boolean | "a") { if (x) throw 0; return x; }
+export function tr4Not(x: boolean) { if (!x) return x; throw 0; }
+export function tr4Number(x: boolean | number) { if (x) throw 0; return x; }
 export function tr5(x: { a: 1 } | undefined) { if (x) return x; throw 0; }
 export function tr5Else(x: { a: 1 } | undefined) { if (x) throw 0; return x; }
 export function tr6(x: string | undefined) { if (!x) return x; throw 0; }
@@ -677,17 +680,21 @@ fn truthiness_narrows_as_the_checker_narrows() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Without `strictNullChecks` the false branch of `if (x)` over `x: boolean`
-/// keeps `boolean`. Wrong-but-clean: the lane narrows to `false`.
-///
-/// What the lane gives:
-/// - `tr4Else`: the checker answers `false` (strict), `boolean`
-///   (strictNullChecks off), `false` (noImplicitAny off), `boolean` (both off);
-///   the lane measured `false` (strictNullChecks off, both off).
+/// Without `strictNullChecks` `true` carries the checker's `Falsy` fact too,
+/// so the false branch of a truthiness test over `boolean` keeps `boolean`;
+/// with it the branch reads `false`.
 #[test]
-#[ignore = "the falsy branch of a boolean test keeps boolean without strictNullChecks"]
-fn wrong_clean_a_falsy_boolean_stays_boolean_without_strict_null_checks() {
+fn a_falsy_boolean_narrows_as_the_checker_narrows_it() {
     let matrix = Matrix::new(TRUTHINESS);
-    let failures = matrix.nullness(&[(Read::Return("tr4Else"), "false", "boolean")]);
+    let failures = matrix.nullness(&[
+        (Read::Return("tr4Else"), "false", "boolean"),
+        (Read::Return("tr4Mixed"), "false", "\"a\" | boolean"),
+        (Read::Return("tr4Not"), "false", "boolean"),
+        (
+            Read::Return("tr4Number"),
+            "number | false",
+            "number | boolean",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
