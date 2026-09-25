@@ -383,18 +383,20 @@ fn wrong_clean_an_intersection_over_a_union_relates_as_its_distribution() {
 }
 
 /// An intersection of object types whose same-named property has disjoint
-/// literal types reduces to `never`. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[{ a: 1 } & { a: 2 }] extends [never] ? 1 : 2`: the checker answers `1`;
-///   the lane measured `2`.
-/// - `[{ k: "x"; v: 1 } & { k: "y" }] extends [never] ? 1 : 2`: the checker
-///   answers `1`; the lane measured `2`.
+/// types, one of them a literal, reduces to `never`; a property whose types
+/// overlap, or that holds no literal, keeps the intersection (TypeScript
+/// 7.0.2, all four settings alike).
 #[test]
-#[ignore = "an intersection whose members disagree on a literal property reduces to never"]
-fn wrong_clean_an_intersection_of_disjoint_discriminants_is_never() {
+fn disjoint_discriminants_reduce_as_the_checker_reduces_them() {
     let matrix = Matrix::new(INTERSECTIONS);
     let failures = matrix.types(&[
+        ("[{ a: 1 } & { a: string }] extends [never] ? 1 : 2", "1"),
+        ("[{ a: 1 } & { a: number }] extends [never] ? 1 : 2", "2"),
+        (
+            "[{ a: string } & { a: number }] extends [never] ? 1 : 2",
+            "2",
+        ),
+        ("[{ a: 1; b: 2 } & { a: 1 }] extends [never] ? 1 : 2", "2"),
         ("[{ a: 1 } & { a: 2 }] extends [never] ? 1 : 2", "1"),
         (
             "[{ k: \"x\"; v: 1 } & { k: \"y\" }] extends [never] ? 1 : 2",

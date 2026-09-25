@@ -810,6 +810,65 @@ pub(crate) fn numeric_literal_values_disjoint(a: f64, b: f64) -> bool {
     !same_value_zero
 }
 
+/// Whether an intersection's object-type arms declare one property whose
+/// types intersect to `never` while some of them is a literal — the
+/// checker's `isNeverReducedProperty` (`isDiscriminantWithNeverType`),
+/// which reduces the whole intersection to `never` (`{ a: 1 } & { a: 2 }`,
+/// `{ k: "x" } & { k: "y" }`). A property optional in some arm is left to
+/// the relation: its type there also holds `undefined`.
+fn object_arms_conflict_on_a_literal_property(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+) -> bool {
+    let views: Vec<crate::semantic_query::SurfaceView> = arms
+        .iter()
+        .filter_map(|arm| match graph.node_data(*arm).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some(view.clone()),
+            _ => None,
+        })
+        .collect();
+    if views.len() < 2 {
+        return false;
+    }
+    let is_literal = |value: SemanticNodeId| {
+        matches!(
+            graph.node_data(value).as_deref(),
+            Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_))
+        )
+    };
+    for (index, view) in views.iter().enumerate() {
+        for member in view.positive_members() {
+            if member.optional || member.method_kind.is_some() {
+                continue;
+            }
+            let mut values = vec![member.value];
+            let mut settled = true;
+            for other in &views[index + 1..] {
+                for candidate in other.positive_members() {
+                    if candidate.key != member.key {
+                        continue;
+                    }
+                    if candidate.optional || candidate.method_kind.is_some() {
+                        settled = false;
+                    }
+                    values.push(candidate.value);
+                }
+            }
+            if !settled || values.len() < 2 || !values.iter().any(|value| is_literal(*value)) {
+                continue;
+            }
+            let property = intern_ordered_intersection(graph, &values).node;
+            if matches!(
+                graph.node_data(property).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Canonical union construction over `members` under `nullability`.
 pub(crate) fn intern_ordered_union(
     graph: &SemanticGraphStore,
@@ -1297,7 +1356,8 @@ fn canonicalize_with(
     //    computed in O(n) over the childless scalar domain.
     if !is_union
         && (scalar_domain_provably_empty(graph, &kept)
-            || nullable_beside_object_type(graph, &kept, &mut evidence))
+            || nullable_beside_object_type(graph, &kept, &mut evidence)
+            || object_arms_conflict_on_a_literal_property(graph, &kept))
     {
         return CanonicalComposite {
             node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
