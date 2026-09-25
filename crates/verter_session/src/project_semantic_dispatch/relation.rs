@@ -9675,6 +9675,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: &SurfaceView,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
+        // A function type has no implicit index signature
+        // (`isObjectTypeWithInferableIndex` excludes a type with call or
+        // construct signatures): only an index signature of type `any`
+        // takes it.
+        if target.index_signatures.iter().any(|index| {
+            !matches!(
+                self.graph().node_data(index.value_type).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+            )
+        }) {
+            return RelationResult::NotAssignable;
+        }
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };

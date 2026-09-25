@@ -941,16 +941,25 @@ fn recursive_weak_and_keyed_types_relate_as_the_checker_relates_them() {
 
 /// `{ a: () => void }` is not below `Json` (`string | number | boolean | null |
 /// Json[] | { [k: string]: Json }`): the function fits no arm of the index
-/// signature's value. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[{ a: () => void }] extends [Json] ? 1 : 2`: the checker answers `2`; the
-///   lane measured `1`.
+/// signature's value: a function type has no implicit index signature, so
+/// only `{ [k: string]: any }` takes one (TypeScript 7.0.2, all four
+/// settings alike).
 #[test]
-#[ignore = "a function-valued property fits no arm of a recursive JSON alias"]
-fn wrong_clean_a_function_member_is_not_below_a_recursive_json_alias() {
+fn a_function_type_relates_to_an_index_signature_as_the_checker_relates_it() {
     let matrix = Matrix::new(RECURSIVE_AND_WEAK);
-    let failures = matrix.types(&[("[{ a: () => void }] extends [Json] ? 1 : 2", "2")]);
+    let failures = matrix.types(&[
+        ("[{ a: () => void }] extends [Json] ? 1 : 2", "2"),
+        ("[{ a: 1 }] extends [Json] ? 1 : 2", "1"),
+        ("[() => void] extends [{ [k: string]: any }] ? 1 : 2", "1"),
+        (
+            "[() => void] extends [{ [k: string]: unknown }] ? 1 : 2",
+            "2",
+        ),
+        (
+            "[() => void] extends [{ [k: number]: string }] ? 1 : 2",
+            "2",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
