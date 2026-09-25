@@ -4589,7 +4589,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         bindings: &mut Vec<InferBinding>,
         position: InferPosition,
     ) -> RelationResult {
-        self.relate_member_with_freshness(source, target, bindings, position, None)
+        self.relate_member_with_freshness(source, target, bindings, position, None, false)
     }
 
     /// Relate an ordinary union arm after the enclosing fresh-source frame
@@ -4609,6 +4609,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bindings,
             position,
             Some(crate::semantic_query::FreshnessKey::Regular),
+            false,
+        )
+    }
+
+    /// Relate one arm of an intersection target on its own, as the checker
+    /// relates it under `IntersectionState.Target`: the whole intersection
+    /// already passed the weak-type check, so the arm skips it.
+    fn relate_intersection_target_arm(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        self.relate_member_with_freshness(
+            source,
+            target,
+            bindings,
+            InferPosition::Covariant,
+            None,
+            true,
         )
     }
 
@@ -4619,6 +4639,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         bindings: &mut Vec<InferBinding>,
         position: InferPosition,
         source_freshness: Option<crate::semantic_query::FreshnessKey>,
+        intersection_target_arm: bool,
     ) -> RelationResult {
         let occurrence = self.relation_occurrence(position);
         if let Some(result) = self.try_relation_projection(source, target, bindings, occurrence) {
@@ -4658,6 +4679,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(source_freshness) = source_freshness {
             key.source_freshness = source_freshness;
         }
+        // Only an intersection target's arm itself skips the weak-type
+        // check; a relation it opens, a property's, never does.
+        key.policy.intersection_target_arm = intersection_target_arm;
         {
             let txn = self.dispatch_txn.borrow();
             if !txn.obligations.substitution().is_empty() {
@@ -5591,7 +5615,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ShallowRelation::NotAssignable => return RelationResult::NotAssignable,
             ShallowRelation::Unknown => {}
         }
-        self.decide_relation_with_dispatch(key.source, key.target, bindings)
+        self.decide_relation_with_dispatch(
+            key.source,
+            key.target,
+            bindings,
+            key.policy.intersection_target_arm,
+        )
     }
 
     /// The `(source, target)` argument pairs two applications of ONE
@@ -6431,6 +6460,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         source: SemanticNodeId,
         target: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
+        intersection_target_arm: bool,
     ) -> RelationResult {
         if let Some(r) = self.try_object_vs_record_relation(source, target, bindings) {
             return r;
@@ -6453,12 +6483,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if pattern.shape == InferPatternShape::Function {
                     let materialised = self.materialise_function_infer_check(source);
                     if materialised != source {
-                        return self.decide_relation(materialised, target, bindings);
+                        return self.decide_relation(
+                            materialised,
+                            target,
+                            bindings,
+                            intersection_target_arm,
+                        );
                     }
                 }
             }
         }
-        self.decide_relation(source, target, bindings)
+        self.decide_relation(source, target, bindings, intersection_target_arm)
     }
 
     /// Materialise a function-infer check through the oracle's transit
@@ -6520,6 +6555,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         source: SemanticNodeId,
         target: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
+        intersection_target_arm: bool,
     ) -> RelationResult {
         // Program recognition precedes the identity shortcut here exactly as
         // at the root and in `expand_pair`: an open program is never accepted
@@ -6544,7 +6580,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut budget_used: u64 = 0;
         let mut work: Vec<RelateWork> = Vec::new();
         let mut results: Vec<RelationResult> = Vec::new();
-        work.push(RelateWork::Expand(source, target));
+        work.push(RelateWork::Expand(source, target, intersection_target_arm));
         while let Some(item) = work.pop() {
             budget_used = budget_used.saturating_add(1);
             if budget_used > budget_limit {
@@ -6552,14 +6588,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return RelationResult::Unknown;
             }
             match item {
-                RelateWork::Expand(s, t) => {
-                    self.expand_pair(s, t, bindings, &mut work, &mut results);
+                RelateWork::Expand(s, t, intersection_target_arm) => {
+                    self.expand_pair(
+                        s,
+                        t,
+                        intersection_target_arm,
+                        bindings,
+                        &mut work,
+                        &mut results,
+                    );
                 }
                 RelateWork::Eval(s, t) => {
                     if self.relation_eval_requires_canonical_frame(s, t) {
                         results.push(self.relate_member(s, t, bindings, InferPosition::Covariant));
                     } else {
-                        self.expand_pair(s, t, bindings, &mut work, &mut results);
+                        self.expand_pair(s, t, false, bindings, &mut work, &mut results);
                     }
                 }
                 RelateWork::Arm(s, t) => {
@@ -6568,7 +6611,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     {
                         results.push(self.relate_member(s, t, bindings, InferPosition::Covariant));
                     } else {
-                        self.expand_pair(s, t, bindings, &mut work, &mut results);
+                        self.expand_pair(s, t, false, bindings, &mut work, &mut results);
+                    }
+                }
+                RelateWork::TargetArm(s, t) => {
+                    if self.relation_eval_requires_canonical_frame(s, t)
+                        || self.arm_pair_names_a_declaration_carrier(s, t)
+                    {
+                        results.push(self.relate_intersection_target_arm(s, t, bindings));
+                    } else {
+                        self.expand_pair(s, t, true, bindings, &mut work, &mut results);
                     }
                 }
                 RelateWork::ReduceAnd(n) => {
@@ -6676,6 +6728,170 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
                 )
             )
+        })
+    }
+
+    /// The checker's weak-type check (`isWeakType` with
+    /// `hasCommonProperties`): a target with at least one property, every
+    /// property optional and no call, construct or index signature — an
+    /// intersection when every arm is one — rejects a source that has a
+    /// property or a signature and shares no property with it. A primitive,
+    /// an array or a tuple offers its apparent type's properties, an
+    /// intersection source every member's, and the global `Object`
+    /// interface is never checked. `false` whenever the check passes, does
+    /// not apply or cannot be read.
+    fn weak_target_rejects(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool {
+        let Some(targets) = self.weak_target_surfaces(target) else {
+            return false;
+        };
+        let Some((keys, has_signatures)) = self.weak_check_source_members(source, target, true)
+        else {
+            return false;
+        };
+        if keys.is_empty() && !has_signatures {
+            return false;
+        }
+        let shares_property = keys.iter().any(|key| {
+            targets.iter().any(|surface| {
+                matches!(
+                    surface.project_known_key(key),
+                    crate::semantic_query::SurfaceKeyProjection::Exact(_)
+                )
+            })
+        });
+        !shares_property && !self.is_global_object_surface(source, target)
+    }
+
+    /// The surfaces of a weak target: the object itself, or every arm of an
+    /// intersection whose arms are all weak objects. `None` otherwise.
+    fn weak_target_surfaces(&self, target: SemanticNodeId) -> Option<Vec<SurfaceView>> {
+        let graph = self.graph();
+        let is_weak = |surface: &SurfaceView| {
+            let members = surface.closed().complete_members();
+            !members.is_empty()
+                && members.iter().all(|member| member.optional)
+                && surface.call_signatures.is_empty()
+                && surface.construct_signatures.is_empty()
+                && surface.index_signatures.is_empty()
+                && !surface.closed().has_index_signature()
+        };
+        match graph.node_data(target).as_deref()? {
+            SemanticNodeData::Object(surface) => is_weak(surface).then(|| vec![surface.clone()]),
+            SemanticNodeData::Intersection(members) => {
+                let members = members.members_arc();
+                let mut surfaces = Vec::with_capacity(members.len());
+                for member in members.iter() {
+                    let IdentityCarrierUnwrap::Concrete(resolved) =
+                        self.unwrap_identity_carrier_for_relation(*member)
+                    else {
+                        return None;
+                    };
+                    let resolved = self.follow_relation_aliases(resolved);
+                    match graph.node_data(resolved).as_deref() {
+                        Some(SemanticNodeData::Object(surface)) if is_weak(surface) => {
+                            surfaces.push(surface.clone());
+                        }
+                        _ => return None,
+                    }
+                }
+                Some(surfaces)
+            }
+            _ => None,
+        }
+    }
+
+    /// The property names a source offers the weak-type check, and whether
+    /// it has a call or construct signature (`getPropertiesOfType`,
+    /// `typeHasCallOrConstructSignatures`). `None` when they cannot be read.
+    /// An intersection source reads its members one level deep: a canonical
+    /// intersection's members are never intersections themselves.
+    fn weak_check_source_members(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        split_intersection: bool,
+    ) -> Option<(Vec<crate::semantic_query::PropertyKey>, bool)> {
+        let graph = self.graph();
+        let surface_members = |surface: &SurfaceView| {
+            let keys = surface
+                .positive_members()
+                .iter()
+                .map(|member| member.key.cloned_known())
+                .collect::<Option<Vec<_>>>()?;
+            let has_signatures =
+                !surface.call_signatures.is_empty() || !surface.construct_signatures.is_empty();
+            Some((keys, has_signatures))
+        };
+        let data = graph.node_data(source)?;
+        match &*data {
+            SemanticNodeData::Object(surface) => surface_members(surface),
+            SemanticNodeData::Signature { .. } => Some((Vec::new(), true)),
+            SemanticNodeData::Intersection(members) if split_intersection => {
+                let mut keys = Vec::new();
+                let mut has_signatures = false;
+                for member in members.members_arc().iter() {
+                    let IdentityCarrierUnwrap::Concrete(resolved) =
+                        self.unwrap_identity_carrier_for_relation(*member)
+                    else {
+                        return None;
+                    };
+                    let resolved = self.follow_relation_aliases(resolved);
+                    let (member_keys, member_signatures) =
+                        self.weak_check_source_members(resolved, target, false)?;
+                    keys.extend(member_keys);
+                    has_signatures |= member_signatures;
+                }
+                Some((keys, has_signatures))
+            }
+            _ => {
+                let Some((name, args)) = self.apparent_wrapper_of(source) else {
+                    // `null`, `undefined`, `void` and `object` have no
+                    // properties.
+                    return matches!(&*data, SemanticNodeData::Primitive(_))
+                        .then(|| (Vec::new(), false));
+                };
+                let canonical = self.relation_wrapper_canonical(target)?;
+                let wrapper = match self.global_wrapper_surface(name, &args, canonical.as_ref()) {
+                    super::apparent_type::GlobalWrapper::Surface(surface) => Some(surface),
+                    super::apparent_type::GlobalWrapper::Absent => None,
+                    super::apparent_type::GlobalWrapper::Unsettled => return None,
+                };
+                let apparent = match &*data {
+                    SemanticNodeData::Tuple { elements, readonly } => {
+                        Some(self.tuple_apparent_surface(wrapper, elements, *readonly))
+                    }
+                    _ => wrapper,
+                };
+                let Some(apparent) = apparent else {
+                    return Some((Vec::new(), false));
+                };
+                match graph.node_data(apparent).as_deref() {
+                    Some(SemanticNodeData::Object(surface)) => surface_members(surface),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// Whether `source` is the global `Object` interface, which the
+    /// weak-type check never applies to.
+    fn is_global_object_surface(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool {
+        self.relation_wrapper_canonical(target)
+            .is_some_and(|canonical| {
+                matches!(
+                    self.global_wrapper_surface("Object", &[], canonical.as_ref()),
+                    super::apparent_type::GlobalWrapper::Surface(surface) if surface == source
+                )
+            })
+    }
+
+    /// The file whose library an apparent type is read from while relating
+    /// to `target`: the demand's, else the one the target was declared in.
+    fn relation_wrapper_canonical(&self, target: SemanticNodeId) -> Option<Arc<str>> {
+        self.wrapper_demand_canonical().or_else(|| {
+            self.graph()
+                .node_scope(target)
+                .and_then(|scope| scope.canonical_file())
         })
     }
 
@@ -6840,10 +7056,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
+        intersection_target_arm: bool,
         bindings: &mut Vec<InferBinding>,
         work: &mut Vec<RelateWork>,
         results: &mut Vec<RelationResult>,
     ) {
+        // A pair the checker relates as this very one — an alias or a merged
+        // declaration unwrapped, an apparent type read — stays an
+        // intersection target's arm when this pair is one.
+        let same_pair = |source, target| {
+            if intersection_target_arm {
+                RelateWork::TargetArm(source, target)
+            } else {
+                RelateWork::Eval(source, target)
+            }
+        };
         // Program recognition precedes the identity shortcut, structural
         // shortcuts, inference deposits, and distribution — identical to the
         // root protocol. An open program is never accepted on node identity.
@@ -6868,14 +7095,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let inner = *inner;
             drop(source_data);
             drop(target_data);
-            work.push(RelateWork::Eval(inner, target));
+            work.push(same_pair(inner, target));
             return;
         }
         if let SemanticNodeData::Alias(inner) = &*target_data {
             let inner = *inner;
             drop(source_data);
             drop(target_data);
-            work.push(RelateWork::Eval(source, inner));
+            work.push(same_pair(source, inner));
             return;
         }
 
@@ -6911,7 +7138,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             drop(source_data);
             drop(target_data);
             let merged = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
-            work.push(RelateWork::Eval(merged, target));
+            work.push(same_pair(merged, target));
             return;
         }
         if let SemanticNodeData::MergedDecl { contributors } = &*target_data {
@@ -6919,7 +7146,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             drop(source_data);
             drop(target_data);
             let merged = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
-            work.push(RelateWork::Eval(source, merged));
+            work.push(same_pair(source, merged));
             return;
         }
 
@@ -6930,7 +7157,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some((source, target)) = self.reduced_authored_relation_pair(source, target) {
             drop(source_data);
             drop(target_data);
-            work.push(RelateWork::Eval(source, target));
+            work.push(same_pair(source, target));
             return;
         }
 
@@ -7329,7 +7556,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let members = members.members_arc();
             drop(source_data);
             drop(target_data);
-            distribute_and(work, results, &members, |m| (*m, target));
+            distribute_and(work, results, &members, RelateWork::Arm, |m| (*m, target));
             return;
         }
         // `boolean` IS the union `true | false` to the checker: against a
@@ -7347,7 +7574,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let literals = [true, false].map(|value| {
                 graph.intern_node(SemanticNodeData::Literal(LiteralValue::Boolean(value)))
             });
-            distribute_and(work, results, &literals, |literal| (*literal, target));
+            distribute_and(work, results, &literals, RelateWork::Arm, |literal| {
+                (*literal, target)
+            });
             return;
         }
         if let SemanticNodeData::Union(members) = &*target_data {
@@ -7371,6 +7600,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             results.push(result);
             return;
         }
+        // A weak target — every property optional — takes no source that
+        // has members but shares none of its properties, checked on the
+        // whole target before an intersection target splits into arms.
+        if !intersection_target_arm
+            && matches!(
+                &*target_data,
+                SemanticNodeData::Object(_) | SemanticNodeData::Intersection(_)
+            )
+            && self.weak_target_rejects(source, target)
+        {
+            results.push(RelationResult::NotAssignable);
+            return;
+        }
         // An intersection TARGET is related arm by arm before an
         // intersection source is split, as the checker orders
         // `unionOrIntersectionRelatedTo`: `QA & Z` against `(QA | QB) & Z`
@@ -7379,7 +7621,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let members = members.members_arc();
             drop(source_data);
             drop(target_data);
-            distribute_and(work, results, &members, |m| (source, *m));
+            distribute_and(work, results, &members, RelateWork::TargetArm, |m| {
+                (source, *m)
+            });
             return;
         }
         if let SemanticNodeData::Intersection(members) = &*source_data {
@@ -7447,7 +7691,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let base = source_literal.base;
             drop(source_data);
             drop(target_data);
-            distribute_and(work, results, &[base], |base| (*base, target));
+            distribute_and(work, results, &[base], RelateWork::Arm, |base| {
+                (*base, target)
+            });
             return;
         }
         if let SemanticNodeData::EnumLiteral(target_literal) = &*target_data {
@@ -7495,7 +7741,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     drop(target_base);
                     drop(source_data);
                     drop(target_data);
-                    distribute_and(work, results, &[base], |base| (source, *base));
+                    distribute_and(work, results, &[base], RelateWork::Arm, |base| {
+                        (source, *base)
+                    });
                     return;
                 }
                 SemanticNodeData::TemplateLiteral { .. } => {
@@ -7959,13 +8207,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if let Some((name, args)) = self.apparent_wrapper_of(source) {
                 drop(source_data);
                 drop(target_data);
-                // The library of the project the relation is asked in: the
-                // demand's, else the one the target was declared in.
-                let Some(canonical) = self.wrapper_demand_canonical().or_else(|| {
-                    self.graph()
-                        .node_scope(target)
-                        .and_then(|scope| scope.canonical_file())
-                }) else {
+                let Some(canonical) = self.relation_wrapper_canonical(target) else {
                     results.push(RelationResult::Unknown);
                     return;
                 };
@@ -7990,7 +8232,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     _ => None,
                 };
                 match tuple.or(wrapper) {
-                    Some(apparent) => work.push(RelateWork::Eval(apparent, target)),
+                    Some(apparent) => work.push(same_pair(apparent, target)),
                     None => results.push(RelationResult::NotAssignable),
                 }
                 return;
@@ -10165,17 +10407,22 @@ fn relation_step_from_payload(payload: &RelationPayload) -> RelationStep {
 /// Iterative worklist item for [`ProjectSemanticDispatch::decide_relation`].
 #[derive(Debug, Clone)]
 enum RelateWork {
-    /// Expand the current frame's root pair locally.
-    Expand(SemanticNodeId, SemanticNodeId),
+    /// Expand the current frame's root pair locally; `true` when the
+    /// frame relates one arm of an intersection target
+    /// ([`RelationPolicy::intersection_target_arm`]).
+    Expand(SemanticNodeId, SemanticNodeId, bool),
     /// Evaluate `(source, target)`.
     Eval(SemanticNodeId, SemanticNodeId),
-    /// Evaluate one ARM of a union source or an intersection target.
+    /// Evaluate one ARM of a union source (or of an enum literal's value).
     /// Every arm of the other two composite forms (a union target's
     /// alternatives, an intersection source's) already relates through the
     /// member authority, whose identity unwrap decides a declaration
     /// carrier; an arm pair naming one takes that authority too, and every
     /// other arm expands inline like [`Self::Eval`].
     Arm(SemanticNodeId, SemanticNodeId),
+    /// Evaluate one arm of an intersection target like [`Self::Arm`], exempt
+    /// from the weak-type check the whole intersection already passed.
+    TargetArm(SemanticNodeId, SemanticNodeId),
     /// Pop `n` prior results, AND them, push one combined result.
     ReduceAnd(u32),
 }
@@ -10431,11 +10678,12 @@ fn surface_is_object_literal(surface: &SurfaceView) -> bool {
 }
 
 /// Build and push the worklist fan-out for a distribution whose reducer
-/// is AND-all.
+/// is AND-all, each pair evaluated as `arm` builds it.
 fn distribute_and<F>(
     work: &mut Vec<RelateWork>,
     results: &mut Vec<RelationResult>,
     members: &[SemanticNodeId],
+    arm: fn(SemanticNodeId, SemanticNodeId) -> RelateWork,
     mut pairer: F,
 ) where
     F: FnMut(&SemanticNodeId) -> (SemanticNodeId, SemanticNodeId),
@@ -10450,7 +10698,7 @@ fn distribute_and<F>(
     let mut forward: Vec<RelateWork> = Vec::with_capacity(n + 1);
     for m in members.iter() {
         let (s, t) = pairer(m);
-        forward.push(RelateWork::Arm(s, t));
+        forward.push(arm(s, t));
     }
     if n > 1 {
         forward.push(RelateWork::ReduceAnd(n as u32));

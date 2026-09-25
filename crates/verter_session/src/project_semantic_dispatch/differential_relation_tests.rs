@@ -1028,18 +1028,98 @@ fn a_function_type_relates_to_an_index_signature_as_the_checker_relates_it() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A WEAK target (every property optional) takes a source only when they share
-/// a property, so `{ c: 1 }` is not below `{ a?: number; b?: string }`.
-/// Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[{ c: 1 }] extends [Weak] ? 1 : 2`: the checker answers `2`; the lane
-///   measured `1`.
+/// Weak targets — interfaces whose every property is optional — and the
+/// types around them.
+const WEAK: &str = r##"
+interface Weak { a?: number; b?: string }
+interface W2 { x?: 1 }
+interface Empty {}
+interface PW { p: Weak }
+declare enum En { A = 1 }
+"##;
+
+/// A WEAK target — at least one property, every property optional, no
+/// signature — takes a source with members only when they share a
+/// property, the checker's `isWeakType` check. A signature counts as a
+/// member, and a source with none (`{}`) is never checked. An intersection
+/// target is weak when every arm is, and is checked whole: its arms are
+/// then related without the check, so `{ a: 1 }` fits `{ a?: 1 } & { b?: 2
+/// }`, while a nested property is checked again. TypeScript 7.0.2 answers
+/// each row alike under all four settings.
 #[test]
-#[ignore = "a source sharing no property with a weak target is not assignable"]
-fn wrong_clean_a_weak_target_needs_a_shared_property() {
-    let matrix = Matrix::new(RECURSIVE_AND_WEAK);
-    let failures = matrix.types(&[("[{ c: 1 }] extends [Weak] ? 1 : 2", "2")]);
+fn a_weak_target_takes_a_source_as_the_checker_checks_it() {
+    let matrix = Matrix::new(WEAK);
+    let failures = matrix.types(&[
+        ("[{ c: 1 }] extends [Weak] ? 1 : 2", "2"),
+        ("[{ a: 1 }] extends [{ a?: 1 } & { b?: 2 }] ? 1 : 2", "1"),
+        ("[{ c: 1 }] extends [Weak & W2] ? 1 : 2", "2"),
+        ("[{ c: 1 }] extends [Weak & { c: 1 }] ? 1 : 2", "1"),
+        ("[{ c: 1 } | { a: 1 }] extends [Weak] ? 1 : 2", "2"),
+        ("[{}] extends [Weak] ? 1 : 2", "1"),
+        ("[() => void] extends [Weak] ? 1 : 2", "2"),
+        ("[{ p: { c: 1 } }] extends [{ p: Weak }] ? 1 : 2", "2"),
+        (
+            "[{ p: { c: 1 }; q: 1 }] extends [{ p: Weak } & { q?: 1 }] ? 1 : 2",
+            "2",
+        ),
+        ("[{ c: 1 }] extends [Weak | W2] ? 1 : 2", "2"),
+        (
+            "[{ c: 1 }] extends [{ [k: string]: unknown; a?: 1 }] ? 1 : 2",
+            "1",
+        ),
+        ("[{ c: 1 }] extends [Empty] ? 1 : 2", "1"),
+        ("[{ c: 1 } & { d: 2 }] extends [Weak] ? 1 : 2", "2"),
+        ("[{ c: 1 } & { a: 1 }] extends [Weak] ? 1 : 2", "1"),
+        ("[Weak] extends [W2] ? 1 : 2", "2"),
+        ("[{ c: 1 }[]] extends [Weak[]] ? 1 : 2", "2"),
+        ("[{ c: 1 }] extends [Partial<{ a: 1 }>] ? 1 : 2", "2"),
+        ("[{ c: 1 }] extends [{ a?: 1 } & {}] ? 1 : 2", "2"),
+        (
+            "[{ p: { c: 1 }; q: 1 }] extends [{ p: Weak; q?: 1 }] ? 1 : 2",
+            "2",
+        ),
+        ("[{ c: 1 } & (() => void)] extends [Weak] ? 1 : 2", "2"),
+        ("[{ get c(): 1 }] extends [Weak] ? 1 : 2", "2"),
+        ("[{ c: 1 }] extends [Weak & Empty] ? 1 : 2", "1"),
+        (
+            "[{ p: { c: 1 }; q: 1 }] extends [PW & { q?: 1 }] ? 1 : 2",
+            "2",
+        ),
+        (
+            "[{ p: { a: 1 }; q: 1 }] extends [PW & { q?: 1 }] ? 1 : 2",
+            "1",
+        ),
+        ("[{ p: { c: 1 } }] extends [PW & Weak] ? 1 : 2", "2"),
+        ("[{ p: { a: 1 } }] extends [PW & Weak] ? 1 : 2", "1"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A primitive, an array or a tuple offers the weak-type check its apparent
+/// type's properties (`1` shares none with `Weak`, `"s"` shares `length`
+/// with `{ length?: number }`, `[1]` its position `0`), an enum member its
+/// value's, and the global `Object` interface is never checked. Measured
+/// over the relation library with `--noLib`, alike under all four settings.
+#[test]
+fn a_weak_target_checks_an_apparent_type_as_the_checker_checks_it() {
+    let matrix = Matrix::new(WEAK).lib(RELATION_LIB);
+    let failures = matrix.types(&[
+        ("[1] extends [Weak] ? 1 : 2", "2"),
+        ("[true] extends [Weak] ? 1 : 2", "2"),
+        ("[\"s\"] extends [{ length?: number }] ? 1 : 2", "1"),
+        ("[string[]] extends [Weak] ? 1 : 2", "2"),
+        ("[[1]] extends [{ 0?: 1 }] ? 1 : 2", "1"),
+        ("[[1]] extends [{ length?: 1 }] ? 1 : 2", "1"),
+        ("[En.A] extends [Weak] ? 1 : 2", "2"),
+        ("[Object] extends [Weak] ? 1 : 2", "1"),
+        (
+            "[string] extends [{ length?: number } & { x?: 1 }] ? 1 : 2",
+            "1",
+        ),
+        ("[string] extends [Weak & W2] ? 1 : 2", "2"),
+        ("[1] extends [{ toFixed?: 1 }] ? 1 : 2", "2"),
+        ("[{ toString(): string }] extends [Weak] ? 1 : 2", "2"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

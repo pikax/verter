@@ -7361,9 +7361,9 @@ impl Default for RelationKind {
 }
 
 /// The comparison policy that governs a relation and is part of relation
-/// IDENTITY — the three §2.7 / §4.0 policy axes: overload selection,
+/// IDENTITY — the §2.7 / §4.0 policy axes: overload selection,
 /// excess-property checking, and variance (including method-parameter
-/// bivariance). Two judgements over the same nodes that differ in any policy
+/// bivariance) — and whether the target is an intersection target's arm. Two judgements over the same nodes that differ in any policy
 /// axis can reach a different OUTCOME / bindings, so they are DISTINCT and must
 /// not share a memo slot. SHAPE only: the policy-driven comparison substrate is
 /// the relation-inference reducer (not yet implemented).
@@ -7384,6 +7384,11 @@ pub struct RelationPolicy {
     /// Context-owned semantic policy set. Changing it changes the identity
     /// of a resident `Relate` parent; a formatting-only change does not.
     pub policy_set: SemanticPolicySetId,
+    /// The target is one arm of an intersection target, related on its own
+    /// after the whole intersection passed the weak-type check (the
+    /// checker's `IntersectionState.Target`): the arm itself skips that
+    /// check, its members' relations do not.
+    pub intersection_target_arm: bool,
 }
 
 /// How an overloaded callee's signatures are selected during a relation
