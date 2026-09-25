@@ -256,10 +256,15 @@ Recorded plainly so no reader mistakes absence for a pass:
   locator-shape lowering (`lower_locator_shape_node`,
   `project_semantic_dispatch/locator_shape.rs`), which interns every
   declaration body's authored shape, lowers the same positions — its
-  reference arguments planned through `plan_locator_ref_head` — and a
+  reference arguments planned through `plan_locator_ref_head` — a
   conditional's check, `extends` clause and branches (the clause and the
-  true branch under the binder frames the conditional declares) from an
-  explicit stack too. A conditional chained through its false branches
+  true branch under the binder frames the conditional declares), and an
+  object type's property values and index-signature types from an
+  explicit stack too. A nested object type (`{ v: { v: … } }`) recursed
+  there once per level, about 16 KiB unoptimized; a 400-deep one reads
+  through 400 member accesses on the default test stack now
+  (`a_400_deep_nested_object_type_reads_on_the_default_stack`, the
+  checker's `1`). A conditional chained through its false branches
   recursed there once per link, about 18 KiB per link unoptimized: a
   160-link chain overflowed the default test stack. A 320-link chain
   resolves now (`type_syntax_depth_tests.rs` →

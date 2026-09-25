@@ -94,3 +94,17 @@ fn a_320_deep_conditional_chain_resolves_on_the_default_stack() {
             .join("\n")
     );
 }
+
+/// A 400-deep nested object type reads through 400 member accesses on the
+/// default test stack: its declaration's shape lowers from an explicit
+/// stack.
+///
+/// Measured on TypeScript 7.0.2 (all four settings): over `type O = { v:
+/// { v: … 1 } }` nested 400 times, `O['v']…['v']` (400 reads) is `1`.
+#[test]
+fn a_400_deep_nested_object_type_reads_on_the_default_stack() {
+    let source = format!("type O = {}1{};\n", "{ v: ".repeat(400), " }".repeat(400));
+    let reads = format!("O{}", "['v']".repeat(400));
+    let failures = mismatches(&source, &[(reads.as_str(), "1")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -510,6 +510,45 @@ enum LocatorFrame<'e, 'r> {
         binders: LocatorBinders<'r>,
         stage: LocatorConditionalStage,
     },
+    /// An object in its member loop at member `next`.
+    Object {
+        object: &'e verter_type_expr::ObjectExpr,
+        next: usize,
+        state: LocatorObjectState,
+        binders: LocatorBinders<'r>,
+        awaiting: LocatorObjectAwait<'e>,
+    },
+}
+
+/// An object's surface as its member loop builds it.
+struct LocatorObjectState {
+    entries: Vec<SurfaceEntry>,
+    call_signatures: u32,
+    construct_signatures: u32,
+    has_index_signature: bool,
+}
+
+impl LocatorObjectState {
+    fn with_capacity(members: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(members),
+            call_signatures: 0,
+            construct_signatures: 0,
+            has_index_signature: false,
+        }
+    }
+}
+
+/// The object member whose child is being lowered.
+enum LocatorObjectAwait<'e> {
+    /// A property's value, beside its lowered key.
+    PropertyValue(
+        &'e verter_type_expr::ObjectProperty,
+        crate::semantic_query::AuthoredPropertyKey,
+    ),
+    IndexKey(&'e verter_type_expr::IndexSignature),
+    /// An index signature's value type, beside its lowered key type.
+    IndexValue(&'e verter_type_expr::IndexSignature, SemanticNodeId),
 }
 
 /// Which child of a conditional is being lowered, with what the earlier
@@ -753,8 +792,136 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 },
             },
+            // -- Object surface: ROLE-FREE member stamps --
+            // A spread-bearing object lowers as a leaf, through its ordered
+            // spread program.
+            TypeExpr::Object(object)
+                if !object
+                    .properties
+                    .iter()
+                    .any(|member| matches!(member, ObjectMember::Spread(_))) =>
+            {
+                self.advance_locator_object(
+                    entry,
+                    object,
+                    0,
+                    LocatorObjectState::with_capacity(object.properties.len()),
+                    binders,
+                    frames,
+                )
+            }
             _ => LocatorStep::Value(self.lower_locator_shape_leaf(expr, &ctx)),
         }
+    }
+
+    /// Continue an object's member loop at member `next`, in authored order
+    /// (the stored surface's `entries` stream is the source order, never
+    /// the grouped bucket order): a property's value and an index
+    /// signature's key and value types lower from the explicit stack, a
+    /// computed key, a method and a call or construct signature in place.
+    /// With no member left, the object interns.
+    fn advance_locator_object<'e, 'r>(
+        &self,
+        entry: &ShapeLowerCtx<'r>,
+        object: &'e verter_type_expr::ObjectExpr,
+        mut next: usize,
+        mut state: LocatorObjectState,
+        binders: LocatorBinders<'r>,
+        frames: &mut Vec<LocatorFrame<'e, 'r>>,
+    ) -> LocatorStep<'e, 'r> {
+        let ctx = entry.with_binders(binders.frames());
+        let scope = ctx.scope;
+        while let Some(member) = object.properties.get(next) {
+            let member_ordinal = u32::try_from(next).unwrap_or(u32::MAX);
+            match member {
+                ObjectMember::Property(prop) => {
+                    let key = prop.key.clone().map(
+                        |computed| self.lower_locator_shape_node(&computed, &ctx),
+                        |identity| identity,
+                    );
+                    frames.push(LocatorFrame::Object {
+                        object,
+                        next,
+                        state,
+                        binders: binders.clone(),
+                        awaiting: LocatorObjectAwait::PropertyValue(prop, key),
+                    });
+                    return LocatorStep::Descend(&prop.ty, binders);
+                }
+                ObjectMember::Method(method) => {
+                    let function_expr = TypeExpr::Function(Arc::new(method.function.clone()));
+                    register_locator_function_alias(
+                        ctx.infer_binders,
+                        &function_expr,
+                        &method.function,
+                    );
+                    let value = self.lower_locator_shape_node(&function_expr, &ctx);
+                    let value =
+                        self.patch_member_signature_occurrence(value, &ctx, member_ordinal, 0);
+                    state.entries.push(SurfaceEntry::Member(SurfaceMember {
+                        key: method.key.clone().map(
+                            |computed| self.lower_locator_shape_node(&computed, &ctx),
+                            |identity| identity,
+                        ),
+                        value,
+                        optional: method.optional,
+                        readonly: false,
+                        method_kind: Some(method.method_kind),
+                        has_implementation_body: method.has_implementation_body,
+                        visibility: method.visibility,
+                        // Declaration materialization is never a
+                        // literal origin (see the property's resume).
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                        spans: method.spans,
+                        declaration_origin: scope.canonical_file(),
+                        declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                        merge_role: MergeRoleStamp::NEUTRAL,
+                    }));
+                }
+                ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                    let construct = matches!(member, ObjectMember::ConstructSignature(_));
+                    let function_expr = if construct {
+                        TypeExpr::ConstructorType(Arc::new(func.clone()))
+                    } else {
+                        TypeExpr::Function(Arc::new(func.clone()))
+                    };
+                    register_locator_function_alias(ctx.infer_binders, &function_expr, func);
+                    let node = self.lower_locator_shape_node(&function_expr, &ctx);
+                    let bucket = if construct {
+                        &mut state.construct_signatures
+                    } else {
+                        &mut state.call_signatures
+                    };
+                    let node =
+                        self.patch_member_signature_occurrence(node, &ctx, member_ordinal, *bucket);
+                    *bucket = bucket.saturating_add(1);
+                    state.entries.push(if construct {
+                        SurfaceEntry::ConstructSignature(node)
+                    } else {
+                        SurfaceEntry::CallSignature(node)
+                    });
+                }
+                ObjectMember::IndexSignature(sig) => {
+                    frames.push(LocatorFrame::Object {
+                        object,
+                        next,
+                        state,
+                        binders: binders.clone(),
+                        awaiting: LocatorObjectAwait::IndexKey(sig),
+                    });
+                    return LocatorStep::Descend(&sig.key_type, binders);
+                }
+                // Unreachable by construction: a spread-bearing object
+                // lowers as a leaf, through its spread program.
+                ObjectMember::Spread(_) => {}
+            }
+            next += 1;
+        }
+        let view = SurfaceView::from_entries(state.entries, None, state.has_index_signature);
+        LocatorStep::Value(
+            self.graph()
+                .intern_node_with_scope(SemanticNodeData::Object(view), scope.clone()),
+        )
     }
 
     /// Deliver `value`, the child `frame` descended into, and continue that
@@ -951,6 +1118,70 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 binders,
                 stage,
             } => self.resume_locator_conditional(entry, conditional, binders, stage, value, frames),
+            LocatorFrame::Object {
+                object,
+                next,
+                mut state,
+                binders,
+                awaiting,
+            } => {
+                match awaiting {
+                    LocatorObjectAwait::PropertyValue(prop, key) => {
+                        state.entries.push(SurfaceEntry::Member(SurfaceMember {
+                            key,
+                            value,
+                            optional: prop.optional,
+                            readonly: prop.readonly,
+                            method_kind: None,
+                            has_implementation_body: false,
+                            visibility: prop.visibility,
+                            // The locator path materializes DECLARATION
+                            // bodies: a member reached through a
+                            // variable/declaration deref is `NonLiteral`
+                            // regardless of the origin the producer recorded
+                            // on the authored literal — freshness never
+                            // survives declaration materialization.
+                            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                            spans: prop.spans,
+                            declaration_origin: scope.canonical_file(),
+                            // ROLE-FREE shape identity: the locator shape
+                            // never carries a caller-relative provenance or
+                            // merge role — those are projection-time stamps
+                            // applied to the fetched shape, never node
+                            // identity. NEUTRAL is the ONLY stamp this path
+                            // can construct: the non-neutral producers
+                            // require a `ProjectionReductionContext`
+                            // witness, and the sealed `LocatorShapeCtx`
+                            // neither contains nor converts to one.
+                            declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                            merge_role: MergeRoleStamp::NEUTRAL,
+                        }));
+                    }
+                    LocatorObjectAwait::IndexKey(sig) => {
+                        frames.push(LocatorFrame::Object {
+                            object,
+                            next,
+                            state,
+                            binders: binders.clone(),
+                            awaiting: LocatorObjectAwait::IndexValue(sig, value),
+                        });
+                        return LocatorStep::Descend(&sig.value_type, binders);
+                    }
+                    LocatorObjectAwait::IndexValue(sig, key_type) => {
+                        state.has_index_signature = true;
+                        state
+                            .entries
+                            .push(SurfaceEntry::IndexSignature(IndexSignature {
+                                key_type,
+                                value_type: value,
+                                readonly: sig.readonly,
+                                spans: sig.spans,
+                                declaration_origin: scope.canonical_file(),
+                            }));
+                    }
+                }
+                self.advance_locator_object(entry, object, next + 1, state, binders, frames)
+            }
         }
     }
 
@@ -1480,154 +1711,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope.clone(),
                     );
                 }
-                let declaration_origin = scope.canonical_file();
-                let mut members: Vec<SurfaceMember> = Vec::new();
-                let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
-                let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
-                let mut index_signatures: Vec<IndexSignature> = Vec::new();
-                // Authored interleave, kept so the stored surface's
-                // `entries` stream is the source order, never the
-                // grouped bucket order.
-                let mut ordered_entries: Vec<SurfaceEntry> =
-                    Vec::with_capacity(obj.properties.len());
-                for (member_ordinal, member) in obj.properties.iter().enumerate() {
-                    let member_ordinal = u32::try_from(member_ordinal).unwrap_or(u32::MAX);
-                    match member {
-                        ObjectMember::Property(prop) => {
-                            let member_index = members.len();
-                            members.push(SurfaceMember {
-                                key: prop.key.clone().map(
-                                    |computed| self.lower_locator_shape_node(&computed, ctx),
-                                    |identity| identity,
-                                ),
-                                value: self.lower_locator_shape_node(&prop.ty, ctx),
-                                optional: prop.optional,
-                                readonly: prop.readonly,
-                                method_kind: None,
-                                has_implementation_body: false,
-                                visibility: prop.visibility,
-                                // The locator path materializes DECLARATION
-                                // bodies: a member reached through a
-                                // variable/declaration deref is `NonLiteral`
-                                // regardless of the origin the producer recorded
-                                // on the authored literal — freshness never
-                                // survives declaration materialization.
-                                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                                spans: prop.spans,
-                                declaration_origin: declaration_origin.clone(),
-                                // ROLE-FREE shape identity: the locator shape
-                                // never carries a caller-relative provenance or
-                                // merge role — those are projection-time stamps
-                                // applied to the fetched shape, never node
-                                // identity. NEUTRAL is the ONLY stamp this path
-                                // can construct: the non-neutral producers
-                                // require a `ProjectionReductionContext`
-                                // witness, and the sealed `LocatorShapeCtx`
-                                // neither contains nor converts to one.
-                                declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
-                                merge_role: MergeRoleStamp::NEUTRAL,
-                            });
-                            ordered_entries
-                                .push(SurfaceEntry::Member(members[member_index].clone()));
-                        }
-                        ObjectMember::Method(method) => {
-                            let function_expr =
-                                TypeExpr::Function(Arc::new(method.function.clone()));
-                            register_locator_function_alias(
-                                ctx.infer_binders,
-                                &function_expr,
-                                &method.function,
-                            );
-                            let value = self.lower_locator_shape_node(&function_expr, ctx);
-                            let value = self.patch_member_signature_occurrence(
-                                value,
-                                ctx,
-                                member_ordinal,
-                                0,
-                            );
-                            let member_index = members.len();
-                            members.push(SurfaceMember {
-                                key: method.key.clone().map(
-                                    |computed| self.lower_locator_shape_node(&computed, ctx),
-                                    |identity| identity,
-                                ),
-                                value,
-                                optional: method.optional,
-                                readonly: false,
-                                method_kind: Some(method.method_kind),
-                                has_implementation_body: method.has_implementation_body,
-                                visibility: method.visibility,
-                                // Declaration materialization is never a
-                                // literal origin (see the Property arm).
-                                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                                spans: method.spans,
-                                declaration_origin: declaration_origin.clone(),
-                                declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
-                                merge_role: MergeRoleStamp::NEUTRAL,
-                            });
-                            ordered_entries
-                                .push(SurfaceEntry::Member(members[member_index].clone()));
-                        }
-                        ObjectMember::CallSignature(func) => {
-                            let function_expr = TypeExpr::Function(Arc::new(func.clone()));
-                            register_locator_function_alias(
-                                ctx.infer_binders,
-                                &function_expr,
-                                func,
-                            );
-                            let node = self.lower_locator_shape_node(&function_expr, ctx);
-                            let bucket_ordinal =
-                                u32::try_from(call_signatures.len()).unwrap_or(u32::MAX);
-                            let node = self.patch_member_signature_occurrence(
-                                node,
-                                ctx,
-                                member_ordinal,
-                                bucket_ordinal,
-                            );
-                            call_signatures.push(node);
-                            ordered_entries.push(SurfaceEntry::CallSignature(node));
-                        }
-                        ObjectMember::ConstructSignature(func) => {
-                            let function_expr = TypeExpr::ConstructorType(Arc::new(func.clone()));
-                            register_locator_function_alias(
-                                ctx.infer_binders,
-                                &function_expr,
-                                func,
-                            );
-                            let node = self.lower_locator_shape_node(&function_expr, ctx);
-                            let bucket_ordinal =
-                                u32::try_from(construct_signatures.len()).unwrap_or(u32::MAX);
-                            let node = self.patch_member_signature_occurrence(
-                                node,
-                                ctx,
-                                member_ordinal,
-                                bucket_ordinal,
-                            );
-                            construct_signatures.push(node);
-                            ordered_entries.push(SurfaceEntry::ConstructSignature(node));
-                        }
-                        ObjectMember::IndexSignature(sig) => {
-                            let index_index = index_signatures.len();
-                            index_signatures.push(IndexSignature {
-                                key_type: self.lower_locator_shape_node(&sig.key_type, ctx),
-                                value_type: self.lower_locator_shape_node(&sig.value_type, ctx),
-                                readonly: sig.readonly,
-                                spans: sig.spans,
-                                declaration_origin: declaration_origin.clone(),
-                            });
-                            ordered_entries.push(SurfaceEntry::IndexSignature(
-                                index_signatures[index_index].clone(),
-                            ));
-                        }
-                        // Unreachable by construction: the spread-bearing
-                        // check above fails the whole object closed before
-                        // this member loop runs.
-                        ObjectMember::Spread(_) => {}
-                    }
-                }
-                let has_index_signature = !index_signatures.is_empty();
-                let view = SurfaceView::from_entries(ordered_entries, None, has_index_signature);
-                graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
+                // Every other object lowers from the explicit stack.
+                self.lower_locator_shape_node(expr, ctx)
             }
             // The structural positions lower from the explicit stack.
             TypeExpr::Union(_)
