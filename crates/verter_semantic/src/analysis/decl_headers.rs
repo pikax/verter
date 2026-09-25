@@ -108,6 +108,11 @@ pub struct AugmentationBlockRecord {
     pub scope: AugmentationScopeKind,
     pub owner: TopLevelOwnerId,
     pub span: Span,
+    /// The name of the block's `export default function / class Name`
+    /// declaration — what the module's `default` export names.
+    pub default_export: Option<String>,
+    /// The local name the block assigns the module to with `export = X`.
+    pub export_assignment: Option<String>,
 }
 
 /// Exact parser-authored locator for a JSDoc typedef declaration.
@@ -253,6 +258,10 @@ pub struct DeclHeaderIndex {
     /// outside it cannot name the member (the checker's TS2694). Empty in
     /// the `from_eval_env` mirror (same block-level-view limitation).
     pub namespace_private_members: FxHashSet<DeclBindingKey>,
+    /// Every `namespace N { … }` block a `declare module "…"` block
+    /// declares, with that block's scope, in source order. Empty in the
+    /// `from_eval_env` mirror (same block-level-view limitation).
+    pub augmentation_namespace_blocks: Vec<(AugmentationScopeKind, NamespaceBlockRecord)>,
 }
 
 impl DeclHeaderIndex {
@@ -330,6 +339,88 @@ impl DeclHeaderIndex {
         self.augmentation_value_headers
             .get(scope)?
             .get(&DeclBindingKey::new(owner, name))
+    }
+
+    /// The one `declare module "…" { … }` block scope that declares the
+    /// type `(owner, name)`; `None` when none or several do.
+    pub fn sole_module_augmentation_type_scope(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<&AugmentationScopeKind> {
+        let key = DeclBindingKey::new(owner, name);
+        let mut declaring = self
+            .augmentation_type_headers
+            .iter()
+            .filter(|(scope, types)| {
+                matches!(scope, AugmentationScopeKind::Module(_)) && types.contains_key(&key)
+            })
+            .map(|(scope, _)| scope);
+        let scope = declaring.next()?;
+        declaring.next().is_none().then_some(scope)
+    }
+
+    /// The one `declare module "…" { … }` block scope that declares the
+    /// value `(owner, name)`; `None` when none or several do.
+    pub fn sole_module_augmentation_value_scope(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<&AugmentationScopeKind> {
+        let key = DeclBindingKey::new(owner, name);
+        let mut declaring = self
+            .augmentation_value_headers
+            .iter()
+            .filter(|(scope, values)| {
+                matches!(scope, AugmentationScopeKind::Module(_)) && values.contains_key(&key)
+            })
+            .map(|(scope, _)| scope);
+        let scope = declaring.next()?;
+        declaring.next().is_none().then_some(scope)
+    }
+
+    /// The value members a reference from outside `namespace` can read
+    /// (the properties of the namespace's object), sorted: every exported
+    /// value declared directly in it, and every exported namespace nested
+    /// in it that declares a value (a namespace holding only types is no
+    /// value). `scope` selects the file's own declarations (`None`) or one
+    /// augmentation block's; `namespace` `None` reads the block's own
+    /// top level.
+    #[must_use]
+    pub fn namespace_value_members(
+        &self,
+        scope: Option<&AugmentationScopeKind>,
+        owner: TopLevelOwnerId,
+        namespace: Option<&str>,
+    ) -> Vec<String> {
+        let values = match scope {
+            None => Some(&self.value_headers),
+            Some(scope) => self.augmentation_value_headers.get(scope),
+        };
+        let mut members: Vec<String> = values
+            .into_iter()
+            .flat_map(DeclMap::keys)
+            .filter(|key| key.owner == owner)
+            .filter_map(|key| {
+                let rest = match namespace {
+                    Some(namespace) => key
+                        .name
+                        .strip_prefix(namespace)
+                        .and_then(|rest| rest.strip_prefix('.'))?,
+                    None => key.name.as_ref(),
+                };
+                let member = rest.split('.').next()?;
+                let qualified = match namespace {
+                    Some(namespace) => format!("{namespace}.{member}"),
+                    None => member.to_string(),
+                };
+                self.namespace_member_is_exported(owner, &qualified)
+                    .then(|| member.to_string())
+            })
+            .collect();
+        members.sort();
+        members.dedup();
+        members
     }
 }
 

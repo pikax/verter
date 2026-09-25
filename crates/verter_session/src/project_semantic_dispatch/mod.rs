@@ -102,6 +102,7 @@ pub(crate) mod locator_shape;
 pub(crate) mod locator_view;
 mod locator_view_worklist;
 pub(crate) mod lower;
+mod module_object;
 pub(crate) mod output_materialization;
 pub(crate) mod query_error_disposition;
 pub(crate) mod signature_discovery;
@@ -2176,8 +2177,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> (SemanticQueryKey, CarrierNormalizationPrelude) {
-        // Cheap subject-shape probe — a non-carrier key skips the tracer.
-        if !self.key_subject_is_carrier(&key) {
+        // Cheap subject-shape probe — a key with neither a carrier subject
+        // nor a subject taking its signatures from a global wrapper skips the
+        // tracer.
+        if !self.key_subject_is_carrier(&key) && !self.key_reads_apparent_signatures(&key) {
             return (key, CarrierNormalizationPrelude::none());
         }
         let ((normalized, partial_reasons), finalise) =
@@ -2186,6 +2189,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 || {
                     let normalized = self.normalize_carrier_subject_key(key);
                     let partial_reasons = self.carrier_normalization_partial_reasons(&normalized);
+                    // The wrapper read is scoped to the demand's project here,
+                    // so its lookup's facts root the admitted entry too.
+                    let normalized = self.scope_apparent_signature_subject(normalized);
                     // Test-only: force a fenced (ReturnOnly) serve observation onto
                     // the prelude tracer so the suppress wiring is exercisable
                     // without a superseded-artifact fixture. Zero-cost when unset.
@@ -4151,6 +4157,8 @@ mod broad_runtime_tests;
 mod cycle_gate_tests;
 
 #[cfg(test)]
+mod ambient_module_value_tests;
+#[cfg(test)]
 mod base_signature_tests;
 #[cfg(test)]
 mod checker_probe_lane_tests;
@@ -4168,6 +4176,8 @@ mod indexed_access_relation_tests;
 mod lib_global_tests;
 #[cfg(test)]
 mod merged_declaration_signature_tests;
+#[cfg(test)]
+mod module_object_tests;
 #[cfg(test)]
 mod module_value_surface_tests;
 #[cfg(test)]

@@ -203,7 +203,13 @@ pub(crate) fn resolve_bare_name_in_scope(
         // merged global declaration. The prepared-decl builder + `ResolveDecl`
         // both fall back to the global augmentation inventory under the same
         // `(canonical, name)` identity.
-        if entry.shallow_state.has_global_augmentation(name) {
+        // Likewise a type of one of the file's `declare module "…"` blocks:
+        // the block's own references to the name read it.
+        if entry
+            .shallow_state
+            .type_fallback_augmentation_scope(scope_owner, name)
+            .is_some()
+        {
             return Some(mint_in_owner(scope_owner));
         }
     }

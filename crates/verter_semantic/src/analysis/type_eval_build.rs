@@ -1893,7 +1893,8 @@ fn collect_augmentation_block(
             // value scope (never file-scope `value_symbols`).
             Statement::VariableDeclaration(_)
             | Statement::FunctionDeclaration(_)
-            | Statement::ClassDeclaration(_) => {
+            | Statement::ClassDeclaration(_)
+            | Statement::ExportDefaultDeclaration(_) => {
                 collect_value_statement_into_augmentation(stmt, source, out, &scope);
             }
             // A namespace nested inside an ambient augmentation block
@@ -2151,15 +2152,32 @@ fn collect_value_statement_into_augmentation(
                 }
             }
         }
+        // `export default function / class Name` declares `Name` in the
+        // block, as the unexported declaration does.
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            oxc_ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(func)
+                if func.id.is_some() =>
+            {
+                if let Some(parts) = lower_function_parts(func, source) {
+                    inner.value_decls.push(parts);
+                }
+            }
+            oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(decl)
+                if decl.id.is_some() =>
+            {
+                collect_class(decl, source, &mut inner);
+            }
+            _ => {}
+        },
         _ => {}
     }
     move_value_parts_into_augmentation(inner, out, scope);
 }
 
-/// Route the VALUE parts an inner collection produced into the augmentation
-/// value scope (the type side a `class` also produces is intentionally
-/// dropped — an ambient `declare module` class augments the value surface; its
-/// instance type is not stitched cross-file today).
+/// Route the parts an inner collection produced into the augmentation
+/// scope: its values into the value scope, and the instance type a `class`
+/// declares into the type scope, where the block's own references to the
+/// class name find it.
 fn move_value_parts_into_augmentation(
     inner: LoweredStatementParts,
     out: &mut LoweredStatementParts,
@@ -2167,6 +2185,9 @@ fn move_value_parts_into_augmentation(
 ) {
     for parts in inner.value_decls {
         out.aug_value_decls.push((scope.clone(), parts));
+    }
+    for parts in inner.type_decls {
+        out.aug_type_decls.push((scope.clone(), parts));
     }
 }
 
@@ -2487,6 +2508,7 @@ fn collect_named_class(
     // Statically-named statics whose authored annotations are exactly
     // `unique symbol` — the member-level nominal fact for `typeof C.A`.
     let mut static_unique_symbol_members = Vec::new();
+    let mut static_widening_members: Vec<String> = Vec::new();
     let mut ctor_sig = None;
     let mut ctor_fn_spans = FunctionSpans::default();
     let mut inference_unavailable = None;
@@ -2621,6 +2643,19 @@ fn collect_named_class(
                         spans,
                     ));
                 if prop.r#static {
+                    // A `readonly` static without an annotation declares the
+                    // fresh literal type of its literal initializer.
+                    let widening = prop.readonly
+                        && prop.type_annotation.is_none()
+                        && prop.value.as_ref().is_some_and(|value| {
+                            initializer_literal_freshness(value)
+                                == DeclaredLiteralFreshness::Widening
+                        });
+                    if widening {
+                        if let Some(key) = static_property_key_name(&prop.key) {
+                            static_widening_members.push(key);
+                        }
+                    }
                     // `static readonly K: unique symbol` is tsc's one member
                     // spelling of a nominal unique-symbol member: a mutable
                     // static widens (with an error), and an assertion
@@ -2912,7 +2947,13 @@ fn collect_named_class(
         object_shape: Some(constructor_shape),
         enum_members: None,
         enum_member_names: None,
-        literal_freshness: DeclaredLiteralFreshness::Regular,
+        literal_freshness: if static_widening_members.is_empty() {
+            DeclaredLiteralFreshness::Regular
+        } else {
+            DeclaredLiteralFreshness::WideningStaticMembers(Arc::from(
+                static_widening_members.into_boxed_slice(),
+            ))
+        },
     });
 }
 
@@ -3900,6 +3941,9 @@ fn lower_variable_parts(
     // A `const` without an annotation declares the fresh literal type of
     // its initializer; every other declaration declares a regular type.
     let literal_freshness = match (&decl.init, var_kind, annotation_is_authored) {
+        (Some(init), _, false) if expr_is_widening_nullish(init) => {
+            DeclaredLiteralFreshness::WideningNullish
+        }
         (Some(init), ValueDeclKind::Const, false) => initializer_literal_freshness(init),
         _ => DeclaredLiteralFreshness::Regular,
     };

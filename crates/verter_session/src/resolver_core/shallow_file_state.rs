@@ -1800,6 +1800,54 @@ impl ShallowFileState {
             .augmentation_type_decl_outcome_in(scope, owner, name)
     }
 
+    /// The ambient block whose value `(owner, name)` the file's identity
+    /// `(canonical, owner, name)` names when the file surface declares no
+    /// such value: a MODULE's own `declare global { … }` member, else the
+    /// member of the one `declare module "…" { … }` block that declares it.
+    /// `None` when neither does, or when several module blocks do (the
+    /// identity cannot say which). A script's `declare global` binds
+    /// nothing.
+    pub(crate) fn value_fallback_augmentation_scope(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<verter_semantic::analysis::type_eval::AugmentationScopeKind> {
+        use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+        let headers = self.decl_bodies.header_index();
+        if crate::global_contributors::classify_shallow_module_kind(self)
+            == crate::global_contributors::FileModuleKind::Module
+            && headers
+                .augmentation_value_header_in(&AugmentationScopeKind::Global, owner, name)
+                .is_some()
+        {
+            return Some(AugmentationScopeKind::Global);
+        }
+        headers
+            .sole_module_augmentation_value_scope(owner, name)
+            .cloned()
+    }
+
+    /// The ambient block whose type `(owner, name)` the file's identity
+    /// `(canonical, owner, name)` names when the file surface declares no
+    /// such type: the file's `declare global { … }` member (a global is
+    /// visible from any scope), else the member of the one
+    /// `declare module "…" { … }` block that declares it — what the block's
+    /// own references to the name read. `None` when neither does, or when
+    /// several module blocks do.
+    pub(crate) fn type_fallback_augmentation_scope(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<verter_semantic::analysis::type_eval::AugmentationScopeKind> {
+        if self.has_global_augmentation(name) {
+            return Some(verter_semantic::analysis::type_eval::AugmentationScopeKind::Global);
+        }
+        self.decl_bodies
+            .header_index()
+            .sole_module_augmentation_type_scope(owner, name)
+            .cloned()
+    }
+
     /// Lease-aware value-space counterpart of
     /// [`Self::augmentation_type_decl_outcome_in`].
     pub(crate) fn augmentation_value_decl_outcome_in(

@@ -325,17 +325,33 @@ impl DeclBodyMemo {
                             }
                             DemandOutcome::Ready(Some(lowered)) => (lowered, None),
                             DemandOutcome::Ready(None) => {
-                                match self.augmentation_type_decl_outcome_in(
-                                    &AugmentationScopeKind::Global,
-                                    owner,
-                                    symbol,
-                                ) {
+                                // Then the one `declare module` block
+                                // declaring the name — the prepared
+                                // declaration's own fallback order.
+                                let scope = if self
+                                    .header_index()
+                                    .augmentation_type_header(
+                                        &AugmentationScopeKind::Global,
+                                        symbol,
+                                    )
+                                    .is_some()
+                                {
+                                    AugmentationScopeKind::Global
+                                } else {
+                                    match self
+                                        .header_index()
+                                        .sole_module_augmentation_type_scope(owner, symbol)
+                                    {
+                                        Some(scope) => scope.clone(),
+                                        None => return Err(LocatorBodyDerefError::UnknownSymbol),
+                                    }
+                                };
+                                match self.augmentation_type_decl_outcome_in(&scope, owner, symbol)
+                                {
                                     DemandOutcome::LeaseMiss => {
                                         return Err(LocatorBodyDerefError::LeaseMiss);
                                     }
-                                    DemandOutcome::Ready(Some(lowered)) => {
-                                        (lowered, Some(AugmentationScopeKind::Global))
-                                    }
+                                    DemandOutcome::Ready(Some(lowered)) => (lowered, Some(scope)),
                                     DemandOutcome::Ready(None) => {
                                         return Err(LocatorBodyDerefError::UnknownSymbol);
                                     }
@@ -422,18 +438,37 @@ impl DeclBodyMemo {
                         // lease-miss / genuine-miss discrimination the demand
                         // cells carry (header presence is checked inside). A
                         // file-scope miss falls through to the GLOBAL ambient
-                        // inventory — the same file-scope-then-global order
-                        // the prepared value decl applies.
+                        // inventory, then to the one `declare module` block
+                        // declaring the name — the same order the prepared
+                        // value decl applies.
                         let parts = match self.transient_value_parts_in(
                             slot.anchor.owner,
                             slot.anchor.symbol.as_ref(),
                         ) {
-                            DemandOutcome::Ready(None) => self
+                            DemandOutcome::Ready(None) => match self
                                 .transient_augmentation_value_parts_in(
                                     &AugmentationScopeKind::Global,
                                     slot.anchor.owner,
                                     slot.anchor.symbol.as_ref(),
-                                ),
+                                ) {
+                                DemandOutcome::Ready(None) => {
+                                    match self.header_index().sole_module_augmentation_value_scope(
+                                        slot.anchor.owner,
+                                        slot.anchor.symbol.as_ref(),
+                                    ) {
+                                        Some(scope) => {
+                                            let scope = scope.clone();
+                                            self.transient_augmentation_value_parts_in(
+                                                &scope,
+                                                slot.anchor.owner,
+                                                slot.anchor.symbol.as_ref(),
+                                            )
+                                        }
+                                        None => DemandOutcome::Ready(None),
+                                    }
+                                }
+                                outcome => outcome,
+                            },
                             outcome => outcome,
                         };
                         let parts = transient_outcome(parts)?;

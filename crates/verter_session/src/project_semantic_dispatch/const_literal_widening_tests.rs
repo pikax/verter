@@ -439,3 +439,106 @@ fn a_copy_cycle_reads_no_widening_literal() {
         &["a".to_string()],
     ));
 }
+
+const STATIC_DEP: &str = "\
+export class KW { static readonly s = 1; static readonly sAnn: 1 = 1; static t = 1; static readonly str = \"s\"; static readonly neg = -1; }
+export const dn = null;
+export const du = undefined;
+export const dnAnn: null = null;
+";
+
+const STATIC_USE: &str = "\
+import { KW, dn, du, dnAnn } from './dep';
+class Local { static readonly ls = 2; static readonly lAs = 2 as const; }
+const mn = null;
+const mu = undefined;
+const mv = void 0;
+export function ks() { return KW.s; }
+export function ksAnn() { return KW.sAnn; }
+export function kt() { return KW.t; }
+export function kstr() { return KW.str; }
+export function kneg() { return KW.neg; }
+export function ksObj() { return { v: KW.s }; }
+export function ksLet() { let v = KW.s; return v; }
+export function lls() { return Local.ls; }
+export function llAs() { return Local.lAs; }
+export function rmn() { return mn; }
+export function rmu() { return mu; }
+export function rmv() { return mv; }
+export function rdn() { return dn; }
+export function rdu() { return du; }
+export function rdnAnn() { return dnAnn; }
+export function rmnObj() { return { v: mn }; }
+export function rmnLet() { let v = mn; return v; }
+export function rmnArr() { return [mn]; }
+";
+
+/// A `static readonly` property without an annotation declares the fresh
+/// literal type of its literal initializer, as a `const` does: a read of
+/// it widens wherever a bare literal widens. With `strictNullChecks` off, a
+/// declaration whose initializer is `null`, `undefined` or a `void`
+/// expression and that has no annotation declares `any`.
+///
+/// Measured on TypeScript 7.0.2 (every row alike under `noImplicitAny` on
+/// and off): `ks`, `kt`, `kneg`, `ksLet` and `lls` are `number`, `kstr`
+/// `string`, `ksObj` `{ v: number; }`, while `ksAnn` stays `1`, `llAs` `2`
+/// and `typeof KW.s` is `1`. With `strictNullChecks`, `rmn`, `rdn`,
+/// `rdnAnn` and `rmnLet` are `null`, `rmu`, `rmv` and `rdu` `undefined`,
+/// `rmnObj` `{ v: null; }` and `rmnArr` `null[]`, `typeof mn` `null`;
+/// without it every one of them is `any` (`{ v: any; }`, `any[]`) except
+/// `rdnAnn`, which stays `null`.
+///
+/// Mutation: recording no widening static member answers `ks` `1`;
+/// declaring a `null` initializer's type regardless of `strictNullChecks`
+/// answers `rmn` `null` without it.
+#[test]
+fn a_readonly_static_and_a_nullish_declaration_widen_as_the_checker_declares() {
+    let files = [("dep.ts", STATIC_DEP)];
+    for (compiler_options, strict) in [(None, true), (Some(LOOSE), false)] {
+        let pick = |strict_answer: &'static str, loose_answer: &'static str| {
+            if strict {
+                strict_answer
+            } else {
+                loose_answer
+            }
+        };
+        let failures = mismatches_in(
+            ProbeProject {
+                files: &files,
+                compiler_options,
+                ambient_lib: None,
+            },
+            STATIC_USE,
+            &[
+                ("ReturnType<typeof ks>", "number"),
+                ("ReturnType<typeof ksAnn>", "1"),
+                ("ReturnType<typeof kt>", "number"),
+                ("ReturnType<typeof kstr>", "string"),
+                ("ReturnType<typeof kneg>", "number"),
+                ("ReturnType<typeof ksObj>", "{ v: number; }"),
+                ("ReturnType<typeof ksLet>", "number"),
+                ("ReturnType<typeof lls>", "number"),
+                ("ReturnType<typeof llAs>", "2"),
+                ("typeof KW.s", "1"),
+                ("ReturnType<typeof rmn>", pick("null", "any")),
+                ("ReturnType<typeof rmu>", pick("undefined", "any")),
+                ("ReturnType<typeof rmv>", pick("undefined", "any")),
+                ("ReturnType<typeof rdn>", pick("null", "any")),
+                ("ReturnType<typeof rdu>", pick("undefined", "any")),
+                ("ReturnType<typeof rdnAnn>", "null"),
+                (
+                    "ReturnType<typeof rmnObj>",
+                    pick("{ v: null; }", "{ v: any; }"),
+                ),
+                ("ReturnType<typeof rmnLet>", pick("null", "any")),
+                ("ReturnType<typeof rmnArr>", pick("null[]", "any[]")),
+                ("typeof mn", pick("null", "any")),
+            ],
+        );
+        assert!(
+            failures.is_empty(),
+            "{compiler_options:?}:\n{}",
+            failures.join("\n")
+        );
+    }
+}

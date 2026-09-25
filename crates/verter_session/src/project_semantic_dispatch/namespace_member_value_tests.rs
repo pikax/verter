@@ -306,3 +306,85 @@ fn declare_global_blocks_merge_later_first() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+const NAMESPACE_FUNCTIONS: &str = "\
+import { L } from './lib';
+import * as LL from './lib';
+export namespace N {
+  export function lit() { return 1; }
+  export function obj() { return { a: 1, b: \"s\" }; }
+  export function decl(): 2 { return 2; }
+  export function arr() { return [1, 2]; }
+  export function callsLit() { return lit(); }
+  export function usesPriv() { return priv(); }
+  function priv() { return true; }
+  export const k = 3;
+  export function readK() { return k; }
+  export namespace Inner { export function deep() { return \"d\" as const; } }
+  export function cond(b: boolean) { return b ? 1 : \"x\"; }
+  export const arrow = () => 5;
+}
+namespace G { export function g() { return 7n; } export function neg() { return -7n; } }
+function t() { return 7n; }
+export function callN() { return N.lit(); }
+export function callInner() { return N.Inner.deep(); }
+export function callG() { return G.g(); }
+export function callGNeg() { return G.neg(); }
+export function callT() { return t(); }
+export function callL() { return L.lit(); }
+export function callLL() { return LL.L.str(); }
+";
+
+const NAMESPACE_FUNCTIONS_LIB: &str = "\
+export namespace L { export function lit() { return 1; } export function str() { return \"s\" as const; } }
+";
+
+/// A function declared in a namespace, exported or not, has an inferred
+/// return as any function does: its body reads the namespace's own
+/// members unqualified (a sibling function, a private one, an exported
+/// `const`), and its literal returns widen as a bare literal's do — a
+/// `bigint` and a signed literal among them.
+///
+/// Measured on TypeScript 7.0.2: `N.lit` returns `number`, `N.obj`
+/// `{ a: number; b: string; }`, `N.decl` `2`, `N.arr` `number[]`,
+/// `N.callsLit` `number`, `N.usesPriv` `boolean`, `N.readK` `number`,
+/// `N.Inner.deep` `"d"`, `N.cond` `"x" | 1`, `N.arrow` `number`; `callN`
+/// is `number`, `callInner` `"d"`, `callG`, `callGNeg` and `callT`
+/// `bigint`, `callL` `number`, `callLL` `"s"`.
+///
+/// Mutation: indexing no function of an exported namespace leaves every
+/// `N.*` row but the annotated `N.decl` a typed miss; reading a namespace
+/// body's free name only at file scope leaves `N.readK` a typed miss;
+/// keeping a `bigint` literal's type answers `callG` and `callT` `7n`.
+#[test]
+fn a_namespace_function_returns_its_inferred_type() {
+    let files = [("lib.ts", NAMESPACE_FUNCTIONS_LIB)];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            compiler_options: None,
+            ambient_lib: None,
+        },
+        NAMESPACE_FUNCTIONS,
+        &[
+            ("ReturnType<typeof N.lit>", "number"),
+            ("ReturnType<typeof N.obj>", "{ a: number; b: string; }"),
+            ("ReturnType<typeof N.decl>", "2"),
+            ("ReturnType<typeof N.arr>", "number[]"),
+            ("ReturnType<typeof N.callsLit>", "number"),
+            ("ReturnType<typeof N.usesPriv>", "boolean"),
+            ("ReturnType<typeof N.readK>", "number"),
+            ("ReturnType<typeof N.Inner.deep>", "\"d\""),
+            ("ReturnType<typeof N.cond>", "\"x\" | 1"),
+            ("ReturnType<typeof N.arrow>", "number"),
+            ("ReturnType<typeof callN>", "number"),
+            ("ReturnType<typeof callInner>", "\"d\""),
+            ("ReturnType<typeof callG>", "bigint"),
+            ("ReturnType<typeof callGNeg>", "bigint"),
+            ("ReturnType<typeof callT>", "bigint"),
+            ("ReturnType<typeof callL>", "number"),
+            ("ReturnType<typeof callLL>", "\"s\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

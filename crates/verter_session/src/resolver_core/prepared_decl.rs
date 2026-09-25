@@ -325,7 +325,16 @@ fn prepare_local_type_decl_outcome_with_base(
     // TYPE-augmentation siblings; the body carries no classified deps — it
     // stitches onto another module's surface). A broken-lease body demand
     // surfaces the DISTINCT `LeaseMiss`, never collapsed into a cacheable miss.
-    let global_scope = AugmentationScopeKind::Global;
+    // A `declare module "…"` block's own type is the block member its
+    // references read, under the same identity (`Module` origin).
+    let fallback_scope: AugmentationScopeKind = if state.has_type_symbol_in(owner, symbol_name) {
+        AugmentationScopeKind::Global
+    } else {
+        match state.type_fallback_augmentation_scope(owner, symbol_name) {
+            Some(scope) => scope,
+            None => return PreparedDeclOutcome::Ready(None),
+        }
+    };
     let (lowered, deps, origin): (Arc<LoweredTypeDecl>, _, Option<&AugmentationScopeKind>) =
         if state.has_type_symbol_in(owner, symbol_name) {
             match state.type_decl_outcome_in(owner, symbol_name) {
@@ -336,7 +345,7 @@ fn prepare_local_type_decl_outcome_with_base(
                 }
             }
         } else {
-            match state.augmentation_type_decl_outcome_in(&global_scope, owner, symbol_name) {
+            match state.augmentation_type_decl_outcome_in(&fallback_scope, owner, symbol_name) {
                 DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
                 DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
                 DemandOutcome::Ready(Some(lowered)) => {
@@ -348,7 +357,7 @@ fn prepare_local_type_decl_outcome_with_base(
                     // Complete surface.
                     let deps =
                         state.classify_lowered_type_deps(owner, symbol_name, lowered.as_ref());
-                    (lowered, Some(deps), Some(&global_scope))
+                    (lowered, Some(deps), Some(&fallback_scope))
                 }
             }
         };
@@ -697,29 +706,24 @@ fn prepare_local_value_decl_outcome_with_base(
     shared_name_resolution_base: Option<&SharedNameResolutionBase>,
     interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedValueDecl> {
-    // A name absent from a MODULE's file surface but present in its own
-    // `declare global { ... }` value inventory is that module's global
-    // value declaration, prepared under the same `(canonical, name)`
-    // identity the type space's global fallback uses. A script's
-    // `declare global` binds nothing.
+    // A name absent from the file surface but declared in one of the
+    // file's ambient blocks — a MODULE's own `declare global { ... }`
+    // value, or the one `declare module "..." { ... }` block declaring it —
+    // is that block's value declaration, prepared under the same
+    // `(canonical, name)` identity the type space's global fallback uses.
     let lowered: Arc<LoweredValueDecl> = match state.value_decl_outcome_in(owner, symbol_name) {
         DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
         DemandOutcome::Ready(Some(lowered)) => lowered,
-        DemandOutcome::Ready(None)
-            if crate::global_contributors::classify_shallow_module_kind(state)
-                == crate::global_contributors::FileModuleKind::Module =>
-        {
-            match state.augmentation_value_decl_outcome_in(
-                &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
-                owner,
-                symbol_name,
-            ) {
+        DemandOutcome::Ready(None) => {
+            let Some(scope) = state.value_fallback_augmentation_scope(owner, symbol_name) else {
+                return PreparedDeclOutcome::Ready(None);
+            };
+            match state.augmentation_value_decl_outcome_in(&scope, owner, symbol_name) {
                 DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
                 DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
                 DemandOutcome::Ready(Some(lowered)) => lowered,
             }
         }
-        DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
     };
     if state.is_import_local_in(owner, symbol_name) {
         return PreparedDeclOutcome::Ready(None);
@@ -1471,11 +1475,18 @@ pub fn build_prepared_type_decl_cache(
     // fallback, so they need a prepared-decl slot even though they never enter
     // the file surface. (A name that IS a file symbol already has a slot and
     // takes precedence.)
+    // A `declare module "…"` block's type prepares through the same
+    // fallback when it is the one block declaring the name.
     for (scope, key) in state.augmentation_type_decl_keys() {
-        if matches!(
-            scope,
-            verter_semantic::analysis::type_eval::AugmentationScopeKind::Global
-        ) && !slots.contains_key(key)
+        let addressable = match scope {
+            verter_semantic::analysis::type_eval::AugmentationScopeKind::Global => true,
+            verter_semantic::analysis::type_eval::AugmentationScopeKind::Module(_) => {
+                state.type_fallback_augmentation_scope(key.owner, key.name.as_ref())
+                    == Some(scope.clone())
+            }
+        };
+        if addressable
+            && !slots.contains_key(key)
             && !state.is_import_local_in(key.owner, key.name.as_ref())
         {
             slots.insert(key.clone(), Arc::new(PreparedDeclSlot::new()));
@@ -1522,27 +1533,28 @@ pub fn build_prepared_value_decl_cache(
         .chain(state.synthesised_value_bodies().map(|(key, _)| key.clone()))
         .map(|key| (key, Arc::new(PreparedDeclSlot::new())))
         .collect();
-    // A module's global-augmentation values (`declare global { var x }`)
-    // prepare through `prepare_local_value_decl`'s global fallback, so they
-    // need a slot although they never enter the file surface; a file symbol
-    // of the same name keeps its own slot and takes precedence.
-    if crate::global_contributors::classify_shallow_module_kind(state.as_ref())
-        == crate::global_contributors::FileModuleKind::Module
-    {
-        if let Some(global_values) = state
-            .decl_bodies()
-            .header_index()
-            .augmentation_value_headers
-            .get(&verter_semantic::analysis::type_eval::AugmentationScopeKind::Global)
-        {
-            for key in global_values.keys() {
-                if !slots.contains_key(key)
-                    && !state.is_import_local_in(key.owner, key.name.as_ref())
-                {
-                    slots.insert(key.clone(), Arc::new(PreparedDeclSlot::new()));
-                }
-            }
-        }
+    // An ambient block's values (`declare global { var x }` in a module,
+    // `declare module "m" { const x }`) prepare through
+    // `prepare_local_value_decl`'s ambient fallback, so they need a slot
+    // although they never enter the file surface; a file symbol of the same
+    // name keeps its own slot and takes precedence.
+    let ambient_keys: Vec<verter_type_expr::DeclBindingKey> = state
+        .decl_bodies()
+        .header_index()
+        .augmentation_value_headers
+        .values()
+        .flat_map(|values| values.keys())
+        .filter(|key| {
+            !slots.contains_key(*key)
+                && !state.is_import_local_in(key.owner, key.name.as_ref())
+                && state
+                    .value_fallback_augmentation_scope(key.owner, key.name.as_ref())
+                    .is_some()
+        })
+        .cloned()
+        .collect();
+    for key in ambient_keys {
+        slots.insert(key, Arc::new(PreparedDeclSlot::new()));
     }
     let name_resolution_bases = slots
         .keys()

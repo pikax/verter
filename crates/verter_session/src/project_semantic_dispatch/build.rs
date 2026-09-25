@@ -538,9 +538,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .is_some();
         // A `declare global { ... }` declaration is not on the file surface but
         // IS resolvable as the merged global declaration (the prepared-decl
-        // builder falls back to the global augmentation inventory).
-        let has_global_augmentation =
-            is_ordinary && shallow.has_global_augmentation(key.name.as_ref());
+        // builder falls back to the global augmentation inventory), and so is
+        // the type of the one `declare module "…"` block declaring the name.
+        let has_global_augmentation = is_ordinary
+            && shallow
+                .type_fallback_augmentation_scope(key.scope.owner, key.name.as_ref())
+                .is_some();
 
         // A name DECLARED in this file (type / value symbol, or a
         // `declare global` contribution) resolves here. A name that is
@@ -702,10 +705,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // dispatch surface. Plain `.ts` is unaffected (rune-module-gated).
         let visible_value =
             shallow.visible_value_binding(value_root.scope.owner, value_root.name.as_ref());
+        // A member of one of the file's `declare module "…"` blocks is a
+        // value the root's identity names too (an import of the ambient
+        // module reaches it here).
         let has_value = matches!(
             visible_value,
             Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(_))
-        );
+        ) || (visible_value.is_none()
+            && matches!(
+                shallow.value_fallback_augmentation_scope(
+                    value_root.scope.owner,
+                    value_root.name.as_ref()
+                ),
+                Some(verter_semantic::analysis::type_eval::AugmentationScopeKind::Module(_))
+            ));
         let has_import_local = matches!(
             visible_value,
             Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Import(_))
@@ -768,6 +781,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Arc::clone(&value_root.scope.canonical_id),
                 observed_hash,
             )]);
+        }
+        // A namespace import, or a namespace this file declares, read whole
+        // is its module object; the rest of the path reads its properties.
+        if !has_value {
+            if let Some((object, roots)) = self.module_object_of_root(value_root, shallow, context)
+            {
+                let output = if path.is_empty() {
+                    crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                        QueryResult::Value(object),
+                        self.dep_signature_for(&value_root.scope.canonical_id, observed_hash),
+                    ))
+                } else {
+                    self.project_typeof_path(object, path, context, observed_hash, value_root)
+                };
+                return output.with_observed_self_roots(
+                    std::iter::once((Arc::clone(&value_root.scope.canonical_id), observed_hash))
+                        .chain(roots),
+                );
+            }
         }
         // A name no scope declares or imports is read in the program's GLOBAL
         // scope: `globalThis` is the global object, and any other name its
@@ -887,7 +919,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 value_root.scope.owner,
                 scope_payload.as_ref(),
                 value_root.name.as_ref(),
-            ),
+            )
+            .or_else(|| {
+                // A `declare module "…"` block member is the file's own
+                // declaration of the name.
+                (has_value && visible_value.is_none()).then(|| {
+                    ResolvedRootIdentity::new_in_owner(
+                        Arc::clone(&value_root.scope.canonical_id),
+                        value_root.scope.owner,
+                        value_root.name.as_ref(),
+                    )
+                })
+            }),
         };
         let root_identity = match resolved_root {
             Some(identity) => identity,
@@ -1134,6 +1177,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 QueryResult::Value(id) => id,
                 _ => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
             }
+        } else if matches!(
+            prepared.type_annotation.literal_freshness,
+            verter_type_expr::facts::DeclaredLiteralFreshness::WideningNullish
+        ) && !self
+            .nullability_for(effective_canonical.as_ref())
+            .is_strict()
+        {
+            // With `strictNullChecks` off a `null` / `undefined` initializer
+            // widens: the declaration's type is `any`.
+            self.graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any))
         } else if !matches!(
             prepared.type_annotation.classification,
             verter_type_expr::facts::ValueAnnotationClass::Absent
@@ -1553,10 +1607,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         {
             return self.declared_literal_widens(&member_root, &path[consumed..], visited);
         }
-        // A member of a value (`obj.a`) is not a declaration of its own.
-        if !path.is_empty() {
-            return false;
-        }
+        // A member of a value (`obj.a`) is not a declaration of its own,
+        // except a class's static member (`C.s`).
+        let static_member = match path {
+            [] => None,
+            [member] => Some(member),
+            _ => return false,
+        };
         let identity = if unbound {
             if name == "globalThis" {
                 return false;
@@ -1591,8 +1648,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         else {
             return false;
         };
+        if let Some(member) = static_member {
+            return matches!(
+                &prepared.type_annotation.literal_freshness,
+                DeclaredLiteralFreshness::WideningStaticMembers(members)
+                    if members.iter().any(|widening| widening.as_str() == member.as_ref())
+            );
+        }
         match &prepared.type_annotation.literal_freshness {
-            DeclaredLiteralFreshness::Regular => false,
+            DeclaredLiteralFreshness::Regular
+            | DeclaredLiteralFreshness::WideningStaticMembers(_)
+            | DeclaredLiteralFreshness::WideningNullish => false,
             DeclaredLiteralFreshness::Widening => true,
             DeclaredLiteralFreshness::Follows(copied) => {
                 // A copy written in a namespace body reads that body's own
@@ -1627,7 +1693,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The value a module assigns with `export = X`, as a root in the
     /// module's own scope, and whether X can be called or constructed (a
     /// function or class declaration). `None` for a module without one.
-    fn export_assignment_root(&self, module: &str) -> Option<(ValueRootKey, bool)> {
+    pub(super) fn export_assignment_root(&self, module: &str) -> Option<(ValueRootKey, bool)> {
         let indexed = self.ctx.ensure_indexed_ready_serve(module)?.indexed;
         let assigned = indexed.shallow_state.export_assignment_target()?;
         let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
@@ -1673,11 +1739,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(LexicalValueBinding::Import(target)) =
             shallow.visible_value_binding(owner, value_root.name.as_ref())
         {
+            let Some(dependency) = self
+                .ctx
+                .resolve_type_dependency_canonical(canonical, &target.source_specifier)
+            else {
+                // No file answers the specifier: the program's ambient
+                // declaration of the module names the member.
+                return self.ambient_import_member_root(target, path);
+            };
             // The imported namespace's own file names its members.
             let (declaring, skipped) = if target.is_namespace {
-                let dependency = self
-                    .ctx
-                    .resolve_type_dependency_canonical(canonical, &target.source_specifier)?;
                 // A module whose value is `export = X`: an import assignment
                 // binds X itself, and a namespace import reads X's members —
                 // its `default` is X when X can be called or constructed
@@ -1775,12 +1846,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         (1..=path.len()).rev().find_map(|length| {
             let name = qualified(value_root.name.as_ref(), &path[..length]);
-            let declared = matches!(
-                shallow.visible_value_binding(owner, &name),
-                Some(LexicalValueBinding::Local(_))
-            ) || (unbound
-                && value_root.name.as_ref() != "globalThis"
-                && self.global_value_declaration(canonical, &name).is_some());
+            let visible = shallow.visible_value_binding(owner, &name);
+            let declared = matches!(visible, Some(LexicalValueBinding::Local(_)))
+                || (visible.is_none()
+                    && matches!(
+                        shallow.value_fallback_augmentation_scope(owner, &name),
+                        Some(
+                            verter_semantic::analysis::type_eval::AugmentationScopeKind::Module(_)
+                        )
+                    ))
+                || (unbound
+                    && value_root.name.as_ref() != "globalThis"
+                    && self.global_value_declaration(canonical, &name).is_some());
             declared.then(|| {
                 (
                     ValueRootKey {
@@ -1847,56 +1924,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .map(Arc::<str>::from)
     }
 
-    /// Build the VALUE-export namespace object for `typeof import("./m")`.
+    /// Build the VALUE-export namespace object for `typeof import("./m")`:
+    /// the module object ([`Self::file_module_object`]) — one member per
+    /// value the module exports, each the `typeof` its declaration reads
+    /// through the shared `TypeOf` rail, so a type-only export is no member.
     ///
-    /// The produced [`SemanticNodeData::Object`] surface carries one member
-    /// per VALUE export of the dependency module — each member's type
-    /// resolved through the SHARED `TypeOf` dispatch (`build_typeof`) in the
-    /// dependency's own scope, the SAME `effective_prepared_value_decl →
-    /// resolve_value_export_target` rail every other value-root consumer uses
-    /// (no forked resolver). A TYPE-only export (`interface`, `type`) resolves
-    /// to no value decl, so its per-export `TypeOf` misses and the name is
-    /// naturally EXCLUDED from the value namespace — matching TS, where
-    /// `typeof import("…")` surfaces only the runtime value bindings.
-    ///
-    /// An ambient `export = X` module reduces instead to the type of the
-    /// export-assignment target `X` (the CommonJS value-namespace identity):
-    /// the whole module IS that single value, not an object wrapping it.
-    ///
-    /// Member order is the lexicographically-sorted export-name order so the
-    /// interned surface is deterministic across the non-deterministic
-    /// `exports` map iteration order.
-    ///
-    /// Read-set NOTE (lead-architect ruled, shared with the cross-file
-    /// value-export rail — see the Enums block's identical carry-forward): the
-    /// per-export `TypeOf` chase resolves each visible leaf correctly but does
-    /// not bubble every resolved leaf decl into the consuming query's
-    /// read-set / reverse index. That is a PRE-EXISTING property of the shared
-    /// cross-file value-export rail (identical to bare `typeof E`), NOT an
-    /// import-type-local defect; the clean fix is system-wide read-set / fact
-    /// bubbling, deferred with the rest of that work.
+    /// A module assigned with `export = X` is instead the type of X (the
+    /// CommonJS whole-module value): `typeof import("…")` applies no interop.
     pub(super) fn build_import_value_namespace(
         &self,
         dep_canonical: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let Some(indexed) = self
-            .ctx
-            .ensure_indexed_ready_serve(dep_canonical)
-            .map(|serve| serve.indexed)
-        else {
-            return self.opaque(QueryError::Miss);
-        };
-        let dep_scope = NodeScopeId::File {
-            canonical_id: Arc::from(dep_canonical),
-            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            whole_hash: indexed.whole_hash,
-            local_scope: None,
-        };
-
-        // Ambient `export = X`: the value namespace IS `typeof X` (the
-        // CommonJS whole-module value). Resolved through the SAME `TypeOf`
-        // rail as a named export.
+        // Ambient `export = X`: the value namespace IS `typeof X`, resolved
+        // through the SAME `TypeOf` rail as a named export.
         if let Some(assign_target) = self.import_export_assignment_target(dep_canonical) {
             return match self
                 .execute_read(self.typeof_key_for(
@@ -1919,70 +1960,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => self.opaque(QueryError::Miss),
             };
         }
-
-        // ESM module: object of value exports, lex-sorted for determinism.
-        let mut export_names: Vec<Arc<str>> = indexed
-            .shallow_state
-            .exports
-            .keys()
-            .map(|name| Arc::<str>::from(name.as_str()))
-            .collect();
-        export_names.sort();
-
-        let mut members: Vec<SurfaceMember> = Vec::new();
-        for name in &export_names {
-            let node = match self
-                .execute_read(self.typeof_key_for(
-                    ValueRootKey {
-                        scope: crate::semantic_query::ScopeId {
-                            canonical_id: Arc::from(dep_canonical),
-                            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                            local_scope: None,
-                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                            ),
-                        },
-                        name: Arc::clone(name),
-                    },
-                    context,
-                ))
-                .value
-            {
-                QueryResult::Value(id) => id,
-                // A TYPE-only export (no value decl) misses the value rail —
-                // it is genuinely absent from the value namespace.
-                _ => continue,
-            };
-            // Defensive: an opaque sentinel is not a real value-export type.
-            if matches!(
-                self.graph().node_data(node).as_deref(),
-                Some(SemanticNodeData::Opaque(_)) | None
-            ) {
-                continue;
-            }
-            members.push(SurfaceMember {
-                key: crate::semantic_query::AuthoredPropertyKey::String(Arc::clone(name)),
-                value: node,
-                optional: false,
-                readonly: false,
-                method_kind: None,
-                has_implementation_body: false,
-                visibility: verter_type_expr::MemberVisibility::Public,
-                // Synthesised namespace member — never a literal member.
-                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                // Synthesised namespace member — no single source decl site;
-                // its declaration lives in the dependency module.
-                spans: verter_type_expr::MemberSpans::default(),
-                declaration_origin: Some(Arc::from(dep_canonical)),
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-            });
+        match self.file_module_object(dep_canonical, context) {
+            Some((object, _)) => object,
+            None => self.opaque(QueryError::Miss),
         }
-
-        self.graph().intern_node_with_scope(
-            SemanticNodeData::Object(SurfaceView::from_members(members, None)),
-            dep_scope,
-        )
     }
 
     /// Build a synthesized component-default PUBLIC INSTANCE surface for
@@ -5361,6 +5342,191 @@ impl<'a> ProjectSemanticDispatch<'a> {
             source_env_unobservable,
             base_position,
         })
+    }
+
+    /// The declaration an import of an AMBIENT module names through `path`
+    /// (see [`Self::qualified_value_member_root`]), and how many path
+    /// segments it consumes: the binding's member of the first
+    /// `declare module` block declaring it — `default` its `export default`
+    /// declaration, an import assignment its `export = X` value, a namespace
+    /// import's first segment the member it names — then the longest
+    /// declared qualified member (`AN.f`) the rest of the path names.
+    fn ambient_import_member_root(
+        &self,
+        target: &crate::resolver_core::ImportTarget,
+        path: &[Arc<str>],
+    ) -> Option<(ValueRootKey, usize)> {
+        let blocks = self.ambient_module_blocks(&target.source_specifier);
+        let (member, skipped): (Arc<str>, usize) = if target.is_import_equals() {
+            let block = blocks
+                .iter()
+                .find(|block| block.export_assignment.is_some())?;
+            let assigned = Arc::clone(block.export_assignment.as_ref()?);
+            return self
+                .ambient_block_declares_value(block, &assigned)
+                .then(|| (block.root(assigned), 0));
+        } else if target.is_namespace {
+            (Arc::clone(path.first()?), 1)
+        } else {
+            (Arc::from(target.imported_name.as_str()), 0)
+        };
+        blocks.iter().find_map(|block| {
+            // A module assigned with `export = X` names X by `default` too
+            // (TypeScript 7 always applies the interop).
+            let name: Arc<str> = if member.as_ref() == "default" {
+                Arc::clone(
+                    block
+                        .default_export
+                        .as_ref()
+                        .or(block.export_assignment.as_ref())?,
+                )
+            } else {
+                Arc::clone(&member)
+            };
+            let rest = &path[skipped..];
+            let exported = |qualified: &str| {
+                self.ctx
+                    .ensure_indexed_ready_serve(block.canonical.as_ref())
+                    .is_some_and(|serve| {
+                        serve
+                            .indexed
+                            .shallow_state
+                            .decl_bodies()
+                            .header_index()
+                            .namespace_member_is_exported(block.owner, qualified)
+                    })
+            };
+            (1..=rest.len())
+                .rev()
+                .find_map(|length| {
+                    let mut qualified = name.to_string();
+                    for segment in &rest[..length] {
+                        qualified.push('.');
+                        qualified.push_str(segment);
+                    }
+                    (self.ambient_block_declares_value(block, &qualified) && exported(&qualified))
+                        .then(|| (block.root(Arc::from(qualified)), skipped + length))
+                })
+                .or_else(|| {
+                    self.ambient_block_declares_value(block, &name)
+                        .then(|| (block.root(Arc::clone(&name)), skipped))
+                })
+        })
+    }
+
+    /// The ambient declarations of the module `specifier` names when no
+    /// file answers it — every `declare module "specifier" { … }` block of
+    /// the program, in declaration precedence order. The augmenter set is observed onto the active
+    /// tracer, so a block that appears, disappears or changes shape later
+    /// misses every warm read that went through it, including a read that
+    /// found no block.
+    pub(super) fn ambient_module_blocks(&self, specifier: &str) -> Vec<AmbientModuleBlock> {
+        use crate::file_artifact_store::{
+            AugmentationTargetKey, AugmentationTargetKind, InternedSpecifier,
+        };
+        let host = self.ctx.host_for_fact_tracer_install();
+        host.ingest_program_ambient_roots();
+        let env_hashes = host.host_view_env_hashes();
+        let (population, overlay_discriminator) =
+            crate::session_view::augmentation_population_for_view(self.ctx.active_session_view());
+        let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier));
+        let key = AugmentationTargetKey {
+            project_identity: host.host_view_project_identity(),
+            resolve_env_hash: env_hashes.resolve_env_hash,
+            lib_env_hash: env_hashes.lib_env_hash,
+            population,
+            target: target.clone(),
+        };
+        let augmenter_set = self
+            .ctx
+            .project_type_store()
+            .indexed()
+            .ensure_augmentation_index_populated(
+                &key,
+                |augmenter: &str, spec: &str| {
+                    self.ctx
+                        .resolve_type_dependency_canonical(augmenter, spec)
+                        .map(Arc::from)
+                },
+                overlay_discriminator,
+            );
+        crate::resolver_core::resolver_context::observe_fan_out(
+            crate::resolver_core::FactVersionRef::RouteSurface(
+                crate::resolver_core::RouteSurfaceFactRef {
+                    canonical_id: specifier.to_owned(),
+                    key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
+                        &target,
+                    ),
+                    lane: verter_semantic::facts::FactLane::Semantic,
+                    expected_hash: augmenter_set.fingerprint,
+                },
+            ),
+        );
+        let scope = verter_semantic::analysis::type_eval::AugmentationScopeKind::Module(
+            specifier.to_owned(),
+        );
+        let mut canonicals: Vec<Arc<str>> = augmenter_set
+            .entries
+            .iter()
+            .map(|entry| Arc::clone(entry.canonical()))
+            .collect();
+        canonicals.sort_by(|left, right| {
+            host.declaration_sequence_rank(left)
+                .cmp(&host.declaration_sequence_rank(right))
+                .then_with(|| left.cmp(right))
+        });
+        canonicals.dedup();
+        let mut blocks = Vec::new();
+        for canonical in canonicals {
+            let Some(indexed) = self
+                .ctx
+                .ensure_indexed_ready_serve(canonical.as_ref())
+                .map(|serve| serve.indexed)
+            else {
+                continue;
+            };
+            for block in &indexed
+                .shallow_state
+                .decl_bodies()
+                .header_index()
+                .augmentation_blocks
+            {
+                if block.scope == scope {
+                    blocks.push(AmbientModuleBlock {
+                        canonical: Arc::clone(&canonical),
+                        owner: block.owner,
+                        scope: scope.clone(),
+                        default_export: block.default_export.as_deref().map(Arc::from),
+                        export_assignment: block.export_assignment.as_deref().map(Arc::from),
+                    });
+                }
+            }
+        }
+        blocks
+    }
+
+    /// Whether the ambient module `block` declares the value `name` — a
+    /// member it names under its own scope, which the identity
+    /// `(canonical, owner, name)` addresses (no file-scope value of the
+    /// file shadows it, and no other module block of the file declares it).
+    pub(super) fn ambient_block_declares_value(
+        &self,
+        block: &AmbientModuleBlock,
+        name: &str,
+    ) -> bool {
+        let Some(indexed) = self
+            .ctx
+            .ensure_indexed_ready_serve(block.canonical.as_ref())
+            .map(|serve| serve.indexed)
+        else {
+            return false;
+        };
+        let shallow = &indexed.shallow_state;
+        shallow.visible_value_binding(block.owner, name).is_none()
+            && shallow
+                .value_fallback_augmentation_scope(block.owner, name)
+                .as_ref()
+                == Some(&block.scope)
     }
 
     /// Resolve a bare type name imported from a NON-FILE (external / ambient)
@@ -14523,6 +14689,37 @@ pub(super) enum MappedKeyRemapOutcome {
     /// The remap is unresolved / non-finite / non-string — the mapped type
     /// FAILS CLOSED to its deferred carrier (never the original key).
     DeferCarrier,
+}
+
+/// One ambient declaration of a module, `declare module "specifier" { … }`
+/// ([`ProjectSemanticDispatch::ambient_module_blocks`]).
+#[derive(Debug, Clone)]
+pub(super) struct AmbientModuleBlock {
+    /// The file declaring the block.
+    pub(super) canonical: Arc<str>,
+    /// The file owner the block's members are declared in.
+    pub(super) owner: verter_type_expr::TopLevelOwnerId,
+    /// The block's augmentation scope.
+    pub(super) scope: verter_semantic::analysis::type_eval::AugmentationScopeKind,
+    /// The name its `export default` declaration declares.
+    pub(super) default_export: Option<Arc<str>>,
+    /// The name it assigns the module to with `export = X`.
+    pub(super) export_assignment: Option<Arc<str>>,
+}
+
+impl AmbientModuleBlock {
+    /// The value root of the block's member `name`.
+    pub(super) fn root(&self, name: Arc<str>) -> ValueRootKey {
+        ValueRootKey {
+            scope: crate::semantic_query::ScopeId {
+                canonical_id: Arc::clone(&self.canonical),
+                owner: self.owner,
+                local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(self.owner),
+            },
+            name,
+        }
+    }
 }
 
 /// The symbol space a global declaration is looked up in

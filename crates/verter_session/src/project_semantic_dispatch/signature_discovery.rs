@@ -522,46 +522,28 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
         Ok(out)
     }
 
-    /// Apparent-type signatures of a global wrapper interface, read from the
-    /// resolved global population of the request's project. An absent global
-    /// (`noLib`) is the checker's empty apparent type: a complete negative.
+    /// Apparent-type signatures of a global wrapper interface: the wrapper
+    /// the demanding project declares
+    /// ([`ProjectSemanticDispatch::global_wrapper_surface`]). An absent
+    /// global (`noLib`) is the checker's empty apparent type: a complete
+    /// negative, which a declaration appearing later invalidates.
+    ///
+    /// A read of a primitive subject arrives with its key already rewritten
+    /// to that wrapper
+    /// ([`ProjectSemanticDispatch::scope_apparent_signature_subject`]); one
+    /// reached here — a union arm, an unscoped or wrapper-less read — depends
+    /// on the demanding project, which its key does not name, so the answer
+    /// stays out of the shared memo with every entry that reads it.
     fn apparent(&mut self, name: &str, args: &[SemanticNodeId]) -> Found {
         let d = self.dispatch();
-        let Some(canonical) = crate::request_context::current_request_canonical()
-            .or_else(|| d.lexical_demand_scope.borrow().last().cloned())
-        else {
+        let Some(canonical) = d.wrapper_demand_canonical() else {
             return unsettled();
         };
-        if d.project_stable_key_for_canonical(canonical.as_ref())
-            .is_none()
-        {
-            return unsettled();
-        }
-        let Some(declaration) =
-            d.lib_global_declaration(canonical.as_ref(), name, super::build::GlobalSpace::Type)
-        else {
-            return Ok(Vec::new());
-        };
-        let slot = d.type_slot_for(
-            Arc::clone(&declaration.canonical_id),
-            declaration.owner,
-            Arc::from(name),
-        );
-        let surface = d.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                slot,
-                Arc::from(args.to_vec().into_boxed_slice()),
-                d.instantiate_context_for(
-                    declaration.canonical_id.as_ref(),
-                    ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Expanded,
-                    ),
-                ),
-            ),
-        ));
-        match surface.value {
-            crate::semantic_query::QueryResult::Value(surface) => self.discover(surface),
-            _ => unsettled(),
+        d.fold_into_top_build_local_taint(false, true);
+        match d.global_wrapper_surface(name, args, canonical.as_ref()) {
+            super::apparent_type::GlobalWrapper::Surface(surface) => self.discover(surface),
+            super::apparent_type::GlobalWrapper::Absent => Ok(Vec::new()),
+            super::apparent_type::GlobalWrapper::Unsettled => unsettled(),
         }
     }
 

@@ -103,15 +103,15 @@ impl ProjectSemanticDispatch<'_> {
                 ApparentDemandScope::Anchored => return miss(),
             },
         };
-        // The consumer depends on the library the lookup reads: a
-        // re-registration of the lib invalidates it through the standard
-        // dependency-fact validators. For a rootless base the recorded
-        // consumer is the demand canonical — the demand-project read.
-        let Some(declaration) = self.lib_global_declaration(
-            canonical.as_ref(),
-            CALLABLE_APPARENT_INTERFACE,
-            super::build::GlobalSpace::Type,
-        ) else {
+        // The global the project declares, through the one global lookup:
+        // the consumer depends on the library it reads (a re-registration
+        // invalidates it through the standard dependency-fact validators)
+        // and, when the library declares none, on the program's global
+        // contributors. For a rootless base the recorded consumer is the
+        // demand canonical — the demand-project read.
+        let Some(declaration) =
+            self.first_global_declaration(canonical.as_ref(), CALLABLE_APPARENT_INTERFACE)
+        else {
             return miss();
         };
 
@@ -273,3 +273,152 @@ impl ProjectSemanticDispatch<'_> {
 #[cfg(test)]
 #[path = "apparent_type_tests.rs"]
 mod apparent_type_tests;
+
+/// A global wrapper interface read for an apparent type
+/// ([`ProjectSemanticDispatch::global_wrapper_surface`]).
+pub(super) enum GlobalWrapper {
+    /// The instantiated interface's surface.
+    Surface(SemanticNodeId),
+    /// The project declares no such global (`noLib`): the checker's empty
+    /// apparent type.
+    Absent,
+    /// The canonical names no project, or the interface's instantiation did
+    /// not settle.
+    Unsettled,
+}
+
+impl ProjectSemanticDispatch<'_> {
+    /// The global wrapper interface `name` (`String`, `Number`, `Array`, …)
+    /// instantiated with `args` — the apparent type of a primitive, a
+    /// literal or an array — as `canonical`'s project declares it, through
+    /// the one global lookup ([`Self::first_global_declaration`]): its
+    /// library's, else the program's own, merged with every later
+    /// declaration. The lookup records `canonical`'s dependency on the
+    /// library it reads and on the program's global contributors, so a
+    /// re-registration, or a declaration appearing after a miss, invalidates
+    /// the read.
+    pub(super) fn global_wrapper_surface(
+        &self,
+        name: &str,
+        args: &[SemanticNodeId],
+        canonical: &str,
+    ) -> GlobalWrapper {
+        if self.project_stable_key_for_canonical(canonical).is_none() {
+            return GlobalWrapper::Unsettled;
+        }
+        let Some(declaration) = self.first_global_declaration(canonical, name) else {
+            return GlobalWrapper::Absent;
+        };
+        let slot = self.type_slot_for(
+            Arc::clone(&declaration.canonical_id),
+            declaration.owner,
+            Arc::from(name),
+        );
+        match self
+            .execute_read(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    slot,
+                    Arc::from(args.to_vec().into_boxed_slice()),
+                    self.instantiate_context_for(
+                        declaration.canonical_id.as_ref(),
+                        ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    ),
+                ),
+            ))
+            .value
+        {
+            QueryResult::Value(surface) => GlobalWrapper::Surface(surface),
+            _ => GlobalWrapper::Unsettled,
+        }
+    }
+
+    /// The file a wrapper read that names no declaration of its own is
+    /// scoped by: the request's file, else the innermost demand site.
+    pub(super) fn wrapper_demand_canonical(&self) -> Option<Arc<str>> {
+        crate::request_context::current_request_canonical()
+            .or_else(|| self.lexical_demand_scope.borrow().last().cloned())
+    }
+
+    /// The global wrapper whose signatures and members `node` has — its
+    /// apparent type (`getApparentType`): `String` for a string, a string
+    /// literal or a template, `Number`, `Boolean`, `BigInt` and `Symbol`
+    /// likewise (a `unique symbol` too), and `Array` / `ReadonlyArray` over
+    /// an array's element type. `None` for any other node.
+    pub(super) fn apparent_wrapper_of(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(&'static str, Vec<SemanticNodeId>)> {
+        use crate::semantic_query::{LiteralValue, PrimitiveKind};
+        let data = self.graph().node_data(node)?;
+        let name = match &*data {
+            SemanticNodeData::Primitive(PrimitiveKind::String)
+            | SemanticNodeData::Literal(LiteralValue::String(_))
+            | SemanticNodeData::TemplateLiteral { .. } => "String",
+            SemanticNodeData::Primitive(PrimitiveKind::Number)
+            | SemanticNodeData::Literal(LiteralValue::Number(_)) => "Number",
+            SemanticNodeData::Primitive(PrimitiveKind::Boolean)
+            | SemanticNodeData::Literal(LiteralValue::Boolean(_)) => "Boolean",
+            SemanticNodeData::Primitive(PrimitiveKind::BigInt)
+            | SemanticNodeData::Literal(LiteralValue::BigInt(_)) => "BigInt",
+            SemanticNodeData::Primitive(PrimitiveKind::Symbol)
+            | SemanticNodeData::TypeOfNominal(_) => "Symbol",
+            SemanticNodeData::Array { element, readonly } => {
+                let name = if *readonly { "ReadonlyArray" } else { "Array" };
+                return Some((name, vec![*element]));
+            }
+            _ => return None,
+        };
+        Some((name, Vec::new()))
+    }
+
+    /// Whether `key` is a `SignaturesOfType` read whose subject takes its
+    /// signatures from a global wrapper ([`Self::apparent_wrapper_of`]).
+    pub(super) fn key_reads_apparent_signatures(&self, key: &SemanticQueryKey) -> bool {
+        matches!(
+            key,
+            SemanticQueryKey::SignaturesOfType { subject, .. }
+                if self.apparent_wrapper_of(*subject).is_some()
+        )
+    }
+
+    /// Rewrite a `SignaturesOfType` read of a subject every project shares
+    /// (`string`, `1`, `T[]`) to the same read over the wrapper the
+    /// demanding project declares, BEFORE memo admission, so the admitted
+    /// entry's key names that project's wrapper and a warm repeat is served
+    /// from it. A project declaring no such wrapper gives the subject no
+    /// apparent signature — the answer `never` has, which every project
+    /// shares — and the lookup facts of the miss root that entry, so a
+    /// declaration appearing later misses it. With no demand site the key
+    /// stays as it is: its build reads the wrapper for the demand and stays
+    /// out of the shared memo.
+    pub(super) fn scope_apparent_signature_subject(
+        &self,
+        key: SemanticQueryKey,
+    ) -> SemanticQueryKey {
+        let SemanticQueryKey::SignaturesOfType {
+            subject,
+            kind,
+            context,
+        } = key
+        else {
+            return key;
+        };
+        let scoped = self
+            .apparent_wrapper_of(subject)
+            .zip(self.wrapper_demand_canonical())
+            .and_then(|((name, args), canonical)| {
+                match self.global_wrapper_surface(name, &args, canonical.as_ref()) {
+                    GlobalWrapper::Surface(surface) => Some(surface),
+                    GlobalWrapper::Absent => Some(self.graph().intern_node(
+                        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::Never),
+                    )),
+                    GlobalWrapper::Unsettled => None,
+                }
+            });
+        SemanticQueryKey::SignaturesOfType {
+            subject: scoped.unwrap_or(subject),
+            kind,
+            context,
+        }
+    }
+}
