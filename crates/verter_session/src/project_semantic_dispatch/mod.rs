@@ -4173,6 +4173,8 @@ mod checker_probe_lane_tests;
 #[cfg(test)]
 mod class_member_return_tests;
 #[cfg(test)]
+mod class_owner_tests;
+#[cfg(test)]
 mod class_prototype_property_tests;
 #[cfg(test)]
 mod class_value_heritage_tests;

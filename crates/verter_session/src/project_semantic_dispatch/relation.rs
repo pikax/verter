@@ -8317,20 +8317,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 MemberOwner::NotAClass => Some(RelationResult::NotAssignable),
                 MemberOwner::Undecided => Some(RelationResult::Unknown),
                 MemberOwner::Class(source_class) => {
-                    if super::build::same_class_identity(&source_class, &target_class) {
-                        return None;
-                    }
-                    let ancestry = self.class_heritage_ancestry(&source_class);
-                    if ancestry
-                        .ancestors
-                        .iter()
-                        .any(|ancestor| super::build::same_class_identity(ancestor, &target_class))
-                    {
-                        None
-                    } else if ancestry.decided {
-                        Some(RelationResult::NotAssignable)
-                    } else {
-                        Some(RelationResult::Unknown)
+                    match self.class_derives_from(&source_class, &target_class) {
+                        Some(true) => None,
+                        Some(false) => Some(RelationResult::NotAssignable),
+                        None => Some(RelationResult::Unknown),
                     }
                 }
             };
@@ -8365,11 +8355,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    /// The declaration that declares `member`: the file-scope class whose
-    /// declaration contains the member's, or no class when a file-scope
-    /// interface or type alias declares it. A member declared anywhere else
-    /// (a local class, a class expression, a type literal inside a body)
-    /// is undecided.
+    /// The class that declares `member` — the class node whose body
+    /// declares it directly, read from the file's syntactic class index —
+    /// or no class when a file-scope interface or type alias declares it.
+    /// A file-scope class is named by its declaration identity, which the
+    /// class-heritage ancestry authority reads; any other class (a class
+    /// expression, a class declared inside a body) by its node. A member
+    /// whose declaration neither reads is undecided.
     fn member_owner(&self, member: &crate::semantic_query::SurfaceMember) -> MemberOwner {
         use verter_semantic::analysis::type_eval::TypeDeclKind;
         let (Some(span), Some(file)) =
@@ -8384,36 +8376,97 @@ impl<'a> ProjectSemanticDispatch<'a> {
         else {
             return MemberOwner::Undecided;
         };
-        let headers = indexed.shallow_state.decl_bodies().header_index();
-        let mut owner = MemberOwner::Undecided;
-        for (key, header) in headers.type_headers.iter() {
-            if header.span.start > span.start || span.end > header.span.end {
-                continue;
-            }
-            owner = match header.kind {
-                TypeDeclKind::Class => {
-                    let direct = member.key.as_known().is_some_and(|name| {
-                        header.member_headers.iter().any(|declared| {
-                            declared
-                                .key
-                                .as_known()
-                                .is_some_and(|declared| declared.element_access_collides(&name))
-                        })
-                    });
-                    if !direct {
-                        return MemberOwner::Undecided;
-                    }
-                    return MemberOwner::Class(crate::semantic_query::DeclIdentity {
-                        canonical_id: Arc::clone(file),
-                        owner: key.owner,
-                        whole_hash: indexed.whole_hash,
-                        decl_name: Arc::clone(&key.name),
-                    });
-                }
-                _ => MemberOwner::NotAClass,
-            };
+        let decl_bodies = indexed.shallow_state.decl_bodies();
+        let headers = decl_bodies.header_index();
+        let classes = decl_bodies.function_program_index();
+        if let Some(class) = classes.class_declaring_member(span) {
+            // A file-scope class declaration is the outermost class inside
+            // its header.
+            let file_scope = (!class.expression && !classes.class_encloses(class.span))
+                .then(|| {
+                    headers.type_headers.iter().find(|(_, header)| {
+                        header.kind == TypeDeclKind::Class
+                            && header.span.start <= class.span.start
+                            && class.span.end <= header.span.end
+                    })
+                })
+                .flatten();
+            return MemberOwner::Class(match file_scope {
+                Some((key, _)) => ClassOwner::Declared(crate::semantic_query::DeclIdentity {
+                    canonical_id: Arc::clone(file),
+                    owner: key.owner,
+                    whole_hash: indexed.whole_hash,
+                    decl_name: Arc::clone(&key.name),
+                }),
+                None => ClassOwner::Syntactic {
+                    file: Arc::clone(file),
+                    span: class.span,
+                    has_heritage: class.has_heritage,
+                },
+            });
         }
-        owner
+        let within_a_type = headers.type_headers.iter().any(|(_, header)| {
+            header.kind != TypeDeclKind::Class
+                && header.span.start <= span.start
+                && span.end <= header.span.end
+        });
+        if within_a_type {
+            MemberOwner::NotAClass
+        } else {
+            MemberOwner::Undecided
+        }
+    }
+
+    /// Whether the class `source` derives from the class `target`, the
+    /// same class included — the checker's `isValidOverrideOf` over the
+    /// members' declaring classes. A file-scope class reads its transitive
+    /// ancestry from the class-heritage ancestry authority, whose decided
+    /// chain names file-scope classes only; a class with no `extends`
+    /// clause derives from itself alone. `None` when the chain is not
+    /// decided, or when a class other than a file-scope one has a
+    /// heritage clause.
+    fn class_derives_from(&self, source: &ClassOwner, target: &ClassOwner) -> Option<bool> {
+        match (source, target) {
+            (ClassOwner::Declared(source), ClassOwner::Declared(target)) => {
+                if super::build::same_class_identity(source, target) {
+                    return Some(true);
+                }
+                let ancestry = self.class_heritage_ancestry(source);
+                if ancestry
+                    .ancestors
+                    .iter()
+                    .any(|ancestor| super::build::same_class_identity(ancestor, target))
+                {
+                    Some(true)
+                } else {
+                    ancestry.decided.then_some(false)
+                }
+            }
+            (ClassOwner::Declared(source), ClassOwner::Syntactic { .. }) => self
+                .class_heritage_ancestry(source)
+                .decided
+                .then_some(false),
+            (
+                ClassOwner::Syntactic {
+                    file,
+                    span,
+                    has_heritage,
+                },
+                target,
+            ) => {
+                if let ClassOwner::Syntactic {
+                    file: target_file,
+                    span: target_span,
+                    ..
+                } = target
+                {
+                    if file == target_file && span == target_span {
+                        return Some(true);
+                    }
+                }
+                (!has_heritage).then_some(false)
+            }
+        }
     }
 
     /// A property the source declares through its apparent `Function` type
@@ -9263,12 +9316,26 @@ fn surfaces_require_members_the_other_lacks(a: &SurfaceView, b: &SurfaceView) ->
 /// What declares a property, for the checker's protected-member rule
 /// ([`ProjectSemanticDispatch::property_accessibility_relation`]).
 enum MemberOwner {
-    /// A file-scope class declares it directly.
-    Class(crate::semantic_query::DeclIdentity),
+    /// A class declares it directly.
+    Class(ClassOwner),
     /// A file-scope interface or type alias declares it: no class does.
     NotAClass,
     /// Its declaration is not read from the graph.
     Undecided,
+}
+
+/// The class that declares a member directly.
+enum ClassOwner {
+    /// A file-scope class, by its declaration identity.
+    Declared(crate::semantic_query::DeclIdentity),
+    /// Any other class — a class expression, a class declared inside a
+    /// body — by its node in the file's syntactic class index.
+    Syntactic {
+        file: Arc<str>,
+        span: verter_span::Span,
+        /// Whether the class has an `extends` clause.
+        has_heritage: bool,
+    },
 }
 
 fn template_literal_kind_verdict(

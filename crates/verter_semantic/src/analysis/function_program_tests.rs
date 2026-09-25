@@ -1514,3 +1514,41 @@ fn class_evaluation_occurrences_are_indexed_without_promoting_static_locals() {
         "static-block locals never enter the function's runtime inventory"
     );
 }
+
+#[test]
+fn every_class_records_the_members_its_body_declares() {
+    let source = "class A { x = 1; m(): { p: number } { return { p: 1 }; } }\n\
+                  function f() { class L extends A { y = 2 } return class { constructor(protected z: number, w: number) {} }; }";
+    let index = index_of(source);
+    let span_of = |text: &str| {
+        let start = source.find(text).expect("fixture text") as u32;
+        verter_span::Span::new(start, start + text.len() as u32)
+    };
+    let a = index
+        .class_declaring_member(span_of("x = 1;"))
+        .expect("a class element");
+    assert!(!a.expression && !a.has_heritage);
+    assert!(!index.class_encloses(a.span));
+    assert_eq!(
+        index.class_declaring_member(span_of("m(): { p: number } { return { p: 1 }; }")),
+        Some(a)
+    );
+    assert_eq!(
+        index.class_declaring_member(span_of("p: number")),
+        None,
+        "a type literal's member is no class member"
+    );
+    let local = index
+        .class_declaring_member(span_of("y = 2"))
+        .expect("a local class element");
+    assert!(!local.expression && local.has_heritage);
+    let expression = index
+        .class_declaring_member(span_of("protected z: number"))
+        .expect("a property-declaring constructor parameter");
+    assert!(expression.expression && !expression.has_heritage);
+    assert_eq!(
+        index.class_declaring_member(span_of("w: number")),
+        None,
+        "a plain parameter declares no property"
+    );
+}

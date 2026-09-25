@@ -765,6 +765,67 @@ pub struct FunctionProgramIndex {
     nested: Arc<rustc_hash::FxHashMap<(FunctionProgramKey, verter_span::Span), usize>>,
     /// Indexed declaration/callback expressions, in source order.
     expressions: Arc<[ProgramExpressionRecord]>,
+    /// Every class the file authors, in source order: syntactic data
+    /// recorded by the same build, owned by this index and released with
+    /// it.
+    classes: Arc<[ClassSyntaxRecord]>,
+}
+
+/// One class the file authors — a declaration at any depth or a class
+/// expression — recorded syntactically at index time. A member's
+/// declaring class is the class whose body declares it directly, so a
+/// class records the span of each member it declares: each class element,
+/// and each constructor parameter that declares a property.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassSyntaxRecord {
+    /// The class node's span.
+    pub span: verter_span::Span,
+    /// Whether the class is an expression rather than a declaration.
+    pub expression: bool,
+    /// Whether the class has an `extends` clause.
+    pub has_heritage: bool,
+    /// The span of each member the class declares directly, in source
+    /// order.
+    pub members: Arc<[verter_span::Span]>,
+}
+
+/// Collects every class of one parsed file, in source order.
+#[derive(Default)]
+struct ClassSyntaxCollector {
+    classes: Vec<ClassSyntaxRecord>,
+}
+
+impl<'a> Visit<'a> for ClassSyntaxCollector {
+    fn visit_class(&mut self, class: &Class<'a>) {
+        let mut members = Vec::with_capacity(class.body.body.len());
+        for element in &class.body.body {
+            members.push(element.span().into());
+            if let oxc_ast::ast::ClassElement::MethodDefinition(method) = element {
+                if method.kind == MethodDefinitionKind::Constructor {
+                    members.extend(
+                        method
+                            .value
+                            .params
+                            .items
+                            .iter()
+                            .filter(|parameter| {
+                                parameter.accessibility.is_some()
+                                    || parameter.readonly
+                                    || parameter.r#override
+                            })
+                            .map(|parameter| verter_span::Span::from(parameter.span)),
+                    );
+                }
+            }
+        }
+        self.classes.push(ClassSyntaxRecord {
+            span: class.span.into(),
+            expression: class.r#type == oxc_ast::ast::ClassType::ClassExpression,
+            has_heritage: class.super_class.is_some(),
+            members: Arc::from(members.into_boxed_slice()),
+        });
+        walk::walk_class(self, class);
+    }
 }
 
 type ValueFunctionLookup = rustc_hash::FxHashMap<
@@ -872,7 +933,29 @@ impl FunctionProgramIndex {
             by_key: Arc::clone(&self.by_key),
             value_functions: Arc::clone(&self.value_functions),
             nested: Arc::clone(&self.nested),
+            classes: Arc::clone(&self.classes),
         }
+    }
+
+    /// The class whose body declares a member directly at `declaration`,
+    /// the member's declaration span: a class element's span, or a
+    /// property-declaring constructor parameter's.
+    #[must_use]
+    pub fn class_declaring_member(
+        &self,
+        declaration: verter_span::Span,
+    ) -> Option<&ClassSyntaxRecord> {
+        self.classes
+            .iter()
+            .find(|class| class.members.contains(&declaration))
+    }
+
+    /// Whether another class of the file encloses the class at `span`.
+    #[must_use]
+    pub fn class_encloses(&self, span: verter_span::Span) -> bool {
+        self.classes.iter().any(|class| {
+            class.span != span && class.span.start <= span.start && span.end <= class.span.end
+        })
     }
 
     /// Indexed expression at the exact content-free program point.
@@ -1014,6 +1097,8 @@ fn build_function_program_index_impl<'ast>(
             &mut ctx,
         );
     }
+    let mut classes = ClassSyntaxCollector::default();
+    classes.visit_program(program);
     resolve_captures(&mut ctx.entries);
     resolve_nested_capture_reads(&mut ctx.entries);
     resolve_call_site_targets(&mut ctx.entries);
@@ -1049,6 +1134,7 @@ fn build_function_program_index_impl<'ast>(
             nested: Arc::new(nested),
             entries: Arc::from(ctx.entries.into_boxed_slice()),
             expressions: Arc::from(ctx.expressions.into_boxed_slice()),
+            classes: Arc::from(classes.classes.into_boxed_slice()),
         },
         ctx.nodes,
     )
