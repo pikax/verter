@@ -14984,6 +14984,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let mut out: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         let mut changed = false;
         let mut unclassified = false;
+        // With `strictNullChecks` off `undefined` and `null` are subtypes of
+        // every type, so the positive `"undefined"` / `"object"` edge reads
+        // them out of any arm of another kind (the checker's
+        // `narrowTypeByTypeFacts` substitutes the implied type):
+        // `typeof x === "undefined"` over `x: string` is `undefined`.
+        let implied_nullish = match kind {
+            _ if negated || self.nullability.is_strict() => None,
+            crate::flow_slice_content::SliceTypeofKind::Undefined => Some(PrimitiveKind::Undefined),
+            crate::flow_slice_content::SliceTypeofKind::Object => Some(PrimitiveKind::Null),
+            _ => None,
+        };
+        let mut implies_nullish = false;
         for arm in &arms {
             // The non-primitive `object` inhabits BOTH the `"object"` and
             // the `"function"` runtime kinds (functions are objects), so
@@ -15042,6 +15054,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         out.push(*arm);
                     } else {
                         changed = true;
+                        implies_nullish |= implied_nullish.is_some() && !self.is_never_node(*arm);
                     }
                 }
                 ArmGuardClass::Unclassified => {
@@ -15056,6 +15069,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             ));
         }
         if out.is_empty() {
+            if let (true, Some(nullish)) = (implies_nullish, implied_nullish) {
+                let node = self
+                    .dispatch
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(nullish));
+                return GuardNarrowing::Narrowed(subject.clone(), node);
+            }
             // Every arm is proved off the tested edge: the subject reads
             // `never` and the edge stays alive.
             return GuardNarrowing::Narrowed(subject.clone(), self.never_node());

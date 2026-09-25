@@ -48,6 +48,12 @@ export function tTernary(x: string | number) { return typeof x === "string" ? x 
 export function tTernaryElse(x: string | number) { return typeof x === "string" ? "" : x; }
 export function tMember(o: { v: string | number }) { if (typeof o.v === "string") return o.v; throw 0; }
 export function tEnumLike(x: 1 | "1" | null | undefined) { if (typeof x === "object") return x; throw 0; }
+export function tUndefOfString(x: string) { if (typeof x === "undefined") return x; throw 0; }
+export function tObjectOrString(x: { a: 1 } | string) { if (typeof x === "object") return x; throw 0; }
+export function tObjectOfNumber(x: number) { if (typeof x === "object") return x; throw 0; }
+export function tUndefOfUnion(x: string | number) { if (typeof x === "undefined") return x; throw 0; }
+export function tNotUndefElse(x: string) { if (typeof x !== "undefined") throw 0; return x; }
+export function tUndefOfNever(x: never) { if (typeof x === "undefined") return x; throw 0; }
 "##;
 
 /// A `typeof` guard keeps the union members of the tested kind in its true
@@ -111,21 +117,23 @@ fn a_switch_on_typeof_narrows_each_clause() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Without `strictNullChecks` the declared type still names `undefined` /
-/// `null` for a `typeof` guard: `typeof x === "undefined"` over `string |
-/// undefined` is `undefined`, and `typeof x === "object"` over `1 | "1" | null
-/// | undefined` is `null`. Wrong-but-clean: the lane narrows to `never`.
-///
-/// What the lane gives:
-/// - `tUndef`: the checker answers `undefined`; the lane measured `never`
-///   (strictNullChecks off, both off).
-/// - `tEnumLike`: the checker answers `null`; the lane measured `never`
-///   (strictNullChecks off, both off).
+/// Without `strictNullChecks` `undefined` and `null` are subtypes of every
+/// type, so the true branch of `typeof x === "undefined"` reads `undefined` and
+/// of `typeof x === "object"` reads `null` out of an arm of another kind (the
+/// checker's `narrowTypeByTypeFacts`), unless an arm of the tested kind
+/// survives; with it such an arm is `never`.
 #[test]
-#[ignore = "a typeof guard for undefined or object keeps the nullish type without strictNullChecks"]
-fn wrong_clean_a_typeof_guard_keeps_its_nullish_type_without_strict_null_checks() {
+fn a_typeof_guard_implies_a_nullish_type_as_the_checker_narrows_it() {
     let matrix = Matrix::new(TYPEOF);
-    let failures = matrix.returns(&[("tUndef", "undefined"), ("tEnumLike", "null")]);
+    let mut failures = matrix.returns(&[("tUndef", "undefined"), ("tEnumLike", "null")]);
+    failures.extend(matrix.nullness(&[
+        (Read::Return("tUndefOfString"), "never", "undefined"),
+        (Read::Return("tObjectOrString"), "{ a: 1; }", "{ a: 1; }"),
+        (Read::Return("tObjectOfNumber"), "never", "null"),
+        (Read::Return("tUndefOfUnion"), "never", "undefined"),
+        (Read::Return("tNotUndefElse"), "never", "undefined"),
+        (Read::Return("tUndefOfNever"), "never", "never"),
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
