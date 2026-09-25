@@ -4167,6 +4167,8 @@ mod cycle_gate_tests;
 #[cfg(test)]
 mod base_signature_tests;
 #[cfg(test)]
+mod captured_declared_type_tests;
+#[cfg(test)]
 mod checker_probe_lane_tests;
 #[cfg(test)]
 mod class_member_return_tests;
@@ -4174,6 +4176,8 @@ mod class_member_return_tests;
 mod class_value_heritage_tests;
 #[cfg(test)]
 mod closure_narrowing_tests;
+#[cfg(test)]
+mod conditional_indexed_check_tests;
 #[cfg(test)]
 mod heritage_signature_tests;
 #[cfg(test)]
@@ -4184,6 +4188,8 @@ mod indexed_access_name_tests;
 mod indexed_access_relation_tests;
 #[cfg(test)]
 mod intersection_distribution_tests;
+#[cfg(test)]
+mod keyof_application_tests;
 #[cfg(test)]
 mod merged_declaration_signature_tests;
 #[cfg(test)]
@@ -4206,3 +4212,5 @@ mod this_receiver_tests;
 mod truthiness_domain_tests;
 #[cfg(test)]
 mod tuple_length_and_apparent_member_tests;
+#[cfg(test)]
+mod unique_symbol_widening_tests;

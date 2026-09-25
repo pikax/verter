@@ -290,8 +290,13 @@ impl ProjectSemanticDispatch<'_> {
                     return Some(self.absorbed_output(true_branch, [check, extends, true_branch]));
                 }
                 let false_branch = force_branch(false);
-                let union = self
-                    .intern_normalized_union_or_intersection(&[true_branch, false_branch], true);
+                let union = self.intern_normalized_union_or_intersection(
+                    &[
+                        self.indexed_access_where_written(true_branch),
+                        self.indexed_access_where_written(false_branch),
+                    ],
+                    true,
+                );
                 Some(self.absorbed_output(union, [check, extends, true_branch, false_branch]))
             }
             // (3) distributive naked-`never` ⇒ `never` (empty distribution).

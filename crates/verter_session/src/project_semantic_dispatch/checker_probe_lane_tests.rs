@@ -49,6 +49,87 @@ pub(super) fn with_probe_in<R>(
     probe: &str,
     read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
 ) -> R {
+    let host = probe_host(project);
+    let module = format!(
+        "{source}\nexport function __checker_probe() {{ \
+            const __probe: {probe} = null as any; \
+            return __probe; \
+        }}\n"
+    );
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        PROBE_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(&module),
+        crate::FileLanguage::script_ts(),
+    );
+    let result = flow_return_of(&host, "__checker_probe")
+        .unwrap_or_else(|| panic!("the probe `{probe}` produced no flow-return result"));
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    // A read of a global the ambient library declares is scoped by the
+    // probe module's project, as the member access in its body would be.
+    let _demand_scope = project.ambient_lib.map(|_| {
+        super::LexicalDemandScopeGuard::push(&dispatch.lexical_demand_scope, Arc::from(PROBE_FILE))
+    });
+    let node = dispatch
+        .normalize_node_keeping_declaration_refs_for_tests(
+            result.return_type(),
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        )
+        .into_complete_node()
+        .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
+    read(&dispatch, node)
+}
+
+/// The degradation the body-derived return of `function` in a module of
+/// `source`, checked in `project`, carries — `Err(())` when it produced
+/// no value.
+pub(super) fn degradation_in(
+    project: ProbeProject<'_>,
+    source: &str,
+    function: &str,
+) -> Result<Option<crate::semantic_query::FlowReturnDegradation>, ()> {
+    let host = probe_host(project);
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        PROBE_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(source),
+        crate::FileLanguage::script_ts(),
+    );
+    flow_return_of(&host, function)
+        .map(|result| result.degradation())
+        .ok_or(())
+}
+
+/// The audited body-derived return of the probe module's `function`.
+fn flow_return_of(
+    host: &Arc<crate::VerterHost>,
+    function: &str,
+) -> Option<Arc<crate::semantic_query::FlowReturnResult>> {
+    let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(PROBE_FILE),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(function),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    host.get_flow_return_type_with_audit(
+        &identity,
+        crate::semantic_query::ReturnProjectionDemand::whole_return(),
+    )
+    .as_result()
+    .ok()
+    .cloned()
+}
+
+/// A host for `project` with its sibling files and ambient library
+/// registered; the probe module itself is not yet upserted.
+fn probe_host(project: ProbeProject<'_>) -> Arc<crate::VerterHost> {
     use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host;
     // A registered ambient library attaches to a configured project, so a
     // probe that reads one is checked in the tsconfig project it belongs to.
@@ -87,52 +168,7 @@ pub(super) fn with_probe_in<R>(
             crate::FileLanguage::script_ts(),
         );
     }
-    let module = format!(
-        "{source}\nexport function __checker_probe() {{ \
-            const __probe: {probe} = null as any; \
-            return __probe; \
-        }}\n"
-    );
-    crate::u6_flow_shape_corpus_tests::upsert(
-        &host,
-        PROBE_FILE,
-        &crate::u6_flow_shape_corpus_tests::module_script(&module),
-        crate::FileLanguage::script_ts(),
-    );
-    let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
-        anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(PROBE_FILE),
-            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("__checker_probe"),
-            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-        },
-        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
-        overload_ordinal: 0,
-    };
-    let carrier = host.get_flow_return_type_with_audit(
-        &identity,
-        crate::semantic_query::ReturnProjectionDemand::whole_return(),
-    );
-    let result = carrier
-        .as_result()
-        .unwrap_or_else(|_| panic!("the probe `{probe}` produced no flow-return result"));
-    let store_view = host.resolver_store_view_read().into_owned_view();
-    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
-    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-    // A read of a global the ambient library declares is scoped by the
-    // probe module's project, as the member access in its body would be.
-    let _demand_scope = project.ambient_lib.map(|_| {
-        super::LexicalDemandScopeGuard::push(&dispatch.lexical_demand_scope, Arc::from(PROBE_FILE))
-    });
-    let node = dispatch
-        .normalize_node_keeping_declaration_refs_for_tests(
-            result.return_type(),
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-        )
-        .into_complete_node()
-        .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
-    read(&dispatch, node)
+    host
 }
 
 /// Every `(probe, checker print)` pair whose live answer does not match the

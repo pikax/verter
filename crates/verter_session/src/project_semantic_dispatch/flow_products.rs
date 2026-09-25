@@ -1232,6 +1232,10 @@ pub struct ReachingTypeProduct {
     united: Option<SemanticNodeId>,
     widening: Option<WideningMembership>,
     widening_nullish: bool,
+    /// Whether some path reaching here carries no assignment at all — only
+    /// an auto-typed declaration without an initializer, which the
+    /// checker binds no assignment for.
+    declaration_only: bool,
 }
 
 impl ReachingTypeProduct {
@@ -1244,6 +1248,7 @@ impl ReachingTypeProduct {
             united: Some(contributor),
             widening: None,
             widening_nullish: false,
+            declaration_only: false,
         }
     }
 
@@ -1259,6 +1264,21 @@ impl ReachingTypeProduct {
     #[must_use]
     pub fn widening_nullish(&self) -> bool {
         self.widening_nullish
+    }
+
+    /// Mark this value as an auto-typed declaration's own, with no
+    /// assignment behind it.
+    #[must_use]
+    pub fn declaration_only(mut self) -> Self {
+        self.declaration_only = true;
+        self
+    }
+
+    /// Whether some path reaching here carries no assignment, only an
+    /// auto-typed declaration without an initializer.
+    #[must_use]
+    pub fn reaches_declaration_only(&self) -> bool {
+        self.declaration_only
     }
 
     /// Literal membership retained by this reaching value.
@@ -1941,6 +1961,7 @@ fn join_reaching_types(
         united,
         widening,
         widening_nullish: products.iter().all(|product| product.widening_nullish),
+        declaration_only: products.iter().any(|product| product.declaration_only),
     };
     if let Some(WideningMembership::Partial(members)) = &product.widening {
         if let Some(exceeded) = width_exceeded(budget, members.len()) {

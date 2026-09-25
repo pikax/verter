@@ -5060,6 +5060,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }),
             pending_statement_gap: None,
             auto_typed_locals: rustc_hash::FxHashSet::default(),
+            inferred_declared_locals: rustc_hash::FxHashMap::default(),
+            declared_capture_types: rustc_hash::FxHashMap::default(),
             circular_inferred: rustc_hash::FxHashSet::default(),
             unwidened_views: rustc_hash::FxHashMap::default(),
             conditional_arm_nesting: 0,
@@ -5904,11 +5906,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Some(answer)
     }
 
-    /// The union arms of `node`, when it interned as a union — the
+    /// The union arms of `node`, when the type it denotes is a union — the
     /// `getAssignmentReducedType` gate (a NON-union declared type
-    /// supplies its binding verbatim).
+    /// supplies its binding verbatim). A `keyof` whose keys settle IS the
+    /// union of those keys (`keyof Box<string>` is `"value" | "size"`); the
+    /// carrier only keeps the name the checker prints it by.
     fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
-        match self.graph().node_data(node).as_deref() {
+        let base = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => return Some(members.to_vec()),
+            Some(SemanticNodeData::KeyOf { base }) => *base,
+            _ => return None,
+        };
+        let keys = self.key_set_of(base)?;
+        match self.graph().node_data(keys).as_deref() {
             Some(SemanticNodeData::Union(members)) => Some(members.to_vec()),
             _ => None,
         }
@@ -6087,6 +6097,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     && !can_fall_through.reaches_end(CompletionDischarge::FreshLiteralWidening)));
         if fresh_seed && arms.len() == 1 && holds.is_empty() {
             arms[0] = widen_literal_node(self, arms[0]);
+        }
+        // A return type that is one `unique symbol` — a unit type — widens
+        // to `symbol` whatever its freshness
+        // (`getWidenedLiteralLikeTypeForContextualReturnTypeIfNeeded`); a
+        // union holding one, a fall-through `undefined` included, keeps it.
+        let unit_seed = !nullability.is_strict()
+            || (!observations.contributes_arm()
+                && !can_fall_through.reaches_end(CompletionDischarge::FreshLiteralWidening));
+        if unit_seed && arms.len() == 1 && holds.is_empty() && is_unique_symbol_node(graph, arms[0])
+        {
+            arms[0] = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol));
         }
         // Bare-return-as-void (BL12): a body whose only return
         // contributions are bare `return;` statements models as `void`
@@ -6489,6 +6510,55 @@ fn widen_values_within(
         if widened.as_slice() == members.as_ref() {
             return node;
         }
+        return dispatch.intern_normalized_union(&widened, nullability);
+    }
+    node
+}
+
+/// Whether `node` is a `unique symbol` type.
+fn is_unique_symbol_node(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: SemanticNodeId,
+) -> bool {
+    matches!(
+        graph.node_data(node).as_deref(),
+        Some(SemanticNodeData::TypeOfNominal(_))
+    )
+}
+
+/// The checker's `getWidenedUniqueESSymbolType`: a `unique symbol` type is
+/// `symbol`, and a union widens each such constituent. It applies at a
+/// mutable location with no contextual type — an object-literal member,
+/// an array element — whatever the value's freshness, and to a value
+/// assigned to an unannotated variable declared by its initializer; every
+/// other node passes through unchanged.
+fn widen_unique_symbols(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    nullability: crate::semantic_query::NullabilityPolicy,
+) -> SemanticNodeId {
+    let graph = dispatch.graph();
+    let symbol = || graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol));
+    if is_unique_symbol_node(graph, node) {
+        return symbol();
+    }
+    if let Some(SemanticNodeData::Union(members)) = graph.node_data(node).as_deref() {
+        if !members
+            .iter()
+            .any(|member| is_unique_symbol_node(graph, *member))
+        {
+            return node;
+        }
+        let widened: Vec<SemanticNodeId> = members
+            .iter()
+            .map(|member| {
+                if is_unique_symbol_node(graph, *member) {
+                    symbol()
+                } else {
+                    *member
+                }
+            })
+            .collect();
         return dispatch.intern_normalized_union(&widened, nullability);
     }
     node
@@ -7042,6 +7112,9 @@ struct PreparedFlowCaptureInput {
     assignment: DefiniteAssignmentProduct,
     reaching: Option<ReachingTypeProduct>,
     declared: Option<SemanticNodeId>,
+    /// The declared type an unannotated `let` / `var` capture outside its
+    /// extended container reads — the body's own creations read it too.
+    inferred_declared: Option<SemanticNodeId>,
     /// The statement's deferred-read look-ahead — the post-write reaching
     /// a closure created in the statement observes (the checker's own
     /// deferred-read rule). The declared-authority application below must
@@ -7063,7 +7136,8 @@ impl PreparedFlowCaptureInput {
                     && matches!(
                         source,
                         crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
-                            crate::flow_slice_content::SliceBindingKind::Var
+                            crate::flow_slice_content::SliceBindingKind::Let
+                                | crate::flow_slice_content::SliceBindingKind::Var
                         ) | crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter { .. }
                     ))
         {
@@ -7229,6 +7303,22 @@ struct FlowEvaluator<'d, 'b> {
     /// fact of the paths reaching a read, carried on its reaching-type
     /// product ([`Self::reads_widening_nullish_local`]).
     auto_typed_locals: rustc_hash::FxHashSet<FlowProductSubject>,
+    /// The DECLARED type of each evaluated unannotated `let` / `var` —
+    /// its initializer's widened type (`getWidenedTypeForVariableLikeDeclaration`),
+    /// `any` for an auto-typed one — by canonical subject, with the
+    /// declarator that supplied it (a redeclaring `var` keeps its first
+    /// declarator's type). A capture outside its extended container reads
+    /// it inside the nested body.
+    inferred_declared_locals:
+        rustc_hash::FxHashMap<FlowProductSubject, (SkeletonBindingId, SemanticNodeId)>,
+    /// The captures of a nested body that entered it outside their
+    /// extended container as unannotated `let` / `var` bindings, with the
+    /// declared type they read. A function the body creates reads the same
+    /// declared type for them.
+    declared_capture_types: rustc_hash::FxHashMap<
+        verter_semantic::analysis::function_program::FlowBindingIdentity,
+        SemanticNodeId,
+    >,
     /// The inferred bindings of the loops under evaluation that the checker
     /// cannot type without their own type
     /// ([`FlowEvaluator::circular_loop_bindings`]), by canonical binding:
@@ -8253,6 +8343,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 _ => None,
             };
+            // A mutable member with no contextual type widens a `unique
+            // symbol` value to `symbol`.
+            let widens_unique_symbols = member_context.is_none() && !member.readonly;
             let outcome = match member_context {
                 Some(member_context) if !assignment_fresh => self.eval_in_context(
                     &member.value,
@@ -8270,6 +8363,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // widened (or stayed pinned under a const assertion) at IR
             // lowering.
             let value = self.widen_value_position_read(member_value, value);
+            let value = if widens_unique_symbols {
+                widen_unique_symbols(self.dispatch, value, self.nullability)
+            } else {
+                value
+            };
             // A non-static key is its own evaluated position. It names
             // the member when it settles to a LITERAL (or a unique
             // symbol); a key of any other property-key type is
@@ -8842,6 +8940,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         parts.push((ReductionArm::plain(node), true));
                     } else {
                         let read = self.widen_value_position_read(value, node);
+                        let read = if element_context.is_none() {
+                            widen_unique_symbols(self.dispatch, read, self.nullability)
+                        } else {
+                            read
+                        };
                         parts.push((self.reduction_arm(value, read), false));
                     }
                 }
@@ -9061,7 +9164,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.eval_assignment_expr(value)
             }
             Some(_) => self.eval_expr(value),
-            None => self.eval_evolving_rhs(value, freshness),
+            None => {
+                // An unannotated variable with an initializer is declared
+                // as that initializer's widened type, which never holds a
+                // `unique symbol` another declaration created: the one it
+                // is assigned reads `symbol`. An auto-typed variable
+                // evolves to the assigned type itself (`let x; x = u`
+                // holds `typeof u`).
+                let auto_typed = match &target.root {
+                    crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => self
+                        .auto_typed_locals
+                        .contains(&self.canonical_runtime_subject(binding)),
+                    crate::flow_slice_content::SliceNarrowRoot::Param { .. } => false,
+                };
+                match self.eval_evolving_rhs(value, freshness) {
+                    Positional::Value(node) if !auto_typed => Positional::Value(
+                        widen_unique_symbols(self.dispatch, node, self.nullability),
+                    ),
+                    other => other,
+                }
+            }
         }
     }
 
@@ -9602,6 +9724,40 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.narrowing_writes.push(NarrowingLedgerEntry::Cleared {
             root: self.canonical_runtime_subject(binding),
         });
+    }
+
+    /// Whether this frame's body assigns `binding` anywhere.
+    fn frame_writes_binding(&self, binding: SkeletonBindingId) -> bool {
+        let canonical = self.bindings.canonical_local(binding);
+        self.skeleton.writes.iter().any(|write| {
+            matches!(write.binding, Some(FlowProductSubject::Local(local))
+                if self.bindings.canonical_local(local) == canonical)
+        })
+    }
+
+    /// Record the declared type an unannotated `let` / `var` declarator
+    /// gives its binding. The first declarator of a redeclared `var` keeps
+    /// its type; a declarator evaluated again (a loop) records its latest.
+    fn record_inferred_declared(
+        &mut self,
+        binding: SkeletonBindingId,
+        kind: crate::flow_slice_content::SliceBindingKind,
+        node: SemanticNodeId,
+    ) {
+        if kind == crate::flow_slice_content::SliceBindingKind::Const {
+            return;
+        }
+        let subject = self.canonical_runtime_subject(&FlowProductSubject::Local(binding));
+        match self.inferred_declared_locals.entry(subject) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().0 == binding {
+                    entry.insert((binding, node));
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert((binding, node));
+            }
+        }
     }
 
     fn set_declared_local(
@@ -11404,7 +11560,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
         }
-        let reduced = self.union(&survivors);
+        // A filter that keeps every constituent is the declared type itself
+        // (`filterType` answers its input), so it keeps the name the
+        // checker prints it by (`keyof Box<string>`).
+        let reduced = if survivors.as_slice() == arms {
+            declared
+        } else {
+            self.union(&survivors)
+        };
         // The checker gives up narrowing when the assigned value is not
         // assignable to what the filter kept.
         match self.dispatch.execute_relate_pair(init, reduced) {
@@ -14328,7 +14491,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         let outcome = self.eval_expr(&member.value);
         match self.settle(outcome) {
-            Some(node) => Ok(Some(self.widen_value_position_read(&member.value, node))),
+            Some(node) => {
+                let node = self.widen_value_position_read(&member.value, node);
+                Ok(Some(if member.readonly {
+                    node
+                } else {
+                    widen_unique_symbols(self.dispatch, node, self.nullability)
+                }))
+            }
             // A hold inside the demanded member is the same coinductive
             // hold the whole-return object path reports.
             None => Ok(None),
@@ -14349,12 +14519,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if self.nullability.is_strict() {
             return false;
         }
-        let crate::flow_slice_content::SliceExpr::Local {
-            binding,
-            captured: false,
-            ..
-        } = expr
-        else {
+        let crate::flow_slice_content::SliceExpr::Local { binding, .. } = expr else {
             return false;
         };
         self.products
@@ -15942,6 +16107,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             .dispatch
                             .graph()
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+                        self.record_inferred_declared(*binding, *kind, any);
                         self.bind_local(&subject, *kind, any, None, false);
                         continue;
                     }
@@ -16003,6 +16169,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             _ => Some(any),
                         };
                         if let Some(declared) = declared {
+                            self.record_inferred_declared(*binding, *kind, declared);
                             self.set_declared_local(&subject, *kind, Some(declared));
                             let redeclares_reaching_var = init.is_none()
                                 && *kind == crate::flow_slice_content::SliceBindingKind::Var
@@ -16017,6 +16184,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // (non-widening) `undefined` until its first write, so a
                     // path that never writes it joins as `undefined`: `let
                     // x; if (c) x = "s"; return x` is `string | undefined`.
+                    // An auto-typed variable's declared type is `any`: a
+                    // closure that does not share its flow reads `any`
+                    // (TS7005 under `noImplicitAny`).
+                    if auto_typed {
+                        self.record_inferred_declared(*binding, *kind, any);
+                    }
                     if auto_typed && init.is_none() {
                         let redeclares_reaching_var = *kind
                             == crate::flow_slice_content::SliceBindingKind::Var
@@ -16027,6 +16200,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 .graph()
                                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
                             self.bind_local(&subject, *kind, undefined, None, false);
+                            // The checker binds no assignment for this
+                            // declaration: a path reaching a read only
+                            // through it reads the variable's initial type.
+                            if let Some(reaching) = self.products.reaching_type(&subject).cloned() {
+                                self.products
+                                    .set_reaching_type(&subject, reaching.declaration_only());
+                            }
                         }
                         continue;
                     }
@@ -16116,6 +16296,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             Positional::Value(node) => {
                                 let membership =
                                     self.binding_init_membership(*kind, init, node, freshness);
+                                // An unannotated declaration always widens a
+                                // `unique symbol` another declaration created
+                                // (`widenTypeForVariableLikeDeclaration`):
+                                // `const l = u` is `symbol`. A union holding
+                                // one keeps it.
+                                let node =
+                                    if is_unique_symbol_node(self.dispatch.graph(), node) {
+                                        self.dispatch.graph().intern_node(
+                                            SemanticNodeData::Primitive(PrimitiveKind::Symbol),
+                                        )
+                                    } else {
+                                        node
+                                    };
                                 match kind {
                                     crate::flow_slice_content::SliceBindingKind::Const => {
                                         self.bind_local(
@@ -16149,6 +16342,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                             }
                                             None => node,
                                         };
+                                        if !auto_typed {
+                                            self.record_inferred_declared(*binding, *kind, node);
+                                        }
                                         // An auto-typed variable's bare
                                         // `null` / `undefined` initializer
                                         // is the checker's widening
@@ -16179,6 +16375,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 let marker = super::flow_return_callee::unmodeled_position_marker(
                                     self.dispatch,
                                 );
+                                if !auto_typed {
+                                    self.record_inferred_declared(*binding, *kind, marker);
+                                }
                                 self.bind_local(
                                     &FlowProductSubject::Local(*binding),
                                     *kind,
@@ -16783,6 +16982,42 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 {
                     self.seed_destructured_param_element(&parent);
                 }
+                // Outside its extended container an unannotated `let` /
+                // `var` reads its DECLARED type: its initializer's widened
+                // type, whatever is assigned before or after the creation.
+                // A capture this frame itself reads outside its extended
+                // container is outside it in every deeper function too: it
+                // keeps the declared type the outer creation supplied.
+                let inferred_declared = (value_demanded && !extended)
+                    .then(|| {
+                        let Some(binding) = local else {
+                            return self
+                                .declared_capture_types
+                                .get(identity)
+                                .map(|node| Some(*node));
+                        };
+                        let fact = self.skeleton.binding(binding);
+                        let unannotated_whole = matches!(
+                            fact.kind,
+                            verter_semantic::analysis::flow::SkeletonBindingKind::Let
+                                | verter_semantic::analysis::flow::SkeletonBindingKind::Var
+                        ) && !fact.destructured
+                            && fact.annotation_span.is_none();
+                        unannotated_whole.then(|| {
+                            self.inferred_declared_locals
+                                .get(&self.canonical_runtime_subject(&parent))
+                                .map(|(_, node)| *node)
+                        })
+                    })
+                    .flatten();
+                if inferred_declared == Some(None) {
+                    // The declarator never supplied its type (it was not
+                    // evaluated on any path before the creation).
+                    self.record_degradation(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                        crate::semantic_query::FlowGap::ClosureCapture,
+                    ));
+                }
+                let inferred_declared = inferred_declared.flatten();
                 PreparedFlowCaptureInput {
                     subject: FlowProductSubject::Captured(identity.clone()),
                     value_demanded,
@@ -16816,10 +17051,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 narrowed
                                     .map(ReachingTypeProduct::of)
                                     .or_else(|| self.products.reaching_type(&parent).cloned())
+                                    .map(|reaching| {
+                                        // A capture is assumed initialized: a path
+                                        // reaching the creation only through an
+                                        // auto-typed declaration reads the
+                                        // variable's initial type — `any`, which
+                                        // absorbs every other path — once the
+                                        // variable is assigned anywhere.
+                                        if reaching.reaches_declaration_only()
+                                            && local.is_some_and(|binding| {
+                                                self.frame_writes_binding(binding)
+                                            })
+                                        {
+                                            ReachingTypeProduct::of(
+                                                self.dispatch.graph().intern_node(
+                                                    SemanticNodeData::Primitive(PrimitiveKind::Any),
+                                                ),
+                                            )
+                                        } else {
+                                            reaching
+                                        }
+                                    })
                             } else {
                                 self.capture_write_lookahead
                                     .get(&self.canonical_runtime_subject(&parent))
                                     .map(|node| ReachingTypeProduct::of(*node))
+                                    .or_else(|| inferred_declared.map(ReachingTypeProduct::of))
                                     .or_else(|| self.products.reaching_type(&parent).cloned())
                             }
                         })
@@ -16827,6 +17084,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     declared: value_demanded
                         .then(|| self.products.declared_type(&parent))
                         .flatten(),
+                    inferred_declared,
                 }
             })
             .collect();
@@ -16952,9 +17210,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
             return self.unmodeled_position();
         };
+        let mut declared_capture_types = rustc_hash::FxHashMap::default();
         for input in capture_inputs {
             if !input.value_demanded {
                 continue;
+            }
+            if let (Some(node), FlowProductSubject::Captured(identity)) =
+                (input.inferred_declared, &input.subject)
+            {
+                declared_capture_types.insert(identity.clone(), node);
             }
             captured_products.import_capture_input(
                 &input.subject,
@@ -17012,6 +17276,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 degradation: None,
                 pending_statement_gap: None,
                 auto_typed_locals: rustc_hash::FxHashSet::default(),
+                inferred_declared_locals: rustc_hash::FxHashMap::default(),
+                declared_capture_types,
                 circular_inferred: rustc_hash::FxHashSet::default(),
                 unwidened_views: rustc_hash::FxHashMap::default(),
                 conditional_arm_nesting: 0,

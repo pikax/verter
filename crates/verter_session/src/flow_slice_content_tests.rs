@@ -3518,10 +3518,12 @@ fn an_invoked_function_extends_the_captures_its_arguments_leave_unwritten() {
 ///
 /// Measured, TypeScript 7.0.2: an immediately invoked arrow over a
 /// parameter reassigned after the call reads the guarded type in every
-/// spelling (`0 | T`, and `"a" | 0` for the `switch` clause), and an arrow
+/// spelling (`0 | T`, and `"a" | 0` for the `switch` clause); an arrow
 /// that reassigns the `let` it captures reads the declared `string | number`
-/// on entry in every spelling — a declared type the evaluator does not
-/// supply for a `let`, so the rail is the typed gap.
+/// on entry in every spelling, which the evaluator supplies, so no gap; and
+/// an arrow over a `catch` parameter written after the creation reads the
+/// declared `unknown` in every spelling — a declared type the evaluator does
+/// not supply for a `catch` parameter, so the rail is the typed gap.
 #[test]
 fn ternary_arms_reach_the_closure_capture_rail_like_the_if_arms() {
     const PREFIX: &str = "export {};\n\
@@ -3575,6 +3577,26 @@ fn ternary_arms_reach_the_closure_capture_rail_like_the_if_arms() {
         (
             "switch",
             "function f(x: string | number) { let y: string | number = x; switch (y) { case \"a\": { const g = () => { const before = y; y = 0; return before }; return g() } } return 0 }",
+        ),
+    ] {
+        let gaps = capture_gaps(body);
+        assert!(
+            gaps.iter().all(Option::is_none),
+            "{spelling}: the guarded `let` outside its extended container reads its declared type, no gap: {gaps:?}"
+        );
+    }
+    for (spelling, body) in [
+        (
+            "if",
+            "function f() { try { return 0 } catch (e) { if (isT(e)) { const g = () => e; e = 0; return g() } return 0 } }",
+        ),
+        (
+            "ternary",
+            "function f() { try { return 0 } catch (e) { const g = isT(e) ? () => e : () => 0; e = 0; return g() } }",
+        ),
+        (
+            "switch",
+            "function f() { try { return 0 } catch (e) { switch (e) { case \"a\": { const g = () => e; e = 0; return g() } } return 0 } }",
         ),
     ] {
         let gaps = capture_gaps(body);

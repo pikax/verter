@@ -7312,6 +7312,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // so an application that is a union (`Partial<A | B>`)
                 // distributes like one.
                 let source_resolved = self.resolve_signature_source_carrier(source_arg, context);
+                // A `keyof` whose keys settle IS that key union
+                // (`Exclude<keyof Box<string>, "size">` filters
+                // `"value" | "size"`).
+                let keyof_base = match graph.node_data(source_resolved).as_deref() {
+                    Some(SemanticNodeData::KeyOf { base }) => Some(*base),
+                    _ => None,
+                };
+                let source_resolved = keyof_base
+                    .and_then(|base| self.key_set_of(base))
+                    .unwrap_or(source_resolved);
                 // The FILTER operand resolves through the same deferred
                 // evaluator: a carrier filter (`R` still a reference shell)
                 // would judge every per-member relation `Unknown` and defer
@@ -11512,13 +11522,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if self.ctx.is_cancelled() {
             return self.cancelled_build_output();
         }
-        if let Some(absorbed) = self.absorb_conditional(check, extends, distributive, |take_true| {
-            self.apply_conditional_branch_pending(
-                if take_true { true_branch } else { false_branch },
-                pending.as_deref(),
-                take_true,
-            )
-        }) {
+        let absorbed_check = self.indexed_access_where_written(check);
+        if let Some(absorbed) =
+            self.absorb_conditional(absorbed_check, extends, distributive, |take_true| {
+                self.apply_conditional_branch_pending(
+                    if take_true { true_branch } else { false_branch },
+                    pending.as_deref(),
+                    take_true,
+                )
+            })
+        {
             return absorbed;
         }
         if distributive {
@@ -11601,8 +11614,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if self.ctx.is_cancelled() {
             return self.cancelled_build_output();
         }
+        let absorbed_check = self.indexed_access_where_written(check);
         if let Some(output) =
-            self.absorb_conditional(check, extends, distributive, &mut *lower_branch)
+            self.absorb_conditional(absorbed_check, extends, distributive, &mut *lower_branch)
         {
             return output;
         }
@@ -11841,6 +11855,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
             .into_complete_node()?;
         union_members_of(resolved)
+    }
+
+    /// The type an operand denotes where it is written. The checker
+    /// instantiates a conditional's check and branch types eagerly, so an
+    /// indexed access over a type that is not generic IS the property type
+    /// it reads (`Rec["a"]` with `a: any` is `any`): the lattice rows of
+    /// [`Self::absorb_conditional`] apply to that check type, and the union
+    /// of both branches an `any` check selects is built from those branch
+    /// types — the same read the relation takes of an indexed-access
+    /// operand. Every other operand, and an indexed access the deferred
+    /// evaluator cannot read further (`T["k"]` over an open `T`), is itself.
+    pub(super) fn indexed_access_where_written(&self, node: SemanticNodeId) -> SemanticNodeId {
+        if !matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
+        ) {
+            return node;
+        }
+        self.evaluate_deferred_semantic_node_with_context(
+            node,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )
+        .into_active_query_build_node(self)
     }
 
     /// Tri-state conditional branch selection — THE shared oracle for

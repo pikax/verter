@@ -6110,10 +6110,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the memo.
     ///
     /// A declaration CARRIER (a `DeclRef` / `InstantiationRef` / an
-    /// unexpanded declaration or recursive-reference placeholder) or a
-    /// mapped type on either side must too: the checker relates the type a
-    /// carrier names, which only the canonical frame's identity unwrap
-    /// reveals — an intersection target `QA & QB` distributes into pairs
+    /// unexpanded declaration or recursive-reference placeholder), a
+    /// mapped type, a `keyof` or an indexed access on either side must too:
+    /// the checker relates the type a carrier names — an indexed access over
+    /// a type that is not generic IS the property type it reads, so a tuple
+    /// element `Rec["a"]` relates as `any` — which only the canonical
+    /// frame's identity unwrap reveals — an intersection target `QA & QB` distributes into pairs
     /// whose arms are declarations, a nominal pair compares DECLARING
     /// identities, and expanded inline a carrier answers `Unknown`, which a
     /// subtype reduction reads as undecided (`A1[]` below `{ x: string }[]`
@@ -6151,6 +6153,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     | SemanticNodeData::InstantiationRef { .. }
                     | SemanticNodeData::Mapped { .. }
                     | SemanticNodeData::KeyOf { .. }
+                    | SemanticNodeData::IndexedAccess { .. }
                     | SemanticNodeData::Opaque(
                         QueryError::DeclPlaceholder { .. } | QueryError::RecursiveRef { .. }
                     )

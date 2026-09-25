@@ -215,10 +215,7 @@ fn an_invoked_function_reads_the_narrowing_reaching_its_call() {
 
 /// A capture outside its extended container reads its declared type in
 /// the body: a parameter's authority, and an unannotated `var`'s
-/// declarator type while no write retypes it before the creation. An
-/// unannotated `var` reassigned before the creation reaches the closure at
-/// the assigned type, which is not what the checker reads, so it takes the
-/// typed closure-capture gap.
+/// initializer's widened type, whatever is assigned before the creation.
 ///
 /// Measured on TypeScript 7.0.2: `ReturnType<typeof paramWrittenLater>`,
 /// `ReturnType<typeof varUnwritten>` and `ReturnType<typeof
@@ -231,6 +228,7 @@ fn a_capture_outside_its_container_reads_its_declared_type() {
         &[
             ("ReturnType<typeof paramWrittenLater>", "string | number"),
             ("ReturnType<typeof varUnwritten>", "string | number"),
+            ("ReturnType<typeof varWrittenBefore>", "string | number"),
             (
                 "ReturnType<typeof asyncStored>",
                 "Promise<string | number> | undefined",
@@ -238,16 +236,14 @@ fn a_capture_outside_its_container_reads_its_declared_type() {
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    for name in ["paramWrittenLater", "varUnwritten", "asyncStored"] {
+    for name in [
+        "paramWrittenLater",
+        "varUnwritten",
+        "varWrittenBefore",
+        "asyncStored",
+    ] {
         assert_eq!(degradation_of(INVOKED, name), None, "{name} is complete");
     }
-    assert_eq!(
-        degradation_of(INVOKED, "varWrittenBefore"),
-        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            crate::semantic_query::FlowGap::ClosureCapture
-        )),
-        "a `var` retyped before the creation takes the typed gap"
-    );
 }
 
 const INVOKED_ASYNC_JOIN: &str = "export function asyncOrUndefined(x: string) { if (x) { return (async () => 1)(); } return undefined; }

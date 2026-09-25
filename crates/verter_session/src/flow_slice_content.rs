@@ -4427,6 +4427,23 @@ impl CaptureScope {
         None
     }
 
+    /// The enclosing frame that declares `identity`, with the binding's
+    /// local slot there.
+    fn defining_local(
+        &self,
+        identity: &verter_semantic::analysis::function_program::FlowBindingIdentity,
+    ) -> Option<(&DefiningFrameGate, SkeletonBindingId)> {
+        let mut current = self.enclosing.as_deref();
+        while let Some(frame) = current {
+            if frame.gate.bindings.function() == &identity.defining_function {
+                let local = frame.gate.bindings.local(identity)?;
+                return Some((&frame.gate, local));
+            }
+            current = frame.gate.outer.enclosing.as_deref();
+        }
+        None
+    }
+
     fn classify_identity(
         &self,
         identity: &verter_semantic::analysis::function_program::FlowBindingIdentity,
@@ -5353,26 +5370,55 @@ impl<'a> Lowerer<'a> {
             .any(|call| span.contains(*call))
     }
 
+    /// The parameters and mutable locals (`let`, `catch` parameter — the
+    /// checker's `isParameterOrMutableLocalVariable`) some nested function
+    /// assigns: none of them is ever past its last assignment.
     fn build_nested_free_writes(&self) -> FxHashSet<SkeletonBindingId> {
         self.index
             .get(self.bindings.function())
             .into_iter()
             .flat_map(|entry| entry.entry().descendant_writes.iter())
             .filter_map(|identity| self.bindings.local(identity))
-            .filter(|binding| self.skeleton.binding(*binding).kind == SkeletonBindingKind::Let)
+            .filter(|binding| {
+                matches!(
+                    self.skeleton.binding(*binding).kind,
+                    SkeletonBindingKind::Param
+                        | SkeletonBindingKind::Let
+                        | SkeletonBindingKind::CatchParam
+                )
+            })
             .collect()
     }
 
+    /// Whether this frame assigns `binding` at or after a function created
+    /// at `creation_span` — the checker's `isPastLastAssignment` negated.
+    /// An assignment's position extends to the end of the outermost
+    /// statement holding it that begins after the binding's declaration
+    /// (`extendAssignmentPosition`): `if (c) { x = 1; const f = () => x; }`
+    /// assigns `x` at the end of the `if`, after `f` is created.
     fn binding_has_write_after(
         &self,
         binding: SkeletonBindingId,
         creation_span: oxc_span::Span,
     ) -> bool {
         let creation = self.rebase(creation_span);
+        let canonical = self.bindings.canonical_local(binding);
+        let declaration = self.skeleton.binding(canonical).span;
         self.skeleton.writes.iter().any(|write| {
-            write.span > creation
-                && matches!(write.binding, Some(FlowBindingRef::Local(local))
-                    if self.bindings.canonical_local(local) == self.bindings.canonical_local(binding))
+            if !matches!(write.binding, Some(FlowBindingRef::Local(local))
+                if self.bindings.canonical_local(local) == canonical)
+            {
+                return false;
+            }
+            let mut extent = AssignmentExtent {
+                anchor: self.anchor,
+                write: write.span,
+                declaration,
+                found: None,
+            };
+            extent.visit_program(self.program);
+            let position = extent.found.unwrap_or(write.span);
+            position.contains(creation) || position > creation
         })
     }
 
@@ -5399,27 +5445,17 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Whether a capture outside its extended container reads exactly what
-    /// the evaluator supplies: a whole parameter or annotated `var` reads
-    /// its declared authority, and an unannotated `var` no write retypes
-    /// before the creation reads the reaching its declarator binds.
-    fn capture_reads_declared_type(
-        &self,
-        binding: SkeletonBindingId,
-        creation_span: oxc_span::Span,
-    ) -> bool {
+    /// the evaluator supplies — the checker's declared type: a whole
+    /// parameter or annotated `let` / `var` reads its declared authority,
+    /// and an unannotated whole `let` / `var` its initializer's widened
+    /// type (`any` for an auto-typed one).
+    fn capture_reads_declared_type(&self, binding: SkeletonBindingId) -> bool {
         let fact = self.skeleton.binding(binding);
-        if fact.destructured {
-            return false;
-        }
-        match fact.kind {
-            SkeletonBindingKind::Param => true,
-            SkeletonBindingKind::Var => {
-                fact.annotation_span.is_some()
-                    || (!self.nested_free_writes.contains(&binding)
-                        && !self.binding_has_write_before(binding, creation_span))
-            }
-            _ => false,
-        }
+        !fact.destructured
+            && matches!(
+                fact.kind,
+                SkeletonBindingKind::Param | SkeletonBindingKind::Let | SkeletonBindingKind::Var
+            )
     }
 
     fn guard_bindings(&self, guard: &SliceGuard, _at: oxc_span::Span) -> Vec<SkeletonBindingId> {
@@ -7997,6 +8033,9 @@ impl<'a> Lowerer<'a> {
             return StatementCallEffect::Unprovable;
         };
         let name = callee.name.as_str();
+        if let Some(effect) = self.callee_binding_effect(callee.span) {
+            return effect;
+        }
         if !matches!(self.classify_occurrence(callee.span), NameBinding::Free) {
             return StatementCallEffect::Unprovable;
         }
@@ -8025,6 +8064,97 @@ impl<'a> Lowerer<'a> {
         } else {
             StatementCallEffect::Unprovable
         }
+    }
+
+    /// The control-flow effect of a statement call whose bare callee names
+    /// a function-local or captured binding, when its declarations decide
+    /// it; `None` for every other callee.
+    ///
+    /// The checker reads a call's control-flow EFFECTS — an assertion, or
+    /// a `never` return that ends the path — only through a callee whose
+    /// declaration carries an explicit type (`getExplicitTypeOfSymbol`),
+    /// and only from that type's lone call signature (or the resolved one
+    /// when an overload asserts or diverges). A variable or parameter
+    /// qualifies only through its annotation (or a `for…of` head, which
+    /// never has an initializer), and a function declaration through the
+    /// signatures it declares, whose return is never inferred `never` nor
+    /// an assertion. So an unannotated `const` / `let` / `var` with an
+    /// initializer, an unannotated parameter, one annotated `any` or with a
+    /// function type, and a nested function declaration narrow nothing and
+    /// never end the path unless a declared signature returns `asserts …`
+    /// or `never` — whatever the function they call writes or returns: a
+    /// closure that assigns a narrowed binding leaves the narrowing in
+    /// place after the call. A lone declared signature returning `never`
+    /// ends the path; any other annotation is unprovable here.
+    fn callee_binding_effect(&self, span: oxc_span::Span) -> Option<StatementCallEffect> {
+        use verter_semantic::analysis::flow::FlowBindingOccurrence;
+        let (gate, local) = match self.bindings.occurrence(self.rebase(span)) {
+            FlowBindingOccurrence::Resolved(FlowBindingRef::Local(local)) => {
+                (&*self.frame_gate, *local)
+            }
+            FlowBindingOccurrence::Resolved(FlowBindingRef::Captured(identity)) => {
+                self.captures.defining_local(identity)?
+            }
+            FlowBindingOccurrence::Free
+            | FlowBindingOccurrence::UnmodeledLocal
+            | FlowBindingOccurrence::Missing => return None,
+        };
+        let declarations = gate.bindings.runtime_declarations(local);
+        if declarations.is_empty() {
+            return None;
+        }
+        let mut annotated: Vec<FrameSpan> = Vec::new();
+        for declaration in declarations {
+            let fact = gate.skeleton.binding(*declaration);
+            match fact.kind {
+                SkeletonBindingKind::Const
+                | SkeletonBindingKind::Let
+                | SkeletonBindingKind::Var
+                    if !fact.destructured =>
+                {
+                    if fact.annotation_span.is_some() {
+                        annotated.push(fact.span);
+                    } else if fact.initializer.is_none() {
+                        return None;
+                    }
+                }
+                SkeletonBindingKind::Param if !fact.destructured => annotated.push(fact.span),
+                SkeletonBindingKind::NestedFunction => annotated.push(fact.span),
+                _ => return None,
+            }
+        }
+        if annotated.is_empty() {
+            return Some(StatementCallEffect::Inert);
+        }
+        let entry = self.index.get(gate.bindings.function())?;
+        let mut finder = DeclaredCallEffects {
+            within: entry.entry().span,
+            anchor: gate.anchor,
+            names: annotated,
+            effects: Vec::new(),
+        };
+        finder.visit_program(self.program);
+        if finder.effects.len() != finder.names.len() {
+            return None;
+        }
+        let count = |effect: DeclaredCallEffect| {
+            finder
+                .effects
+                .iter()
+                .filter(|found| **found == effect)
+                .count()
+        };
+        Some(
+            match (
+                count(DeclaredCallEffect::Asserts) + count(DeclaredCallEffect::Undecided),
+                count(DeclaredCallEffect::Never),
+                declarations.len(),
+            ) {
+                (0, 0, _) => StatementCallEffect::Inert,
+                (0, 1, 1) => StatementCallEffect::NeverReturns,
+                _ => StatementCallEffect::Unprovable,
+            },
+        )
     }
 
     /// Whether a closed same-file callee provably COMPLETES — the proof a
@@ -10051,8 +10181,6 @@ impl<'a> Lowerer<'a> {
             }
         }
         let mut gap = None;
-        // Mutability constrains captured values. A closure that only
-        // forwards a write effect does not observe the entering value.
         let mut checked = rustc_hash::FxHashSet::default();
         for read in entry.captured_reads.iter() {
             let identity = &read.binding;
@@ -10062,34 +10190,26 @@ impl<'a> Lowerer<'a> {
             let Some(binding) = self.bindings.local(identity) else {
                 continue;
             };
-            let fact = self.skeleton.binding(binding);
-            if fact.kind == SkeletonBindingKind::Let && self.nested_free_writes.contains(&binding) {
-                let writes_capture = entry.writes.iter().flat_map(|write| write.targets.iter()).any(|target| {
-                    matches!(target,
-                        verter_semantic::analysis::function_program::FunctionWriteTarget::Binding { reference, .. }
-                        if reference.binding.resolved() == Some(identity))
-                });
-                if !writes_capture {
-                    gap = Some(crate::semantic_query::FlowGap::ClosureCapture);
-                }
-            }
             // A guard's narrowing reaches an extended capture's body. Any
-            // other capture reads its declared type there, which the
-            // evaluator reproduces for a parameter or an annotated `var`
-            // (their declared authority) and for an unannotated `var` not
-            // reassigned before the creation (its reaching IS its declared type); every other
-            // capture created under an active guard, a `let` assigned after
-            // the creation and an unannotated `var` reassigned before it
-            // take the typed gap.
-            if extended_captures.contains(&binding) {
+            // other capture reads its DECLARED type there, whatever the
+            // enclosing body assigns before or after the creation or
+            // another closure assigns: the evaluator supplies it for a
+            // parameter and an annotated `let` / `var` (their declared
+            // authority) and for an unannotated `let` / `var` (its
+            // initializer's widened type). Every other capture that is
+            // mutable where the function is created — a destructured
+            // element, a `catch` parameter — takes the typed gap.
+            if extended_captures.contains(&binding) || self.capture_reads_declared_type(binding) {
                 continue;
             }
-            if (self.active_guard_bindings.contains(&binding)
-                && !self.capture_reads_declared_type(binding, node_span(node)))
-                || (fact.kind == SkeletonBindingKind::Let
-                    && self.binding_has_write_after(binding, node_span(node)))
+            let fact = self.skeleton.binding(binding);
+            if self.active_guard_bindings.contains(&binding)
+                || (matches!(
+                    fact.kind,
+                    SkeletonBindingKind::Let | SkeletonBindingKind::CatchParam
+                ) && (self.nested_free_writes.contains(&binding)
+                    || self.binding_has_write_after(binding, node_span(node))))
                 || (fact.kind == SkeletonBindingKind::Var
-                    && fact.annotation_span.is_none()
                     && self.binding_has_write_before(binding, node_span(node)))
             {
                 gap = Some(crate::semantic_query::FlowGap::ClosureCapture);
@@ -10524,6 +10644,17 @@ impl<'a> Lowerer<'a> {
                     }
                     let closed_non_narrowing = |position: ResultIndependentPosition| {
                         callee.as_ref().is_some_and(|(name, callee_span)| {
+                            // A discarded call narrows only as an
+                            // assertion, which a frame binding's declared
+                            // type decides.
+                            if matches!(position, ResultIndependentPosition::DiscardedOperand)
+                                && matches!(
+                                    self.callee_binding_effect(*callee_span),
+                                    Some(StatementCallEffect::Inert)
+                                )
+                            {
+                                return true;
+                            }
                             matches!(self.classify_occurrence(*callee_span), NameBinding::Free)
                                 && self
                                     .closed_callee_declaration(name)
@@ -10755,6 +10886,145 @@ fn annotation_provably_not_never(ty: &TSType<'_>) -> bool {
         TSType::TSParenthesizedType(inner) => annotation_provably_not_never(&inner.type_annotation),
         TSType::TSUnionType(union) => union.types.iter().any(annotation_provably_not_never),
         _ => false,
+    }
+}
+
+/// The checker's `extendAssignmentPosition` over one frame-relative write:
+/// the outermost variable, expression, `if`, loop, `with`, `switch`, `try`
+/// or class-declaration statement holding the write that begins after the
+/// binding's declaration.
+struct AssignmentExtent {
+    anchor: u32,
+    write: FrameSpan,
+    declaration: FrameSpan,
+    found: Option<FrameSpan>,
+}
+
+impl<'a> Visit<'a> for AssignmentExtent {
+    fn visit_statement(&mut self, it: &Statement<'a>) {
+        if self.found.is_some() {
+            return;
+        }
+        let span = FrameSpan::rebase(self.anchor, it.span().into());
+        if !span.contains(self.write) {
+            return;
+        }
+        let extends = matches!(
+            it,
+            Statement::VariableDeclaration(_)
+                | Statement::ExpressionStatement(_)
+                | Statement::IfStatement(_)
+                | Statement::DoWhileStatement(_)
+                | Statement::WhileStatement(_)
+                | Statement::ForStatement(_)
+                | Statement::ForInStatement(_)
+                | Statement::ForOfStatement(_)
+                | Statement::WithStatement(_)
+                | Statement::SwitchStatement(_)
+                | Statement::TryStatement(_)
+                | Statement::ClassDeclaration(_)
+        );
+        if extends && span > self.declaration && !span.contains(self.declaration) {
+            self.found = Some(span);
+            return;
+        }
+        walk::walk_statement(self, it);
+    }
+}
+
+/// What one declaration's explicit type says about the control-flow effect
+/// of a statement call through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclaredCallEffect {
+    /// No declared signature asserts or returns `never`: an unannotated
+    /// parameter, an `any` annotation, a function type or a function
+    /// declaration returning anything else.
+    Inert,
+    /// A declared signature returns `asserts x` / `asserts x is T`.
+    Asserts,
+    /// A declared signature returns `never`.
+    Never,
+    /// An annotation whose call signatures this syntax does not show.
+    Undecided,
+}
+
+/// The effect a declared return annotation gives a call statement.
+fn declared_return_effect(
+    annotation: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
+) -> DeclaredCallEffect {
+    match annotation.map(|annotation| &annotation.type_annotation) {
+        Some(TSType::TSTypePredicate(predicate)) if predicate.asserts => {
+            DeclaredCallEffect::Asserts
+        }
+        Some(TSType::TSNeverKeyword(_)) => DeclaredCallEffect::Never,
+        _ => DeclaredCallEffect::Inert,
+    }
+}
+
+/// The effect a variable or parameter annotation gives a call statement
+/// through it: its type's call signatures.
+fn declared_type_effect(
+    annotation: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
+) -> DeclaredCallEffect {
+    match annotation.map(|annotation| &annotation.type_annotation) {
+        None | Some(TSType::TSAnyKeyword(_)) => DeclaredCallEffect::Inert,
+        Some(TSType::TSFunctionType(function)) => {
+            declared_return_effect(Some(&function.return_type))
+        }
+        Some(_) => DeclaredCallEffect::Undecided,
+    }
+}
+
+/// The declared call effects of the variables, parameters and function
+/// declarations named by `names` (binding-identifier spans in the frame
+/// anchored at `anchor`), found inside the defining function's source
+/// range `within`.
+struct DeclaredCallEffects {
+    within: verter_span::Span,
+    anchor: u32,
+    names: Vec<FrameSpan>,
+    effects: Vec<DeclaredCallEffect>,
+}
+
+impl DeclaredCallEffects {
+    fn names(&self, span: oxc_span::Span) -> bool {
+        self.names
+            .contains(&FrameSpan::rebase(self.anchor, span.into()))
+    }
+}
+
+impl<'a> Visit<'a> for DeclaredCallEffects {
+    fn visit_statement(&mut self, it: &Statement<'a>) {
+        let span = it.span();
+        if span.end < self.within.start || span.start > self.within.end {
+            return;
+        }
+        walk::walk_statement(self, it);
+    }
+    fn visit_function(
+        &mut self,
+        it: &oxc_ast::ast::Function<'a>,
+        flags: oxc_syntax::scope::ScopeFlags,
+    ) {
+        if it.id.as_ref().is_some_and(|id| self.names(id.span)) {
+            self.effects
+                .push(declared_return_effect(it.return_type.as_deref()));
+        }
+        walk::walk_function(self, it, flags);
+    }
+    fn visit_variable_declarator(&mut self, it: &oxc_ast::ast::VariableDeclarator<'a>) {
+        if matches!(&it.id, BindingPattern::BindingIdentifier(id) if self.names(id.span)) {
+            self.effects
+                .push(declared_type_effect(it.type_annotation.as_deref()));
+        }
+        walk::walk_variable_declarator(self, it);
+    }
+    fn visit_formal_parameter(&mut self, it: &oxc_ast::ast::FormalParameter<'a>) {
+        if matches!(&it.pattern, BindingPattern::BindingIdentifier(id) if self.names(id.span)) {
+            self.effects
+                .push(declared_type_effect(it.type_annotation.as_deref()));
+        }
+        walk::walk_formal_parameter(self, it);
     }
 }
 
