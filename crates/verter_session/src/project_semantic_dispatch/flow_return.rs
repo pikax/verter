@@ -1961,6 +1961,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         // (4) Instantiation transfer.
         if let Some(result) = self.instantiated_from_uninstantiated(&key) {
+            self.note_transferred_flow_return(&key);
             return FlowReturnStep::Complete(result);
         }
         // (5) Cold compute. Root versus inline is decided by the generic

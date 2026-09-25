@@ -57,7 +57,10 @@
 //!   scheduled where it is made, its own evaluation probed in turn. An
 //!   instantiation read from an argument of any form, or a call nested
 //!   where discovery does not look, then costs one refused probe per level
-//!   rather than one native level.
+//!   rather than one native level. A recorded instantiated return whose
+//!   uninstantiated return is answered by then is read off it when the
+//!   schedule evaluates it, queueing no member; that read is as reusable as
+//!   a member, since every later demand reads it the same way.
 //! - **Cycles stay with the SCC machinery.** A callee whose discovered
 //!   closure reaches a frame in flight, an open member of a pending
 //!   component, or an entry below it on the explicit stack is never
@@ -117,6 +120,14 @@ pub(crate) struct FlowScheduleSession {
     /// The instantiated callee returns each uninstantiated frame demanded
     /// while it evaluated, in demand order.
     demands: FxHashMap<FlowReturnKey, Vec<FlowReturnKey>>,
+    /// The instantiated callee returns the instantiation transfer answered
+    /// in this session ([`ProjectSemanticDispatch::note_transferred_flow_return`]).
+    /// The uninstantiated return each was read off stays answered while the
+    /// session is open — no machinery root drains or aborts a member while
+    /// a frame evaluates — so every later demand is answered the same way,
+    /// without an evaluation: a scheduled evaluation the transfer answered
+    /// is as reusable as one that closed as a reusable completed member.
+    transferred: FxHashSet<FlowReturnKey>,
     /// The scheduled evaluations in progress, innermost last: `Some` for a
     /// probe collecting the unsettled callee returns its evaluation
     /// demands, `None` for one whose demands are scheduled where they are
@@ -152,6 +163,7 @@ impl Drop for FlowScheduleScope<'_> {
             if session.open == 0 {
                 session.settled.clear();
                 session.demands.clear();
+                session.transferred.clear();
                 session.probes.clear();
             }
         }
@@ -530,14 +542,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let _ = frame.finish();
         completeness.discard();
         drop(deferred_sticky);
-        let reusable = matches!(step, FlowReturnStep::Complete(_))
-            && self
-                .dispatch_txn
-                .borrow()
-                .flow
+        // An evaluation the instantiation transfer answered queued no
+        // member, and needs none: every later demand is answered the same
+        // way.
+        let reusable = matches!(step, FlowReturnStep::Complete(_)) && {
+            let txn = self.dispatch_txn.borrow();
+            txn.flow
                 .completed_members
                 .iter()
-                .any(|member| &member.key == key && member.reuse.is_some());
+                .any(|member| &member.key == key && member.reuse.is_some())
+                || txn.flow.schedule.transferred.contains(key)
+        };
         ScheduledEvaluation { reusable, recorded }
     }
 
@@ -838,6 +853,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return false;
             }
             span = enclosing;
+        }
+    }
+
+    /// Record that the instantiation transfer answered the instantiated
+    /// `key` without evaluating it (see [`FlowScheduleSession`]). Nothing
+    /// is recorded while no schedule is open.
+    pub(super) fn note_transferred_flow_return(&self, key: &FlowReturnKey) {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        let session = &mut txn.flow.schedule;
+        if session.open > 0 {
+            session.transferred.insert(key.clone());
         }
     }
 
