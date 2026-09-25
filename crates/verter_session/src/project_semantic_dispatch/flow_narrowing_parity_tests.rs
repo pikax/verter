@@ -534,6 +534,7 @@ const CALL_ROWS: &[(&str, &str, &str)] = &[
     ("c11", "Foo", "Foo"),
     ("c12", "Bar | Foo", "Bar | Foo"),
     ("c13", "string & any[]", "string & any[]"),
+    ("c14", "Foo", "Foo"),
     (
         "c17",
         "{ k: \"a\"; v: string; } | { k: \"b\"; v: number; }",
@@ -599,19 +600,18 @@ const CALL_PREDICATE_ROWS: &[(&str, &str, &str)] = &[
 /// A predicate over a member narrows the member, not a union parent
 /// through it (`c17`); `g(x)` over a type parameter narrows it through its
 /// constraint (`c15` is `T & T[]`, pinned by
-/// [`a_type_parameter_narrows_through_its_constraint`]). Two calls degrade: `isFoo(o["x"])`
-/// narrows the element access (`c14` is `Foo`) and `isFoo(o?.x)` the
-/// optional chain's root (`c18` is `{ x: Foo | Bar; }`), references this
-/// half does not carry.
+/// [`a_type_parameter_narrows_through_its_constraint`]). `isFoo(o["x"])`
+/// narrows the element access its literal key names (`c14` is `Foo` in
+/// all four `strictNullChecks` × `noImplicitAny` projects). One call
+/// degrades: `isFoo(o?.x)` narrows the optional chain's root (`c18` is
+/// `{ x: Foo | Bar; }`), a reference this half does not carry.
 #[test]
 fn a_call_to_a_predicate_signature_narrows_its_argument() {
     check_rows(CALL_PREDICATES, CALL_ROWS);
     check_predicate_rows(CALL_PREDICATES, CALL_PREDICATE_ROWS);
     let host = host_with(CALL_PREDICATES);
     for root in [STRICT_ROOT, LOOSE_ROOT] {
-        for function in ["c14", "c18"] {
-            super::signature_predicate_inference_tests::assert_degrades(&host, root, function);
-        }
+        super::signature_predicate_inference_tests::assert_degrades(&host, root, "c18");
     }
 }
 
@@ -1670,6 +1670,24 @@ fn only_an_entered_call_can_assert() {
         ("f8", "string", "string"),
     ];
     check_rows(ENTERED_CALLS, &rows);
+}
+
+/// A comma operand in the argument of a statement call whose callee is an
+/// unresolved import narrows like any other: measured on 7.0.2, with and
+/// without `strictNullChecks` (and with the import resolved to
+/// `declare function touch(v: unknown): void`), `n8` is `string`. The
+/// lane reads `string` behind the typed guard gap, because the callee's
+/// effects signature is not settled.
+#[test]
+#[ignore = "a statement call whose callee is an unresolved import settles no effects signature, \
+            so the argument's entered assertion publishes behind the typed guard gap"]
+fn an_unresolved_import_statement_callee_keeps_its_arguments_assertion() {
+    const SOURCE: &str = r#"
+import { touch } from "./touch";
+declare function assertString(x: unknown): asserts x is string;
+export function n8(x: string | number) { touch((assertString(x), 0)); return x; }
+"#;
+    check_rows(SOURCE, &[("n8", "string", "string")]);
 }
 
 const EMPTY_OBJECT_TARGETS: &str = r#"

@@ -9375,12 +9375,13 @@ fn element_reads_infer_no_return_predicate() {
     );
 }
 
-/// Correlated destructured narrowings the lane does not carry degrade
-/// rather than publish the unnarrowed sibling. Measured on TypeScript
-/// 7.0.2, every project: `closureRead` is `string | true` (a closure an
-/// arm creates reads the sibling the test narrowed) and `objSwitch` is
-/// `string | true` (a `switch` over a discriminant element narrows its
-/// siblings); the lane answers both with the typed gap.
+/// Correlated destructured narrowings. Measured on TypeScript 7.0.2, every
+/// project: `closureRead` is `string | true` (a closure an arm creates
+/// reads the sibling the test narrowed — a `const` capture enters the
+/// closure at its narrowed type) and `objSwitch` is `string | true` (a
+/// `switch` over a discriminant element narrows its siblings). The lane
+/// answers `closureRead` clean and `objSwitch`, which it does not carry,
+/// with the typed gap rather than the unnarrowed sibling.
 #[test]
 fn correlated_narrowings_the_lane_does_not_carry_degrade() {
     let host = four_policy_host();
@@ -9395,16 +9396,16 @@ fn correlated_narrowings_the_lane_does_not_carry_degrade() {
     ] {
         let canonical = format!("{root}/correlated-gaps.ts");
         upsert(&host, &canonical, source);
-        for (symbol, gap) in [
-            ("closureRead", "ClosureCapture"),
-            ("objSwitch", "GuardNarrowing"),
-        ] {
-            let observed = observe(&host, &canonical, symbol);
-            assert!(
-                observed.ends_with(&format!("[degraded Some(FlowGap({gap}))]")),
-                "{canonical} `{symbol}`: {observed}"
-            );
-        }
+        assert_eq!(
+            observe(&host, &canonical, "closureRead"),
+            "string | true",
+            "{canonical} `closureRead`"
+        );
+        let observed = observe(&host, &canonical, "objSwitch");
+        assert!(
+            observed.ends_with("[degraded Some(FlowGap(GuardNarrowing))]"),
+            "{canonical} `objSwitch`: {observed}"
+        );
     }
 }
 

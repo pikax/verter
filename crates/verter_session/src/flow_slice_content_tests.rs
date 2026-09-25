@@ -4659,9 +4659,10 @@ fn locator_miss_is_typed_none() {
 /// ARGUMENT (`touch((assertString(x), 0));`), and an assignment the modeled arm
 /// refused (a member target, or a right-hand side the slice did not
 /// select) can all carry an `asserts` narrowing of a frame-owned binding,
-/// and a class subtree hides a write from the skeleton entirely. Each
-/// takes the fail-closed scan: an effect that could narrow a frame binding
-/// flags the typed `GuardNarrowing` gap. Ordinary value-neutral statements
+/// which applies once the statement has run, and a class subtree hides a
+/// write from the skeleton entirely, which takes the fail-closed scan: an
+/// effect that could narrow a frame binding flags the typed
+/// `GuardNarrowing` gap. Ordinary value-neutral statements
 /// — a call whose callee is PROVEN and whose arguments carry no effect, a
 /// visible write the unapplied-write ledger already covers — stay silent,
 /// and so does a call that IS a `void` operand: the checker enters only a
@@ -4671,10 +4672,12 @@ fn locator_miss_is_typed_none() {
 #[test]
 fn unmodeled_expression_statement_effects_take_the_typed_gap() {
     // A closed same-file assertion the checker enters into control flow —
-    // a comma operand, also inside a `void`, a right operand a literal
-    // `true` always runs, a member write's or an unselected assignment's
-    // right-hand side — applies once the statement has run (measured on
-    // 7.0.2: each leaves `x` as `string`).
+    // a comma operand, also inside a `void` or a call's argument, a right
+    // operand a literal `true` always runs, a member write's or an
+    // unselected assignment's right-hand side — applies once the statement
+    // has run (measured on 7.0.2: each leaves `x` as `string`). An
+    // imported statement callee is settled by the evaluator, so its
+    // argument's assertion takes no gap.
     let applied = [
         (
             "a discarded sequence operand",
@@ -4697,6 +4700,12 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
              function f(x: string | number) { o.p = (assertString(x), 1); return x }",
         ),
         (
+            "a comma operand in an imported callee's argument",
+            "import { touch } from \"./touch\";\n\
+             function assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { touch((assertString(x), 0)); return x }",
+        ),
+        (
             "an assignment right-hand side the slice did not select",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { let y = 0; y = (assertString(x), 1); return x }",
@@ -4712,12 +4721,6 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
     }
 
     let gapped = [
-        (
-            "a call argument",
-            "import { touch } from \"./touch\";\n\
-             function assertString(x: unknown): asserts x is string {}\n\
-             function f(x: string | number) { touch((assertString(x), 0)); return x }",
-        ),
         (
             "a class-hidden write in an expression statement",
             "export {};\nfunction f(x: string | number) { void (class { static { x = \"s\"; } }); return x }",
