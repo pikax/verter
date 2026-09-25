@@ -193,6 +193,101 @@ impl ProjectSemanticDispatch<'_> {
         }
     }
 
+    /// A tuple's `length`: `number` with a rest element, else the union of
+    /// the lengths from its required count to its element count
+    /// (`[1, 2?]['length']` is `1 | 2`).
+    pub(super) fn tuple_length(
+        &self,
+        elements: &[crate::semantic_query::TupleElement],
+    ) -> SemanticNodeId {
+        if elements.iter().any(|element| element.rest) {
+            return self
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        }
+        let required = elements.iter().filter(|element| !element.optional).count();
+        let lengths: Vec<SemanticNodeId> = (required..=elements.len())
+            .map(|length| {
+                self.graph()
+                    .intern_node(SemanticNodeData::Literal(LiteralValue::Number(
+                        length as f64,
+                    )))
+            })
+            .collect();
+        self.intern_normalized_union_or_intersection(&lengths, true)
+    }
+
+    /// A tuple's apparent object type: the tuple's own members — `length`
+    /// as its possible lengths and each position before a rest element as
+    /// the numeric-key property it is (`"0"`, `"1"`, optional when the
+    /// element is) — over the members of the `Array` wrapper `surface`,
+    /// when the project declares one. The checker synthesizes the tuple's
+    /// own members whatever its library declares.
+    pub(super) fn tuple_apparent_surface(
+        &self,
+        surface: Option<SemanticNodeId>,
+        elements: &[crate::semantic_query::TupleElement],
+        readonly: bool,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let member = |key: &str, value: SemanticNodeId, optional: bool| {
+            crate::semantic_query::SurfaceMember {
+                key: crate::semantic_query::AuthoredPropertyKey::string(key),
+                value,
+                optional,
+                readonly,
+                method_kind: None,
+                has_implementation_body: false,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: None,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
+                merge_role: crate::semantic_query::MergeRoleStamp::default(),
+            }
+        };
+        let mut members: Vec<crate::semantic_query::SurfaceMember> = elements
+            .iter()
+            .take_while(|element| !element.rest)
+            .enumerate()
+            .map(|(position, element)| {
+                member(
+                    position.to_string().as_str(),
+                    element.value,
+                    element.optional,
+                )
+            })
+            .collect();
+        members.push(member("length", self.tuple_length(elements), false));
+        let wrapper = surface
+            .and_then(|surface| graph.node_data(surface))
+            .and_then(|data| match data.as_ref() {
+                SemanticNodeData::Object(view) => Some(view.clone()),
+                _ => None,
+            });
+        let view = match wrapper {
+            Some(view) => {
+                let own: Vec<_> = members.iter().map(|member| member.key.clone()).collect();
+                members.extend(
+                    view.positive_members()
+                        .iter()
+                        .filter(|member| !own.contains(&member.key))
+                        .cloned(),
+                );
+                view.with_positive_members(Arc::from(members.into_boxed_slice()))
+            }
+            None => crate::semantic_query::SurfaceView::from_entries(
+                members
+                    .into_iter()
+                    .map(crate::semantic_query::SurfaceEntry::Member)
+                    .collect(),
+                None,
+                false,
+            ),
+        };
+        graph.intern_node(SemanticNodeData::Object(view))
+    }
+
     /// The element type of a rest tuple element's array value, through
     /// transparent aliases; `None` for a value that is not a settled array.
     fn rest_array_element(&self, value: SemanticNodeId) -> Option<SemanticNodeId> {

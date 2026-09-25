@@ -167,17 +167,22 @@ fn wrong_clean_an_interface_is_not_below_an_implicit_string_index_signature() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A fixed-length tuple type carries `length: 2`, so it relates to `{ length: 2
-/// }`. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[[1, 2]] extends [{ length: 2 }] ? 1 : 2`: the checker answers `1`; the
-///   lane measured `2`.
+/// A tuple type carries its own members: `length` as its possible lengths
+/// and each position as a numeric-key property, so `[1, 2]` relates to `{
+/// length: 2 }` and `{ 0: 1 }`, `[1, 2?]` to `{ length: 1 | 2 }`, and neither
+/// a wrong length, a wrong position nor a rest tuple's `number` length
+/// fits a literal one (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "a fixed tuple carries a literal length property"]
-fn wrong_clean_a_tuple_has_its_literal_length_property() {
+fn a_tuple_relates_as_the_checker_relates_its_own_members() {
     let matrix = Matrix::new(OBJECTS);
-    let failures = matrix.types(&[("[[1, 2]] extends [{ length: 2 }] ? 1 : 2", "1")]);
+    let failures = matrix.types(&[
+        ("[[1, 2]] extends [{ length: 2 }] ? 1 : 2", "1"),
+        ("[[1, 2?]] extends [{ length: 1 | 2 }] ? 1 : 2", "1"),
+        ("[[1, 2]] extends [{ 0: 1 }] ? 1 : 2", "1"),
+        ("[[1, 2]] extends [{ length: 3 }] ? 1 : 2", "2"),
+        ("[[1, 2]] extends [{ 1: 3 }] ? 1 : 2", "2"),
+        ("[[1, ...number[]]] extends [{ length: 1 }] ? 1 : 2", "2"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

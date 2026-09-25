@@ -7658,17 +7658,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     results.push(RelationResult::Unknown);
                     return;
                 };
-                match self.global_wrapper_surface(name, &args, canonical.as_ref()) {
+                let wrapper = match self.global_wrapper_surface(name, &args, canonical.as_ref()) {
                     super::apparent_type::GlobalWrapper::Surface(surface) if surface != source => {
-                        work.push(RelateWork::Eval(surface, target));
+                        Some(surface)
                     }
-                    super::apparent_type::GlobalWrapper::Absent => {
-                        results.push(RelationResult::NotAssignable);
-                    }
+                    super::apparent_type::GlobalWrapper::Absent => None,
                     super::apparent_type::GlobalWrapper::Surface(_)
                     | super::apparent_type::GlobalWrapper::Unsettled => {
                         results.push(RelationResult::Unknown);
+                        return;
                     }
+                };
+                // A tuple's own members — its literal `length` and its
+                // positions — stand over the `Array` wrapper, and exist
+                // whatever the library declares.
+                let tuple = match self.graph().node_data(source).as_deref() {
+                    Some(SemanticNodeData::Tuple { elements, readonly }) => {
+                        Some(self.tuple_apparent_surface(wrapper, elements, *readonly))
+                    }
+                    _ => None,
+                };
+                match tuple.or(wrapper) {
+                    Some(apparent) => work.push(RelateWork::Eval(apparent, target)),
+                    None => results.push(RelationResult::NotAssignable),
                 }
                 return;
             }

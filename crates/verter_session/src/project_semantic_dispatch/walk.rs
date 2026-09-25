@@ -2363,28 +2363,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .intern_normalized_union(&arms, NullabilityPolicy::Erased)
     }
 
-    /// A tuple's `length`: `number` with a rest element, else the union of
-    /// the lengths from its required count to its element count
-    /// (`[1, 2?]['length']` is `1 | 2`).
-    fn tuple_length(&self, elements: &[crate::semantic_query::TupleElement]) -> SemanticNodeId {
-        use crate::semantic_query::PrimitiveKind;
-        if elements.iter().any(|element| element.rest) {
-            return self
-                .graph()
-                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-        }
-        let required = elements.iter().filter(|element| !element.optional).count();
-        let lengths: Vec<SemanticNodeId> = (required..=elements.len())
-            .map(|length| {
-                self.graph().intern_node(SemanticNodeData::Literal(
-                    crate::semantic_query::LiteralValue::Number(length as f64),
-                ))
-            })
-            .collect();
-        self.dispatch
-            .intern_normalized_union_or_intersection(&lengths, true)
-    }
-
     /// The apparent wrapper surface a primitive, an array or a tuple reads
     /// its non-index keys from
     /// ([`ProjectSemanticDispatch::apparent_wrapper_of`]); `None` when the
@@ -4554,7 +4532,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     drop(data);
                     let member = self.dispatch.apparent_member_name(segment);
                     if member.as_deref() == Some("length") {
-                        let length = self.tuple_length(&elements);
+                        let length = self.dispatch.tuple_length(&elements);
                         let (edge_kind, meta) = match segment {
                             PathSegment::Index(ix) => {
                                 (OriginEdgeKind::ProjectIndex, OriginMeta::Index(ix.clone()))
