@@ -33,6 +33,19 @@ Deletion population this node: the fixed single-signature construction adapter o
 
 Known TypeScript limit (open finding F5, raised for an architect ruling): TypeScript's type system reads only the last signature of an overload set and cannot copy a generic signature, so in a rebuilt set the signatures declared ahead of a generic signature are not enumerable, and the generic signature itself is constructed at its constraints (its binder is not inferred per use). A lone generic call signature keeps its binder through higher-order inference; a typed constructor without an open catch-all is passed through whole and keeps every generic overload.
 
+Known failures under F5 (the reviewer's reproductions, open): with `Mix` declared as `(props: { kind: "a"; n: number })`, `<T>(props: { kind: "g"; value: T })`, `(props: { kind: "z"; s: string })`, the use `kind: "a"` fails with TS2322 (`"a"` is not assignable to `"z"`) and `kind: "g"` constructs `value: unknown`; with the pair `<T extends string>(props: { kind: "list"; items: T[] })`, `<T extends string>(props: { kind: "one"; item: T })`, only `"one"` is selectable and `item` is `string`, not `"x"`. A direct call selects every one of these overloads and infers `T`.
+
+Why the direct call is not the projection's fix either (`tests/sfc-projection/evidence/STP19/ts-limits/`, clean on both pinned engines with `tsc -p tests/sfc-projection/evidence/STP19/ts-limits`; each limit is an assertion or an `@ts-expect-error` that fails if a later TypeScript lifts it):
+
+- L1–L3: conditional inference reads the last signature only, erases a generic signature's binder, and an intersection drops only an identical signature copy, so no signature-by-signature rebuild passes a generic call signature;
+- L4: value-level higher-order inference keeps a binder for a single signature only;
+- L5–L6: `new` on a value with call signatures only resolves every overload but yields `any` with TS7009 under `noImplicitAny`, and a call on a value with construct signatures only is TS2348, so no one application syntax checks both component kinds, and the projection renders from the template without knowing which kind a component is (it answers no types);
+- L7: rendering every use as a call and converting constructors instead moves the same loss to constructors (a generic construct overload beside another overload is dropped);
+- L8: a direct call of the component's own value (gated so a callable passes through whole) does select every overload and infer `T`, but its result is the component's return type, never the chosen overload's props, slots or emit that the use's observations read, so it cannot be the use's one construction; as an extra validation it renders the authored props twice and reports each argument diagnostic twice;
+- `jsx.tsx`: JSX is the one syntax TypeScript resolves against a value's construct signatures, else its call signatures, keeping every overload and binder. A `.tsx` checking module cannot host `lang="ts"` setup code verbatim (`<T>value` assertions), and an element's type is `JSX.Element`, so it gives no specialized instance.
+
+Closing F5 therefore needs a decision beyond this node's surfaces: a type-directed or JSX-based construction for callable components, with its own observation channel, or a ruling that scopes `STP19-overloads` to overload sets without a generic call signature ahead of other signatures.
+
 Not claimed here (owned elsewhere): an overloaded component's undeclared fallthrough attributes are tolerated only by its last signature (excess-key and attribute obligations are STP20's); listener props of a plain generic functional component whose declaration publishes only a context `emit` are not reconstructed from that `emit` (the dependency's declared props are what the adapter reads); event payload overloads (STP22); slot-scope placement of nested uses (STP24); global/async/recursive component resolution (STP32); composition of setup statements into the checking module (STP58).
 
 ## Why the negative cases discriminate
@@ -71,7 +84,7 @@ This round:
 
 - F1, an attribute index on every rebuilt call overload hid a later overload — rebuilt call overloads take exactly their declared props; discriminated by `call-overloads-tolerate-attributes`.
 - F4, a generic construct signature reopened the `any[]` catch-all — the walk keeps what it read instead of returning the declared constructor; anchored negative `Select :label="1"` plus `generic-construct-overload-reopens-catch-all`.
-- F5, one generic call signature dropped non-generic siblings — overloads read up to the generic signature are now kept (`generic-call-overload-drops-read-overloads`); the overloads declared ahead of a generic signature remain unreachable (see the known TypeScript limit above) and are open for an architect ruling.
+- F5, one generic call signature dropped non-generic siblings — overloads read up to the generic signature are now kept (`generic-call-overload-drops-read-overloads`); the overloads declared ahead of a generic signature remain unreachable and a generic call signature stays at its constraints (see the known TypeScript limit and its evidence above); open for an architect ruling.
 - F6, this evidence file did not describe the shipped rebuild — updated here.
 
 Raw outcomes: see the CI artifact owner for the candidate run; local qualification is the charter §14 command above.
