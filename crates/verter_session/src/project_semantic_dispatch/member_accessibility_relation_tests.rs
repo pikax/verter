@@ -109,3 +109,76 @@ fn keyof_lists_public_members_only() {
     let failures = mismatches(FIXTURE, &[("keyof D0", "\"p\""), ("keyof PV", "never")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Whether the comparable relation finds `a` and `b` disjoint, read off the
+/// tuple `[a, b]` the probe lane settles.
+fn comparability(a: &str, b: &str) -> &'static str {
+    super::checker_probe_lane_tests::with_probe(
+        FIXTURE,
+        &format!("[{a}, {b}]"),
+        |dispatch, node| {
+            let Some(crate::semantic_query::SemanticNodeData::Tuple { elements, .. }) =
+                dispatch.graph().node_data(node).as_deref().cloned()
+            else {
+                panic!("`[{a}, {b}]` settles to a tuple");
+            };
+            match dispatch.nodes_comparable(elements[0].value, elements[1].value) {
+                super::relation::ComparabilityVerdict::Overlaps => "overlaps",
+                super::relation::ComparabilityVerdict::Disjoint(_) => "disjoint",
+                super::relation::ComparabilityVerdict::Undecided => "undecided",
+            }
+        },
+    )
+}
+
+/// The comparable relation reads a property pair's accessibility as the
+/// checker's `propertyRelatedTo` does, in either direction: two types are
+/// disjoint when a shared property's accessibility relates in neither.
+///
+/// Measured on TypeScript 7.0.2 over `declare const` values of each type:
+/// `d0 === q0`, `pv === pv2`, `pr === pr2`, `pr === pb` and `pv === pb`
+/// are TS2367 ("the types … have no overlap") and `d0 as Q0`, `pv as
+/// PV2`, `pr as PR2`, `pr as PB`, `pb as PR` and `pv as PB` TS2352
+/// ("neither type sufficiently overlaps"); `pr2 === subPR2` is TS2367 and
+/// `subPR2 as PR2` TS2352; `subPR === pr`, `pr === subPR2`, `subPR2 as
+/// PR`, `pr as SubPR2`, `pr === subPub`, `subPub as PR` and `pr as SubPub`
+/// are accepted — one direction relates.
+#[test]
+fn the_comparable_relation_reads_property_accessibility_both_ways() {
+    let rows = [
+        ("D0", "Q0", "disjoint"),
+        ("PV", "PV2", "disjoint"),
+        ("PR", "PR2", "disjoint"),
+        ("PR", "PB", "disjoint"),
+        ("PV", "PB", "disjoint"),
+        ("SubPR", "PR", "overlaps"),
+        ("PR", "SubPR2", "overlaps"),
+        ("PR", "SubPub", "overlaps"),
+        ("PR2", "SubPR2", "disjoint"),
+        ("PV", "PV", "overlaps"),
+    ];
+    let failures: Vec<String> = rows
+        .iter()
+        .filter_map(|(a, b, expected)| {
+            let measured = comparability(a, b);
+            (measured != *expected)
+                .then(|| format!("`{a}` / `{b}`: expected {expected}, measured {measured}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A class's own member shadows the member it inherits, accessibility
+/// and declaration included, however the class body is reached.
+///
+/// Measured on TypeScript 7.0.2 (all four settings): `keyof SubPub` over
+/// `class SubPub extends PR { x = 3 }` (`PR`'s `protected x`) is `"x"` and
+/// `SubPub['x']` is `number`.
+#[test]
+fn an_overriding_member_shadows_the_inherited_one() {
+    let failures = mismatches(
+        FIXTURE,
+        &[("keyof SubPub", "\"x\""), ("SubPub['x']", "number")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

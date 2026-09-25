@@ -6718,6 +6718,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 );
             }
             SemanticNodeData::Intersection(arms) => {
+                // An interface or class body is a heritage overlay however
+                // it was reached: its own body shadows what it inherits.
+                let heritage_body = arms.origin_category()
+                    == crate::semantic_query::composite::CompositeOriginCategory::Heritage;
                 let arms = arms.members_arc();
                 drop(data);
                 let buffer_id = *next_buffer_id;
@@ -6742,7 +6746,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         // for an interface/class body) makes the per-arm
                         // descent stamp reference arms `Heritage`.
                         member_role_override,
-                        heritage_overlay: heritage_overlay_body,
+                        heritage_overlay: heritage_overlay_body || heritage_body,
                         provenance_override,
                     });
                 }

@@ -5154,6 +5154,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         else {
                             continue;
                         };
+                        // The property pair's accessibility, as the
+                        // checker's comparable relation reads it through
+                        // `propertyRelatedTo` in either direction: a pair
+                        // neither direction admits proves the types
+                        // disjoint (TS2367 / TS2352 between `D0` and a
+                        // `Q0` redeclaring its private member).
+                        if let Some(result) =
+                            self.comparable_property_accessibility(source_member, target_member)
+                        {
+                            results.push(result);
+                            continue;
+                        }
                         work.push(Work::Eval(
                             read(source_member.value, source_member.optional),
                             read(target_member.value, target_member.optional),
@@ -8221,6 +8233,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return Some(RelationResult::NotAssignable);
         }
         None
+    }
+
+    /// The accessibility of a property pair the comparable relation reads:
+    /// comparability holds when either direction relates, so the pair
+    /// proves the types disjoint (`NotAssignable`) only when
+    /// [`Self::property_accessibility_relation`] refuses it both ways.
+    /// `None` when a direction admits the pair and its types decide;
+    /// `Unknown` when a direction is undecided and none admits it.
+    fn comparable_property_accessibility(
+        &self,
+        a: &crate::semantic_query::SurfaceMember,
+        b: &crate::semantic_query::SurfaceMember,
+    ) -> Option<RelationResult> {
+        let forward = self.property_accessibility_relation(a, b)?;
+        let backward = self.property_accessibility_relation(b, a)?;
+        Some(
+            if matches!(forward, RelationResult::NotAssignable)
+                && matches!(backward, RelationResult::NotAssignable)
+            {
+                RelationResult::NotAssignable
+            } else {
+                RelationResult::Unknown
+            },
+        )
     }
 
     /// The declaration that declares `member`: the file-scope class whose
