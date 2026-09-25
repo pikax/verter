@@ -11956,10 +11956,8 @@ const NON_ASSIGNABLE_ARGUMENT_TABLE: &[(&str, &str, &str, &str, &str)] = &[
 /// Without `noImplicitAny` an evolving array is `never[]`, so `a.indexOf(1)`
 /// passes an argument `never` cannot hold (TS2345), and the checker still
 /// types the call by its only signature: `number`, and `boolean` for
-/// `includes` (measured on TypeScript 7.0.2). The lane refuses the callee in
-/// that setting.
+/// `includes` (measured on TypeScript 7.0.2).
 #[test]
-#[ignore = "a call whose argument is not assignable still takes the return type of its only signature"]
 fn a_call_with_a_non_assignable_argument_keeps_its_only_signature() {
     assert_measured_matrix_with_lib(
         "non-assignable-argument.ts",
@@ -11986,10 +11984,8 @@ const BOOLEAN_MEMBER_RETURNS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
 
 /// `return a.includes(1)`, `return a.some(x => x > 0)` and `return o.xs[0]`
 /// read a parameter's member and are `boolean`: the checker infers no type
-/// predicate from them (measured on TypeScript 7.0.2). The lane answers
-/// `boolean` degraded by the guard-narrowing gap.
+/// predicate from them (measured on TypeScript 7.0.2).
 #[test]
-#[ignore = "a boolean member call or element read of a parameter infers no type predicate"]
 fn boolean_member_reads_of_a_parameter_infer_no_type_predicate() {
     assert_measured_matrix_with_lib(
         "boolean-member-returns.ts",
@@ -12009,10 +12005,8 @@ const STRING_ELEMENT_TABLE: &[(&str, &str, &str, &str, &str)] = &[
 ];
 
 /// `s[0]` over `s: string` is `string`, the `String` wrapper's
-/// `[index: number]: string` (measured on TypeScript 7.0.2). The lane misses
-/// the read.
+/// `[index: number]: string` (measured on TypeScript 7.0.2).
 #[test]
-#[ignore = "an element read of a string reads the `String` wrapper's number index signature"]
 fn a_string_element_read_reads_the_string_index_signature() {
     assert_measured_matrix_with_lib(
         "string-element.ts",
@@ -12113,10 +12107,8 @@ const MEMBER_WRITES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
 
 /// An assignment `o.y = "s"` narrows the reference `o.y` for the reads after
 /// it: `string` straight after it, and `string | number` past a loop that
-/// assigns it over `o.y = 0` (measured on TypeScript 7.0.2). The lane reads the
-/// member's declared type.
+/// assigns it over `o.y = 0` (measured on TypeScript 7.0.2).
 #[test]
-#[ignore = "an assignment to a member path narrows later reads of that path, in and outside loops"]
 fn member_writes_narrow_their_member_path() {
     assert_measured_matrix(
         "member-writes.ts",
