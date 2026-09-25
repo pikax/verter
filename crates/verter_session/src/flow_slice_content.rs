@@ -3662,6 +3662,15 @@ fn member_target_chain<'a>(
     Some((root, path))
 }
 
+/// Whether a `var` declares the type `any` whatever is later written to
+/// it: an unannotated, undestructured declarator with no initializer is
+/// the checker's auto-typed variable under `noImplicitAny` and `any`
+/// without it, and a closure reads either as `any` (TS7005 under
+/// `noImplicitAny`).
+fn var_declares_any(fact: &verter_semantic::analysis::flow::SkeletonBinding) -> bool {
+    fact.annotation_span.is_none() && fact.initializer.is_none() && !fact.destructured
+}
+
 /// Whether a member access's object is a flow VALUE with no reference
 /// behind it: a `new` expression or an object literal, or a static member
 /// chain rooted at one.
@@ -6546,6 +6555,7 @@ impl<'a> Lowerer<'a> {
             SkeletonBindingKind::Param => true,
             SkeletonBindingKind::Var => {
                 fact.annotation_span.is_some()
+                    || var_declares_any(fact)
                     || (!self.nested_free_writes.contains(&binding)
                         && !self.binding_has_write_before(binding, creation_span))
             }
@@ -13467,6 +13477,7 @@ impl<'a> Lowerer<'a> {
                     && self.binding_has_write_after(binding, node_span(node)))
                 || (fact.kind == SkeletonBindingKind::Var
                     && fact.annotation_span.is_none()
+                    && !var_declares_any(fact)
                     && self.binding_has_write_before(binding, node_span(node)))
             {
                 gap = Some(crate::semantic_query::FlowGap::ClosureCapture);
