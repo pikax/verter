@@ -1736,6 +1736,14 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "839f9a8c43d6651273c69a500548408423cb6b9c3fe7596f9b9288929423ef70",
     ),
     (
+        "N61_unannotated_const_assertion_does_not_narrow",
+        "5949a3900fb8e02527cc4f60c06ad1c63e135fe0b2b72a6e82e6aede41bb1d24",
+    ),
+    (
+        "N62_annotated_const_assertion_narrows",
+        "19be328abd0ed8ddac111c9fbd3bc8ead5dfbf7563621780a177c3be2ae73c6a",
+    ),
+    (
         "N63_two_discriminants_conjunction",
         "b7d1e5359cb077889bb12447e27a7590144da48791ce7e3270d27a845dc10d5c",
     ),
@@ -3513,8 +3521,12 @@ mod corpus_suite {
                 "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
+                "N61_unannotated_const_assertion_does_not_narrow",
+                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(string | number) }`",
+            ),
+            (
                 "N62_annotated_const_assertion_narrows",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same node `{ v: string }` — member terminators differ",
             ),
             (
                 "N64_boolean_literal_discriminant",
@@ -5326,11 +5338,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member Union carrying Opaque(Miss) beside DeclRef(Box) — no Miss variant in the recursive expectation vocabulary",
     ),
     (
-        "N61_unannotated_const_assertion_does_not_narrow",
-        Owner::U6NarrowSubstitution,
-        "member Union — the published value EQUALS the checker, so a recursive pin would assert the divergence this KnownOwed row records does not exist",
-    ),
-    (
         "X101_optional_chain_nullish_coalesce",
         Owner::U6ValueInference,
         "member Union — the published value EQUALS the checker behind the typed guard-narrowing gap, so a recursive pin would assert a divergence this KnownOwed row does not have",
@@ -5440,14 +5447,9 @@ const OPEN_DEBTS: &[&str] = &[
     "N34_non_null_asserted_property_discriminant",
     "N39_instanceof_imported_class",
     "N41_instanceof_member_expression_constructor",
-    // Assertion CALL TARGETS the statement rail does not accept: a class
-    // method and an annotated `const`. Each publishes the unnarrowed union
-    // as a typed ReturnOnly. The `does_not_narrow` row is the paired
-    // over-narrow CONTROL: its published value is already correct and only
-    // the admission is owed, so a repair must leave its surface alone.
+    // An assertion CALL TARGET the statement rail does not accept: a class
+    // method. It publishes the unnarrowed union as a typed ReturnOnly.
     "N60_class_method_assertion_narrows",
-    "N61_unannotated_const_assertion_does_not_narrow",
-    "N62_annotated_const_assertion_narrows",
     // Discriminant / `in` key SPELLINGS outside the decidable-guard set:
     // an enum member reference, a const-typed literal key, a numeric key,
     // and a `typeof`-narrowed callable. The optional-member row is the one
@@ -5585,8 +5587,11 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6NarrowLattice, 38, 30, 8),
     // A call's predicate is read from its callee's resolved signature —
     // an arrow bound to a `const`, an object-literal method, a generic
-    // instantiated at the call (N56, N57, N59): 9 match.
-    (Owner::U6NarrowSubstitution, 12, 9, 3),
+    // instantiated at the call (N56, N57, N59) — and a statement call
+    // through a callee whose declaration set the file closes reads the
+    // callee's declared signatures: the annotated `const` assertion
+    // narrows (N62) and the unannotated one does not (N61): 11 match.
+    (Owner::U6NarrowSubstitution, 12, 11, 1),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     // A `new` and a tagged template resolve to the instance: C02, C04, C08,
     // C11 and C12 and their tagged-template twins C18, C19, C21, C23 and C24

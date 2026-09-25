@@ -6172,10 +6172,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the memo.
     ///
     /// A declaration CARRIER (a `DeclRef` / `InstantiationRef` / an
-    /// unexpanded declaration or recursive-reference placeholder) or a
-    /// mapped type on either side must too: the checker relates the type a
-    /// carrier names, which only the canonical frame's identity unwrap
-    /// reveals — an intersection target `QA & QB` distributes into pairs
+    /// unexpanded declaration or recursive-reference placeholder), a
+    /// mapped type, a `keyof` or an indexed access on either side must too:
+    /// the checker relates the type a carrier names — an indexed access over
+    /// a type that is not generic IS the property type it reads, so a tuple
+    /// element `Rec["a"]` relates as `any` — which only the canonical
+    /// frame's identity unwrap reveals — an intersection target `QA & QB` distributes into pairs
     /// whose arms are declarations, a nominal pair compares DECLARING
     /// identities, and expanded inline a carrier answers `Unknown`, which a
     /// subtype reduction reads as undecided (`A1[]` below `{ x: string }[]`
@@ -6213,6 +6215,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     | SemanticNodeData::InstantiationRef { .. }
                     | SemanticNodeData::Mapped { .. }
                     | SemanticNodeData::KeyOf { .. }
+                    | SemanticNodeData::IndexedAccess { .. }
                     | SemanticNodeData::Opaque(
                         QueryError::DeclPlaceholder { .. } | QueryError::RecursiveRef { .. }
                     )
@@ -6576,6 +6579,74 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //    quasi skeleton where that is provably sound, BEFORE the
         //    deferred gate silently defers the pair. An undecidable pair
         //    still falls through to Unknown. ─────────────────────────────
+        // A template literal type relates as the type the checker builds for
+        // it — its holes settled and its unions distributed — and a pattern
+        // accepts a string literal or template whose slices fit its holes.
+        let mut settled_pair = None;
+        let mut template_budget_exceeded = false;
+        for (side, data) in [(source, &source_data), (target, &target_data)] {
+            if settled_pair.is_some() || template_budget_exceeded {
+                break;
+            }
+            if let SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            } = &**data
+            {
+                let reduced = self.reduce_template_literal_nodes(
+                    quasis,
+                    expressions,
+                    ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Expanded,
+                    ),
+                );
+                if reduced.keyspace_budget_exceeded {
+                    template_budget_exceeded = true;
+                    continue;
+                }
+                if reduced.node != side
+                    && !matches!(
+                        graph.node_data(reduced.node).as_deref(),
+                        Some(SemanticNodeData::TemplateLiteral { quasis: q, expressions: e })
+                            if q == quasis && e == expressions
+                    )
+                {
+                    settled_pair = Some(if side == source {
+                        (reduced.node, target)
+                    } else {
+                        (source, reduced.node)
+                    });
+                }
+            }
+        }
+        if template_budget_exceeded {
+            results.push(RelationResult::Unknown);
+            return;
+        }
+        if let Some((source, target)) = settled_pair {
+            drop(source_data);
+            drop(target_data);
+            work.push(RelateWork::Eval(source, target));
+            return;
+        }
+        if let Some(accepted) = self.string_mapping_relation(source, target) {
+            results.push(if accepted {
+                assignable(bindings)
+            } else {
+                RelationResult::NotAssignable
+            });
+            return;
+        }
+        if matches!(&*target_data, SemanticNodeData::TemplateLiteral { .. }) {
+            if let Some(accepted) = self.template_pattern_accepts(source, target) {
+                results.push(if accepted {
+                    assignable(bindings)
+                } else {
+                    RelationResult::NotAssignable
+                });
+                return;
+            }
+        }
         if let Some(result) =
             self.relate_string_literal_and_template(&source_data, &target_data, bindings)
         {
@@ -6666,7 +6737,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         // ── Deferred shells on either side → Unknown ───────────────────
-        if !nominal_defers_gate && (is_deferred(&source_data) || is_deferred(&target_data)) {
+        //    A settled template literal type (every hole a placeholder) is
+        //    a terminal string type, not a deferred shell: a union on the
+        //    other side distributes over it below.
+        let deferred = |node: SemanticNodeId, data: &SemanticNodeData| {
+            is_deferred(data)
+                && !(matches!(data, SemanticNodeData::TemplateLiteral { .. })
+                    && self.template_is_settled(node))
+        };
+        if !nominal_defers_gate
+            && (deferred(source, &source_data) || deferred(target, &target_data))
+        {
             results.push(RelationResult::Unknown);
             return;
         }
@@ -8190,10 +8271,51 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
+        // An accessor is ONE property on either side — its getter's return,
+        // else its setter's parameter — related once per key, never as the
+        // accessor functions.
+        let graph = self.graph();
+        let mut accessor_keys: Vec<crate::semantic_query::PropertyKey> = Vec::new();
         for t_prop in closed_target.complete_members() {
             let Some(target_key) = t_prop.key.cloned_known() else {
                 return RelationResult::Unknown;
             };
+            let target_property;
+            let t_prop = match t_prop.method_kind {
+                Some(
+                    verter_type_expr::ObjectMethodKind::Get
+                    | verter_type_expr::ObjectMethodKind::Set,
+                ) => {
+                    if accessor_keys.contains(&target_key) {
+                        continue;
+                    }
+                    accessor_keys.push(target_key.clone());
+                    match target
+                        .project_known_key_accessor(&target_key)
+                        .and_then(|accessor| accessor.property_member(graph))
+                    {
+                        Some(property) => {
+                            target_property = property;
+                            &target_property
+                        }
+                        None => return RelationResult::Unknown,
+                    }
+                }
+                _ => t_prop,
+            };
+            if let Some(accessor) = source.project_known_key_accessor(&target_key) {
+                let prop_result = match accessor.property_member(graph) {
+                    Some(source_member) => {
+                        self.relate_property_pair(&source_member, t_prop, bindings)
+                    }
+                    None => RelationResult::Unknown,
+                };
+                acc = result_and(acc, prop_result);
+                if matches!(acc, RelationResult::NotAssignable) {
+                    return RelationResult::NotAssignable;
+                }
+                continue;
+            }
             let prop_result = match source.project_known_key(&target_key) {
                 crate::semantic_query::SurfaceKeyProjection::Exact(source_member) => {
                     self.relate_property_pair(source_member, t_prop, bindings)

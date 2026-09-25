@@ -274,6 +274,24 @@ pub(super) struct TemplateReduceOutcome {
     pub(super) keyspace_budget_exceeded: bool,
 }
 
+/// One piece of a distributed template concatenation: literal text, or a
+/// hole type the template literal type keeps (`string`, `number`, …).
+#[derive(Debug, Clone)]
+pub(super) enum TemplatePiece {
+    Text(String),
+    Hole(SemanticNodeId),
+}
+
+/// The concatenations a template distributes into.
+enum TemplateAlternatives {
+    /// Every concatenation, as its pieces.
+    Finite(Vec<Vec<TemplatePiece>>),
+    /// Some expression does not settle; the template stays authored.
+    Open,
+    /// The product exceeds [`TEMPLATE_LITERAL_KEYSPACE_CAP`].
+    OverBudget,
+}
+
 /// Canonical TypeScript stringification of a literal interpolated into a
 /// template-literal type (`` `${...}` ``). Typed-IR only — it reads the
 /// interned [`LiteralValue`], never source text. Mirrors TS lexing: a string
@@ -7307,46 +7325,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
             // ---- String intrinsics ----
             // `Uppercase` / `Lowercase` / `Capitalize` / `Uncapitalize` are
-            // literal-preserving: a string literal maps to its case-transformed
-            // literal, a union distributes per-arm then renormalises, `never`
-            // stays `never`, and a broad `string` (or any unresolved/non-string
-            // shape) fails closed to the `string` primitive. The template-literal
-            // reducer consumes this result so `` `on${Capitalize<"submit"|"cancel">}` ``
-            // distributes correctly. Typed-IR only — the case transform applies
-            // to the interned literal value, never to source/display text.
+            // the checker's `getStringMappingType` over the operand the
+            // application denotes where written — see
+            // [`Self::apply_string_intrinsic`]. Typed-IR only: the case
+            // transform applies to interned literal values, never to source
+            // or display text.
             "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize" if args.len() == 1 => {
-                let resolved_arg = self
-                    .evaluate_deferred_semantic_node_with_context(args[0], context)
-                    .into_active_query_build_node(self);
-                let result = if matches!(
-                    graph.node_data(resolved_arg).as_deref(),
-                    Some(SemanticNodeData::TypeParam { .. })
-                ) {
-                    // Binder-preservation catches ONLY a BARE, unsubstituted
-                    // `TypeParam` (e.g. the mapper binder `K` in
-                    // `as `on${Capitalize<K>}``): preserve the intrinsic as a
-                    // deferred `InstantiationRef` carrier so a later per-key
-                    // substitution can bind the param and reduce. Reducing now
-                    // would erase the binder (collapse to the broad `string`)
-                    // before the key is known. A COMPOUND / nested open arg
-                    // (an open conditional, a `TypeParam` buried inside a union
-                    // or object) is NOT caught here — it falls through to
-                    // `apply_string_intrinsic`, which fails closed to the
-                    // `string` primitive for any non-finite-literal shape.
-                    graph.intern_node(SemanticNodeData::InstantiationRef {
-                        base: crate::semantic_query::DeclIdentity {
-                            canonical_id: Arc::from("__builtin__"),
-                            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                            whole_hash: crate::semantic_query::HashValue::default(),
-                            decl_name: Arc::from(name),
-                        },
-                        args: Arc::from(vec![args[0]].into_boxed_slice()),
-                    })
-                } else {
-                    // Reuse the node we already resolved above — do NOT re-evaluate
-                    // `args[0]` from scratch inside `apply_string_intrinsic`.
-                    self.apply_string_intrinsic(name, resolved_arg, context)
-                };
+                let result = self.apply_string_intrinsic(name, args[0], context);
                 record_utility_edges(result);
                 (QueryResult::Value(result), fence, false)
             }
@@ -7612,6 +7597,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // so an application that is a union (`Partial<A | B>`)
                 // distributes like one.
                 let source_resolved = self.resolve_signature_source_carrier(source_arg, context);
+                // A `keyof` whose keys settle IS that key union
+                // (`Exclude<keyof Box<string>, "size">` filters
+                // `"value" | "size"`).
+                let keyof_base = match graph.node_data(source_resolved).as_deref() {
+                    Some(SemanticNodeData::KeyOf { base }) => Some(*base),
+                    _ => None,
+                };
+                let source_resolved = keyof_base
+                    .and_then(|base| self.key_set_of(base))
+                    .unwrap_or(source_resolved);
                 // The FILTER operand resolves through the same deferred
                 // evaluator: a carrier filter (`R` still a reference shell)
                 // would judge every per-member relation `Unknown` and defer
@@ -9585,8 +9580,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .filter(|member| member.visibility.is_public())
                     .filter_map(|member| member.key.cloned_known())
                     .collect::<Vec<_>>();
-                self.intern_keyspace_keys(base, keys, &fence)
-                    .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base }))
+                // An index signature contributes its key type — a `string`
+                // one `string | number`, since a numeric key reads it too
+                // (`getLiteralTypeFromProperties`) — beside the members'
+                // literal keys, which a `string` key type absorbs.
+                let index_keys: Vec<SemanticNodeId> = surface
+                    .index_signatures
+                    .iter()
+                    .flat_map(|signature| {
+                        let string_key = matches!(
+                            self.graph().node_data(signature.key_type).as_deref(),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+                        );
+                        std::iter::once(signature.key_type).chain(string_key.then(|| {
+                            self.graph()
+                                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number))
+                        }))
+                    })
+                    .collect();
+                let literal_keys = self.intern_keyspace_keys(base, keys, &fence);
+                match (literal_keys, index_keys.is_empty()) {
+                    (Some(literal_keys), true) => literal_keys,
+                    (Some(literal_keys), false) => {
+                        let members: Vec<SemanticNodeId> =
+                            std::iter::once(literal_keys).chain(index_keys).collect();
+                        self.intern_normalized_union_or_intersection(&members, true)
+                    }
+                    (None, _) => self.graph().intern_node(SemanticNodeData::KeyOf { base }),
+                }
             }
             Some(SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_)) => self
                 .member_names_for_published_projection(base)
@@ -9766,8 +9787,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let keys = settled_keys(read(settled)?)?;
         match self.graph().node_data(keys).as_deref() {
+            // The checker's key list is one type per property and per index
+            // signature — a `string` index contributing its prebuilt
+            // `string | number` — and a one-type list is that type itself,
+            // with no `keyof` origin (`keyof Rec` over `{ [k: string]:
+            // number }` prints `string | number`; a property or a second
+            // index signature beside it keeps the origin).
+            Some(SemanticNodeData::Union(_)) if self.keys_are_one_string_index(settled) => {
+                Some(keys)
+            }
             Some(SemanticNodeData::Union(members)) if named.is_some() && members.len() > 1 => None,
             _ => Some(keys),
+        }
+    }
+
+    /// Whether `surface` declares no property and exactly one index
+    /// signature, keyed by `string`.
+    fn keys_are_one_string_index(&self, surface: SemanticNodeId) -> bool {
+        match self.graph().node_data(surface).as_deref() {
+            Some(SemanticNodeData::Object(view)) => {
+                view.positive_members().is_empty()
+                    && matches!(
+                        view.index_signatures.as_ref(),
+                        [signature] if matches!(
+                            self.graph().node_data(signature.key_type).as_deref(),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+                        )
+                    )
+            }
+            _ => false,
         }
     }
 
@@ -11834,13 +11882,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if self.ctx.is_cancelled() {
             return self.cancelled_build_output();
         }
-        if let Some(absorbed) = self.absorb_conditional(check, extends, distributive, |take_true| {
-            self.apply_conditional_branch_pending(
-                if take_true { true_branch } else { false_branch },
-                pending.as_deref(),
-                take_true,
-            )
-        }) {
+        let absorbed_check = self.indexed_access_where_written(check);
+        if let Some(absorbed) =
+            self.absorb_conditional(absorbed_check, extends, distributive, |take_true| {
+                self.apply_conditional_branch_pending(
+                    if take_true { true_branch } else { false_branch },
+                    pending.as_deref(),
+                    take_true,
+                )
+            })
+        {
             return absorbed;
         }
         if distributive {
@@ -11923,8 +11974,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if self.ctx.is_cancelled() {
             return self.cancelled_build_output();
         }
+        let absorbed_check = self.indexed_access_where_written(check);
         if let Some(output) =
-            self.absorb_conditional(check, extends, distributive, &mut *lower_branch)
+            self.absorb_conditional(absorbed_check, extends, distributive, &mut *lower_branch)
         {
             return output;
         }
@@ -12163,6 +12215,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
             .into_complete_node()?;
         union_members_of(resolved)
+    }
+
+    /// The type an operand denotes where it is written. The checker
+    /// instantiates a conditional's check and branch types eagerly, so an
+    /// indexed access over a type that is not generic IS the property type
+    /// it reads (`Rec["a"]` with `a: any` is `any`): the lattice rows of
+    /// [`Self::absorb_conditional`] apply to that check type, and the union
+    /// of both branches an `any` check selects is built from those branch
+    /// types — the same read the relation takes of an indexed-access
+    /// operand. Every other operand, and an indexed access the deferred
+    /// evaluator cannot read further (`T["k"]` over an open `T`), is itself.
+    pub(super) fn indexed_access_where_written(&self, node: SemanticNodeId) -> SemanticNodeId {
+        if !matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
+        ) {
+            return node;
+        }
+        self.evaluate_deferred_semantic_node_with_context(
+            node,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )
+        .into_active_query_build_node(self)
     }
 
     /// Tri-state conditional branch selection — THE shared oracle for
@@ -12672,45 +12747,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
         output
     }
 
-    /// Literal-preserving string-intrinsic transform shared by the
-    /// `Uppercase` / `Lowercase` / `Capitalize` / `Uncapitalize` arms of
-    /// [`Self::build_instantiate`]. Takes an ALREADY-RESOLVED argument node
-    /// (the caller evaluates it ONCE through the shared deferred evaluator), then:
-    ///
-    /// - a string literal ⇒ the case-transformed literal;
-    /// - a union ⇒ per-arm transform + `ReduceUnion` (each arm is resolved
-    ///   before transforming);
-    /// - `never` ⇒ `never` (empty domain);
-    /// - a broad `string` / unresolved / non-string shape ⇒ fail closed to the
-    ///   `string` primitive.
-    ///
-    /// Typed-IR only: the transform applies to the interned `LiteralValue`,
-    /// never to source/display text.
+    /// The checker's `getStringMappingType` for the intrinsic `intrinsic`
+    /// over `operand`, read where the application is written
+    /// ([`Self::settle_string_operand`]): a union maps each constituent,
+    /// `never` stays `never`, a string literal maps its text, and a
+    /// template literal type maps its texts and holes
+    /// (`applyTemplateStringMapping`). `string`, `any` and another string
+    /// mapping keep the application (`Uppercase<string>`; the same mapping
+    /// twice is one), and `number` / `bigint` apply to their pattern
+    /// template (`` Uppercase<`${number}`> ``). A non-string literal is the
+    /// operand itself, and an operand that does not settle — an open
+    /// binder, a generic `keyof` — keeps the application over the operand
+    /// as authored, so a later substitution reduces it.
     pub(super) fn apply_string_intrinsic(
         &self,
         intrinsic: &str,
-        resolved: SemanticNodeId,
+        operand: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
         let graph = self.graph();
-        match graph.node_data(resolved).as_deref() {
+        let resolved = self.settle_string_operand(operand, context);
+        let data = graph.node_data(resolved);
+        match data.as_deref() {
             Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
                 let transformed = transform_string_intrinsic(intrinsic, text);
                 graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(transformed)))
             }
+            Some(SemanticNodeData::Literal(_)) => resolved,
             Some(SemanticNodeData::Union(members)) => {
                 let members = members.members_arc();
+                drop(data);
                 let mapped: Vec<SemanticNodeId> = members
                     .iter()
-                    .map(|m| {
-                        // Union arms are raw member nodes — resolve each once
-                        // before transforming (the entry node was resolved by
-                        // the caller, but its members were not).
-                        let resolved_member = self
-                            .evaluate_deferred_semantic_node_with_context(*m, context)
-                            .into_active_query_build_node(self);
-                        self.apply_string_intrinsic(intrinsic, resolved_member, context)
-                    })
+                    .map(|member| self.apply_string_intrinsic(intrinsic, *member, context))
                     .collect();
                 let read = self.execute_read(SemanticQueryKey::ReduceUnion {
                     members: Arc::from(mapped.into_boxed_slice()),
@@ -12718,17 +12787,189 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 });
                 match read.value {
                     QueryResult::Value(id) => id,
-                    _ => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+                    _ => self.string_mapping_carrier(intrinsic, operand),
                 }
             }
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
-                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => resolved,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String | PrimitiveKind::Any)) => {
+                drop(data);
+                self.string_mapping_carrier(intrinsic, resolved)
             }
-            // Broad `string`, an unresolved deferred shell, or any non-string
-            // shape: fail closed to the `string` primitive (the intrinsic's
-            // declared result domain).
-            _ => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number | PrimitiveKind::BigInt)) => {
+                drop(data);
+                let pattern = graph.intern_node(SemanticNodeData::TemplateLiteral {
+                    quasis: Arc::from(vec![Arc::from(""), Arc::from("")].into_boxed_slice()),
+                    expressions: Arc::from(vec![resolved].into_boxed_slice()),
+                });
+                self.string_mapping_carrier(intrinsic, pattern)
+            }
+            Some(SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            }) if expressions.iter().all(|hole| self.is_template_hole(*hole)) => {
+                let (quasis, expressions) = (Arc::clone(quasis), Arc::clone(expressions));
+                drop(data);
+                self.apply_template_string_mapping(intrinsic, &quasis, &expressions, context)
+            }
+            _ => {
+                drop(data);
+                match self.string_mapping_of(resolved) {
+                    Some((existing, _)) if existing.as_ref() == intrinsic => resolved,
+                    Some(_) => self.string_mapping_carrier(intrinsic, resolved),
+                    None => self.string_mapping_carrier(intrinsic, operand),
+                }
+            }
         }
+    }
+
+    /// `applyTemplateStringMapping`: `Uppercase` / `Lowercase` map every
+    /// text and every hole of a template literal type; `Capitalize` /
+    /// `Uncapitalize` map its first text, or its first hole when that text
+    /// is empty.
+    fn apply_template_string_mapping(
+        &self,
+        intrinsic: &str,
+        quasis: &[Arc<str>],
+        holes: &[SemanticNodeId],
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let whole = matches!(intrinsic, "Uppercase" | "Lowercase");
+        let first_text_empty = quasis.first().is_none_or(|text| text.is_empty());
+        let mut pieces: Vec<TemplatePiece> = Vec::with_capacity(quasis.len() + holes.len());
+        for (index, text) in quasis.iter().enumerate() {
+            let text = if whole || (index == 0 && !first_text_empty) {
+                transform_string_intrinsic(intrinsic, text)
+            } else {
+                text.to_string()
+            };
+            pieces.push(TemplatePiece::Text(text));
+            if let Some(hole) = holes.get(index) {
+                pieces.push(TemplatePiece::Hole(
+                    if whole || (index == 0 && first_text_empty) {
+                        self.apply_string_intrinsic(intrinsic, *hole, context)
+                    } else {
+                        *hole
+                    },
+                ));
+            }
+        }
+        self.template_type_from_pieces(pieces)
+    }
+
+    /// The `__builtin__` string-mapping application `intrinsic<operand>`.
+    fn string_mapping_carrier(&self, intrinsic: &str, operand: SemanticNodeId) -> SemanticNodeId {
+        self.graph()
+            .intern_node(SemanticNodeData::InstantiationRef {
+                base: crate::semantic_query::DeclIdentity {
+                    canonical_id: Arc::from("__builtin__"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    whole_hash: crate::semantic_query::HashValue::default(),
+                    decl_name: Arc::from(intrinsic),
+                },
+                args: Arc::from(vec![operand].into_boxed_slice()),
+            })
+    }
+
+    /// The string mapping a `__builtin__` application applies, with its
+    /// operand.
+    pub(super) fn string_mapping_of(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(Arc<str>, SemanticNodeId)> {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, args })
+                if base.canonical_id.as_ref() == "__builtin__"
+                    && matches!(
+                        base.decl_name.as_ref(),
+                        "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize"
+                    )
+                    && args.len() == 1 =>
+            {
+                Some((Arc::clone(&base.decl_name), args[0]))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a template literal type keeps `node` as a hole: `string`,
+    /// `number`, `bigint`, `any`, a template literal type made of those, or
+    /// a string mapping over one of them.
+    pub(super) fn is_template_hole(&self, node: SemanticNodeId) -> bool {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::String
+                | PrimitiveKind::Number
+                | PrimitiveKind::BigInt
+                | PrimitiveKind::Any,
+            )) => true,
+            Some(SemanticNodeData::TemplateLiteral { expressions, .. }) => {
+                expressions.iter().all(|hole| self.is_template_hole(*hole))
+            }
+            _ => self
+                .string_mapping_of(node)
+                .is_some_and(|(_, operand)| self.is_template_hole(operand)),
+        }
+    }
+
+    /// The type an operand of a string mapping or a template literal type
+    /// denotes where it is written: an alias, a declaration or application
+    /// carrier settles to what it names, a `keyof` whose keys settle is
+    /// that key union, and an intersection is the canonical intersection of
+    /// its settled members (`keyof T & string` over `T = Plain` is
+    /// `"a" | "b"`). A string-mapping application and every other shape is
+    /// itself.
+    pub(super) fn settle_string_operand(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let mut visited = rustc_hash::FxHashSet::default();
+        let mut current = self
+            .evaluate_deferred_semantic_node_with_context(node, context)
+            .into_active_query_build_node(self);
+        while visited.insert(current) {
+            if self.string_mapping_of(current).is_some() {
+                return current;
+            }
+            let data = self.graph().node_data(current);
+            let next = match data.as_deref() {
+                Some(SemanticNodeData::Alias(inner)) => *inner,
+                Some(
+                    SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. },
+                ) => {
+                    drop(data);
+                    self.resolve_signature_source_carrier(current, context)
+                }
+                Some(SemanticNodeData::KeyOf { base }) => {
+                    let base = *base;
+                    drop(data);
+                    match self.key_set_of(base) {
+                        Some(keys) => keys,
+                        None => return current,
+                    }
+                }
+                Some(SemanticNodeData::Intersection(members)) => {
+                    let members = members.members_arc();
+                    drop(data);
+                    let settled: Vec<SemanticNodeId> = members
+                        .iter()
+                        .map(|member| self.settle_string_operand(*member, context))
+                        .collect();
+                    if settled.as_slice() == members.as_ref() {
+                        return current;
+                    }
+                    self.intern_normalized_union_or_intersection(&settled, false)
+                }
+                _ => return current,
+            };
+            if next == current {
+                return current;
+            }
+            current = self
+                .evaluate_deferred_semantic_node_with_context(next, context)
+                .into_active_query_build_node(self);
+        }
+        current
     }
 
     /// Template-literal reduction — the LIVE producer for
@@ -14207,24 +14448,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// The ONE shared template-literal reduction helper (typed-IR only).
-    /// Produces the CARTESIAN PRODUCT over the finite string-literal choices
-    /// of every interpolated expression:
+    /// The ONE shared template-literal reduction helper (typed-IR only) —
+    /// the checker's `getTemplateLiteralType`. Every interpolated
+    /// expression is read where it is written
+    /// ([`Self::settle_string_operand`]: an alias, a settled `keyof`, an
+    /// intersection) and the template distributes over each union among
+    /// them, forming the CARTESIAN PRODUCT of their constituents:
     ///
-    /// - `` `cell:${"name" | "count"}` `` ⇒ `"cell:name" | "cell:count"`;
-    /// - an all-single-literal template ⇒ a single `Literal` string;
-    /// - an empty product (some expression resolved to `never`) ⇒ `never`;
-    /// - any non-finite / non-string expression ⇒ carrier-stop to the
-    ///   `TemplateLiteral` shell (the caller re-dispatches once it resolves).
+    /// - a literal (string, number, boolean, bigint) and `null` /
+    ///   `undefined` contribute their text, and `boolean` its two;
+    /// - `string`, `number`, `bigint`, `any`, a string mapping over one of
+    ///   those and a nested template literal type stay HOLES, so
+    ///   `` `k${keyof Rec}` `` over `Rec`'s string index signature is
+    ///   `` `k${string}` | `k${number}` ``; a hole alone is itself when
+    ///   it is `string` or a string mapping;
+    /// - an all-text product is a `Literal` string, an empty product
+    ///   (some expression resolved to `never`) is `never`;
+    /// - any other expression — an open binder, a generic `keyof` —
+    ///   carrier-stops to the authored `TemplateLiteral` shell (the caller
+    ///   re-dispatches once it resolves).
     ///
-    /// Keyspace budget: the running product width `∏ |choice_set_i|` is
+    /// Keyspace budget: the running product width `∏ |alternatives_i|` is
     /// bounded by [`TEMPLATE_LITERAL_KEYSPACE_CAP`]. A product whose width
     /// exceeds the cap carrier-stops to the `TemplateLiteral` shell and the
     /// returned [`TemplateReduceOutcome::keyspace_budget_exceeded`] flag is
-    /// set so the live producer refuses to warm-admit the over-budget result
-    /// (the per-arg recursion ceiling on the deferred evaluator bounds depth,
-    /// NOT product width — this cap is the width bound). The check runs on the
-    /// per-arg choice-set cardinalities BEFORE any string is allocated.
+    /// set so the live producer refuses to warm-admit the over-budget result.
+    /// The check runs on the per-arg alternative counts BEFORE any string is
+    /// allocated.
     ///
     /// The multi-result case renormalises through
     /// [`SemanticQueryKey::ReduceUnion`] so the union is canonical. Used by
@@ -14238,79 +14488,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> TemplateReduceOutcome {
         let graph = self.graph();
-        let carrier_stop = || TemplateReduceOutcome {
+        let carrier_stop = |keyspace_budget_exceeded: bool| TemplateReduceOutcome {
             node: graph.intern_node(SemanticNodeData::TemplateLiteral {
                 quasis: Arc::from(quasis.to_vec().into_boxed_slice()),
                 expressions: Arc::from(args.to_vec().into_boxed_slice()),
             }),
-            keyspace_budget_exceeded: false,
+            keyspace_budget_exceeded,
         };
-        // Resolve every interpolated expression to its finite set of
-        // string-literal choices. A `None` carrier-stops the whole template.
-        let mut choice_sets: Vec<Vec<Arc<str>>> = Vec::with_capacity(args.len());
-        for &arg in args {
-            match self.template_arg_literal_choices(arg, eval_context) {
-                Some(choices) => choice_sets.push(choices),
-                None => return carrier_stop(),
-            }
-        }
-        // Keyspace budget gate: bound the cartesian product width BEFORE
-        // allocating any string. A finite-but-huge keyspace (e.g. a template
-        // over several wide finite unions) would otherwise explode allocation
-        // and could warm-publish a truncated surface. An over-cap product
-        // carrier-stops to the deferred shell, tainted budget-exceeded so the
-        // producer never warm-admits it.
-        let mut product_width: usize = 1;
-        for choices in &choice_sets {
-            product_width = product_width.saturating_mul(choices.len());
-        }
-        if product_width > TEMPLATE_LITERAL_KEYSPACE_CAP {
-            return TemplateReduceOutcome {
-                keyspace_budget_exceeded: true,
-                ..carrier_stop()
-            };
-        }
-        // Cartesian product: result = quasis[0] expr[0] quasis[1] … quasis[n].
-        // An empty choice set (a `never` expression) collapses the product to
-        // the empty set, which becomes `never` below.
-        let mut results: Vec<String> = vec![String::new()];
-        for (idx, choices) in choice_sets.iter().enumerate() {
-            let quasi = quasis.get(idx).map(|q| q.as_ref()).unwrap_or("");
-            let mut next: Vec<String> = Vec::with_capacity(results.len() * choices.len());
-            for prefix in &results {
-                for choice in choices {
-                    let mut combined =
-                        String::with_capacity(prefix.len() + quasi.len() + choice.len());
-                    combined.push_str(prefix);
-                    combined.push_str(quasi);
-                    combined.push_str(choice);
-                    next.push(combined);
-                }
-            }
-            results = next;
-        }
-        let tail = quasis.get(args.len()).map(|q| q.as_ref()).unwrap_or("");
-        for combined in &mut results {
-            combined.push_str(tail);
-        }
-
-        let node = match results.len() {
-            0 => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
-            1 => graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
-                results.into_iter().next().expect("len == 1"),
-            ))),
+        let alternatives = match self.template_alternatives(quasis, args, eval_context) {
+            TemplateAlternatives::Open => return carrier_stop(false),
+            TemplateAlternatives::OverBudget => return carrier_stop(true),
+            TemplateAlternatives::Finite(alternatives) => alternatives,
+        };
+        let members: Vec<SemanticNodeId> = alternatives
+            .into_iter()
+            .map(|pieces| self.template_type_from_pieces(pieces))
+            .collect();
+        let node = match members.as_slice() {
+            [] => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+            [single] => *single,
             _ => {
-                let members: Vec<SemanticNodeId> = results
-                    .into_iter()
-                    .map(|s| graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(s))))
-                    .collect();
                 let read = self.execute_read(SemanticQueryKey::ReduceUnion {
                     members: Arc::from(members.into_boxed_slice()),
                     nullability: crate::semantic_query::NullabilityPolicy::Strict,
                 });
                 match read.value {
                     QueryResult::Value(id) => id,
-                    _ => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+                    _ => return carrier_stop(false),
                 }
             }
         };
@@ -14320,62 +14524,164 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Resolve ONE template-literal interpolated expression to its finite set
-    /// of string-literal choices, or `None` when the expression is non-finite /
-    /// non-string (broad `string`, an unresolved deferred shell, an open
-    /// generic). `never` ⇒ `Some(empty)` (an empty product factor). The arg is
-    /// resolved through the shared deferred evaluator; a residual
-    /// `InstantiationRef` (e.g. `Capitalize<…>`) is dispatched through
-    /// `Instantiate` so string intrinsics fold before enumeration.
-    fn template_arg_literal_choices(
+    /// Every concatenation a template of `quasis` and `args` distributes
+    /// into, each as its sequence of text and hole pieces — the cartesian
+    /// product of the per-expression alternatives
+    /// ([`Self::template_arg_alternatives`]).
+    fn template_alternatives(
+        &self,
+        quasis: &[Arc<str>],
+        args: &[SemanticNodeId],
+        eval_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> TemplateAlternatives {
+        let mut per_arg: Vec<Vec<Vec<TemplatePiece>>> = Vec::with_capacity(args.len());
+        let mut product_width: usize = 1;
+        for &arg in args {
+            match self.template_arg_alternatives(arg, eval_context) {
+                TemplateAlternatives::Finite(alternatives) => {
+                    product_width = product_width.saturating_mul(alternatives.len());
+                    per_arg.push(alternatives);
+                }
+                other => return other,
+            }
+        }
+        if product_width > TEMPLATE_LITERAL_KEYSPACE_CAP {
+            return TemplateAlternatives::OverBudget;
+        }
+        let text = |index: usize| {
+            TemplatePiece::Text(quasis.get(index).map(|q| q.to_string()).unwrap_or_default())
+        };
+        let mut results: Vec<Vec<TemplatePiece>> = vec![vec![text(0)]];
+        for (index, alternatives) in per_arg.iter().enumerate() {
+            let mut next: Vec<Vec<TemplatePiece>> =
+                Vec::with_capacity(results.len() * alternatives.len());
+            for prefix in &results {
+                for alternative in alternatives {
+                    let mut combined = prefix.clone();
+                    combined.extend(alternative.iter().cloned());
+                    combined.push(text(index + 1));
+                    next.push(combined);
+                }
+            }
+            results = next;
+        }
+        TemplateAlternatives::Finite(results)
+    }
+
+    /// The alternatives ONE interpolated expression contributes, each a
+    /// sequence of pieces: its text for a literal (TS-stringified —
+    /// `` `${1 | 2}` `` is `"1" | "2"`, a bigint its base-10 digits) and for
+    /// `null` / `undefined`, both texts for `boolean`, nothing at all for
+    /// `never` (an empty product factor), the constituents' alternatives for
+    /// a union, a nested template literal type's own alternatives, and a
+    /// hole for `string` / `number` / `bigint` / `any` or a string mapping
+    /// over one. A residual string-mapping application reduces first, so
+    /// `` `on${Capitalize<K>}` `` folds once `K` is substituted. Every other
+    /// shape leaves the template open.
+    fn template_arg_alternatives(
         &self,
         arg: SemanticNodeId,
         eval_context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<Vec<Arc<str>>> {
+    ) -> TemplateAlternatives {
         let graph = self.graph();
-        let mut resolved = self
-            .evaluate_deferred_semantic_node_with_context(arg, eval_context)
-            .into_active_query_build_node(self);
-        if let Some(SemanticNodeData::InstantiationRef { base, args }) =
-            graph.node_data(resolved).as_deref()
-        {
-            let slot = self.type_slot_for(
-                Arc::clone(&base.canonical_id),
-                base.owner,
-                Arc::clone(&base.decl_name),
-            );
-            let inst_ctx = self.instantiate_context_for(&base.canonical_id, eval_context);
-            let args = Arc::clone(args);
-            let read = self.execute_read(SemanticQueryKey::Instantiate(
-                crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
-            ));
-            if let QueryResult::Value(id) = read.value {
-                resolved = id;
-            }
+        let mut resolved = self.settle_string_operand(arg, eval_context);
+        if let Some((intrinsic, operand)) = self.string_mapping_of(resolved) {
+            resolved = self.apply_string_intrinsic(&intrinsic, operand, eval_context);
         }
-        match graph.node_data(resolved).as_deref() {
-            // A finite literal interpolant — string OR numeric / boolean /
-            // bigint — contributes ONE TS-stringified choice. TS interpolates
-            // `` `${1 | 2}` `` ⇒ `"1" | "2"`, `` `${true}` `` ⇒ `"true"`, and a
-            // bigint literal as its base-10 digits. Stringification is
-            // canonical-TS and typed-IR only (it reads the interned
-            // `LiteralValue`, never source text). See
-            // [`literal_value_template_text`].
-            Some(SemanticNodeData::Literal(value)) => {
-                Some(vec![Arc::from(literal_value_template_text(value).as_str())])
+        let text =
+            |text: String| TemplateAlternatives::Finite(vec![vec![TemplatePiece::Text(text)]]);
+        let data = graph.node_data(resolved);
+        match data.as_deref() {
+            Some(SemanticNodeData::Literal(value)) => text(literal_value_template_text(value)),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
+                TemplateAlternatives::Finite(Vec::new())
             }
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => Some(Vec::new()),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => text("null".to_owned()),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => {
+                text("undefined".to_owned())
+            }
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => {
+                TemplateAlternatives::Finite(vec![
+                    vec![TemplatePiece::Text("false".to_owned())],
+                    vec![TemplatePiece::Text("true".to_owned())],
+                ])
+            }
             Some(SemanticNodeData::Union(members)) => {
                 let members = members.members_arc();
-                let mut out: Vec<Arc<str>> = Vec::new();
+                drop(data);
+                let mut out: Vec<Vec<TemplatePiece>> = Vec::new();
                 for member in members.iter() {
-                    let choices = self.template_arg_literal_choices(*member, eval_context)?;
-                    out.extend(choices);
+                    match self.template_arg_alternatives(*member, eval_context) {
+                        TemplateAlternatives::Finite(alternatives) => out.extend(alternatives),
+                        other => return other,
+                    }
                 }
-                Some(out)
+                if out.len() > TEMPLATE_LITERAL_KEYSPACE_CAP {
+                    return TemplateAlternatives::OverBudget;
+                }
+                TemplateAlternatives::Finite(out)
             }
-            _ => None,
+            Some(SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            }) => {
+                let (quasis, expressions) = (Arc::clone(quasis), Arc::clone(expressions));
+                drop(data);
+                self.template_alternatives(&quasis, &expressions, eval_context)
+            }
+            _ => {
+                drop(data);
+                if self.is_template_hole(resolved) {
+                    TemplateAlternatives::Finite(vec![vec![TemplatePiece::Hole(resolved)]])
+                } else {
+                    TemplateAlternatives::Open
+                }
+            }
         }
+    }
+
+    /// The type one distributed template concatenation denotes: adjacent
+    /// texts join; with no hole it is the string literal; a lone hole with
+    /// no text around it is the hole itself when that is `string` or a
+    /// string mapping; otherwise the template literal type of its texts and
+    /// holes.
+    pub(super) fn template_type_from_pieces(&self, pieces: Vec<TemplatePiece>) -> SemanticNodeId {
+        let graph = self.graph();
+        let mut texts: Vec<String> = vec![String::new()];
+        let mut holes: Vec<SemanticNodeId> = Vec::new();
+        for piece in pieces {
+            match piece {
+                TemplatePiece::Text(text) => texts
+                    .last_mut()
+                    .expect("one text per hole plus one")
+                    .push_str(&text),
+                TemplatePiece::Hole(hole) => {
+                    holes.push(hole);
+                    texts.push(String::new());
+                }
+            }
+        }
+        if holes.is_empty() {
+            let text = texts.pop().expect("one text per hole plus one");
+            return graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(text)));
+        }
+        if let [hole] = holes.as_slice() {
+            if texts.iter().all(String::is_empty)
+                && (matches!(
+                    graph.node_data(*hole).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+                ) || self.string_mapping_of(*hole).is_some())
+            {
+                return *hole;
+            }
+        }
+        graph.intern_node(SemanticNodeData::TemplateLiteral {
+            quasis: texts
+                .into_iter()
+                .map(|text| Arc::from(text.as_str()))
+                .collect(),
+            expressions: Arc::from(holes.into_boxed_slice()),
+        })
     }
 
     /// `ResolveMacroPayload` body.
@@ -14958,7 +15264,7 @@ fn fence_to_dep_signature(
 /// Apply a TS string-intrinsic case transform to a single string literal value.
 /// `Capitalize` / `Uncapitalize` toggle the case of the FIRST character only;
 /// `Uppercase` / `Lowercase` transform the whole string.
-fn transform_string_intrinsic(intrinsic: &str, text: &str) -> String {
+pub(super) fn transform_string_intrinsic(intrinsic: &str, text: &str) -> String {
     match intrinsic {
         "Uppercase" => text.to_uppercase(),
         "Lowercase" => text.to_lowercase(),

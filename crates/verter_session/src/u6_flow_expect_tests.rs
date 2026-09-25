@@ -1277,6 +1277,23 @@ pub(crate) mod checker_syntax {
             name: String,
             args: Vec<CheckerType>,
         },
+        /// `typeof name` / `typeof a.b` — the checker's print of a `unique
+        /// symbol` type. Matches a live nominal `typeof` whose declaring
+        /// identity names the same value symbol and member path, never
+        /// the widened `symbol`.
+        UniqueSymbol(String),
+        /// `keyof T` — the checker keeps the `keyof` origin in its print
+        /// of a key union over a declaration or application. Matches a
+        /// live `keyof` carrier whose base matches `T`, never the key
+        /// union it settles to.
+        KeyOf(Box<CheckerType>),
+        /// `` `text${T}text` `` — a template literal type print. Matches a
+        /// live template literal node with the same texts and recursively
+        /// equal holes.
+        Template {
+            texts: Vec<String>,
+            holes: Vec<CheckerType>,
+        },
         Union(Vec<CheckerType>),
         Array(Box<CheckerType>),
         Intersection(Vec<CheckerType>),
@@ -1521,6 +1538,7 @@ pub(crate) mod checker_syntax {
                     }
                 }
                 Some('{') => self.object(),
+                Some('`') => self.template(),
                 Some('"') => {
                     let inner = &rest[1..];
                     let close = inner
@@ -1549,6 +1567,19 @@ pub(crate) mod checker_syntax {
                 _ => {
                     // `new (p: T, …) => R` — the construct print; `new` is
                     // a keyword, never a type name.
+                    if self.eat_keyword("typeof") {
+                        self.skip_ws();
+                        let mut name = self.ident()?;
+                        while self.rest().starts_with('.') {
+                            self.pos += 1;
+                            name.push('.');
+                            name.push_str(&self.ident()?);
+                        }
+                        return Ok(CheckerType::UniqueSymbol(name));
+                    }
+                    if self.eat_keyword("keyof") {
+                        return Ok(CheckerType::KeyOf(Box::new(self.postfix()?)));
+                    }
                     if self.eat_keyword("new") {
                         self.skip_ws();
                         if !self.rest().starts_with('(') {
@@ -1603,6 +1634,35 @@ pub(crate) mod checker_syntax {
                         _ => CheckerType::Ref(name),
                     })
                 }
+            }
+        }
+
+        /// One `` `text${T}text` `` print: its texts, one more than its
+        /// holes.
+        fn template(&mut self) -> Result<CheckerType, String> {
+            self.pos += 1;
+            let mut texts = vec![String::new()];
+            let mut holes = Vec::new();
+            loop {
+                let Some(c) = self.rest().chars().next() else {
+                    return Err(format!("unterminated template literal in `{}`", self.text));
+                };
+                if c == '`' {
+                    self.pos += 1;
+                    return Ok(CheckerType::Template { texts, holes });
+                }
+                if self.rest().starts_with("${") {
+                    self.pos += 2;
+                    holes.push(self.union()?);
+                    self.expect('}')?;
+                    texts.push(String::new());
+                    continue;
+                }
+                texts
+                    .last_mut()
+                    .expect("one text per hole plus one")
+                    .push(c);
+                self.pos += c.len_utf8();
             }
         }
 
@@ -1992,6 +2052,34 @@ pub(crate) mod checker_syntax {
                 e == g
             }
             (CheckerType::Primitive(e), SemanticNodeData::Primitive(g)) => e == g,
+            (CheckerType::KeyOf(expected), SemanticNodeData::KeyOf { base }) => {
+                matches_node(dispatch, *base, expected, depth + 1)
+            }
+            (
+                CheckerType::Template { texts, holes },
+                SemanticNodeData::TemplateLiteral {
+                    quasis,
+                    expressions,
+                },
+            ) => {
+                quasis.len() == texts.len()
+                    && quasis
+                        .iter()
+                        .zip(texts)
+                        .all(|(got, want)| got.as_ref() == want)
+                    && expressions.len() == holes.len()
+                    && expressions
+                        .iter()
+                        .zip(holes)
+                        .all(|(node, want)| matches_node(dispatch, *node, want, depth + 1))
+            }
+            (CheckerType::UniqueSymbol(name), nominal @ SemanticNodeData::TypeOfNominal(_)) => {
+                nominal.typeof_nominal_identity().is_some_and(|identity| {
+                    std::iter::once(identity.symbol.as_ref())
+                        .chain(identity.member_path.iter().map(String::as_str))
+                        .eq(name.split('.'))
+                })
+            }
             // A reference name matches a resolved `DeclRef` — plus
             // the ZERO-ARGUMENT generic carrier, whose raised print is
             // the identical bare reference. `BareRef` / `TypeParam` / an
@@ -2853,12 +2941,11 @@ mod matrix_suite {
             script: "function makeProps() { let x: \"a\" | \"b\" = \"a\"; const f = () => x; x = \"b\"; return f }",
             checker: "() => \"a\" | \"b\"",
             outcome: CellOutcome::Value {
-                rendered: "() => \"a\"",
-                degradation: Degr::FlowGap(FlowGap::ClosureCapture),
-                warm_replay: false,
+                rendered: "() => Union(\"b\" | \"a\")",
+                degradation: Degr::None,
+                warm_replay: true,
             },
-            gap: "the write AFTER closure creation is not joined into the captured read — the \
-                  G6 class, wrong-and-warm; owner U6.LOOP_CLOSURE",
+            gap: "",
         },
         FixedCell {
             id: "let_sibling_closure_write",
@@ -2870,12 +2957,11 @@ mod matrix_suite {
             script: "function makeProps() { let x: \"a\" | \"b\" = \"a\"; const w = () => { x = \"b\" }; void w; return () => x }",
             checker: "() => \"a\" | \"b\"",
             outcome: CellOutcome::Value {
-                rendered: "() => \"a\"",
-                degradation: Degr::FlowGap(FlowGap::ClosureCapture),
-                warm_replay: false,
+                rendered: "() => Union(\"b\" | \"a\")",
+                degradation: Degr::None,
+                warm_replay: true,
             },
-            gap: "the SIBLING-closure write never invalidates the captured read — the G7 \
-                  class, wrong-and-warm; owner U6.LOOP_CLOSURE",
+            gap: "",
         },
         FixedCell {
             id: "let_deeper_closure_write",
@@ -2887,12 +2973,11 @@ mod matrix_suite {
             script: "function makeProps() { let x: \"a\" | \"b\" = \"a\"; const w = () => () => { x = \"b\" }; void w; return () => x }",
             checker: "() => \"a\" | \"b\"",
             outcome: CellOutcome::Value {
-                rendered: "() => \"a\"",
-                degradation: Degr::FlowGap(FlowGap::ClosureCapture),
-                warm_replay: false,
+                rendered: "() => Union(\"b\" | \"a\")",
+                degradation: Degr::None,
+                warm_replay: true,
             },
-            gap: "the DEEPER-closure (depth 2) write never invalidates the captured read — \
-                  the G7 class, wrong-and-warm; owner U6.LOOP_CLOSURE",
+            gap: "",
         },
         FixedCell {
             id: "let_same_closure_unannotated_write",
@@ -3207,8 +3292,13 @@ mod matrix_suite {
         /// print syntax: the renderer spells a union `Union(a | b)` where
         /// the checker prints `a | b`. For these the semantic agreement
         /// is held by the live pin comparison, not by text equality.
-        const RENDER_DIVERGENT: &[&str] =
-            &["var_write_after_creation", "param_write_after_creation"];
+        const RENDER_DIVERGENT: &[&str] = &[
+            "let_write_after_creation",
+            "let_sibling_closure_write",
+            "let_deeper_closure_write",
+            "var_write_after_creation",
+            "param_write_after_creation",
+        ];
         let mut seen_divergent: Vec<&str> = Vec::new();
         for cell in FIXED_CELLS {
             if !cell.gap.is_empty() {

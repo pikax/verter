@@ -362,6 +362,12 @@ impl FlowEvaluator<'_, '_> {
                 }
                 return;
             }
+            SliceGuard::CalleePredicate { arguments, .. } => {
+                for subject in arguments.iter().flatten() {
+                    self.degrade_discriminant_test(subject);
+                }
+                return;
+            }
             // Each part is its own test under the same polarity.
             SliceGuard::Both(parts) => {
                 for part in parts.iter() {

@@ -660,24 +660,38 @@ fn nominal_computed_keys_preserve_declaring_identity() {
     );
 }
 
+/// A `let` captured outside its extended container — written after the
+/// creation, or by another closure at any depth — reads its declared type
+/// in the body: a complete answer, admitted warm.
+///
+/// Measured on TypeScript 7.0.2: `ReturnType<typeof makeProps>` is
+/// `() => "a" | "b"` for all three.
 #[test]
-fn flow_gap_known_gap_results_are_typed_partial_and_never_warm() {
+fn a_let_capture_outside_its_container_is_complete_and_warm() {
     let fixtures = [
         (
             "g6",
             "function makeProps() { let x: \"a\" | \"b\" = \"a\"; const f = () => x; x = \"b\"; return f }",
-            FlowGap::ClosureCapture,
         ),
         (
             "g7_sibling",
             "function makeProps() { let x: \"a\" | \"b\" = \"a\"; const w = () => { x = \"b\" }; void w; return () => x }",
-            FlowGap::ClosureCapture,
         ),
         (
             "g7_deeper",
             "function makeProps() { let x: \"a\" | \"b\" = \"a\"; const w = () => () => { x = \"b\" }; void w; return () => x }",
-            FlowGap::ClosureCapture,
         ),
+    ];
+    for (id, script) in fixtures {
+        let trace = run(id, script, "makeProps");
+        record_trace(id, &trace);
+        assert_complete_warm(&trace, None);
+    }
+}
+
+#[test]
+fn flow_gap_known_gap_results_are_typed_partial_and_never_warm() {
+    let fixtures = [
         (
             "g11_sequence",
             "function makeProps() { return (0, () => \"a\" as const) }",

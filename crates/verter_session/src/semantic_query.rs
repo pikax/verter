@@ -4197,6 +4197,24 @@ pub(crate) struct KnownKeyAccessor<'a> {
 }
 
 impl KnownKeyAccessor<'_> {
+    /// The accessor as the one PROPERTY every reader sees: its read value
+    /// ([`Self::read_value`]), `readonly` when there is no setter.
+    pub(crate) fn property_member(
+        &self,
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+    ) -> Option<SurfaceMember> {
+        let value = self.read_value(graph)?;
+        let declared = self.getter.or(self.setter)?;
+        Some(SurfaceMember {
+            value,
+            optional: false,
+            readonly: self.setter.is_none(),
+            method_kind: None,
+            has_implementation_body: false,
+            ..declared.clone()
+        })
+    }
+
     /// The accessor's VALUE type as a read sees it: the getter's return,
     /// else the setter's parameter. `None` when the accessor's signature
     /// carries neither.

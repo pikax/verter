@@ -197,6 +197,7 @@ pub(crate) mod semantic_source_leaf_facts;
 pub(crate) mod substitute;
 pub(crate) mod symbol_identity;
 pub(crate) mod template_class_facts;
+mod template_relation;
 pub(crate) mod walk;
 
 /// Shared structural depth-fuse cap. The walker's per-request depth
@@ -4170,6 +4171,10 @@ mod cycle_gate_tests;
 #[cfg(test)]
 mod base_signature_tests;
 #[cfg(test)]
+mod callee_signature_effect_tests;
+#[cfg(test)]
+mod captured_declared_type_tests;
+#[cfg(test)]
 mod checker_probe_lane_tests;
 #[cfg(test)]
 mod class_member_return_tests;
@@ -4177,6 +4182,8 @@ mod class_member_return_tests;
 mod class_value_heritage_tests;
 #[cfg(test)]
 mod closure_narrowing_tests;
+#[cfg(test)]
+mod conditional_indexed_check_tests;
 #[cfg(test)]
 mod heritage_signature_tests;
 #[cfg(test)]
@@ -4188,11 +4195,17 @@ mod indexed_access_relation_tests;
 #[cfg(test)]
 mod intersection_distribution_tests;
 #[cfg(test)]
+mod keyof_application_tests;
+#[cfg(test)]
 mod merged_declaration_signature_tests;
 #[cfg(test)]
 mod namespace_member_value_tests;
 #[cfg(test)]
 mod namespace_value_tests;
+#[cfg(test)]
+mod never_callee_tests;
+#[cfg(test)]
+mod object_literal_accessor_tests;
 #[cfg(test)]
 mod object_literal_key_tests;
 #[cfg(test)]
@@ -4204,8 +4217,14 @@ mod relation_operand_tests;
 #[cfg(test)]
 mod signature_relation_tests;
 #[cfg(test)]
+mod string_mapping_template_tests;
+#[cfg(test)]
+mod template_pattern_relation_tests;
+#[cfg(test)]
 mod this_receiver_tests;
 #[cfg(test)]
 mod truthiness_domain_tests;
 #[cfg(test)]
 mod tuple_length_and_apparent_member_tests;
+#[cfg(test)]
+mod unique_symbol_widening_tests;
