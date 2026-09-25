@@ -803,6 +803,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::IntrinsicApplication { .. }
             | SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::InferRef { .. }
@@ -1135,6 +1136,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::IntrinsicApplication { .. }
             | SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::TypeParam { .. }
             | SemanticNodeData::Opaque(_)
             // Raw-fallback / synthetic-binding carriers pass through this
@@ -4281,7 +4283,9 @@ impl<'a> OpenWalk<'a> {
                     || self.position == OperandPosition::ValueSensitive)
                     && elements.iter().any(|e| self.node_is_open(ctx, e.value))
             }
-            SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_) => false,
+            SemanticNodeData::Primitive(_)
+            | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_) => false,
 
             // --- composites: open iff any arm is open ---
             composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {

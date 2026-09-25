@@ -968,6 +968,9 @@ pub fn audit_key_for_node(
         SemanticNodeData::Primitive(p) => format!("Primitive({p:?})"),
         SemanticNodeData::Literal(LiteralValue::String(s)) => format!("Literal(\"{s}\")"),
         SemanticNodeData::Literal(other) => format!("Literal({other:?})"),
+        SemanticNodeData::EnumLiteral(literal) => {
+            format!("EnumLiteral({})", literal.printed_name())
+        }
         SemanticNodeData::Opaque(_) => format!("Opaque#{}", id.0),
         SemanticNodeData::Array { element, readonly } => {
             format!("Array{{element={},readonly={}}}", element.0, readonly)

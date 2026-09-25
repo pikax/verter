@@ -254,6 +254,7 @@ impl SemanticGraphStore {
             // admission problem.
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::TypeParam { .. }
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::InferRef { .. }

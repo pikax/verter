@@ -2565,12 +2565,26 @@ fn publication_score_corpus(
         predicate: None,
     });
 
+    let zero = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::Number(0.0),
+    ));
     vec![
         ("primitive", string),
         (
             "literal",
             graph.intern_node(SemanticNodeData::Literal(
                 crate::semantic_query::LiteralValue::String("idle".to_string()),
+            )),
+        ),
+        (
+            "enum_literal",
+            graph.intern_node(SemanticNodeData::EnumLiteral(
+                crate::semantic_query::EnumLiteralType {
+                    enum_decl: decl_identity_unscoped("/w/m.ts", "Status"),
+                    member: Arc::from("Idle"),
+                    base: zero,
+                    member_count: 2,
+                },
             )),
         ),
         (
@@ -2850,6 +2864,7 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
         match data {
             SemanticNodeData::Primitive(_) => "primitive",
             SemanticNodeData::Literal(_) => "literal",
+            SemanticNodeData::EnumLiteral(_) => "enum_literal",
             SemanticNodeData::Alias(_) => "alias",
             SemanticNodeData::Union(_) => "union",
             SemanticNodeData::Intersection(_) => "intersection",
@@ -2891,6 +2906,7 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
     const EXPECTED: &[&str] = &[
         "primitive",
         "literal",
+        "enum_literal",
         "alias",
         "union",
         "intersection",

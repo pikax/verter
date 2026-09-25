@@ -448,6 +448,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return ClassMemberKey::Unmodeled;
         };
         let graph = self.dispatch.graph();
+        // An enum member names the member its value names.
+        let node = match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::EnumLiteral(literal)) => literal.base,
+            _ => node,
+        };
         match graph.node_data(node).as_deref() {
             Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
                 return ClassMemberKey::Named(AuthoredPropertyKey::string(value.as_str()));

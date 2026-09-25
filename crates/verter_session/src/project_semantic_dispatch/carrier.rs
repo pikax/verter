@@ -847,31 +847,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ..
             } = scope
             {
-                if let Some(member_value) = self.resolve_enum_member_value(
+                if let Some(member_type) = self.resolve_enum_member_type(
                     canonical_id.as_ref(),
                     *owner,
                     name_resolution,
                     scope_payload,
                     name.as_ref(),
                 ) {
-                    // The projected member value is a raw `TypeExpr`; lower it
-                    // through the shared eager lowering with the SAME value-side
-                    // inputs (an enum member value carries no own type args).
-                    let env = ctx.env();
-                    let shadowing = ctx.shadowing();
-                    let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-                    return CarrierResolutionPlan::Ready(
-                        self.shallow_lower_type_expr_with_context(
-                            &member_value,
-                            env,
-                            scope,
-                            name_resolution,
-                            scope_payload,
-                            shadowing,
-                            &mut substitutions,
-                            reduction_context,
-                        ),
-                    );
+                    return CarrierResolutionPlan::Ready(member_type);
                 }
             }
             // Currently-unresolved authored reference. Under the carrier

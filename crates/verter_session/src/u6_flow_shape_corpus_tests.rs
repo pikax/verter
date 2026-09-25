@@ -1644,6 +1644,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "c13f0591d4c8cbad6f9598e8f0416e78ccd0fa510563558e51bafc52240f2f8d",
     ),
     (
+        "N65_enum_member_discriminant",
+        "07ef5ac6c5edd64f8bded0d8730907f374e98d00c3dc39015e851e464efb6f42",
+    ),
+    (
         "N66_shared_nonliteral_property_is_not_a_discriminant",
         "c79aa1eef3b0955b01462e490e414915f527e0e73f7c81dd6835be7eda251523",
     ),
@@ -3345,6 +3349,10 @@ mod corpus_suite {
             ),
             (
                 "N64_boolean_literal_discriminant",
+                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(number | string) }`",
+            ),
+            (
+                "N65_enum_member_discriminant",
                 "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(number | string) }`",
             ),
             (
@@ -5213,10 +5221,9 @@ const OPEN_DEBTS: &[&str] = &[
     "N61_unannotated_const_assertion_does_not_narrow",
     "N62_annotated_const_assertion_narrows",
     // Discriminant / `in` key SPELLINGS outside the decidable-guard set:
-    // an enum member reference, a const-typed literal key, a numeric key,
-    // and a `typeof`-narrowed callable. The optional-member row is the one
+    // a const-typed literal key, a numeric key, and a `typeof`-narrowed
+    // callable. The optional-member row is the one
     // NARROWER-than-checker answer in this group; its note says so.
-    "N65_enum_member_discriminant",
     "N69_in_operator_const_literal_key",
     "N70_in_operator_numeric_key",
     "N72_typeof_function_guard",
@@ -5304,8 +5311,9 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // deep measurement showed the dead contributor SURVIVES (wrong-and-
     // warm), so the row is parked against its narrowing block. D10
     // closed N88's unknown-key intersection (the Record mint), moving
-    // this owner to 25 matching.
-    (Owner::U6NarrowLattice, 38, 25, 13),
+    // this owner to 25 matching; an enum member discriminant (N65)
+    // narrows as the checker's does, moving it to 26.
+    (Owner::U6NarrowLattice, 38, 26, 12),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     // A `new` and a tagged template resolve to the instance: C02, C04, C08,

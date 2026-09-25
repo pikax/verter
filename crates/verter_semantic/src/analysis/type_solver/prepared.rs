@@ -2013,10 +2013,12 @@ mod tests {
                 EnumMemberEntry {
                     name: "Red".to_string(),
                     value: EnumScalar::Number("0".to_string()),
+                    initializer: None,
                 },
                 EnumMemberEntry {
                     name: "Green".to_string(),
                     value: EnumScalar::Number("1".to_string()),
+                    initializer: None,
                 },
             ]),
         });

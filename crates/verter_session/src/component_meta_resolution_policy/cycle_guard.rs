@@ -340,6 +340,10 @@ fn hash_node_rec<H: std::hash::Hasher>(
         SemanticNodeData::Literal(value) => {
             value.hash(hasher);
         }
+        SemanticNodeData::EnumLiteral(literal) => {
+            literal.enum_decl.hash(hasher);
+            literal.member.hash(hasher);
+        }
         SemanticNodeData::Primitive(kind) => {
             kind.hash(hasher);
         }

@@ -11,7 +11,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_semantic::analysis::type_solver::PreparedTypeDecl;
-use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
+use verter_type_expr::TypeExpr;
 
 use super::signature_discovery::PositionalArgument;
 use super::walk::PathWalker;
@@ -1327,38 +1327,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let signature_nodes: Vec<SemanticNodeId> = groups.into_iter().flatten().collect();
                 self.value_signature_surface(signature_nodes, is_class, &scope)
             }
-        } else if let Some(members) = prepared.enum_members.as_ref() {
-            let object_expr = ObjectExpr {
-                properties: members
-                    .members
-                    .iter()
-                    .map(|entry| {
-                        // One synthetic property per member — EVERY member, not
-                        // just the foldable subset. A foldable member carries its
-                        // literal; a deferred member its degraded sound primitive
-                        // (the stored scalar via `enum_scalar_type_expr`), so
-                        // `keyof typeof Enum` surfaces every declared name. The
-                        // prepared enum member inventory carries no per-member
-                        // source span.
-                        ObjectMember::Property(ObjectProperty::synthetic_public_key(
-                            entry.name.clone().into(),
-                            super::lower::enum_scalar_type_expr(&entry.value),
-                            false,
-                            true,
-                        ))
-                    })
-                    .collect(),
-            };
-            self.shallow_lower_type_expr_with_context(
-                &TypeExpr::Object(Arc::new(object_expr)),
-                &empty_env,
-                &scope,
-                &prepared.name_resolution,
-                scope_payload.as_ref(),
-                &shadowing,
-                &mut substitutions,
-                context,
-            )
+        } else if let Some(enumeration) = self.enum_declaration_of(
+            Arc::clone(&effective_canonical),
+            effective_owner,
+            Arc::clone(&effective_symbol),
+            &prepared,
+        ) {
+            // The enum object: every member, a constant one and a computed
+            // one alike, as a readonly property of its literal type.
+            self.enum_object(&enumeration)
         } else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
@@ -1577,67 +1554,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         path: &[Arc<str>],
         visited: &mut FxHashSet<(ValueRootKey, Vec<Arc<str>>)>,
     ) -> bool {
-        use crate::resolver_core::shallow_file_state::LexicalValueBinding;
         use verter_type_expr::facts::DeclaredLiteralFreshness;
-        if !visited.insert((value_root.clone(), path.to_vec())) {
-            return false;
-        }
-        let canonical = value_root.scope.canonical_id.as_ref();
-        let owner = value_root.scope.owner;
-        let name = value_root.name.as_ref();
-        let Some(indexed) = self
-            .ctx
-            .ensure_indexed_ready_serve(canonical)
-            .map(|serve| serve.indexed)
-        else {
+        let Some((identity, path)) = self.value_path_declaration(value_root, path, visited) else {
             return false;
         };
-        let shallow = &indexed.shallow_state;
-        let visible = shallow.visible_value_binding(owner, name);
-        let unbound = visible.is_none()
-            && shallow.visible_local_type_owner(owner, name).is_none()
-            && !name.split_once('.').is_some_and(|(prefix, _)| {
-                matches!(
-                    shallow.visible_value_binding(owner, prefix),
-                    Some(LexicalValueBinding::Import(_))
-                )
-            });
-        if let Some((member_root, consumed)) =
-            self.qualified_value_member_root(value_root, path, shallow, unbound)
-        {
-            return self.declared_literal_widens(&member_root, &path[consumed..], visited);
-        }
         // A member of a value (`obj.a`) is not a declaration of its own,
-        // except a class's static member (`C.s`).
-        let static_member = match path {
+        // except a class's static member (`C.s`) and an enum's member
+        // (`E.A`).
+        let static_member = match path.as_slice() {
             [] => None,
             [member] => Some(member),
             _ => return false,
-        };
-        let identity = if unbound {
-            if name == "globalThis" {
-                return false;
-            }
-            match self.global_value_declaration(canonical, name) {
-                Some((identity, _)) => identity,
-                None => return false,
-            }
-        } else {
-            let scope_payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
-                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                    &bundle, owner,
-                )
-            });
-            match crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-                self.ctx,
-                canonical,
-                owner,
-                scope_payload.as_ref(),
-                name,
-            ) {
-                Some(identity) => identity,
-                None => return false,
-            }
         };
         let Some((declaring_canonical, declaring_owner, _, prepared)) = self
             .effective_prepared_value_decl(
@@ -1649,6 +1576,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return false;
         };
         if let Some(member) = static_member {
+            // Every enum member declares the fresh literal type of its
+            // value, so a read of one widens as a bare literal does.
+            if prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Enum {
+                return prepared.enum_members.as_ref().is_some_and(|members| {
+                    members
+                        .members
+                        .iter()
+                        .any(|entry| entry.name.as_str() == member.as_ref())
+                });
+            }
             return matches!(
                 &prepared.type_annotation.literal_freshness,
                 DeclaredLiteralFreshness::WideningStaticMembers(members)
@@ -1688,6 +1625,67 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.declared_literal_widens(&copied_root, &rest, visited)
             }
         }
+    }
+
+    /// The value declaration the longest declared prefix of a value path
+    /// names, and the path's remaining segments: the value declared under
+    /// the root's name in its scope — or, when no scope declares it, among
+    /// the program's globals — and a namespace's member, declared under its
+    /// qualified name (`NS.Inner`) in its own file. A reference to a
+    /// value resolves here as a `typeof` of it does. `visited` holds the
+    /// roots already followed, so a cycle of re-exports resolves nothing.
+    pub(super) fn value_path_declaration(
+        &self,
+        value_root: &ValueRootKey,
+        path: &[Arc<str>],
+        visited: &mut FxHashSet<(ValueRootKey, Vec<Arc<str>>)>,
+    ) -> Option<(ResolvedRootIdentity, Vec<Arc<str>>)> {
+        use crate::resolver_core::shallow_file_state::LexicalValueBinding;
+        if !visited.insert((value_root.clone(), path.to_vec())) {
+            return None;
+        }
+        let canonical = value_root.scope.canonical_id.as_ref();
+        let owner = value_root.scope.owner;
+        let name = value_root.name.as_ref();
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(canonical)
+            .map(|serve| serve.indexed)?;
+        let shallow = &indexed.shallow_state;
+        let visible = shallow.visible_value_binding(owner, name);
+        let unbound = visible.is_none()
+            && shallow.visible_local_type_owner(owner, name).is_none()
+            && !name.split_once('.').is_some_and(|(prefix, _)| {
+                matches!(
+                    shallow.visible_value_binding(owner, prefix),
+                    Some(LexicalValueBinding::Import(_))
+                )
+            });
+        if let Some((member_root, consumed)) =
+            self.qualified_value_member_root(value_root, path, shallow, unbound)
+        {
+            return self.value_path_declaration(&member_root, &path[consumed..], visited);
+        }
+        let identity = if unbound {
+            if name == "globalThis" {
+                return None;
+            }
+            self.global_value_declaration(canonical, name)?.0
+        } else {
+            let scope_payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
+                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                    &bundle, owner,
+                )
+            });
+            crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                self.ctx,
+                canonical,
+                owner,
+                scope_payload.as_ref(),
+                name,
+            )?
+        };
+        Some((identity, path.to_vec()))
     }
 
     /// The value a module assigns with `export = X`, as a root in the
@@ -6254,6 +6252,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame,
         >,
     ) -> SemanticNodeId {
+        // An enum's type is the union of its members' literal types, read
+        // off the member inventory its value declaration carries.
+        if let Some(enumeration) = self.enum_declared_at(
+            prepared.root_identity.canonical_id.as_ref(),
+            prepared.root_identity.owner,
+            prepared.root_identity.symbol_name.as_ref(),
+        ) {
+            return self.enum_type(&enumeration);
+        }
         // The declaration's OWN decl-body locator (whole body).
         let canonical: Arc<str> = match scope {
             NodeScopeId::File { canonical_id, .. } => Arc::clone(canonical_id),
@@ -13938,11 +13945,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Resolve every interpolated expression to its finite set of
         // string-literal choices. A `None` carrier-stops the whole template.
         let mut choice_sets: Vec<Vec<Arc<str>>> = Vec::with_capacity(args.len());
+        let mut spells_any_string = false;
         for &arg in args {
             match self.template_arg_literal_choices(arg, eval_context) {
-                Some(choices) => choice_sets.push(choices),
+                Some(TemplateArgChoices::Finite(choices)) => choice_sets.push(choices),
+                Some(TemplateArgChoices::AnyString) => spells_any_string = true,
                 None => return carrier_stop(),
             }
+        }
+        // An interpolant that is neither a literal nor a placeholder type
+        // (an enum member whose value is not a constant) makes the whole
+        // template `string`, as the checker's template construction does.
+        if spells_any_string {
+            return TemplateReduceOutcome {
+                node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+                keyspace_budget_exceeded: false,
+            };
         }
         // Keyspace budget gate: bound the cartesian product width BEFORE
         // allocating any string. A finite-but-huge keyspace (e.g. a template
@@ -14021,7 +14039,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         arg: SemanticNodeId,
         eval_context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<Vec<Arc<str>>> {
+    ) -> Option<TemplateArgChoices> {
         let graph = self.graph();
         let mut resolved = self
             .evaluate_deferred_semantic_node_with_context(arg, eval_context)
@@ -14052,17 +14070,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `LiteralValue`, never source text). See
             // [`literal_value_template_text`].
             Some(SemanticNodeData::Literal(value)) => {
-                Some(vec![Arc::from(literal_value_template_text(value).as_str())])
+                Some(TemplateArgChoices::Finite(vec![Arc::from(
+                    literal_value_template_text(value).as_str(),
+                )]))
             }
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => Some(Vec::new()),
+            // An enum member interpolates as its value; a member whose
+            // value is not a constant is no literal and spells any string.
+            Some(SemanticNodeData::EnumLiteral(literal)) => {
+                if super::canonical_algebra::enum_literal_is_unit(graph, literal) {
+                    self.template_arg_literal_choices(literal.base, eval_context)
+                } else {
+                    Some(TemplateArgChoices::AnyString)
+                }
+            }
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
+                Some(TemplateArgChoices::Finite(Vec::new()))
+            }
             Some(SemanticNodeData::Union(members)) => {
                 let members = members.members_arc();
                 let mut out: Vec<Arc<str>> = Vec::new();
+                let mut any_string = false;
                 for member in members.iter() {
-                    let choices = self.template_arg_literal_choices(*member, eval_context)?;
-                    out.extend(choices);
+                    match self.template_arg_literal_choices(*member, eval_context)? {
+                        TemplateArgChoices::Finite(choices) => out.extend(choices),
+                        TemplateArgChoices::AnyString => any_string = true,
+                    }
                 }
-                Some(out)
+                Some(if any_string {
+                    TemplateArgChoices::AnyString
+                } else {
+                    TemplateArgChoices::Finite(out)
+                })
             }
             _ => None,
         }
@@ -15004,4 +15042,13 @@ fn modified_readonly(readonly: bool, modifier: crate::semantic_query::ReadonlyMo
         crate::semantic_query::ReadonlyMod::Remove => false,
         crate::semantic_query::ReadonlyMod::Keep => readonly,
     }
+}
+
+/// What one template-literal interpolant contributes to the template's
+/// strings.
+enum TemplateArgChoices {
+    /// Exactly these strings.
+    Finite(Vec<Arc<str>>),
+    /// Any string: the template is `string`.
+    AnyString,
 }

@@ -728,7 +728,7 @@ fn is_empty_object_node(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNo
 /// arm, where a wrong `true` would delete a real constraint.
 fn is_definitely_non_nullish(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
     match dispatch.graph().node_data(node).as_deref() {
-        Some(SemanticNodeData::Literal(_)) => true,
+        Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => true,
         Some(SemanticNodeData::Primitive(kind)) => match kind {
             PrimitiveKind::String
             | PrimitiveKind::Number

@@ -5410,6 +5410,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(
                     SemanticNodeData::Literal(_) | SemanticNodeData::Primitive(PrimitiveKind::Null),
                 ) => !(optional && nullability.is_strict()),
+                // A member whose value is a constant is a unit type.
+                Some(SemanticNodeData::EnumLiteral(literal)) => {
+                    super::canonical_algebra::enum_literal_is_unit(graph, literal)
+                        && !(optional && nullability.is_strict())
+                }
                 _ => false,
             };
             unit.then_some(value)
@@ -6170,39 +6175,24 @@ fn top_level_literal_nodes_in(
     node: SemanticNodeId,
 ) -> Vec<SemanticNodeId> {
     match graph.node_data(node).as_deref() {
-        Some(SemanticNodeData::Literal(_)) => vec![node],
+        Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => vec![node],
         Some(SemanticNodeData::Union(members)) => members
             .iter()
             .copied()
-            .filter(|member| {
-                matches!(
-                    graph.node_data(*member).as_deref(),
-                    Some(SemanticNodeData::Literal(_))
-                )
-            })
+            .filter(|member| super::enum_type::is_literal_type(graph, *member))
             .collect(),
         _ => Vec::new(),
     }
 }
 
-/// Widen one FRESH literal node to its primitive (tsc's
-/// widening-literal-type rule). Every non-literal node passes through
-/// unchanged.
+/// Widen one FRESH literal node (tsc's widening-literal-type rule): a
+/// plain literal to its primitive, an enum member's literal to its enum's
+/// type. Every non-literal node passes through unchanged.
 fn widen_literal_node(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
 ) -> SemanticNodeId {
-    let graph = dispatch.graph();
-    let widened = match graph.node_data(node).as_deref() {
-        Some(SemanticNodeData::Literal(literal)) => match literal {
-            crate::semantic_query::LiteralValue::String(_) => PrimitiveKind::String,
-            crate::semantic_query::LiteralValue::Number(_) => PrimitiveKind::Number,
-            crate::semantic_query::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
-            crate::semantic_query::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
-        },
-        _ => return node,
-    };
-    graph.intern_node(SemanticNodeData::Primitive(widened))
+    dispatch.widened_literal(node)
 }
 
 /// The `TypeExpr` a guard literal denotes — the ONE literal lowering the
@@ -6226,6 +6216,14 @@ fn guard_literal_type_expr(
         }
         SliceGuardLiteral::Undefined => {
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined)
+        }
+        // A value path whose root the frame leaves free reads as the
+        // module or global value's type, exactly as a leaf naming it does.
+        SliceGuardLiteral::Value(path) => {
+            verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: path.iter().map(|segment| segment.to_string()).collect(),
+                type_args: Vec::new(),
+            })
         }
     })
 }
@@ -8221,6 +8219,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let Positional::Value(node) = outcome else {
             return None;
         };
+        // An enum member names the property its value names.
+        let node = match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::EnumLiteral(literal)) => literal.base,
+            _ => node,
+        };
         match self.dispatch.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
                 Some(crate::semantic_query::AuthoredPropertyKey::string(
@@ -9862,6 +9865,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// reaching-definition dedup domain only — a narrow's iteration
     /// domain is [`Self::enumerated_union_arms_or_self`], which
     /// additionally enumerates through identity carriers.
+    /// Whether an equality operand's type is a UNIT type — a literal, an
+    /// enum member's literal, `null` or `undefined` — the operands an
+    /// equality narrows by on both of its edges.
+    fn is_guard_unit(&self, node: SemanticNodeId) -> bool {
+        matches!(
+            self.dispatch.graph().node_data(node).as_deref(),
+            Some(
+                SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_)
+                    | SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)
+            )
+        )
+    }
+
+    /// Whether `node`, or one of its union arms, is an enum member's
+    /// literal.
+    fn carries_enum_literal(&self, node: SemanticNodeId) -> bool {
+        let graph = self.dispatch.graph();
+        self.union_arms_or_self(node).into_iter().any(|arm| {
+            matches!(
+                graph.node_data(arm).as_deref(),
+                Some(SemanticNodeData::EnumLiteral(_))
+            )
+        })
+    }
+
     fn union_arms_or_self(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
         match self.dispatch.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.to_vec(),
@@ -10718,6 +10747,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         kind: crate::flow_slice_content::SliceTypeofKind,
     ) -> ArmGuardClass {
         use crate::flow_slice_content::SliceTypeofKind;
+        // An enum member's `typeof` is its value's.
+        if let Some(SemanticNodeData::EnumLiteral(literal)) =
+            self.dispatch.graph().node_data(arm).as_deref()
+        {
+            return self.arm_typeof_class(literal.base, kind);
+        }
         let classified = match self.dispatch.graph().node_data(arm).as_deref() {
             Some(SemanticNodeData::Primitive(primitive)) => match primitive {
                 PrimitiveKind::String => Some(SliceTypeofKind::String),
@@ -10915,6 +10950,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return GuardNarrowing::Unchanged;
         };
         let literal_node = self.lower_body_type(&literal_ty);
+        // A value operand narrows as a literal does only when its type is
+        // a unit type; any other value type relates to the subject's arms
+        // by comparability alone, which this narrow does not carry.
+        if !self.is_guard_unit(literal_node) {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+            return GuardNarrowing::Unchanged;
+        }
         if subject.path.is_empty() {
             // An arm whose relation to the literal the oracle cannot
             // decide (a deferred form such as a template-literal arm)
@@ -11084,14 +11128,37 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         negated: bool,
     ) -> SemanticNodeId {
         use crate::flow_slice_content::SliceGuardLiteral;
-        let base = match literal {
-            SliceGuardLiteral::String(_) => PrimitiveKind::String,
-            SliceGuardLiteral::Number(_) => PrimitiveKind::Number,
-            SliceGuardLiteral::Boolean(_) => PrimitiveKind::Boolean,
-            SliceGuardLiteral::Null | SliceGuardLiteral::Undefined => return node,
+        let Some(literal_ty) = guard_literal_type_expr(literal) else {
+            return node;
+        };
+        let literal_node = self.lower_body_type(&literal_ty);
+        // The primitive the compared value inhabits: a literal's own kind,
+        // an enum member's value's kind — `number` for a member whose
+        // value is not a constant.
+        let graph = self.dispatch.graph();
+        let literal_base = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Literal(value)) => Some(match value {
+                crate::semantic_query::LiteralValue::String(_) => PrimitiveKind::String,
+                crate::semantic_query::LiteralValue::Number(_) => PrimitiveKind::Number,
+                crate::semantic_query::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
+                crate::semantic_query::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
+            }),
+            _ => None,
+        };
+        let base = match graph.node_data(literal_node).as_deref() {
+            Some(SemanticNodeData::EnumLiteral(enum_literal)) => {
+                match graph.node_data(enum_literal.base).as_deref() {
+                    Some(SemanticNodeData::Primitive(kind)) => Some(*kind),
+                    _ => literal_base(enum_literal.base),
+                }
+            }
+            _ => literal_base(literal_node),
+        };
+        let Some(base) = base else {
+            return node;
         };
         let replacement = match (literal, negated) {
-            (_, false) => guard_literal_type_expr(literal),
+            (_, false) => Some(literal_ty),
             (SliceGuardLiteral::Boolean(value), true) => {
                 Some(verter_type_expr::TypeExpr::boolean_literal(!*value))
             }
@@ -11422,7 +11489,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let mut test_nodes: Vec<SemanticNodeId> = Vec::with_capacity(tests.len());
         for test in tests {
             let ty = guard_literal_type_expr(test)?;
-            test_nodes.push(self.lower_body_type(&ty));
+            let node = self.lower_body_type(&ty);
+            if !self.is_guard_unit(node) {
+                return None;
+            }
+            test_nodes.push(node);
         }
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for arm in &arms {
@@ -11844,6 +11915,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 SemanticNodeData::Object(_)
                 | SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
+                | SemanticNodeData::EnumLiteral(_)
                 | SemanticNodeData::Array { .. }
                 | SemanticNodeData::Tuple { .. }
                 | SemanticNodeData::Signature { .. },
@@ -12520,8 +12592,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         expr: &crate::flow_slice_content::SliceExpr,
         node: SemanticNodeId,
     ) -> bool {
-        let crate::flow_slice_content::SliceExpr::Type(leaf) = expr else {
-            return false;
+        let leaf = match expr {
+            crate::flow_slice_content::SliceExpr::Type(leaf) => leaf,
+            // A member read through a frame binding holding an enum's
+            // object: the object's member is the member's fresh literal.
+            crate::flow_slice_content::SliceExpr::FrameShadowed { inner, .. } => {
+                return match inner.as_ref() {
+                    crate::flow_slice_content::SliceExpr::Type(leaf) => {
+                        self.reads_enum_object_member(leaf, node)
+                    }
+                    _ => false,
+                };
+            }
+            _ => return false,
         };
         let verter_type_expr::TypeExpr::TypeOf(value) = leaf.ty() else {
             return false;
@@ -12531,6 +12614,41 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             && self
                 .dispatch
                 .value_read_widens(self.canonical, self.owner, &value.path)
+    }
+
+    /// Whether a frame-rooted member read (`o.A`) yielded the member of an
+    /// enum's object — the object whose members are declared with their
+    /// FRESH literal types, so the read widens as `E.A` does.
+    fn reads_enum_object_member(
+        &self,
+        leaf: &crate::flow_slice_content::GatedLeaf,
+        node: SemanticNodeId,
+    ) -> bool {
+        let verter_type_expr::TypeExpr::TypeOf(value) = leaf.ty() else {
+            return false;
+        };
+        let (Some(binding), [root, member]) = (leaf.frame_root(), value.path.as_slice()) else {
+            return false;
+        };
+        if !value.type_args.is_empty() {
+            return false;
+        }
+        let literal = match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::EnumLiteral(literal)) if &*literal.member == member.as_str() => {
+                literal.clone()
+            }
+            _ => return false,
+        };
+        let subject = crate::flow_slice_content::SliceNarrowSubject {
+            root: crate::flow_slice_content::SliceNarrowRoot::Local {
+                name: Arc::from(root.as_str()),
+                binding: binding.clone(),
+            },
+            path: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        self.narrowed_read(&subject)
+            .or_else(|| self.local_value(binding))
+            .is_some_and(|object| self.dispatch.is_enum_object_of(object, &literal))
     }
 
     /// The completed fresh-literal call this expression IS (transparently)
@@ -12884,9 +13002,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     // lone fresh `"a"` (TypeScript 7.0.2:
                                     // `string`).
                                     fresh_literal |= fresh_values.contains(&node)
-                                        && matches!(
-                                            self.dispatch.graph().node_data(node).as_deref(),
-                                            Some(SemanticNodeData::Literal(_))
+                                        && super::enum_type::is_literal_type(
+                                            self.dispatch.graph(),
+                                            node,
                                         );
                                     Some((node, fresh_values))
                                 }
@@ -14103,7 +14221,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     // initializer already lowered widened.
                                     crate::flow_slice_content::SliceBindingKind::Let
                                     | crate::flow_slice_content::SliceBindingKind::Var => {
-                                        let node = match &membership {
+                                        let widened = match &membership {
                                             Some(WideningMembership::All) => widen_fresh_read_node(
                                                 self.dispatch,
                                                 node,
@@ -14118,6 +14236,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                                 )
                                             }
                                             None => node,
+                                        };
+                                        // The widened initializer is the
+                                        // binding's DECLARED type, and the
+                                        // checker reads a union-typed
+                                        // binding assignment-reduced by the
+                                        // value written to it. Widening a
+                                        // plain literal yields exactly the
+                                        // constituents the value reduces
+                                        // to; widening an enum member's
+                                        // literal yields its enum, a union
+                                        // the member reduces back to (`let
+                                        // x = E.A` holds `E.A`, typed `E`).
+                                        let node = match self.dispatch.union_arms_of(widened) {
+                                            Some(arms)
+                                                if widened != node
+                                                    && self.carries_enum_literal(node) =>
+                                            {
+                                                self.set_declared_local(
+                                                    &FlowProductSubject::Local(*binding),
+                                                    *kind,
+                                                    Some(widened),
+                                                );
+                                                self.assignment_reduced_union(widened, &arms, node)
+                                            }
+                                            _ => widened,
                                         };
                                         // An auto-typed variable's bare
                                         // `null` / `undefined` initializer

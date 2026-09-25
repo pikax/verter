@@ -521,10 +521,18 @@ pub(crate) fn render_node(
         }
         SemanticNodeData::ObjectSpreadProgram(_) => "ObjectSpreadProgram".to_owned(),
         SemanticNodeData::Union(members) => {
-            let parts: Vec<String> = members
-                .iter()
-                .map(|member| render_node(dispatch, *member, depth + 1))
-                .collect();
+            let parts: Vec<String> =
+                crate::semantic_query::printed_union_arms(dispatch.graph(), members)
+                    .into_iter()
+                    .map(|arm| match arm {
+                        crate::semantic_query::PrintedUnionArm::Node(member) => {
+                            render_node(dispatch, member, depth + 1)
+                        }
+                        crate::semantic_query::PrintedUnionArm::Enum(decl) => {
+                            format!("Enum({})", decl.decl_name)
+                        }
+                    })
+                    .collect();
             format!("Union({})", parts.join(" | "))
         }
         SemanticNodeData::Intersection(members) => {
@@ -539,6 +547,9 @@ pub(crate) fn render_node(
         SemanticNodeData::Literal(LiteralValue::Number(value)) => format!("{value}"),
         SemanticNodeData::Literal(LiteralValue::Boolean(value)) => format!("{value}"),
         SemanticNodeData::Literal(LiteralValue::BigInt(value)) => format!("{value}n"),
+        SemanticNodeData::EnumLiteral(literal) => {
+            format!("EnumLiteral({})", literal.printed_name())
+        }
         SemanticNodeData::Opaque(error) => {
             let text = format!("{error:?}");
             let short: String = text.chars().take(60).collect();
@@ -1945,15 +1956,43 @@ pub(crate) mod checker_syntax {
                         .zip(args.iter())
                         .all(|(node, expected)| matches_node(dispatch, *node, expected, depth + 1))
             }
+            // An enum member's literal prints as `Enum.Member`, or as the
+            // enum for its only member.
+            (CheckerType::Ref(name), SemanticNodeData::EnumLiteral(literal)) => {
+                literal.printed_name() == *name
+            }
+            // A union holding every member of one enum prints as the enum.
+            (CheckerType::Ref(name), SemanticNodeData::Union(members)) => matches!(
+                crate::semantic_query::printed_union_arms(dispatch.graph(), members).as_slice(),
+                [crate::semantic_query::PrintedUnionArm::Enum(decl)]
+                    if &*decl.decl_name == name.as_str()
+            ),
             (CheckerType::Union(exp), SemanticNodeData::Union(members)) => {
-                // Order-insensitive EXACT set equality, backtracking so
-                // duplicate constituents are handled exactly.
+                // Order-insensitive EXACT set equality over the union as the
+                // checker prints it, backtracking so duplicate constituents
+                // are handled exactly.
+                let members = crate::semantic_query::printed_union_arms(dispatch.graph(), members);
                 if members.len() != exp.len() {
                     return false;
                 }
+                fn arm_matches(
+                    dispatch: &ProjectSemanticDispatch<'_>,
+                    arm: &crate::semantic_query::PrintedUnionArm,
+                    expected: &CheckerType,
+                    depth: usize,
+                ) -> bool {
+                    match arm {
+                        crate::semantic_query::PrintedUnionArm::Node(node) => {
+                            matches_node(dispatch, *node, expected, depth)
+                        }
+                        crate::semantic_query::PrintedUnionArm::Enum(decl) => {
+                            matches!(expected, CheckerType::Ref(name) if &*decl.decl_name == name.as_str())
+                        }
+                    }
+                }
                 fn assign(
                     dispatch: &ProjectSemanticDispatch<'_>,
-                    measured: &[SemanticNodeId],
+                    measured: &[crate::semantic_query::PrintedUnionArm],
                     expected: &[CheckerType],
                     used: &mut [bool],
                     index: usize,
@@ -1963,8 +2002,7 @@ pub(crate) mod checker_syntax {
                         return true;
                     }
                     for (slot, candidate) in measured.iter().enumerate() {
-                        if !used[slot]
-                            && matches_node(dispatch, *candidate, &expected[index], depth)
+                        if !used[slot] && arm_matches(dispatch, candidate, &expected[index], depth)
                         {
                             used[slot] = true;
                             if assign(dispatch, measured, expected, used, index + 1, depth) {
@@ -1976,7 +2014,7 @@ pub(crate) mod checker_syntax {
                     false
                 }
                 let mut used = vec![false; members.len()];
-                assign(dispatch, members, exp, &mut used, 0, depth + 1)
+                assign(dispatch, &members, exp, &mut used, 0, depth + 1)
             }
             (CheckerType::Array(elem), SemanticNodeData::Array { element, readonly }) => {
                 !readonly && matches_node(dispatch, *element, elem, depth + 1)

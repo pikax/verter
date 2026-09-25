@@ -745,6 +745,16 @@ impl StructuralEncoder<'_> {
                 self.buf.push(SemanticNodeTag::DeclRef.stable_id());
                 self.encode_decl_identity(identity);
             }
+            // An enum member's literal: the declaring enum and the member
+            // name are its identity, the base value its one child.
+            SemanticNodeData::EnumLiteral(literal) => {
+                self.buf.push(SemanticNodeTag::EnumLiteral.stable_id());
+                self.encode_decl_identity(&literal.enum_decl);
+                self.push_str(&literal.member);
+                self.buf
+                    .extend_from_slice(&literal.member_count.to_le_bytes());
+                self.encode_child(literal.base, depth);
+            }
             SemanticNodeData::ClassExpressionInstance {
                 identity,
                 type_arguments,

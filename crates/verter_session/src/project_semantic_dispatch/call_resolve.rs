@@ -2220,12 +2220,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // not arise.
                             let has_fresh_literal_deposit =
                                 substitution.bindings().iter().any(|(param, bound)| {
-                                    matches!(
-                                        self.graph().node_data(*bound).as_deref(),
-                                        Some(SemanticNodeData::Literal(_))
-                                    ) && self.binding_is_fresh_literal_deposit(
-                                        session_id, *param, *bound,
-                                    )
+                                    super::enum_type::is_literal_type(self.graph(), *bound)
+                                        && self.binding_is_fresh_literal_deposit(
+                                            session_id, *param, *bound,
+                                        )
                                 });
                             let binder_structure = if !has_fresh_literal_deposit {
                                 None
@@ -2869,7 +2867,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // (the arguments of a rest parameter): every fresh literal
             // candidate stays fresh.
             let candidates: Vec<SemanticNodeId> = match graph.node_data(*bound).as_deref() {
-                Some(SemanticNodeData::Literal(_)) => vec![*bound],
+                Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => {
+                    vec![*bound]
+                }
                 Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
                 _ => continue,
             };
@@ -2877,10 +2877,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 continue;
             }
             for candidate in candidates {
-                if matches!(
-                    graph.node_data(candidate).as_deref(),
-                    Some(SemanticNodeData::Literal(_))
-                ) && self.binding_is_fresh_literal_deposit(session_id, *param, candidate)
+                if super::enum_type::is_literal_type(graph, candidate)
+                    && self.binding_is_fresh_literal_deposit(session_id, *param, candidate)
                     && !fresh_literal_returns.contains(&candidate)
                 {
                     fresh_literal_returns.push(candidate);
@@ -2961,28 +2959,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .iter()
             .map(|(param, bound)| {
                 // One candidate widens when it is a fresh literal deposit.
-                let widen_fresh = |candidate: SemanticNodeId| match graph
-                    .node_data(candidate)
-                    .as_deref()
-                {
-                    Some(SemanticNodeData::Literal(value))
-                        if self.binding_is_fresh_literal_deposit(session_id, *param, candidate) =>
+                let widen_fresh = |candidate: SemanticNodeId| {
+                    if super::enum_type::is_literal_type(graph, candidate)
+                        && self.binding_is_fresh_literal_deposit(session_id, *param, candidate)
                     {
-                        let primitive = match value {
-                            verter_type_expr::LiteralValue::String(_) => PrimitiveKind::String,
-                            verter_type_expr::LiteralValue::Number(_) => PrimitiveKind::Number,
-                            verter_type_expr::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
-                            verter_type_expr::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
-                        };
-                        graph.intern_node(SemanticNodeData::Primitive(primitive))
+                        self.widened_literal(candidate)
+                    } else {
+                        candidate
                     }
-                    _ => candidate,
                 };
                 let kept = return_structure
                     .is_some_and(|structure| self.deposit_at_top_level(structure, *param));
                 let widened = match graph.node_data(*bound).as_deref() {
                     _ if kept => *bound,
-                    Some(SemanticNodeData::Literal(_)) => widen_fresh(*bound),
+                    Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => {
+                        widen_fresh(*bound)
+                    }
                     // Several candidates combined into a union (the
                     // arguments of a rest parameter): each fresh arm
                     // widens, then the arms combine again.
@@ -3028,14 +3020,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let graph = self.graph();
         memo.insert(node, node);
         let result = match graph.node_data(node).as_deref() {
-            Some(SemanticNodeData::Literal(value)) if policy == ConstParamPolicy::NonConst => {
-                let primitive = match value {
-                    verter_type_expr::LiteralValue::String(_) => PrimitiveKind::String,
-                    verter_type_expr::LiteralValue::Number(_) => PrimitiveKind::Number,
-                    verter_type_expr::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
-                    verter_type_expr::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
-                };
-                graph.intern_node(SemanticNodeData::Primitive(primitive))
+            Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_))
+                if policy == ConstParamPolicy::NonConst =>
+            {
+                self.widened_literal(node)
             }
             Some(SemanticNodeData::Tuple { elements, .. }) => {
                 let values = elements

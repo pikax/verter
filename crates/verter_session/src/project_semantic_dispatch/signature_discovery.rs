@@ -419,6 +419,12 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 drop(data);
                 self.apparent("String", &[])
             }
+            // An enum member's apparent type is its value's.
+            SemanticNodeData::EnumLiteral(literal) => {
+                let base = literal.base;
+                drop(data);
+                self.discover(base)
+            }
             SemanticNodeData::TypeOfNominal(_) => {
                 drop(data);
                 self.apparent("Symbol", &[])

@@ -730,7 +730,7 @@ fn index_top_level_statement(
             }
         }
         Statement::TSEnumDeclaration(enum_decl) => {
-            index_enum(enum_decl, ctx, index);
+            index_enum(enum_decl, enum_decl.id.name.as_str(), ctx, index);
         }
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
@@ -812,7 +812,7 @@ fn index_declaration(
             }
         }
         Declaration::TSEnumDeclaration(enum_decl) => {
-            index_enum(enum_decl, ctx, index);
+            index_enum(enum_decl, enum_decl.id.name.as_str(), ctx, index);
         }
         _ => {}
     }
@@ -836,10 +836,10 @@ fn index_declaration(
 /// the contributor locators feed the parse-stable skeleton and facts).
 fn index_enum(
     enum_decl: &TSEnumDeclaration<'_>,
+    name: &str,
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
 ) {
-    let name = enum_decl.id.name.as_str();
     let entry = index
         .enum_headers
         .entry(ctx.key(name))
@@ -1009,6 +1009,13 @@ fn index_namespaced_statement(
                 }
             }
         }
+        Statement::TSEnumDeclaration(enum_decl) => {
+            let name = format!("{namespace}.{}", enum_decl.id.name);
+            index_enum(enum_decl, &name, ctx, index);
+            if !implicit_export {
+                index.namespace_private_members.insert(ctx.key(&name));
+            }
+        }
         Statement::TSModuleDeclaration(module) => {
             if !implicit_export {
                 if let TSModuleDeclarationName::Identifier(id) = &module.id {
@@ -1070,6 +1077,10 @@ fn index_namespaced_declaration(
         }
         Declaration::TSModuleDeclaration(module) => {
             index_module_declaration(module, ctx, index, Some(namespace), ambient);
+        }
+        Declaration::TSEnumDeclaration(enum_decl) => {
+            let name = format!("{namespace}.{}", enum_decl.id.name);
+            index_enum(enum_decl, &name, ctx, index);
         }
         Declaration::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {

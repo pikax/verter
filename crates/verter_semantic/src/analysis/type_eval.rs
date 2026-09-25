@@ -278,41 +278,43 @@ pub enum TypeDeclKind {
 /// The classified value of one `enum` member.
 ///
 /// An enum member always has a NAME (recorded on the presence rail). Its VALUE
-/// is either statically FOLDED to a literal scalar, or DEFERRED — a computed /
-/// expression / member-reference initializer the literal-enum producer does not
-/// constant-fold (`B = 1 << 2`, `B = someFn()`, `~A`, or a bare member after an
-/// unknown running value). A deferred member is NEVER dropped and NEVER given a
-/// fabricated literal: it carries the narrowest SOUND primitive DOMAIN proven
-/// from its initializer-expression KIND, so every type/value projection surface
-/// (`typeof Enum`, `keyof typeof Enum`, `Enum.Member`, the enum type union) sees
-/// the member with an honest, never-under-approximating type.
+/// is either a CONSTANT the checker's constant evaluator computes from the
+/// declaration alone (`Folded`), a constant whose initializer names another
+/// declaration — another enum's member, a member of another declaration of a
+/// merged enum, a `const` variable — so it is computed only once that
+/// declaration is read (`Pending`), or COMPUTED: an initializer that is no
+/// constant expression, a member without one in an ambient non-`const` enum,
+/// or a member without one after a non-numeric member (`Deferred`, over the
+/// `number` domain every computed member has). A member is NEVER dropped and
+/// NEVER given a fabricated literal.
 ///
-/// This is the rail-explicit VIEW over the stored [`EnumScalar`]: the two are a
-/// lossless bijection ([`from_scalar`](Self::from_scalar) /
-/// [`projected_scalar`](Self::projected_scalar)) — a folded member maps to the
-/// `Number` / `String` scalar arms, a deferred one to the `Primitive` domain
-/// arm.
+/// This is the rail-explicit VIEW over the stored [`EnumScalar`]: a folded
+/// member maps to the `Number` / `String` scalar arms, a deferred one to the
+/// `Primitive` domain arm ([`from_scalar`](Self::from_scalar) /
+/// [`projected_scalar`](Self::projected_scalar)); a pending member stores the
+/// `number` domain and carries its initializer on
+/// [`EnumMemberEntry::initializer`](verter_type_expr::facts::EnumMemberEntry::initializer).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
 pub enum EnumMemberValue {
-    /// Statically folded to a literal scalar (string / ±numeric /
-    /// auto-increment). This literal is BOTH the projected type AND the
-    /// value-body fingerprint basis — the only members the foldable rail
-    /// observes. Producer invariant: the scalar is always a `Number` / `String`
-    /// arm, never `Primitive` (a primitive domain is the deferred arm's
-    /// payload).
+    /// A constant the declaration alone determines (string / ±numeric /
+    /// auto-increment / an operator over those and earlier members). This
+    /// literal is BOTH the projected type AND the value-body fingerprint basis
+    /// — the only members the foldable rail observes. Producer invariant: the
+    /// scalar is always a `Number` / `String` arm, never `Primitive` (a
+    /// primitive domain is the deferred arm's payload).
     Folded(EnumScalar),
-    /// Value deferred. Carries the narrowest SOUND primitive domain proven from
-    /// the initializer-expression kind — never the enum self-reference and
-    /// NEVER a fabricated literal. The member's NAME stays on the presence
-    /// rail; only its foldable VALUE is absent (it is projected out of the
-    /// fingerprint, NOT out of the type surfaces).
+    /// A constant whose initializer names another declaration, evaluated when
+    /// the enum is read.
+    Pending(verter_type_expr::facts::EnumConstantExpr),
+    /// A computed member: its value is not a constant, and its type is the
+    /// member's own over the `number` domain.
     Deferred(EnumPrimitiveDomain),
 }
 
 impl EnumMemberValue {
     /// Classify a stored member scalar back into its rail-explicit view: a
     /// `Number` / `String` scalar is a folded member, a `Primitive` domain is a
-    /// deferred one. The inverse of [`projected_scalar`](Self::projected_scalar).
+    /// deferred one.
     pub fn from_scalar(scalar: &EnumScalar) -> Self {
         match scalar {
             EnumScalar::Number(_) | EnumScalar::String(_) => Self::Folded(scalar.clone()),
@@ -320,26 +322,34 @@ impl EnumMemberValue {
         }
     }
 
-    /// The scalar this member PROJECTS to on every type/value surface (`typeof
-    /// Enum`, `Enum.Member`, the enum type union): the folded literal for a
-    /// foldable member, or the degraded primitive domain for a deferred one.
-    /// ALWAYS present — a deferred member is degraded, never dropped. This is
-    /// also the STORED form ([`EnumMemberEntry::value`]).
+    /// The scalar this member STORES ([`EnumMemberEntry::value`]): the
+    /// folded literal for a constant member, the `number` domain for a
+    /// pending or computed one.
+    ///
+    /// [`EnumMemberEntry::value`]: verter_type_expr::facts::EnumMemberEntry::value
     pub fn projected_scalar(&self) -> EnumScalar {
         match self {
             Self::Folded(scalar) => scalar.clone(),
+            Self::Pending(_) => EnumScalar::Primitive(EnumPrimitiveDomain::Number),
             Self::Deferred(domain) => EnumScalar::Primitive(*domain),
         }
     }
 
-    /// The folded literal scalar, or `None` when the member's value is
-    /// deferred. This is the foldable-only view the value-body fingerprint
-    /// observes — a deferred member MUST NOT enter the fingerprint, because its
-    /// degraded domain is not a value edit.
+    /// The folded literal scalar, or `None` when the member's value is not a
+    /// constant of the declaration alone. This is the foldable-only view the
+    /// value-body fingerprint observes.
     pub fn folded_literal(&self) -> Option<&EnumScalar> {
         match self {
             Self::Folded(scalar) => Some(scalar),
-            Self::Deferred(_) => None,
+            Self::Pending(_) | Self::Deferred(_) => None,
+        }
+    }
+
+    /// The initializer a pending member's value is evaluated from.
+    pub fn pending_initializer(&self) -> Option<&verter_type_expr::facts::EnumConstantExpr> {
+        match self {
+            Self::Pending(initializer) => Some(initializer),
+            Self::Folded(_) | Self::Deferred(_) => None,
         }
     }
 }

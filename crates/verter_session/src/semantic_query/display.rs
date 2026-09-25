@@ -563,9 +563,16 @@ fn display_resolved_type_node(
             // A union arm only parenthesises a LOOSER binder (Conditional /
             // Function). A same-kind nested union arm (`A | (B | C)`) and a
             // tighter intersection arm (`A | B & C`) both render bare.
-            let rendered: Vec<String> = arms
-                .iter()
-                .map(|a| render_operand(store, *a, needs, child_depth, visited, Prec::Union))
+            let rendered: Vec<String> = crate::semantic_query::printed_union_arms(store, arms)
+                .into_iter()
+                .map(|arm| match arm {
+                    crate::semantic_query::PrintedUnionArm::Node(a) => {
+                        render_operand(store, a, needs, child_depth, visited, Prec::Union)
+                    }
+                    crate::semantic_query::PrintedUnionArm::Enum(decl) => {
+                        decl.decl_name.to_string()
+                    }
+                })
                 .collect();
             if needs.contains(DisplayFacet::TruncateLargeUnions)
                 && rendered.len() > UNION_TRUNCATION_THRESHOLD
@@ -599,6 +606,7 @@ fn display_resolved_type_node(
         }
         SemanticNodeData::Primitive(kind) => primitive_keyword(*kind).to_string(),
         SemanticNodeData::Literal(value) => literal_token(value),
+        SemanticNodeData::EnumLiteral(literal) => literal.printed_name(),
         // Error carrier riding through display — a concise token, NOT a panic.
         SemanticNodeData::Opaque(_) => "<error>".to_string(),
         SemanticNodeData::Array { element, readonly } => {
@@ -1443,6 +1451,7 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         | SemanticNodeData::ObjectSpreadProgram(_)
         | SemanticNodeData::Primitive(_)
         | SemanticNodeData::Literal(_)
+        | SemanticNodeData::EnumLiteral(_)
         | SemanticNodeData::Opaque(_)
         | SemanticNodeData::Tuple { .. }
         | SemanticNodeData::TemplateLiteral { .. }

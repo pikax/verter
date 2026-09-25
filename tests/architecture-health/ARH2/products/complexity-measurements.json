@@ -20,11 +20,11 @@
     { "path": "crates/verter_scheduler/src/scheduler.rs", "fileLoc": 21022 },
     {
       "path": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
-      "fileLoc": 16964
+      "fileLoc": 17107
     },
-    { "path": "crates/verter_session/src/project_semantic_dispatch/build.rs", "fileLoc": 15007 },
-    { "path": "crates/verter_session/src/semantic_query.rs", "fileLoc": 11064 },
-    { "path": "crates/verter_session/src/flow_slice_content.rs", "fileLoc": 10525 }
+    { "path": "crates/verter_session/src/project_semantic_dispatch/build.rs", "fileLoc": 15054 },
+    { "path": "crates/verter_session/src/semantic_query.rs", "fileLoc": 11166 },
+    { "path": "crates/verter_session/src/flow_slice_content.rs", "fileLoc": 10562 }
   ],
   "structuralMethod": "line count of each hotspot file with Rust lines() semantics (split on LF, a trailing newline does not add a line); re-derived live by the verifier on every run",
   "godModuleBasis": {

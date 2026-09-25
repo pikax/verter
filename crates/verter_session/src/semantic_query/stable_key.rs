@@ -72,6 +72,7 @@ pub mod subtag {
     pub const OBJECT: u8 = 9;
     pub const MERGED_DECL: u8 = 10;
     pub const CLASS_EXPRESSION_INSTANCE: u8 = 11;
+    pub const ENUM_LITERAL: u8 = 12;
     pub const TYPE_PARAM: u8 = 1;
     pub const INFER: u8 = 2;
     pub const INFER_REF: u8 = 3;
@@ -605,6 +606,17 @@ fn encode_data(
             enc.str(&identity.canonical_id);
             encode_owner(&mut enc, identity.owner);
             enc.str(&identity.decl_name);
+        }
+        // An enum member's literal is identified by its enum's declaration
+        // and its name; its base value descends as a child.
+        SemanticNodeData::EnumLiteral(literal) => {
+            enc.header(category::AUTHORED, subtag::ENUM_LITERAL);
+            enc.str(&literal.enum_decl.canonical_id);
+            encode_owner(&mut enc, literal.enum_decl.owner);
+            enc.str(&literal.enum_decl.decl_name);
+            enc.str(&literal.member);
+            enc.u64(u64::from(literal.member_count));
+            encode_child(graph, literal.base, seen, &mut enc, depth);
         }
         SemanticNodeData::InstantiationRef { base, args } => {
             enc.header(category::AUTHORED, subtag::INSTANTIATION_REF);
