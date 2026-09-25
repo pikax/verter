@@ -8425,6 +8425,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// clause derives from itself alone. `None` when the chain is not
     /// decided, or when a class other than a file-scope one has a
     /// heritage clause.
+    ///
+    /// The ancestry walk reads each declaration file through an accessor
+    /// that records no fact of its own, so the files it observed join the
+    /// relation build's self-roots here: an edit to an ancestor's file
+    /// retracts the answer.
     fn class_derives_from(&self, source: &ClassOwner, target: &ClassOwner) -> Option<bool> {
         match (source, target) {
             (ClassOwner::Declared(source), ClassOwner::Declared(target)) => {
@@ -8432,6 +8437,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     return Some(true);
                 }
                 let ancestry = self.class_heritage_ancestry(source);
+                self.deposit_operand_self_roots(&ancestry.observed);
                 if ancestry
                     .ancestors
                     .iter()
@@ -8442,10 +8448,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ancestry.decided.then_some(false)
                 }
             }
-            (ClassOwner::Declared(source), ClassOwner::Syntactic { .. }) => self
-                .class_heritage_ancestry(source)
-                .decided
-                .then_some(false),
+            (ClassOwner::Declared(source), ClassOwner::Syntactic { .. }) => {
+                let ancestry = self.class_heritage_ancestry(source);
+                self.deposit_operand_self_roots(&ancestry.observed);
+                ancestry.decided.then_some(false)
+            }
             (
                 ClassOwner::Syntactic {
                     file,

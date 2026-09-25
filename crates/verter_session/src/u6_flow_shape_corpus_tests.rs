@@ -1692,6 +1692,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "c13f0591d4c8cbad6f9598e8f0416e78ccd0fa510563558e51bafc52240f2f8d",
     ),
     (
+        "N65_enum_member_discriminant",
+        "07ef5ac6c5edd64f8bded0d8730907f374e98d00c3dc39015e851e464efb6f42",
+    ),
+    (
         "N66_shared_nonliteral_property_is_not_a_discriminant",
         "c79aa1eef3b0955b01462e490e414915f527e0e73f7c81dd6835be7eda251523",
     ),
@@ -1722,6 +1726,18 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "N78_strict_not_undefined_keeps_null",
         "501aee0440f7bfb526a1235fe6e75f55e6e9d314f31cded0cca0ca22c0bd497e",
+    ),
+    (
+        "N79_equality_against_const_literal_binding",
+        "eb56597a228aabd93fbf494bc076733f79373f3edbd5437724e8477a901b3cef",
+    ),
+    (
+        "N80_equality_against_const_literal_target_narrows",
+        "bbd96b82015e965e899aa3a69e6b9cc5365210c8cfdd219e6612ea6593e7c34b",
+    ),
+    (
+        "N81_equality_against_let_widened_target_does_not_narrow",
+        "5cf45a21bc89978a7f1faae587adcb5745d563d5c2a5c9c3b9fd95890189d0b9",
     ),
     (
         "N82_falsy_branch_keeps_empty_string_literal",
@@ -3447,12 +3463,20 @@ mod corpus_suite {
                 "checker prints `{ v: string | null; }`; the renderer spells the same node `{ v: Union(string | null) }`",
             ),
             (
+                "N65_enum_member_discriminant",
+                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(number | string) }`",
+            ),
+            (
                 "N79_equality_against_const_literal_binding",
-                "checker prints `{ v: 5 | 15; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(5 | 10 | 15) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: 5 | 15; }`; the renderer spells the same node `{ v: Union(15 | 5) }`",
             ),
             (
                 "N80_equality_against_const_literal_target_narrows",
-                "checker prints `{ v: \"a\"; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(\"a\" | \"b\") }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: \"a\"; }`; the renderer spells the same node `{ v: \"a\" }`",
+            ),
+            (
+                "N81_equality_against_let_widened_target_does_not_narrow",
+                "checker prints `{ v: \"a\" | \"b\"; }`; the renderer spells the same node `{ v: Union(\"b\" | \"a\") }`",
             ),
             (
                 "N82_falsy_branch_keeps_empty_string_literal",
@@ -5108,11 +5132,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         Owner::U6NarrowTypeof,
         "member Union carrying Array(number) — no Array variant in the recursive expectation vocabulary",
     ),
-    (
-        "N81_equality_against_let_widened_target_does_not_narrow",
-        Owner::U6NarrowTypeof,
-        "member Union — the published value EQUALS the checker, so a recursive pin would assert a divergence this KnownOwed row does not have",
-    ),
 ];
 
 /// Burn-down ceiling of [`SHALLOW_PINNED_ROWS`]. Lower freely as rows
@@ -5138,7 +5157,7 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 /// undeclared-call rows, whose members spell the typed marker and so need no
 /// shallow entry.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 76;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 75;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -5251,15 +5270,11 @@ const OPEN_DEBTS: &[&str] = &[
     // an enum member reference, a const-typed literal key, a numeric key,
     // and a `typeof`-narrowed callable. The optional-member row is the one
     // NARROWER-than-checker answer in this group; its note says so.
-    "N65_enum_member_discriminant",
     "N69_in_operator_const_literal_key",
     "N70_in_operator_numeric_key",
     "N72_typeof_function_guard",
     "N74_array_isarray_true_arm",
     "N75_array_isarray_false_arm",
-    "N79_equality_against_const_literal_binding",
-    "N80_equality_against_const_literal_target_narrows",
-    "N81_equality_against_let_widened_target_does_not_narrow",
     // Evolving `let` bindings, the `never`-default switch admission, the
     // `??` short circuit, index-signature reads, and a closure created
     // inside a narrowed arm.
@@ -5338,7 +5353,12 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // `== null` selects both nullish members (N76), and a nested body
     // narrows a captured binding by its own guard (N48): 34 matching, 14
     // parked.
-    (Owner::U6NarrowTypeof, 48, 34, 14),
+    // An equality against a value that is not a literal narrows by the
+    // value's type through the comparable relation: a `const` literal
+    // binding on the negated edge (N79), a `const` comparison target
+    // (N80) and its `let`-widened control (N81) match: 37 matching, 11
+    // parked.
+    (Owner::U6NarrowTypeof, 48, 37, 11),
     // The `instanceof` arm rule: derivation decided by class heritage on
     // both edges (the subclass arm survives, the base arm downcasts, the
     // negated edge drops the tested class's family) with nullish
@@ -5352,7 +5372,9 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // this owner to 25 matching. A predicate over a captured binding
     // narrows inside the invoked body, dropping N25's dead contributor:
     // 26 matching, 12 parked.
-    (Owner::U6NarrowLattice, 38, 26, 12),
+    // An enum member discriminant (N65) narrows by the member's type: 27
+    // matching, 11 parked.
+    (Owner::U6NarrowLattice, 38, 27, 11),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     // A `new` and a tagged template resolve to the instance: C02, C04, C08,

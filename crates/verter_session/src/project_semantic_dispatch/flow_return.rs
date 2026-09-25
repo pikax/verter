@@ -6786,39 +6786,6 @@ enum ArmFilter {
     NoSurvivor,
 }
 
-/// One arm of an equality's value type, as
-/// [`FlowEvaluator::equality_value_shape`] classifies it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ValueArm {
-    /// `any` or `unknown`.
-    Top,
-    /// A non-literal primitive: `string`, `number`, `bigint`, `boolean`,
-    /// `symbol`.
-    Primitive,
-    /// The non-primitive `object`, or the empty object type `{}`.
-    Itself,
-    /// `null` or `undefined`.
-    Nullish,
-    /// Any other object type: an object surface, an array, a tuple, a
-    /// function, a class instance.
-    Object,
-}
-
-/// How an equality's value type narrows the compared binding
-/// ([`FlowEvaluator::narrow_eq_value`]).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EqualityValueShape {
-    /// The value is `any` or `unknown`: every arm is comparable to it.
-    Top,
-    /// One type an `unknown` or `{}`-carrying binding reads as itself on
-    /// the strict positive edge: a primitive, `object`, `{}`.
-    Itself,
-    /// One object type, which such a binding reads as `object`.
-    NonPrimitive,
-    /// A union: every binding filters its arms by comparability.
-    Union,
-}
-
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// COLD heritage-authority reads made by the `instanceof` guard
@@ -12576,6 +12543,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         negated: bool,
         comparison: LiteralComparison,
     ) -> GuardNarrowing {
+        self.narrow_eq_literal_with(subject, literal, negated, comparison, true)
+    }
+
+    /// [`Self::narrow_eq_literal`], with whether the literal is the
+    /// checker's FRESH literal type — an authored literal operand is; a
+    /// value's declared literal type is not, and never widens.
+    fn narrow_eq_literal_with(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        literal: &crate::flow_slice_content::SliceGuardLiteral,
+        negated: bool,
+        comparison: LiteralComparison,
+        fresh: bool,
+    ) -> GuardNarrowing {
         // `strictNullChecks` off: an equality with `null` / `undefined`
         // narrows nothing on either edge (the checker's
         // `narrowTypeByEquality` returns the type unchanged) — the nullable
@@ -12602,6 +12583,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 negated,
                 comparison,
             );
+            if !fresh {
+                return narrowed;
+            }
             return self.establish_fresh_equality_literal(
                 narrowed,
                 before,
@@ -12613,7 +12597,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // A `case` clause's dispatch edge is baked as ONE fact: the
         // discriminant's parent.
         if comparison == LiteralComparison::SwitchCase {
-            return self.narrow_eq_literal_parent(subject, literal_node, negated);
+            return self.narrow_parent_by_discriminant(subject, &mut |this, member| {
+                this.narrow_type_by_equality(member, literal_node, negated, false)
+            });
         }
         // The discriminant narrows the tested property's PARENT
         // reference, so that fact lands at the parent subject: a later
@@ -12624,11 +12610,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // a binding (`o.k == null` over `k: string | null` reads `null`
         // on the positive edge and `string` on the negated one, whether
         // or not `o` is a union).
-        let parent = self.narrow_eq_literal_parent(subject, literal_node, negated);
+        let loose = comparison == LiteralComparison::Loose;
+        let parent = self.narrow_parent_by_discriminant(subject, &mut |this, member| {
+            this.narrow_type_by_equality(member, literal_node, negated, loose)
+        });
         let leaf =
             self.narrow_eq_literal_reference(subject, literal, literal_node, negated, comparison);
-        let leaf =
-            self.establish_fresh_equality_literal(leaf, before, literal_node, negated, comparison);
+        let leaf = if fresh {
+            self.establish_fresh_equality_literal(leaf, before, literal_node, negated, comparison)
+        } else {
+            leaf
+        };
         match (parent, leaf) {
             (parent, GuardNarrowing::Unchanged) => parent,
             (GuardNarrowing::Narrowed(parent_subject, node), leaf) => {
@@ -12639,116 +12631,470 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// `subject === value` against a VALUE the lowering could not read as
-    /// a literal — the checker's `narrowTypeByEquality` over the value's
-    /// type. The positive edge keeps the subject's arms COMPARABLE to the
-    /// value's type, in either direction, through the sole relation
-    /// authority (`filterType(type, t => areTypesComparable(t,
-    /// valueType))`); a subject that is `unknown` or carries an empty
-    /// object arm reads, on the strict positive edge, the value's own
-    /// type when that is a primitive, `object` or `{}`, and `object` when
-    /// it is any other object type. The negated edge narrows only against
-    /// a unit type, which no value this carrier admits is, so it keeps
-    /// the subject as declared. A value whose type is a literal, a unit,
-    /// or a form this rule does not classify leaves the typed guard gap:
-    /// the checker substitutes literals and filters unit arms there.
+    /// `subject === value` against a VALUE that is not a literal — the
+    /// checker's `narrowTypeByEquality` applied to every matching
+    /// reference: the subject by the value's type and, when the value is
+    /// itself a reference, that reference by the subject's type, both read
+    /// at the test.
     fn narrow_eq_value(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
-        value: &crate::flow_slice_content::SliceExpr,
+        value: &crate::flow_slice_content::SliceEqOperand,
         negated: bool,
         loose: bool,
     ) -> GuardNarrowing {
+        use crate::flow_slice_content::SliceEqOperand;
+        let (value_node, mirror) = match value {
+            SliceEqOperand::Value(expr) => match self.eval_expr(expr) {
+                Positional::Value(node) => (node, None),
+                Positional::Hold | Positional::Unmodeled => {
+                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                        crate::semantic_query::FlowGap::GuardNarrowing,
+                    ));
+                    return GuardNarrowing::Unchanged;
+                }
+            },
+            SliceEqOperand::Reference(reference) => {
+                let Some(node) = self.subject_current_node(reference) else {
+                    return GuardNarrowing::Unchanged;
+                };
+                (node, Some(reference))
+            }
+        };
+        let subject_node = match mirror {
+            Some(_) => self.subject_current_node(subject),
+            None => None,
+        };
+        let fact = self.narrow_reference_by_value(subject, value_node, negated, loose);
+        if let (Some(reference), Some(subject_node)) = (mirror, subject_node) {
+            if let GuardNarrowing::Narrowed(narrowed, node) =
+                self.narrow_reference_by_value(reference, subject_node, negated, loose)
+            {
+                self.push_narrowing(&narrowed, node);
+            }
+        }
+        fact
+    }
+
+    /// Narrow one reference by equality with a value of type `value`. A
+    /// unit value — one literal, `null`, `undefined` — takes the literal
+    /// equality's rules, its literal pinned (the value's declared type,
+    /// never a fresh literal); any other value filters the reference's
+    /// arms ([`Self::narrow_type_by_equality`]) and a member reference's
+    /// parent as a discriminant ([`Self::narrow_parent_by_discriminant`]).
+    fn narrow_reference_by_value(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        value: SemanticNodeId,
+        negated: bool,
+        loose: bool,
+    ) -> GuardNarrowing {
+        use crate::flow_slice_content::{SliceGuard, SliceGuardLiteral};
+        if let Some(literal) = self.unit_guard_literal(value) {
+            if loose
+                && matches!(
+                    literal,
+                    SliceGuardLiteral::Null | SliceGuardLiteral::Undefined
+                )
+            {
+                // `== null` and `== undefined` select both nullish arms.
+                let arms: Arc<[SliceGuard]> = Arc::from(
+                    [SliceGuardLiteral::Null, SliceGuardLiteral::Undefined]
+                        .into_iter()
+                        .map(|literal| SliceGuard::EqLiteral {
+                            subject: subject.clone(),
+                            literal,
+                            negated,
+                            loose: false,
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+                let guard = if negated {
+                    SliceGuard::And(arms)
+                } else {
+                    SliceGuard::Or(arms)
+                };
+                self.apply_guard_scoped(&guard, true);
+                return GuardNarrowing::Unchanged;
+            }
+            let comparison = if loose {
+                LiteralComparison::Loose
+            } else {
+                LiteralComparison::Strict
+            };
+            return self.narrow_eq_literal_with(subject, &literal, negated, comparison, false);
+        }
         let Some(current) = self.subject_current_node(subject) else {
             return GuardNarrowing::Unchanged;
         };
-        if matches!(
-            self.dispatch.graph().node_data(current).as_deref(),
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
-        ) {
-            return GuardNarrowing::Unchanged;
-        }
-        let value_node = match self.eval_expr(value) {
-            Positional::Value(node) => node,
-            Positional::Hold | Positional::Unmodeled => {
-                self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::GuardNarrowing,
-                ));
-                return GuardNarrowing::Unchanged;
-            }
-        };
-        let Some(shape) = self.equality_value_shape(value_node, loose) else {
+        let Some(narrowed) = self.narrow_type_by_equality(current, value, negated, loose) else {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 crate::semantic_query::FlowGap::GuardNarrowing,
             ));
             return GuardNarrowing::Unchanged;
         };
-        if negated || shape == EqualityValueShape::Top {
-            return GuardNarrowing::Unchanged;
-        }
-        if !loose {
-            let unknown = matches!(
-                self.dispatch.graph().node_data(current).as_deref(),
-                Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
-            );
-            let empty_arm = self
-                .enumerated_union_arms_or_self(current)
-                .iter()
-                .any(|arm| self.is_empty_object_arm(*arm));
-            if unknown || empty_arm {
-                match shape {
-                    EqualityValueShape::Itself => {
-                        return GuardNarrowing::Narrowed(subject.clone(), value_node);
-                    }
-                    EqualityValueShape::NonPrimitive => {
-                        let object = self
-                            .dispatch
-                            .graph()
-                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Object));
-                        return GuardNarrowing::Narrowed(subject.clone(), object);
-                    }
-                    EqualityValueShape::Union | EqualityValueShape::Top => {}
-                }
+        if !subject.path.is_empty() {
+            let parent = self.narrow_parent_by_discriminant(subject, &mut |this, prop| {
+                this.narrow_type_by_equality(prop, value, negated, loose)
+            });
+            if let GuardNarrowing::Narrowed(parent, node) = parent {
+                self.push_narrowing(&parent, node);
             }
         }
-        let mut undecided = false;
-        let fact = self.narrow_arms_by(subject, |this, arm| {
-            match this.comparable_either_way(arm, value_node) {
-                Some(comparable) => Some(comparable),
-                None => {
-                    undecided = true;
-                    Some(true)
-                }
-            }
-        });
-        if undecided {
-            self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
-            ));
-        }
-        match fact {
-            ArmFilter::NoSurvivor => GuardNarrowing::Narrowed(subject.clone(), self.never_node()),
-            ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(subject.clone(), node),
-            ArmFilter::Unchanged => GuardNarrowing::Unchanged,
+        if narrowed == current {
+            GuardNarrowing::Unchanged
+        } else {
+            GuardNarrowing::Narrowed(subject.clone(), narrowed)
         }
     }
 
-    /// The checker's `areTypesComparable`, through the sole relation
-    /// authority: `false` on its disjointness proof, `true` when either
-    /// type is assignable to the other (assignability implies
-    /// comparability), `None` otherwise. The authority's permissive
-    /// verdict alone is no proof: it answers "no proof of empty overlap",
-    /// which is weaker than the checker's comparable relation, so an arm it
-    /// only fails to separate from the value keeps the typed gap.
-    fn comparable_either_way(&self, a: SemanticNodeId, b: SemanticNodeId) -> Option<bool> {
-        use super::relation::ComparabilityVerdict;
-        match self.dispatch.nodes_comparable(a, b) {
-            ComparabilityVerdict::Disjoint(_) => Some(false),
-            ComparabilityVerdict::Undecided => None,
-            ComparabilityVerdict::Overlaps => (self.assignable(a, b) == Some(true)
-                || self.assignable(b, a) == Some(true))
-            .then_some(true),
+    /// The literal a unit value spells, when it is one the literal
+    /// equality carries: a string, number or boolean literal, `null`,
+    /// `undefined`.
+    fn unit_guard_literal(
+        &self,
+        value: SemanticNodeId,
+    ) -> Option<crate::flow_slice_content::SliceGuardLiteral> {
+        use crate::flow_slice_content::SliceGuardLiteral;
+        let settled = match self.dispatch.unwrap_identity_carrier_for_relation(value) {
+            super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+            super::relation::IdentityCarrierUnwrap::Unresolvable => return None,
+        };
+        match self.dispatch.graph().node_data(settled).as_deref()? {
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(text)) => {
+                Some(SliceGuardLiteral::String(Arc::from(text.as_str())))
+            }
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(number))
+                if number.is_finite() =>
+            {
+                Some(SliceGuardLiteral::Number(Arc::from(number.to_string())))
+            }
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Boolean(value)) => {
+                Some(SliceGuardLiteral::Boolean(*value))
+            }
+            SemanticNodeData::Primitive(PrimitiveKind::Null) => Some(SliceGuardLiteral::Null),
+            SemanticNodeData::Primitive(PrimitiveKind::Undefined) => {
+                Some(SliceGuardLiteral::Undefined)
+            }
+            _ => None,
         }
+    }
+
+    /// The checker's `narrowTypeByEquality` over a TYPE: `ty` narrowed by
+    /// equality with a value of type `value`. The positive edge keeps the
+    /// arms comparable to the value's type in either direction (`==` also
+    /// keeps a `number`, `string` or boolean arm a `number`, `string` or
+    /// `boolean` value coerces to) and replaces a `string`, `number` or
+    /// `bigint` arm by the value's literals of that kind
+    /// (`replacePrimitivesWithLiterals`); `unknown` and a type with a `{}`
+    /// arm read, under `===`, the value's own type when it is a primitive,
+    /// `object` or `{}`, and `object` for any other object type. The
+    /// negated edge removes only the unit arms comparable to a unit value.
+    /// A `null` / `undefined` value selects or removes the nullish arms,
+    /// under `strictNullChecks` only. `any` stays `any`. `None` when an arm
+    /// or the value is a form this rule does not read, or a comparison is
+    /// undecided.
+    fn narrow_type_by_equality(
+        &mut self,
+        ty: SemanticNodeId,
+        value: SemanticNodeId,
+        negated: bool,
+        loose: bool,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        let data = |node: SemanticNodeId| graph.node_data(node);
+        if matches!(
+            data(ty).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+        ) {
+            return Some(ty);
+        }
+        let mut values = Vec::new();
+        for arm in self.enumerated_union_arms_or_self(value) {
+            let settled = match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
+                super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                super::relation::IdentityCarrierUnwrap::Unresolvable => return None,
+            };
+            match data(settled).as_deref()? {
+                SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown) => {
+                    return Some(ty);
+                }
+                SemanticNodeData::Primitive(PrimitiveKind::Void) => return None,
+                SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::Object(_)
+                | SemanticNodeData::ObjectSpreadProgram(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Signature { .. }
+                | SemanticNodeData::ClassExpressionInstance { .. } => values.push(settled),
+                _ => return None,
+            }
+        }
+        let primitive_of = |node: SemanticNodeId| match data(node).as_deref() {
+            Some(SemanticNodeData::Primitive(kind)) => Some(*kind),
+            _ => None,
+        };
+        let nullish = match values.as_slice() {
+            [single] => primitive_of(*single)
+                .filter(|kind| matches!(kind, PrimitiveKind::Null | PrimitiveKind::Undefined)),
+            _ => None,
+        };
+        if let Some(kind) = nullish {
+            if !self.nullability.is_strict() {
+                return Some(ty);
+            }
+            let mut survivors = Vec::new();
+            for arm in self.enumerated_union_arms_or_self(ty) {
+                let selected = match primitive_of(arm) {
+                    Some(PrimitiveKind::Null | PrimitiveKind::Undefined) => {
+                        loose || primitive_of(arm) == Some(kind)
+                    }
+                    Some(PrimitiveKind::Unknown | PrimitiveKind::Any) => return None,
+                    _ => false,
+                };
+                if selected != negated {
+                    survivors.push(arm);
+                }
+            }
+            return Some(self.union_or_never(&survivors));
+        }
+        let boolean_literal = values.iter().any(|value| {
+            matches!(
+                data(*value).as_deref(),
+                Some(SemanticNodeData::Literal(
+                    crate::semantic_query::LiteralValue::Boolean(_)
+                ))
+            )
+        });
+        let arms = self.equality_arms(ty, boolean_literal);
+        if negated {
+            let unit = values.len() == 1
+                && matches!(
+                    data(values[0]).as_deref(),
+                    Some(SemanticNodeData::Literal(_))
+                );
+            if !unit {
+                return Some(ty);
+            }
+            let mut survivors = Vec::new();
+            for arm in arms {
+                let unit_arm = matches!(data(arm).as_deref(), Some(SemanticNodeData::Literal(_)))
+                    || matches!(
+                        primitive_of(arm),
+                        Some(PrimitiveKind::Null | PrimitiveKind::Undefined)
+                    );
+                if unit_arm && self.comparable_either_way(arm, value)? {
+                    continue;
+                }
+                survivors.push(arm);
+            }
+            return Some(self.union_or_never(&survivors));
+        }
+        if !loose {
+            let unknown = primitive_of(ty) == Some(PrimitiveKind::Unknown);
+            let empty_arm = self
+                .enumerated_union_arms_or_self(ty)
+                .iter()
+                .any(|arm| self.is_empty_object_arm(*arm));
+            if (unknown || empty_arm) && values.len() == 1 {
+                return Some(match data(values[0]).as_deref()? {
+                    SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_) => value,
+                    SemanticNodeData::Object(surface) if surface.closed().is_empty() => value,
+                    _ => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Object)),
+                });
+            }
+        }
+        let coerces = loose
+            && values.iter().any(|value| {
+                matches!(
+                    primitive_of(*value),
+                    Some(PrimitiveKind::Number | PrimitiveKind::String | PrimitiveKind::Boolean)
+                )
+            });
+        let mut survivors = Vec::new();
+        for arm in arms {
+            let coercible = coerces
+                && (matches!(
+                    primitive_of(arm),
+                    Some(PrimitiveKind::Number | PrimitiveKind::String | PrimitiveKind::Boolean)
+                ) || matches!(
+                    data(arm).as_deref(),
+                    Some(SemanticNodeData::Literal(
+                        crate::semantic_query::LiteralValue::Boolean(_)
+                    ))
+                ));
+            if coercible || self.comparable_either_way(arm, value)? {
+                survivors.push(arm);
+            }
+        }
+        let filtered = self.union_or_never(&survivors);
+        Some(self.replace_primitives_with_literals(filtered, &values))
+    }
+
+    /// The arms of `ty` an equality filters: its union arms, with a
+    /// `boolean` arm split into `true | false` when the compared value
+    /// carries a boolean literal (the checker's `boolean` is that union).
+    fn equality_arms(&mut self, ty: SemanticNodeId, split_boolean: bool) -> Vec<SemanticNodeId> {
+        let arms = self.enumerated_union_arms_or_self(ty);
+        if !split_boolean {
+            return arms;
+        }
+        let graph = self.dispatch.graph();
+        let mut out = Vec::with_capacity(arms.len() + 1);
+        for arm in arms {
+            if matches!(
+                graph.node_data(arm).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+            ) {
+                for value in [true, false] {
+                    out.push(graph.intern_node(SemanticNodeData::Literal(
+                        crate::semantic_query::LiteralValue::Boolean(value),
+                    )));
+                }
+            } else {
+                out.push(arm);
+            }
+        }
+        out
+    }
+
+    /// The union of `arms`, `never` when there is none.
+    fn union_or_never(&mut self, arms: &[SemanticNodeId]) -> SemanticNodeId {
+        if arms.is_empty() {
+            self.never_node()
+        } else {
+            self.union(arms)
+        }
+    }
+
+    /// The checker's `replacePrimitivesWithLiterals`: when `node` has a
+    /// `string`, `number`, `bigint` or template-literal arm and the
+    /// compared value's arms carry literals, each such arm becomes the
+    /// value's arms of its kind (`x: string` compared with a `"a" | "b"`
+    /// value reads `"a" | "b"`).
+    fn replace_primitives_with_literals(
+        &mut self,
+        node: SemanticNodeId,
+        values: &[SemanticNodeId],
+    ) -> SemanticNodeId {
+        use crate::semantic_query::LiteralValue;
+        let graph = self.dispatch.graph();
+        let kind_of = |node: SemanticNodeId| -> Option<(u8, bool)> {
+            // (kind: 0 string, 1 number, 2 bigint; whether a literal)
+            match graph.node_data(node).as_deref()? {
+                SemanticNodeData::Primitive(PrimitiveKind::String) => Some((0, false)),
+                SemanticNodeData::TemplateLiteral { .. } => Some((0, false)),
+                SemanticNodeData::Primitive(PrimitiveKind::Number) => Some((1, false)),
+                SemanticNodeData::Primitive(PrimitiveKind::BigInt) => Some((2, false)),
+                SemanticNodeData::Literal(LiteralValue::String(_)) => Some((0, true)),
+                SemanticNodeData::Literal(LiteralValue::Number(_)) => Some((1, true)),
+                SemanticNodeData::Literal(LiteralValue::BigInt(_)) => Some((2, true)),
+                _ => None,
+            }
+        };
+        if !values
+            .iter()
+            .any(|value| kind_of(*value).is_some_and(|(_, literal)| literal))
+        {
+            return node;
+        }
+        let arms = self.enumerated_union_arms_or_self(node);
+        if !arms
+            .iter()
+            .any(|arm| kind_of(*arm).is_some_and(|(_, literal)| !literal))
+        {
+            return node;
+        }
+        let value_has_broad_string = values
+            .iter()
+            .any(|value| kind_of(*value) == Some((0, false)));
+        let mut out = Vec::new();
+        for arm in arms {
+            let is_template = matches!(
+                graph.node_data(arm).as_deref(),
+                Some(SemanticNodeData::TemplateLiteral { .. })
+            );
+            match kind_of(arm) {
+                Some((kind, false)) if !is_template || !value_has_broad_string => {
+                    out.extend(values.iter().copied().filter(|value| {
+                        kind_of(*value).is_some_and(|(value_kind, literal)| {
+                            value_kind == kind && (!is_template || literal)
+                        })
+                    }));
+                }
+                _ => out.push(arm),
+            }
+        }
+        self.union_or_never(&out)
+    }
+
+    /// The checker's `areTypesComparable`, through the sole relation
+    /// authority, read over the union arms of both sides (a union is
+    /// comparable when one of its arms is): a pair is comparable when
+    /// either type is assignable to the other (assignability implies
+    /// comparability), not comparable on the authority's disjointness
+    /// proof, and not comparable when both are scalar types — primitives,
+    /// literals, template literals — related in neither direction, where
+    /// the comparable relation is assignability. `None` otherwise: the
+    /// authority's permissive verdict alone answers "no proof of empty
+    /// overlap", which is weaker than the checker's comparable relation,
+    /// so an arm it only fails to separate keeps the typed gap.
+    fn comparable_either_way(&mut self, a: SemanticNodeId, b: SemanticNodeId) -> Option<bool> {
+        use super::relation::ComparabilityVerdict;
+        let scalar = |this: &Self, node: SemanticNodeId| {
+            let settled = match this.dispatch.unwrap_identity_carrier_for_relation(node) {
+                super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                super::relation::IdentityCarrierUnwrap::Unresolvable => return false,
+            };
+            matches!(
+                this.dispatch.graph().node_data(settled).as_deref(),
+                Some(
+                    SemanticNodeData::Literal(_)
+                        | SemanticNodeData::TemplateLiteral { .. }
+                        | SemanticNodeData::Primitive(
+                            PrimitiveKind::String
+                                | PrimitiveKind::Number
+                                | PrimitiveKind::BigInt
+                                | PrimitiveKind::Boolean
+                                | PrimitiveKind::Symbol
+                                | PrimitiveKind::Null
+                                | PrimitiveKind::Undefined
+                        )
+                )
+            )
+        };
+        let mut undecided = false;
+        for a_arm in self.enumerated_union_arms_or_self(a) {
+            for b_arm in self.enumerated_union_arms_or_self(b) {
+                let verdict = match self.dispatch.nodes_comparable(a_arm, b_arm) {
+                    ComparabilityVerdict::Disjoint(_) => Some(false),
+                    ComparabilityVerdict::Undecided => None,
+                    ComparabilityVerdict::Overlaps => {
+                        let forward = self.assignable(a_arm, b_arm);
+                        let backward = self.assignable(b_arm, a_arm);
+                        if forward == Some(true) || backward == Some(true) {
+                            Some(true)
+                        } else if forward == Some(false)
+                            && backward == Some(false)
+                            && scalar(self, a_arm)
+                            && scalar(self, b_arm)
+                        {
+                            Some(false)
+                        } else {
+                            None
+                        }
+                    }
+                };
+                match verdict {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => undecided = true,
+                }
+            }
+        }
+        (!undecided).then_some(false)
     }
 
     /// Whether `arm` is the empty object type `{}`.
@@ -12757,64 +13103,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.dispatch.graph().node_data(arm).as_deref(),
             Some(SemanticNodeData::Object(surface)) if surface.closed().is_empty()
         )
-    }
-
-    /// How an equality's VALUE type takes part in
-    /// [`Self::narrow_eq_value`], `None` for a value this rule does not
-    /// read: a literal or unit type, alone or in a union (the checker
-    /// substitutes a literal for a primitive arm and filters unit arms), a
-    /// primitive under the loose operator (coercion), or any form the
-    /// classification cannot settle.
-    fn equality_value_shape(
-        &mut self,
-        value: SemanticNodeId,
-        loose: bool,
-    ) -> Option<EqualityValueShape> {
-        let arms = self.enumerated_union_arms_or_self(value);
-        let mut shapes = Vec::with_capacity(arms.len());
-        for arm in &arms {
-            let settled = match self.dispatch.unwrap_identity_carrier_for_relation(*arm) {
-                super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
-                super::relation::IdentityCarrierUnwrap::Unresolvable => return None,
-            };
-            let shape = match self.dispatch.graph().node_data(settled).as_deref()? {
-                SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown) => {
-                    ValueArm::Top
-                }
-                SemanticNodeData::Primitive(
-                    PrimitiveKind::String
-                    | PrimitiveKind::Number
-                    | PrimitiveKind::BigInt
-                    | PrimitiveKind::Boolean
-                    | PrimitiveKind::Symbol,
-                ) => ValueArm::Primitive,
-                SemanticNodeData::Primitive(PrimitiveKind::Object) => ValueArm::Itself,
-                SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined) => {
-                    ValueArm::Nullish
-                }
-                SemanticNodeData::Object(surface) if surface.closed().is_empty() => {
-                    ValueArm::Itself
-                }
-                SemanticNodeData::Object(_)
-                | SemanticNodeData::ObjectSpreadProgram(_)
-                | SemanticNodeData::Array { .. }
-                | SemanticNodeData::Tuple { .. }
-                | SemanticNodeData::Signature { .. }
-                | SemanticNodeData::ClassExpressionInstance { .. } => ValueArm::Object,
-                _ => return None,
-            };
-            shapes.push(shape);
-        }
-        if shapes.contains(&ValueArm::Top) {
-            return Some(EqualityValueShape::Top);
-        }
-        match shapes.as_slice() {
-            [ValueArm::Nullish] => None,
-            [ValueArm::Primitive] if loose => None,
-            [ValueArm::Primitive | ValueArm::Itself] => Some(EqualityValueShape::Itself),
-            [ValueArm::Object] => Some(EqualityValueShape::NonPrimitive),
-            _ => Some(EqualityValueShape::Union),
-        }
     }
 
     /// Establish a literal equality's narrow whose literal the narrow took
@@ -13092,19 +13380,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         GuardNarrowing::Unchanged
     }
 
-    /// The discriminant reading of `parent.member === literal`: filter
-    /// the arms of the tested property's PARENT reference — the root for
-    /// a one-segment path, the enclosing reference for a deeper one. The
-    /// checker never selects a ROOT arm through a nested discriminant:
-    /// doing so DROPS the constituents whose nested member differs (a
-    /// SUBSET of the checker's type — strictly worse than widening),
-    /// while the parent reference is exactly what it narrows
-    /// (`m.meta.kind === "one"` narrows `m.meta`, never `m`).
-    fn narrow_eq_literal_parent(
+    /// The discriminant reading of an equality over `parent.member`: the
+    /// checker's `narrowTypeByDiscriminant`. The PARENT reference narrows
+    /// only when the member is a discriminant of its union type
+    /// (`isDiscriminantProperty`: the arms' member types differ and one is
+    /// a literal type — a unit, `boolean`, or a union of units); the
+    /// member's union type across the arms is narrowed by `narrow_member`,
+    /// and an arm survives when its own member type is comparable to that
+    /// narrowed type. The checker never selects a ROOT arm through a nested
+    /// discriminant: the parent reference is what it narrows
+    /// (`m.meta.kind === "one"` narrows `m.meta`, never `m`). Measured:
+    /// `x: { k: string } | { k: number }` keeps both arms inside `x.k ===
+    /// "a"` (no literal member), and `A | B | C` over `kind: 'a'`, `'b'`
+    /// and `string` keeps all three inside `x.kind !== "a"` (the member's
+    /// union type is `string`, which excluding `"a"` leaves `string`).
+    fn narrow_parent_by_discriminant(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
-        literal_node: SemanticNodeId,
-        negated: bool,
+        narrow_member: &mut dyn FnMut(&mut Self, SemanticNodeId) -> Option<SemanticNodeId>,
     ) -> GuardNarrowing {
         let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
             root: subject.root.clone(),
@@ -13119,61 +13412,97 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .to_vec()
                 .into_boxed_slice(),
         );
-        // A parent arm whose projected discriminant the relation
-        // oracle cannot compare stays possible on BOTH edges and
-        // degrades the result — undecided is never "proved off this
-        // edge" nor "proved unchanged".
+        let Some(current) = self.subject_current_node(&parent_subject) else {
+            return GuardNarrowing::Unchanged;
+        };
+        let arms = self.enumerated_union_arms_or_self(current);
+        let mut projected: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        for arm in &arms {
+            match self.project_segments_navigate(*arm, &last) {
+                Some(member) => projected.push(member),
+                None => return GuardNarrowing::Unchanged,
+            }
+        }
+        let discriminant = if arms.len() >= 2 {
+            self.members_discriminate(&projected)
+        } else {
+            self.declared_parent_discriminates(&parent_subject, &last)
+        };
+        if !discriminant {
+            return GuardNarrowing::Unchanged;
+        }
+        let member_type = self.union(&projected);
+        let Some(narrowed) = narrow_member(self, member_type) else {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+            return GuardNarrowing::Unchanged;
+        };
+        let never = self.never_node();
+        if narrowed == never {
+            return GuardNarrowing::Narrowed(parent_subject, never);
+        }
         let mut undecided = false;
-        let mut projected: Vec<SemanticNodeId> = Vec::new();
-        let narrowed = self.narrow_arms_by(&parent_subject, |this, arm| {
-            let member = this.project_segments_navigate(arm, &last)?;
-            projected.push(member);
-            let verdict = if negated {
-                // Excluding one literal removes a parent arm only when
-                // the projected member is wholly that literal. A named
-                // alias can project a broad discriminant union without
-                // exposing its root constituents; `"a"` fits
-                // `"a" | "b"`, but its negative edge remains possible.
-                this.assignable(member, literal_node)
-                    .map(|covered| !covered)
-            } else {
-                this.assignable(literal_node, member)
-            };
-            match verdict {
-                Some(keep) => Some(keep),
+        let mut survivors = Vec::with_capacity(arms.len());
+        for (arm, member) in arms.iter().zip(projected) {
+            if member == never {
+                continue;
+            }
+            match self.comparable_either_way(narrowed, member) {
+                Some(true) => survivors.push(*arm),
+                Some(false) => {}
                 None => {
                     undecided = true;
-                    Some(true)
+                    survivors.push(*arm);
                 }
             }
-        });
+        }
         if undecided {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 crate::semantic_query::FlowGap::GuardNarrowing,
             ));
         }
-        match narrowed {
-            // The checker filters a PARENT through a member test only
-            // when the member DISCRIMINATES its arms. A no-survivor
-            // filter whose projections DIFFER is the genuine
-            // discriminant case with no matching arm: the parent reads
-            // `never` and the edge stays alive (measured:
-            // `{ kind: "a" } | { kind: "c" }` under `x.kind === "b"`).
-            // A non-union parent, or one whose member projects
-            // identically in every arm, is never discriminated — the
-            // checker keeps its declared type — so no fact lands.
-            ArmFilter::NoSurvivor => {
-                let discriminated = (projected.len() > 1
-                    && projected.windows(2).any(|pair| pair[0] != pair[1]))
-                    || self.declared_parent_discriminates(&parent_subject, &last);
-                if discriminated {
-                    GuardNarrowing::Narrowed(parent_subject, self.never_node())
-                } else {
-                    GuardNarrowing::Unchanged
-                }
-            }
-            ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(parent_subject, node),
-            ArmFilter::Unchanged => GuardNarrowing::Unchanged,
+        if survivors.len() == arms.len() {
+            return GuardNarrowing::Unchanged;
+        }
+        let node = self.union_or_never(&survivors);
+        GuardNarrowing::Narrowed(parent_subject, node)
+    }
+
+    /// Whether member types projected from a union's arms make the member
+    /// a discriminant (`isDiscriminantProperty`): they differ, and one is
+    /// a literal type — a unit, `boolean`, or a union of units.
+    fn members_discriminate(&self, projected: &[SemanticNodeId]) -> bool {
+        projected.windows(2).any(|pair| pair[0] != pair[1])
+            && projected.iter().any(|member| self.is_literal_type(*member))
+    }
+
+    /// The checker's `isLiteralType`: a unit type (a literal, `null`,
+    /// `undefined`), `boolean`, or a union of units.
+    fn is_literal_type(&self, node: SemanticNodeId) -> bool {
+        let graph = self.dispatch.graph();
+        let unit = |node: SemanticNodeId| {
+            let settled = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+                super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                super::relation::IdentityCarrierUnwrap::Unresolvable => return false,
+            };
+            matches!(
+                graph.node_data(settled).as_deref(),
+                Some(
+                    SemanticNodeData::Literal(_)
+                        | SemanticNodeData::Primitive(
+                            PrimitiveKind::Boolean | PrimitiveKind::Null | PrimitiveKind::Undefined
+                        )
+                )
+            )
+        };
+        let settled = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+            super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+            super::relation::IdentityCarrierUnwrap::Unresolvable => return false,
+        };
+        match graph.node_data(settled).as_deref() {
+            Some(SemanticNodeData::Union(arms)) => arms.members_arc().iter().all(|arm| unit(*arm)),
+            _ => unit(settled),
         }
     }
 
@@ -13271,7 +13600,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 None => return false,
             }
         }
-        projected.windows(2).any(|pair| pair[0] != pair[1])
+        self.members_discriminate(&projected)
     }
 
     /// Bake a narrow verdict into a state SNAPSHOT's reaching-definition

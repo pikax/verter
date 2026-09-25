@@ -137,3 +137,71 @@ fn a_function_local_class_declares_its_own_members() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+const HERITAGE: &str = "\
+class PR { protected x = 1 }
+type Ext<A, B> = [A] extends [B] ? 'y' : 'n';
+type Ctor<T = {}> = new (...args: any[]) => T;
+function Tagged<B extends Ctor>(base: B) { return class extends base { protected tag = 't' as const }; }
+class TB { protected z = 1 }
+const CE1 = class { protected x = 1 };
+const CE2 = class extends CE1 { protected x = 2 };
+const CE3 = class extends CE2 { protected x = 3 };
+function loc() { class L extends Tagged(TB) { protected z = 2 } return new L(); }
+class G extends Tagged(TB) { protected z = 3 }
+";
+
+/// A class expression extending a class expression derives from it, and
+/// from its base in turn.
+///
+/// Measured on TypeScript 7.0.2 (all four settings, `--noEmit`):
+/// `Ext<InstanceType<typeof CE2>, InstanceType<typeof CE1>>` and
+/// `Ext<InstanceType<typeof CE3>, InstanceType<typeof CE1>>` are `"y"`;
+/// `Ext<InstanceType<typeof CE1>, InstanceType<typeof CE2>>` and
+/// `Ext<InstanceType<typeof CE2>, PR>` are `"n"`.
+#[test]
+#[ignore = "the protected-member rule reads the base of a class expression with an extends clause"]
+fn a_class_expression_extending_a_class_expression_derives_from_it() {
+    let failures = mismatches(
+        HERITAGE,
+        &[
+            (
+                "Ext<InstanceType<typeof CE2>, InstanceType<typeof CE1>>",
+                "\"y\"",
+            ),
+            (
+                "Ext<InstanceType<typeof CE3>, InstanceType<typeof CE1>>",
+                "\"y\"",
+            ),
+            (
+                "Ext<InstanceType<typeof CE1>, InstanceType<typeof CE2>>",
+                "\"n\"",
+            ),
+            ("Ext<InstanceType<typeof CE2>, PR>", "\"n\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A class extending a mixin application derives from the mixin's base.
+///
+/// Measured on TypeScript 7.0.2 (all four settings, `--noEmit`):
+/// `Ext<G, TB>` over `class G extends Tagged(TB) { protected z = 3 }` is
+/// `"y"` and `Ext<TB, G>` `"n"`; over a function-local `class L extends
+/// Tagged(TB) { protected z = 2 }` returned as an instance,
+/// `Ext<ReturnType<typeof loc>, TB>` is `"y"` and `Ext<TB,
+/// ReturnType<typeof loc>>` `"n"`.
+#[test]
+#[ignore = "a class extending a mixin application relates through its mixin base without a relation panic"]
+fn a_class_extending_a_mixin_application_derives_from_its_base() {
+    let failures = mismatches(
+        HERITAGE,
+        &[
+            ("Ext<G, TB>", "\"y\""),
+            ("Ext<TB, G>", "\"n\""),
+            ("Ext<ReturnType<typeof loc>, TB>", "\"y\""),
+            ("Ext<TB, ReturnType<typeof loc>>", "\"n\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

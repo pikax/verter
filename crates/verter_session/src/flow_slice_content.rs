@@ -858,6 +858,17 @@ pub enum SliceGuardLiteral {
     Undefined,
 }
 
+/// The other operand of a [`SliceGuard::EqValue`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceEqOperand {
+    /// A value read for its type: a free name, a static member path rooted
+    /// at one, or a call.
+    Value(Box<SliceExpr>),
+    /// A reference a narrow lands on: read for its type at the test, and
+    /// narrowed in turn by the subject's.
+    Reference(SliceNarrowSubject),
+}
+
 /// The narrowing facts ONE conditional test establishes, lowered once and
 /// shared by the ternary's branch join and the `if` statement's arms —
 /// the single authority over test-expression forms, so the two control
@@ -917,16 +928,15 @@ pub enum SliceGuard {
         loose: bool,
     },
     /// `subject === value` (`!==` negates) against a VALUE that is not a
-    /// literal — a name the frame leaves free, or a static member path
-    /// rooted at one. The evaluator reads the value's type and narrows the
-    /// subject, a whole binding, by comparability with it (the checker's
-    /// `narrowTypeByEquality`).
+    /// literal. The evaluator reads the value's type and narrows the
+    /// subject by it (the checker's `narrowTypeByEquality`), a member
+    /// subject's parent as a discriminant, and a value that is itself a
+    /// reference by the subject's type.
     EqValue {
-        /// The compared binding.
+        /// The compared reference.
         subject: SliceNarrowSubject,
-        /// The value compared against, lowered as the flow expression it
-        /// is.
-        value: Box<SliceExpr>,
+        /// The other operand.
+        value: SliceEqOperand,
         /// Whether the comparison is negated.
         negated: bool,
         /// The loose spelling (`==` / `!=`).
@@ -1022,10 +1032,22 @@ fn collect_guard_subjects(guard: &SliceGuard, visitor: &mut impl FnMut(&SliceNar
         SliceGuard::Typeof { subject, .. }
         | SliceGuard::Truthy { subject, .. }
         | SliceGuard::EqLiteral { subject, .. }
-        | SliceGuard::EqValue { subject, .. }
+        | SliceGuard::EqValue {
+            subject,
+            value: SliceEqOperand::Value(_),
+            ..
+        }
         | SliceGuard::Instanceof { subject, .. }
         | SliceGuard::TypePredicate { subject, .. }
         | SliceGuard::In { subject, .. } => visitor(subject),
+        SliceGuard::EqValue {
+            subject,
+            value: SliceEqOperand::Reference(reference),
+            ..
+        } => {
+            visitor(subject);
+            visitor(reference);
+        }
         SliceGuard::And(parts) | SliceGuard::Or(parts) => {
             for part in parts.iter() {
                 collect_guard_subjects(part, visitor);
@@ -7468,17 +7490,17 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// `subject === value` against a VALUE that is not a literal: a name
-    /// the frame leaves free, or a static member path rooted at one, with
-    /// no call. The checker narrows the subject by the value's type
-    /// through the comparable relation (`narrowTypeByEquality`), so the
-    /// value lowers as the flow expression it is and the evaluator reads
-    /// its type ([`SliceGuard::EqValue`]).
-    ///
-    /// The subject is a whole binding. A member subject also narrows its
-    /// parent as a discriminant, and a value rooted at a narrowing
-    /// destination is narrowed in turn by the subject — facts this
-    /// carrier does not spell, so both stay unexpressible (`None`).
+    /// `subject === value` against a VALUE that is not a literal, in
+    /// either operand order: another reference a narrow can land on —
+    /// then both narrow, each by the other's type — or a name the frame
+    /// leaves free, a static member path rooted at one, or a call whose
+    /// callee is one. The checker narrows each matching reference by the
+    /// other operand's type (`narrowTypeByEquality`), and a member
+    /// reference's parent as a discriminant, so the value lowers as the
+    /// flow expression it is and the evaluator reads its type
+    /// ([`SliceGuard::EqValue`]). `None` when neither side is a
+    /// represented reference, or when a side reaches a narrowing
+    /// destination this vocabulary cannot spell.
     fn eq_value_guard(
         &mut self,
         binary: &oxc_ast::ast::BinaryExpression<'_>,
@@ -7491,20 +7513,24 @@ impl<'a> Lowerer<'a> {
             let Some(subject) = self.narrow_subject_of(subject_side) else {
                 continue;
             };
-            if !subject.path.is_empty()
-                || self.subject_root_carries_an_unmentioned_narrowing(&subject)
-                || self.operand_reaches_narrow_subject(value_side)
-            {
+            if self.subject_root_carries_an_unmentioned_narrowing(&subject) {
                 return None;
             }
-            let value = unwrap_parenthesized(value_side);
-            if !self.free_rooted_static_reference(value) {
-                return None;
-            }
-            let value = self.lower_expr(value, ExprMode::Return);
+            let value = if let Some(reference) = self.narrow_subject_of(value_side) {
+                if self.subject_root_carries_an_unmentioned_narrowing(&reference) {
+                    return None;
+                }
+                SliceEqOperand::Reference(reference)
+            } else {
+                let value = unwrap_parenthesized(value_side);
+                if self.operand_reaches_narrow_subject(value) || !self.free_rooted_value(value) {
+                    return None;
+                }
+                SliceEqOperand::Value(Box::new(self.lower_expr(value, ExprMode::Return)))
+            };
             return Some(SliceGuard::EqValue {
                 subject,
-                value: Box::new(value),
+                value,
                 negated,
                 loose,
             });
@@ -7512,17 +7538,31 @@ impl<'a> Lowerer<'a> {
         None
     }
 
-    /// Whether `expression` is a name the frame leaves free (never
-    /// `undefined`, which is a literal operand), or a static member path
-    /// rooted at one — a value reference whose read has no effect.
-    fn free_rooted_static_reference(&self, expression: &Expression<'_>) -> bool {
+    /// Whether `expression` is a value whose read has no effect of its
+    /// own beyond a call's: a name the frame leaves free (never
+    /// `undefined`, which is a literal operand), a static member path
+    /// rooted at one, or a call whose callee is one. A call's own effects
+    /// are the control test's to certify.
+    fn free_rooted_value(&self, expression: &Expression<'_>) -> bool {
         match unwrap_parenthesized(expression) {
             Expression::Identifier(identifier) => {
                 identifier.name.as_str() != "undefined"
                     && matches!(self.classify_occurrence(identifier.span), NameBinding::Free)
             }
             Expression::StaticMemberExpression(member) => {
-                self.free_rooted_static_reference(&member.object)
+                self.free_rooted_value(&member.object)
+                    && !matches!(
+                        unwrap_parenthesized(&member.object),
+                        Expression::CallExpression(_)
+                    )
+            }
+            Expression::CallExpression(call) => {
+                !call.optional
+                    && matches!(
+                        unwrap_parenthesized(&call.callee),
+                        Expression::Identifier(_) | Expression::StaticMemberExpression(_)
+                    )
+                    && self.free_rooted_value(&call.callee)
             }
             _ => false,
         }
