@@ -148,6 +148,9 @@ pub(crate) enum ExpectedNode {
     /// The typed unmodelled-position marker
     /// (`Opaque(QueryError::UnmodeledPosition)`).
     OpaqueUnmodeledPosition,
+    /// The typed semantic-miss carrier (`Opaque(QueryError::Miss)`) — a
+    /// member read the projection proved absent.
+    OpaqueMiss,
     /// `SemanticNodeData::ObjectSpreadProgram` compared through the
     /// SAME public spread-projection consumer the audited boundary
     /// projects through (`project_object_spread_for_consumer`,
@@ -353,6 +356,7 @@ pub(crate) fn node_matches(
             ExpectedNode::OpaqueUnmodeledPosition,
             SemanticNodeData::Opaque(QueryError::UnmodeledPosition),
         ) => true,
+        (ExpectedNode::OpaqueMiss, SemanticNodeData::Opaque(QueryError::Miss)) => true,
         // A live spread PROGRAM raises through the same public
         // spread-projection consumer the audited boundary projects
         // through; the expectation pins the composed arms exactly.

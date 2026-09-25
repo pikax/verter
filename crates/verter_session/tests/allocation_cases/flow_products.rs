@@ -42,6 +42,7 @@ fn request(basis: u8) -> FlowDemandRequest {
                 policy: FlowReturnPolicy {
                     nullability: NullabilityPolicy::Strict,
                     no_implicit_any: true,
+                    use_unknown_in_catch_variables: true,
                 },
             },
             demand: ReturnProjectionDemand::whole_return(),

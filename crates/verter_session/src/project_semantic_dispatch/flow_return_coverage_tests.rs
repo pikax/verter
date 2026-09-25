@@ -1678,39 +1678,12 @@ fn template_literal_expression_return_is_string() {
     assert_clean_warm(&host, LEAF, "leafTemplate", string());
 }
 
-/// An `UpdateExpression` (`a++`) in return position carries a WRITE
-/// EFFECT the evaluator does not apply, so the result is a DEGRADED
-/// SUCCESS that admits nothing. This is the fail-safe half of the
-/// `UpdateExpression` arm; the value half is the canary below.
-#[test]
-fn update_expression_return_degrades_as_an_unapplied_write_effect() {
-    let host = ts_host();
-    assert_degraded(
-        &host,
-        LEAF,
-        "leafUpdate",
-        FlowReturnDegradation::UnappliedWriteEffect,
-    );
-}
-
-/// CANARY — an `UpdateExpression` in return position is `number`.
+/// An `UpdateExpression` (`a++`) in return position is the checker's
+/// unary numeric result over the target's value, and its write applies in
+/// evaluation order: clean and warm.
 ///
 /// Oracle: `ReturnType<typeof leafUpdate>` is `number`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: leafUpdate
-///   left: Value { ty: Primitive(Any), degradation: Some(UnappliedWriteEffect), candidates: 0 }
-///  right: Value { ty: Primitive(Number), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: `flow_slice_content`'s leaf arm — `UpdateExpression`
-/// falls into `lower_leaf` and no prefix/postfix numeric rule exists. The
-/// `ReturnOnly` degradation makes this one fail-SAFE today, unlike the
-/// warm `any` rows below.
 #[test]
-#[ignore = "UpdateExpression has no numeric leaf rule: it evaluates to `any` and degrades as UnappliedWriteEffect"]
 fn update_expression_return_is_number() {
     let host = ts_host();
     assert_clean_warm(&host, LEAF, "leafUpdate", number());
@@ -1743,22 +1716,11 @@ fn instantiation_expression_return_is_the_instantiated_signature() {
     );
 }
 
-/// CANARY — a `BigIntLiteral` in return position is `bigint`.
+/// A `BigIntLiteral` in return position is `bigint`: the literal is a
+/// fresh `bigint` literal the return join widens.
 ///
 /// Oracle: `ReturnType<typeof leafBigInt>` is `bigint`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: leafBigInt
-///   left: Value { ty: Primitive(Any), degradation: None, candidates: 1 }
-///  right: Value { ty: Primitive(BigInt), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: the flow evaluator's literal rules — `BigIntLiteral` has
-/// no arm, so the shallow leaf answers `any` and it is admitted WARM.
 #[test]
-#[ignore = "BigIntLiteral has no literal rule: it evaluates to `any` and is admitted warm"]
 fn bigint_literal_return_is_bigint() {
     let host = ts_host();
     assert_clean_warm(

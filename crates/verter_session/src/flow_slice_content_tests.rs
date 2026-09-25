@@ -22,10 +22,11 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
-    FlowSliceSelection, ReturnPredicateTest, SliceBindingKind, SliceCall, SliceCallSite,
-    SliceContent, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral, SliceLoopBinding,
-    SliceLoopTest, SliceNarrowRoot, SliceNarrowSubject, SliceObjectEntry, SliceObjectMember,
-    SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind, SliceUnsupported,
+    FlowSliceSelection, ReturnPredicateTest, SliceArithmetic, SliceBindingKind, SliceCall,
+    SliceCallSite, SliceContent, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral,
+    SliceLoopBinding, SliceLoopTest, SliceNarrowRoot, SliceNarrowSubject, SliceObjectEntry,
+    SliceObjectMember, SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind,
+    SliceUnsupported,
 };
 
 /// The MEMBER entries of a structural object literal, in authored order.
@@ -1216,6 +1217,25 @@ fn guard_gap_count(node: &SliceContent) -> usize {
             )
         })
         .count()
+}
+
+/// The statement calls the body defers to the evaluator's effects
+/// signature ([`SliceStatement::CallEffect`]), top-level or in a
+/// top-level block.
+fn call_effect_count(node: &SliceContent) -> usize {
+    node.body
+        .statements
+        .iter()
+        .map(|statement| match statement {
+            SliceStatement::CallEffect { .. } => 1,
+            SliceStatement::Block(region) => region
+                .statements
+                .iter()
+                .filter(|statement| matches!(statement, SliceStatement::CallEffect { .. }))
+                .count(),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// The guard of the body's first top-level `if` statement.
@@ -3090,8 +3110,8 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
             "export {};\nfunction f(x: string | number) { if (null ?? (typeof x === \"string\")) { return x } return 0 }",
         ),
         (
-            "an equality over a computed discriminant access",
-            "export {};\nfunction f(x: { kind: \"a\"; a: 1 } | { kind: \"b\"; b: 2 }) { if (x[\"kind\"] === \"a\") { return x } return 0 }",
+            "an equality over a discriminant access keyed by a `const`",
+            "export {};\nfunction f(x: { kind: \"a\"; a: 1 } | { kind: \"b\"; b: 2 }) { const k = \"kind\"; if (x[k] === \"a\") { return x } return 0 }",
         ),
         (
             "a truthiness test of an optional discriminant access",
@@ -3180,11 +3200,27 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
             "a `const` alias of a discriminant read, tested by equality",
             "function f(x: { kind: \"a\"; a: 1 } | { kind: \"b\"; b: 2 }) { const kind = x.kind; if (kind === \"a\") { return x } return 0 }",
         ),
-        (
-            "a destructured discriminant alias",
-            "function f(x: { kind: \"a\"; a: 1 } | { kind: \"b\"; b: 2 }) { const { kind } = x; if (kind === \"a\") { return x } return 0 }",
-        ),
     ];
+    // A modelled destructuring declaration carries its aliases to the
+    // evaluator instead: the element narrows the destructured source.
+    let node = content_for(
+        &format!(
+            "{IS_STRING}function f(x: {{ kind: \"a\"; a: 1 }} | {{ kind: \"b\"; b: 2 }}) {{ const {{ kind }} = x; if (kind === \"a\") {{ return x }} return 0 }}"
+        ),
+        "f",
+    );
+    assert_eq!(guard_gap_count(&node), 0, "{node:?}");
+    assert!(
+        node.body.statements.iter().any(|statement| matches!(
+            statement,
+            SliceStatement::Destructure {
+                correlated: true,
+                source: Some(_),
+                ..
+            }
+        )),
+        "a destructured discriminant alias carries its source: {node:?}"
+    );
     for (case, source) in alias_modeled {
         let node = content_for(&format!("{IS_STRING}{source}"), "f");
         assert_eq!(
@@ -3374,7 +3410,7 @@ fn reference_transparent_wrappers_around_a_whole_test_keep_its_narrowing_fact() 
     // survives the wrapper in both directions.
     let node = content_for(
         "export {};\ntype A = { kind: \"a\" }; type B = { kind: \"b\" };\n\
-         function f(x: A | B) { if ((x[\"kind\"] === \"a\")!) { return x } return 0 }",
+         function f(x: A | B) { const k = \"kind\"; if ((x[k] === \"a\")!) { return x } return 0 }",
         "f",
     );
     assert_eq!(
@@ -3423,11 +3459,13 @@ fn reference_transparent_wrappers_around_a_whole_test_keep_its_narrowing_fact() 
 /// the path, so the statements after it contribute nothing. The callee
 /// must therefore be PROVEN — a closed same-file declaration whose
 /// authored return is not an assertion signature and which provably
-/// completes. Everything else degrades; a proven `never` callee is
-/// MODELED as the terminator it is.
+/// completes, or a dotted-name callee whose type the evaluator reads
+/// (`getEffectsSignature`). A closed callee that may assert or never
+/// complete degrades; a proven `never` callee is MODELED as the
+/// terminator it is.
 #[test]
 fn statement_position_calls_are_proven_or_degrade() {
-    let gapped = [
+    let settled = [
         (
             "an imported callee",
             "import { touch } from \"./touch\";\n\
@@ -3443,6 +3481,16 @@ fn statement_position_calls_are_proven_or_degrade() {
             "export {};\nconst api = { touch(): void {} };\n\
              function f(x: string | number) { api.touch(); return x }",
         ),
+    ];
+    for (case, source) in settled {
+        let node = content_for(source, "f");
+        assert_eq!(
+            (guard_gap_count(&node), call_effect_count(&node)),
+            (0, 1),
+            "{case}: the evaluator settles the callee's effects signature: {node:?}"
+        );
+    }
+    let gapped = [
         (
             "a closed callee that may never complete",
             "export {};\nfunction touch() { throw new Error() }\n\
@@ -4450,7 +4498,8 @@ fn object_return_spread_of_a_frame_binding_reads_the_frame_binding() {
     assert_eq!(member.key.static_name(), Some("x"));
 }
 
-/// @ai-generated - arrow expression body lowers to a single return of the expression
+/// @ai-generated - arrow expression body lowers to a single return of the expression, an
+/// arithmetic operation over a parameter read
 #[test]
 fn arrow_expression_body_is_single_return() {
     let node = content_for("export const double = (x: number) => x * 2;\n", "double");
@@ -4459,21 +4508,33 @@ fn arrow_expression_body_is_single_return() {
         !node.can_fall_through.reaches_end_for_assertion(),
         "an expression body always returns"
     );
+    let [SliceStatement::Return {
+        argument: Some(SliceExpr::Arithmetic { operator, operands }),
+        freshness: SliceFreshness::Pinned,
+        predicate_test,
+    }] = node.body.statements.as_ref()
+    else {
+        panic!(
+            "a binary expression over a frame read is an arithmetic operation: {:?}",
+            node.body.statements
+        );
+    };
+    assert_eq!(*operator, SliceArithmetic::Numeric);
+    assert!(
+        matches!(
+            operands.as_ref(),
+            [SliceExpr::Param { ordinal: 0, .. }, SliceExpr::Type(_)]
+        ),
+        "the operands are flow expressions: {operands:?}"
+    );
+    // Arithmetic narrows nothing, so no parameter can be a predicate
+    // subject.
     assert_eq!(
-        node.body.statements.as_ref(),
-        &[SliceStatement::Return {
-            argument: Some(SliceExpr::Gap(
-                crate::semantic_query::FlowGap::UnmodeledExpression
-            )),
-            freshness: SliceFreshness::Pinned,
-            // Arithmetic narrows nothing, so no parameter can be a
-            // predicate subject.
-            predicate_test: Some(ReturnPredicateTest::Guard {
-                guard: Box::new(SliceGuard::None),
-                parameters: Arc::from(vec![0].into_boxed_slice()),
-            }),
-        }],
-        "a binary expression is an unmodelled leaf, not semantic any"
+        predicate_test,
+        &Some(ReturnPredicateTest::Guard {
+            guard: Box::new(SliceGuard::None),
+            parameters: Arc::from(vec![0].into_boxed_slice()),
+        })
     );
 }
 
@@ -4661,10 +4722,21 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
             "a class-hidden write in an expression statement",
             "export {};\nfunction f(x: string | number) { void (class { static { x = \"s\"; } }); return x }",
         ),
-        // The statement's OWN callee is unproven in both of these: an
-        // imported binding and a member callee each have a
-        // checker-visible signature set this file cannot enumerate, so
-        // either could assert about a frame binding or never return.
+    ];
+    for (case, source) in gapped {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the effect-bearing statement takes the typed gap: {node:?}"
+        );
+    }
+
+    // The statement's OWN callee is a dotted name in both of these: an
+    // imported binding and a member callee each have a checker-visible
+    // signature set this file cannot enumerate, so the evaluator reads the
+    // callee's signatures for an assertion or a `never` return.
+    let settled = [
         (
             "an imported callee in statement position",
             "import { touch } from \"./touch\";\n\
@@ -4676,12 +4748,12 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
              function f(x: string | number) { console.log(x); return x }",
         ),
     ];
-    for (case, source) in gapped {
+    for (case, source) in settled {
         let node = content_for(source, "f");
         assert_eq!(
-            guard_gap_count(&node),
-            1,
-            "{case}: the effect-bearing statement takes the typed gap: {node:?}"
+            (guard_gap_count(&node), call_effect_count(&node)),
+            (0, 1),
+            "{case}: the evaluator settles the callee's effects signature: {node:?}"
         );
     }
 
@@ -5260,7 +5332,7 @@ fn composition_with_one_unexpressible_operand_degrades_the_whole_test_to_none() 
     for (op, test) in [("&&", "&&"), ("||", "||")] {
         let source = format!(
             "export {{}};\ntype A = {{ kind: \"a\" }}; type B = {{ kind: \"b\" }};\n\
-             function f(x: A | B) {{ if (typeof x === \"object\" {test} x[\"kind\"] === \"a\") {{ return x }} return 0 }}"
+             function f(x: A | B) {{ const k = \"kind\"; if (typeof x === \"object\" {test} x[k] === \"a\") {{ return x }} return 0 }}"
         );
         let node = content_for(&source, "f");
         assert!(

@@ -1347,8 +1347,18 @@ fn narrowing_order(fact: &FlowNarrowingFact) -> (&FunctionProgramKey, u32, &[Arc
     )
 }
 
-/// The guard facts that hold at the subject. The join INTERSECTS: a fact
-/// survives a merge point only when every incoming edge established it.
+/// The reference a fact narrows: the binding and the member path.
+fn narrowing_reference(fact: &FlowNarrowingFact) -> (&FunctionProgramKey, u32, &[Arc<str>]) {
+    (
+        &fact.binding.defining_function,
+        fact.binding.binding_slot,
+        fact.path.as_ref(),
+    )
+}
+
+/// The guard facts that hold at the subject. The join keeps a reference
+/// only when every incoming edge narrowed it, as the union of their
+/// narrowed types.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NarrowingProduct {
     facts: Arc<[FlowNarrowingFact]>,
@@ -1652,8 +1662,8 @@ pub enum FlowTransferOutcome {
 ///   construction is a typed gap, never an unproven published product.
 /// - **Declared types** agree or gap: a merge point cannot invent a
 ///   declaration neither edge declared.
-/// - **Narrowing** INTERSECTS: a guard fact survives only when EVERY
-///   incoming edge established it.
+/// - **Narrowing** keeps a reference only when EVERY incoming edge
+///   narrowed it, as the canonical union of the narrowed types.
 /// - **Definite assignment** uses its declared lattice.
 ///
 /// Joins are idempotent. Reaching definitions and narrowing use canonical
@@ -1737,29 +1747,41 @@ pub fn join_product(
             else {
                 return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression);
             };
+            // A reference both edges narrow reads, past the merge, the
+            // union of the two narrowed types — the checker's branch label
+            // unions the reference's type on each antecedent. A reference
+            // one edge leaves unnarrowed reads that edge's unnarrowed type,
+            // which contains every narrowing of it: the fact drops.
             let mut common = Vec::new();
-            let (mut a, mut b) = (
-                left.facts().iter().peekable(),
-                right.facts().iter().peekable(),
-            );
-            while let (Some(left), Some(right)) = (a.peek(), b.peek()) {
-                match narrowing_order(left).cmp(&narrowing_order(right)) {
-                    std::cmp::Ordering::Less => {
-                        a.next();
-                    }
-                    std::cmp::Ordering::Greater => {
-                        b.next();
-                    }
-                    std::cmp::Ordering::Equal => {
-                        common.push((*left).clone());
-                        a.next();
-                        b.next();
-                    }
+            for fact in left.facts() {
+                let reference = narrowing_reference(fact);
+                let Some(other) = right
+                    .facts()
+                    .iter()
+                    .find(|other| narrowing_reference(other) == reference)
+                else {
+                    continue;
+                };
+                if other.narrowed_to == fact.narrowed_to {
+                    common.push(FlowNarrowingFact {
+                        fresh_literal: (other.fresh_literal == fact.fresh_literal)
+                            .then_some(fact.fresh_literal)
+                            .flatten(),
+                        ..fact.clone()
+                    });
+                    continue;
                 }
+                let united = algebra.union(&[fact.narrowed_to, other.narrowed_to]);
+                if united.incomplete {
+                    return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression);
+                }
+                common.push(FlowNarrowingFact {
+                    narrowed_to: united.node,
+                    fresh_literal: None,
+                    ..fact.clone()
+                });
             }
-            FlowProductValue::Narrowing(NarrowingProduct {
-                facts: common.into(),
-            })
+            FlowProductValue::Narrowing(NarrowingProduct::new(common))
         }
         FlowDomain::DefiniteAssignment => {
             let (

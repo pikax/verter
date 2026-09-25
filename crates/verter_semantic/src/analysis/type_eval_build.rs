@@ -562,7 +562,7 @@ fn collect_statement_parts(stmt: &Statement<'_>, source: &str, out: &mut Lowered
         }
         Statement::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                if let Some(parts) = lower_variable_parts(decl, var_decl.kind, source, None) {
+                for parts in lower_variable_parts(decl, var_decl.kind, source, None) {
                     out.value_decls.push(parts);
                 }
             }
@@ -761,7 +761,7 @@ fn collect_from_declaration(decl: &Declaration<'_>, source: &str, out: &mut Lowe
         }
         Declaration::VariableDeclaration(var_decl) => {
             for d in &var_decl.declarations {
-                if let Some(parts) = lower_variable_parts(d, var_decl.kind, source, None) {
+                for parts in lower_variable_parts(d, var_decl.kind, source, None) {
                     out.value_decls.push(parts);
                 }
             }
@@ -1868,7 +1868,7 @@ fn collect_namespaced_statement_into_augmentation(
         }
         Statement::VariableDeclaration(var_decl) => {
             for declarator in &var_decl.declarations {
-                if let Some(parts) =
+                for parts in
                     lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
                 {
                     out.aug_value_decls.push((scope.clone(), parts));
@@ -1924,7 +1924,7 @@ fn collect_namespaced_declaration_into_augmentation(
             // name into the augmentation VALUE scope (lowered exactly as the
             // file-scope namespaced-value path does).
             for declarator in &var_decl.declarations {
-                if let Some(parts) =
+                for parts in
                     lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
                 {
                     out.aug_value_decls.push((scope.clone(), parts));
@@ -1958,7 +1958,7 @@ fn collect_value_statement_into_augmentation(
         }
         Statement::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                if let Some(parts) = lower_variable_parts(decl, var_decl.kind, source, None) {
+                for parts in lower_variable_parts(decl, var_decl.kind, source, None) {
                     inner.value_decls.push(parts);
                 }
             }
@@ -2032,7 +2032,7 @@ fn collect_namespaced_statement(
         }
         Statement::VariableDeclaration(var_decl) if ambient => {
             for declarator in &var_decl.declarations {
-                if let Some(parts) =
+                for parts in
                     lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
                 {
                     out.value_decls.push(parts);
@@ -2088,7 +2088,7 @@ fn collect_namespaced_declaration(
         // so `typeof NS.M` binds.
         Declaration::VariableDeclaration(var_decl) => {
             for declarator in &var_decl.declarations {
-                if let Some(parts) =
+                for parts in
                     lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
                 {
                     out.value_decls.push(parts);
@@ -3638,7 +3638,264 @@ fn lower_class_expression_value(
     Some(value)
 }
 
+/// The value declarations one declarator makes: the binding identifier's,
+/// or — for a destructuring pattern — one per element binding
+/// ([`lower_destructured_variable_parts`]).
 fn lower_variable_parts(
+    decl: &VariableDeclarator<'_>,
+    kind: VariableDeclarationKind,
+    source: &str,
+    namespace: Option<&str>,
+) -> Vec<LoweredValueDeclParts> {
+    match &decl.id {
+        BindingPattern::BindingIdentifier(_) => {
+            lower_identifier_variable_parts(decl, kind, source, namespace)
+                .into_iter()
+                .collect()
+        }
+        _ => lower_destructured_variable_parts(decl, kind, source, namespace),
+    }
+}
+
+/// The value declarations a DESTRUCTURING declarator makes: each element
+/// binding is typed as its parent's member — the checker's
+/// `getTypeForBindingElement` spelled as an indexed access of the parent by
+/// the element's property name or position, a default replacing the
+/// member's `undefined` (`Exclude<T, undefined> | D`). The parent is the
+/// declarator's annotation, else its initializer's type — an array literal
+/// under an array pattern read as the tuple of its widened elements (the
+/// literal's type in the pattern's tuple context); any other initializer's
+/// fresh literals widen. A `let` / `var` element also widens its
+/// default's fresh literal. A rest element, or a key that is not a static
+/// name or literal, declares nothing here.
+fn lower_destructured_variable_parts(
+    decl: &VariableDeclarator<'_>,
+    kind: VariableDeclarationKind,
+    source: &str,
+    namespace: Option<&str>,
+) -> Vec<LoweredValueDeclParts> {
+    let var_kind = match kind {
+        VariableDeclarationKind::Const
+        | VariableDeclarationKind::Using
+        | VariableDeclarationKind::AwaitUsing => ValueDeclKind::Const,
+        VariableDeclarationKind::Let => ValueDeclKind::Let,
+        VariableDeclarationKind::Var => ValueDeclKind::Var,
+    };
+    let mutable = matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var);
+    let parent = match (decl.type_annotation.as_ref(), decl.init.as_ref()) {
+        (Some(annotation), _) => Ok(lower_ts_type(&annotation.type_annotation, source)),
+        (None, Some(init)) => match (&decl.id, init.without_parentheses()) {
+            (BindingPattern::ArrayPattern(_), Expression::ArrayExpression(array))
+                if array.elements.iter().all(|element| {
+                    !matches!(
+                        element,
+                        oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
+                            | oxc_ast::ast::ArrayExpressionElement::Elision(_)
+                    )
+                }) =>
+            {
+                array
+                    .elements
+                    .iter()
+                    .filter_map(|element| element.as_expression())
+                    .map(|element| {
+                        infer_declaration_expression_type(
+                            element,
+                            source,
+                            TopLevelLiteralPolicy::Preserve,
+                        )
+                        .and_then(widen_literal_type)
+                        .map(|ty| TupleElement {
+                            label: None,
+                            ty,
+                            optional: false,
+                            rest: false,
+                        })
+                    })
+                    .collect::<InferenceResult<Vec<_>>>()
+                    .map(|elements| TypeExpr::Tuple {
+                        elements: Arc::from(elements.into_boxed_slice()),
+                        readonly: false,
+                    })
+            }
+            (_, _) => infer_declaration_expression_type(init, source, TopLevelLiteralPolicy::Widen),
+        },
+        (None, None) => Ok(TypeExpr::Primitive(PrimitiveName::Any)),
+    };
+    let Ok(parent) = parent else {
+        return Vec::new();
+    };
+    let mut leaves: Vec<(String, TypeExpr)> = Vec::new();
+    collect_destructured_leaf_types(&decl.id, parent, source, mutable, &mut leaves);
+    leaves
+        .into_iter()
+        .map(|(name, ty)| LoweredValueDeclParts {
+            name: match namespace {
+                Some(ns) => qualified_name(ns, &name),
+                None => name,
+            },
+            kind: var_kind,
+            is_unique_symbol: false,
+            unique_symbol_members: Vec::new(),
+            type_annotation: Some(ty),
+            annotation_is_authored: false,
+            inference_unavailable: None,
+            expression_source_offset: None,
+            signatures: Vec::new(),
+            object_shape: None,
+            enum_members: None,
+            enum_member_names: None,
+        })
+        .collect()
+}
+
+/// The type of `parent`'s member `key`: read off an authored tuple or
+/// object literal type directly (an optional member with its `undefined`),
+/// else the indexed access `parent[key]`.
+fn destructured_member_type(parent: &TypeExpr, key: TypeExpr) -> TypeExpr {
+    let direct = match (parent, &key) {
+        (
+            TypeExpr::Tuple { elements, .. },
+            TypeExpr::Literal(verter_type_expr::LiteralValue::Number(index)),
+        ) if index.fract() == 0.0 && *index >= 0.0 => {
+            let index = *index as usize;
+            (index < elements.len()
+                && elements[..=index]
+                    .iter()
+                    .all(|element| !element.rest && !element.optional))
+            .then(|| elements[index].ty.clone())
+        }
+        (
+            TypeExpr::Object(object),
+            TypeExpr::Literal(verter_type_expr::LiteralValue::String(name)),
+        ) => object.properties.iter().find_map(|member| match member {
+            ObjectMember::Property(property) if property.key.as_string() == Some(name.as_str()) => {
+                Some(if property.optional {
+                    TypeExpr::union(vec![
+                        property.ty.clone(),
+                        TypeExpr::Primitive(PrimitiveName::Undefined),
+                    ])
+                } else {
+                    property.ty.clone()
+                })
+            }
+            _ => None,
+        }),
+        _ => None,
+    };
+    direct.unwrap_or_else(|| TypeExpr::IndexedAccess {
+        object: Arc::new(parent.clone()),
+        index: Arc::new(key),
+    })
+}
+
+/// `getNonUndefinedType`: a union without its `undefined` members, a
+/// type that is not `undefined` itself unchanged; any other form as
+/// `Exclude<T, undefined>`.
+fn without_undefined(ty: TypeExpr) -> TypeExpr {
+    let undefined = TypeExpr::Primitive(PrimitiveName::Undefined);
+    match &ty {
+        TypeExpr::Union(members) => {
+            let kept: Vec<TypeExpr> = members
+                .iter()
+                .filter(|member| **member != undefined)
+                .cloned()
+                .collect();
+            match kept.len() {
+                0 => TypeExpr::Primitive(PrimitiveName::Never),
+                1 => kept.into_iter().next().expect("one member"),
+                _ => TypeExpr::union(kept),
+            }
+        }
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Tuple { .. }
+        | TypeExpr::Array { .. }
+        | TypeExpr::Object(_)
+            if ty != undefined =>
+        {
+            ty
+        }
+        _ => TypeExpr::Ref {
+            name: Arc::from("Exclude"),
+            type_arguments: Arc::from(vec![ty, undefined].into_boxed_slice()),
+        },
+    }
+}
+
+/// Every element binding of `pattern` with its type over `parent`.
+fn collect_destructured_leaf_types(
+    pattern: &BindingPattern<'_>,
+    parent: TypeExpr,
+    source: &str,
+    mutable: bool,
+    out: &mut Vec<(String, TypeExpr)>,
+) {
+    let member = |parent: &TypeExpr, key: TypeExpr| destructured_member_type(parent, key);
+    let element =
+        |pattern: &BindingPattern<'_>, ty: TypeExpr, out: &mut Vec<(String, TypeExpr)>| {
+            match pattern {
+                BindingPattern::AssignmentPattern(assignment) => {
+                    // A `let` / `var` element widens its default's fresh
+                    // literal; a `const` element keeps it.
+                    let policy = if mutable {
+                        TopLevelLiteralPolicy::Widen
+                    } else {
+                        TopLevelLiteralPolicy::Preserve
+                    };
+                    let Ok(default) =
+                        infer_declaration_expression_type(&assignment.right, source, policy)
+                    else {
+                        return;
+                    };
+                    let defined = without_undefined(ty);
+                    collect_destructured_leaf_types(
+                        &assignment.left,
+                        TypeExpr::union(vec![defined, default]),
+                        source,
+                        mutable,
+                        out,
+                    );
+                }
+                other => collect_destructured_leaf_types(other, ty, source, mutable, out),
+            }
+        };
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => out.push((id.name.to_string(), parent)),
+        BindingPattern::ObjectPattern(object) => {
+            for property in &object.properties {
+                let key = match &property.key {
+                    oxc_ast::ast::PropertyKey::StaticIdentifier(id) if !property.computed => {
+                        TypeExpr::string_literal(id.name.as_str())
+                    }
+                    oxc_ast::ast::PropertyKey::StringLiteral(literal) => {
+                        TypeExpr::string_literal(literal.value.as_str())
+                    }
+                    oxc_ast::ast::PropertyKey::NumericLiteral(literal) => {
+                        TypeExpr::number_literal(literal.value)
+                    }
+                    _ => continue,
+                };
+                element(&property.value, member(&parent, key), out);
+            }
+        }
+        BindingPattern::ArrayPattern(array) => {
+            for (index, item) in array.elements.iter().enumerate() {
+                let Some(item) = item else {
+                    continue;
+                };
+                element(
+                    item,
+                    member(&parent, TypeExpr::number_literal(index as f64)),
+                    out,
+                );
+            }
+        }
+        BindingPattern::AssignmentPattern(_) => {}
+    }
+}
+
+fn lower_identifier_variable_parts(
     decl: &VariableDeclarator<'_>,
     kind: VariableDeclarationKind,
     source: &str,
@@ -4827,6 +5084,9 @@ fn infer_expression_type_ctx_with_read_root(
         }
         Expression::StringLiteral(s) => Ok(TypeExpr::string_literal(s.value.as_str())),
         Expression::NumericLiteral(n) => Ok(TypeExpr::number_literal(n.value)),
+        Expression::BigIntLiteral(b) => Ok(TypeExpr::Literal(
+            verter_type_expr::LiteralValue::BigInt(b.value.to_string()),
+        )),
         Expression::BooleanLiteral(b) => Ok(TypeExpr::boolean_literal(b.value)),
         Expression::NullLiteral(_) => Ok(TypeExpr::Primitive(PrimitiveName::Null)),
         // `void x` evaluates its operand and produces `undefined`.

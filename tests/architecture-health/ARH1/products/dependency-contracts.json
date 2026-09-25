@@ -1015,7 +1015,7 @@
         "pubType": 200,
         "pubCrateMod": 2,
         "inlinePubMod": 15,
-        "pubStructField": 298
+        "pubStructField": 299
       },
       "authority": [
         {
@@ -1356,13 +1356,13 @@
         }
       ],
       "snapshot": {
-        "pubFn": 16,
+        "pubFn": 18,
         "pubFnTestHooks": 0,
         "pubCrateFn": 12,
-        "pubType": 49,
+        "pubType": 58,
         "pubCrateMod": 1,
         "inlinePubMod": 0,
-        "pubStructField": 95
+        "pubStructField": 104
       },
       "authority": [
         {

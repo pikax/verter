@@ -1648,6 +1648,9 @@ pub struct FlowReturnPolicy {
     /// follows its assignments) or is declared as its initializer's
     /// widened type (`any` with no initializer).
     pub no_implicit_any: bool,
+    /// `useUnknownInCatchVariables` of the project owning the function:
+    /// whether an unannotated `catch` variable is `unknown` or `any`.
+    pub use_unknown_in_catch_variables: bool,
 }
 
 impl FlowReturnPolicy {
@@ -1659,6 +1662,7 @@ impl FlowReturnPolicy {
         Self {
             nullability: NullabilityPolicy::from_strict_null_checks(options.strict_null_checks),
             no_implicit_any: options.no_implicit_any,
+            use_unknown_in_catch_variables: options.use_unknown_in_catch_variables,
         }
     }
 }

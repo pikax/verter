@@ -529,19 +529,16 @@ fn assert_clean_warm_object(host: &Arc<VerterHost>, name: &str, expected: &[(&st
 /// tsgo gives `number` for every one of them (`{ z: number }` for the
 /// `new` case).
 ///
-/// `gateOptionalChain` and `gateTaggedTemplate` are not in this set:
-/// the optional-member carrier and the tagged-template call both lower
-/// their root through the frame (the `Local` carrier, substitution and
-/// narrowing included), so nothing can mis-bind — the rows assert the
-/// checker's `number`, clean and warm, below.
+/// `gateOptionalChain`, `gateTaggedTemplate` and `gateComputedMember`
+/// are not in this set: the optional-member carrier, the tagged-template
+/// call and a literal-keyed element access all lower their root through
+/// the frame (the `Local` carrier, substitution and narrowing included),
+/// so nothing can mis-bind — the rows assert the checker's `number`,
+/// clean and warm, below.
 #[test]
 fn flow_return_unmodelled_form_read_through_a_frame_binding_fails_closed() {
     let host = make_host();
-    for name in [
-        "gateComputedMember",
-        "gateNewExpression",
-        "gatePrivateField",
-    ] {
+    for name in ["gateNewExpression", "gatePrivateField"] {
         assert_fails_closed(&host, name);
     }
     // A MEMBER-valued optional chain over a FRAME-OWNED root resolves the
@@ -552,6 +549,9 @@ fn flow_return_unmodelled_form_read_through_a_frame_binding_fails_closed() {
     // A tagged template's tag is the frame's local arrow, whose return is
     // `number` — never the owner-scope `"OUTERTAG"` tag of the same name.
     assert_clean_warm(&host, "gateTaggedTemplate", number());
+    // A literal-keyed element access reads the frame's local `compBait`
+    // exactly as `compBait.x` would — never the owner-scope bait.
+    assert_clean_warm(&host, "gateComputedMember", number());
 }
 
 /// The positive controls. The gate is about names the FRAME owns, so a

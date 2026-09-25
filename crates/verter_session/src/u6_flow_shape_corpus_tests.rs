@@ -1432,6 +1432,14 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "3e1e77d7329f3b55c8cedf6f73489b4cd61555dd3cf23023fe561df74e483f56",
     ),
     (
+        "N37_destructured_local_discriminant",
+        "d65694c949429fa0ab838075c25cd81dd1a34ac4a4a9cf522d7c5099612649e8",
+    ),
+    (
+        "N47_correlated_tuple_discriminant",
+        "1ce11d1e05e74c645ddac49f9d1510dea8e4e601eb9e2277536a7c3f9a2343ef",
+    ),
+    (
         "N49_closure_narrows_own_parameter",
         "7c3c9f675623866d1625c5ddbda540c416b751080fcefc6983d9c8c97e9ee4f0",
     ),
@@ -3439,7 +3447,9 @@ mod corpus_suite {
             ),
             (
                 "N47_correlated_tuple_discriminant",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | Opaque(UnmodeledPosition)) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
             ),
             (
                 "N48_closure_narrows_captured_binding",
@@ -5320,6 +5330,11 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         Owner::U6NarrowSubstitution,
         "member Union — the published value EQUALS the checker, so a recursive pin would assert the divergence this KnownOwed row records does not exist",
     ),
+    (
+        "X101_optional_chain_nullish_coalesce",
+        Owner::U6ValueInference,
+        "member Union — the published value EQUALS the checker behind the typed guard-narrowing gap, so a recursive pin would assert a divergence this KnownOwed row does not have",
+    ),
 ];
 
 /// Burn-down ceiling of [`SHALLOW_PINNED_ROWS`]. Lower freely as rows
@@ -5425,7 +5440,6 @@ const OPEN_DEBTS: &[&str] = &[
     "N34_non_null_asserted_property_discriminant",
     "N39_instanceof_imported_class",
     "N41_instanceof_member_expression_constructor",
-    "N47_correlated_tuple_discriminant",
     // Assertion CALL TARGETS the statement rail does not accept: a class
     // method and an annotated `const`. Each publishes the unnarrowed union
     // as a typed ReturnOnly. The `does_not_narrow` row is the paired
@@ -5564,10 +5578,11 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // closed N88's unknown-key intersection (the Record mint), moving
     // this owner to 25 matching. A `const` alias of a discriminant, read
     // or destructured, is a discriminant of its object (N36, N37), a
-    // discriminant behind a comma sequence is its last operand (N50), and
-    // a predicate over a captured binding narrows inside the invoked body,
-    // dropping N25's dead contributor: 29.
-    (Owner::U6NarrowLattice, 38, 29, 9),
+    // discriminant behind a comma sequence is its last operand (N50), a
+    // predicate over a captured binding narrows inside the invoked body,
+    // dropping N25's dead contributor, and a correlated tuple's
+    // destructured discriminant narrows its siblings (N47): 30.
+    (Owner::U6NarrowLattice, 38, 30, 8),
     // A call's predicate is read from its callee's resolved signature —
     // an arrow bound to a `const`, an object-literal method, a generic
     // instantiated at the call (N56, N57, N59): 9 match.

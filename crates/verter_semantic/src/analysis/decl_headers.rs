@@ -1255,6 +1255,7 @@ fn index_variable(
     namespace: Option<&str>,
 ) {
     let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &decl.id else {
+        index_destructured_variable(decl, kind, ctx, table, namespace);
         return;
     };
     let var_kind = match kind {
@@ -1303,6 +1304,83 @@ fn index_variable(
         decl.span.into(),
         id.span.into(),
     );
+}
+
+/// Index the element bindings of a DESTRUCTURING declarator — every
+/// binding identifier a static, string or numeric key or an array position
+/// names (the elements the value lowering types; a rest element and a
+/// computed key declare no value header).
+fn index_destructured_variable(
+    decl: &VariableDeclarator<'_>,
+    kind: VariableDeclarationKind,
+    ctx: HeaderStatementContext<'_>,
+    table: &mut DeclMap<ValueDeclHeader>,
+    namespace: Option<&str>,
+) {
+    use oxc_ast::ast::{BindingPattern, PropertyKey};
+    fn leaves<'a>(
+        pattern: &'a BindingPattern<'a>,
+        out: &mut Vec<&'a oxc_ast::ast::BindingIdentifier<'a>>,
+    ) {
+        let element = |element: &'a BindingPattern<'a>, out: &mut Vec<_>| match element {
+            BindingPattern::AssignmentPattern(assignment) => leaves(&assignment.left, out),
+            other => leaves(other, out),
+        };
+        match pattern {
+            BindingPattern::BindingIdentifier(id) => out.push(id),
+            BindingPattern::ObjectPattern(object) => {
+                for property in &object.properties {
+                    let named = match &property.key {
+                        PropertyKey::StaticIdentifier(_) => !property.computed,
+                        PropertyKey::StringLiteral(_) | PropertyKey::NumericLiteral(_) => true,
+                        _ => false,
+                    };
+                    if named {
+                        element(&property.value, out);
+                    }
+                }
+            }
+            BindingPattern::ArrayPattern(array) => {
+                for item in array.elements.iter().flatten() {
+                    element(item, out);
+                }
+            }
+            BindingPattern::AssignmentPattern(_) => {}
+        }
+    }
+    let var_kind = match kind {
+        VariableDeclarationKind::Const
+        | VariableDeclarationKind::Using
+        | VariableDeclarationKind::AwaitUsing => ValueDeclKind::Const,
+        VariableDeclarationKind::Let => ValueDeclKind::Let,
+        VariableDeclarationKind::Var => ValueDeclKind::Var,
+    };
+    let mut ids = Vec::new();
+    leaves(&decl.id, &mut ids);
+    for id in ids {
+        let key = match namespace {
+            Some(ns) => format!("{ns}.{}", id.name),
+            None => id.name.to_string(),
+        };
+        let entry = table
+            .entry(ctx.key(&key))
+            .or_insert_with(|| ValueDeclHeader {
+                kind: var_kind,
+                span: decl.span.into(),
+                name_span: id.span.into(),
+                object_member_headers: Vec::new(),
+                contributors: Vec::new(),
+            });
+        entry.kind = var_kind;
+        entry.span = decl.span.into();
+        entry.name_span = id.span.into();
+        push_contributor(
+            &mut entry.contributors,
+            ctx,
+            decl.span.into(),
+            id.span.into(),
+        );
+    }
 }
 
 /// Mirror of `alias_default_export_type_symbol`: clone the declared-name
