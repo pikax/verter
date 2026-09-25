@@ -366,19 +366,19 @@ fn intersection_types_relate_as_the_checker_relates_them() {
 }
 
 /// `(A | B) & { c: 1 }` is the union `(A & { c: 1 }) | (B & { c: 1 })`, so it
-/// relates to it. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[(A | B) & { c: 1 }] extends [(A & { c: 1 }) | (B & { c: 1 })] ? 1 : 2`:
-///   the checker answers `1`; the lane measured `2`.
+/// relates to it and to `{ c: 1 }`, but not to one arm alone (TypeScript
+/// 7.0.2, all four settings alike).
 #[test]
-#[ignore = "an intersection with a union member relates as its distributed union"]
-fn wrong_clean_an_intersection_over_a_union_relates_as_its_distribution() {
+fn an_intersection_over_a_union_relates_as_the_checker_distributes_it() {
     let matrix = Matrix::new(INTERSECTIONS);
-    let failures = matrix.types(&[(
-        "[(A | B) & { c: 1 }] extends [(A & { c: 1 }) | (B & { c: 1 })] ? 1 : 2",
-        "1",
-    )]);
+    let failures = matrix.types(&[
+        (
+            "[(A | B) & { c: 1 }] extends [(A & { c: 1 }) | (B & { c: 1 })] ? 1 : 2",
+            "1",
+        ),
+        ("[(A | B) & { c: 1 }] extends [A & { c: 1 }] ? 1 : 2", "2"),
+        ("[(A | B) & { c: 1 }] extends [{ c: 1 }] ? 1 : 2", "1"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

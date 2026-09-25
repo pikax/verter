@@ -6025,6 +6025,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .strict_null_checks,
         );
         let graph = self.graph();
+        // A source intersection over a union IS the distributed union of
+        // intersections (`getIntersectionType`), even where its written
+        // form stays the printed origin: `(A | B) & C` relates as
+        // `(A & C) | (B & C)`.
+        if let Some(SemanticNodeData::Intersection(arms)) = graph.node_data(source).as_deref() {
+            let arms = arms.members_arc();
+            if arms.iter().any(|arm| {
+                matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::Union(_))
+                )
+            }) {
+                if let Some(distributed) = self.distributed_intersection(&arms) {
+                    if distributed != source {
+                        return Some((distributed, target));
+                    }
+                }
+            }
+        }
         let reduced_source =
             super::canonical_algebra::reduced_authored_intersection(graph, source, nullability);
         let reduced_target =
