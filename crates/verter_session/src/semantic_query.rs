@@ -1093,6 +1093,98 @@ impl DeclIdentity {
     }
 }
 
+/// The payload of [`SemanticNodeData::EnumLiteral`]: the literal type of one
+/// member of an enum declaration.
+///
+/// The type is NOMINAL: it is identified by the enum's type declaration
+/// and the member's name, never by its value, so `E.A` and `F.A` differ
+/// though both are `1`, and neither is the plain literal `1`. Its `base` is
+/// the value it stands for — the number or string literal of a constant
+/// member, `number` for a member whose value the checker does not compute
+/// (a member of a non-`const` ambient enum without an initializer, or one
+/// initialized by a non-constant expression) — and every operation that
+/// does not ask about identity (apparent members, a template placeholder,
+/// a relation to a non-enum type) reads the base.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EnumLiteralType {
+    /// The enum's TYPE declaration — the identity a reference to the enum
+    /// resolves to. Its `decl_name` is the enum's qualified name
+    /// (`NS.Inner`), which is how the checker prints it.
+    pub enum_decl: DeclIdentity,
+    /// The member's name.
+    pub member: Arc<str>,
+    /// The value the member stands for.
+    pub base: SemanticNodeId,
+    /// How many members the enum declares (across every declaration of a
+    /// merged enum). A one-member enum's type IS its member's literal type,
+    /// which then prints as the enum, and a union holding every member of
+    /// an enum prints as the enum.
+    pub member_count: u32,
+}
+
+impl EnumLiteralType {
+    /// How the checker prints this type: the enum's name for the only
+    /// member of an enum, `Enum.Member` otherwise.
+    #[must_use]
+    pub fn printed_name(&self) -> String {
+        if self.is_sole() {
+            self.enum_decl.decl_name.to_string()
+        } else {
+            format!("{}.{}", self.enum_decl.decl_name, self.member)
+        }
+    }
+
+    /// Whether the member is the enum's only member.
+    #[must_use]
+    pub fn is_sole(&self) -> bool {
+        self.member_count == 1
+    }
+}
+
+/// One constituent of a union as the checker prints it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrintedUnionArm {
+    /// A constituent printed on its own.
+    Node(SemanticNodeId),
+    /// Every member of one enum, printed as the enum's name.
+    Enum(DeclIdentity),
+}
+
+/// A union's constituents as the checker prints them: a union holding
+/// every member of an enum prints the enum's name in place of them, where
+/// its first member stands (`E.A | E.B` over a two-member `E` prints `E`;
+/// `E3.A | E3.B` over a three-member `E3` prints both members).
+pub(crate) fn printed_union_arms(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    members: &[SemanticNodeId],
+) -> Vec<PrintedUnionArm> {
+    let literals: Vec<Option<EnumLiteralType>> = members
+        .iter()
+        .map(|member| match graph.node_data(*member).as_deref() {
+            Some(SemanticNodeData::EnumLiteral(literal)) => Some(literal.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut present: std::collections::HashMap<&DeclIdentity, u32> =
+        std::collections::HashMap::new();
+    for literal in literals.iter().flatten() {
+        *present.entry(&literal.enum_decl).or_default() += 1;
+    }
+    let mut printed: std::collections::HashSet<&DeclIdentity> = std::collections::HashSet::new();
+    let mut arms = Vec::with_capacity(members.len());
+    for (member, literal) in members.iter().zip(literals.iter()) {
+        match literal {
+            Some(literal) if present.get(&literal.enum_decl) == Some(&literal.member_count) => {
+                if printed.insert(&literal.enum_decl) {
+                    arms.push(PrintedUnionArm::Enum(literal.enum_decl.clone()));
+                }
+            }
+            _ => arms.push(PrintedUnionArm::Node(*member)),
+        }
+    }
+    arms
+}
+
 /// Identity of one class EXPRESSION — the payload of
 /// [`SemanticNodeData::ClassExpressionInstance`].
 ///
@@ -9323,6 +9415,11 @@ pub enum SemanticNodeData {
     /// classes: `Primitive(String)` is the broad string kind (all
     /// strings), `Literal(String("idle"))` is the specific literal.
     Literal(LiteralValue),
+    /// The nominal literal type of one enum member (`E.A`). An enum's type
+    /// is the union of these (a one-member enum's type IS its member's
+    /// literal), and each relates to its value only through the enum rules
+    /// ([`EnumLiteralType`]).
+    EnumLiteral(EnumLiteralType),
     Opaque(QueryError),
     /// Array shell. Publishes `T[]` / `Array<T>` /
     /// `ReadonlyArray<T>` directly rather than routing through generic
@@ -9758,6 +9855,7 @@ impl SemanticNodeData {
             | Self::Intersection(_)
             | Self::Primitive(_)
             | Self::Literal(_)
+            | Self::EnumLiteral(_)
             | Self::Array { .. }
             | Self::Tuple { .. }
             | Self::TemplateLiteral { .. }
@@ -9813,6 +9911,7 @@ impl PartialEq for SemanticNodeData {
             (Self::Intersection(a), Self::Intersection(b)) => a == b,
             (Self::Primitive(a), Self::Primitive(b)) => a == b,
             (Self::Literal(a), Self::Literal(b)) => a == b,
+            (Self::EnumLiteral(a), Self::EnumLiteral(b)) => a == b,
             (Self::Opaque(a), Self::Opaque(b)) => a == b,
             (
                 Self::Array {
@@ -10037,6 +10136,9 @@ impl std::hash::Hash for SemanticNodeData {
             }
             Self::Literal(value) => {
                 value.hash(state);
+            }
+            Self::EnumLiteral(literal) => {
+                literal.hash(state);
             }
             Self::Opaque(err) => {
                 err.hash(state);

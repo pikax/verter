@@ -362,6 +362,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match root_data.as_ref() {
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::InferRef { .. }
@@ -929,6 +930,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match data.as_ref() {
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::InferRef { .. }
@@ -1013,6 +1015,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             match child_data.as_ref() {
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
+                | SemanticNodeData::EnumLiteral(_)
                 | SemanticNodeData::Opaque(_)
                 | SemanticNodeData::Infer { .. }
                 | SemanticNodeData::InferRef { .. }
@@ -1164,6 +1167,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match data.as_ref() {
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::InferRef { .. }
@@ -1373,6 +1377,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::RawFallback { .. }
             | SemanticNodeData::Infer { .. }

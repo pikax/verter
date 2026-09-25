@@ -94,6 +94,11 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             alg.primitive(semantic_primitive_to_primitive_name(*kind))
         }
         SemanticNodeData::Literal(value) => alg.literal(value.clone()),
+        // The checker's print of an enum member's literal: a reference to
+        // the member (`E.A`), or to the enum for its only member.
+        SemanticNodeData::EnumLiteral(literal) => {
+            alg.reference(Arc::from(literal.printed_name()), Vec::new())
+        }
         SemanticNodeData::Alias(target) => {
             if !active.insert(node) {
                 return Some(alg.opaque_sentinel(&QueryError::RaiseAliasCycle));
@@ -115,11 +120,20 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
         }
         SemanticNodeData::Union(members) => {
             // Presence-aware: a PRESENT-but-unraisable member fails the WHOLE
-            // composite (never silently erased).
-            let folded: Vec<A::Out> = members
-                .iter()
-                .map(|member| fold_node(alg, dispatch, *member, active))
-                .collect::<Option<_>>()?;
+            // composite (never silently erased). Every member of an enum
+            // raises as the enum, as the checker prints it.
+            let folded: Vec<A::Out> =
+                crate::semantic_query::printed_union_arms(dispatch.graph(), members)
+                    .into_iter()
+                    .map(|arm| match arm {
+                        crate::semantic_query::PrintedUnionArm::Node(member) => {
+                            fold_node(alg, dispatch, member, active)
+                        }
+                        crate::semantic_query::PrintedUnionArm::Enum(decl) => {
+                            Some(alg.reference(Arc::clone(&decl.decl_name), Vec::new()))
+                        }
+                    })
+                    .collect::<Option<_>>()?;
             alg.union(folded)
         }
         SemanticNodeData::Intersection(members) => {

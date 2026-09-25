@@ -21,7 +21,7 @@ use super::{
 
 /// Exclusive upper bound of every [`SemanticNodeTag::stable_id`] — the width of
 /// per-variant bucket arrays.
-pub const SEMANTIC_NODE_TAG_BOUND: usize = 33;
+pub const SEMANTIC_NODE_TAG_BOUND: usize = 34;
 
 /// Fieldless identity of one [`SemanticNodeData`] variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -59,11 +59,12 @@ pub enum SemanticNodeTag {
     ObjectSpreadProgram = 30,
     DeferredCallable = 31,
     ClassExpressionInstance = 32,
+    EnumLiteral = 33,
 }
 
 impl SemanticNodeTag {
     /// Every tag, in stable-id order.
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 32] = [
         Self::Alias,
         Self::Object,
         Self::Union,
@@ -95,6 +96,7 @@ impl SemanticNodeTag {
         Self::ObjectSpreadProgram,
         Self::DeferredCallable,
         Self::ClassExpressionInstance,
+        Self::EnumLiteral,
     ];
 
     /// The stable one-byte identity. Always in `1..SEMANTIC_NODE_TAG_BOUND`.
@@ -135,6 +137,7 @@ impl SemanticNodeData {
             Self::Intersection(_) => SemanticNodeTag::Intersection,
             Self::Primitive(_) => SemanticNodeTag::Primitive,
             Self::Literal(_) => SemanticNodeTag::Literal,
+            Self::EnumLiteral(_) => SemanticNodeTag::EnumLiteral,
             Self::Opaque(_) => SemanticNodeTag::Opaque,
             Self::Array { .. } => SemanticNodeTag::Array,
             Self::Tuple { .. } => SemanticNodeTag::Tuple,
@@ -183,6 +186,7 @@ impl SemanticNodeData {
             | Self::InferRef { .. }
             | Self::DeclRef { .. }
             | Self::TypeOfNominal(_) => {}
+            Self::EnumLiteral(literal) => visit(literal.base),
             Self::IntrinsicApplication { args, .. } | Self::InstantiationRef { args, .. } => {
                 args.iter().copied().for_each(visit);
             }
@@ -369,7 +373,7 @@ mod tests {
     #[test]
     fn stable_ids_are_pinned() {
         use SemanticNodeTag as T;
-        let pinned: [(T, u8); 31] = [
+        let pinned: [(T, u8); 32] = [
             (T::Alias, 1),
             (T::Object, 2),
             (T::Union, 3),
@@ -401,6 +405,7 @@ mod tests {
             (T::ObjectSpreadProgram, 30),
             (T::DeferredCallable, 31),
             (T::ClassExpressionInstance, 32),
+            (T::EnumLiteral, 33),
         ];
         for (tag, id) in pinned {
             assert_eq!(tag.stable_id(), id, "{tag:?}");

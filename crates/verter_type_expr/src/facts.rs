@@ -2649,6 +2649,128 @@ pub struct EnumMemberEntry {
     pub name: String,
     /// The member's folded/sound value.
     pub value: EnumScalar,
+    /// The member's constant initializer when its value depends on another
+    /// declaration — another enum's member, a member of another declaration
+    /// of a merged enum, a `const` variable — so it is known only once that
+    /// declaration is read. `value` is then the computed member's domain,
+    /// and a reader that can resolve the references evaluates this instead.
+    pub initializer: Option<EnumConstantExpr>,
+}
+
+/// An enum member initializer the checker's constant evaluator reads, as a
+/// postfix program over the values it names: literals, references and the
+/// operators the evaluator folds. Evaluating it pushes each literal and
+/// each referenced value, and each operator pops its operands and pushes
+/// its result; the one value left is the member's.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct EnumConstantExpr {
+    /// The program's steps, in evaluation order.
+    pub steps: Arc<[EnumConstantStep]>,
+}
+
+/// One step of an [`EnumConstantExpr`].
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum EnumConstantStep {
+    /// A number literal, as the canonical `f64` display string.
+    Number(String),
+    /// A string literal.
+    String(String),
+    /// The value a path names: a member of the enum itself (`A`), another
+    /// enum's member (`Other.A`, `NS.Other.A`, `Other["A"]`), or a `const`
+    /// variable (`k`, `NS.k`).
+    Reference(Arc<[String]>),
+    /// A prefix operator over the value below.
+    Unary(EnumConstantUnaryOp),
+    /// A binary operator over the two values below (left deeper).
+    Binary(EnumConstantBinaryOp),
+    /// A template: the quasis concatenated around the `quasis.len() - 1`
+    /// values below, in order.
+    Template(Arc<[String]>),
+    /// The value below plus one when it is a number — the auto-incremented
+    /// value of a member without an initializer.
+    Increment,
+}
+
+/// A prefix operator of an [`EnumConstantExpr`].
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum EnumConstantUnaryOp {
+    /// `+x`.
+    Plus,
+    /// `-x`.
+    Minus,
+    /// `~x`.
+    BitNot,
+}
+
+/// A binary operator of an [`EnumConstantExpr`].
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum EnumConstantBinaryOp {
+    /// `|`.
+    BitOr,
+    /// `&`.
+    BitAnd,
+    /// `^`.
+    BitXor,
+    /// `<<`.
+    ShiftLeft,
+    /// `>>`.
+    ShiftRight,
+    /// `>>>`.
+    ShiftRightUnsigned,
+    /// `*`.
+    Multiply,
+    /// `/`.
+    Divide,
+    /// `+` (numeric addition, or concatenation with a string).
+    Add,
+    /// `-`.
+    Subtract,
+    /// `%`.
+    Remainder,
+    /// `**`.
+    Exponent,
 }
 
 /// The `PreparedValueDecl.enum_members` narrowing — the ordered inventory.

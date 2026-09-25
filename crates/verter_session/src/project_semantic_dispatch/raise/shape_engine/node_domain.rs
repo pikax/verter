@@ -1613,6 +1613,7 @@ pub(super) fn project_root_summary(
     Some(match data.as_ref() {
         SemanticNodeData::Primitive(_)
         | SemanticNodeData::Literal(_)
+        | SemanticNodeData::EnumLiteral(_)
         | SemanticNodeData::Infer { .. }
         | SemanticNodeData::InferRef { .. }
         | SemanticNodeData::TemplateLiteral { .. }

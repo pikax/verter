@@ -240,28 +240,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Widen one FRESH primitive-literal leaf to its base primitive; every
-    /// other leaf passes through unchanged.
+    /// Widen one FRESH literal leaf — a plain literal to its base
+    /// primitive, an enum member's literal to its enum's type; every other
+    /// leaf passes through unchanged.
     pub(super) fn widen_fresh_return_leaf(&self, leaf: SemanticNodeId) -> SemanticNodeId {
-        let graph = self.graph();
-        let primitive = match graph.node_data(leaf).as_deref() {
-            Some(SemanticNodeData::Literal(value)) => match value {
-                crate::semantic_query::LiteralValue::String(_) => {
-                    crate::semantic_query::PrimitiveKind::String
-                }
-                crate::semantic_query::LiteralValue::Number(_) => {
-                    crate::semantic_query::PrimitiveKind::Number
-                }
-                crate::semantic_query::LiteralValue::Boolean(_) => {
-                    crate::semantic_query::PrimitiveKind::Boolean
-                }
-                crate::semantic_query::LiteralValue::BigInt(_) => {
-                    crate::semantic_query::PrimitiveKind::BigInt
-                }
-            },
-            _ => return leaf,
-        };
-        graph.intern_node(SemanticNodeData::Primitive(primitive))
+        self.widened_literal(leaf)
     }
 }
 

@@ -579,71 +579,71 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Project a dotted type-position reference `Enum.Member` to the named
-    /// member's projected type (a folded literal for a foldable member, the
-    /// degraded sound primitive for a deferred one), GATED strictly on the typed
+    /// The literal type a dotted type-position reference `Enum.Member`
+    /// names — the enum member's own nominal literal type — GATED strictly
+    /// on the typed
     /// [`ValueDeclKind::Enum`](verter_semantic::analysis::type_eval::ValueDeclKind::Enum)
     /// fact. Returns `None` for any prefix that is not a proven enum value
     /// declaration (so a non-enum `Ns.Member` reference is never
-    /// mis-projected) or an unknown member name. The prefix is resolved to
-    /// its declaring `(canonical, name)` through the prepared decl's
-    /// pre-resolved map first, then the shared bare-name resolver — so a
-    /// locally-declared OR an imported enum binding both resolve, with no
-    /// private drill-down path.
-    ///
-    /// LIMITATION: only a TOP-LEVEL `Enum.Member` is projected. The
-    /// `split_once('.')` below takes the FIRST dotted segment as the prefix, so
-    /// a namespace-nested enum member (`Ns.Enum.Member`) resolves the prefix
-    /// `Ns` — a namespace, not an enum — and returns `None` (a miss). Projecting
-    /// `Ns.Enum.Member` would require first walking the namespace to its inner
-    /// `Enum` binding.
-    pub(super) fn resolve_enum_member_value(
+    /// mis-projected) or an unknown member name. A one-segment prefix
+    /// resolves through the prepared decl's pre-resolved map first, then
+    /// the shared bare-name resolver, so a locally-declared OR an imported
+    /// enum binding both resolve; a qualified prefix (`Ns.Enum.Member`)
+    /// resolves as a value path does, so a namespace's enum resolves in the
+    /// namespace's own file.
+    pub(super) fn resolve_enum_member_type(
         &self,
         scope_canonical: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
         name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         dotted_name: &str,
-    ) -> Option<TypeExpr> {
-        let (prefix, member) = dotted_name.split_once('.')?;
-        let identity = if let Some(direct) = name_resolution.get(prefix) {
-            direct.clone()
-        } else {
-            resolve_bare_name_in_scope(
-                self.ctx,
-                scope_canonical,
-                scope_owner,
-                scope_payload,
-                prefix,
-            )?
+    ) -> Option<SemanticNodeId> {
+        let (prefix, member) = dotted_name.rsplit_once('.')?;
+        let identity = match prefix.split_once('.') {
+            None => match name_resolution.get(prefix) {
+                Some(direct) => direct.clone(),
+                None => resolve_bare_name_in_scope(
+                    self.ctx,
+                    scope_canonical,
+                    scope_owner,
+                    scope_payload,
+                    prefix,
+                )?,
+            },
+            Some((root, rest)) => {
+                let value_root = crate::semantic_query::ValueRootKey {
+                    scope: crate::semantic_query::ScopeId {
+                        canonical_id: Arc::from(scope_canonical),
+                        owner: scope_owner,
+                        local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                            scope_owner,
+                        ),
+                    },
+                    name: Arc::from(root),
+                };
+                let path: Vec<Arc<str>> = rest.split('.').map(Arc::from).collect();
+                let (identity, remaining) = self.value_path_declaration(
+                    &value_root,
+                    &path,
+                    &mut rustc_hash::FxHashSet::default(),
+                )?;
+                if !remaining.is_empty() {
+                    return None;
+                }
+                identity
+            }
         };
-        // Resolve the prefix's enum VALUE decl through the SAME export-target
-        // chase `typeof Enum` uses ([`Self::effective_prepared_value_decl`]): a
-        // locally-declared enum resolves directly; a barrel re-export
-        // (`export { E } from "./leaf"`) chases to the declaring leaf's decl. So
-        // a re-exported enum projects its members exactly like a local one,
-        // matching `typeof E`'s cross-file behaviour — one shared chase, no
-        // forked resolution path.
-        let (_, _, _, prepared) = self.effective_prepared_value_decl(
+        // The enum resolves through the SAME export-target chase
+        // `typeof Enum` uses, so a re-exported enum names its declaring
+        // file's members.
+        let enumeration = self.enum_declaration(
             identity.canonical_id.as_ref(),
             identity.owner,
             identity.symbol_name.as_ref(),
         )?;
-        if prepared.kind != verter_semantic::analysis::type_eval::ValueDeclKind::Enum {
-            return None;
-        }
-        // A DECLARED member projects to its type — the folded literal for a
-        // foldable member, the degraded sound primitive for a deferred one
-        // (the stored scalar via [`enum_scalar_type_expr`]), never a miss. An
-        // UNDECLARED name is genuinely absent (`find` yields `None`) and
-        // stays a miss, so the member-existence gate is preserved.
-        prepared
-            .enum_members
-            .as_ref()?
-            .members
-            .iter()
-            .find(|entry| entry.name == member)
-            .map(|entry| enum_scalar_type_expr(&entry.value))
+        self.enum_member_type(&enumeration, member)
     }
 
     /// The ONE script-setup generic `TypeParam` node construction. BOTH

@@ -332,6 +332,7 @@ impl SemanticNodeData {
             | Self::Intersection(_)
             | Self::Primitive(_)
             | Self::Literal(_)
+            | Self::EnumLiteral(_)
             | Self::Opaque(_)
             | Self::Array { .. }
             | Self::Tuple { .. }
@@ -496,6 +497,7 @@ impl SemanticNodeData {
             | Self::Intersection(_)
             | Self::Primitive(_)
             | Self::Literal(_)
+            | Self::EnumLiteral(_)
             | Self::Opaque(_)
             | Self::Array { .. }
             | Self::Tuple { .. }

@@ -96,6 +96,7 @@ pub(crate) mod carrier;
 // dispatcher holds a ledger; it does not implement one.
 pub(crate) mod connected_demand;
 pub(crate) mod cycle_gate;
+mod enum_type;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
 #[cfg(test)]
@@ -4197,6 +4198,8 @@ mod closure_narrowing_tests;
 mod conditional_indexed_check_tests;
 #[cfg(test)]
 mod const_literal_widening_tests;
+#[cfg(test)]
+mod enum_literal_tests;
 #[cfg(test)]
 mod heritage_signature_tests;
 #[cfg(test)]

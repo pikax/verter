@@ -569,10 +569,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let members = members.members_arc();
             return self.union_collapse_class(members.iter().copied(), source);
         }
-        if super::canonical_algebra::tag_level_disjoint(self.graph(), source, target) {
+        if super::canonical_algebra::tag_level_disjoint(self.graph(), source, target)
+            || super::canonical_algebra::scalar_domain_provably_empty(
+                self.graph(),
+                &[source, target],
+            )
+        {
             // Disjoint tags at the TOP level of the two operands: an empty
             // primitive/literal intersection, which the checker's
-            // intersection reducer collapses to `never`.
+            // intersection reducer collapses to `never` — as it does two
+            // distinct unit types (an enum member's literal and a plain
+            // literal of its value).
             return IntersectionCollapse::ReducesToNever;
         }
         // Two structural surfaces: the checker collapses only on a shared
@@ -3551,6 +3558,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
+                | SemanticNodeData::EnumLiteral(_)
                 | SemanticNodeData::Opaque(_)
                 | SemanticNodeData::Infer { .. }
                 | SemanticNodeData::InferRef { .. }
@@ -6886,6 +6894,82 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return;
         }
 
+        // ── Enum member literals ───────────────────────────────────────
+        //    An enum member's literal is NOMINAL: another enum's member
+        //    (whatever its value) is not assignable to it. Against any
+        //    other target it relates as the value it stands for. Into one,
+        //    `number` is assignable when the member is numeric, and a plain
+        //    number literal when it has the member's value (or the member's
+        //    value is not a constant) — the checker's bit-flag rule. No
+        //    other literal is.
+        if let SemanticNodeData::EnumLiteral(source_literal) = &*source_data {
+            if matches!(&*target_data, SemanticNodeData::EnumLiteral(_)) {
+                // Distinct nodes (the identical pair returned above).
+                results.push(RelationResult::NotAssignable);
+                return;
+            }
+            let base = source_literal.base;
+            drop(source_data);
+            drop(target_data);
+            distribute_and(work, results, &[base], |base| (*base, target));
+            return;
+        }
+        if let SemanticNodeData::EnumLiteral(target_literal) = &*target_data {
+            let target_base = graph.node_data(target_literal.base);
+            let numeric_member = matches!(
+                target_base.as_deref(),
+                Some(
+                    SemanticNodeData::Literal(LiteralValue::Number(_))
+                        | SemanticNodeData::Primitive(PrimitiveKind::Number)
+                )
+            );
+            match &*source_data {
+                SemanticNodeData::Primitive(PrimitiveKind::Number) => {
+                    results.push(if numeric_member {
+                        assignable(bindings)
+                    } else {
+                        RelationResult::NotAssignable
+                    });
+                    return;
+                }
+                SemanticNodeData::Literal(source_value) => {
+                    let related = match (source_value, target_base.as_deref()) {
+                        (
+                            LiteralValue::Number(_),
+                            Some(SemanticNodeData::Literal(target_value)),
+                        ) => literals_equal(source_value, target_value),
+                        (
+                            LiteralValue::Number(_),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::Number)),
+                        ) => true,
+                        _ => false,
+                    };
+                    results.push(if related {
+                        assignable(bindings)
+                    } else {
+                        RelationResult::NotAssignable
+                    });
+                    return;
+                }
+                // Another primitive relates as it relates to the member's
+                // value (`string` is not a `"p"`), and a template literal
+                // is never a member.
+                SemanticNodeData::Primitive(_) => {
+                    let base = target_literal.base;
+                    drop(target_base);
+                    drop(source_data);
+                    drop(target_data);
+                    distribute_and(work, results, &[base], |base| (source, *base));
+                    return;
+                }
+                SemanticNodeData::TemplateLiteral { .. } => {
+                    results.push(RelationResult::NotAssignable);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // ── Primitives / literals ──────────────────────────────────────
         if let (SemanticNodeData::Primitive(s), SemanticNodeData::Primitive(t)) =
             (&*source_data, &*target_data)
@@ -9355,7 +9439,9 @@ fn comparable_root_kind(data: &SemanticNodeData) -> Option<ComparableRootKind> {
             PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Never => None,
             _ => Some(ComparableRootKind::Primitive(*kind)),
         },
-        SemanticNodeData::Literal(_) => Some(ComparableRootKind::Literal),
+        SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_) => {
+            Some(ComparableRootKind::Literal)
+        }
         // An UNREDUCED operation has no comparable root shape yet — comparing
         // it structurally would compare the operation, not its value.
         SemanticNodeData::IntrinsicApplication { .. } => None,

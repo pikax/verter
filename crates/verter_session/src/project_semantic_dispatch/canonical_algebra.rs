@@ -1034,11 +1034,25 @@ fn canonicalize_with(
                 #[cfg(test)]
                 literal_provenance_tests::SUBSUMPTION_READS
                     .with(|count| count.set(count.get() + 1));
+                fn literal_bit(literal: &LiteralValue) -> u8 {
+                    match literal {
+                        LiteralValue::String(_) => 1,
+                        LiteralValue::Number(_) => 2,
+                        LiteralValue::BigInt(_) => 4,
+                        LiteralValue::Boolean(_) => 8,
+                    }
+                }
                 let base = match graph.node_data(*member).as_deref() {
-                    Some(SemanticNodeData::Literal(LiteralValue::String(_))) => 1,
-                    Some(SemanticNodeData::Literal(LiteralValue::Number(_))) => 2,
-                    Some(SemanticNodeData::Literal(LiteralValue::BigInt(_))) => 4,
-                    Some(SemanticNodeData::Literal(LiteralValue::Boolean(_))) => 8,
+                    Some(SemanticNodeData::Literal(literal)) => literal_bit(literal),
+                    // An enum member's literal is a literal of its value's
+                    // kind; a member whose value is not a constant is not a
+                    // literal and stays.
+                    Some(SemanticNodeData::EnumLiteral(enum_literal)) => {
+                        match graph.node_data(enum_literal.base).as_deref() {
+                            Some(SemanticNodeData::Literal(literal)) => literal_bit(literal),
+                            _ => 0,
+                        }
+                    }
                     _ => 0,
                 };
                 base & primitives == 0
@@ -1808,8 +1822,35 @@ pub(crate) fn tag_level_disjoint(
         | (SemanticNodeData::Primitive(prim), SemanticNodeData::Literal(lit)) => {
             concrete(*prim) && literal_base(lit) != *prim
         }
+        // Two members' literals are distinct types when each stands for a
+        // constant; a member whose value is not a constant is undecided.
+        (SemanticNodeData::EnumLiteral(x), SemanticNodeData::EnumLiteral(y)) => {
+            x != y && enum_literal_is_unit(graph, x) && enum_literal_is_unit(graph, y)
+        }
+        // A member's literal against a literal or a primitive shares an
+        // inhabitant exactly when its value does.
+        (SemanticNodeData::EnumLiteral(literal), SemanticNodeData::Literal(_))
+        | (SemanticNodeData::EnumLiteral(literal), SemanticNodeData::Primitive(_)) => {
+            tag_level_disjoint(graph, literal.base, b)
+        }
+        (SemanticNodeData::Literal(_), SemanticNodeData::EnumLiteral(literal))
+        | (SemanticNodeData::Primitive(_), SemanticNodeData::EnumLiteral(literal)) => {
+            tag_level_disjoint(graph, a, literal.base)
+        }
         _ => false,
     }
+}
+
+/// Whether an enum member's literal is a UNIT type: its member stands for a
+/// constant value.
+pub(crate) fn enum_literal_is_unit(
+    graph: &SemanticGraphStore,
+    literal: &crate::semantic_query::EnumLiteralType,
+) -> bool {
+    matches!(
+        graph.node_data(literal.base).as_deref(),
+        Some(SemanticNodeData::Literal(_))
+    )
 }
 
 /// Whether a payload carries NO child node ids — for such a payload,
@@ -1820,6 +1861,9 @@ fn payload_is_childless(data: &SemanticNodeData) -> bool {
     use SemanticNodeData as D;
     match data {
         D::Primitive(_) | D::Literal(_) | D::Opaque(_) | D::RawFallback { .. } => true,
+        // The base is a value leaf interned by its value, so payload
+        // equality is structural identity.
+        D::EnumLiteral(_) => true,
         D::Infer { .. } | D::InferRef { .. } | D::DeclRef { .. } => true,
         // Carries its operand ids — payload equality is NOT identity.
         D::IntrinsicApplication { .. } => false,
@@ -2247,6 +2291,7 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
         // defense in depth.
         D::Primitive(_)
         | D::Literal(_)
+        | D::EnumLiteral(_)
         | D::Opaque(_)
         | D::RawFallback { .. }
         | D::Infer { .. }
@@ -2261,7 +2306,10 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
 /// true" over the whole arm set: the intersection's scalar tag-level
 /// domain is PROVABLY empty. Non-scalar arms contribute nothing (they are
 /// never tag-level decidable); an undecided shape is never guessed.
-fn scalar_domain_provably_empty(graph: &SemanticGraphStore, arms: &[SemanticNodeId]) -> bool {
+pub(crate) fn scalar_domain_provably_empty(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+) -> bool {
     fn concrete(kind: PrimitiveKind) -> bool {
         !matches!(
             kind,
@@ -2276,11 +2324,41 @@ fn scalar_domain_provably_empty(graph: &SemanticGraphStore, arms: &[SemanticNode
             LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
         }
     }
+    // The base primitive kind of an enum member's value: a member is
+    // number-like or string-like whether or not its value is a constant.
+    let enum_base_kind = |literal: &crate::semantic_query::EnumLiteralType| match graph
+        .node_data(literal.base)
+        .as_deref()
+    {
+        Some(SemanticNodeData::Literal(value)) => Some(literal_base(value)),
+        Some(SemanticNodeData::Primitive(kind)) if concrete(*kind) => Some(*kind),
+        _ => None,
+    };
     let mut seen_concrete: Option<PrimitiveKind> = None;
     let mut seen_literal: Option<LiteralValue> = None;
+    // An enum member's type is a unit type of its own, distinct from every
+    // other member's and from every plain literal, whatever its value.
+    let mut seen_enum: Option<(SemanticNodeId, Option<PrimitiveKind>)> = None;
     for &arm in arms {
         match graph.node_data(arm).as_deref() {
+            Some(SemanticNodeData::EnumLiteral(literal)) => {
+                if seen_literal.is_some() || seen_enum.is_some_and(|(other, _)| other != arm) {
+                    return true;
+                }
+                let kind = enum_base_kind(literal);
+                if let (Some(kind), Some(concrete_kind)) = (kind, seen_concrete) {
+                    if kind != concrete_kind {
+                        return true;
+                    }
+                }
+                seen_enum = Some((arm, kind));
+            }
             Some(SemanticNodeData::Primitive(kind)) if concrete(*kind) => {
+                if let Some((_, Some(enum_kind))) = seen_enum {
+                    if enum_kind != *kind {
+                        return true;
+                    }
+                }
                 if let Some(prev) = seen_concrete {
                     let widening_pair = matches!(
                         (prev, *kind),
@@ -2305,6 +2383,9 @@ fn scalar_domain_provably_empty(graph: &SemanticGraphStore, arms: &[SemanticNode
                 }
             }
             Some(SemanticNodeData::Literal(value)) => {
+                if seen_enum.is_some() {
+                    return true;
+                }
                 if let Some(prev) = &seen_literal {
                     // TS literal identity: numeric pairs compare
                     // SameValueZero (`0` / `-0` are one literal type).
@@ -2585,6 +2666,7 @@ fn compare_shallow(
         // pair is Distinct.
         (D::Primitive(_), D::Primitive(_))
         | (D::Literal(_), D::Literal(_))
+        | (D::EnumLiteral(_), D::EnumLiteral(_))
         | (D::Opaque(_), D::Opaque(_))
         | (D::RawFallback { .. }, D::RawFallback { .. }) => false,
         (

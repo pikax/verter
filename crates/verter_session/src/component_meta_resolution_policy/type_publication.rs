@@ -439,6 +439,11 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                     .expect("TypeOfNominal carrier identity");
                 references.insert(path, ProofReferenceIdentity::Nominal(identity.clone()));
             }
+            // An enum member's literal names its enum declaration; the
+            // member is compared by the shape proof below.
+            SemanticNodeData::EnumLiteral(literal) => {
+                references.insert(path, ProofReferenceIdentity::Decl(literal.enum_decl.clone()));
+            }
             SemanticNodeData::ObjectSpreadProgram(program) => {
                 for (index, child) in program.child_nodes().enumerate() {
                     push_proof_child(
@@ -597,6 +602,11 @@ fn normalized_projection_shape_equivalent(
                 }
             }
             (SemanticNodeData::Literal(left), SemanticNodeData::Literal(right)) => {
+                if left != right {
+                    return Some(false);
+                }
+            }
+            (SemanticNodeData::EnumLiteral(left), SemanticNodeData::EnumLiteral(right)) => {
                 if left != right {
                     return Some(false);
                 }

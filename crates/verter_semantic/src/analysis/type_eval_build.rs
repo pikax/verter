@@ -33,11 +33,11 @@ use oxc_span::GetSpan;
 use verter_parser::utils::oxc::script::route_inventory::statements_have_export_declarations;
 use verter_type_expr::facts::{
     AuthoredReferenceHeadFact, ClosedTypeFact, DeclaredLiteralFreshness, EnumMemberEntry,
-    EnumMemberFact, EnumMemberNamesFact, EnumPrimitiveDomain, EnumScalar,
-    FlowFunctionReturnIdentity, FunctionParamFact, FunctionPartIdentity, FunctionReturnSource,
-    FunctionSignatureFact, IndexSignatureFact, InferenceUnavailableReason, KeyTypeShape,
-    LeafTypeFact, MemberHeaderFact, NarrowTypeParam, ObjectMemberFact, ObjectMethodFact,
-    ObjectPropertyFact, ObjectShapeFact, SemanticTypeSource, SpreadMemberFact, TypeParamDeclFact,
+    EnumMemberFact, EnumMemberNamesFact, EnumPrimitiveDomain, FlowFunctionReturnIdentity,
+    FunctionParamFact, FunctionPartIdentity, FunctionReturnSource, FunctionSignatureFact,
+    IndexSignatureFact, InferenceUnavailableReason, KeyTypeShape, LeafTypeFact, MemberHeaderFact,
+    NarrowTypeParam, ObjectMemberFact, ObjectMethodFact, ObjectPropertyFact, ObjectShapeFact,
+    SemanticTypeSource, SpreadMemberFact, TypeParamDeclFact,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, FunctionReturnLocator, LocatorSymbolSpace,
@@ -571,7 +571,7 @@ fn collect_statement_parts(
             collect_class(decl, source, out);
         }
         Statement::TSEnumDeclaration(decl) => {
-            collect_enum(decl, out);
+            collect_enum(decl, decl.id.name.to_string(), declaration_file, out);
         }
         Statement::FunctionDeclaration(func) => {
             if let Some(parts) = lower_function_parts(func, source) {
@@ -939,7 +939,7 @@ fn collect_from_declaration(
             collect_class(cls, source, out);
         }
         Declaration::TSEnumDeclaration(decl) => {
-            collect_enum(decl, out);
+            collect_enum(decl, decl.id.name.to_string(), declaration_file, out);
         }
         Declaration::FunctionDeclaration(func) => {
             if let Some(parts) = lower_function_parts(func, source) {
@@ -1533,6 +1533,7 @@ fn mint_value_decl(
             .map(|(name, value)| EnumMemberEntry {
                 name: name.clone(),
                 value: value.projected_scalar(),
+                initializer: value.pending_initializer().cloned(),
             })
             .collect(),
     });
@@ -2240,6 +2241,17 @@ fn collect_namespaced_statement(
         Statement::TSModuleDeclaration(module) => {
             collect_module_declaration(module, source, out, Some(namespace), ambient);
         }
+        // A namespace's enum registers under its qualified name, exported
+        // or not, as a class does: the header index records which a
+        // reference from outside the body may name.
+        Statement::TSEnumDeclaration(enum_decl) => {
+            collect_enum(
+                enum_decl,
+                qualified_name(namespace, &enum_decl.id.name),
+                ambient,
+                out,
+            );
+        }
         // Namespace value indexing is EXPORT-ONLY: a non-exported
         // `namespace N { const hidden = … }` is private to the namespace body
         // (TS: `N.hidden` does not exist on `typeof N`), so a DIRECT
@@ -2305,6 +2317,14 @@ fn collect_namespaced_declaration(
         }
         Declaration::TSModuleDeclaration(module) => {
             collect_module_declaration(module, source, out, Some(namespace), ambient);
+        }
+        Declaration::TSEnumDeclaration(enum_decl) => {
+            collect_enum(
+                enum_decl,
+                qualified_name(namespace, &enum_decl.id.name),
+                ambient,
+                out,
+            );
         }
         // A namespaced value member (`namespace NS { export const M = … }`,
         // `export function f()`) registers under its QUALIFIED name `NS.M`
@@ -3018,86 +3038,14 @@ fn infer_declaration_or_unknown(
 // Value declarations
 // ---------------------------------------------------------------------------
 
-/// The narrowest SOUND primitive DOMAIN for a DEFERRED enum member, proven from
-/// its initializer-expression KIND. This is a typed AST classification at the
-/// lowering boundary — NOT a string heuristic and NOT a constant-fold: it never
-/// evaluates the expression, only reads its shape to BOUND the runtime value's
-/// type. An enum member is `number | string`-valued at runtime; this narrows to
-/// the soundest provable arm so a deferred member is honestly typed, never
-/// under-approximated to `never` and never widened past what the syntax proves:
-/// - a bare member (the auto-increment series — always numeric) ⇒ `number`;
-/// - a numeric-guaranteed expression (`1 << 2`, `~A`, `-x`, `a * b`) ⇒ `number`;
-/// - a `+` expression (numeric add OR string concat) ⇒ `number | string`;
-/// - a PLAIN string / template-literal expression (no tag) ⇒ `string`;
-/// - a member-reference (`B = A`), call (`someFn()`), TAGGED template
-///   (`` tag`...` `` — a call that can return ANY type, so `string` would
-///   under-approximate), comparison/logical operator (boolean-valued), or any
-///   other unclassifiable initializer ⇒ `unknown` — no narrower domain is
-///   provable without constant-folding, which the literal-enum reducer
-///   deliberately does not do.
-fn degraded_member_domain(initializer: Option<&Expression<'_>>) -> EnumPrimitiveDomain {
-    let Some(expr) = initializer else {
-        // A bare member is only deferred when the running auto-increment value
-        // is unknown; the auto-increment series is always NUMERIC.
-        return EnumPrimitiveDomain::Number;
-    };
-    match expr {
-        // A plain string or template literal (NO tag) is a string-valued
-        // expression. A TAGGED template (`tag`...``) is deliberately EXCLUDED:
-        // it is a call to `tag`, which can return any type, so `string` is not a
-        // sound bound — it falls to the `_ => Unknown` arm below.
-        Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => {
-            EnumPrimitiveDomain::String
-        }
-        Expression::NumericLiteral(_) => EnumPrimitiveDomain::Number,
-        Expression::UnaryExpression(unary) => match unary.operator {
-            UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus | UnaryOperator::BitwiseNot => {
-                EnumPrimitiveDomain::Number
-            }
-            // `!x` (boolean), `typeof`/`void`/`delete` — not a sound numeric or
-            // string enum value; no narrower domain than `unknown` is provable.
-            _ => EnumPrimitiveDomain::Unknown,
-        },
-        Expression::BinaryExpression(binary) => match binary.operator {
-            BinaryOperator::ShiftLeft
-            | BinaryOperator::ShiftRight
-            | BinaryOperator::ShiftRightZeroFill
-            | BinaryOperator::BitwiseOR
-            | BinaryOperator::BitwiseXOR
-            | BinaryOperator::BitwiseAnd
-            | BinaryOperator::Subtraction
-            | BinaryOperator::Multiplication
-            | BinaryOperator::Division
-            | BinaryOperator::Remainder
-            | BinaryOperator::Exponential => EnumPrimitiveDomain::Number,
-            // `+` is numeric add OR string concat — the soundest bound is the
-            // union of both.
-            BinaryOperator::Addition => EnumPrimitiveDomain::NumberOrString,
-            // Comparison / logical / `in` / `instanceof` produce booleans —
-            // never a sound enum value.
-            _ => EnumPrimitiveDomain::Unknown,
-        },
-        // A parenthesized wrapper carries no domain of its own — classify the
-        // inner expression (`A = (1 << 2)` is still `number`).
-        Expression::ParenthesizedExpression(paren) => {
-            degraded_member_domain(Some(&paren.expression))
-        }
-        // Member-reference, call, identifier, anything else — unprovable here.
-        _ => EnumPrimitiveDomain::Unknown,
-    }
-}
-
 /// Register a TypeScript `enum` as the dual-space symbol it is: a VALUE
 /// binding carrying the ordered member inventory (NAME → [`EnumMemberValue`];
 /// drives `typeof Enum` — an object keyed by the member NAMES — and the
 /// `Enum.Member` member projection) AND a TYPE binding for the enum used as
-/// a type (e.g. a `${Enum}` template-literal expansion or an enum-member
-/// discriminant). The type body — the projected-type union (folded literals
-/// plus degraded primitive arms for deferred members) — is NOT computed here:
-/// a per-declaration walk cannot see same-name merged
+/// a type. The type body — the union of the members' literal types — is NOT
+/// computed here: a per-declaration walk cannot see same-name merged
 /// contributors, so the type binding gets a non-served placeholder body and
-/// the single source of truth is [`ValueDeclGroup::enum_type_union`], which
-/// derives the union from the MERGED value members on demand.
+/// the members are read from the MERGED value members on demand.
 ///
 /// Member NAMES are resolved for EVERY member via the SAME `static_name` helper
 /// the production `index_enum` header walk uses (all four `TSEnumMemberName`
@@ -3106,131 +3054,76 @@ fn degraded_member_domain(initializer: Option<&Expression<'_>>) -> EnumPrimitive
 /// the header walk. A computed string/template member name (`["A"]`, `` [`A`] ``)
 /// is recorded, NOT dropped.
 ///
-/// Member VALUES follow TypeScript's literal-enum rules: a string-literal
-/// initializer is the member's value; a numeric-literal initializer (including
-/// a leading unary `-` / `+` over one, e.g. `A = -1`) both IS the value and
-/// reseeds the auto-increment counter; a bare member takes the next
-/// auto-increment numeric (start 0, previous numeric + 1 — so `A = -1, B` ⇒
-/// `B = 0`). The `const` modifier does not change the type-level value
-/// (const-enum inlining is a runtime concern; the type-level projection equals
-/// the assigned literal).
-///
-/// VALUE-DEFERRED (the member NAME is recorded with an
-/// [`EnumMemberValue::Deferred`] value — never crashed, never given a wrong
-/// literal): a member-REFERENCE initializer (`B = A`), a computed / expression
-/// initializer (`B = 1 << 2`, `B = someFn()`, `~A`). Resolving those would
-/// require constant-folding a member-reference graph, which the literal-enum
-/// reducer deliberately does not model. A deferred member is NOT dropped — it
-/// carries the narrowest SOUND primitive DOMAIN proven from its
-/// initializer-expression kind (`degraded_member_domain`), so it stays honestly
-/// typed on every projection surface (`typeof Enum`, `Enum.Member`, the enum
-/// type union) while its DEGRADED value is projected out of the foldable rail
-/// ([`ValueDeclGroup::merged_enum_members`]) that only the value-body
-/// fingerprint observes.
-///
-/// A deferred member ALSO makes the running auto-increment value UNKNOWN:
-/// because a bare member's value is `previous + 1`, once the previous value is
-/// unknowable a following BARE member's value is DEFERRED too rather than
-/// fabricated off a stale counter (its degraded domain is still `number` — the
-/// auto-increment series is numeric). The next explicit foldable literal
-/// RESEEDS the counter to KNOWN. (A string value likewise cannot seed a numeric
-/// `+ 1`, so a bare member following a string member has a deferred value.)
-/// Example: `enum E { A = 1 << 2, B, C = 5, D }` ⇒ NAMES `A`/`B`/`C`/`D` all
-/// recorded; `A` (`1 << 2`) and `B` (bare after a deferred value) degrade to
-/// `number`; `C = 5`, `D = 6` fold. Members are folded in SOURCE order; the
-/// enum's full member set across same-name merged declarations is unioned by
-/// the `merged_enum_*` accessors.
-fn collect_enum(decl: &TSEnumDeclaration<'_>, out: &mut LoweredStatementParts) {
-    let name = decl.id.name.to_string();
-
-    // The ordered member inventory: the NAME of EVERY statically-named member
-    // plus its [`EnumMemberValue`] — `Folded` (a literal [`EnumScalar`]) when
-    // statically foldable, `Deferred` (carrying the degraded sound domain)
-    // otherwise. See the `ValueDeclInfo::enum_members` field doc for the rail
-    // contract (the NAME set is the presence-rail authority; the `Folded`
-    // subset is the foldable rail; every member's projected scalar drives the
-    // type surfaces). The NAME set must equal what `index_enum` records.
+/// Member VALUES follow the checker's enum member value computation: an
+/// initializer is read into the constant evaluator's program
+/// ([`enum_constant_expr`]) and evaluated against the earlier members of
+/// this declaration; a member without one takes the previous member's
+/// numeric value plus one (0 for the first member) — except in an AMBIENT
+/// non-`const` enum (a `declare enum`, or any enum of a declaration file or
+/// an ambient namespace), where a member without an initializer is
+/// computed. A program naming a value this declaration does not declare is
+/// PENDING (the session evaluates it once it reads that value); a member
+/// whose value is no constant is COMPUTED ([`EnumMemberValue::Deferred`]
+/// over `number`, the domain the checker gives every computed member).
+/// Members are evaluated in SOURCE order; the enum's full member set across
+/// same-name merged declarations is unioned by the `merged_enum_*`
+/// accessors.
+fn collect_enum(
+    decl: &TSEnumDeclaration<'_>,
+    name: String,
+    ambient: bool,
+    out: &mut LoweredStatementParts,
+) {
+    use crate::analysis::enum_constant::{
+        enum_constant_expr, enum_first_member_expr, enum_increment_expr, evaluate_enum_constant,
+        EnumConstant,
+    };
+    let enum_name = decl.id.name.as_str();
+    let ambient = ambient || decl.declare;
     let mut members: Vec<(String, EnumMemberValue)> = Vec::new();
-    // The running auto-increment value, tracked as KNOWN (`Some`) / UNKNOWN
-    // (`None`). A bare member's value is `previous + 1`, so the moment a
-    // member's value cannot be statically folded (an unsupported initializer,
-    // or a string value a numeric `+ 1` cannot follow) the running value
-    // becomes UNKNOWN — and a subsequent BARE member with an unknown running
-    // value has its VALUE DEFERRED, never fabricated. The next explicit foldable
-    // numeric literal RESEEDS it to KNOWN.
-    let mut next_auto: Option<f64> = Some(0.0);
     for member in &decl.body.members {
-        // Member NAME resolution is SHARED with `index_enum`'s header walk
-        // (`static_name` over all four `TSEnumMemberName` variants:
-        // `Identifier`, `String`, `ComputedString`, `ComputedTemplateString`).
-        // A computed string / template member name (`["A"]`, `` [`A`] ``)
-        // carries a STATIC identity — it is recorded, NOT dropped — so the
-        // eval-env member-NAME set matches the production header walk exactly
-        // (name logic is shared, never forked, so the two paths cannot diverge).
+        // Member NAME resolution is SHARED with `index_enum`'s header walk.
         let member_name = member.id.static_name().to_string();
-        // The VALUE is `Folded` when statically foldable, `Deferred` (degraded)
-        // otherwise; the NAME above is recorded either way.
-        let value: EnumMemberValue = match &member.initializer {
-            // A string value cannot seed a numeric `+ 1`, so a bare member that
-            // follows has a deferred value: record this value, mark UNKNOWN.
-            Some(Expression::StringLiteral(s)) => {
-                next_auto = None;
-                EnumMemberValue::Folded(EnumScalar::String(s.value.to_string()))
-            }
-            Some(Expression::NumericLiteral(n)) => {
-                next_auto = Some(n.value + 1.0);
-                EnumMemberValue::Folded(EnumScalar::Number(format_enum_number(n.value)))
-            }
-            // TS represents a signed numeric initializer (`A = -1`, `A = +2`)
-            // as a unary expression over a numeric literal. Fold it to the
-            // signed literal and reseed the auto-increment counter from it.
-            Some(Expression::UnaryExpression(unary)) => {
-                match (unary.operator, &unary.argument) {
-                    (UnaryOperator::UnaryNegation, Expression::NumericLiteral(n)) => {
-                        next_auto = Some(-n.value + 1.0);
-                        EnumMemberValue::Folded(EnumScalar::Number(format_enum_number(-n.value)))
+        let program = match &member.initializer {
+            Some(initializer) => enum_constant_expr(initializer),
+            None if ambient && !decl.r#const => None,
+            None => Some(match members.last() {
+                Some((previous, _)) => enum_increment_expr(previous),
+                None => enum_first_member_expr(),
+            }),
+        };
+        let value = match program {
+            None => EnumMemberValue::Deferred(EnumPrimitiveDomain::Number),
+            Some(program) => {
+                // A reference this declaration cannot answer — another
+                // declaration's value, or an earlier member that is itself
+                // pending — leaves the program for the session to evaluate.
+                let mut pending = false;
+                let constant = evaluate_enum_constant(&program, |path| {
+                    let member = match path {
+                        [member] => member,
+                        [owner, member] if owner == enum_name => member,
+                        _ => {
+                            pending = true;
+                            return None;
+                        }
+                    };
+                    match members.iter().find(|(earlier, _)| earlier == member) {
+                        Some((_, EnumMemberValue::Folded(scalar))) => {
+                            EnumConstant::from_scalar(scalar)
+                        }
+                        Some((_, EnumMemberValue::Pending(_))) | None => {
+                            pending = true;
+                            None
+                        }
+                        Some((_, EnumMemberValue::Deferred(_))) => None,
                     }
-                    (UnaryOperator::UnaryPlus, Expression::NumericLiteral(n)) => {
-                        next_auto = Some(n.value + 1.0);
-                        EnumMemberValue::Folded(EnumScalar::Number(format_enum_number(n.value)))
-                    }
-                    // A non-`+`/`-` unary (`~A`, `!x`) or a unary over a
-                    // non-literal argument is a computed enum expression — out
-                    // of the literal-enum scope. The member NAME stays recorded;
-                    // its VALUE is DEFERRED (degraded from the initializer kind)
-                    // and the running value becomes UNKNOWN so a following bare
-                    // member is not fabricated off it.
-                    _ => {
-                        next_auto = None;
-                        EnumMemberValue::Deferred(degraded_member_domain(
-                            member.initializer.as_ref(),
-                        ))
-                    }
+                });
+                match constant {
+                    Some(constant) => EnumMemberValue::Folded(constant.to_scalar()),
+                    None if pending => EnumMemberValue::Pending(program),
+                    None => EnumMemberValue::Deferred(EnumPrimitiveDomain::Number),
                 }
-            }
-            None => match next_auto {
-                // KNOWN running value: this bare member is `previous + 1`.
-                Some(assigned) => {
-                    next_auto = Some(assigned + 1.0);
-                    EnumMemberValue::Folded(EnumScalar::Number(format_enum_number(assigned)))
-                }
-                // UNKNOWN running value (a preceding member was unfoldable): a
-                // bare member's value depends on the previous member, which is
-                // unknown — DEFER its VALUE, never fabricate. The NAME is still
-                // recorded; its degraded domain is `number` (the auto-increment
-                // series is numeric). It stays UNKNOWN until the next explicit
-                // foldable literal reseeds the counter.
-                None => EnumMemberValue::Deferred(degraded_member_domain(None)),
-            },
-            // A member-REFERENCE (`B = A`) or other computed / expression
-            // initializer has no statically known literal value here — out of
-            // the literal-enum scope. The member NAME stays recorded; its VALUE
-            // is DEFERRED (degraded from the initializer kind) and the running
-            // value becomes UNKNOWN so a following bare member is not fabricated
-            // off it.
-            Some(_) => {
-                next_auto = None;
-                EnumMemberValue::Deferred(degraded_member_domain(member.initializer.as_ref()))
             }
         };
         // Members are unique within a single enum body (TS forbids a repeated

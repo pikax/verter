@@ -129,6 +129,7 @@ fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParams
         | SemanticNodeData::Intersection(_)
         | SemanticNodeData::Primitive(_)
         | SemanticNodeData::Literal(_)
+        | SemanticNodeData::EnumLiteral(_)
         | SemanticNodeData::Array { .. }
         | SemanticNodeData::TemplateLiteral { .. }
         | SemanticNodeData::KeyOf { .. }

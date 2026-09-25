@@ -550,6 +550,7 @@ impl ProjectSemanticDispatch<'_> {
                 //    no catch-all — so a new variant forces a compile error. ──
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
+                | SemanticNodeData::EnumLiteral(_)
                 | SemanticNodeData::Opaque(_)
                 // The nominal terminal carries a scalar declaring identity
                 // and no type args — no infer-bearing child node id.

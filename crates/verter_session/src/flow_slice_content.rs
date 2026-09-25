@@ -1114,6 +1114,11 @@ pub enum SliceGuardLiteral {
     Null,
     /// `undefined`.
     Undefined,
+    /// A value named by a static member path whose root the frame leaves
+    /// free (`E.A`, `NS.E.A`) — an enum member. The evaluator reads its
+    /// type as a `typeof` of the path, which narrows as a literal does
+    /// when it is a unit type (a literal or an enum member's literal).
+    Value(Arc<[Arc<str>]>),
 }
 
 /// The narrowing facts ONE conditional test establishes, lowered once and
@@ -7109,6 +7114,35 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// An equality or `case` operand naming a value by a static member path
+    /// whose root the frame leaves free — `E.A`, `NS.E.A` — the operand an
+    /// enum member's comparison is spelled with. A root the frame binds
+    /// (or cannot classify) names no module value, so the operand is not
+    /// one.
+    fn guard_value_path_of(&self, expression: &Expression<'_>) -> Option<SliceGuardLiteral> {
+        let mut segments: Vec<Arc<str>> = Vec::new();
+        let mut current = unwrap_parenthesized(expression);
+        let root = loop {
+            match current {
+                Expression::StaticMemberExpression(member) => {
+                    segments.push(Arc::from(member.property.name.as_str()));
+                    current = unwrap_parenthesized(&member.object);
+                }
+                Expression::Identifier(root) => break root,
+                _ => return None,
+            }
+        };
+        if segments.is_empty() || !matches!(self.classify_occurrence(root.span), NameBinding::Free)
+        {
+            return None;
+        }
+        segments.push(Arc::from(root.name.as_str()));
+        segments.reverse();
+        Some(SliceGuardLiteral::Value(Arc::from(
+            segments.into_boxed_slice(),
+        )))
+    }
+
     /// Classify the exact prepared occurrence. Missing evidence is never free.
     fn classify_occurrence(&self, span: oxc_span::Span) -> NameBinding {
         use verter_semantic::analysis::flow::FlowBindingOccurrence;
@@ -7713,6 +7747,7 @@ impl<'a> Lowerer<'a> {
                             None => SliceSwitchTest::Default,
                             Some(test) => {
                                 match guard_literal_of(test, self.source)
+                                    .or_else(|| self.guard_value_path_of(test))
                                     .filter(|_| discriminant.is_some())
                                 {
                                     Some(literal) => SliceSwitchTest::Literal(literal),
@@ -9544,7 +9579,9 @@ impl<'a> Lowerer<'a> {
                     let Some(subject) = self.narrow_subject_of(subject_side) else {
                         continue;
                     };
-                    let Some(literal) = guard_literal_of(literal_side, self.source) else {
+                    let Some(literal) = guard_literal_of(literal_side, self.source)
+                        .or_else(|| self.guard_value_path_of(literal_side))
+                    else {
                         continue;
                     };
                     // An aliased DISCRIMINANT carries its own fact: the

@@ -23,13 +23,12 @@ fn upsert_enum_fixture(host: &crate::VerterHost) {
 const ENUMS: &str = include_str!("fixtures/enums.ts");
 
 #[test]
-#[ignore = "Enums reducer complete: Verter resolves `Color.Red` to the literal number `0` (verified). NOT oracle-liftable — tsgo hover displays the numeric-enum member NOMINALLY as `Color.Red`, which cannot carry the structural literal (oracle admission Reject(EnumMemberOrQualified)); lift pending oracle-infra for nominal enum-member display"]
+#[ignore = "Enums reducer complete: Verter resolves `Color.Red` to the member's nominal literal type, printed `Color.Red` as tsgo prints it (verified). NOT oracle-liftable — the oracle admission gate rejects a qualified enum-member print (Reject(EnumMemberOrQualified)); lift pending oracle-infra for nominal enum-member display"]
 fn enum_numeric_member_resolves_to_branded_literal_zero() {
-    // TS7 contract: `Color.Red` is a branded numeric-enum member type whose
-    // value-side numeric literal is `0`. The published surface for the type
-    // alias `ColorRed = Color.Red` is the literal `0` (TS treats numeric enum
-    // members as assignable to/from the corresponding number literal at the
-    // type level).
+    // TS7 contract: `Color.Red` is the numeric-enum member's own literal
+    // type, whose value is `0`. TypeScript 7.0.2 prints the alias
+    // `ColorRed = Color.Red` as `Color.Red` (measured through a
+    // `ColorRed`-typed return).
     let host = make_host_with_footprint();
     upsert_enum_fixture(&host);
 
@@ -41,17 +40,16 @@ fn enum_numeric_member_resolves_to_branded_literal_zero() {
         ProjectionMode::Expanded,
     );
 
-    assert_number_literal(&expr, 0.0);
+    assert_ref(&expr, "Color.Red");
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
 #[test]
-#[ignore = "Enums reducer complete: Verter resolves `Status.Idle` to the string literal `\"idle\"` (verified). NOT oracle-liftable — tsgo hover displays the string-enum member NOMINALLY as `Status.Idle` (oracle admission Reject(EnumMemberOrQualified)); lift pending oracle-infra for nominal enum-member display"]
+#[ignore = "Enums reducer complete: Verter resolves `Status.Idle` to the member's nominal literal type, printed `Status.Idle` as tsgo prints it (verified). NOT oracle-liftable — the oracle admission gate rejects a qualified enum-member print (Reject(EnumMemberOrQualified)); lift pending oracle-infra for nominal enum-member display"]
 fn enum_string_member_resolves_to_branded_string_literal() {
-    // TS7 contract: `Status.Idle` is a branded string-enum member. At the
-    // structural type level it surfaces as the string literal `"idle"`
-    // (Verter publishes the literal value; the brand identity is a TS-only
-    // nominal-typing trick that has no runtime structure).
+    // TS7 contract: `Status.Idle` is the string-enum member's own literal
+    // type, whose value is `"idle"`; TypeScript 7.0.2 prints it
+    // `Status.Idle`.
     let host = make_host_with_footprint();
     upsert_enum_fixture(&host);
 
@@ -63,7 +61,7 @@ fn enum_string_member_resolves_to_branded_string_literal() {
         ProjectionMode::Expanded,
     );
 
-    assert_string_literal(&expr, "idle");
+    assert_ref(&expr, "Status.Idle");
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
@@ -130,11 +128,12 @@ fn enum_keyof_typeof_string_yields_member_name_union() {
 }
 
 #[test]
-#[ignore = "Enums reducer complete: Verter resolves the const-enum member `Direction.Up` to the string literal `\"UP\"` (verified). NOT oracle-liftable — tsgo hover displays the const-enum member NOMINALLY as `Direction.Up` (oracle admission Reject(EnumMemberOrQualified)); lift pending oracle-infra for nominal enum-member display"]
+#[ignore = "Enums reducer complete: Verter resolves the const-enum member `Direction.Up` to its nominal literal type, printed `Direction.Up` as tsgo prints it (verified). NOT oracle-liftable — the oracle admission gate rejects a qualified enum-member print (Reject(EnumMemberOrQualified)); lift pending oracle-infra for nominal enum-member display"]
 fn enum_const_enum_member_resolves_to_inlined_string_literal() {
-    // TS7 contract: `Direction.Up` from a `const enum` produces the string
-    // literal `"UP"` (const enums inline at use sites; the type-level
-    // projection equals the assigned literal).
+    // TS7 contract: `Direction.Up` from a `const enum` is the member's own
+    // literal type, whose value is `"UP"` (a const enum is inlined at run
+    // time, not in the type system); TypeScript 7.0.2 prints it
+    // `Direction.Up`.
     let host = make_host_with_footprint();
     upsert_enum_fixture(&host);
 
@@ -146,12 +145,12 @@ fn enum_const_enum_member_resolves_to_inlined_string_literal() {
         ProjectionMode::Expanded,
     );
 
-    assert_string_literal(&expr, "UP");
+    assert_ref(&expr, "Direction.Up");
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
 #[test]
-#[ignore = "Enums reducer complete: Verter selects the `Status.Idle` arm and projects its payload `{ hint: string }` (verified) — `Status.Idle` lowers to the SAME literal on both the union arm and the Extract probe, so the shared object relation + indexed access pick the right arm. NOT oracle-liftable — tsgo hover displays the indexed-access ORIGIN, not the resolved object (oracle admission Reject(DeferredConstruct(indexed-access))); lift pending an indexed-access expansion probe"]
+#[ignore = "Enums reducer complete: Verter selects the `Status.Idle` arm and projects its payload `{ hint: string }` (verified) — `Status.Idle` lowers to the SAME member literal on both the union arm and the Extract probe, so the shared object relation + indexed access pick the right arm. NOT oracle-liftable — tsgo hover displays the indexed-access ORIGIN, not the resolved object (oracle admission Reject(DeferredConstruct(indexed-access))); lift pending an indexed-access expansion probe"]
 fn enum_discriminant_extract_projects_matching_arm_payload() {
     // TS7 contract: `Extract<StatefulNode, { status: Status.Idle }>["payload"]`
     // selects the `Status.Idle` arm and projects its payload object:
@@ -182,9 +181,9 @@ fn enum_discriminant_extract_projects_matching_arm_payload() {
 #[test]
 fn enum_member_projection_is_gated_to_declared_members() {
     // DISCRIMINATING (member-existence gate): a DECLARED member projects to
-    // its value literal, but an UNDECLARED member name must NOT be minted into
-    // a bogus literal — it stays a semantic miss. Removing the
-    // `enum_members.get(member)` gate would project `Color.Blue` to garbage.
+    // its own literal type (`Color.Red`, as TypeScript 7.0.2 prints it), but
+    // an UNDECLARED member name must NOT be minted into a bogus literal — it
+    // stays a semantic miss.
     let host = make_host_with_footprint();
     upsert_ts(
         &host,
@@ -201,7 +200,7 @@ fn enum_member_projection_is_gated_to_declared_members() {
         &[],
         ProjectionMode::Expanded,
     );
-    assert_number_literal(&real, 0.0);
+    assert_ref(&real, "Color.Red");
 
     let (ghost, _) = resolve_expr(
         &host,
@@ -309,20 +308,18 @@ fn enum_keyof_typeof_member_name_union_resolver_fence() {
 }
 
 // ---------------------------------------------------------------------------
-// Deferred-value member completeness fences — a member whose VALUE is deferred
-// (a computed `1 << 2`, a bare member after an unknown running value) keeps its
-// NAME on every projection surface and degrades its VALUE to the narrowest
-// sound primitive. Dropping a known member NAME is false absence, NOT a
-// deferred-value evaluation. These run (un-ignored) over LOCAL fixtures and pin
-// the resolver directly: `typeof Enum`, `keyof typeof Enum`, and `Enum.Member`
-// must all see EVERY member.
+// Member completeness fences — EVERY member, a constant one and a computed one
+// alike (a member whose initializer is no constant expression), keeps its NAME
+// on every projection surface and is typed by its own literal type. Dropping a
+// known member NAME is false absence. These run (un-ignored) over LOCAL
+// fixtures and pin the resolver directly: `typeof Enum`, `keyof typeof Enum`,
+// and `Enum.Member` must all see EVERY member.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn enum_keyof_typeof_includes_deferred_member_names_fence() {
-    // `keyof typeof E` over `enum E { A = 1 << 2, B, C = 5, D }` — `A`/`B` are
-    // VALUE-deferred but their NAMES are members and MUST appear in the key
-    // union. Expect all four names, not just the folded `C`/`D`.
+    // `keyof typeof E` over `enum E { A = 1 << 2, B, C = 5, D }` — every
+    // member NAME appears in the key union.
     let host = make_host_with_footprint();
     upsert_ts(
         &host,
@@ -343,11 +340,11 @@ fn enum_keyof_typeof_includes_deferred_member_names_fence() {
 }
 
 #[test]
-fn enum_typeof_degrades_deferred_members_to_sound_primitive_fence() {
-    // `typeof E` over `enum E { A = 1 << 2, B, C = 5, D }` — one synthetic
-    // property per member: the folded members carry their literal (`C: 5`,
-    // `D: 6`); the deferred members carry their DEGRADED sound primitive
-    // (`A: number`, `B: number`), never vanish.
+fn enum_typeof_types_every_member_by_its_literal_fence() {
+    // `typeof E` over `enum E { A = 1 << 2, B, C = 5, D }` — one property
+    // per member, each typed by the member's own literal type (`E.A` is the
+    // constant `4`, `E.B` the next value `5`). TypeScript 7.0.2 prints the
+    // members `E.A` .. `E.D`, and `` `${E.A}` `` as `"4"`.
     let host = make_host_with_footprint();
     upsert_ts(
         &host,
@@ -366,17 +363,15 @@ fn enum_typeof_degrades_deferred_members_to_sound_primitive_fence() {
 
     let props = object_props(&expr);
     assert_eq!(prop_names(&props), vec!["A", "B", "C", "D"]);
-    assert_primitive(&props["A"].ty, PrimitiveName::Number);
-    assert_primitive(&props["B"].ty, PrimitiveName::Number);
-    assert_number_literal(&props["C"].ty, 5.0);
-    assert_number_literal(&props["D"].ty, 6.0);
+    for (name, printed) in [("A", "E.A"), ("B", "E.B"), ("C", "E.C"), ("D", "E.D")] {
+        assert_ref(&props[name].ty, printed);
+    }
 }
 
 #[test]
 fn all_deferred_enum_keyof_typeof_yields_member_name_union_fence() {
-    // An ALL-deferred enum still has member NAMES. `keyof typeof Flags` =
-    // `"A" | "B"` (never empty / `never`), even though no value folds: the
-    // `typeof` object surfaces every member, degrading the values.
+    // `keyof typeof Flags` = `"A" | "B"` (never empty / `never`): the
+    // `typeof` object surfaces every member.
     let host = make_host_with_footprint();
     upsert_ts(
         &host,
@@ -397,16 +392,17 @@ fn all_deferred_enum_keyof_typeof_yields_member_name_union_fence() {
 }
 
 #[test]
-fn enum_member_deferred_value_resolves_to_degraded_type_fence() {
-    // `E.A` where `A`'s value is deferred (`1 << 2`) resolves to its DEGRADED
-    // sound primitive (`number`), NOT a semantic miss. The member is DECLARED;
-    // only its VALUE is deferred. (Contrast the gated UNDECLARED-member miss in
+fn enum_member_computed_value_resolves_to_its_literal_type_fence() {
+    // `E.A` where `A`'s initializer is no constant expression (`"x".length`)
+    // resolves to the member's own literal type, NOT a semantic miss:
+    // TypeScript 7.0.2 prints it `E.A`, and it is number-like (`E.A extends
+    // number` holds). (Contrast the gated UNDECLARED-member miss in
     // `enum_member_projection_is_gated_to_declared_members`.)
     let host = make_host_with_footprint();
     upsert_ts(
         &host,
         "/fixtures/enum_member_deferred_fence.ts",
-        "export enum E { A = 1 << 2, B = 5 }\n\
+        "export enum E { A = \"x\".length, B = 5 }\n\
          export type EA = E.A;\n",
     );
 
@@ -418,7 +414,7 @@ fn enum_member_deferred_value_resolves_to_degraded_type_fence() {
         ProjectionMode::Expanded,
     );
 
-    assert_primitive(&expr, PrimitiveName::Number);
+    assert_ref(&expr, "E.A");
 }
 
 // ---------------------------------------------------------------------------
@@ -435,8 +431,9 @@ fn enum_member_projection_resolves_through_barrel_reexport() {
     // to the BARREL (the import target), which declares NO local enum value
     // decl — only a re-export. The member hook must chase the re-export to the
     // leaf's enum value decl (the SAME export-target chase `typeof E` uses), so
-    // `E.A` projects to the member literal `0` rather than a semantic miss. This
-    // matches `typeof E`'s established cross-file behaviour.
+    // `E.A` projects to the member's literal type (printed `E.A`) rather than a
+    // semantic miss. This matches `typeof E`'s established cross-file
+    // behaviour.
     let host = make_host_with_footprint();
     upsert_ts(
         &host,
@@ -463,7 +460,7 @@ fn enum_member_projection_resolves_through_barrel_reexport() {
         ProjectionMode::Expanded,
     );
 
-    assert_number_literal(&expr, 0.0);
+    assert_ref(&expr, "E.A");
 }
 
 #[test]
@@ -471,9 +468,11 @@ fn cross_file_enum_member_projection_invalidates_on_leaf_edit() {
     // CACHE CORRECTNESS: the cross-file `E.A` projection reaches the leaf's enum
     // value decl through the SAME fact-traced chase `typeof E` uses, so the
     // leaf's content version enters the consuming query's read-set. Editing the
-    // LEAF's member value MUST invalidate the warm `E.A` result. Resolve `E.A`
-    // cold (= 0), reseed `A = 5` on the leaf, re-resolve: the result must follow
-    // the edit (= 5), never serve the stale `0`.
+    // LEAF's member value MUST invalidate the warm result. The member's value
+    // is read through a template (`` `${E.A}` ``, which TypeScript 7.0.2
+    // prints as the value's string): resolve it cold (`"0"`), reseed `A = 5`
+    // on the leaf, re-resolve: the result must follow the edit (`"5"`), never
+    // serve the stale `"0"`.
     let host = make_host_with_footprint();
     upsert_ts(
         &host,
@@ -489,7 +488,7 @@ fn cross_file_enum_member_projection_invalidates_on_leaf_edit() {
         &host,
         "/fixtures/enum_xinval_main.ts",
         "import { E } from \"/fixtures/enum_xinval_barrel\";\n\
-         export type X = E.A;\n",
+         export type X = `${E.A}`;\n",
     );
 
     let (cold, _) = resolve_expr(
@@ -499,7 +498,7 @@ fn cross_file_enum_member_projection_invalidates_on_leaf_edit() {
         &[],
         ProjectionMode::Expanded,
     );
-    assert_number_literal(&cold, 0.0);
+    assert_string_literal(&cold, "0");
 
     // Reseed `A = 5` on the LEAF — a member-value edit on the declaring file.
     upsert_ts(
@@ -515,5 +514,5 @@ fn cross_file_enum_member_projection_invalidates_on_leaf_edit() {
         &[],
         ProjectionMode::Expanded,
     );
-    assert_number_literal(&warm, 5.0);
+    assert_string_literal(&warm, "5");
 }

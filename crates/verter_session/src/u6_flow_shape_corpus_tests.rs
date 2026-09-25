@@ -1752,6 +1752,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "c13f0591d4c8cbad6f9598e8f0416e78ccd0fa510563558e51bafc52240f2f8d",
     ),
     (
+        "N65_enum_member_discriminant",
+        "07ef5ac6c5edd64f8bded0d8730907f374e98d00c3dc39015e851e464efb6f42",
+    ),
+    (
         "N66_shared_nonliteral_property_is_not_a_discriminant",
         "c79aa1eef3b0955b01462e490e414915f527e0e73f7c81dd6835be7eda251523",
     ),
@@ -3530,6 +3534,10 @@ mod corpus_suite {
             ),
             (
                 "N64_boolean_literal_discriminant",
+                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(number | string) }`",
+            ),
+            (
+                "N65_enum_member_discriminant",
                 "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(number | string) }`",
             ),
             (
@@ -5451,10 +5459,9 @@ const OPEN_DEBTS: &[&str] = &[
     // method. It publishes the unnarrowed union as a typed ReturnOnly.
     "N60_class_method_assertion_narrows",
     // Discriminant / `in` key SPELLINGS outside the decidable-guard set:
-    // an enum member reference, a const-typed literal key, a numeric key,
-    // and a `typeof`-narrowed callable. The optional-member row is the one
+    // a const-typed literal key, a numeric key, and a `typeof`-narrowed
+    // callable. The optional-member row is the one
     // NARROWER-than-checker answer in this group; its note says so.
-    "N65_enum_member_discriminant",
     "N69_in_operator_const_literal_key",
     "N70_in_operator_numeric_key",
     "N72_typeof_function_guard",
@@ -5583,8 +5590,9 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // discriminant behind a comma sequence is its last operand (N50), a
     // predicate over a captured binding narrows inside the invoked body,
     // dropping N25's dead contributor, and a correlated tuple's
-    // destructured discriminant narrows its siblings (N47): 30.
-    (Owner::U6NarrowLattice, 38, 30, 8),
+    // destructured discriminant narrows its siblings (N47), and an enum
+    // member discriminant narrows as the checker's does (N65): 31.
+    (Owner::U6NarrowLattice, 38, 31, 7),
     // A call's predicate is read from its callee's resolved signature —
     // an arrow bound to a `const`, an object-literal method, a generic
     // instantiated at the call (N56, N57, N59) — and a statement call

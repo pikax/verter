@@ -3067,6 +3067,14 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     current = widened;
                     continue;
                 }
+                // A member of an enum member's literal is a member of the
+                // value it stands for.
+                SemanticNodeData::EnumLiteral(literal) => {
+                    let base = literal.base;
+                    drop(data);
+                    current = base;
+                    continue;
+                }
                 SemanticNodeData::TypeOf(_) => {
                     // `typeof value.path<args>`: the TypeOf query owns the
                     // remaining member path (sole unique-symbol member mint)
@@ -6391,6 +6399,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             // diagnostic at flush time.
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Array { .. }
             | SemanticNodeData::Tuple { .. }
@@ -8083,6 +8092,7 @@ pub(super) fn value_may_contribute_call_signatures(
             SemanticNodeData::IntrinsicApplication { .. }
             | SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             // The nominal terminal widens to the `symbol` scalar — same
             // one-backing-interface order-safety as the primitive itself.
             | SemanticNodeData::TypeOfNominal(_)

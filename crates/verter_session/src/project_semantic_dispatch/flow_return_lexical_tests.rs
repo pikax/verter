@@ -2665,6 +2665,11 @@ fn flow_return_type_space_names_are_not_classified_against_the_value_inventory()
 /// printed name: `const w: import("./q").QE = qEnum(0)` is `TS2322 Type
 /// 'QE' is not assignable to type 'import("…").QE'`.
 ///
+/// The declaration file reuses the authored `QE.M` node for `qNoShadow`;
+/// the type itself is the module enum's only member's literal type, which
+/// the checker prints as the enum (`const r: QE.M = x as any; return r`
+/// emits `QE`).
+///
 /// Mutation recipe: pushing the DOTTED name into `ReferencedNames`
 /// instead of its head (the pre-fix `recursive_traversal` `Ref` /
 /// `RecursiveRef` arms) makes `"QE.M"` compare against binding names,
@@ -2672,8 +2677,8 @@ fn flow_return_type_space_names_are_not_classified_against_the_value_inventory()
 /// never fires, and all three shadowed rows publish the owner scope's
 /// answer CLEAN and WARM. The `qNoShadow` row is the value control: it
 /// pins that taking the head leaves an UNSHADOWED qualified reference's
-/// resolved answer (the module enum member's literal) untouched, so the
-/// gate cannot be widened into a blanket fail-closed on every qualified
+/// resolved answer (the module enum member's literal type) untouched, so
+/// the gate cannot be widened into a blanket fail-closed on every qualified
 /// reference.
 #[test]
 fn flow_return_qualified_type_reference_is_owned_by_its_head_segment() {
@@ -2682,7 +2687,14 @@ fn flow_return_qualified_type_reference_is_owned_by_its_head_segment() {
     // Control: no local `QE` at all, so the module enum member governs
     // and the answer stays clean + warm. This is the over-fire guard —
     // a head split that fires on an unshadowed name breaks this row.
-    assert_clean_warm(&host, "qNoShadow", string_lit("outer"));
+    assert_clean_warm(
+        &host,
+        "qNoShadow",
+        TypeExpr::Ref {
+            name: Arc::from("QE"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        },
+    );
 
     // The frame declares the HEAD in type space (`enum` / `namespace`,
     // both unconditionally unmodelable), so every one of these must fail

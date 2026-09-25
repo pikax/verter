@@ -1062,6 +1062,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // it from the scan.
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
+                | SemanticNodeData::EnumLiteral(_)
                 | SemanticNodeData::Opaque(_)
                 | SemanticNodeData::Infer { .. }
                 | SemanticNodeData::InferRef { .. }
