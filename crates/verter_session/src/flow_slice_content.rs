@@ -2466,6 +2466,11 @@ pub struct SliceEvolvingOperation {
     pub binding: FlowBindingRef,
     /// The operation.
     pub kind: SliceEvolvingOperationKind,
+    /// The span the skeleton records the operation's write at (the call
+    /// of a `push` / `unshift`, the element of `a[i] = v`, the
+    /// assignment of a reset) — the identity the unapplied-write ledger
+    /// subtracts once the evaluator applies the operation.
+    pub span: FrameSpan,
 }
 
 impl SliceEvolvingOperation {
@@ -12530,6 +12535,7 @@ impl<'a> Lowerer<'a> {
                             span,
                             value,
                         },
+                        span,
                     })));
                 }
             }
@@ -14118,6 +14124,7 @@ impl<'a> Lowerer<'a> {
             return EvolvingLowering::Operation(SliceEvolvingOperation {
                 binding,
                 kind: SliceEvolvingOperationKind::Append(Arc::from(arguments.into_boxed_slice())),
+                span: self.rebase(call.span),
             });
         }
         let Expression::AssignmentExpression(assignment) = expression else {
@@ -14141,6 +14148,7 @@ impl<'a> Lowerer<'a> {
                 value: Box::new(self.lower_expr(&assignment.right, mode)),
                 freshness: expression_freshness(&assignment.right),
             },
+            span: self.rebase(member.span),
         })
     }
 
@@ -14167,6 +14175,7 @@ impl<'a> Lowerer<'a> {
                 span,
                 value,
             },
+            span,
         }))
     }
 

@@ -6781,12 +6781,10 @@ fn collect_assignment_spans(
                 }
             }
             crate::flow_slice_content::SliceStatement::EvolvingArray(operation) => {
-                if let crate::flow_slice_content::SliceEvolvingOperationKind::Reset {
-                    span, ..
-                } = &operation.kind
-                {
-                    out.insert(*span);
-                }
+                // The evaluator applies every operation it lowers: a
+                // `push` or element write adds to the element type, a
+                // reset starts a new evolving array.
+                out.insert(operation.span);
                 if include_expression_writes {
                     for operand in operation.operands() {
                         collect_expression_write_spans(operand, out);
@@ -6910,7 +6908,8 @@ fn collect_assignment_spans(
     }
 }
 
-/// Collect the spans of every expression-position write in an expression
+/// Collect the spans of every expression-position write and EVOLVING-array
+/// operation in an expression
 /// tree — the same spans [`collect_assignment_spans`] subtracts for value
 /// roots, walked over every structurally-lowered nesting a write can sit
 /// in (object members and keys, spreads, branch arms, an IIFE's nested
@@ -6919,19 +6918,14 @@ fn collect_expression_write_spans(
     expr: &crate::flow_slice_content::SliceExpr,
     out: &mut rustc_hash::FxHashSet<verter_semantic::analysis::flow::FrameSpan>,
 ) {
-    for write in expression_write_tree(expr) {
+    for write in expression_effect_tree(expr, |_| true) {
         match write {
             crate::flow_slice_content::SliceExpr::Assignment { span, .. }
             | crate::flow_slice_content::SliceExpr::Update { span, .. } => {
                 out.insert(*span);
             }
             crate::flow_slice_content::SliceExpr::EvolvingArray(operation) => {
-                if let crate::flow_slice_content::SliceEvolvingOperationKind::Reset {
-                    span, ..
-                } = &operation.kind
-                {
-                    out.insert(*span);
-                }
+                out.insert(operation.span);
             }
             _ => {}
         }
