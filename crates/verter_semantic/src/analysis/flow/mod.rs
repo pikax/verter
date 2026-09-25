@@ -1905,16 +1905,21 @@ impl<'entry> SkeletonBuilder<'entry> {
                 self.record_member_write_target(MemberRef::Private(member), certainty, value);
             }
             AssignmentTarget::TSAsExpression(as_expression) => {
-                self.record_expression_write_target(&as_expression.expression, certainty, value);
+                self.record_expression_write_target(
+                    &as_expression.expression,
+                    true,
+                    certainty,
+                    value,
+                );
             }
             AssignmentTarget::TSSatisfiesExpression(satisfies) => {
-                self.record_expression_write_target(&satisfies.expression, certainty, value);
+                self.record_expression_write_target(&satisfies.expression, true, certainty, value);
             }
             AssignmentTarget::TSNonNullExpression(non_null) => {
-                self.record_expression_write_target(&non_null.expression, certainty, value);
+                self.record_expression_write_target(&non_null.expression, false, certainty, value);
             }
             AssignmentTarget::TSTypeAssertion(assertion) => {
-                self.record_expression_write_target(&assertion.expression, certainty, value);
+                self.record_expression_write_target(&assertion.expression, true, certainty, value);
             }
             AssignmentTarget::ArrayAssignmentTarget(array) => {
                 for element in array.elements.iter().flatten() {
@@ -2074,12 +2079,24 @@ impl<'entry> SkeletonBuilder<'entry> {
 
     /// A TS-carrier-wrapped write target (`(x as T) = v`): unwrap to the
     /// inner identifier / member target.
+    /// Record the target an assignment names through TS carriers:
+    /// `asserted` says a type assertion already wraps `expression`. An
+    /// identifier under a type assertion is a read, never a write
+    /// ([`WrappedAssignmentTarget`]).
     fn record_expression_write_target(
         &mut self,
         expression: &Expression<'_>,
+        asserted: bool,
         certainty: SkeletonWriteCertainty,
         value: Option<SkeletonExprSiteId>,
     ) {
+        if let WrappedAssignmentTarget::Asserted(identifier) =
+            wrapped_assignment_target(expression, asserted)
+        {
+            let name = self.intern(identifier.name.as_str());
+            self.push_read(name, identifier.span.into());
+            return;
+        }
         match unwrap_expression_carriers(expression) {
             Expression::Identifier(identifier) => {
                 let name = self.intern(identifier.name.as_str());
@@ -2670,8 +2687,10 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
 
     fn visit_update_expression(&mut self, it: &oxc_ast::ast::UpdateExpression<'a>) {
         let scoped = self.ensure_site_scope(it.span.into());
-        match &it.argument {
-            SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+        // `x++`, `x!++` and `(x)++` alike read and write the binding.
+        let binding = simple_assignment_target_binding(&it.argument);
+        match (&it.argument, binding) {
+            (_, Some(identifier)) => {
                 let name = self.intern(identifier.name.as_str());
                 self.push_read(name, identifier.span.into());
                 self.push_write(
@@ -2683,55 +2702,60 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                     Some(identifier.span.into()),
                 );
             }
-            SimpleAssignmentTarget::StaticMemberExpression(member) => {
+            (SimpleAssignmentTarget::StaticMemberExpression(member), None) => {
                 self.record_member_write_target(
                     MemberRef::Static(member),
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
-            SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+            (SimpleAssignmentTarget::ComputedMemberExpression(member), None) => {
                 self.record_member_write_target(
                     MemberRef::Computed(member),
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
-            SimpleAssignmentTarget::PrivateFieldExpression(member) => {
+            (SimpleAssignmentTarget::PrivateFieldExpression(member), None) => {
                 self.record_member_write_target(
                     MemberRef::Private(member),
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
-            SimpleAssignmentTarget::TSAsExpression(inner) => {
+            (SimpleAssignmentTarget::TSAsExpression(inner), None) => {
                 self.record_expression_write_target(
                     &inner.expression,
+                    true,
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
-            SimpleAssignmentTarget::TSSatisfiesExpression(inner) => {
+            (SimpleAssignmentTarget::TSSatisfiesExpression(inner), None) => {
                 self.record_expression_write_target(
                     &inner.expression,
+                    true,
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
-            SimpleAssignmentTarget::TSNonNullExpression(inner) => {
+            (SimpleAssignmentTarget::TSNonNullExpression(inner), None) => {
                 self.record_expression_write_target(
                     &inner.expression,
+                    false,
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
-            SimpleAssignmentTarget::TSTypeAssertion(inner) => {
+            (SimpleAssignmentTarget::TSTypeAssertion(inner), None) => {
                 self.record_expression_write_target(
                     &inner.expression,
+                    true,
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
+            (SimpleAssignmentTarget::AssignmentTargetIdentifier(_), None) => {}
         }
         if scoped {
             self.site_stack.pop();
@@ -2859,6 +2883,100 @@ impl SkeletonBuilder<'_> {
                 }
             }
         }
+    }
+}
+
+/// What a wrapped assignment target writes, as the checker reads
+/// assignment targets (`getAssignmentTarget`): the walk up from an
+/// identifier to the assignment crosses parentheses and non-null `!`, and
+/// stops at a type assertion (`as`, `satisfies`, `<T>`, an instantiation
+/// expression) — the identifier inside one is a REFERENCE, not an
+/// assignment target (tsc 7.0.2: `(x as any) = 5` leaves `x` narrowed as
+/// it was, `x! = 5` and `(x) = 5` retype it).
+#[derive(Debug, Clone, Copy)]
+pub enum WrappedAssignmentTarget<'a, 'ast> {
+    /// The target writes this binding.
+    Binding(&'a oxc_ast::ast::IdentifierReference<'ast>),
+    /// The target names this binding under a type assertion: a read.
+    Asserted(&'a oxc_ast::ast::IdentifierReference<'ast>),
+    /// Any other expression (a member access, …), carriers unwrapped.
+    Other(&'a Expression<'ast>),
+}
+
+/// Classify a wrapped assignment target expression
+/// ([`WrappedAssignmentTarget`]); `asserted` says a type assertion
+/// already wraps it.
+#[must_use]
+pub fn wrapped_assignment_target<'a, 'ast>(
+    expression: &'a Expression<'ast>,
+    mut asserted: bool,
+) -> WrappedAssignmentTarget<'a, 'ast> {
+    let mut current = expression;
+    loop {
+        current = match current {
+            Expression::Identifier(identifier) if asserted => {
+                return WrappedAssignmentTarget::Asserted(identifier)
+            }
+            Expression::Identifier(identifier) => {
+                return WrappedAssignmentTarget::Binding(identifier)
+            }
+            Expression::ParenthesizedExpression(inner) => &inner.expression,
+            Expression::TSNonNullExpression(inner) => &inner.expression,
+            Expression::TSAsExpression(inner) => {
+                asserted = true;
+                &inner.expression
+            }
+            Expression::TSSatisfiesExpression(inner) => {
+                asserted = true;
+                &inner.expression
+            }
+            Expression::TSTypeAssertion(inner) => {
+                asserted = true;
+                &inner.expression
+            }
+            Expression::TSInstantiationExpression(inner) => {
+                asserted = true;
+                &inner.expression
+            }
+            other => return WrappedAssignmentTarget::Other(other),
+        };
+    }
+}
+
+/// The binding a whole-binding assignment target writes: an identifier,
+/// or one under non-null `!` / parentheses; `None` for a member, a
+/// destructuring pattern, or an identifier under a type assertion
+/// ([`WrappedAssignmentTarget::Asserted`]).
+#[must_use]
+pub fn assignment_target_binding<'a, 'ast>(
+    target: &'a AssignmentTarget<'ast>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'ast>> {
+    match target {
+        AssignmentTarget::AssignmentTargetIdentifier(identifier) => Some(identifier),
+        AssignmentTarget::TSNonNullExpression(inner) => {
+            match wrapped_assignment_target(&inner.expression, false) {
+                WrappedAssignmentTarget::Binding(identifier) => Some(identifier),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// [`assignment_target_binding`] for an update expression's operand.
+#[must_use]
+pub fn simple_assignment_target_binding<'a, 'ast>(
+    target: &'a SimpleAssignmentTarget<'ast>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'ast>> {
+    match target {
+        SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => Some(identifier),
+        SimpleAssignmentTarget::TSNonNullExpression(inner) => {
+            match wrapped_assignment_target(&inner.expression, false) {
+                WrappedAssignmentTarget::Binding(identifier) => Some(identifier),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 

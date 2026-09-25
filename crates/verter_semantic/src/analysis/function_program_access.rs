@@ -49,14 +49,23 @@ pub(crate) fn static_member_reference(
     }
 }
 
+/// The write an assignment names through TS carriers, or `None` when the
+/// target is a whole binding under a type assertion — a reference, not an
+/// assignment target
+/// ([`crate::analysis::flow::WrappedAssignmentTarget`]). `asserted` says a
+/// type assertion already wraps `expression`.
 fn expression_target(
     mut expression: &Expression<'_>,
     mut kind: FunctionWriteKind,
-) -> FunctionWriteTarget {
+    mut asserted: bool,
+) -> Option<FunctionWriteTarget> {
     let span = expression.span().into();
     loop {
         expression = match expression {
-            Expression::Identifier(identifier) => return named(identifier, kind),
+            Expression::Identifier(_) if asserted && kind == FunctionWriteKind::Whole => {
+                return None
+            }
+            Expression::Identifier(identifier) => return Some(named(identifier, kind)),
             Expression::StaticMemberExpression(member) => {
                 kind = FunctionWriteKind::Member;
                 &member.object
@@ -70,12 +79,24 @@ fn expression_target(
                 &member.object
             }
             Expression::ParenthesizedExpression(inner) => &inner.expression,
-            Expression::TSAsExpression(inner) => &inner.expression,
-            Expression::TSSatisfiesExpression(inner) => &inner.expression,
             Expression::TSNonNullExpression(inner) => &inner.expression,
-            Expression::TSTypeAssertion(inner) => &inner.expression,
-            Expression::TSInstantiationExpression(inner) => &inner.expression,
-            _ => return FunctionWriteTarget::Unsupported { span },
+            Expression::TSAsExpression(inner) => {
+                asserted = true;
+                &inner.expression
+            }
+            Expression::TSSatisfiesExpression(inner) => {
+                asserted = true;
+                &inner.expression
+            }
+            Expression::TSTypeAssertion(inner) => {
+                asserted = true;
+                &inner.expression
+            }
+            Expression::TSInstantiationExpression(inner) => {
+                asserted = true;
+                &inner.expression
+            }
+            _ => return Some(FunctionWriteTarget::Unsupported { span }),
         };
     }
 }
@@ -100,31 +121,35 @@ pub(crate) fn expression_root<'a, 'ast>(
     }
 }
 
-pub(super) fn simple_assignment_target(target: &SimpleAssignmentTarget<'_>) -> FunctionWriteTarget {
+/// The write a simple assignment target names; `None` for a whole
+/// binding under a type assertion, which is a reference.
+pub(super) fn simple_assignment_target(
+    target: &SimpleAssignmentTarget<'_>,
+) -> Option<FunctionWriteTarget> {
     match target {
         SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-            named(identifier, FunctionWriteKind::Whole)
+            Some(named(identifier, FunctionWriteKind::Whole))
         }
         SimpleAssignmentTarget::StaticMemberExpression(member) => {
-            expression_target(&member.object, FunctionWriteKind::Member)
+            expression_target(&member.object, FunctionWriteKind::Member, false)
         }
         SimpleAssignmentTarget::ComputedMemberExpression(member) => {
-            expression_target(&member.object, FunctionWriteKind::Member)
+            expression_target(&member.object, FunctionWriteKind::Member, false)
         }
         SimpleAssignmentTarget::PrivateFieldExpression(member) => {
-            expression_target(&member.object, FunctionWriteKind::Member)
+            expression_target(&member.object, FunctionWriteKind::Member, false)
         }
         SimpleAssignmentTarget::TSAsExpression(inner) => {
-            expression_target(&inner.expression, FunctionWriteKind::Whole)
+            expression_target(&inner.expression, FunctionWriteKind::Whole, true)
         }
         SimpleAssignmentTarget::TSSatisfiesExpression(inner) => {
-            expression_target(&inner.expression, FunctionWriteKind::Whole)
+            expression_target(&inner.expression, FunctionWriteKind::Whole, true)
         }
         SimpleAssignmentTarget::TSNonNullExpression(inner) => {
-            expression_target(&inner.expression, FunctionWriteKind::Whole)
+            expression_target(&inner.expression, FunctionWriteKind::Whole, false)
         }
         SimpleAssignmentTarget::TSTypeAssertion(inner) => {
-            expression_target(&inner.expression, FunctionWriteKind::Whole)
+            expression_target(&inner.expression, FunctionWriteKind::Whole, true)
         }
     }
 }
@@ -172,7 +197,7 @@ fn collect_targets(target: &AssignmentTarget<'_>, out: &mut Vec<FunctionWriteTar
                 collect_targets(&rest.target, out);
             }
         }
-        _ => out.push(simple_assignment_target(
+        _ => out.extend(simple_assignment_target(
             target.to_simple_assignment_target(),
         )),
     }

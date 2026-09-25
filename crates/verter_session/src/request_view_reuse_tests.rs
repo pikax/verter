@@ -682,10 +682,26 @@ fn repeated_completion_of_one_content_version_promotes_once() {
 /// A plain script's artifact key reuses the parse identity its source
 /// snapshot derived once, and that key is exactly the one the source bytes
 /// derive: every serve reads the key, so re-hashing the whole source per
-/// serve made each read cost the file's size.
+/// serve made each read cost the file's size. Reading the key fifty times
+/// hashes the source no time at all; deriving it from the source (the
+/// control) hashes it once.
 #[test]
 fn a_script_artifact_key_reuses_the_snapshot_parse_identity() {
     let (host, canonical) = small_host_with_one_script();
+    assert!(host
+        .authoritative_current_artifact_key(&canonical)
+        .is_some());
+    let before = crate::file_artifact_store::source_parse_identity_derivations_for_tests();
+    for _ in 0..50 {
+        assert!(host
+            .authoritative_current_artifact_key(&canonical)
+            .is_some());
+    }
+    assert_eq!(
+        crate::file_artifact_store::source_parse_identity_derivations_for_tests() - before,
+        0,
+        "fifty key reads hash the script's source no time at all"
+    );
     let state = host
         .effective_file_state(&canonical, None)
         .expect("the script has a source state");
@@ -702,6 +718,11 @@ fn a_script_artifact_key_reuses_the_snapshot_parse_identity() {
         crate::file_artifact_store::BASE_PARSE_ENV_HASH,
     )
     .expect("the script's language has a parse identity");
+    assert_eq!(
+        crate::file_artifact_store::source_parse_identity_derivations_for_tests() - before,
+        1,
+        "deriving the key from the source hashes it once"
+    );
     assert_eq!(from_source.parse_key, parse_key);
     assert_eq!(
         host.authoritative_current_artifact_key(&canonical),

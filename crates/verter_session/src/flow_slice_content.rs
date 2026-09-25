@@ -62,8 +62,8 @@
 use std::sync::Arc;
 
 use oxc_ast::ast::{
-    BindingPattern, Expression, FormalParameters, LogicalOperator, Program, Statement, TSType,
-    UnaryOperator, VariableDeclarationKind,
+    BinaryOperator, BindingPattern, Expression, FormalParameters, LogicalOperator, Program,
+    Statement, TSType, UnaryOperator, VariableDeclarationKind,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::GetSpan;
@@ -1079,6 +1079,36 @@ pub enum SliceExpr {
         declared_evolving_captures:
             Arc<[verter_semantic::analysis::function_program::FlowBindingIdentity]>,
     },
+    /// A logical expression (`&&`, `||`, `??`) whose right operand writes
+    /// a binding — an EVOLVING-array operation, an assignment, an update:
+    /// the checker's flow branches at the left operand, so the right one
+    /// runs on its edge and the two paths join after it, and the value is
+    /// the checker's logical result over the operands' types.
+    Logical {
+        /// The operator.
+        operator: SliceLogicalOperator,
+        /// The left operand, evaluated on every path.
+        left: Box<SliceExpr>,
+        /// The right operand, evaluated on the path the left one does not
+        /// short-circuit.
+        right: Box<SliceExpr>,
+        /// The narrowing facts the left operand establishes (`&&` runs the
+        /// right operand under its positive reading, `||` under its
+        /// negated one; `??` narrows nothing).
+        guard: SliceGuard,
+    },
+    /// An arithmetic binary expression (`+`, `-`, `*`, `/`, `%`, `**`,
+    /// the shifts and the bitwise operators): the checker types it from its
+    /// operands' kinds (`checkBinaryLikeExpression`).
+    Arithmetic {
+        /// Whether the operator is `+` (numeric add or string concat);
+        /// every other arithmetic operator is numeric.
+        addition: bool,
+        /// The left operand.
+        left: Box<SliceExpr>,
+        /// The right operand.
+        right: Box<SliceExpr>,
+    },
     /// A value-position operation on an EVOLVING array
     /// ([`SliceEvolvingOperation`]): `a.push(v)` is the new length,
     /// `number`; `a[i] = v` is the assigned value.
@@ -1776,6 +1806,17 @@ pub struct SliceMutationArgument {
     /// The argument's freshness mirror (a bare `null` is the widening
     /// nullable type).
     pub freshness: SliceFreshness,
+}
+
+/// A logical operator ([`SliceExpr::Logical`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliceLogicalOperator {
+    /// `&&`.
+    And,
+    /// `||`.
+    Or,
+    /// `??`.
+    Coalesce,
 }
 
 /// One element of a structurally lowered array literal.
@@ -4014,14 +4055,31 @@ enum EvolvingLowering {
     NotEvolving,
 }
 
+/// Whether a binary operator is arithmetic ([`SliceExpr::Arithmetic`]):
+/// `+`, `-`, `*`, `/`, `%`, `**`, the shifts and the bitwise operators.
+fn binary_operator_is_arithmetic(operator: BinaryOperator) -> bool {
+    matches!(
+        operator,
+        BinaryOperator::Addition
+            | BinaryOperator::Subtraction
+            | BinaryOperator::Multiplication
+            | BinaryOperator::Division
+            | BinaryOperator::Remainder
+            | BinaryOperator::Exponential
+            | BinaryOperator::ShiftLeft
+            | BinaryOperator::ShiftRight
+            | BinaryOperator::ShiftRightZeroFill
+            | BinaryOperator::BitwiseOR
+            | BinaryOperator::BitwiseXOR
+            | BinaryOperator::BitwiseAnd
+    )
+}
+
 /// Whether an assignment is `x = []` — the unparenthesized empty array
 /// literal that starts a new EVOLVING array when `x` is one.
 fn evolving_reset_assignment(assignment: &oxc_ast::ast::AssignmentExpression<'_>) -> bool {
     assignment.operator == oxc_ast::ast::AssignmentOperator::Assign
-        && matches!(
-            &assignment.left,
-            oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(_)
-        )
+        && verter_semantic::analysis::flow::assignment_target_binding(&assignment.left).is_some()
         && verter_semantic::analysis::flow::is_evolving_array_initializer(Some(&assignment.right))
 }
 
@@ -4971,34 +5029,7 @@ impl Lowerer<'_> {
     /// involving the slot (which may be a predicate/assertion), or a write to
     /// the slot. A loop with none of those captures stays transparent.
     fn loop_has_selected_transfer(&mut self, statement: &Statement<'_>) -> bool {
-        self.loop_has_selected_transfer_where(statement, false)
-    }
-
-    /// [`Self::loop_has_selected_transfer`] with every operation on an
-    /// EVOLVING array set aside — a `push` / `unshift` call on one and a
-    /// write to or into one (a reassignment, its element writes, and any
-    /// other path write, which never retypes it): the loop's body lowers
-    /// them all. What remains transfers past the loop.
-    fn loop_has_selected_transfer_beyond_evolving(&mut self, statement: &Statement<'_>) -> bool {
-        self.loop_has_selected_transfer_where(statement, true)
-    }
-
-    fn loop_has_selected_transfer_where(
-        &mut self,
-        statement: &Statement<'_>,
-        beyond_evolving: bool,
-    ) -> bool {
         let loop_span = self.rebase(statement.span());
-        let mut evolving_calls: FxHashSet<FrameSpan> = FxHashSet::default();
-        if beyond_evolving {
-            for_each_call_expression(std::slice::from_ref(statement), |call| {
-                if verter_semantic::analysis::flow::evolving_array_mutation_root(call)
-                    .is_some_and(|root| self.evolving_binding_at(root.span).is_some())
-                {
-                    evolving_calls.insert(self.rebase(call.span));
-                }
-            });
-        }
         let control_guard_reads_selected =
             self.statement_has_selected_guard_transfer(statement, loop_span);
         if control_guard_reads_selected {
@@ -5008,7 +5039,6 @@ impl Lowerer<'_> {
         let call_reads_selected = self.skeleton.expr_sites.iter().any(|site| {
             site.calls.iter().any(|call| {
                 loop_span.contains(call.span)
-                    && !evolving_calls.contains(&call.span)
                     && !self.span_is_in_literal_dead_branch(statement, call.span)
                     && self.span_reads_downstream_slot(call.span, loop_span)
             })
@@ -5021,20 +5051,55 @@ impl Lowerer<'_> {
             return true;
         }
 
+        self.loop_has_selected_write(statement)
+    }
+
+    /// Whether a loop writes a binding the slice selects — a local declared
+    /// outside the loop or a captured EVOLVING array — whether the slice
+    /// reads it after the loop or inside it (a `return` in the body): the
+    /// loop then lowers whole.
+    ///
+    /// A write INTO a selected local (`o.y = v`) keeps the loop refused:
+    /// this lane applies no member write to a later member read.
+    fn loop_writes_a_selected_binding(&self, statement: &Statement<'_>) -> bool {
+        let loop_span = self.rebase(statement.span());
+        let writes_into = self.skeleton.writes.iter().any(|write| {
+            loop_span.contains(write.span)
+                && !write.path.is_empty()
+                && matches!(write.binding, Some(FlowBindingRef::Local(binding))
+                    if self.binding_is_selected(binding) && !self.skeleton.binding(binding).evolving_array)
+        });
+        !writes_into
+            && self.skeleton.writes.iter().any(|write| {
+                loop_span.contains(write.span)
+                    && match &write.binding {
+                        // A binding the loop itself declares (`for (let i …)`)
+                        // lives within it: its writes reach nothing past it.
+                        Some(FlowBindingRef::Local(binding)) => {
+                            self.binding_is_selected(*binding)
+                                && !loop_span.contains(self.skeleton.binding(*binding).span)
+                        }
+                        Some(captured @ FlowBindingRef::Captured(_)) => {
+                            self.is_evolving_binding(captured)
+                        }
+                        None => false,
+                    }
+            })
+    }
+
+    /// Whether a loop writes a binding the slice reads after it (a local,
+    /// or a captured EVOLVING array): the write transfer
+    /// [`Self::loop_has_selected_transfer`] refuses and a whole-lowered
+    /// loop ([`SliceStatement::Loop`]) resolves through each reference's
+    /// loop head.
+    fn loop_has_selected_write(&mut self, statement: &Statement<'_>) -> bool {
+        let loop_span = self.rebase(statement.span());
         self.skeleton.writes.iter().any(|write| {
             if !loop_span.contains(write.span) {
                 return false;
             }
             if self.span_is_in_literal_dead_branch(statement, write.span) {
                 self.inert_write_spans.insert(write.span);
-                return false;
-            }
-            if beyond_evolving
-                && write
-                    .binding
-                    .as_ref()
-                    .is_some_and(|binding| self.is_evolving_binding(binding))
-            {
                 return false;
             }
             match &write.binding {
@@ -5758,6 +5823,7 @@ impl Lowerer<'_> {
                     if verter_semantic::analysis::flow::expression_contains_call(&if_stmt.test) {
                         out.push(SliceStatement::ThrowPoint);
                     }
+                    self.lower_test_updates(&if_stmt.test, &mut out);
                     if let Some(alternate) = alternate {
                         may_break.extend(alternate.may_break);
                         out.push(SliceStatement::If {
@@ -5849,17 +5915,26 @@ impl Lowerer<'_> {
                     // guard, call/assertion, or write depends on iteration
                     // flow. Every shape takes the existing typed loop
                     // refusal.
-                    // A loop body that lowers whole carries its own
-                    // returns; a `yield` or an escaping `var` stays refused.
+                    // A loop that writes a binding read after it lowers
+                    // whole ([`SliceStatement::Loop`]), its guards, calls,
+                    // returns and jumps included: the evaluator takes each
+                    // reference's loop-head type the checker's way. A
+                    // `yield` or an escaping `var` stays refused, and so
+                    // does every other loop whose flow reaches past it —
+                    // one invoking a closure that writes among them (the
+                    // checker inlines an immediately invoked body's flow).
                     let refused_form =
                         statement_yields_in_own_frame(statement) || declares_var(statement);
+                    let reaches_past = self.control_has_return(statement)
+                        || loop_transfers_to_enclosing_label(statement, &self.loop_direct_labels)
+                        || self.loop_has_selected_transfer(statement);
+                    let loop_span = self.rebase(statement.span());
                     if !refused_form
-                        && self.loop_has_selected_transfer(statement)
-                        && !self.loop_has_selected_transfer_beyond_evolving(statement)
+                        && reaches_past
+                        && self.loop_writes_a_selected_binding(statement)
+                        && !self.invoked_closure_transfers_downstream_slot(statement, loop_span)
                     {
-                        // The only transfers past the loop are operations
-                        // on EVOLVING arrays: the loop lowers whole.
-                        let lowered = self.lower_evolving_loop(statement);
+                        let lowered = self.lower_loop(statement);
                         can_fall_through = lowered
                             .region
                             .can_fall_through
@@ -5867,11 +5942,7 @@ impl Lowerer<'_> {
                         hit_unsupported = lowered.hit_unsupported;
                         may_break.extend(lowered.may_break);
                         out.push(SliceStatement::Block(lowered.region));
-                    } else if refused_form
-                        || self.control_has_return(statement)
-                        || loop_transfers_to_enclosing_label(statement, &self.loop_direct_labels)
-                        || self.loop_has_selected_transfer(statement)
-                    {
+                    } else if refused_form || reaches_past {
                         out.push(SliceStatement::Unsupported(SliceUnsupported::Loop));
                         hit_unsupported = true;
                         can_fall_through = false;
@@ -6403,8 +6474,8 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Lower a loop whose only transfers past it are EVOLVING-array
-    /// operations into the block holding its initializer and the
+    /// Lower a loop whose flow reaches past it into the block holding its
+    /// initializer and the
     /// [`SliceStatement::Loop`]. Each iteration is an `if` over the test
     /// (a `for … of` / `for … in` tests nothing the checker narrows by)
     /// whose alternate leaves the loop through an anonymous break, around
@@ -6412,7 +6483,7 @@ impl Lowerer<'_> {
     /// `continue`s break to — and the update. A `do … while` tests after
     /// the body. A loop form this lowering does not model keeps the typed
     /// loop refusal.
-    fn lower_evolving_loop(&mut self, statement: &Statement<'_>) -> LoweredRegion {
+    fn lower_loop(&mut self, statement: &Statement<'_>) -> LoweredRegion {
         let refused = || LoweredRegion {
             region: SliceRegion {
                 statements: Arc::from(vec![SliceStatement::Unsupported(SliceUnsupported::Loop)]),
@@ -6554,6 +6625,7 @@ impl Lowerer<'_> {
             if verter_semantic::analysis::flow::expression_contains_call(test) {
                 test_statements.push(SliceStatement::ThrowPoint);
             }
+            self.lower_test_updates(test, &mut test_statements);
         }
         // The body: an anonymous `break` leaves this loop, a `continue`
         // ends the body, and the test's facts cover it like an `if` arm.
@@ -8097,9 +8169,7 @@ impl Lowerer<'_> {
                 return Some(statement);
             }
         }
-        if let Some(statement) =
-            self.lower_evolving_branch_statement(unwrap_parenthesized(expression))
-        {
+        if let Some(statement) = self.lower_branch_statement(unwrap_parenthesized(expression)) {
             return Some(statement);
         }
         match unwrap_parenthesized(expression) {
@@ -8215,16 +8285,27 @@ impl Lowerer<'_> {
         }
     }
 
+    /// Whether an expression writes a binding: a whole-binding write, an
+    /// update, or an EVOLVING-array operation the skeleton records.
+    fn writes_a_binding(&self, expression: &Expression<'_>) -> bool {
+        self.span_writes_a_binding(self.rebase(expression.span()))
+    }
+
+    fn span_writes_a_binding(&self, span: FrameSpan) -> bool {
+        self.skeleton
+            .writes
+            .iter()
+            .any(|write| span.contains(write.span) && write.binding.is_some())
+    }
+
     /// A statement-position conditional (`c ? a.push(1) : a.push("s")`)
-    /// or logical (`c && a.push(1)`, `c || …`, `c ?? …`) expression whose
-    /// arms write an EVOLVING array: the checker's flow branches there as
-    /// an `if` over the test does, so it lowers as one — the test's guard
-    /// narrows each arm, each arm is its own effect statement, and the
-    /// paths join after it. `None` for every other expression.
-    fn lower_evolving_branch_statement(
-        &mut self,
-        expression: &Expression<'_>,
-    ) -> Option<SliceStatement> {
+    /// or logical (`c && a.push(1)`, `c || (x = 1)`, `c ?? …`) expression
+    /// whose conditionally evaluated operands write a binding: the
+    /// checker's flow branches there as an `if` over the test does, so it
+    /// lowers as one — the test's guard narrows each arm, each arm is its
+    /// own effect statement, and the paths join after it. `None` for
+    /// every other expression.
+    fn lower_branch_statement(&mut self, expression: &Expression<'_>) -> Option<SliceStatement> {
         let (test, consequent, alternate, prefix) = match expression {
             Expression::ConditionalExpression(conditional) => (
                 Some(&conditional.test),
@@ -8248,14 +8329,7 @@ impl Lowerer<'_> {
             .flatten()
             .map(|arm| self.rebase(arm.span()))
             .collect();
-        let writes_evolving = self.skeleton.writes.iter().any(|write| {
-            arms.iter().any(|arm| arm.contains(write.span))
-                && write
-                    .binding
-                    .as_ref()
-                    .is_some_and(|binding| self.is_evolving_binding(binding))
-        });
-        if !writes_evolving {
+        if !arms.iter().any(|arm| self.span_writes_a_binding(*arm)) {
             return None;
         }
         let region = |statements: Vec<SliceStatement>| SliceRegion {
@@ -8290,6 +8364,7 @@ impl Lowerer<'_> {
             if verter_semantic::analysis::flow::expression_contains_call(test) {
                 statements.push(SliceStatement::ThrowPoint);
             }
+            self.lower_test_updates(test, &mut statements);
         }
         let lower_arm = |this: &mut Self, arm: Option<&Expression<'_>>| {
             let active_guard_base = this.active_guard_bindings.len();
@@ -8314,17 +8389,38 @@ impl Lowerer<'_> {
         Some(SliceStatement::Block(region(statements)))
     }
 
+    /// The `x++` / `x--` updates a control test evaluates on every path
+    /// through it (`while (n-- > 0)`), lowered ahead of the test's branch
+    /// in source order: the checker's flow assigns each where the test
+    /// evaluates, before the condition splits. An update in a conditionally
+    /// evaluated operand (`c && n--`, a conditional's arm) is not on every
+    /// path, and one the frame cannot model stays on the unapplied-write
+    /// ledger.
+    fn lower_test_updates(&mut self, test: &Expression<'_>, out: &mut Vec<SliceStatement>) {
+        match test {
+            Expression::UpdateExpression(update) => {
+                out.extend(self.modeled_update_statement(update));
+            }
+            Expression::BinaryExpression(binary) => {
+                self.lower_test_updates(&binary.left, out);
+                self.lower_test_updates(&binary.right, out);
+            }
+            Expression::UnaryExpression(unary) => self.lower_test_updates(&unary.argument, out),
+            Expression::ParenthesizedExpression(paren) => {
+                self.lower_test_updates(&paren.expression, out);
+            }
+            _ => {}
+        }
+    }
+
     /// The modeled `x++` / `x--` statement ([`SliceStatement::Update`]),
     /// when `x` is a parameter or modelable local the demand selected.
     fn modeled_update_statement(
         &mut self,
         update: &oxc_ast::ast::UpdateExpression<'_>,
     ) -> Option<SliceStatement> {
-        let oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) =
-            &update.argument
-        else {
-            return None;
-        };
+        let identifier =
+            verter_semantic::analysis::flow::simple_assignment_target_binding(&update.argument)?;
         let binding = match self.binding_at(identifier.span)? {
             FlowBindingRef::Local(binding) => binding,
             FlowBindingRef::Captured(_) => return None,
@@ -8406,11 +8502,8 @@ impl Lowerer<'_> {
         verter_semantic::analysis::flow::SkeletonExprSiteId,
         FrameSpan,
     )> {
-        let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) =
-            &assignment.left
-        else {
-            return None;
-        };
+        let identifier =
+            verter_semantic::analysis::flow::assignment_target_binding(&assignment.left)?;
         let name = identifier.name.as_str();
         let root = match self.classify_occurrence(identifier.span) {
             NameBinding::Param(ordinal) => {
@@ -8435,11 +8528,10 @@ impl Lowerer<'_> {
     ) -> SliceExpr {
         // A class expression assigned to a binding is named after it
         // (`C = class {}` is the checker's `C`).
-        if let (
-            oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier),
-            Expression::ClassExpression(class),
-        ) = (&assignment.left, &assignment.right)
-        {
+        if let (Some(identifier), Expression::ClassExpression(class)) = (
+            verter_semantic::analysis::flow::assignment_target_binding(&assignment.left),
+            &assignment.right,
+        ) {
             return self.lower_class_expression(class, Some(identifier.name.as_str()));
         }
         self.lower_expr(
@@ -8472,8 +8564,8 @@ impl Lowerer<'_> {
             .or_else(|| self.modeled_assignment_parts(assignment, assignment.span()))?;
         // `(a = [])` starts a new EVOLVING array.
         if evolving_reset_assignment(assignment) {
-            if let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) =
-                &assignment.left
+            if let Some(identifier) =
+                verter_semantic::analysis::flow::assignment_target_binding(&assignment.left)
             {
                 if let Some(binding) = self.evolving_binding_at(identifier.span) {
                     let value = Box::new(self.lowered_assignment_rhs(assignment));
@@ -8560,6 +8652,43 @@ impl Lowerer<'_> {
         }
         match expr {
             Expression::Identifier(identifier) => self.lower_identifier_read(identifier, mode),
+            Expression::LogicalExpression(logical) if self.writes_a_binding(&logical.right) => {
+                let guard = if logical.operator == LogicalOperator::Coalesce {
+                    SliceGuard::None
+                } else {
+                    let guard = self.lower_guard(&logical.left);
+                    if self.record_control_position_calls(&logical.left) {
+                        self.control_test_gap = true;
+                    }
+                    guard
+                };
+                let left = self.lower_expr(&logical.left, mode);
+                let right = self.lower_expr(&logical.right, mode);
+                SliceExpr::Logical {
+                    operator: match logical.operator {
+                        LogicalOperator::And => SliceLogicalOperator::And,
+                        LogicalOperator::Or => SliceLogicalOperator::Or,
+                        LogicalOperator::Coalesce => SliceLogicalOperator::Coalesce,
+                    },
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    guard,
+                }
+            }
+            Expression::BinaryExpression(binary)
+                if binary_operator_is_arithmetic(binary.operator) =>
+            {
+                // Each operand is a value read by the operator, never a
+                // binding's declared literal: lower both as operands.
+                let operand_mode = ExprMode::BindingInit {
+                    preserve_literal: true,
+                };
+                SliceExpr::Arithmetic {
+                    addition: binary.operator == BinaryOperator::Addition,
+                    left: Box::new(self.lower_expr(&binary.left, operand_mode)),
+                    right: Box::new(self.lower_expr(&binary.right, operand_mode)),
+                }
+            }
             Expression::ChainExpression(chain) => {
                 // A MEMBER-valued chain (`maybeObj?.b`) is a typed optional
                 // member read over a non-call base: it publishes
@@ -9077,11 +9206,8 @@ impl Lowerer<'_> {
         if !evolving_reset_assignment(assignment) {
             return None;
         }
-        let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) =
-            &assignment.left
-        else {
-            return None;
-        };
+        let identifier =
+            verter_semantic::analysis::flow::assignment_target_binding(&assignment.left)?;
         let binding = self.evolving_binding_at(identifier.span)?;
         let (_, definition, span) =
             self.modeled_assignment_parts(assignment, assignment.right.span())?;
@@ -10671,16 +10797,16 @@ impl<'a> LeafCallScanner<'a> {
                 self.push_write(identifier.name.as_str(), identifier.span);
             }
             AssignmentTarget::TSAsExpression(as_expression) => {
-                self.collect_expression_write_target(&as_expression.expression);
+                self.collect_expression_write_target(&as_expression.expression, true);
             }
             AssignmentTarget::TSSatisfiesExpression(satisfies) => {
-                self.collect_expression_write_target(&satisfies.expression);
+                self.collect_expression_write_target(&satisfies.expression, true);
             }
             AssignmentTarget::TSNonNullExpression(non_null) => {
-                self.collect_expression_write_target(&non_null.expression);
+                self.collect_expression_write_target(&non_null.expression, false);
             }
             AssignmentTarget::TSTypeAssertion(assertion) => {
-                self.collect_expression_write_target(&assertion.expression);
+                self.collect_expression_write_target(&assertion.expression, true);
             }
             AssignmentTarget::ArrayAssignmentTarget(array) => {
                 for element in array.elements.iter().flatten() {
@@ -10733,27 +10859,15 @@ impl<'a> LeafCallScanner<'a> {
 
     /// Peel parser-legal wrappers recursively: a write through
     /// `((x) as any) = v` still retypes `x`.
-    fn collect_expression_write_target(&mut self, expression: &Expression<'a>) {
-        match expression {
-            Expression::Identifier(identifier) => {
-                self.push_write(identifier.name.as_str(), identifier.span);
-            }
-            Expression::ParenthesizedExpression(inner) => {
-                self.collect_expression_write_target(&inner.expression);
-            }
-            Expression::TSAsExpression(inner) => {
-                self.collect_expression_write_target(&inner.expression);
-            }
-            Expression::TSSatisfiesExpression(inner) => {
-                self.collect_expression_write_target(&inner.expression);
-            }
-            Expression::TSNonNullExpression(inner) => {
-                self.collect_expression_write_target(&inner.expression);
-            }
-            Expression::TSTypeAssertion(inner) => {
-                self.collect_expression_write_target(&inner.expression);
-            }
-            _ => {}
+    /// A whole-binding write the target names through TS carriers; an
+    /// identifier under a type assertion (`asserted`, or one reached on the
+    /// way) is a reference, not an assignment target
+    /// ([`verter_semantic::analysis::flow::WrappedAssignmentTarget`]).
+    fn collect_expression_write_target(&mut self, expression: &Expression<'a>, asserted: bool) {
+        if let verter_semantic::analysis::flow::WrappedAssignmentTarget::Binding(identifier) =
+            verter_semantic::analysis::flow::wrapped_assignment_target(expression, asserted)
+        {
+            self.push_write(identifier.name.as_str(), identifier.span);
         }
     }
 
@@ -10786,26 +10900,13 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
     }
     fn visit_update_expression(&mut self, it: &oxc_ast::ast::UpdateExpression<'a>) {
         if self.nested_frame_nesting == 0 {
-            // A parser-legal TS wrapper still writes its inner binding:
-            // `(x as any)++` retypes `x` exactly as `x++` does.
-            use oxc_ast::ast::SimpleAssignmentTarget as T;
-            match &it.argument {
-                T::AssignmentTargetIdentifier(identifier) => {
-                    self.push_write(identifier.name.as_str(), identifier.span);
-                }
-                T::TSAsExpression(inner) => {
-                    self.collect_expression_write_target(&inner.expression);
-                }
-                T::TSSatisfiesExpression(inner) => {
-                    self.collect_expression_write_target(&inner.expression);
-                }
-                T::TSNonNullExpression(inner) => {
-                    self.collect_expression_write_target(&inner.expression);
-                }
-                T::TSTypeAssertion(inner) => {
-                    self.collect_expression_write_target(&inner.expression);
-                }
-                _ => {}
+            // The checker assigns through non-null `!` and parentheses and
+            // never through a type assertion: `x!++` retypes `x` as `x++`
+            // does, `(x as any)++` leaves it as it was.
+            if let Some(identifier) =
+                verter_semantic::analysis::flow::simple_assignment_target_binding(&it.argument)
+            {
+                self.push_write(identifier.name.as_str(), identifier.span);
             }
         }
         walk::walk_update_expression(self, it);

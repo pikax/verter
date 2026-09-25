@@ -3343,3 +3343,461 @@ const ARRAY_JOIN_TABLE: &[(&str, &str, &str, &str, &str)] = &[
 fn array_joins_reduce_by_the_covariant_subtype_relation() {
     assert_measured_matrix("array-joins.ts", ARRAY_JOIN_SOURCE, ARRAY_JOIN_TABLE);
 }
+
+/// Arithmetic binary expressions over parameters, literals, locals, enums and `any` / `unknown` / nullish operands.
+const ARITHMETIC_SOURCE: &str = r#"
+export function addNum(i: number) { return i + 1; }
+export function addLit() { return 1 + 2; }
+export function addStr(i: number, s: string) { return i + s; }
+export function addStrLit(i: number) { return "a" + i; }
+export function addAny(a: any, i: number) { return a + i; }
+export function addAnyStr(a: any) { return a + "s"; }
+export function addUnion(u: 1 | 2, i: number) { return u + i; }
+export function addNumUnionStr(u: number | string, i: number) { return u + i; }
+export function addBool(b: boolean, i: number) { return b + i; }
+export function addNull(i: number) { return null + i; }
+export function addUndef(u: undefined, i: number) { return u + i; }
+export function addUnknown(u: unknown, i: number) { return u + i; }
+export function addTemplate(i: number) { return `${i}` + i; }
+export function subNum(i: number) { return i - 1; }
+export function subAny(a: any) { return a - 1; }
+export function subBigNum(a: bigint, i: number) { return a - i; }
+export function subStr(s: string) { return s - 1; }
+export function mulUnknown(u: unknown) { return u * 2; }
+export function shiftNum(i: number) { return i << 2; }
+export function powNum(i: number) { return i ** 2; }
+export function bitAny(a: any, b: any) { return a | b; }
+export function modBigAny(a: bigint, b: any) { return a % b; }
+export function addEnum(e: E, i: number) { return e + i; }
+export function addStrEnum(e: S, i: number) { return e + i; }
+export function nestedArith(i: number, s: string) { return i + 1 + s; }
+export function parenArith(i: number) { return (i + 1) * 2; }
+export function localArith() { let x = 0; x = x + 1; return x; }
+export function constArith() { const x = 1 + 1; return x; }
+export function arrElem(i: number) { return [i + 1]; }
+export function addBigParams(a: bigint, b: bigint) { return a + b; }
+export function mulBigParams(a: bigint, b: bigint) { return a * b; }
+export function subBigLit(a: bigint, b: 1n | 2n) { return a - b; }
+export function parenAssignNarrow() { let x: string | number = "s"; (x) = 5; return x; }
+enum E { A, B }
+enum S { A = "a" }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const ARITHMETIC_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number / number / number / number
+    ("addNum", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("addLit", "number", "number", "number", "number"),
+    // string / string / string / string
+    ("addStr", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("addStrLit", "string", "string", "string", "string"),
+    // any / any / any / any
+    ("addAny", "any", "any", "any", "any"),
+    // string / string / string / string
+    ("addAnyStr", "string", "string", "string", "string"),
+    // number / number / number / number
+    ("addUnion", "number", "number", "number", "number"),
+    // any {TS2365@72} / any {TS2365@72} / any {TS2365@72} / any {TS2365@72}
+    ("addNumUnionStr", "any", "any", "any", "any"),
+    // any {TS2365@57} / any {TS2365@57} / any {TS2365@57} / any {TS2365@57}
+    ("addBool", "any", "any", "any", "any"),
+    // any {TS18050@45} / any {TS2365@45} / any {TS18050@45} / any {TS2365@45}
+    ("addNull", "any", "any", "any", "any"),
+    // any {TS18048@60} / any {TS2365@60} / any {TS18048@60} / any {TS2365@60}
+    ("addUndef", "any", "any", "any", "any"),
+    // any {TS18046@60} / any {TS2365@60} / any {TS18046@60} / any {TS2365@60}
+    ("addUnknown", "any", "any", "any", "any"),
+    // string / string / string / string
+    ("addTemplate", "string", "string", "string", "string"),
+    // number / number / number / number
+    ("subNum", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("subAny", "number", "number", "number", "number"),
+    // any {TS2365@58} / any {TS2365@58} / any {TS2365@58} / any {TS2365@58}
+    ("subBigNum", "any", "any", "any", "any"),
+    // number {TS2362@44} / number {TS2362@44} / number {TS2362@44} / number {TS2362@44}
+    ("subStr", "number", "number", "number", "number"),
+    // number {TS18046@49} / number {TS2362@49} / number {TS18046@49} / number {TS2362@49}
+    ("mulUnknown", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("shiftNum", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("powNum", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("bitAny", "number", "number", "number", "number"),
+    // bigint / bigint / bigint / bigint
+    ("modBigAny", "bigint", "bigint", "bigint", "bigint"),
+    // number / number / number / number
+    ("addEnum", "number", "number", "number", "number"),
+    // string / string / string / string
+    ("addStrEnum", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("nestedArith", "string", "string", "string", "string"),
+    // number / number / number / number
+    ("parenArith", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("localArith", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("constArith", "number", "number", "number", "number"),
+    // number[] / number[] / number[] / number[]
+    ("arrElem", "number[]", "number[]", "number[]", "number[]"),
+    // bigint / bigint / bigint / bigint
+    ("addBigParams", "bigint", "bigint", "bigint", "bigint"),
+    // bigint / bigint / bigint / bigint
+    ("mulBigParams", "bigint", "bigint", "bigint", "bigint"),
+    // bigint / bigint / bigint / bigint
+    ("subBigLit", "bigint", "bigint", "bigint", "bigint"),
+    // number / number / number / number
+    ("parenAssignNarrow", "number", "number", "number", "number"),
+];
+
+/// Assignments and updates through TS carriers: through non-null `!` and parentheses they assign the binding; through a type assertion (`as`, `satisfies`, `<T>`) they do not.
+const ASSERTED_TARGETS_SOURCE: &str = r#"
+export function asAssignNum() { let a = []; a.push(1); (a as any) = 5; return a; }
+export function asAssignLet() { let x: string | number = "s"; (x as any) = 5; return x; }
+export function asAssignNarrow(y: string | number) { let x = y; if (typeof x === "string") { (x as any) = 5; return x; } return 0; }
+export function asAssignLiteral() { let x = "s" as string | number; x = 1; (x as any) = "t"; return x; }
+export function parenAssignNarrow() { let x: string | number = "s"; (x) = 5; return x; }
+export function nonNullAssign() { let x: string | number = "s"; x! = 5; return x; }
+export function satisfiesAssign() { let x: string | number = "s"; (x satisfies string | number) = 5; return x; }
+export function angleAssign() { let x: string | number = "s"; (<any>x) = 5; return x; }
+export function asUpdate() { let x: string | number = "s"; (x as any)++; return x; }
+export function asCaptureAfter() { let x: string | number = "s"; (x as any) = 5; return () => x; }
+export function asArrayWrite() { let a = []; a.push(1); (a as any)[0] = "s"; return a; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const ASSERTED_TARGETS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number[] / number[] / never[] {TS2345@52} / any[]
+    ("asAssignNum", "number[]", "number[]", "never[]", "any[]"),
+    // string / string / string / string
+    ("asAssignLet", "string", "string", "string", "string"),
+    // string | 0 / string | 0 / string | 0 / string | 0
+    (
+        "asAssignNarrow",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+    ),
+    // number / number / number / number
+    ("asAssignLiteral", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("parenAssignNarrow", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("nonNullAssign", "number", "number", "number", "number"),
+    // string {TS2322@67} / string {TS2322@67} / string {TS2322@67} / string {TS2322@67}
+    ("satisfiesAssign", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("angleAssign", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("asUpdate", "string", "string", "string", "string"),
+    // () => string / () => string / () => string / () => string
+    (
+        "asCaptureAfter",
+        "() => string",
+        "() => string",
+        "() => string",
+        "() => string",
+    ),
+    // number[] / number[] / never[] {TS2345@53} / any[]
+    ("asArrayWrite", "number[]", "number[]", "never[]", "any[]"),
+];
+
+/// Writes to ordinary variables in loops, and updates in control tests.
+const LOOP_WRITES_SOURCE: &str = r#"
+export function counterFor(n: number) { let x = 0; for (let i = 0; i < n; i++) { x = x + 1; } return x; }
+export function widenFor(n: number) { let x: string | number = 0; for (let i = 0; i < n; i++) { x = "s"; } return x; }
+export function whileWrite(n: number) { let x: string | number | boolean = 0; while (n-- > 0) { x = "s"; } return x; }
+export function doWrite(n: number) { let x: string | number | boolean = 0; do { x = true; } while (n-- > 0); return x; }
+export function breakWrite(n: number) { let x: string | number | boolean = 0; for (let i = 0; i < n; i++) { if (i > 2) break; x = "s"; } return x; }
+export function continueWrite(n: number) { let x: string | number | boolean = 0; for (let i = 0; i < n; i++) { if (i > 2) continue; x = "s"; } return x; }
+export function autoLoop(n: number) { let x; for (let i = 0; i < n; i++) { x = i; } return x; }
+export function autoNullLoop(n: number) { let x = null; for (let i = 0; i < n; i++) { x = "s"; } return x; }
+export function narrowedAfter(n: number) { let x: string | number = 0; while (n > 0) { x = "s"; n--; } return typeof x === "string" ? x : 1; }
+export function incLoop(n: number) { let x = 0; while (x < n) { x++; } return x; }
+export function varLoop(n: number) { var x: string | number = 0; for (let i = 0; i < n; i++) { x = "s"; } return x; }
+export function returnInLoopWrite(n: number) { let x: string | number = 0; for (let i = 0; i < n; i++) { x = "s"; if (i) return x; } return x; }
+export function autoReadInBody(n: number) { let x; for (let i = 0; i < n; i++) { if (i > 0) return x; x = i; } return 0; }
+export function varReadInBody(n: number) { var x: string | number = 0; for (let i = 0; i < n; i++) { if (i > 0) return x; x = "s"; } return true; }
+export function doFalseWrite() { let x: "a" | "b" | "c" = "a"; do { x = "b" } while (false); return x }
+export function doFalseTwo(f: boolean) { let x: "a" | "b" | "c" = "a"; do { if (f) { x = "b" } else { x = "c" } } while (false); return x }
+export function ifTestUpdate(n: number) { if (n-- > 0) { return n; } return 1; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const LOOP_WRITES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "b" / "b" / "b" / "b"
+    ("doFalseWrite", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "b" | "c" / "b" | "c" / "b" | "c" / "b" | "c"
+    (
+        "doFalseTwo",
+        "\"b\" | \"c\"",
+        "\"b\" | \"c\"",
+        "\"b\" | \"c\"",
+        "\"b\" | \"c\"",
+    ),
+    // number | undefined / number / any / any
+    (
+        "autoReadInBody",
+        "number | undefined",
+        "number",
+        "any",
+        "any",
+    ),
+    // string | number | true / string | number | true / string | number | true / string | number | true
+    (
+        "varReadInBody",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // number / number / number / number
+    ("counterFor", "number", "number", "number", "number"),
+    // string | number / string | number / string | number / string | number
+    (
+        "widenFor",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "whileWrite",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // boolean / boolean / boolean / boolean
+    ("doWrite", "boolean", "boolean", "boolean", "boolean"),
+    // string | number / string | number / string | number / string | number
+    (
+        "breakWrite",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "continueWrite",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // number | undefined / number / any / any
+    ("autoLoop", "number | undefined", "number", "any", "any"),
+    // string | null / string / null {TS2322@87} / any
+    ("autoNullLoop", "null | string", "string", "null", "any"),
+    // string | 1 / string | 1 / string | 1 / string | 1
+    (
+        "narrowedAfter",
+        "1 | string",
+        "1 | string",
+        "1 | string",
+        "1 | string",
+    ),
+    // number / number / number / number
+    ("incLoop", "number", "number", "number", "number"),
+    // string | number / string | number / string | number / string | number
+    (
+        "varLoop",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "returnInLoopWrite",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // number / number / number / number
+    ("ifTestUpdate", "number", "number", "number", "number"),
+];
+
+/// Logical expressions whose right operand writes a binding, in value and statement position.
+const VALUE_LOGICAL_SOURCE: &str = r#"
+export function valueLogicalRead(c: boolean) { const a = []; const r = c && a.push(1); return [r, a]; }
+export function valueOrRead(c: boolean) { const a = []; const r = c || a.push(1); return [r, a]; }
+export function valueCoalesceRead(x: number | null) { const a = []; const r = x ?? a.push("s"); return [r, a]; }
+export function valueLogicalOnly(c: boolean) { const a = []; return c && a.push(1); }
+export function valueStrLeft(s: string) { const a = []; const r = s && a.push(1); return [r, a]; }
+export function valueNumOr(n: number) { const a = []; const r = n || a.push(1); return [r, a]; }
+export function valueObjAnd(o: { k: 1 }) { const a = []; const r = o && a.push(1); return [r, a]; }
+export function valueNullOr(v: string | null) { const a = []; const r = v || a.push(1); return [r, a]; }
+export function valueUndefCoalesce(v?: string) { const a = []; const r = v ?? a.push(1); return [r, a]; }
+export function stmtAssignAnd(c: boolean) { let x: string | number = "s"; c && (x = 1); return x; }
+export function valueNarrowAnd(v: string | null) { const a = []; const r = v !== null && a.push(v); return [r, a]; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const VALUE_LOGICAL_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // (number | false | number[])[] / (number | number[])[] / (number | false | never[])[] {TS2345@84} / (number | any[])[]
+    (
+        "valueLogicalRead",
+        "(false | number | number[])[]",
+        "(number | number[])[]",
+        "(false | never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // (number | true | number[])[] / (number | true | number[])[] / (number | true | never[])[] {TS2345@79} / (number | true | any[])[]
+    (
+        "valueOrRead",
+        "(number | number[] | true)[]",
+        "(number | number[] | true)[]",
+        "(never[] | number | true)[]",
+        "(any[] | number | true)[]",
+    ),
+    // (number | string[])[] / (number | string[])[] / (number | never[])[] {TS2345@91} / (number | any[])[]
+    (
+        "valueCoalesceRead",
+        "(number | string[])[]",
+        "(number | string[])[]",
+        "(never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // number | false / number / number | false {TS2345@81} / number
+    (
+        "valueLogicalOnly",
+        "false | number",
+        "number",
+        "false | number",
+        "number",
+    ),
+    // (number | "" | number[])[] / (number | number[])[] / (number | "" | never[])[] {TS2345@79} / (number | any[])[]
+    (
+        "valueStrLeft",
+        "(\"\" | number | number[])[]",
+        "(number | number[])[]",
+        "(\"\" | never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // (number | number[])[] / (number | number[])[] / (number | never[])[] {TS2345@77} / (number | any[])[]
+    (
+        "valueNumOr",
+        "(number | number[])[]",
+        "(number | number[])[]",
+        "(never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // (number | number[])[] / (number | number[])[] / (number | never[])[] {TS2345@80} / (number | any[])[]
+    (
+        "valueObjAnd",
+        "(number | number[])[]",
+        "(number | number[])[]",
+        "(never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // (string | number | number[])[] / (string | number | number[])[] / (string | number | never[])[] {TS2345@85} / (string | number | any[])[]
+    (
+        "valueNullOr",
+        "(number | number[] | string)[]",
+        "(number | number[] | string)[]",
+        "(never[] | number | string)[]",
+        "(any[] | number | string)[]",
+    ),
+    // (string | number | number[])[] / (string | number | number[])[] / (string | number | never[])[] {TS2345@86} / (string | number | any[])[]
+    (
+        "valueUndefCoalesce",
+        "(number | number[] | string)[]",
+        "(number | number[] | string)[]",
+        "(never[] | number | string)[]",
+        "(any[] | number | string)[]",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "stmtAssignAnd",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // (number | false | string[])[] / (number | string[])[] / (number | false | never[])[] {TS2345@97} / (number | any[])[]
+    (
+        "valueNarrowAnd",
+        "(false | number | string[])[]",
+        "(number | string[])[]",
+        "(false | never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+];
+
+/// An arithmetic binary expression takes the checker's rule
+/// (`checkBinaryLikeExpression`). `+` is `number` over two number-like
+/// operands, `bigint` over two bigint-like ones, `string` when either is
+/// string-like, and `any` when either is `any`, where "like" never admits
+/// `any`, `unknown`, `void`, `null` or `undefined`. Every other combination
+/// is the checker's error, typed `any` (`b + i` over `b: boolean`, `null +
+/// i`). Every other arithmetic operator is `number` unless an operand may be
+/// a bigint, and `bigint` over two bigint-like operands (`any` admitted),
+/// else `any`.
+#[test]
+fn arithmetic_expressions_take_the_checkers_operand_rule() {
+    assert_measured_matrix("arithmetic.ts", ARITHMETIC_SOURCE, ARITHMETIC_TABLE);
+}
+
+/// The checker assigns through parentheses and non-null `!` and never
+/// through a type assertion: `(x as any) = 5`, `(<any>x) = 5` and `(x
+/// satisfies T) = 5` leave `x` as it was — it stays past its last
+/// assignment for a closure, and an evolving array keeps its elements —
+/// while `x! = 5` and `(x) = 5` retype it. An update through a type
+/// assertion (`(x as any)++`) likewise leaves the binding alone.
+#[test]
+fn assignments_through_a_type_assertion_are_not_assignments() {
+    assert_measured_matrix(
+        "asserted-targets.ts",
+        ASSERTED_TARGETS_SOURCE,
+        ASSERTED_TARGETS_TABLE,
+    );
+}
+
+/// Writes to ordinary variables in a loop take each reference's loop-head
+/// type (its entry type joined with one pass of the body) rather than the
+/// loop refusal, through `for`, `while` and `do`, `break`, `continue` and a
+/// `return` inside the body; an initializer-less `let` or a `var` written
+/// in the body joins its never-assigned entry path as an `if` does. An
+/// update a control test evaluates on every path (`while (n-- > 0)`,
+/// `if (n-- > 0)`) applies before the test branches.
+#[test]
+fn loop_writes_take_each_references_loop_head() {
+    assert_measured_matrix("loop-writes.ts", LOOP_WRITES_SOURCE, LOOP_WRITES_TABLE);
+}
+
+/// A logical expression whose right operand writes a binding branches at
+/// its left operand: the right operand runs on the edge the left one does
+/// not short-circuit, under the left operand's guard, the paths join, and
+/// the value is the checker's logical result — `&&` the left operand's
+/// definitely-falsy part with the right operand (with `strictNullChecks`
+/// off, the right operand's base type's), `||` the left operand without its
+/// falsy parts with the right operand, `??` the non-nullable left operand
+/// with the right one.
+#[test]
+fn logical_expressions_that_write_branch_at_their_left_operand() {
+    assert_measured_matrix(
+        "value-logical.ts",
+        VALUE_LOGICAL_SOURCE,
+        VALUE_LOGICAL_TABLE,
+    );
+}

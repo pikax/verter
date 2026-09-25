@@ -6226,6 +6226,10 @@ fn expression_effect_tree(
             SliceExpr::Call(SliceCall::Construct(constructor), _) => {
                 walk(constructor, out);
             }
+            SliceExpr::Arithmetic { left, right, .. } | SliceExpr::Logical { left, right, .. } => {
+                walk(left, out);
+                walk(right, out);
+            }
             SliceExpr::EvolvingArray(operation) => {
                 if keep(operation) {
                     out.push(expr);
@@ -9213,6 +9217,373 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         Positional::Value(self.union(&nodes))
     }
 
+    /// A logical expression whose right operand writes a binding
+    /// ([`crate::flow_slice_content::SliceExpr::Logical`]): the left
+    /// operand evaluates, the right one runs on the edge the left one does
+    /// not short-circuit (under the guard's reading for `&&` / `||`), and
+    /// the paths join as an `if`'s arms do. The value is
+    /// [`Self::logical_result`].
+    fn eval_logical(
+        &mut self,
+        operator: crate::flow_slice_content::SliceLogicalOperator,
+        left: &crate::flow_slice_content::SliceExpr,
+        right: &crate::flow_slice_content::SliceExpr,
+        guard: &crate::flow_slice_content::SliceGuard,
+    ) -> Positional<SemanticNodeId> {
+        let holds_before = self.holds.len();
+        let outcome = self.eval_expr(left);
+        self.holds.truncate(holds_before);
+        let Positional::Value(left_node) = outcome else {
+            return outcome;
+        };
+        // `&&` continues on the left operand's truthy edge, `||` on its
+        // falsy one; `??` expresses no guard.
+        let continues_positive = match operator {
+            crate::flow_slice_content::SliceLogicalOperator::And => Some(true),
+            crate::flow_slice_content::SliceLogicalOperator::Or => Some(false),
+            crate::flow_slice_content::SliceLogicalOperator::Coalesce => None,
+        };
+        let entry_products = self.products.clone();
+        let entry_writes = self.products.observe_writes();
+        self.conditional_arm_nesting += 1;
+        let mark = self.narrowing_snapshot();
+        if let Some(positive) = continues_positive {
+            self.apply_guard_scoped(guard, positive);
+        }
+        let holds_before = self.holds.len();
+        let outcome = self.eval_expr(right);
+        self.holds.truncate(holds_before);
+        self.restore_narrowings(mark);
+        let continued = self.products.clone();
+        self.restore_arm_entry(&entry_products);
+        self.conditional_arm_nesting -= 1;
+        self.join_arm_writes(
+            &continued,
+            true,
+            &entry_products,
+            true,
+            &entry_products,
+            &entry_writes,
+        );
+        let Positional::Value(right_node) = outcome else {
+            return outcome;
+        };
+        self.logical_result(operator, left_node, right_node)
+    }
+
+    /// The type of `left op right` for a logical operator, by the checker's
+    /// `checkBinaryLikeExpression`:
+    ///
+    /// - `&&` is the left operand when it cannot be truthy, else the union
+    ///   of its definitely-falsy part — with `strictNullChecks` off, the
+    ///   definitely-falsy part of the right operand's base type — and the
+    ///   right operand;
+    /// - `||` is the left operand when it cannot be falsy, else the
+    ///   subtype-reduced union of the left without its definitely-falsy
+    ///   parts and `undefined`, and the right operand;
+    /// - `??` is the left operand when it cannot be nullish, else the
+    ///   subtype-reduced union of the non-nullable left and the right
+    ///   operand (with `strictNullChecks` off any operand may be nullish).
+    ///
+    /// tsc 7.0.2: `c && a.push(1)` over `c: boolean` is `number | false`
+    /// (`number` with `strictNullChecks` off), `c || a.push(1)` is
+    /// `number | true`.
+    fn logical_result(
+        &mut self,
+        operator: crate::flow_slice_content::SliceLogicalOperator,
+        left: SemanticNodeId,
+        right: SemanticNodeId,
+    ) -> Positional<SemanticNodeId> {
+        use crate::flow_slice_content::SliceLogicalOperator as LogicalOperator;
+        let strict = self.nullability.is_strict();
+        let arms = |this: &mut Self, node: SemanticNodeId| this.enumerated_union_arms_or_self(node);
+        match operator {
+            LogicalOperator::And => {
+                let mut truthy = false;
+                for arm in arms(self, left) {
+                    match self.arm_truthy_part(arm) {
+                        Some(Some(_)) => truthy = true,
+                        Some(None) => {}
+                        None => return Positional::Unmodeled,
+                    }
+                }
+                if !truthy {
+                    return Positional::Value(left);
+                }
+                let falsy_source = if strict {
+                    left
+                } else {
+                    self.literal_base_type(right)
+                };
+                let mut members = Vec::new();
+                for arm in arms(self, falsy_source) {
+                    match self.arm_falsy_part(arm) {
+                        Some(Some(part)) => members.push(part),
+                        Some(None) => {}
+                        None => return Positional::Unmodeled,
+                    }
+                }
+                members.push(right);
+                Positional::Value(self.union(&members))
+            }
+            LogicalOperator::Or => {
+                let mut falsy = false;
+                let mut kept = Vec::new();
+                for arm in arms(self, left) {
+                    match (self.arm_falsy_part(arm), self.arm_truthy_part(arm)) {
+                        (Some(falsy_part), Some(truthy_part)) => {
+                            falsy |= falsy_part.is_some();
+                            kept.extend(truthy_part.filter(|part| !self.is_undefined_node(*part)));
+                        }
+                        _ => return Positional::Unmodeled,
+                    }
+                }
+                if !falsy {
+                    return Positional::Value(left);
+                }
+                kept.push(right);
+                self.subtype_union_value(&kept)
+            }
+            LogicalOperator::Coalesce => {
+                let left_arms = arms(self, left);
+                let nullish = |this: &Self, arm: SemanticNodeId| {
+                    matches!(
+                        this.dispatch.graph().node_data(arm).as_deref(),
+                        Some(SemanticNodeData::Primitive(
+                            PrimitiveKind::Null
+                                | PrimitiveKind::Undefined
+                                | PrimitiveKind::Void
+                                | PrimitiveKind::Any
+                                | PrimitiveKind::Unknown
+                        ))
+                    )
+                };
+                if strict && !left_arms.iter().any(|arm| nullish(self, *arm)) {
+                    return Positional::Value(left);
+                }
+                let mut kept: Vec<SemanticNodeId> = left_arms
+                    .into_iter()
+                    .filter(|arm| {
+                        !matches!(
+                            self.dispatch.graph().node_data(*arm).as_deref(),
+                            Some(SemanticNodeData::Primitive(
+                                PrimitiveKind::Null | PrimitiveKind::Undefined
+                            ))
+                        )
+                    })
+                    .collect();
+                kept.push(right);
+                self.subtype_union_value(&kept)
+            }
+        }
+    }
+
+    /// The subtype-reduced union of `members` as a value; an undecided
+    /// reduction degrades.
+    fn subtype_union_value(&mut self, members: &[SemanticNodeId]) -> Positional<SemanticNodeId> {
+        let composite = self
+            .dispatch
+            .subtype_reduced_union(members, self.nullability);
+        if composite.incomplete {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::NominalRelation,
+            ));
+        }
+        Positional::Value(composite.node)
+    }
+
+    fn is_undefined_node(&self, node: SemanticNodeId) -> bool {
+        matches!(
+            self.dispatch.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+        )
+    }
+
+    /// One union arm's definitely-falsy part (the checker's
+    /// `getDefinitelyFalsyPartOfType`): `""` of `string`, `0` of
+    /// `number`, `false` of `boolean`, a falsy literal, `null`,
+    /// `undefined`, `void`, `any` and `unknown` themselves; `Some(None)`
+    /// for an arm with no falsy value (a truthy literal, an object, a
+    /// function); `None` for an arm this reading does not classify.
+    fn arm_falsy_part(&self, arm: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
+        use crate::semantic_query::LiteralValue;
+        let graph = self.dispatch.graph();
+        let literal = |value| graph.intern_node(SemanticNodeData::Literal(value));
+        Some(match graph.node_data(arm)?.as_ref() {
+            SemanticNodeData::Primitive(PrimitiveKind::String) => {
+                Some(literal(LiteralValue::String(String::new())))
+            }
+            SemanticNodeData::Primitive(PrimitiveKind::Number) => {
+                Some(literal(LiteralValue::Number(0.0)))
+            }
+            SemanticNodeData::Primitive(PrimitiveKind::Boolean) => {
+                Some(literal(LiteralValue::Boolean(false)))
+            }
+            SemanticNodeData::Primitive(
+                PrimitiveKind::Null
+                | PrimitiveKind::Undefined
+                | PrimitiveKind::Void
+                | PrimitiveKind::Any
+                | PrimitiveKind::Unknown,
+            ) => Some(arm),
+            SemanticNodeData::Primitive(
+                PrimitiveKind::Never | PrimitiveKind::Symbol | PrimitiveKind::Object,
+            ) => None,
+            SemanticNodeData::Literal(LiteralValue::String(value)) => {
+                value.is_empty().then_some(arm)
+            }
+            SemanticNodeData::Literal(LiteralValue::Number(value)) => {
+                (*value == 0.0 || value.is_nan()).then_some(arm)
+            }
+            SemanticNodeData::Literal(LiteralValue::Boolean(value)) => (!value).then_some(arm),
+            SemanticNodeData::Object(_)
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::Signature { .. } => None,
+            _ => return None,
+        })
+    }
+
+    /// One union arm's part that can be truthy (the checker's
+    /// `removeDefinitelyFalsyTypes` per arm): `true` of `boolean`, the arm
+    /// itself when it has a truthy value, `Some(None)` for a definitely
+    /// falsy arm; `None` for an arm this reading does not classify.
+    fn arm_truthy_part(&self, arm: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
+        use crate::semantic_query::LiteralValue;
+        let graph = self.dispatch.graph();
+        Some(match graph.node_data(arm)?.as_ref() {
+            SemanticNodeData::Primitive(PrimitiveKind::Boolean) => {
+                Some(graph.intern_node(SemanticNodeData::Literal(LiteralValue::Boolean(true))))
+            }
+            SemanticNodeData::Primitive(
+                PrimitiveKind::Null | PrimitiveKind::Undefined | PrimitiveKind::Void,
+            ) => None,
+            SemanticNodeData::Primitive(PrimitiveKind::Never) => None,
+            SemanticNodeData::Primitive(_) => Some(arm),
+            SemanticNodeData::Literal(LiteralValue::String(value)) => {
+                (!value.is_empty()).then_some(arm)
+            }
+            SemanticNodeData::Literal(LiteralValue::Number(value)) => {
+                (*value != 0.0 && !value.is_nan()).then_some(arm)
+            }
+            SemanticNodeData::Literal(LiteralValue::Boolean(value)) => value.then_some(arm),
+            SemanticNodeData::Object(_)
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::Signature { .. } => Some(arm),
+            _ => return None,
+        })
+    }
+
+    /// The checker's `getBaseTypeOfLiteralType`: each literal arm as its
+    /// primitive.
+    fn literal_base_type(&mut self, node: SemanticNodeId) -> SemanticNodeId {
+        let arms = self.enumerated_union_arms_or_self(node);
+        let based: Vec<SemanticNodeId> = arms
+            .into_iter()
+            .map(|arm| widen_literal_node(self.dispatch, arm))
+            .collect();
+        self.union(&based)
+    }
+
+    /// The type of an arithmetic binary expression over operand types
+    /// `left` and `right` ([`crate::flow_slice_content::SliceExpr::Arithmetic`]),
+    /// by the checker's `checkBinaryLikeExpression`.
+    ///
+    /// `+` is `number` when both operands are number-like, `bigint` when
+    /// both are bigint-like, `string` when either is string-like, and `any`
+    /// when either is `any`. Here "like" is the strict kind test, under
+    /// which `any`, `unknown`, `void`, `null` and `undefined` are
+    /// never like anything. Every other operator is `number` unless an
+    /// operand may be a bigint, and then `bigint` when both are
+    /// bigint-like. Any other combination is the checker's error, typed
+    /// `any` (tsc 7.0.2: `b + 1` over `b: boolean` and `a - 1` over
+    /// `a: bigint` are `any`, `a - 1` over `a: any` is `number`).
+    fn arithmetic_result(
+        &self,
+        addition: bool,
+        left: SemanticNodeId,
+        right: SemanticNodeId,
+    ) -> Positional<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        let primitive = |kind| graph.intern_node(SemanticNodeData::Primitive(kind));
+        let is_primitive = |node: SemanticNodeId, kinds: &[PrimitiveKind]| {
+            matches!(graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(kind)) if kinds.contains(kind))
+        };
+        // The checker's `isTypeAssignableToKind`.
+        let like = |node: SemanticNodeId, kind: PrimitiveKind, strict: bool| -> Option<bool> {
+            if strict
+                && is_primitive(
+                    node,
+                    &[
+                        PrimitiveKind::Any,
+                        PrimitiveKind::Unknown,
+                        PrimitiveKind::Void,
+                        PrimitiveKind::Undefined,
+                        PrimitiveKind::Null,
+                    ],
+                )
+            {
+                return Some(false);
+            }
+            self.assignable(node, primitive(kind))
+        };
+        let result = |kind| Positional::Value(primitive(kind));
+        let both = |kind, strict| -> Option<bool> {
+            Some(like(left, kind, strict)? && like(right, kind, strict)?)
+        };
+        if addition {
+            match both(PrimitiveKind::Number, true) {
+                Some(true) => return result(PrimitiveKind::Number),
+                None => return Positional::Unmodeled,
+                Some(false) => {}
+            }
+            match both(PrimitiveKind::BigInt, true) {
+                Some(true) => return result(PrimitiveKind::BigInt),
+                None => return Positional::Unmodeled,
+                Some(false) => {}
+            }
+            match (
+                like(left, PrimitiveKind::String, true),
+                like(right, PrimitiveKind::String, true),
+            ) {
+                (Some(true), _) | (_, Some(true)) => return result(PrimitiveKind::String),
+                (Some(false), Some(false)) => {}
+                _ => return Positional::Unmodeled,
+            }
+            return result(PrimitiveKind::Any);
+        }
+        let any_or_unknown = [PrimitiveKind::Any, PrimitiveKind::Unknown];
+        if (is_primitive(left, &any_or_unknown) && is_primitive(right, &any_or_unknown))
+            || !(self.may_be_bigint(left) || self.may_be_bigint(right))
+        {
+            return result(PrimitiveKind::Number);
+        }
+        match both(PrimitiveKind::BigInt, false) {
+            Some(true) => result(PrimitiveKind::BigInt),
+            Some(false) => result(PrimitiveKind::Any),
+            None => Positional::Unmodeled,
+        }
+    }
+
+    /// Whether `node` is a bigint type or a union or intersection with one
+    /// (the checker's `maybeTypeOfKind(type, BigIntLike)`).
+    fn may_be_bigint(&self, node: SemanticNodeId) -> bool {
+        let graph = self.dispatch.graph();
+        match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt))
+            | Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::BigInt(_))) => {
+                true
+            }
+            Some(SemanticNodeData::Union(arms)) => arms.iter().any(|arm| self.may_be_bigint(*arm)),
+            Some(SemanticNodeData::Intersection(arms)) => {
+                arms.iter().any(|arm| self.may_be_bigint(*arm))
+            }
+            _ => false,
+        }
+    }
+
     /// One pass of a [`crate::flow_slice_content::SliceStatement::Loop`]
     /// iteration from `start`, charged to the connected demand's work
     /// budget: its abrupt edges (breaks, returns, throw points) replace any
@@ -9823,65 +10194,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let mut joined = self.join_states(&states, observation);
         // The branch join over the function-scoped `var` layer — the ONE
         // shared `FlowFrame` product lattice over this graph's edge class,
-        // never a merge over the evaluator's locals maps. Every continuing
-        // predecessor's reaching definition unions through the shared
-        // join above; a predecessor with NO reaching definition is the
-        // never-assigned path, and it folds its DECLARED authority into
-        // the joined reaching when it has one (the var's annotation
-        // covers the paths that never assign — `if (flag) { var y:
-        // number | undefined = 1; } return y` joins `number` with
-        // `number | undefined`). A never-assigned path with NO declared
-        // authority keeps the conditional-definition refusal: tsc
-        // REJECTS that program (TS2454, used before assigned), so the
-        // fail-closed degradation is the contract, and an
-        // already-established binding keeps the entry's own flag.
-        for subject in joined
-            .products
-            .subjects_in(super::flow_solve::FlowDomain::ReachingType)
-        {
-            if !self.uses_conditional_definition_policy(&subject) {
-                continue;
-            }
-            let mut defined_on_every_path = true;
-            let mut never_assigned_declared: Option<Option<SemanticNodeId>> = None;
-            for state in incoming.iter() {
-                if state.products.reaching(&subject).is_none() {
-                    defined_on_every_path = false;
-                    let declared = state.products.declared_type(&subject);
-                    never_assigned_declared = Some(match never_assigned_declared {
-                        None => declared,
-                        // One authority-less predecessor is enough to keep
-                        // the refusal: the fold must cover EVERY path.
-                        Some(None) => None,
-                        Some(earlier) => earlier.filter(|_| declared.is_some()),
-                    });
-                }
-            }
-            let inherited =
-                entry.assignment(&subject).single_path() || self.conditional_arm_nesting > 0;
-            let single_path = if defined_on_every_path {
-                inherited
-            } else {
-                match never_assigned_declared {
-                    Some(Some(declared)) => {
-                        let folded = match joined.products.reaching(&subject) {
-                            Some(reaching) => self.union(&[reaching, declared]),
-                            None => declared,
-                        };
-                        joined
-                            .products
-                            .set_reaching_type(&subject, ReachingTypeProduct::of(folded));
-                        inherited
-                    }
-                    _ => true,
-                }
-            };
-            let assignment = joined
-                .products
-                .assignment(&subject)
-                .with_single_path(single_path);
-            joined.products.set_assignment(&subject, assignment);
-        }
+        // never a merge over the evaluator's locals maps — settles each
+        // binding's conditional definition by the shared rule.
+        self.settle_conditional_definitions(&mut joined, &states, entry);
         let written = joined.products.writes_since(observation);
         self.restore_layer_state(joined);
         for subject in written {
@@ -10123,6 +10438,75 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             start.products.set_assignment(&subject, flagged);
         }
     }
+    /// Settle the conditional-definition flag of every function-scoped
+    /// (`var`) or initializer-less `let` binding at a join of `incoming`
+    /// into `joined`, entered from `entry` — the `if` join's rule, which
+    /// a loop head and a loop exit share.
+    ///
+    /// A binding every incoming path defines keeps the entry's flag (or the
+    /// enclosing arm's). A path with no reaching definition is the
+    /// never-assigned path: it folds the binding's DECLARED authority into
+    /// the joined reaching when it has one (the var's annotation covers the
+    /// paths that never assign — `if (flag) { var y: number | undefined =
+    /// 1; } return y` joins `number` with `number | undefined`), and with
+    /// no declared authority keeps the conditional-definition refusal: tsc
+    /// REJECTS that program (TS2454, used before assigned), so the
+    /// fail-closed degradation is the contract.
+    fn settle_conditional_definitions(
+        &self,
+        joined: &mut FlowLayerState,
+        incoming: &[&FlowLayerState],
+        entry: &FlowProductStore,
+    ) {
+        for subject in joined
+            .products
+            .subjects_in(super::flow_solve::FlowDomain::ReachingType)
+        {
+            if !self.uses_conditional_definition_policy(&subject) {
+                continue;
+            }
+            let mut defined_on_every_path = true;
+            let mut never_assigned_declared: Option<Option<SemanticNodeId>> = None;
+            for state in incoming.iter() {
+                if state.products.reaching(&subject).is_none() {
+                    defined_on_every_path = false;
+                    let declared = state.products.declared_type(&subject);
+                    never_assigned_declared = Some(match never_assigned_declared {
+                        None => declared,
+                        // One authority-less predecessor is enough to keep
+                        // the refusal: the fold must cover EVERY path.
+                        Some(None) => None,
+                        Some(earlier) => earlier.filter(|_| declared.is_some()),
+                    });
+                }
+            }
+            let inherited =
+                entry.assignment(&subject).single_path() || self.conditional_arm_nesting > 0;
+            let single_path = if defined_on_every_path {
+                inherited
+            } else {
+                match never_assigned_declared {
+                    Some(Some(declared)) => {
+                        let folded = match joined.products.reaching(&subject) {
+                            Some(reaching) => self.union(&[reaching, declared]),
+                            None => declared,
+                        };
+                        joined
+                            .products
+                            .set_reaching_type(&subject, ReachingTypeProduct::of(folded));
+                        inherited
+                    }
+                    _ => true,
+                }
+            };
+            let assignment = joined
+                .products
+                .assignment(&subject)
+                .with_single_path(single_path);
+            joined.products.set_assignment(&subject, assignment);
+        }
+    }
+
     /// Missing reaching definitions on actual normal predecessors cannot
     /// discharge the established conditional-definition refusal. The storage
     /// layer does not decide that fact: uninitialized lexicals need it too.
@@ -14574,16 +14958,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     contributors.extend(returned);
                     let exits = self.drain_break_exits(break_base, None);
                     let reaches = !exits.is_empty();
-                    let mut joined = if reaches {
+                    let joined = if reaches {
                         let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> =
                             exits.iter().collect();
-                        self.join_states(&incoming, &entry.write_observation)
+                        let mut joined = self.join_states(&incoming, &entry.write_observation);
+                        self.settle_conditional_definitions(
+                            &mut joined,
+                            &incoming,
+                            &entry.products,
+                        );
+                        joined
                     } else {
                         entry.clone()
                     };
-                    if reaches {
-                        self.flag_conditionally_defined_bindings(&mut joined, &exits);
-                    }
                     self.restore_layer_state(joined);
                     path_alive = reaches;
                 }
@@ -16495,6 +16882,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             crate::flow_slice_content::SliceExpr::EvolvingArray(operation) => {
                 self.eval_evolving_operation(operation)
+            }
+            crate::flow_slice_content::SliceExpr::Logical {
+                operator,
+                left,
+                right,
+                guard,
+            } => self.eval_logical(*operator, left, right, guard),
+            crate::flow_slice_content::SliceExpr::Arithmetic {
+                addition,
+                left,
+                right,
+            } => {
+                let mut operands = [left, right].into_iter().map(|operand| {
+                    let holds_before = self.holds.len();
+                    let outcome = self.eval_expr(operand);
+                    self.holds.truncate(holds_before);
+                    outcome
+                });
+                let Some(Positional::Value(left)) = operands.next() else {
+                    return Positional::Unmodeled;
+                };
+                let Some(Positional::Value(right)) = operands.next() else {
+                    return Positional::Unmodeled;
+                };
+                self.arithmetic_result(*addition, left, right)
             }
             // A `for … of` binding holds the iterated element type (a
             // tuple's elements, an array's element, a string's `string`);

@@ -2091,6 +2091,18 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "G03_emits_new_spread",
         "91947af5d9430228abb3f409c16a917195753c624b392120f5ee11856437531c",
     ),
+    (
+        "N52_while_downstream_narrow",
+        "1dfe1a8c70d0c602d4940c78e883ae065e651bdcbc1788366503df0553213816",
+    ),
+    (
+        "N53_do_while_downstream_narrow",
+        "c300a24424bffdc179e4df7fd2443042711738f2f3f6622d83e082e5eae40cc5",
+    ),
+    (
+        "N54_for_loop_downstream_narrow",
+        "663d4cbacbd2a69e8eb2bd183125b3266b1a4fd1d4b675eca2f55fefdbbd2584",
+    ),
 ];
 
 // The suite
@@ -5167,7 +5179,10 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // the one-branch and default-less-switch joins that keep `undefined` —
     // to MatchesChecker: 83 matching, 7 parked.
     (Owner::U6ValueInference, 93, 83, 7),
-    (Owner::U6LoopClosure, 6, 1, 2),
+    // A loop writing a binding it does not declare takes each reference's
+    // loop head: N52, N53 and N54 — the `while`, `do` and `for` loops that
+    // narrow a written parameter downstream — move to MatchesChecker.
+    (Owner::U6LoopClosure, 6, 4, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
     // B10's `as const` spread-modifier debt moved to the value-inference
     // owner with its B03/B04 class, so the substrate total drops by one

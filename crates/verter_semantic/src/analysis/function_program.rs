@@ -3862,7 +3862,9 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
     fn visit_update_expression(&mut self, it: &oxc_ast::ast::UpdateExpression<'a>) {
         self.writes.push(FunctionWriteRecord {
             span: it.span.into(),
-            targets: vec![access::simple_assignment_target(&it.argument)].into(),
+            targets: access::simple_assignment_target(&it.argument)
+                .into_iter()
+                .collect(),
         });
         let previous = self.compound_target_read;
         self.compound_target_read = true;

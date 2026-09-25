@@ -2459,14 +2459,6 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
             "export {};\nfunction f(x: string | number) { return (class { static { x = \"s\"; } } as object) }",
         ),
         (
-            "a TS-wrapped assignment target",
-            "export {};\nfunction f(x: string | number) { class C { static { ((x) as any) = \"s\"; } } return x }",
-        ),
-        (
-            "a TS-wrapped update target",
-            "export {};\nfunction f(x: number | undefined) { class C { static { (x as any)++; } } return x }",
-        ),
-        (
             "a static block destructuring assignment",
             "export {};\nfunction f(x: string | number) { class C { static { [x] = [1]; } } return x }",
         ),
@@ -2477,6 +2469,30 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
             guard_gap_count(&node),
             1,
             "{case}: the statement takes the typed gap: {node:?}"
+        );
+    }
+
+    // A target under a type assertion is a reference, not an assignment
+    // target: the checker leaves the binding as it was (tsc 7.0.2:
+    // `((x) as any) = "s"` in a static block leaves `return x` at `string |
+    // number`, where the bare `x = "s"` makes it `string`), so no write
+    // exists to gap.
+    let unwritten = [
+        (
+            "a TS-wrapped assignment target",
+            "export {};\nfunction f(x: string | number) { class C { static { ((x) as any) = \"s\"; } } return x }",
+        ),
+        (
+            "a TS-wrapped update target",
+            "export {};\nfunction f(x: number | undefined) { class C { static { (x as any)++; } } return x }",
+        ),
+    ];
+    for (case, source) in unwritten {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: nothing is written, so nothing gaps: {node:?}"
         );
     }
 
@@ -4130,21 +4146,42 @@ fn arrow_expression_body_is_single_return() {
         !node.can_fall_through.reaches_end_for_assertion(),
         "an expression body always returns"
     );
-    assert_eq!(
-        node.body.statements.as_ref(),
-        &[SliceStatement::Return {
-            argument: Some(SliceExpr::Gap(
-                crate::semantic_query::FlowGap::UnmodeledExpression
-            )),
-            freshness: SliceFreshness::Pinned,
-            // Arithmetic narrows nothing, so no parameter can be a
-            // predicate subject.
-            predicate_test: Some(ReturnPredicateTest::Guard {
-                guard: Box::new(SliceGuard::None),
-                parameters: Arc::from(vec![0].into_boxed_slice()),
+    // The body is the arithmetic expression over the parameter and the
+    // literal: the evaluator types it by the checker's operand rule.
+    let [SliceStatement::Return {
+        argument:
+            Some(SliceExpr::Arithmetic {
+                addition,
+                left,
+                right,
             }),
-        }],
-        "a binary expression is an unmodelled leaf, not semantic any"
+        freshness: SliceFreshness::Pinned,
+        predicate_test,
+    }] = node.body.statements.as_ref()
+    else {
+        panic!(
+            "an expression body is one arithmetic return: {:?}",
+            node.body.statements
+        );
+    };
+    assert!(!addition, "`*` is not `+`");
+    assert!(
+        matches!(**left, SliceExpr::Param { ordinal: 0, .. }),
+        "the left operand reads the parameter: {left:?}"
+    );
+    assert!(
+        matches!(&**right, SliceExpr::Type(leaf)
+            if matches!(leaf.ty(), TypeExpr::Literal(LiteralValue::Number(value)) if *value == 2.0)),
+        "the right operand is the literal: {right:?}"
+    );
+    // Arithmetic narrows nothing, so no parameter can be a predicate
+    // subject.
+    assert_eq!(
+        predicate_test,
+        &Some(ReturnPredicateTest::Guard {
+            guard: Box::new(SliceGuard::None),
+            parameters: Arc::from(vec![0].into_boxed_slice()),
+        })
     );
 }
 

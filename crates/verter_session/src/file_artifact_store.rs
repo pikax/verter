@@ -84,6 +84,21 @@ pub struct FileArtifactKey {
     pub file_language_id: FileLanguage,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many keys this thread derived by hashing a plain script's whole
+    /// source ([`FileArtifactKey::for_source_identity`]); test-only.
+    static SOURCE_PARSE_IDENTITY_DERIVATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// How many artifact keys this thread derived from a plain script's whole
+/// source text so far (test-only).
+#[cfg(test)]
+pub(crate) fn source_parse_identity_derivations_for_tests() -> usize {
+    SOURCE_PARSE_IDENTITY_DERIVATIONS.with(std::cell::Cell::get)
+}
+
 impl FileArtifactKey {
     /// Builds the exact key for an already-materialized artifact.
     pub(crate) fn for_indexed(
@@ -141,6 +156,8 @@ impl FileArtifactKey {
                 artifact.parse_key().clone()
             }
             None => {
+                #[cfg(test)]
+                SOURCE_PARSE_IDENTITY_DERIVATIONS.with(|count| count.set(count.get() + 1));
                 verter_language::default_parse_identity_for(source, &file_language_id)
                     .ok()?
                     .1

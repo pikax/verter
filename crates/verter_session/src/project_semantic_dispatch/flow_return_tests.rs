@@ -5390,8 +5390,8 @@ fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachabi
         crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
     );
 
-    // Negative controls: a directly invoked write, a same-path write, and a
-    // reachable write all remain effectful and fail closed.
+    // Negative controls: a directly invoked write and a same-path write
+    // remain effectful and fail closed.
     expect_refused_flow_as(
         "function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { (() => { x = \"b\" })() } while (false); return x }",
         crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
@@ -5399,8 +5399,14 @@ fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachabi
     expect_refused_flow(
         "function makeProps() { let o: { y: \"a\" | \"b\" } = { y: \"a\" }; do { o.y = \"b\" } while (false); return o.y }",
     );
-    expect_refused_flow(
-        "function makeProps(flag: boolean) { let x: \"a\" | \"b\" = \"a\"; do { if (flag) x = \"b\" } while (false); return x }",
+    // A reachable write to a local resolves through the loop head: tsc 7.0.2
+    // answers `"a" | "b"` under all four strictNullChecks x noImplicitAny
+    // settings.
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps(flag: boolean) { let x: \"a\" | \"b\" = \"a\"; do { if (flag) x = \"b\" } while (false); return x }",
+        ),
+        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")]),
     );
 }
 
@@ -8450,27 +8456,22 @@ function f(x: string | number) {
     });
 }
 
-/// A parser-legal TS wrapper does not launder a write: `((x) as any) =
-/// "s"` and `(x as any)++` retype the frame binding exactly as the bare
-/// forms do. The wrapped target takes the same typed gap — the later
-/// read keeps the unnarrowed join and the family slot holds zero
-/// candidates.
+/// A target under a type assertion is a reference, not an assignment
+/// target: `((x) as any) = "s"` in a static block leaves the binding as it
+/// was, so the read is the parameter's own clean type (tsc 7.0.2: `string |
+/// number` under all four `strictNullChecks` x `noImplicitAny` settings,
+/// where the bare `x = "s"` makes it `string`).
 #[test]
-fn class_declaration_wrapped_write_never_seals_unnarrowed() {
-    const CANONICAL: &str = "/ws/class-decl-wrapped-write/main.ts";
-    const FIXTURE: &str = r#"
-export {};
-
-function f(x: string | number) {
-  class C { static { ((x) as any) = "s"; } }
-  return x;
-}
-"#;
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    upsert_ts(&host, CANONICAL, FIXTURE);
-    with_dispatch(&host, |dispatch| {
-        assert_class_evaluation_write_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
-    });
+fn class_declaration_wrapped_write_is_no_write() {
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps(x: string | number) { class C { static { ((x) as any) = \"s\"; } } return x }",
+        ),
+        verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        ]),
+    );
 }
 
 /// An UNSELECTED binding's initializer never lowers — but it still runs at
