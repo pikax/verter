@@ -3204,13 +3204,9 @@ function two_callbacks(x, y) {
 "#;
 
 /// Classes create callables the indexed program serves no record for: a
-/// class passed as an argument, a local class declaration, and a served
-/// callback whose body evaluates a class. Each really retains `a`.
-const UNSERVED_CLASS_FIXTURE_SOURCES: [(&str, &str); 3] = [
-    (
-        "class_argument",
-        "function class_argument() { const a = 1; return sink(class { m() { return a; } }); }",
-    ),
+/// local class declaration, and a served callback whose body evaluates a
+/// class. Each really retains `a`.
+const UNSERVED_CLASS_FIXTURE_SOURCES: [(&str, &str); 2] = [
     (
         "class_declaration",
         "function class_declaration() { const a = 1; class C { m() { return a; } } return new C(); }",
@@ -3523,6 +3519,45 @@ fn an_unserved_callable_fails_closed_as_a_capture_gap_not_as_capture_free() {
             .iter()
             .any(|record| matches!(record.state, ObligationState::Gap(FlowGap::ClosureCapture))),
         "the unknown installs directly in the capture family's typed gap"
+    );
+}
+
+/// A class expression passed as an argument runs nothing an index record
+/// cannot serve: its method is a served callable of the frame, and the
+/// capture it retains is named exactly — never the family's typed gap and
+/// never proved capture-free.
+#[test]
+fn a_class_expression_argument_names_its_methods_capture() {
+    let fixture = flow_graph_fixture_for_tests(
+        "function class_argument() { const a = 1; return sink(class { m() { return a; } }); }",
+        75,
+    );
+    let plan = fixture
+        .build_plan(request_named("class_argument"))
+        .expect("class_argument plans");
+    assert!(
+        plan.obligation_specs().iter().any(|spec| matches!(
+            spec.basis(),
+            FlowObligationBasis::CapturedBinding { identity, .. } if identity.name.as_ref() == "a"
+        )),
+        "the method's capture of `a` is named"
+    );
+    assert!(
+        !plan
+            .obligation_specs()
+            .iter()
+            .any(|spec| matches!(spec.basis(), FlowObligationBasis::CaptureFreeClosure { .. })),
+        "a callable retaining `a` is never proved capture-free"
+    );
+    let mut runtime = ObligationRuntime::default();
+    let handle = runtime.install_flow_demand(&plan);
+    assert!(
+        !runtime
+            .flow_obligations(handle)
+            .expect("the demand is installed")
+            .iter()
+            .any(|record| matches!(record.state, ObligationState::Gap(FlowGap::ClosureCapture))),
+        "a served capture is no typed gap"
     );
 }
 

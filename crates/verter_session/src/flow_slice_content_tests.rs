@@ -23,9 +23,9 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
     FlowSliceSelection, ReturnPredicateTest, SliceBindingKind, SliceCall, SliceCallSite,
-    SliceContent, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral, SliceNarrowRoot,
-    SliceNarrowSubject, SliceObjectEntry, SliceObjectMember, SliceRegion, SliceStatement,
-    SliceSwitchTest, SliceTypeofKind, SliceUnsupported,
+    SliceContent, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral, SliceLoopBinding,
+    SliceLoopTest, SliceNarrowRoot, SliceNarrowSubject, SliceObjectEntry, SliceObjectMember,
+    SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind, SliceUnsupported,
 };
 
 /// The MEMBER entries of a structural object literal, in authored order.
@@ -730,26 +730,22 @@ fn return_free_loop_is_transparent() {
 }
 
 /// @ai-generated - a loop whose transfer depends on a downstream-selected
-/// binding must use the typed loop refusal until fixed-point semantics exist.
+/// binding lowers structurally, for the evaluator's fixed point.
 #[test]
-fn selected_loop_transfers_are_unsupported_but_inert_loops_stay_transparent() {
+fn selected_loop_transfers_lower_structurally_but_inert_loops_stay_transparent() {
     for source in [
         "function makeProps(x: \"s\" | 0) { while (typeof x === \"string\") { } return x }",
         "declare function assertNumber(v: unknown): asserts v is number\nfunction makeProps(x: string | number) { do { assertNumber(x); break } while (true); return x }",
         "function makeProps(x: \"a\" | \"b\") { exit: while (true) { if (x === \"a\") break exit; throw 0 } return x }",
     ] {
         let node = content_for(source, "makeProps");
-        let unsupported = node.body.statements.iter().any(|statement| match statement {
-            SliceStatement::Unsupported(SliceUnsupported::Loop) => true,
-            SliceStatement::Labeled { body, .. } => matches!(
-                body.statements.first(),
-                Some(SliceStatement::Unsupported(SliceUnsupported::Loop))
-            ),
-            _ => false,
-        });
         assert!(
-            unsupported,
-            "a loop transfer involving the selected return binding must refuse: {source}"
+            region_contains_structural_loop(&node.body),
+            "a loop transfer involving the selected return binding lowers structurally: {source}"
+        );
+        assert!(
+            !region_contains_unsupported_loop(&node.body),
+            "no typed loop refusal: {source}"
         );
     }
 
@@ -788,6 +784,27 @@ fn selected_loop_transfers_are_unsupported_but_inert_loops_stay_transparent() {
 }
 
 /// Whether any statement of `region` — recursing through the lowered
+/// containers loops nest under — is a structurally lowered loop.
+fn region_contains_structural_loop(region: &SliceRegion) -> bool {
+    region.statements.iter().any(|statement| match statement {
+        SliceStatement::Loop(_) => true,
+        SliceStatement::Labeled { body, .. } => region_contains_structural_loop(body),
+        SliceStatement::Block(body) => region_contains_structural_loop(body),
+        SliceStatement::If {
+            consequent,
+            alternate,
+            ..
+        } => {
+            region_contains_structural_loop(consequent)
+                || alternate
+                    .as_deref()
+                    .is_some_and(region_contains_structural_loop)
+        }
+        _ => false,
+    })
+}
+
+/// Whether any statement of `region` — recursing through the lowered
 /// containers the fixtures below nest loops under — is the typed loop
 /// refusal.
 fn region_contains_unsupported_loop(region: &SliceRegion) -> bool {
@@ -817,20 +834,22 @@ fn region_contains_unsupported_loop(region: &SliceRegion) -> bool {
 /// break skips is treated reachable. Measured against the checker,
 /// `outer: { for (;;) { break outer } return 0 } return x` on
 /// `x: string | null` is `string | 0 | null` (transparency published
-/// `number`), and the guarded twin is `0 | null`. Such a loop takes the
-/// typed refusal, exactly like a return-bearing one.
+/// `number`), and the guarded twin is `0 | null`. Such a loop lowers
+/// structurally, its body's `break` recorded for the enclosing label to
+/// absorb.
 ///
 /// The escaping fixtures are deliberately OUTSIDE the selected-transfer
 /// nets: an unconditional break, and one whose path condition reads a slot
 /// with no downstream-selected read inside the loop — neither a guard, a
 /// call, a write, nor an invoked closure catches them.
 ///
-/// The refusal is about the TARGET, not the label: a label chain DIRECTLY
-/// wrapping the loop names the loop's own exit — its continuation IS the
-/// loop's fall-through point — so those shapes keep the transparent path
-/// (measured: every direct-wrap control below stays `string | null`).
+/// The structural lowering is about the TARGET, not the label: a label
+/// chain DIRECTLY wrapping the loop names the loop's own exit — its
+/// continuation IS the loop's fall-through point — so those shapes keep the
+/// transparent path (measured: every direct-wrap control below stays
+/// `string | null`).
 #[test]
-fn loop_break_to_enclosing_label_refuses_while_direct_wrap_labels_stay_transparent() {
+fn loop_break_to_enclosing_label_lowers_structurally_while_direct_wrap_labels_stay_transparent() {
     for source in [
         // Unconditional break out of a labeled BLOCK: skips `return 0`.
         "export {};\nfunction f(x: string | null) { outer: { for (;;) { break outer } return 0 } return x }",
@@ -840,8 +859,12 @@ fn loop_break_to_enclosing_label_refuses_while_direct_wrap_labels_stay_transpare
     ] {
         let node = content_for(source, "f");
         assert!(
-            region_contains_unsupported_loop(&node.body),
-            "a break to an enclosing lowered target must refuse the loop: {source}"
+            region_contains_structural_loop(&node.body),
+            "a break to an enclosing lowered target lowers the loop structurally: {source}"
+        );
+        assert!(
+            !region_contains_unsupported_loop(&node.body),
+            "no typed loop refusal: {source}"
         );
     }
 
@@ -2627,10 +2650,6 @@ fn elided_declaration_position_effects_take_the_typed_gap() {
              function f(x: string | number) { const unused = (check(x), 0); return x }",
         ),
         (
-            "a write in an unselected binding's initializer",
-            "export {};\nfunction f(x: string | number) { const unused = (x = \"s\", 0); return x }",
-        ),
-        (
             "a write in a destructuring declarator's initializer",
             "export {};\nfunction f(x: string | number) { const [a] = (x = \"s\", [0]); return x }",
         ),
@@ -3502,112 +3521,169 @@ fn statement_position_calls_are_proven_or_degrade() {
     );
 }
 
-/// A closure created inside a GUARDED arm captures the guarded reading of
-/// the guard's subject, which the evaluator cannot reproduce at the
-/// capture's own evaluation — so the nested value takes the typed
-/// closure-capture gap. The `if` statement and the ternary are two
-/// spellings of ONE guard, so they must reach that rail identically: an
-/// arm-local active guard set that only the statement spelling populates
-/// makes the same source degrade under `if` and seal clean under `?:`.
+/// Every nested function value a region's returns and declarations lower,
+/// through ternary arms, invocations and nested statement regions.
+fn collect_nested_function_values<'a>(region: &'a SliceRegion, found: &mut Vec<&'a SliceExpr>) {
+    fn scan<'a>(expr: &'a SliceExpr, found: &mut Vec<&'a SliceExpr>) {
+        match expr {
+            SliceExpr::NestedFunctionValue { .. } => found.push(expr),
+            SliceExpr::Union { arms, .. } => {
+                for arm in arms.iter() {
+                    scan(arm, found);
+                }
+            }
+            SliceExpr::Call(SliceCall::Nested(nested), _) => scan(nested, found),
+            _ => {}
+        }
+    }
+    for statement in region.statements.iter() {
+        match statement {
+            SliceStatement::Return {
+                argument: Some(expr),
+                ..
+            }
+            | SliceStatement::Binding {
+                init: Some(expr), ..
+            } => scan(expr, found),
+            SliceStatement::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                collect_nested_function_values(consequent, found);
+                if let Some(alternate) = alternate {
+                    collect_nested_function_values(alternate, found);
+                }
+            }
+            SliceStatement::Block(block) => collect_nested_function_values(block, found),
+            SliceStatement::Switch { cases, .. } => {
+                for case in cases.iter() {
+                    collect_nested_function_values(&case.region, found);
+                }
+            }
+            SliceStatement::Try { block, catch, .. } => {
+                collect_nested_function_values(block, found);
+                if let Some(catch) = catch {
+                    collect_nested_function_values(&catch.region, found);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// An invoked function's captures read the flow reaching its call, so each
+/// capture is extended into the body — except one the call's own arguments
+/// write, since the arguments run before the body. (Measured, TypeScript
+/// 7.0.2: `((y: number) => x)(x = 0)` under `typeof x === "string"` reads
+/// `number`, the argument's assignment, not the guarded `string`.)
+#[test]
+fn an_invoked_function_extends_the_captures_its_arguments_leave_unwritten() {
+    let extended = |body: &str| {
+        let content = content_for(&format!("export {{}};\n{body}"), "f");
+        let mut values = Vec::new();
+        collect_nested_function_values(&content.body, &mut values);
+        let [SliceExpr::NestedFunctionValue {
+            extended_captures, ..
+        }] = values.as_slice()
+        else {
+            panic!("one invoked nested value: {content:?}");
+        };
+        extended_captures.len()
+    };
+    assert_eq!(
+        extended(
+            "function f(x: string | number) { if (typeof x === \"string\") { return ((y: number) => x)(1) } x = 0; return 0 }"
+        ),
+        1,
+        "the capture reads the call's narrowing"
+    );
+    assert_eq!(
+        extended(
+            "function f(x: string | number) { if (typeof x === \"string\") { return ((y: number) => x)(x = 0) } return 0 }"
+        ),
+        0,
+        "an argument's write reaches the body first"
+    );
+}
+
+/// A closure created inside a GUARDED arm reads the guarded narrowing
+/// only when the checker extends the capture's control-flow container to
+/// the enclosing one; any other capture reads its declared type, and a
+/// capture whose declared type the evaluator cannot supply takes the typed
+/// closure-capture gap. The `if` statement, the ternary and the `switch`
+/// clause are spellings of ONE guard, so they must reach that rail
+/// identically: an arm-local active guard set that only the statement
+/// spelling populates makes the same source degrade under `if` and seal
+/// clean under `?:`.
+///
+/// Measured, TypeScript 7.0.2: an immediately invoked arrow over a
+/// parameter reassigned after the call reads the guarded type in every
+/// spelling (`0 | T`, and `"a" | 0` for the `switch` clause), and an arrow
+/// that reassigns the `let` it captures reads the declared `string | number`
+/// on entry in every spelling — a declared type the evaluator does not
+/// supply for a `let`, so the rail is the typed gap.
 #[test]
 fn ternary_arms_reach_the_closure_capture_rail_like_the_if_arms() {
     const PREFIX: &str = "export {};\n\
          type T = { length: number };\n\
-         function isT(x: any): x is T { return true }\n";
-    let statement = content_for(
-        &format!("{PREFIX}function f(x: any) {{ if (isT(x)) {{ return (() => x)() }} return 0 }}"),
-        "f",
-    );
-    let ternary = content_for(
-        &format!("{PREFIX}function f(x: any) {{ return isT(x) ? (() => x)() : 0 }}"),
-        "f",
-    );
-    let capture_gaps = |node: &SliceContent| {
-        let mut found = false;
-        fn walk(region: &SliceRegion, found: &mut bool) {
-            for statement in region.statements.iter() {
-                match statement {
-                    SliceStatement::Return {
-                        argument: Some(argument),
-                        ..
-                    } => scan_expr(argument, found),
-                    SliceStatement::If {
-                        consequent,
-                        alternate,
-                        ..
-                    } => {
-                        walk(consequent, found);
-                        if let Some(alternate) = alternate {
-                            walk(alternate, found);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        fn scan_expr(expr: &SliceExpr, found: &mut bool) {
-            match expr {
-                SliceExpr::NestedFunctionValue { gap, .. } => {
-                    if gap.is_some() {
-                        *found = true;
-                    }
-                }
-                SliceExpr::Union { arms, .. } => {
-                    for arm in arms.iter() {
-                        scan_expr(arm, found);
-                    }
-                }
-                SliceExpr::Call(SliceCall::Nested(nested), _) => scan_expr(nested, found),
-                _ => {}
-            }
-        }
-        walk(&node.body, &mut found);
-        found
+         function isT(x: unknown): x is T { return true }\n";
+    let capture_gaps = |body: &str| {
+        let content = content_for(&format!("{PREFIX}{body}"), "f");
+        let mut values = Vec::new();
+        collect_nested_function_values(&content.body, &mut values);
+        assert!(
+            !values.is_empty(),
+            "the closure lowers as a nested value: {content:?}"
+        );
+        values
+            .into_iter()
+            .map(|value| match value {
+                SliceExpr::NestedFunctionValue { gap, .. } => *gap,
+                _ => unreachable!("only nested function values are collected"),
+            })
+            .collect::<Vec<_>>()
     };
-    assert!(
-        capture_gaps(&statement),
-        "the `if` arm's capture takes the closure-capture gap: {statement:?}"
-    );
-    assert!(
-        capture_gaps(&ternary),
-        "the ternary arm's capture takes the SAME rail: {ternary:?}"
-    );
-
-    // A `switch` clause body evaluates under the dispatch narrow of its
-    // discriminant, so a closure created there takes the same rail.
-    let dispatch = content_for(
-        "export {};\n\
-         function f(x: string | number) { switch (x) { case \"a\": return (() => x)(); } return 0 }",
-        "f",
-    );
-    let mut found = false;
-    fn scan_region(region: &SliceRegion, found: &mut bool) {
-        for statement in region.statements.iter() {
-            match statement {
-                SliceStatement::Switch { cases, .. } => {
-                    for case in cases.iter() {
-                        scan_region(&case.region, found);
-                    }
-                }
-                SliceStatement::Return {
-                    argument: Some(SliceExpr::Call(SliceCall::Nested(nested), _)),
-                    ..
-                } => {
-                    if let SliceExpr::NestedFunctionValue { gap, .. } = nested.as_ref() {
-                        if gap.is_some() {
-                            *found = true;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+    for (spelling, body) in [
+        (
+            "if",
+            "function f(x: unknown) { if (isT(x)) { return (() => x)() } x = 0; return 0 }",
+        ),
+        (
+            "ternary",
+            "function f(x: unknown) { const r = isT(x) ? (() => x)() : 0; x = 0; return r }",
+        ),
+        (
+            "switch",
+            "function f(x: string | number) { switch (x) { case \"a\": return (() => x)(); } x = 0; return 0 }",
+        ),
+    ] {
+        let gaps = capture_gaps(body);
+        assert!(
+            gaps.iter().all(Option::is_none),
+            "{spelling}: an invoked arrow reads the guarded capture, no gap: {gaps:?}"
+        );
     }
-    scan_region(&dispatch.body, &mut found);
-    assert!(
-        found,
-        "the switch clause's capture takes the SAME rail: {dispatch:?}"
-    );
+    for (spelling, body) in [
+        (
+            "if",
+            "function f(x: string | number) { let y: string | number = x; if (typeof y === \"string\") { const g = () => { const before = y; y = 0; return before }; return g() } return 0 }",
+        ),
+        (
+            "ternary",
+            "function f(x: string | number) { let y: string | number = x; const g = typeof y === \"string\" ? () => { const before = y; y = 0; return before } : () => 1; return g() }",
+        ),
+        (
+            "switch",
+            "function f(x: string | number) { let y: string | number = x; switch (y) { case \"a\": { const g = () => { const before = y; y = 0; return before }; return g() } } return 0 }",
+        ),
+    ] {
+        let gaps = capture_gaps(body);
+        assert!(
+            gaps.contains(&Some(crate::semantic_query::FlowGap::ClosureCapture)),
+            "{spelling}: the guarded capture outside its extended container takes the SAME rail: {gaps:?}"
+        );
+    }
 }
 
 /// A destructured parameter element is a CORRELATED projection of its
@@ -3650,9 +3726,11 @@ fn correlated_destructured_parameter_relations_take_the_typed_gap() {
     );
 }
 
-/// @ai-generated - return-bearing loop is typed-unsupported and stops the region
+/// @ai-generated - a return-bearing loop lowers structurally; a literal
+/// `true` test has no exit edge, so the return after it is unreachable and
+/// rides the trailing unreachable region (the checker still aggregates it)
 #[test]
-fn return_bearing_loop_is_unsupported() {
+fn return_bearing_loop_lowers_structurally() {
     let node = content_for(
         "function spin() {\n\
          \x20 while (true) {\n\
@@ -3662,12 +3740,145 @@ fn return_bearing_loop_is_unsupported() {
          }\n",
         "spin",
     );
-    assert_eq!(
-        node.body.statements.as_ref(),
-        &[SliceStatement::Unsupported(SliceUnsupported::Loop)],
-        "the region stops at the unsupported marker; the trailing return is dropped"
-    );
+    let [SliceStatement::Loop(lowered), SliceStatement::Unreachable(unreachable)] =
+        node.body.statements.as_ref()
+    else {
+        panic!(
+            "the loop lowers structurally and the trailing return is unreachable: {:?}",
+            node.body.statements
+        );
+    };
+    assert!(matches!(
+        unreachable.statements.as_ref(),
+        [SliceStatement::Return {
+            argument: Some(_),
+            ..
+        }]
+    ));
+    assert!(matches!(
+        lowered.test,
+        SliceLoopTest::Before {
+            guard: SliceGuard::None,
+            constant: Some(true)
+        }
+    ));
+    assert!(matches!(
+        lowered.body.statements.as_ref(),
+        [SliceStatement::Return {
+            argument: Some(_),
+            ..
+        }]
+    ));
+    assert!(lowered.element.is_none());
     assert!(!node.can_fall_through.reaches_end_for_assertion());
+}
+
+/// @ai-generated - every loop form lowers its own parts: a `for`
+/// initializer and update, a `do…while`'s test after the body, a
+/// `for…of` element binding, a destructuring element that binds nothing,
+/// a `continue` naming the loop, and the literal-`false` `while` whose body
+/// no path enters
+#[test]
+fn every_loop_form_lowers_its_own_parts() {
+    let for_loop = content_for(
+        "export {};\nfunction f(n: number) { for (let i = 0; i < n; i++) { if (i) return i; } return 0 }",
+        "f",
+    );
+    let Some(SliceStatement::Loop(lowered)) = for_loop.body.statements.first() else {
+        panic!("{:?}", for_loop.body.statements);
+    };
+    assert!(matches!(
+        lowered.init.statements.as_ref(),
+        [SliceStatement::Binding { .. }]
+    ));
+    assert!(matches!(
+        lowered.update.statements.as_ref(),
+        [SliceStatement::CompoundAssignment { .. }]
+    ));
+    assert!(matches!(
+        lowered.test,
+        SliceLoopTest::Before { constant: None, .. }
+    ));
+
+    let do_while = content_for(
+        "export {};\nfunction f(c: boolean) { let x: string | number = 1; do { if (c) return x; x = \"s\"; } while (c); return 0 }",
+        "f",
+    );
+    assert!(do_while.body.statements.iter().any(|statement| matches!(
+        statement,
+        SliceStatement::Loop(lowered)
+            if matches!(lowered.test, SliceLoopTest::After { constant: None, .. })
+    )));
+
+    let for_of = content_for(
+        "export {};\nfunction f(xs: string[]) { for (const x of xs) { if (x) return x; } return 0 }",
+        "f",
+    );
+    let Some(SliceStatement::Loop(lowered)) = for_of.body.statements.first() else {
+        panic!("{:?}", for_of.body.statements);
+    };
+    assert!(matches!(lowered.test, SliceLoopTest::Exhausted));
+    let element = lowered
+        .element
+        .as_ref()
+        .expect("a for…of iterates an element");
+    assert!(!element.keys);
+    assert!(matches!(
+        element.binding,
+        Some(SliceLoopBinding {
+            kind: SliceBindingKind::Const,
+            ..
+        })
+    ));
+
+    let destructured = content_for(
+        "export {};\nfunction f(xs: [number, string][]) { for (const [a, b] of xs) { if (a) return b; } return 0 }",
+        "f",
+    );
+    let Some(SliceStatement::Loop(lowered)) = destructured.body.statements.first() else {
+        panic!("{:?}", destructured.body.statements);
+    };
+    assert!(
+        lowered
+            .element
+            .as_ref()
+            .is_some_and(|element| element.binding.is_none()),
+        "a destructuring element binds nothing the evaluator models"
+    );
+
+    let labeled = content_for(
+        "export {};\nfunction f(c: boolean) { outer: while (c) { while (c) { if (c) return 1; continue outer; } } return 0 }",
+        "f",
+    );
+    let Some(SliceStatement::Labeled { body, .. }) = labeled.body.statements.first() else {
+        panic!("{:?}", labeled.body.statements);
+    };
+    let Some(SliceStatement::Loop(outer)) = body.statements.first() else {
+        panic!("{body:?}");
+    };
+    assert_eq!(outer.labels.as_ref(), &[Arc::<str>::from("outer")]);
+    let Some(SliceStatement::Loop(inner)) = outer.body.statements.first() else {
+        panic!("{:?}", outer.body);
+    };
+    assert!(matches!(
+        inner.body.statements.as_ref(),
+        [SliceStatement::If { .. }, SliceStatement::Continue { target: Some(label) }]
+            if label.as_ref() == "outer"
+    ));
+
+    let dead = content_for(
+        "export {};\nfunction f() { while (false) { return 1; } return 0 }",
+        "f",
+    );
+    assert!(
+        dead.body.statements.iter().any(|statement| matches!(
+            statement,
+            SliceStatement::Loop(lowered)
+                if matches!(lowered.test, SliceLoopTest::Before { constant: Some(false), .. })
+        )),
+        "a body the literal `false` test never enters lowers for the unreachable reading: {:?}",
+        dead.body.statements
+    );
 }
 
 /// @ai-generated - a switch lowers each case clause as its own region
@@ -3939,7 +4150,7 @@ fn direct_self_call_is_recursion_hold() {
     );
 }
 
-/// @ai-generated - an exact same-file served callee is a Flow obligation edge; unresolved / member calls ride the symbolic carrier or `any`
+/// @ai-generated - an exact same-file served callee is a Flow obligation edge; a `this` member call rides the receiver-member carrier; an unrepresentable callee fails closed
 #[test]
 fn symbolic_and_unrepresentable_calls() {
     let node = content_for(
@@ -3984,12 +4195,40 @@ fn symbolic_and_unrepresentable_calls() {
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
+            argument: Some(SliceExpr::Call(
+                SliceCall::Member {
+                    receiver: Box::new(SliceExpr::This(
+                        crate::flow_slice_content::SliceThis::Instance {
+                            class: Arc::from("Service"),
+                            type_parameters: Arc::from([]),
+                        }
+                    )),
+                    member: Arc::from([Arc::from("helper")]),
+                },
+                SliceCallSite::new(0, false, false, verter_span::Span::new(58, 71)),
+            )),
+            freshness: SliceFreshness::Pinned,
+            predicate_test: None,
+        }],
+        "a `this` member call reads the member off the class's receiver"
+    );
+
+    // A callee with no structural arm (a computed member of a module
+    // object) fails closed rather than fabricating `any`.
+    let node = content_for(
+        "const table = { h() { return 1; } };\n\
+         const key: string = \"h\";\n\
+         function run() { return table[key](); }\n",
+        "run",
+    );
+    assert_eq!(
+        node.body.statements.as_ref(),
+        &[SliceStatement::Return {
             argument: Some(SliceExpr::UnreducedCallValue),
             freshness: SliceFreshness::Pinned,
             predicate_test: None,
         }],
-        "a `this` receiver is not modeled, so the call has no structural \
-         arm and fails closed rather than fabricating `any`"
+        "an unrepresentable callee fails closed"
     );
 }
 
@@ -4016,23 +4255,12 @@ fn sequence_wrapped_call_rides_the_bare_calls_rail() {
     // The discriminator: a sequence around a call with NO structural arm
     // keeps the positional fail-closed marker — the sequence context
     // invents no arm for the wrapped form.
-    let memo = memo_for(
-        "class Service {\n\
-         \x20 helper() { return 1; }\n\
-         \x20 run() { return (0, this.helper()); }\n\
-         }\n",
+    let node = content_for(
+        "const table = { h() { return 1; } };\n\
+         const key: string = \"h\";\n\
+         function run() { return (0, table[key]()); }\n",
+        "run",
     );
-    let index = memo.function_program_index();
-    let entry = member_entry_of(&index, "Service", 1);
-    let (selection, skeleton) = selection_for(&memo, entry, &[]);
-    let node = memo
-        .flow_slice_content(
-            entry,
-            selection,
-            &skeleton,
-            crate::semantic_query::NullabilityPolicy::Strict,
-        )
-        .expect("the class method slice content must build");
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
@@ -4464,7 +4692,10 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
          function f(x: string | number) { try { throw (assertString(x), \"e\"); } catch { return x; } return x }",
         "f",
     );
-    let [SliceStatement::Try { block, .. }] = thrown.body.statements.as_ref() else {
+    // The trailing `return x` no path reaches rides the unreachable region.
+    let [SliceStatement::Try { block, .. }, SliceStatement::Unreachable(_)] =
+        thrown.body.statements.as_ref()
+    else {
         panic!("the try lowers as a region: {thrown:?}");
     };
     assert_eq!(
@@ -4743,6 +4974,7 @@ fn typeof_and_equality_guards_support_both_operand_orders_and_negation() {
             subject,
             literal,
             negated: n,
+            ..
         } = &guard
         else {
             panic!("the test must model an EqLiteral guard: {guard:?}");
@@ -5216,14 +5448,14 @@ fn ternary_guard_shares_the_if_authority_for_a_modeled_and_an_unexpressible_test
     assert_eq!(guard_gap_count(&unexpressible), 1, "{unexpressible:?}");
 }
 
-/// A loop TEST consults the same tri-state classifier — never lowering a
-/// guard, only deciding whether a return-free loop stays fall-through
-/// TRANSPARENT. A MODELED narrow and an UNEXPRESSIBLE one over a
-/// downstream-selected slot must both refuse identically: collapsing the
+/// A loop TEST goes through the same tri-state classifier as an `if`
+/// test. A MODELED narrow over a downstream-selected slot lowers the loop
+/// structurally with the modeled guard, and an UNEXPRESSIBLE one lowers it
+/// with the typed guard-narrowing gap ahead of the loop: collapsing the
 /// unexpressible answer to "no narrowing" would let the loop iterate
 /// under a narrow the checker applies and this half silently dropped.
 #[test]
-fn loop_test_consults_the_guard_classifier_for_both_a_modeled_and_an_unexpressible_narrow() {
+fn loop_test_lowers_through_the_guard_classifier_for_both_a_modeled_and_an_unexpressible_narrow() {
     let modeled = content_for(
         "export {};\nfunction f(x: string | number) { while (typeof x === \"string\") { } return x }",
         "f",
@@ -5231,26 +5463,34 @@ fn loop_test_consults_the_guard_classifier_for_both_a_modeled_and_an_unexpressib
     assert!(
         modeled.body.statements.iter().any(|statement| matches!(
             statement,
-            SliceStatement::Unsupported(SliceUnsupported::Loop)
+            SliceStatement::Loop(lowered)
+                if matches!(
+                    lowered.test,
+                    SliceLoopTest::Before {
+                        guard: SliceGuard::Typeof { .. },
+                        ..
+                    }
+                )
         )),
-        "a modeled narrow over a downstream-selected slot refuses: {modeled:?}"
+        "a modeled narrow over a downstream-selected slot lowers with its guard: {modeled:?}"
     );
+    assert_eq!(guard_gap_count(&modeled), 0, "{modeled:?}");
 
     let unexpressible = content_for(
         "export {};\nfunction f(x: { a: number } | { b: number }, k: string) { while (k in x) { } return x }",
         "f",
     );
+    let statements = &unexpressible.body.statements;
+    let loop_index = statements
+        .iter()
+        .position(|statement| matches!(statement, SliceStatement::Loop(_)))
+        .unwrap_or_else(|| panic!("the loop lowers structurally: {statements:?}"));
     assert!(
-        unexpressible
-            .body
-            .statements
-            .iter()
-            .any(|statement| matches!(
-                statement,
-                SliceStatement::Unsupported(SliceUnsupported::Loop)
-            )),
-        "an UNEXPRESSIBLE narrow over the same downstream-selected slot must refuse identically, \
-         never fall through as though it narrowed nothing: {unexpressible:?}"
+        loop_index > 0
+            && statements[loop_index - 1]
+                == SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+        "an UNEXPRESSIBLE narrow over the same downstream-selected slot takes the typed gap \
+         ahead of the loop, never iterating as though it narrowed nothing: {statements:?}"
     );
 
     // Positive control: the SAME unexpressible test shape reaching no

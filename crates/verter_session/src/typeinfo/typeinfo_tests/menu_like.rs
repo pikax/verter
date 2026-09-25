@@ -46,9 +46,9 @@ fn menu_like_props_surface_keeps_expected_controls() {
     }
     assert_ref(&props["items"].ty, "ConcreteMenuItems");
     assert_ref(&props["ui"].ty, "MenuUi");
-    // `multiple?: M & boolean` with `M = true`: `true & boolean` reduces to
-    // the literal, so TS7 reads the member as `true` (`p.multiple` is
-    // `true | undefined`).
+    // `multiple?: M & boolean` at `M = true` is `true & boolean`, which the
+    // checker reduces to `true` (TS 7.0.2:
+    // `NonNullable<ConcreteMenuPropsSurface['multiple']>` is `true`).
     assert_boolean_literal(&props["multiple"].ty, true);
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }

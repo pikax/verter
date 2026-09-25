@@ -354,6 +354,8 @@ export function implicitEnd(x: unknown) { if (x) return typeof x === "string"; }
 export function noParams() { return typeof globalThis === "object"; }
 export function isArr(x: string | string[]) { return Array.isArray(x); }
 export function looseNull(x: string | null | undefined) { return x == null; }
+export function looseNotNull(x: string | null | undefined) { return x != null; }
+export function looseLit(x: string | number) { return x == "a"; }
 export function viaLocal(x: unknown) { const r = typeof x === "string"; return r; }
 export function eqParams(x: string, y: string) { return x === y; }
 export function closureRead(x: unknown) { const g = () => x; return typeof x === "string"; }
@@ -431,6 +433,23 @@ const INFERS: &[(&str, &str, &str)] = &[
         "notUndef",
         "(x: string | undefined) => x is string",
         "(x: string) => boolean",
+    ),
+    // A loose nullish test selects both nullish members; a loose test
+    // against another literal narrows as the strict one does.
+    (
+        "looseNull",
+        "(x: string | null | undefined) => x is null | undefined",
+        "(x: string) => boolean",
+    ),
+    (
+        "looseNotNull",
+        "(x: string | null | undefined) => x is string",
+        "(x: string) => boolean",
+    ),
+    (
+        "looseLit",
+        "(x: string | number) => x is \"a\"",
+        "(x: string | number) => x is \"a\"",
     ),
     (
         "isCls",

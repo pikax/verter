@@ -27,6 +27,9 @@
 //! fence observes the new dep-signature through the shared memo once
 //! the substituted result enters a build flow.
 //!
+//! A class's polymorphic `this` rides a [`SemanticNodeData::TypeParam`]
+//! at [`THIS_BINDER_INDEX`] (see `this_binder`).
+//!
 //! **Binder identity contract.** Binder matching is done by
 //! `SemanticNodeId` equality (the binder's interned `TypeParam`
 //! node id) rather than by `display_name` string equality. This
@@ -34,6 +37,10 @@
 //! file share a display name (`K`) but are otherwise distinct
 //! identities — the substitute only touches the binder whose node
 //! id matches the caller's `parameter_node` argument.
+
+/// The clause position a class's polymorphic `this` binder carries: no
+/// authored clause has this many parameters, so it names no authored one.
+pub(crate) const THIS_BINDER_INDEX: u16 = u16::MAX;
 
 use std::sync::Arc;
 
@@ -102,6 +109,159 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .substitute_memo_publish(node, parameter_node, arg, result);
         }
         result
+    }
+
+    /// A class's polymorphic `this` type as a class member body reads it:
+    /// a binder whose constraint is the class instance `instance` (none for
+    /// a class expression, whose instance is built from its members). A
+    /// member read off a receiver binds it to the receiver
+    /// ([`Self::bind_this_receiver`]), the checker's instantiation of a
+    /// class's `this` type with the reference it is accessed through.
+    pub(super) fn this_binder(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &Arc<str>,
+        instance: Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        self.graph().intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::from(canonical),
+                owner,
+                whole_hash: crate::semantic_query::HashValue::default(),
+                decl_name: Arc::clone(class),
+            },
+            param_index: THIS_BINDER_INDEX,
+            constraint: instance,
+            default: None,
+            display_name: Arc::from("this"),
+        })
+    }
+
+    /// The class instance a polymorphic `this` binder stands for, when
+    /// `node` is one.
+    pub(super) fn this_binder_instance(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        match self.graph().node_data(node)?.as_ref() {
+            SemanticNodeData::TypeParam {
+                param_index: THIS_BINDER_INDEX,
+                constraint,
+                ..
+            } => *constraint,
+            _ => None,
+        }
+    }
+
+    /// Whether `node` mentions `target` anywhere below it.
+    pub(super) fn mentions_node(&self, node: SemanticNodeId, target: SemanticNodeId) -> bool {
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if current == target {
+                return true;
+            }
+            if !visited.insert(current) {
+                continue;
+            }
+            if let Some(data) = self.graph().node_data(current) {
+                let _ = data.for_each_child(|child| stack.push(child));
+            }
+        }
+        false
+    }
+
+    /// Whether a member read off `node` binds a polymorphic `this`: a
+    /// reference to a class (or class expression) instance.
+    pub(super) fn is_this_receiver(&self, node: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. }
+            )
+        )
+    }
+
+    /// Bind every polymorphic `this` binder `node` mentions to
+    /// `receiver`, the reference its member was read through.
+    pub(super) fn bind_this_receiver(
+        &self,
+        node: SemanticNodeId,
+        receiver: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let mut binders: Vec<SemanticNodeId> = Vec::new();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                continue;
+            };
+            if let SemanticNodeData::TypeParam { param_index, .. } = data.as_ref() {
+                if *param_index == THIS_BINDER_INDEX && current != receiver {
+                    binders.push(current);
+                }
+                continue;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        binders.into_iter().fold(node, |result, binder| {
+            self.substitute_semantic_type_param(result, binder, receiver)
+        })
+    }
+
+    /// Rebind the ENCLOSING type parameters a body-derived return mentions
+    /// to what the declaration lowering reading it binds them to.
+    ///
+    /// The flow lane interns an enclosing clause's parameter (a class's
+    /// `H` in a method body) as the signature-scoped binder of the
+    /// defining file — `DeclIdentity::from_scope(scope, name)` at ordinal
+    /// 0 — while the lowering that reads the return binds the same name to
+    /// its own binder or to an instantiation argument (`GH<number>` binds
+    /// `H` to `number`). Every such binder of `canonical` whose name
+    /// `bind` answers is replaced by the answer. A signature's OWN
+    /// parameters are the caller's to refuse: the call resolver
+    /// instantiates those through the body-derived carrier itself.
+    pub(super) fn rebind_flow_return_binders(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        bind: impl Fn(&str) -> Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        let mut binders: Vec<(SemanticNodeId, Arc<str>)> = Vec::new();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                continue;
+            };
+            if let SemanticNodeData::TypeParam {
+                decl,
+                param_index: 0,
+                display_name,
+                ..
+            } = data.as_ref()
+            {
+                if decl.canonical_id.as_ref() == canonical && decl.decl_name == *display_name {
+                    binders.push((current, Arc::clone(display_name)));
+                }
+                continue;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        binders
+            .into_iter()
+            .fold(node, |result, (binder, name)| match bind(&name) {
+                Some(target) if target != binder => {
+                    self.substitute_semantic_type_param(result, binder, target)
+                }
+                _ => result,
+            })
     }
 
     /// Apply a stored positional substitution frame to a demanded winner

@@ -11522,9 +11522,11 @@ fn project_path_tuple_string_index_requires_canonical_digits() {
 /// Literal positions strictly BEFORE a rest element resolve exactly
 /// (pinned tsgo: `[string, ...number[]][0]` = `string`;
 /// `[string, number?, ...boolean[]][1]` = `number | undefined` — the same
-/// optional widening as a rest-free tuple). Positions AT or AFTER the rest
-/// start have suffix-dependent arithmetic this walker does not guess —
-/// they keep the honest `Opaque` miss.
+/// optional widening as a rest-free tuple). A position AT or AFTER the rest
+/// start reads every element from the rest start on, the rest contributing
+/// its element type: TypeScript 7.0.2 (`tsc --noEmit --strict`) answers
+/// `boolean` for both `T[2]` and `T[5]` over `type T = [x: string, n?:
+/// number, ...rest: boolean[]]`.
 #[test]
 fn project_path_tuple_numeric_index_resolves_fixed_prefix_before_rest() {
     use crate::semantic_query::TupleElement;
@@ -11597,16 +11599,13 @@ fn project_path_tuple_numeric_index_resolves_fixed_prefix_before_rest() {
         other => panic!("expected number|undefined union, got {other:?}"),
     }
 
-    // Positions AT (2) and AFTER (5) the rest start: honest Opaque miss —
-    // never a guessed suffix union.
+    // Positions AT (2) and AFTER (5) the rest start read the rest's
+    // element type.
     for position in [2, 5] {
-        let at_or_after_rest = project(position);
-        assert!(
-            matches!(
-                graph.node_data(at_or_after_rest).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
-            ),
-            "position {position} at/after the rest start must keep the honest miss"
+        assert_eq!(
+            project(position),
+            boolean_node,
+            "position {position} at/after the rest start reads the rest element"
         );
     }
 }
@@ -14604,11 +14603,14 @@ fn subtype_refuses_any_source_that_assignability_accepts() {
     );
 }
 
-/// V4-AC4 — `StrictSubtype` demands a PROPER subtype: the mutual pair
-/// `string ≡ string` is accepted by `Subtype` and refused by
-/// `StrictSubtype`, while a genuinely narrower literal survives both.
+/// `StrictSubtype` is the checker's strict subtype relation — the one its
+/// union subtype reduction asks — not a proper-subtype test: a type is
+/// below itself, a literal below its primitive, and `any`, below `unknown`
+/// in the subtype relation, is not below it here. Measured on TypeScript
+/// 7.0.2 through the reduction: `c ? a : b` over `a: any[]` and `b:
+/// unknown[]` is `any[]` (`unknown[]` is absorbed, `any[]` is not).
 #[test]
-fn strict_subtype_rejects_mutual_pair_that_subtype_accepts() {
+fn strict_subtype_is_the_checkers_strict_subtype_relation() {
     use crate::semantic_query::{LiteralValue, RelationKind};
 
     let host = host();
@@ -14629,9 +14631,9 @@ fn strict_subtype_rejects_mutual_pair_that_subtype_accepts() {
     assert!(
         matches!(
             dispatch.execute_relate_pair_kind(string, string, RelationKind::StrictSubtype),
-            RelationStep::NotAssignable
+            RelationStep::Assignable { .. }
         ),
-        "StrictSubtype must refuse the mutual pair: no proper subtype exists"
+        "a type is below itself in the strict subtype relation"
     );
     assert!(
         matches!(
@@ -14646,6 +14648,22 @@ fn strict_subtype_rejects_mutual_pair_that_subtype_accepts() {
             RelationStep::Assignable { .. }
         ),
         "StrictSubtype keeps the genuinely narrower literal: \"a\" < string"
+    );
+    let any = primitive(&graph, PrimitiveKind::Any);
+    let unknown = primitive(&graph, PrimitiveKind::Unknown);
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(any, unknown, RelationKind::Subtype),
+            RelationStep::Assignable { .. }
+        ),
+        "control: any is below unknown in the subtype relation"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(any, unknown, RelationKind::StrictSubtype),
+            RelationStep::NotAssignable
+        ),
+        "any is not below unknown in the strict subtype relation"
     );
 }
 

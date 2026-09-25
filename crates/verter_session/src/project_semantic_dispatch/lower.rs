@@ -2143,7 +2143,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     || !matches!(
                         graph.node_data(obj_id).as_deref(),
                         Some(SemanticNodeData::Object(_))
-                    );
+                    )
+                    // A terminal that reads a named declaration (`(typeof
+                    // C)['prototype']` is `C`) stays the access: each
+                    // consumer reads it at its own altitude, and a printed
+                    // answer keeps the name.
+                    || self.indexed_access_reads_named_declaration(obj_id, &index_key);
                 if should_defer {
                     graph.intern_node_with_scope(
                         SemanticNodeData::IndexedAccess {

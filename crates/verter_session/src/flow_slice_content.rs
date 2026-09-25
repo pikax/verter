@@ -415,9 +415,41 @@ pub enum SliceStatement {
     /// state of the region the break happens to sit in. Statements after
     /// it in the same region are unreachable and never evaluate.
     Break {
-        /// `None` for an anonymous (switch) break, the label's name for a
-        /// named one.
+        /// `None` for an anonymous (switch or loop) break, the label's
+        /// name for a named one.
         target: Option<Arc<str>>,
+    },
+    /// A `continue` of an enclosing modelled loop: the evaluator captures
+    /// the full layer state at this point as one of the loop's back edges.
+    /// Statements after it in the same region are unreachable.
+    Continue {
+        /// `None` for the innermost loop, a label naming the loop
+        /// otherwise.
+        target: Option<Arc<str>>,
+    },
+    /// A loop the evaluator iterates to the checker's fixed point
+    /// ([`SliceLoop`]).
+    Loop(Box<SliceLoop>),
+    /// Statements no path reaches that hold a `return` or a `yield` —
+    /// always the last statement of its region. The checker still
+    /// aggregates those contributions, its references reading their
+    /// declared types there; the evaluator reads the region for them alone
+    /// and nothing it does reaches the live state.
+    Unreachable(Box<SliceRegion>),
+    /// A compound write statement to a parameter or modelable local
+    /// (`x += v;`, `i++;`): the checker's flow type after it is the
+    /// base type of the literal type the target held before
+    /// (`getBaseTypeOfLiteralType` of the antecedent flow type), whatever
+    /// the operand is. The operand's evaluation effects take the statement
+    /// scan.
+    CompoundAssignment {
+        target: SliceNarrowSubject,
+        /// The write's span, in this frame's coordinates — the identity
+        /// the evaluator's write-effect ledger matches against.
+        span: FrameSpan,
+        /// The write's value site, when the skeleton records one (the
+        /// right-hand side of `x += v`; an update expression has none).
+        definition: Option<verter_semantic::analysis::flow::SkeletonExprSiteId>,
     },
     /// A `throw`: terminates the region path without contributing a
     /// return arm. The marker lets the evaluator capture the state at the
@@ -513,10 +545,12 @@ pub enum SliceStatement {
         /// return-object member positions and at the return join. A MIXED
         /// tree carries per-arm verdicts, so the evaluator widens exactly
         /// the fresh arms and keeps authored pins (`1 as const`, a call,
-        /// a reference). Annotated declarators and `let` / `var` (whose
-        /// bare literal initializers already widened at lowering) stay
-        /// `Pinned` — except a `let` / `var` initialised to a bare
-        /// `null` / `undefined` / `void` value, which carries its
+        /// a reference). An ANNOTATED declarator carries its initializer's
+        /// shape too: the declared union's reduction keeps a fresh boolean
+        /// literal fresh. An unannotated `let` / `var` (whose bare
+        /// literal initializer already widened at lowering) stays
+        /// `Pinned` — except one initialised to a bare `null` /
+        /// `undefined` / `void` value, which carries its
         /// [`SliceFreshness::WideningNullish`] shape.
         freshness: SliceFreshness,
         /// Whether the declaration has the checker's AUTO-TYPED form: an
@@ -550,6 +584,99 @@ pub enum SliceStatement {
     /// region is produced up to this marker and the evaluator degrades
     /// the whole result.
     Unsupported(SliceUnsupported),
+}
+
+/// One loop, lowered for the evaluator's fixed point: the state at the
+/// loop head is the join of the state entering the loop and every back
+/// edge (the body's end and each `continue`, after the `for` update),
+/// iterated until it stops changing, exactly as the checker's loop label
+/// joins its antecedents. Every return, yield and break of the body is
+/// evaluated from the converged head.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceLoop {
+    /// What a `for` initializer runs once, before the first test.
+    pub init: SliceRegion,
+    /// Where and whether the loop tests a condition.
+    pub test: SliceLoopTest,
+    /// The element a `for…of` / `for…in` binds at every iteration.
+    pub element: Option<SliceLoopElement>,
+    /// The loop body.
+    pub body: SliceRegion,
+    /// A `for` update's effects: run after the body's end and after
+    /// every `continue`, before the next test.
+    pub update: SliceRegion,
+    /// The labels naming the loop — what a labeled `continue` targets.
+    pub labels: Arc<[Arc<str>]>,
+    /// The test calls a function: every evaluation of it is a throw point.
+    pub test_throws: bool,
+    /// Every whole-binding write inside the loop, with the bindings its
+    /// value reads — empty when the loop declares no inferred binding.
+    pub writes: Arc<[SliceLoopDependency]>,
+    /// Every binding the loop declares with an INFERRED type (no
+    /// annotation, an initializer), with the bindings its initializer
+    /// reads: the checker types such a binding from its initializer, and
+    /// when the loop's back edges feed that initializer a value computed
+    /// from the binding itself, the checker has no type for it and uses
+    /// `any` (TS7022 under `noImplicitAny`).
+    pub inferred: Arc<[SliceLoopDependency]>,
+}
+
+/// One binding and the bindings its value reads
+/// ([`SliceLoop::writes`], [`SliceLoop::inferred`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceLoopDependency {
+    pub binding: SkeletonBindingId,
+    pub reads: Arc<[SkeletonBindingId]>,
+}
+
+/// Where a loop tests its condition.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceLoopTest {
+    /// Before every iteration (`while`, a `for` with a test): the body
+    /// is entered under the test's positive reading and the loop exits
+    /// under its negated one. A literal `true` test has no exit edge, and
+    /// a literal `false` one never enters the body — no path reaches it,
+    /// and its returns and yields count as unreachable code's do.
+    Before {
+        guard: SliceGuard,
+        constant: Option<bool>,
+    },
+    /// After every iteration (`do…while`): the first iteration is entered
+    /// unconditionally, a back edge under the positive reading, and the
+    /// loop exits under the negated one. A literal `true` test has no
+    /// exit edge and a literal `false` one no back edge.
+    After {
+        guard: SliceGuard,
+        constant: Option<bool>,
+    },
+    /// A `for` with no test: only a `break` leaves.
+    Never,
+    /// A `for…of` / `for…in`: the iteration may end at every head.
+    Exhausted,
+}
+
+/// The element a `for…of` / `for…in` iterates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceLoopElement {
+    /// The one declared identifier the element binds at every iteration;
+    /// `None` for a destructuring pattern or an existing assignment
+    /// target, whose names the evaluator does not model.
+    pub binding: Option<SliceLoopBinding>,
+    /// The iterated expression, evaluated once when the loop is entered.
+    pub iterable: SliceExpr,
+    /// `for…in` binds the iterated object's keys, `for…of` its
+    /// iterated values.
+    pub keys: bool,
+}
+
+/// The identifier a `for…of` / `for…in` declares for its element.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceLoopBinding {
+    pub binding: SkeletonBindingId,
+    pub kind: SliceBindingKind,
+    /// The binding identifier's span — the identity of the per-iteration
+    /// write the skeleton records there.
+    pub span: FrameSpan,
 }
 
 /// One `switch` case clause: its statements as a region, and whether a
@@ -783,8 +910,8 @@ pub enum SliceGuard {
     },
     /// `subject === <literal>` (`!==` negates). An EMPTY subject path is
     /// a literal-equality narrow of the binding itself; a non-empty path
-    /// is a DISCRIMINANT — the narrow selects the root's union arms by
-    /// the member's type.
+    /// narrows the tested member and is a DISCRIMINANT of its parent —
+    /// the narrow selects the parent's union arms by the member's type.
     EqLiteral {
         /// The compared reference.
         subject: SliceNarrowSubject,
@@ -792,6 +919,12 @@ pub enum SliceGuard {
         literal: SliceGuardLiteral,
         /// Whether the comparison is negated.
         negated: bool,
+        /// The loose spelling (`==` / `!=`) against a literal that is not
+        /// `null` or `undefined`. It narrows exactly as the strict one
+        /// except that `unknown` and an empty object arm are never
+        /// replaced by the literal on the positive edge — the checker's
+        /// double-equals rule (a literal operand is never coerced).
+        loose: bool,
     },
     /// `subject instanceof Ctor`, the constructor named by a bare
     /// identifier the frame leaves FREE that provably denotes the module's
@@ -1121,7 +1254,17 @@ pub enum SliceExpr {
         context: Arc<NestedFlowContext>,
         has_declared_return: bool,
         gap: Option<crate::semantic_query::FlowGap>,
+        /// The captured bindings of THIS frame whose narrowing at the
+        /// function's creation reaches its body: a `const`, or a parameter
+        /// or `let` / `var` past its last assignment (no write after the
+        /// creation, none in any nested callable) — the checker's closure
+        /// extension of the control-flow container. Empty for a callable
+        /// in a class property initializer, whose container stops there.
+        extended_captures: Arc<[SkeletonBindingId]>,
     },
+    /// A `this` read inside a class declaration's member (or an arrow a
+    /// member body creates): the receiver the member runs against.
+    This(SliceThis),
     /// A class EXPRESSION's value — its constructor. The evaluator composes
     /// the constructor type and the instance surface from the lowered
     /// class body ([`SliceClass`]); a class form this half does not model
@@ -1189,6 +1332,27 @@ pub enum SliceExpr {
         right: Box<SliceExpr>,
         /// The narrowing the left operand establishes as a test.
         guard: SliceGuard,
+    },
+    /// `operand satisfies target` over an object or array literal: the
+    /// operand lowered as the bare literal it is (every member and
+    /// element carries its pre-widening view beside its widened value),
+    /// and the target the evaluation CONTEXTUALLY types it by — a fresh
+    /// literal keeps its literal type exactly where the target's matching
+    /// position is a literal context, and an array literal in a tuple
+    /// context is a tuple (the checker's `checkSatisfiesExpression`).
+    Satisfies {
+        operand: Box<SliceExpr>,
+        target: GatedType,
+    },
+    /// `void operand` in VALUE position over a modeled whole-binding `=`
+    /// write (`return [void (x = "s"), x]`): the operand is the
+    /// [`SliceExpr::Assignment`] the evaluator applies in evaluation
+    /// order, and `value` is the expression's own answer whatever the
+    /// operand produced — the `undefined` a `void` expression is, or
+    /// the `any` a `strictNullChecks`-off object member widens it to.
+    Void {
+        operand: Box<SliceExpr>,
+        value: Box<SliceExpr>,
     },
     Gap(crate::semantic_query::FlowGap),
     /// A read (or call) of a name the frame's lexical authority resolves
@@ -1297,6 +1461,9 @@ pub struct SliceClass {
     /// signatures, else its implementation's; `None` when the class
     /// declares no constructor (the base constructor's signatures apply).
     pub constructors: Option<Arc<[Arc<[SliceClassParam]>]>>,
+    /// The accessibility the class's first constructor declares; `None`
+    /// when it declares no constructor.
+    pub constructor_visibility: Option<verter_type_expr::MemberVisibility>,
     /// The instance and static members in declaration order, including
     /// the constructor's parameter properties. An overloaded method is one
     /// member per visible overload signature, in order.
@@ -1587,6 +1754,15 @@ pub enum SliceCall {
     },
     /// A call lowered to the symbolic `ReturnType<typeof …>` carrier.
     Symbolic(TypeExpr, Option<FlowBindingRef>),
+    /// A call of a member read off a lowered receiver (`this.m()`): the
+    /// evaluator projects `member` off the receiver's value and resolves
+    /// the call over the member's signatures.
+    Member {
+        /// The receiver whose member is called.
+        receiver: Box<SliceExpr>,
+        /// The authored static member path off the receiver.
+        member: Arc<[Arc<str>]>,
+    },
     /// A `new` expression. The constructor is lowered as a flow value (a
     /// parameter or local rides its binding carrier, a free name the
     /// shared leaf lowering), and the evaluator resolves the construction
@@ -1800,6 +1976,10 @@ pub enum SliceArrayElement {
         value: SliceExpr,
         /// The element expression's top-level freshness shape.
         freshness: SliceFreshness,
+        /// The element's value before the mutable-slot widening of its
+        /// fresh literals, when that widening changed it: the view a
+        /// contextual type selects when it is a literal context.
+        pre_widening: Option<Box<SliceExpr>>,
     },
     /// A spread (`...source`): the source's elements enter here.
     Spread {
@@ -1843,19 +2023,9 @@ pub enum SliceObjectKey {
     /// authored text is not its name.
     Computed {
         /// The key expression, lowered as an ordinary value position.
-        /// Its evaluated LITERAL names the property.
+        /// Its evaluated LITERAL (or `unique symbol` carrier) names the
+        /// property; any other property-key type is late-bound.
         value: Box<SliceExpr>,
-        /// The AUTHORED key, through the shared property-key lowering.
-        ///
-        /// The value channel cannot carry every nameable key: a `unique
-        /// symbol` key names exactly one nominal property, and the
-        /// evaluator flattens its value to the bare `symbol` primitive,
-        /// losing the identity the name IS. The authored channel keeps
-        /// it (`typeof ob12Key`), and is the same carrier the
-        /// whole-literal leaf answer used to produce — so a symbol key
-        /// names its property exactly as before, without the literal
-        /// having to abandon its structural lowering to get there.
-        authored: verter_type_expr::TypeAuthoredPropertyKey,
     },
 }
 
@@ -1890,20 +2060,6 @@ pub enum ObjectMemberPolicy {
     /// primitive, because the member slot is mutable. A per-member `as
     /// const` still pins that one member.
     Widen,
-    /// Under `satisfies T`: members keep their literals and are NOT
-    /// `readonly`.
-    ///
-    /// `satisfies` keeps the operand's SOURCE type, and whether a fresh
-    /// member literal survives in that source type depends on whether the
-    /// TARGET contextually types it — `{ mode: "dark" } satisfies { mode:
-    /// "dark" | "light" }` is `{ mode: "dark" }`, while `{ n: 1 }
-    /// satisfies object` is `{ n: number }` (both pinned against TypeScript
-    /// 7.0.2 `tsc`). This substrate performs no contextual
-    /// typing, so it takes the PRESERVING side of that split uniformly,
-    /// which is the shallow pass's own long-standing choice; the
-    /// target-driven half is the separate deferred contextual-widening
-    /// contract.
-    Preserve,
     /// Under an enclosing `as const`: every member keeps its literal AND
     /// is `readonly`.
     ConstAssert,
@@ -1925,25 +2081,35 @@ impl ObjectMemberPolicy {
 /// `None` when the carrier's type is genuinely its own rather than its
 /// operand's.
 ///
-/// Only the two carriers that PRESERVE the operand's own member set
-/// qualify. `x as const` pins every member; `x satisfies T` keeps the
-/// operand's source type (see [`ObjectMemberPolicy`]). A non-const `as T`
-/// / `<T>x` REPLACES the type with `T`, a `!` non-null assertion and a
-/// `<T>`-instantiation say nothing about members — every one of those
-/// keeps the whole-carrier leaf lowering, where the carrier's own answer
-/// is the honest one.
+/// Only `x as const` qualifies here: it pins every member. `x satisfies T`
+/// over a literal keeps the operand's own lowering and its target
+/// ([`SliceExpr::Satisfies`]). A non-const `as T` / `<T>x` REPLACES the
+/// type with `T`, a `!` non-null assertion and a `<T>`-instantiation say
+/// nothing about members — every one of those keeps the whole-carrier leaf
+/// lowering, where the carrier's own answer is the honest one.
 fn member_literal_policy(expression: &Expression<'_>, source: &str) -> Option<ObjectMemberPolicy> {
     match expression {
         Expression::ParenthesizedExpression(paren) => {
             member_literal_policy(&paren.expression, source)
         }
-        Expression::TSSatisfiesExpression(_) => Some(ObjectMemberPolicy::Preserve),
         // The SHARED const-assertion authority decides, so `as const`
         // and a non-const `as T` are never told apart twice.
         Expression::TSAsExpression(_) => {
             verter_semantic::analysis::type_eval_build::expr_is_const_asserted(expression, source)
                 .then_some(ObjectMemberPolicy::ConstAssert)
         }
+        _ => None,
+    }
+}
+
+/// The `satisfies` carrier an expression is, through
+/// parentheses.
+fn satisfies_target<'a, 'ast>(
+    expression: &'a Expression<'ast>,
+) -> Option<&'a oxc_ast::ast::TSSatisfiesExpression<'ast>> {
+    match expression {
+        Expression::ParenthesizedExpression(paren) => satisfies_target(&paren.expression),
+        Expression::TSSatisfiesExpression(satisfies) => Some(satisfies),
         _ => None,
     }
 }
@@ -2343,6 +2509,47 @@ pub(crate) fn build_flow_slice_content(
             outer: captures.clone(),
             anchor,
         });
+    // A direct class-declaration member reads its receiver; a nested
+    // function reads the `this` its creating frame handed it.
+    let this = match context {
+        Some(context) => context.this.clone(),
+        None => resolved.enclosing_this.and_then(|this| {
+            let class = Arc::clone(&entry.key.declaration.name);
+            Some(match this {
+                verter_semantic::analysis::function_program::EnclosingThis::Instance => {
+                    SliceThis::Instance {
+                        class,
+                        type_parameters: enclosing_type_parameters
+                            .iter()
+                            .map(|param| Arc::clone(&param.name))
+                            .collect(),
+                    }
+                }
+                verter_semantic::analysis::function_program::EnclosingThis::Static => {
+                    SliceThis::Static {
+                        class,
+                        contributor: matches!(
+                            entry.locator.descent.as_ref(),
+                            [FunctionDescentStep::ClassMember { .. }]
+                        )
+                        .then_some(entry.locator.contributor.contributor_index),
+                    }
+                }
+                verter_semantic::analysis::function_program::EnclosingThis::ObjectLiteral => {
+                    match entry.locator.descent.as_ref() {
+                        [FunctionDescentStep::VariableInitializer { declarator_ordinal }, FunctionDescentStep::ObjectMember { .. }] => {
+                            SliceThis::Value {
+                                value: class,
+                                contributor: entry.locator.contributor.contributor_index,
+                                declarator: *declarator_ordinal,
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+            })
+        }),
+    };
     let mut lowerer = Lowerer {
         frame_gate,
         bindings: &bindings,
@@ -2354,6 +2561,8 @@ pub(crate) fn build_flow_slice_content(
         type_param_names: &type_param_names,
         self_name: self_name.as_deref(),
         enclosing_heritage: resolved.enclosing_heritage,
+        this,
+        member_this: None,
         skeleton,
         captures,
         control: Arc::clone(&entry.control),
@@ -2382,10 +2591,12 @@ pub(crate) fn build_flow_slice_content(
         alias_inline_budget: ALIAS_INLINE_LIMIT,
         unsafe_invoked_closure_effects: FxHashSet::default(),
         nested_free_writes: FxHashSet::default(),
+        class_property_initializers: 0,
         active_guard_bindings: Vec::new(),
-        active_guard_subjects: Vec::new(),
         break_targets: Vec::new(),
         loop_direct_labels: Vec::new(),
+        pending_loop_labels: Vec::new(),
+        continue_targets: Vec::new(),
         break_target_followed_by_return: Vec::new(),
         current_statement_followed_by_return: SuffixReturn::NotGuaranteed,
         nullability,
@@ -2654,6 +2865,82 @@ fn collect_binding_pattern_names<'a>(pattern: &BindingPattern<'a>, out: &mut FxH
         BindingPattern::AssignmentPattern(assignment) => {
             collect_binding_pattern_names(&assignment.left, out);
         }
+    }
+}
+
+/// Where a discarded value sits — which effect scan its unmodeled
+/// positions take ([`Lowerer::lower_discarded_effects`]).
+#[derive(Clone, Copy)]
+enum DiscardedContext {
+    /// An expression statement.
+    Statement,
+    /// A declarator initializer the demand did not select.
+    Initializer,
+}
+
+/// The whole-binding `=` write a `void (x = v)` discards (through
+/// parentheses on both sides of the `void`).
+fn void_write_assignment<'a>(
+    expression: &'a Expression<'a>,
+) -> Option<&'a oxc_ast::ast::AssignmentExpression<'a>> {
+    let Expression::UnaryExpression(unary) = unwrap_parenthesized(expression) else {
+        return None;
+    };
+    if unary.operator != UnaryOperator::Void {
+        return None;
+    }
+    match unwrap_parenthesized(&unary.argument) {
+        Expression::AssignmentExpression(assignment)
+            if matches!(
+                assignment.operator,
+                oxc_ast::ast::AssignmentOperator::Assign
+            ) && assigned_identifier(&assignment.left).is_some() =>
+        {
+            Some(assignment)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a discarded value holds a whole-binding `=` write where the
+/// evaluator can apply it ([`Lowerer::lower_discarded_effects`]): the
+/// value itself, `void` of one, or one in a conditional arm, a sequence
+/// operand, an object literal's member value or an array literal's
+/// element.
+fn discarded_value_holds_write(expression: &Expression<'_>) -> bool {
+    match unwrap_parenthesized(expression) {
+        Expression::AssignmentExpression(assignment) => {
+            matches!(
+                assignment.operator,
+                oxc_ast::ast::AssignmentOperator::Assign
+            ) && assigned_identifier(&assignment.left).is_some()
+        }
+        void @ Expression::UnaryExpression(_) => void_write_assignment(void).is_some(),
+        Expression::ConditionalExpression(conditional) => {
+            discarded_value_holds_write(&conditional.consequent)
+                || discarded_value_holds_write(&conditional.alternate)
+        }
+        Expression::SequenceExpression(sequence) => {
+            sequence.expressions.iter().any(discarded_value_holds_write)
+        }
+        Expression::ObjectExpression(object) => object.properties.iter().any(|property| {
+            matches!(
+                property,
+                oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property)
+                    if property.kind == oxc_ast::ast::PropertyKind::Init
+                        && !property.method
+                        && discarded_value_holds_write(&property.value)
+            )
+        }),
+        Expression::ArrayExpression(array) => array.elements.iter().any(|element| {
+            !matches!(
+                element,
+                oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
+            ) && element
+                .as_expression()
+                .is_some_and(discarded_value_holds_write)
+        }),
+        _ => false,
     }
 }
 
@@ -3860,6 +4147,35 @@ fn rebase_span(anchor: u32, span: oxc_span::Span) -> FrameSpan {
     FrameSpan::rebase(anchor, span.into())
 }
 
+/// The static member path of a chain rooted at `this` (`this.a.b` is
+/// `[a, b]`); `None` for any other chain.
+/// One member an object literal's `this` names.
+enum ObjectThisMember<'p> {
+    /// A property, whose value its declaration initializes it with.
+    Property(&'p Expression<'p>),
+    /// A method, served as its own position.
+    Method(verter_semantic::analysis::function_program::FunctionProgramKey),
+    /// A getter, served as its own position.
+    Getter(verter_semantic::analysis::function_program::FunctionProgramKey),
+}
+
+fn this_member_path(member: &oxc_ast::ast::StaticMemberExpression<'_>) -> Option<Vec<Arc<str>>> {
+    let mut path = vec![Arc::from(member.property.name.as_str())];
+    let mut object = &member.object;
+    loop {
+        match object {
+            Expression::ThisExpression(_) => break,
+            Expression::StaticMemberExpression(parent) => {
+                path.push(Arc::from(parent.property.name.as_str()));
+                object = &parent.object;
+            }
+            _ => return None,
+        }
+    }
+    path.reverse();
+    Some(path)
+}
+
 /// The parameter names one signature answer references — the
 /// PARAMETER-LIST half of the frame gate.
 ///
@@ -4079,6 +4395,17 @@ enum ExprMode {
 /// The region lowering result: the region plus whether any nested lowering
 /// hit an unsupported construct (the marker is in the tree; the flag
 /// propagates so the root region stops at the same point).
+/// One lowered loop and what it tells the enclosing region.
+struct LoweredLoop {
+    lowered: SliceLoop,
+    hit_unsupported: bool,
+    /// The named `break` exits the body may take past the loop.
+    may_break: Vec<SliceBreakTarget>,
+    /// The loop can complete normally: its test can fail, it iterates a
+    /// value, or a `break` targets it.
+    completes: bool,
+}
+
 struct LoweredRegion {
     region: SliceRegion,
     hit_unsupported: bool,
@@ -4154,6 +4481,39 @@ struct CapturedFrame {
     region: verter_semantic::analysis::flow::SkeletonRegionId,
 }
 
+/// What `this` reads inside a class declaration's member: the checker's
+/// receiver for the member (`checkThisExpression`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SliceThis {
+    /// An instance member of the class `class` (its registered
+    /// declaration name) declaring `type_parameters`: the class's
+    /// polymorphic `this` type, whose constraint is the class instance.
+    Instance {
+        class: Arc<str>,
+        type_parameters: Arc<[Arc<str>]>,
+    },
+    /// A static member: the class constructor, `typeof class`. A top-level
+    /// class is statement `contributor`; a static member read off `this`
+    /// lowers from the static member it names there.
+    Static {
+        class: Arc<str>,
+        contributor: Option<u32>,
+    },
+    /// A method or accessor of the object literal a variable declares:
+    /// the variable's value, `typeof value`. The literal is the initializer
+    /// of declarator `declarator` of top-level statement `contributor`;
+    /// a member read off `this` lowers from the member it names there.
+    Value {
+        value: Arc<str>,
+        contributor: u32,
+        declarator: u32,
+    },
+    /// An instance member of a class EXPRESSION, or a method or accessor of
+    /// an object literal: the instance (or object) the evaluator binds
+    /// while it evaluates the class's members (or the literal's).
+    Receiver,
+}
+
 /// The exact lexical chain at a nested function's authored position.
 /// Shared frame handles avoid enumerating or copying visible declarations.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -4165,6 +4525,16 @@ struct CaptureScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NestedFlowContext {
     captures: CaptureScope,
+    /// The lexical `this` an ARROW created in a class member reads; `None`
+    /// for every other nested function, whose `this` is its own.
+    this: Option<SliceThis>,
+}
+
+impl NestedFlowContext {
+    /// What `this` reads inside the nested function.
+    pub(crate) fn this(&self) -> Option<&SliceThis> {
+        self.this.as_ref()
+    }
 }
 
 /// An exact source declaration eligible to provide a selected capture's type.
@@ -4788,6 +5158,14 @@ struct Lowerer<'a> {
     /// `None` for every other frame (nested callables included, mirroring
     /// the type-parameter clause rule).
     enclosing_heritage: Option<verter_semantic::analysis::function_program::EnclosingHeritage<'a>>,
+    /// What `this` reads in this frame: a class declaration's member
+    /// receiver, or the one an arrow inherits from the member creating it.
+    /// A class expression's instance initializers read the class's own
+    /// receiver while they lower.
+    this: Option<SliceThis>,
+    /// The `this` the NEXT nested function lowered takes in place of the
+    /// one its kind implies: a class expression's member function.
+    member_this: Option<Option<SliceThis>>,
     /// This frame's shared structural skeleton. Runtime references use the
     /// prepared map's exact occurrence records; type-position visibility
     /// queries use the skeleton's separate lexical meaning rules.
@@ -4908,8 +5286,11 @@ struct Lowerer<'a> {
     alias_inline_budget: usize,
     unsafe_invoked_closure_effects: FxHashSet<FrameSpan>,
     nested_free_writes: FxHashSet<SkeletonBindingId>,
+    /// How many class property initializers enclose the lowering position:
+    /// a callable there is contained by the property, not this frame, so
+    /// no narrowing of this frame reaches it.
+    class_property_initializers: u32,
     active_guard_bindings: Vec<SkeletonBindingId>,
-    active_guard_subjects: Vec<FlowBindingRef>,
     /// The stack of breakable constructs whose bodies are currently being
     /// lowered (innermost last): `None` for a `switch`, `Some(label)` for
     /// a labeled statement. A `break` resolves against this stack — an
@@ -4928,6 +5309,14 @@ struct Lowerer<'a> {
     /// the loop by an intervening statement (a block with statements after
     /// the loop): breaking to THOSE skips lowered content.
     loop_direct_labels: Vec<Arc<str>>,
+    /// The labels of a label chain that directly wraps the loop about to
+    /// lower — the loop takes them as the names a labeled `continue`
+    /// targets it by.
+    pending_loop_labels: Vec<Arc<str>>,
+    /// The loops whose bodies are currently being lowered (innermost
+    /// last), each with the labels naming it: an unlabeled `continue`
+    /// targets the innermost one, a labeled one the loop its label names.
+    continue_targets: Vec<Arc<[Arc<str>]>>,
     /// For each break target, whether the target statement has a guaranteed
     /// current-function return later in its enclosing statement list. A
     /// pending break contributes implicit `undefined` only when its
@@ -4940,7 +5329,7 @@ struct Lowerer<'a> {
     current_statement_followed_by_return: SuffixReturn,
 }
 
-impl Lowerer<'_> {
+impl<'a> Lowerer<'a> {
     /// Rebase a LIVE source span onto this frame's anchor.
     ///
     /// The two coordinate systems are different TYPES
@@ -5268,6 +5657,52 @@ impl Lowerer<'_> {
         })
     }
 
+    fn binding_has_write_before(
+        &self,
+        binding: SkeletonBindingId,
+        creation_span: oxc_span::Span,
+    ) -> bool {
+        let creation = self.rebase(creation_span);
+        self.skeleton.writes.iter().any(|write| {
+            write.span < creation
+                && matches!(write.binding, Some(FlowBindingRef::Local(local))
+                    if self.bindings.canonical_local(local) == self.bindings.canonical_local(binding))
+        })
+    }
+
+    fn binding_has_write_within(&self, binding: SkeletonBindingId, range: oxc_span::Span) -> bool {
+        let range = self.rebase(range);
+        self.skeleton.writes.iter().any(|write| {
+            range.contains(write.span)
+                && matches!(write.binding, Some(FlowBindingRef::Local(local))
+                    if self.bindings.canonical_local(local) == self.bindings.canonical_local(binding))
+        })
+    }
+
+    /// Whether a capture outside its extended container reads exactly what
+    /// the evaluator supplies: a whole parameter or annotated `var` reads
+    /// its declared authority, and an unannotated `var` no write retypes
+    /// before the creation reads the reaching its declarator binds.
+    fn capture_reads_declared_type(
+        &self,
+        binding: SkeletonBindingId,
+        creation_span: oxc_span::Span,
+    ) -> bool {
+        let fact = self.skeleton.binding(binding);
+        if fact.destructured {
+            return false;
+        }
+        match fact.kind {
+            SkeletonBindingKind::Param => true,
+            SkeletonBindingKind::Var => {
+                fact.annotation_span.is_some()
+                    || (!self.nested_free_writes.contains(&binding)
+                        && !self.binding_has_write_before(binding, creation_span))
+            }
+            _ => false,
+        }
+    }
+
     fn guard_bindings(&self, guard: &SliceGuard, _at: oxc_span::Span) -> Vec<SkeletonBindingId> {
         let mut bindings = Vec::new();
         collect_guard_subjects(guard, &mut |subject| {
@@ -5306,21 +5741,6 @@ impl Lowerer<'_> {
         if !bindings.contains(&local) {
             bindings.push(local);
         }
-    }
-
-    fn predicate_subject_binding(&self, test: &Expression<'_>) -> Option<FlowBindingRef> {
-        let Expression::CallExpression(call) = unwrap_parenthesized(test) else {
-            return None;
-        };
-        let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
-            return None;
-        };
-        let (ordinal, _) = self.same_file_predicate(callee.name.as_str(), false, call.span)?;
-        let argument = call
-            .arguments
-            .get(ordinal)
-            .and_then(|argument| argument.as_expression())?;
-        chain_root_identifier(argument).and_then(|identifier| self.binding_at(identifier.span))
     }
 
     fn nested_function_transfers_downstream_slot(
@@ -5627,6 +6047,14 @@ impl Lowerer<'_> {
     /// Lower a sequential statement list into a region. Statements after a
     /// terminal path are unreachable and dropped; an unsupported construct
     /// ends the region with its marker and propagates.
+    ///
+    /// The checker still aggregates every `return` and `yield` of the body
+    /// that no path reaches, its references reading their declared types:
+    /// dropped statements holding one lower into a trailing
+    /// [`SliceStatement::Unreachable`] region the evaluator reads for those
+    /// contributions alone. One whose lowering hits an unsupported
+    /// construct takes the typed `AbruptCompletion` gap at the region's
+    /// head instead.
     fn lower_region(&mut self, statements: &[Statement<'_>]) -> LoweredRegion {
         let enclosing_followed_by_return = self.current_statement_followed_by_return;
         let mut out: Vec<SliceStatement> = Vec::new();
@@ -5635,6 +6063,17 @@ impl Lowerer<'_> {
         let mut may_break: Vec<SliceBreakTarget> = Vec::new();
         for (index, statement) in statements.iter().enumerate() {
             if !can_fall_through {
+                if !hit_unsupported && unreachable_statements_contribute(&statements[index..]) {
+                    let unreachable = self.lower_region(&statements[index..]);
+                    if unreachable.hit_unsupported {
+                        out.insert(
+                            0,
+                            SliceStatement::Gap(crate::semantic_query::FlowGap::AbruptCompletion),
+                        );
+                    } else {
+                        out.push(SliceStatement::Unreachable(Box::new(unreachable.region)));
+                    }
+                }
                 break;
             }
             self.current_statement_followed_by_return = SuffixReturn::fold(
@@ -5713,30 +6152,16 @@ impl Lowerer<'_> {
                     });
                     out.extend(assertion_statements(test_assertions));
                     let active_guard_base = self.active_guard_bindings.len();
-                    let active_guard_subject_base = self.active_guard_subjects.len();
                     let guard_bindings = self.guard_bindings(&guard, if_stmt.test.span());
-                    let guard_name = self.predicate_subject_binding(&if_stmt.test);
-                    let nested_predicate_gap = guard_name.as_ref().is_some_and(|name| {
-                        self.active_guard_subjects.contains(name)
-                            && matches!(name, FlowBindingRef::Captured(_))
-                    });
                     self.active_guard_bindings
                         .extend(guard_bindings.iter().copied());
-                    self.active_guard_subjects
-                        .extend(guard_name.iter().cloned());
                     let consequent = self.lower_arm(&if_stmt.consequent);
                     self.active_guard_bindings.truncate(active_guard_base);
-                    self.active_guard_subjects
-                        .truncate(active_guard_subject_base);
                     let alternate = if_stmt.alternate.as_ref().map(|alternate| {
                         self.active_guard_bindings
                             .extend(guard_bindings.iter().copied());
-                        self.active_guard_subjects
-                            .extend(guard_name.iter().cloned());
                         let lowered = self.lower_arm(alternate);
                         self.active_guard_bindings.truncate(active_guard_base);
-                        self.active_guard_subjects
-                            .truncate(active_guard_subject_base);
                         lowered
                     });
                     can_fall_through = consequent
@@ -5763,7 +6188,7 @@ impl Lowerer<'_> {
                     // arm — the test lowers to guard facts only, so the
                     // marker carries the point (ahead of the `if`, where
                     // the test evaluates).
-                    if nested_predicate_gap || unprovable_control_call || unprovable_guard {
+                    if unprovable_control_call || unprovable_guard {
                         out.push(SliceStatement::Gap(
                             crate::semantic_query::FlowGap::GuardNarrowing,
                         ));
@@ -5787,172 +6212,7 @@ impl Lowerer<'_> {
                     }
                 }
                 Statement::VariableDeclaration(decl) => {
-                    let kind = match decl.kind {
-                        VariableDeclarationKind::Const
-                        | VariableDeclarationKind::Using
-                        | VariableDeclarationKind::AwaitUsing => SliceBindingKind::Const,
-                        VariableDeclarationKind::Let => SliceBindingKind::Let,
-                        VariableDeclarationKind::Var => SliceBindingKind::Var,
-                    };
-                    for declarator in &decl.declarations {
-                        // An eligible alias of a CONDITION or a
-                        // DISCRIMINANT re-establishes its initializer's
-                        // fact at every later test of the bound name,
-                        // whether or not the demand value-selected the
-                        // declaration — the name still resolves either
-                        // way, and a destructured discriminant aliases
-                        // exactly as a whole-binding one does.
-                        self.record_narrowing_aliases(&decl.kind, declarator);
-                        let BindingPattern::BindingIdentifier(id) = &declarator.id else {
-                            // Destructuring declarators are not simple
-                            // local reaching definitions — but the
-                            // initializer still RUNS at the statement, so
-                            // its effects take the same fail-closed scan
-                            // every unmodeled position gets.
-                            if let Some(init) = declarator.init.as_ref() {
-                                let entered = self.collecting_entered_assertions(|this| {
-                                    this.scan_unmodeled_position_effects(init)
-                                });
-                                out.extend(assertion_statements(entered));
-                            }
-                            continue;
-                        };
-                        // A binding OUTSIDE the slice's value-selected
-                        // slot set never lowers: the elided declaration's
-                        // initializer stays cold (no lowering, no
-                        // resolution, no budget charge). Classification of
-                        // later reads/calls is unchanged — the skeleton
-                        // indexes the declaration regardless of the
-                        // demand. The gate is the binding-identifier SPAN
-                        // (declaration-precise), never the name — a
-                        // shadowed same-named sibling the plan kept out
-                        // must not lower.
-                        //
-                        // The elided initializer still RUNS at the
-                        // statement, though: an assertion call or a
-                        // whole-binding write inside it narrows / retypes
-                        // what follows in the checker while the slice's
-                        // obligations never reach the position — scan it
-                        // with the same fail-closed discipline (a
-                        // pure-literal initializer carries no effect and
-                        // stays silent).
-                        if !self.slot_selected(id.span) {
-                            // An entered `asserts` call in it narrows once
-                            // the initializer has run.
-                            if let Some(init) = declarator.init.as_ref() {
-                                let entered = self.collecting_entered_assertions(|this| {
-                                    this.scan_unmodeled_position_effects(init)
-                                });
-                                out.extend(assertion_statements(entered));
-                            }
-                            continue;
-                        }
-                        // An ANNOTATED declarator preserves its
-                        // initializer's fresh literal: the declared type
-                        // governs the binding, and for a union declared
-                        // type the initializer only SELECTS which
-                        // declared constituents survive — a widened
-                        // initializer would select none.
-                        let preserve_literal =
-                            kind == SliceBindingKind::Const || declarator.type_annotation.is_some();
-                        // A class expression that directly initializes a
-                        // variable is named after it (`const C = class {}`
-                        // is the checker's `C`).
-                        let init = declarator.init.as_ref().map(|expr| {
-                            self.lower_assigned_value(
-                                expr,
-                                id.name.as_str(),
-                                ExprMode::BindingInit { preserve_literal },
-                            )
-                        });
-                        // The authored annotation is the binding's
-                        // DECLARED type — it SUPPLIES a value, it does
-                        // not merely suppress the initializer's
-                        // widening.
-                        // A declarator annotation is a BODY position: it
-                        // sits IN this frame's region chain, so it takes
-                        // the frame gate with NO nearer-clause binders —
-                        // this frame's own clause is consulted BEHIND
-                        // this frame's lexical authority, which is what
-                        // lets a block-scoped local of the binder's name
-                        // win. The initializer's gate cannot stand in for
-                        // it — the `(Some(init), None)` arm binds the
-                        // DECLARED node and skips the initializer
-                        // entirely.
-                        let declared = declarator.type_annotation.as_ref().map(|annotation| {
-                            self.gate(
-                                lower_ts_type(&annotation.type_annotation, self.source),
-                                id.span,
-                                &[],
-                            )
-                        });
-                        // The initializer's FRESHNESS shape for an
-                        // unannotated `const` — the evaluator's widening
-                        // membership input. An all-fresh tree (a bare
-                        // literal, or a conditional whose EVERY leaf is
-                        // one — `f ? 1 : "s"`) is the classic
-                        // widening-literal binding: the checker widens
-                        // every arm at a widening read (`{ label: v }`
-                        // reads `string | number`). A MIXED tree (an
-                        // `as const` arm, a call, a reference beside a
-                        // fresh leaf) carries per-arm verdicts so the
-                        // evaluator widens exactly the fresh arms and
-                        // keeps the authored pins. `let` / `var`
-                        // initializers already widened at `BindingInit`
-                        // lowering, and an annotated `const` takes its
-                        // declared type — both stay `Pinned` here.
-                        // An unannotated `let` / `var` whose initializer is
-                        // a bare `null` / `undefined` / `void` value carries
-                        // that shape too: it is the checker's auto-typed
-                        // variable, reading the widening nullable type
-                        // until a later write retypes it.
-                        let freshness = match (declared.as_ref(), declarator.init.as_ref()) {
-                            (None, Some(init)) if kind == SliceBindingKind::Const => {
-                                expression_freshness(init)
-                            }
-                            (None, Some(init)) if expr_is_widening_nullish(init) => {
-                                expression_freshness(init)
-                            }
-                            _ => SliceFreshness::Pinned,
-                        };
-                        let auto_typed_form = declared.is_none()
-                            && kind != SliceBindingKind::Const
-                            && declarator
-                                .init
-                                .as_ref()
-                                .is_none_or(|init| self.is_null_or_undefined_keyword(init));
-                        let Some(binding) = self.bindings.declaration_at_span(self.rebase(id.span))
-                        else {
-                            out.push(SliceStatement::Gap(
-                                crate::semantic_query::FlowGap::UnmodeledExpression,
-                            ));
-                            continue;
-                        };
-                        let evolving_array = (declared.is_none()
-                            && declarator.init.as_ref().is_some_and(|init| {
-                                matches!(
-                                    init,
-                                    Expression::ArrayExpression(array) if array.elements.is_empty()
-                                )
-                            }))
-                        .then(|| {
-                            if self.binding_only_read_whole(binding) {
-                                SliceEvolvingArray::Settled
-                            } else {
-                                SliceEvolvingArray::MayEvolve
-                            }
-                        });
-                        out.push(SliceStatement::Binding {
-                            binding,
-                            name: Arc::from(id.name.as_str()),
-                            kind,
-                            init,
-                            declared,
-                            freshness,
-                            auto_typed_form,
-                            evolving_array,
-                        });
-                    }
+                    self.lower_variable_declaration(decl, &mut out)
                 }
                 // An expression statement's value is never consumed by the
                 // evaluator; its evaluation effects ride the slice's typed
@@ -6030,17 +6290,32 @@ impl Lowerer<'_> {
                     // `continue` naming an enclosing label exits an edge
                     // the vanished body can no longer record; a selected
                     // guard, call/assertion, or write depends on iteration
-                    // flow. Every shape takes the existing typed loop
-                    // refusal.
+                    // flow. Every such loop lowers structurally and the
+                    // evaluator iterates it to the checker's fixed point
+                    // ([`SliceLoop`]); a shape that does not lower keeps
+                    // the typed loop refusal.
+                    let labels = std::mem::take(&mut self.pending_loop_labels);
                     if self.control_has_return(statement)
                         || statement_yields_in_own_frame(statement)
                         || declares_var(statement)
                         || loop_transfers_to_enclosing_label(statement, &self.loop_direct_labels)
                         || self.loop_has_selected_transfer(statement)
                     {
-                        out.push(SliceStatement::Unsupported(SliceUnsupported::Loop));
-                        hit_unsupported = true;
-                        can_fall_through = false;
+                        match self.lower_loop(statement, labels) {
+                            Some(lowered) => {
+                                hit_unsupported = lowered.hit_unsupported;
+                                may_break.extend(lowered.may_break);
+                                if !lowered.completes || hit_unsupported {
+                                    can_fall_through = false;
+                                }
+                                out.push(SliceStatement::Loop(Box::new(lowered.lowered)));
+                            }
+                            None => {
+                                out.push(SliceStatement::Unsupported(SliceUnsupported::Loop));
+                                hit_unsupported = true;
+                                can_fall_through = false;
+                            }
+                        }
                     } else if loop_exit_edge_is_unreachable(statement, &self.loop_direct_labels) {
                         // The loop never completes normally, so it ends the
                         // region's normal path exactly as an authored `throw`
@@ -6067,10 +6342,13 @@ impl Lowerer<'_> {
                     // loop's transparency classification treats a jump to
                     // it as local rather than an escaping transfer.
                     let direct_wrap = label_directly_wraps_loop(&labeled.body);
+                    let pending_base = self.pending_loop_labels.len();
                     if direct_wrap {
                         self.loop_direct_labels.push(Arc::clone(&label));
+                        self.pending_loop_labels.push(Arc::clone(&label));
                     }
                     let child = self.lower_arm(&labeled.body);
+                    self.pending_loop_labels.truncate(pending_base);
                     if direct_wrap {
                         self.loop_direct_labels.pop();
                     }
@@ -6150,9 +6428,8 @@ impl Lowerer<'_> {
                         .push(SuffixReturn::NotGuaranteed);
                     // A clause body evaluates under the dispatch narrow
                     // of the discriminant, so a closure created there
-                    // captures a reading the evaluator cannot reproduce
-                    // at the capture's own evaluation — the same rail the
-                    // `if` arms and the ternary's arms take.
+                    // takes the closure-capture rail the `if` arms and
+                    // the ternary's arms take.
                     let active_guard_base = self.active_guard_bindings.len();
                     if let Some(subject) = discriminant.as_ref() {
                         let bindings = self.subject_bindings(subject, switch.discriminant.span());
@@ -6301,6 +6578,16 @@ impl Lowerer<'_> {
                             .find(|(entry, _)| entry.as_ref() == Some(name))
                             .map(|(_, followed_by_return)| *followed_by_return)
                     };
+                    // An anonymous break's destination is the innermost
+                    // anonymous breakable's continuation.
+                    let anonymous_followed_by_return = || {
+                        self.break_targets
+                            .iter()
+                            .zip(self.break_target_followed_by_return.iter())
+                            .rev()
+                            .find(|(entry, _)| entry.is_none())
+                            .map(|(_, followed_by_return)| *followed_by_return)
+                    };
                     // The destination decides the contribution, and an
                     // UNDECIDED destination decides nothing: the value keeps
                     // the derivation it always had, and the gap below makes
@@ -6311,7 +6598,9 @@ impl Lowerer<'_> {
                                 SliceBreakTarget::Named(name) => {
                                     target_followed_by_return(name) == Some(state)
                                 }
-                                SliceBreakTarget::Anonymous => false,
+                                SliceBreakTarget::Anonymous => {
+                                    anonymous_followed_by_return() == Some(state)
+                                }
                             })
                     };
                     let pending_break_destination_undecided =
@@ -6437,12 +6726,27 @@ impl Lowerer<'_> {
                         }
                     }
                 }
-                Statement::ContinueStatement(_) => {
-                    // A `continue` always targets a loop, and a loop body
-                    // never lowers — so no modelled construct can absorb
-                    // one.
-                    out.push(SliceStatement::Unsupported(SliceUnsupported::Jump));
-                    hit_unsupported = true;
+                Statement::ContinueStatement(continue_stmt) => {
+                    // A `continue` of a loop whose body is being lowered
+                    // ends this region's path and records a back edge of
+                    // that loop; any other stays the typed jump failure.
+                    let target = match continue_stmt.label.as_ref() {
+                        Some(label) => {
+                            let name: Arc<str> = Arc::from(label.name.as_str());
+                            self.continue_targets
+                                .iter()
+                                .any(|labels| labels.contains(&name))
+                                .then_some(Some(name))
+                        }
+                        None => (!self.continue_targets.is_empty()).then_some(None),
+                    };
+                    match target {
+                        Some(target) => out.push(SliceStatement::Continue { target }),
+                        None => {
+                            out.push(SliceStatement::Unsupported(SliceUnsupported::Jump));
+                            hit_unsupported = true;
+                        }
+                    }
                     can_fall_through = false;
                 }
                 Statement::ImportDeclaration(_)
@@ -6548,6 +6852,437 @@ impl Lowerer<'_> {
             },
             hit_unsupported,
             may_break,
+        }
+    }
+
+    /// Lower a loop the evaluator iterates to the checker's fixed point
+    /// ([`SliceLoop`]). `None` for a shape it does not model — `for
+    /// await`, or a `for…of` / `for…in` declaring more than one binding
+    /// — which keeps the typed loop refusal.
+    fn lower_loop(
+        &mut self,
+        statement: &Statement<'_>,
+        labels: Vec<Arc<str>>,
+    ) -> Option<LoweredLoop> {
+        let (test, update, body, test_after, element_source) = match statement {
+            Statement::WhileStatement(while_stmt) => {
+                (Some(&while_stmt.test), None, &while_stmt.body, false, None)
+            }
+            Statement::DoWhileStatement(do_while) => {
+                (Some(&do_while.test), None, &do_while.body, true, None)
+            }
+            Statement::ForStatement(for_stmt) => (
+                for_stmt.test.as_ref(),
+                for_stmt.update.as_ref(),
+                &for_stmt.body,
+                false,
+                None,
+            ),
+            Statement::ForOfStatement(for_of) if !for_of.r#await => (
+                None,
+                None,
+                &for_of.body,
+                false,
+                Some((&for_of.left, &for_of.right, false)),
+            ),
+            Statement::ForInStatement(for_in) => (
+                None,
+                None,
+                &for_in.body,
+                false,
+                Some((&for_in.left, &for_in.right, true)),
+            ),
+            _ => return None,
+        };
+        let constant = test.and_then(literal_boolean_value);
+        // The element binding: one declared identifier. A destructuring
+        // pattern or an existing assignment target binds nothing the
+        // evaluator models — its names read as unmodeled bindings and its
+        // writes keep the typed unapplied-write degradation.
+        let element_binding = match element_source {
+            Some((oxc_ast::ast::ForStatementLeft::VariableDeclaration(decl), _, _)) => {
+                match (decl.declarations.as_slice(), decl.kind) {
+                    ([declarator], kind) => match &declarator.id {
+                        BindingPattern::BindingIdentifier(id) => {
+                            let span = self.rebase(id.span);
+                            let binding = self.bindings.declaration_at_span(span)?;
+                            let kind = match kind {
+                                VariableDeclarationKind::Let => SliceBindingKind::Let,
+                                VariableDeclarationKind::Var => SliceBindingKind::Var,
+                                VariableDeclarationKind::Const
+                                | VariableDeclarationKind::Using
+                                | VariableDeclarationKind::AwaitUsing => SliceBindingKind::Const,
+                            };
+                            Some(SliceLoopBinding {
+                                binding,
+                                kind,
+                                span,
+                            })
+                        }
+                        _ => None,
+                    },
+                    _ => return None,
+                }
+            }
+            _ => None,
+        };
+        let completes = !loop_exit_edge_is_unreachable(statement, &self.loop_direct_labels);
+        // The loop's own region: the `for` initializer, and the iterated
+        // expression, evaluated once when the loop is entered.
+        let mut init: Vec<SliceStatement> = Vec::new();
+        if let Statement::ForStatement(for_stmt) = statement {
+            match &for_stmt.init {
+                Some(oxc_ast::ast::ForStatementInit::VariableDeclaration(decl)) => {
+                    self.lower_variable_declaration(decl, &mut init);
+                }
+                Some(other) => {
+                    if let Some(expression) = other.as_expression() {
+                        init.extend(self.lower_effect_statement(expression));
+                    }
+                }
+                None => {}
+            }
+        }
+        let element = element_source.map(|(_, right, keys)| SliceLoopElement {
+            binding: element_binding,
+            iterable: self.lower_expr(right, ExprMode::Return),
+            keys,
+        });
+        // The test lowers to its narrowing facts through the one guard
+        // authority; a test this vocabulary cannot express, or a control
+        // call it cannot certify, takes the typed gap ahead of the loop.
+        let mut test_gap = false;
+        let mut test_throws = false;
+        let mut active_guard = None;
+        let test = match test {
+            Some(test) => {
+                let guard = self.lower_guard(test);
+                test_gap |= std::mem::take(&mut self.control_test_gap);
+                test_gap |= self.record_control_position_calls(test);
+                test_throws = verter_semantic::analysis::flow::expression_contains_call(test);
+                if !test_after {
+                    active_guard = Some(self.guard_bindings(&guard, test.span()));
+                }
+                if test_after {
+                    SliceLoopTest::After { guard, constant }
+                } else {
+                    SliceLoopTest::Before { guard, constant }
+                }
+            }
+            None if element.is_some() => SliceLoopTest::Exhausted,
+            None => SliceLoopTest::Never,
+        };
+        // The body: an unlabeled `break` and `continue` target this loop,
+        // and a label chain wrapping the loop wraps nothing inside it.
+        let enclosing_direct_labels = std::mem::take(&mut self.loop_direct_labels);
+        // A `break` leaves to the statement after the loop.
+        self.break_targets.push(None);
+        self.break_target_followed_by_return
+            .push(self.current_statement_followed_by_return);
+        let labels: Arc<[Arc<str>]> = Arc::from(labels.into_boxed_slice());
+        self.continue_targets.push(Arc::clone(&labels));
+        let active_guard_base = self.active_guard_bindings.len();
+        if let Some(bindings) = &active_guard {
+            self.active_guard_bindings.extend(bindings.iter().copied());
+        }
+        let lowered_body = self.lower_arm(body);
+        self.active_guard_bindings.truncate(active_guard_base);
+        self.continue_targets.pop();
+        self.break_target_followed_by_return.pop();
+        self.break_targets.pop();
+        self.loop_direct_labels = enclosing_direct_labels;
+        let mut update_statements: Vec<SliceStatement> = Vec::new();
+        if let Some(update) = update {
+            update_statements.extend(self.lower_effect_statement(update));
+        }
+        if test_gap {
+            self.control_test_gap = true;
+        }
+        let region = |statements: Vec<SliceStatement>| SliceRegion {
+            statements: Arc::from(statements.into_boxed_slice()),
+            can_fall_through: NormalCompletion::minted(
+                true,
+                CompletionConstruction::SynthesizedRegion,
+            ),
+        };
+        // The loop's own anonymous break is absorbed here; a named one
+        // travels to its labeled statement.
+        let may_break = lowered_body
+            .may_break
+            .into_iter()
+            .filter(|target| !matches!(target, SliceBreakTarget::Anonymous))
+            .collect();
+        let (writes, inferred) = self.loop_dependencies(statement);
+        Some(LoweredLoop {
+            lowered: SliceLoop {
+                init: region(init),
+                test,
+                element,
+                body: lowered_body.region,
+                update: region(update_statements),
+                labels,
+                test_throws,
+                writes,
+                inferred,
+            },
+            hit_unsupported: lowered_body.hit_unsupported,
+            may_break,
+            completes,
+        })
+    }
+
+    /// The dependencies the checker's loop analysis can close into a cycle
+    /// ([`SliceLoop::inferred`]): every binding the loop declares with an
+    /// inferred type, with the bindings its initializer reads, and every
+    /// whole-binding write inside the loop, with the bindings its value
+    /// reads. Both are empty when the loop declares no inferred binding.
+    fn loop_dependencies(
+        &self,
+        statement: &Statement<'_>,
+    ) -> (Arc<[SliceLoopDependency]>, Arc<[SliceLoopDependency]>) {
+        let loop_span = self.rebase(statement.span());
+        let inferred: Vec<SliceLoopDependency> = self
+            .skeleton
+            .bindings
+            .iter()
+            .filter(|binding| {
+                loop_span.contains(binding.span)
+                    && !binding.destructured
+                    && binding.annotation_span.is_none()
+                    && matches!(
+                        binding.kind,
+                        SkeletonBindingKind::Let
+                            | SkeletonBindingKind::Const
+                            | SkeletonBindingKind::Var
+                    )
+            })
+            .filter_map(|binding| {
+                let initializer = binding.initializer?;
+                let declared = self.bindings.declaration_at_span(binding.span)?;
+                Some(SliceLoopDependency {
+                    binding: self.bindings.canonical_local(declared),
+                    reads: self.site_binding_reads(initializer),
+                })
+            })
+            .collect();
+        if inferred.is_empty() {
+            return (Arc::from([]), Arc::from([]));
+        }
+        let writes: Vec<SliceLoopDependency> = self
+            .skeleton
+            .writes
+            .iter()
+            .filter(|write| loop_span.contains(write.span) && write.path.is_empty())
+            .filter_map(|write| {
+                let Some(FlowBindingRef::Local(target)) = write.binding else {
+                    return None;
+                };
+                Some(SliceLoopDependency {
+                    binding: self.bindings.canonical_local(target),
+                    reads: self.site_binding_reads(write.value?),
+                })
+            })
+            .collect();
+        (
+            Arc::from(writes.into_boxed_slice()),
+            Arc::from(inferred.into_boxed_slice()),
+        )
+    }
+
+    /// The frame bindings every site under `site` reads, canonical and
+    /// deduplicated.
+    fn site_binding_reads(
+        &self,
+        site: verter_semantic::analysis::flow::SkeletonExprSiteId,
+    ) -> Arc<[SkeletonBindingId]> {
+        let span = self.skeleton.expr_site(site).span;
+        let mut reads: Vec<SkeletonBindingId> = self
+            .skeleton
+            .expr_sites
+            .iter()
+            .filter(|candidate| span.contains(candidate.span))
+            .flat_map(|candidate| candidate.reads.iter())
+            .filter_map(|read| match read.binding {
+                Some(FlowBindingRef::Local(binding)) => {
+                    Some(self.bindings.canonical_local(binding))
+                }
+                _ => None,
+            })
+            .collect();
+        reads.sort_unstable_by_key(|binding| binding.index());
+        reads.dedup();
+        Arc::from(reads.into_boxed_slice())
+    }
+
+    /// Lower one variable declaration's declarators into `out` — a
+    /// statement's, or a `for` loop initializer's.
+    fn lower_variable_declaration(
+        &mut self,
+        decl: &oxc_ast::ast::VariableDeclaration<'_>,
+        out: &mut Vec<SliceStatement>,
+    ) {
+        let kind = match decl.kind {
+            VariableDeclarationKind::Const
+            | VariableDeclarationKind::Using
+            | VariableDeclarationKind::AwaitUsing => SliceBindingKind::Const,
+            VariableDeclarationKind::Let => SliceBindingKind::Let,
+            VariableDeclarationKind::Var => SliceBindingKind::Var,
+        };
+        for declarator in &decl.declarations {
+            // An eligible alias of a CONDITION or a
+            // DISCRIMINANT re-establishes its initializer's
+            // fact at every later test of the bound name,
+            // whether or not the demand value-selected the
+            // declaration — the name still resolves either
+            // way, and a destructured discriminant aliases
+            // exactly as a whole-binding one does.
+            self.record_narrowing_aliases(&decl.kind, declarator);
+            let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+                // Destructuring declarators are not simple
+                // local reaching definitions — but the
+                // initializer still RUNS at the statement, so
+                // its effects take the same fail-closed scan
+                // every unmodeled position gets; an entered `asserts`
+                // call in it narrows once the initializer has run.
+                if let Some(init) = declarator.init.as_ref() {
+                    let entered = self.collecting_entered_assertions(|this| {
+                        this.scan_unmodeled_position_effects(init)
+                    });
+                    out.extend(assertion_statements(entered));
+                }
+                continue;
+            };
+            // A binding OUTSIDE the slice's value-selected
+            // slot set never lowers: the elided declaration's
+            // initializer stays cold (no lowering, no
+            // resolution, no budget charge). Classification of
+            // later reads/calls is unchanged — the skeleton
+            // indexes the declaration regardless of the
+            // demand. The gate is the binding-identifier SPAN
+            // (declaration-precise), never the name — a
+            // shadowed same-named sibling the plan kept out
+            // must not lower.
+            //
+            // The elided initializer still RUNS at the
+            // statement, though: an assertion call or a
+            // whole-binding write inside it narrows / retypes
+            // what follows in the checker while the slice's
+            // obligations never reach the position — scan it
+            // with the same fail-closed discipline (a
+            // pure-literal initializer carries no effect and
+            // stays silent).
+            //
+            // A whole-binding write the initializer holds
+            // applies in evaluation order instead
+            // ([`Self::lower_discarded_effects`]).
+            if !self.slot_selected(id.span) {
+                if let Some(init) = declarator.init.as_ref() {
+                    self.lower_discarded_effects(init, DiscardedContext::Initializer, out);
+                }
+                continue;
+            }
+            // An ANNOTATED declarator preserves its
+            // initializer's fresh literal: the declared type
+            // governs the binding, and for a union declared
+            // type the initializer only SELECTS which
+            // declared constituents survive — a widened
+            // initializer would select none.
+            let preserve_literal =
+                kind == SliceBindingKind::Const || declarator.type_annotation.is_some();
+            // A class expression that directly initializes a
+            // variable is named after it (`const C = class {}`
+            // is the checker's `C`).
+            let init = declarator.init.as_ref().map(|expr| {
+                self.lower_assigned_value(
+                    expr,
+                    id.name.as_str(),
+                    ExprMode::BindingInit { preserve_literal },
+                )
+            });
+            // The authored annotation is the binding's
+            // DECLARED type — it SUPPLIES a value, it does
+            // not merely suppress the initializer's
+            // widening.
+            // A declarator annotation is a BODY position: it
+            // sits IN this frame's region chain, so it takes
+            // the frame gate with NO nearer-clause binders —
+            // this frame's own clause is consulted BEHIND
+            // this frame's lexical authority, which is what
+            // lets a block-scoped local of the binder's name
+            // win. The initializer's gate cannot stand in for
+            // it — the `(Some(init), None)` arm binds the
+            // DECLARED node and skips the initializer
+            // entirely.
+            let declared = declarator.type_annotation.as_ref().map(|annotation| {
+                self.gate(
+                    lower_ts_type(&annotation.type_annotation, self.source),
+                    id.span,
+                    &[],
+                )
+            });
+            // The initializer's FRESHNESS shape for an
+            // unannotated `const` — the evaluator's widening
+            // membership input. An all-fresh tree (a bare
+            // literal, or a conditional whose EVERY leaf is
+            // one — `f ? 1 : "s"`) is the classic
+            // widening-literal binding: the checker widens
+            // every arm at a widening read (`{ label: v }`
+            // reads `string | number`). A MIXED tree (an
+            // `as const` arm, a call, a reference beside a
+            // fresh leaf) carries per-arm verdicts so the
+            // evaluator widens exactly the fresh arms and
+            // keeps the authored pins. `let` / `var`
+            // initializers already widened at `BindingInit`
+            // lowering and stay `Pinned` here; an annotated
+            // declarator's shape is the declared union
+            // reduction's fresh-boolean input.
+            // An unannotated `let` / `var` whose initializer is
+            // a bare `null` / `undefined` / `void` value carries
+            // that shape too: it is the checker's auto-typed
+            // variable, reading the widening nullable type
+            // until a later write retypes it.
+            let freshness = match (declared.as_ref(), declarator.init.as_ref()) {
+                (Some(_), Some(init)) => expression_freshness(init),
+                (None, Some(init)) if kind == SliceBindingKind::Const => expression_freshness(init),
+                (None, Some(init)) if expr_is_widening_nullish(init) => expression_freshness(init),
+                _ => SliceFreshness::Pinned,
+            };
+            let auto_typed_form = declared.is_none()
+                && kind != SliceBindingKind::Const
+                && declarator
+                    .init
+                    .as_ref()
+                    .is_none_or(|init| self.is_null_or_undefined_keyword(init));
+            let Some(binding) = self.bindings.declaration_at_span(self.rebase(id.span)) else {
+                out.push(SliceStatement::Gap(
+                    crate::semantic_query::FlowGap::UnmodeledExpression,
+                ));
+                continue;
+            };
+            let evolving_array = (declared.is_none()
+                && declarator.init.as_ref().is_some_and(|init| {
+                    matches!(
+                        init,
+                        Expression::ArrayExpression(array) if array.elements.is_empty()
+                    )
+                }))
+            .then(|| {
+                if self.binding_only_read_whole(binding) {
+                    SliceEvolvingArray::Settled
+                } else {
+                    SliceEvolvingArray::MayEvolve
+                }
+            });
+            out.push(SliceStatement::Binding {
+                binding,
+                name: Arc::from(id.name.as_str()),
+                kind,
+                init,
+                declared,
+                freshness,
+                auto_typed_form,
+                evolving_array,
+            });
         }
     }
 
@@ -7071,12 +7806,14 @@ impl Lowerer<'_> {
                                     subject,
                                     literal: literal.clone(),
                                     negated,
+                                    loose: false,
                                 })
                                 .unwrap_or(SliceGuard::None);
                             let aliased = SliceGuard::EqLiteral {
                                 subject: member,
                                 literal,
                                 negated,
+                                loose: false,
                             };
                             return GuardDisposition::modeled(SliceGuard::Both(Arc::from(
                                 vec![own, aliased].into_boxed_slice(),
@@ -7100,6 +7837,7 @@ impl Lowerer<'_> {
                         subject,
                         literal,
                         negated,
+                        loose: false,
                     });
                 }
                 if let Some(disposition) = self.equality_value_guard(binary, false, negated) {
@@ -7107,48 +7845,63 @@ impl Lowerer<'_> {
                 }
                 self.classify_unexpressible_comparison(binary)
             }
-            // Loose (in)equality against `null` or `undefined` selects BOTH
-            // nullish arms (the checker's `EQUndefinedOrNull` facts), so it
-            // lowers as the disjunction of the two strict relations — its
-            // negation, by De Morgan, their conjunction. Any other loose
-            // relation coerces its operands and stays unexpressible.
+            // Loose (in)equality. A `typeof` comparison narrows as the
+            // strict one does. With `null` or `undefined` it selects BOTH
+            // nullish arms (`x == null` is `x === null || x === undefined`,
+            // and `x != null` its conjunction of negations — the checker's
+            // `EQUndefinedOrNull` / `NEUndefinedOrNull` facts). With any
+            // other literal it is the loose [`SliceGuard::EqLiteral`].
+            // A comparison of two values, neither of them a literal, is the
+            // loose two-value equality ([`SliceGuard::EqValue`]).
             BinaryOperator::Equality | BinaryOperator::Inequality => {
+                let negated = matches!(binary.operator, BinaryOperator::Inequality);
+                if let Some(guard) = self.typeof_guard(&binary.left, &binary.right, negated) {
+                    return GuardDisposition::modeled(guard);
+                }
+                if let Some(guard) = self.typeof_guard(&binary.right, &binary.left, negated) {
+                    return GuardDisposition::modeled(guard);
+                }
                 for (subject_side, literal_side) in
                     [(&binary.left, &binary.right), (&binary.right, &binary.left)]
                 {
                     let Some(subject) = self.narrow_subject_of(subject_side) else {
                         continue;
                     };
-                    if !matches!(
-                        guard_literal_of(literal_side, self.source),
-                        Some(SliceGuardLiteral::Null | SliceGuardLiteral::Undefined)
-                    ) {
+                    let Some(literal) = guard_literal_of(literal_side, self.source) else {
                         continue;
-                    }
+                    };
                     if self.subject_root_carries_an_unmentioned_narrowing(&subject) {
                         return GuardDisposition::Unexpressible;
                     }
-                    let either = or_guard(
-                        SliceGuard::EqLiteral {
-                            subject: subject.clone(),
-                            literal: SliceGuardLiteral::Null,
-                            negated: false,
-                        },
-                        SliceGuard::EqLiteral {
+                    if !matches!(
+                        literal,
+                        SliceGuardLiteral::Null | SliceGuardLiteral::Undefined
+                    ) {
+                        return GuardDisposition::modeled(SliceGuard::EqLiteral {
                             subject,
-                            literal: SliceGuardLiteral::Undefined,
-                            negated: false,
-                        },
+                            literal,
+                            negated,
+                            loose: true,
+                        });
+                    }
+                    let arms: Arc<[SliceGuard]> = Arc::from(
+                        [SliceGuardLiteral::Null, SliceGuardLiteral::Undefined]
+                            .into_iter()
+                            .map(|literal| SliceGuard::EqLiteral {
+                                subject: subject.clone(),
+                                literal,
+                                negated,
+                                loose: false,
+                            })
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
                     );
-                    return GuardDisposition::modeled(
-                        if matches!(binary.operator, BinaryOperator::Inequality) {
-                            negate_guard(either)
-                        } else {
-                            either
-                        },
-                    );
+                    return GuardDisposition::modeled(if negated {
+                        SliceGuard::And(arms)
+                    } else {
+                        SliceGuard::Or(arms)
+                    });
                 }
-                let negated = matches!(binary.operator, BinaryOperator::Inequality);
                 if let Some(disposition) = self.equality_value_guard(binary, true, negated) {
                     return disposition;
                 }
@@ -8302,14 +9055,11 @@ impl Lowerer<'_> {
                 root: self.narrow_root(name, identifier.span, Some(ordinal))?,
                 path,
             }),
-            NameBinding::Local(_) => Some(SliceNarrowSubject {
+            NameBinding::Local(_) | NameBinding::Captured => Some(SliceNarrowSubject {
                 root: self.narrow_root(name, identifier.span, None)?,
                 path,
             }),
-            NameBinding::Free
-            | NameBinding::Captured
-            | NameBinding::NestedFunction
-            | NameBinding::Unmodeled => None,
+            NameBinding::Free | NameBinding::NestedFunction | NameBinding::Unmodeled => None,
         }
     }
 
@@ -8339,42 +9089,94 @@ impl Lowerer<'_> {
     /// ledger.
     fn lower_effect_statement(&mut self, expression: &Expression<'_>) -> Option<SliceStatement> {
         match unwrap_parenthesized(expression) {
-            // `void x = v;` retypes `x` exactly as the bare write statement
-            // does; every other `void` statement's operand only RUNS, and
-            // its calls are never entered into control flow (the leaf
-            // scanner's `void` rule).
+            // A discarded value holding a whole-binding `=` write — the
+            // bare write, `void x = v;`, a conditional, sequence, object or
+            // array literal holding one — applies its writes in evaluation
+            // order ([`Self::lower_discarded_effects`]).
+            discarded if discarded_value_holds_write(discarded) => {
+                let mut statements = Vec::new();
+                self.lower_discarded_effects(
+                    expression,
+                    DiscardedContext::Statement,
+                    &mut statements,
+                );
+                match statements.len() {
+                    0 => None,
+                    1 => statements.pop(),
+                    _ => Some(SliceStatement::Block(SliceRegion {
+                        statements: Arc::from(statements.into_boxed_slice()),
+                        can_fall_through: NormalCompletion::minted(
+                            true,
+                            CompletionConstruction::SynthesizedRegion,
+                        ),
+                    })),
+                }
+            }
+            // Every operand of a comma sequence is entered like a statement
+            // of its own, a `void` operand's included; any other `void`
+            // operand only RUNS, and its calls are never entered into
+            // control flow (the leaf scanner's `void` rule).
             Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::Void => {
-                // A comma sequence's operands are entered calls wherever
-                // the sequence sits.
-                if let Expression::SequenceExpression(sequence) =
-                    unwrap_parenthesized(&unary.argument)
-                {
-                    return Some(self.lower_entered_sequence_statement(sequence));
-                }
-                if let Expression::AssignmentExpression(assignment) =
-                    unwrap_parenthesized(&unary.argument)
-                {
-                    if matches!(
-                        assignment.operator,
-                        oxc_ast::ast::AssignmentOperator::Assign
-                    ) {
-                        if let Some(statement) = self.modeled_assignment_statement(assignment) {
-                            return Some(statement);
-                        }
+                match unwrap_parenthesized(&unary.argument) {
+                    Expression::SequenceExpression(sequence) => {
+                        Some(self.lower_entered_sequence_statement(sequence))
                     }
+                    _ => self.scan_unmodeled_statement_effects(expression),
                 }
-                self.scan_unmodeled_statement_effects(expression)
+            }
+            // A compound write to a parameter or modelable local (`x += v;`,
+            // `i++;`) retypes it to the base type of what it held; the
+            // operand still runs first.
+            Expression::UpdateExpression(update) => {
+                let oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) =
+                    &update.argument
+                else {
+                    return self.scan_unmodeled_statement_effects(expression);
+                };
+                match self.write_target_root(identifier) {
+                    Some(root) => Some(SliceStatement::CompoundAssignment {
+                        target: SliceNarrowSubject {
+                            root,
+                            path: Arc::from(Vec::new().into_boxed_slice()),
+                        },
+                        span: self.rebase(update.span),
+                        definition: None,
+                    }),
+                    None => self.scan_unmodeled_statement_effects(expression),
+                }
             }
             Expression::AssignmentExpression(assignment)
-                if matches!(
-                    assignment.operator,
-                    oxc_ast::ast::AssignmentOperator::Assign
-                ) =>
+                if assignment.operator.is_arithmetic() || assignment.operator.is_bitwise() =>
             {
-                if let Some(statement) = self.modeled_assignment_statement(assignment) {
-                    return Some(statement);
+                let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) =
+                    &assignment.left
+                else {
+                    return self.scan_unmodeled_statement_effects(expression);
+                };
+                let Some(root) = self.write_target_root(identifier) else {
+                    return self.scan_unmodeled_statement_effects(expression);
+                };
+                let definition = self.selection.and_then(|selection| {
+                    selection.value_site(self.rebase(assignment.right.span()))
+                });
+                let write = SliceStatement::CompoundAssignment {
+                    target: SliceNarrowSubject {
+                        root,
+                        path: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                    span: self.rebase(identifier.span),
+                    definition,
+                };
+                match self.scan_unmodeled_statement_effects(&assignment.right) {
+                    Some(throw_point) => Some(SliceStatement::Block(SliceRegion {
+                        statements: Arc::from(vec![throw_point, write].into_boxed_slice()),
+                        can_fall_through: NormalCompletion::minted(
+                            true,
+                            CompletionConstruction::SynthesizedRegion,
+                        ),
+                    })),
+                    None => Some(write),
                 }
-                self.scan_unmodeled_statement_effects(expression)
             }
             // Only an UNPARENTHESIZED call is entered into control flow
             // (`(assertString(x));` narrows nothing — the binder's
@@ -8574,19 +9376,25 @@ impl Lowerer<'_> {
         FrameSpan,
     )> {
         let identifier = assigned_identifier(&assignment.left)?;
-        let name = identifier.name.as_str();
-        let root = match self.classify_occurrence(identifier.span) {
-            NameBinding::Param(ordinal) => {
-                self.narrow_root(name, identifier.span, Some(ordinal))?
-            }
-            NameBinding::Local(_) => self.narrow_root(name, identifier.span, None)?,
-            NameBinding::Captured => self.narrow_root(name, identifier.span, None)?,
-            NameBinding::Free | NameBinding::NestedFunction | NameBinding::Unmodeled => {
-                return None
-            }
-        };
+        let root = self.write_target_root(identifier)?;
         let definition = self.selection?.value_site(self.rebase(definition_span))?;
         Some((root, definition, self.rebase(identifier.span)))
+    }
+
+    /// The narrow root of a whole-binding write target this frame models:
+    /// a parameter or a modelable local (captured ones included).
+    fn write_target_root(
+        &mut self,
+        identifier: &oxc_ast::ast::IdentifierReference<'_>,
+    ) -> Option<SliceNarrowRoot> {
+        let name = identifier.name.as_str();
+        match self.classify_occurrence(identifier.span) {
+            NameBinding::Param(ordinal) => self.narrow_root(name, identifier.span, Some(ordinal)),
+            NameBinding::Local(_) | NameBinding::Captured => {
+                self.narrow_root(name, identifier.span, None)
+            }
+            NameBinding::Free | NameBinding::NestedFunction | NameBinding::Unmodeled => None,
+        }
     }
 
     /// Lower a modeled write's right-hand side — shared by the statement
@@ -8644,6 +9452,167 @@ impl Lowerer<'_> {
             value: Box::new(value),
             freshness: expression_freshness(&assignment.right),
         })
+    }
+
+    /// The modeled whole-binding write a `void (x = v)` discards, lowered
+    /// as the [`SliceExpr::Assignment`] the evaluator applies in
+    /// evaluation order. The write's value site is its right-hand side's,
+    /// exactly as at statement position — the `void` site's value is not
+    /// the written one.
+    fn modeled_void_write(&mut self, expression: &Expression<'_>) -> Option<SliceExpr> {
+        let assignment = void_write_assignment(expression)?;
+        self.modeled_assignment_expression(assignment, assignment.right.span())
+    }
+
+    /// Lower the EFFECTS of a value nothing consumes — an expression
+    /// statement, or a declarator initializer the demand did not select —
+    /// into statements the evaluator applies in evaluation order, when the
+    /// value holds a whole-binding `=` write
+    /// ([`discarded_value_holds_write`]): the write (bare or under
+    /// `void`) applies as the statement write does, a conditional's arms
+    /// apply under its test's narrowing exactly as an `if` statement's
+    /// arms do, and a sequence, object literal or array literal applies
+    /// its operands, member values and elements in source order. Every
+    /// other position — and a write this frame cannot model — takes the
+    /// effect scan of `context`, exactly as the whole value did before.
+    fn lower_discarded_effects(
+        &mut self,
+        expression: &Expression<'_>,
+        context: DiscardedContext,
+        out: &mut Vec<SliceStatement>,
+    ) {
+        if !discarded_value_holds_write(expression) {
+            self.scan_discarded_effects(expression, context, out);
+            return;
+        }
+        match unwrap_parenthesized(expression) {
+            Expression::AssignmentExpression(assignment) => {
+                match self.modeled_assignment_statement(assignment) {
+                    Some(statement) => out.push(statement),
+                    None => self.scan_discarded_effects(expression, context, out),
+                }
+            }
+            // The one `void` form that holds a write: `void (x = v)`.
+            // Any other `void` operand is scanned whole, under the leaf
+            // scanner's `void` rule.
+            void @ Expression::UnaryExpression(_) => {
+                let modeled = void_write_assignment(void)
+                    .and_then(|assignment| self.modeled_assignment_statement(assignment));
+                match modeled {
+                    Some(statement) => out.push(statement),
+                    None => self.scan_discarded_effects(expression, context, out),
+                }
+            }
+            Expression::ConditionalExpression(conditional) => {
+                let guard = self.lower_guard(&conditional.test);
+                if self.record_control_position_calls(&conditional.test) {
+                    self.control_test_gap = true;
+                }
+                if verter_semantic::analysis::flow::expression_contains_call(&conditional.test) {
+                    out.push(SliceStatement::ThrowPoint);
+                }
+                // The arms are GUARDED exactly as an `if` statement's are:
+                // a closure created inside one captures the guarded reading.
+                let active_guard_base = self.active_guard_bindings.len();
+                let guard_bindings = self.guard_bindings(&guard, conditional.test.span());
+                self.active_guard_bindings
+                    .extend(guard_bindings.iter().copied());
+                let mut consequent = Vec::new();
+                self.lower_discarded_effects(&conditional.consequent, context, &mut consequent);
+                let mut alternate = Vec::new();
+                self.lower_discarded_effects(&conditional.alternate, context, &mut alternate);
+                self.active_guard_bindings.truncate(active_guard_base);
+                let region = |statements: Vec<SliceStatement>| {
+                    Box::new(SliceRegion {
+                        statements: Arc::from(statements.into_boxed_slice()),
+                        can_fall_through: NormalCompletion::minted(
+                            true,
+                            CompletionConstruction::SynthesizedRegion,
+                        ),
+                    })
+                };
+                out.push(SliceStatement::If {
+                    guard,
+                    consequent: region(consequent),
+                    alternate: Some(region(alternate)),
+                });
+            }
+            Expression::SequenceExpression(sequence) => {
+                for operand in &sequence.expressions {
+                    // An unparenthesized call operand is entered into
+                    // control flow wherever the sequence sits, exactly as a
+                    // statement's own call is.
+                    let context = if matches!(operand, Expression::CallExpression(_)) {
+                        DiscardedContext::Statement
+                    } else {
+                        context
+                    };
+                    self.lower_discarded_effects(operand, context, out);
+                }
+            }
+            Expression::ObjectExpression(object) => {
+                for property in &object.properties {
+                    match property {
+                        oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) => {
+                            if property.computed {
+                                if let Some(key) = property.key.as_expression() {
+                                    self.scan_discarded_effects(key, context, out);
+                                }
+                            }
+                            // A method or accessor value is a function:
+                            // creating it runs nothing.
+                            if property.kind == oxc_ast::ast::PropertyKind::Init && !property.method
+                            {
+                                self.lower_discarded_effects(&property.value, context, out);
+                            }
+                        }
+                        oxc_ast::ast::ObjectPropertyKind::SpreadProperty(spread) => {
+                            self.scan_discarded_effects(&spread.argument, context, out);
+                        }
+                    }
+                }
+            }
+            Expression::ArrayExpression(array) => {
+                for element in &array.elements {
+                    match element {
+                        oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
+                            self.scan_discarded_effects(&spread.argument, context, out);
+                        }
+                        oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
+                        other => {
+                            if let Some(value) = other.as_expression() {
+                                self.lower_discarded_effects(value, context, out);
+                            }
+                        }
+                    }
+                }
+            }
+            other => self.scan_discarded_effects(other, context, out),
+        }
+    }
+
+    /// The effect scan a discarded position of `context` takes: an
+    /// expression statement's ([`Self::scan_unmodeled_statement_effects`],
+    /// which also marks its throw point) or an unselected initializer's
+    /// ([`Self::scan_unmodeled_position_effects`]).
+    fn scan_discarded_effects(
+        &mut self,
+        expression: &Expression<'_>,
+        context: DiscardedContext,
+        out: &mut Vec<SliceStatement>,
+    ) {
+        match context {
+            DiscardedContext::Statement => {
+                out.extend(self.scan_unmodeled_statement_effects(expression));
+            }
+            // An entered `asserts` call narrows once the position has run.
+            DiscardedContext::Initializer => {
+                let entered = self.collecting_entered_assertions(|this| {
+                    this.scan_unmodeled_position_effects(expression)
+                });
+                out.extend(assertion_statements(entered));
+            }
+        }
     }
 
     /// Scan one UNMODELED expression statement's effects: the statement's
@@ -8731,6 +9700,31 @@ impl Lowerer<'_> {
                     None => self.lower_leaf(expr, mode),
                 }
             }
+            Expression::ThisExpression(_) if self.this.is_some() => {
+                SliceExpr::This(self.this.clone().expect("guarded"))
+            }
+            // A member read off an object literal's `this` lowers from the
+            // member the literal declares.
+            Expression::StaticMemberExpression(member)
+                if matches!(
+                    self.this,
+                    Some(SliceThis::Value { .. } | SliceThis::Static { .. })
+                ) && this_member_path(member).is_some() =>
+            {
+                let path = this_member_path(member).expect("guarded");
+                self.lower_object_this_read(&path, member.span, mode)
+            }
+            // A member read off the receiver (`this.v`, `this.a.b`) projects
+            // through the same member-path walk an optional chain takes.
+            Expression::StaticMemberExpression(member)
+                if self.this.is_some() && this_member_path(member).is_some() =>
+            {
+                let path = this_member_path(member).expect("guarded");
+                SliceExpr::OptionalMember {
+                    root: Box::new(SliceExpr::This(self.this.clone().expect("guarded"))),
+                    links: path.into_iter().map(|name| (name, false)).collect(),
+                }
+            }
             Expression::FunctionExpression(func) => {
                 self.lower_nested_function(&FunctionNode::Function(func))
             }
@@ -8751,8 +9745,7 @@ impl Lowerer<'_> {
             },
             // `a && b` / `a || b`: the left operand is a control position
             // exactly as a ternary's test is, and the right operand is read
-            // under its narrowing (a closure created there captures the
-            // guarded reading, as in a ternary's arm).
+            // under its narrowing, with the guard set a ternary's arm has.
             Expression::LogicalExpression(logical)
                 if matches!(
                     logical.operator,
@@ -8765,17 +9758,11 @@ impl Lowerer<'_> {
                 }
                 let left = self.lower_expr(&logical.left, mode);
                 let active_guard_base = self.active_guard_bindings.len();
-                let active_guard_subject_base = self.active_guard_subjects.len();
                 let guard_bindings = self.guard_bindings(&guard, logical.left.span());
-                let guard_name = self.predicate_subject_binding(&logical.left);
                 self.active_guard_bindings
                     .extend(guard_bindings.iter().copied());
-                self.active_guard_subjects
-                    .extend(guard_name.iter().cloned());
                 let right = self.lower_expr(&logical.right, mode);
                 self.active_guard_bindings.truncate(active_guard_base);
-                self.active_guard_subjects
-                    .truncate(active_guard_subject_base);
                 SliceExpr::Logical {
                     conjunction: logical.operator == oxc_ast::ast::LogicalOperator::And,
                     left: Box::new(left),
@@ -8806,10 +9793,10 @@ impl Lowerer<'_> {
                 // evaluated return.
                 let function = match unwrap_parenthesized(&call.callee) {
                     Expression::FunctionExpression(func) => {
-                        self.lower_nested_function(&FunctionNode::Function(func))
+                        self.lower_function_value(&FunctionNode::Function(func), Some(call))
                     }
                     Expression::ArrowFunctionExpression(arrow) => {
-                        self.lower_nested_function(&FunctionNode::Arrow(arrow))
+                        self.lower_function_value(&FunctionNode::Arrow(arrow), Some(call))
                     }
                     _ => unreachable!("the guard admits function values only"),
                 };
@@ -8907,6 +9894,33 @@ impl Lowerer<'_> {
                     {
                         return SliceExpr::Call(
                             SliceCall::Direct(direct.target.clone()),
+                            call_site(call),
+                        );
+                    }
+                }
+                // A `this.m()` callee: the member of the frame's receiver —
+                // an object literal's own method is a direct call of it.
+                if let (Some(this), Expression::StaticMemberExpression(member)) =
+                    (self.this.clone(), unwrap_parenthesized(&call.callee))
+                {
+                    if let (SliceThis::Value { .. } | SliceThis::Static { .. }, Some([name])) =
+                        (&this, this_member_path(member).as_deref())
+                    {
+                        return match self.object_this_member(name) {
+                            Some(ObjectThisMember::Method(target)) => {
+                                SliceExpr::Call(SliceCall::Direct(target), call_site(call))
+                            }
+                            _ => {
+                                SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression)
+                            }
+                        };
+                    }
+                    if let Some(path) = this_member_path(member) {
+                        return SliceExpr::Call(
+                            SliceCall::Member {
+                                receiver: Box::new(SliceExpr::This(this)),
+                                member: Arc::from(path.into_boxed_slice()),
+                            },
                             call_site(call),
                         );
                     }
@@ -9046,6 +10060,18 @@ impl Lowerer<'_> {
                 while let Expression::ParenthesizedExpression(paren) = unwrapped {
                     unwrapped = &paren.expression;
                 }
+                // `void (x = v)` in value position: the write applies in
+                // evaluation order exactly as the bare write does, and the
+                // expression answers `undefined`.
+                if let Some(write) = self.modeled_void_write(unwrapped) {
+                    return SliceExpr::Void {
+                        operand: Box::new(write),
+                        value: Box::new(SliceExpr::Type(GatedLeaf(
+                            widening_nullish_type(unwrapped),
+                            None,
+                        ))),
+                    };
+                }
                 if let Expression::AssignmentExpression(assignment) = unwrapped {
                     if matches!(
                         assignment.operator,
@@ -9088,8 +10114,35 @@ impl Lowerer<'_> {
                     // operand's).
                     //
                     // An ARRAY literal lowers structurally under the same
-                    // policy: its const tuple under `as const`, its
-                    // literals kept under `satisfies`.
+                    // policy: its const tuple under `as const`.
+                    //
+                    // `satisfies` over an object or array literal keeps
+                    // the literal's own lowering and carries its target,
+                    // which contextually types the literal at evaluation.
+                    ValueDescent::TypeCarrier(inner)
+                        if matches!(
+                            value_descent(unwrap_parenthesized(inner)),
+                            ValueDescent::Object(_) | ValueDescent::Array(_)
+                        ) && satisfies_target(other).is_some() =>
+                    {
+                        let target = satisfies_target(other).expect("checked above");
+                        SliceExpr::Satisfies {
+                            // The operand keeps its fresh member and
+                            // element views whatever the position: the
+                            // target decides which of them survive.
+                            operand: Box::new(self.lower_expr(
+                                inner,
+                                ExprMode::BindingInit {
+                                    preserve_literal: true,
+                                },
+                            )),
+                            target: self.gate(
+                                lower_ts_type(&target.type_annotation, self.source),
+                                target.span,
+                                &[],
+                            ),
+                        }
+                    }
                     ValueDescent::TypeCarrier(inner) => {
                         match member_literal_policy(other, self.source) {
                             Some(policy) => match value_descent(inner) {
@@ -9136,25 +10189,18 @@ impl Lowerer<'_> {
                         });
                         // The ternary's arms are GUARDED exactly as the `if`
                         // statement's are: a closure created inside one
-                        // captures the guarded reading of the guard's
-                        // subject, and a later write to that subject makes
-                        // the capture unsound. The two control spellings must
-                        // reach the closure-capture rail with the same active
-                        // guard set, or the same source degrades under `if`
-                        // and seals clean under `?:`.
+                        // reads a capture's guarded narrowing only when the
+                        // capture is extended into it. The two control
+                        // spellings must reach the closure-capture rail with
+                        // the same active guard set, or the same source
+                        // degrades under `if` and seals clean under `?:`.
                         let active_guard_base = self.active_guard_bindings.len();
-                        let active_guard_subject_base = self.active_guard_subjects.len();
                         let guard_bindings = self.guard_bindings(&guard, conditional.test.span());
-                        let guard_name = self.predicate_subject_binding(&conditional.test);
                         self.active_guard_bindings
                             .extend(guard_bindings.iter().copied());
-                        self.active_guard_subjects
-                            .extend(guard_name.iter().cloned());
                         let consequent = self.lower_expr(&conditional.consequent, mode);
                         let alternate = self.lower_expr(&conditional.alternate, mode);
                         self.active_guard_bindings.truncate(active_guard_base);
-                        self.active_guard_subjects
-                            .truncate(active_guard_subject_base);
                         let union = SliceExpr::Union {
                             arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
                             guard,
@@ -9340,13 +10386,17 @@ impl Lowerer<'_> {
                     expression,
                     self.source,
                 );
+            let (value, pre_widening) = if pinned {
+                (value, None)
+            } else {
+                let widened = widen_mutable_slot_literals(value.clone());
+                let pre_widening = (widened != value).then(|| Box::new(value));
+                (widened, pre_widening)
+            };
             elements.push(SliceArrayElement::Value {
-                value: if pinned {
-                    value
-                } else {
-                    widen_mutable_slot_literals(value)
-                },
+                value,
                 freshness: expression_freshness(expression),
+                pre_widening,
             });
         }
         SliceExpr::Array {
@@ -9563,7 +10613,6 @@ impl Lowerer<'_> {
                 // NUMBER's, which only the value knows.
                 ObjectEntryKey::Computed(expression) => SliceObjectKey::Computed {
                     value: Box::new(self.lower_expr(expression, mode)),
-                    authored: verter_type_expr_oxc::lower_property_key(&p.key, self.source),
                 },
                 // A private name is a key form neither half models, and
                 // unlike a computed key it has no value to resolve.
@@ -9610,6 +10659,9 @@ impl Lowerer<'_> {
             if method_kind.is_some() {
                 let value = match value_expression {
                     Expression::FunctionExpression(func) => {
+                        // A method or accessor of the literal runs against
+                        // the object the literal builds.
+                        self.member_this = Some(Some(SliceThis::Receiver));
                         self.lower_nested_function(&FunctionNode::Function(func))
                     }
                     Expression::ArrowFunctionExpression(arrow) => {
@@ -9638,13 +10690,23 @@ impl Lowerer<'_> {
             // `void` member is the widening nullable type, which the
             // literal's widening turns into `any` under every member
             // policy (`{ a: null } as const` is `{ readonly a: any }`).
-            // The value still RUNS, so a call inside `void f()` takes
-            // the same scan an elided position does.
+            // The value still RUNS: a `void (x = v)` applies its write,
+            // and a call inside `void f()` takes the same scan an elided
+            // position does.
             if !self.nullability.is_strict() && expr_is_widening_nullish(value_expression) {
-                self.scan_unmodeled_position_effects(value_expression);
+                let value = match self.modeled_void_write(value_expression) {
+                    Some(write) => SliceExpr::Void {
+                        operand: Box::new(write),
+                        value: Box::new(SliceExpr::SemanticAny),
+                    },
+                    None => {
+                        self.scan_unmodeled_position_effects(value_expression);
+                        SliceExpr::SemanticAny
+                    }
+                };
                 entries.push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
                     key,
-                    value: SliceExpr::SemanticAny,
+                    value,
                     assignment_value: None,
                     unwidened: Some(SliceExpr::Type(GatedLeaf(
                         widening_nullish_type(value_expression),
@@ -9678,9 +10740,14 @@ impl Lowerer<'_> {
                     let name = Arc::clone(name);
                     self.lower_assigned_value(value_expression, &name, mode)
                 }
-                _ if policy == ObjectMemberPolicy::ConstAssert => {
-                    self.lower_in_const_context(value_expression, mode)
-                }
+                // A const-asserted member keeps its literal in every
+                // position, a mutable declaration's initializer included.
+                _ if policy == ObjectMemberPolicy::ConstAssert => self.lower_in_const_context(
+                    value_expression,
+                    ExprMode::BindingInit {
+                        preserve_literal: true,
+                    },
+                ),
                 _ => self.lower_expr(value_expression, mode),
             };
             let assignment_value = value.clone();
@@ -9718,6 +10785,201 @@ impl Lowerer<'_> {
     /// exact captured identities and lexical signature facts. Its body lowers
     /// only when evaluated, through the child's own indexed graph and demand.
     fn lower_nested_function(&mut self, node: &FunctionNode<'_>) -> SliceExpr {
+        self.lower_function_value(node, None)
+    }
+
+    /// The member `name` of the object literal the frame's `this` is, as
+    /// the literal declares it; `None` when the literal does not declare
+    /// it (or a later spread may replace it).
+    fn object_this_member(&self, name: &str) -> Option<ObjectThisMember<'a>> {
+        let (contributor, declarator) = match &self.this {
+            Some(SliceThis::Value {
+                contributor,
+                declarator,
+                ..
+            }) => (contributor, declarator),
+            Some(SliceThis::Static {
+                contributor: Some(contributor),
+                ..
+            }) => return self.static_this_member(*contributor, name),
+            _ => return None,
+        };
+        let program: &'a Program<'a> = self.program;
+        let declaration = match program.body.get(*contributor as usize)? {
+            Statement::VariableDeclaration(declaration) => declaration,
+            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
+                oxc_ast::ast::Declaration::VariableDeclaration(declaration) => declaration,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let Expression::ObjectExpression(object) = declaration
+            .declarations
+            .get(*declarator as usize)?
+            .init
+            .as_ref()?
+        else {
+            return None;
+        };
+        let mut found = None;
+        for (ordinal, property) in object.properties.iter().enumerate() {
+            let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) = property else {
+                // A spread after the member may replace it.
+                found = None;
+                continue;
+            };
+            if property.computed
+                || verter_semantic::analysis::flow::static_property_key_text(&property.key)
+                    != Some(name)
+            {
+                continue;
+            }
+            let key = || verter_semantic::analysis::function_program::FunctionProgramKey {
+                declaration: self.bindings.function().declaration.clone(),
+                part: verter_type_expr::facts::FunctionPartIdentity::Member {
+                    member_path: Arc::from([u32::try_from(ordinal).unwrap_or(u32::MAX)]),
+                },
+                overload_ordinal: 0,
+            };
+            found = match (&property.value, property.kind, property.method) {
+                (Expression::FunctionExpression(_), oxc_ast::ast::PropertyKind::Get, _) => {
+                    Some(ObjectThisMember::Getter(key()))
+                }
+                (Expression::FunctionExpression(_), oxc_ast::ast::PropertyKind::Init, true) => {
+                    Some(ObjectThisMember::Method(key()))
+                }
+                (value, oxc_ast::ast::PropertyKind::Init, false) => {
+                    Some(ObjectThisMember::Property(value))
+                }
+                // A setter reads nothing.
+                _ => found,
+            };
+        }
+        found
+    }
+
+    /// The static member `name` the class of statement `contributor`
+    /// declares: a property is its annotation, else its initializer; a
+    /// method or getter its own served position.
+    fn static_this_member(&self, contributor: u32, name: &str) -> Option<ObjectThisMember<'a>> {
+        let program: &'a Program<'a> = self.program;
+        let class = match program.body.get(contributor as usize)? {
+            Statement::ClassDeclaration(class) => class,
+            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
+                oxc_ast::ast::Declaration::ClassDeclaration(class) => class,
+                _ => return None,
+            },
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(class) => class,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let key =
+            |ordinal: usize| verter_semantic::analysis::function_program::FunctionProgramKey {
+                declaration: self.bindings.function().declaration.clone(),
+                part: verter_type_expr::facts::FunctionPartIdentity::Member {
+                    member_path: Arc::from([u32::try_from(ordinal).unwrap_or(u32::MAX)]),
+                },
+                overload_ordinal: 0,
+            };
+        let mut found = None;
+        for (ordinal, element) in class.body.body.iter().enumerate() {
+            match element {
+                oxc_ast::ast::ClassElement::PropertyDefinition(property)
+                    if property.r#static
+                        && !property.computed
+                        && verter_semantic::analysis::flow::static_property_key_text(
+                            &property.key,
+                        ) == Some(name) =>
+                {
+                    found = match (&property.type_annotation, &property.value) {
+                        (None, Some(value)) => Some(ObjectThisMember::Property(value)),
+                        // An annotated or uninitialized static reads its
+                        // declaration, which this read does not lower.
+                        _ => None,
+                    };
+                }
+                oxc_ast::ast::ClassElement::MethodDefinition(method)
+                    if method.r#static
+                        && !method.computed
+                        && method.value.body.is_some()
+                        && verter_semantic::analysis::flow::static_property_key_text(
+                            &method.key,
+                        ) == Some(name) =>
+                {
+                    found = match method.kind {
+                        oxc_ast::ast::MethodDefinitionKind::Method => {
+                            Some(ObjectThisMember::Method(key(ordinal)))
+                        }
+                        oxc_ast::ast::MethodDefinitionKind::Get => {
+                            Some(ObjectThisMember::Getter(key(ordinal)))
+                        }
+                        _ => found,
+                    };
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    /// A member read off an object literal's (or a class's static) `this`:
+    /// a property is the value its declaration initializes it with, widened;
+    /// a getter is its served return.
+    fn lower_object_this_read(
+        &mut self,
+        path: &[Arc<str>],
+        span: oxc_span::Span,
+        _mode: ExprMode,
+    ) -> SliceExpr {
+        let gap = SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression);
+        let Some((first, rest)) = path.split_first() else {
+            return gap;
+        };
+        let root = match self.object_this_member(first) {
+            // The declared literal type widens where the read is used (a
+            // readonly literal is the checker's widening literal type).
+            Some(ObjectThisMember::Property(value)) => self.lower_leaf(
+                value,
+                ExprMode::BindingInit {
+                    preserve_literal: false,
+                },
+            ),
+            Some(ObjectThisMember::Getter(target)) => SliceExpr::Call(
+                SliceCall::Direct(target),
+                SliceCallSite::new(0, false, false, span.into()),
+            ),
+            _ => return gap,
+        };
+        if rest.is_empty() {
+            root
+        } else {
+            SliceExpr::OptionalMember {
+                root: Box::new(root),
+                links: rest.iter().map(|name| (Arc::clone(name), false)).collect(),
+            }
+        }
+    }
+
+    /// Lower a nested function value, `invocation` naming the call that
+    /// invokes it where it is created (an IIFE).
+    ///
+    /// A capture reads the narrowing reaching the function's creation when
+    /// the checker extends the capture's control-flow container to the
+    /// enclosing one: a `const`, or a parameter / `let` past its last
+    /// assignment (never a `var`, never inside a class property
+    /// initializer). An immediately invoked function — async and generator
+    /// ones included — is no control-flow container of its own, so every
+    /// capture reads the narrowing reaching the call, whatever is assigned
+    /// later or by another nested function, unless the call's own arguments
+    /// write it.
+    fn lower_function_value(
+        &mut self,
+        node: &FunctionNode<'_>,
+        invocation: Option<&oxc_ast::ast::CallExpression<'_>>,
+    ) -> SliceExpr {
+        let member_this = self.member_this.take();
         let Some(entry) = self
             .index
             .nested_at(self.bindings.function(), node_span(node).into())
@@ -9726,6 +10988,51 @@ impl Lowerer<'_> {
         };
         let entry = entry.entry();
         let captures = self.capture_scope_for(node_span(node));
+        let invoked_arguments =
+            invocation.map(|call| oxc_span::Span::new(call.callee.span().end, call.span.end));
+        let mut extended_captures: Vec<SkeletonBindingId> = Vec::new();
+        if self.class_property_initializers == 0 {
+            for read in entry.captured_reads.iter() {
+                let Some(binding) = self.bindings.local(&read.binding) else {
+                    continue;
+                };
+                if extended_captures.contains(&binding) {
+                    continue;
+                }
+                // A `var` is never a mutable local the checker extends
+                // (`isMutableLocalVariableDeclaration` is `let`-only), and a
+                // `let` declared after the creation is assigned after it.
+                // An invoked function's captures read the call's flow, so
+                // only a write among the call's arguments (which run before
+                // the body) moves them.
+                let fact = self.skeleton.binding(binding);
+                let past_last_assignment = || {
+                    !self.nested_free_writes.contains(&binding)
+                        && !self.binding_has_write_after(binding, node_span(node))
+                };
+                let declared_before = || fact.span < self.rebase(node_span(node));
+                let eligible = match (fact.kind, invoked_arguments) {
+                    (SkeletonBindingKind::Const, _) => true,
+                    (SkeletonBindingKind::Param, Some(arguments)) => {
+                        !self.binding_has_write_within(binding, arguments)
+                    }
+                    (
+                        SkeletonBindingKind::Let
+                        | SkeletonBindingKind::Var
+                        | SkeletonBindingKind::CatchParam,
+                        Some(arguments),
+                    ) => declared_before() && !self.binding_has_write_within(binding, arguments),
+                    (SkeletonBindingKind::Param, None) => past_last_assignment(),
+                    (SkeletonBindingKind::Let | SkeletonBindingKind::CatchParam, None) => {
+                        declared_before() && past_last_assignment()
+                    }
+                    _ => false,
+                };
+                if eligible {
+                    extended_captures.push(binding);
+                }
+            }
+        }
         let mut gap = None;
         // Mutability constrains captured values. A closure that only
         // forwards a write effect does not observe the entering value.
@@ -9749,9 +11056,24 @@ impl Lowerer<'_> {
                     gap = Some(crate::semantic_query::FlowGap::ClosureCapture);
                 }
             }
-            if self.active_guard_bindings.contains(&binding)
+            // A guard's narrowing reaches an extended capture's body. Any
+            // other capture reads its declared type there, which the
+            // evaluator reproduces for a parameter or an annotated `var`
+            // (their declared authority) and for an unannotated `var` not
+            // reassigned before the creation (its reaching IS its declared type); every other
+            // capture created under an active guard, a `let` assigned after
+            // the creation and an unannotated `var` reassigned before it
+            // take the typed gap.
+            if extended_captures.contains(&binding) {
+                continue;
+            }
+            if (self.active_guard_bindings.contains(&binding)
+                && !self.capture_reads_declared_type(binding, node_span(node)))
                 || (fact.kind == SkeletonBindingKind::Let
                     && self.binding_has_write_after(binding, node_span(node)))
+                || (fact.kind == SkeletonBindingKind::Var
+                    && fact.annotation_span.is_none()
+                    && self.binding_has_write_before(binding, node_span(node)))
             {
                 gap = Some(crate::semantic_query::FlowGap::ClosureCapture);
                 break;
@@ -9759,9 +11081,23 @@ impl Lowerer<'_> {
         }
         SliceExpr::NestedFunctionValue {
             function: entry.key.clone(),
-            context: Arc::new(NestedFlowContext { captures }),
+            context: Arc::new(NestedFlowContext {
+                captures,
+                // An arrow has no `this` of its own: it reads its creating
+                // frame's (a class expression's instance initializer reads
+                // the class's own receiver). A class expression's member
+                // function reads the receiver the class binds.
+                this: match member_this {
+                    Some(this) => this,
+                    None => match node {
+                        FunctionNode::Arrow(_) => self.this.clone(),
+                        FunctionNode::Function(_) => None,
+                    },
+                },
+            }),
             has_declared_return: node.return_type().is_some(),
             gap,
+            extended_captures: Arc::from(extended_captures.into_boxed_slice()),
         }
     }
 
@@ -10481,6 +11817,19 @@ impl<'a> Visit<'a> for OwnFrameReturnFinder {
 /// yield type joins every yield it evaluates, so a loop whose body yields
 /// contributes to the answer exactly as one whose body returns does and
 /// can never be skipped as transparent.
+/// Whether unreachable `statements` hold a `return` or a `yield` of their
+/// own frame — contributions the checker aggregates whether or not a path
+/// reaches them.
+fn unreachable_statements_contribute(statements: &[Statement<'_>]) -> bool {
+    let mut returns = OwnFrameReturnFinder::default();
+    let mut yields = OwnFrameYieldFinder::default();
+    for statement in statements {
+        returns.visit_statement(statement);
+        yields.visit_statement(statement);
+    }
+    returns.found || yields.found
+}
+
 fn statement_yields_in_own_frame(statement: &Statement<'_>) -> bool {
     let mut finder = OwnFrameYieldFinder::default();
     finder.visit_statement(statement);
@@ -11454,10 +12803,12 @@ fn negate_guard(guard: SliceGuard) -> SliceGuard {
             subject,
             literal,
             negated,
+            loose,
         } => SliceGuard::EqLiteral {
             subject,
             literal,
             negated: !negated,
+            loose,
         },
         SliceGuard::Instanceof {
             subject,

@@ -110,7 +110,7 @@
       ],
       "pins": [
         {
-          "behavior": "symbolic flow-return calls resolve complete; this-calls fail closed; an empty cycle stays return-only",
+          "behavior": "symbolic flow-return calls resolve complete; this-calls read the receiver member; an empty cycle stays return-only",
           "command": "cargo nextest run -p verter_session flow_return_tests",
           "filter": "flow_return_tests",
           "witnesses": [
@@ -120,7 +120,7 @@
             },
             {
               "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_tests.rs",
-              "test": "flow_return_this_call_fails_closed"
+              "test": "flow_return_this_call_reads_the_receiver_member"
             },
             {
               "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_tests.rs",

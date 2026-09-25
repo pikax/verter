@@ -47,15 +47,16 @@ export function q1IifeArray() {
 
 // ── a nested body whose CONTROL surface is unmodelled ────────────────
 //
-// tsgo: `{ label: string; go: (n: number) => number }`
-export function objWithLoopArrow() {
+// tsc: `{ label: string; go: (n: number) => number; }`
+export function objWithInvokedArrow() {
   return {
     label: "x",
     go: (n: number) => {
-      while (n > 0) {
-        return n;
-      }
-      return 0;
+      let r = n;
+      (() => {
+        r = 0;
+      })();
+      return r;
     },
   };
 }
@@ -304,20 +305,22 @@ fn a_marker_in_a_callee_return_position_is_a_value_not_a_frame_failure() {
 ///
 /// The nested body's frame-level failure used to propagate through the
 /// enclosing frame's `?` (`let contributors = contributors?`), deleting
-/// the whole enclosing object. tsgo types
-/// `{ label: "x", go: (n: number) => { while (n > 0) { return n } return 0 } }`
-/// as `{ label: string; go: (n: number) => number }`; the loop is beyond
-/// this substrate, so `go`'s RETURN is the marker — and `go` is still a
-/// one-parameter call signature, and `label` is still `string`.
+/// the whole enclosing object. TypeScript 7.0.2 types
+/// `{ label: "x", go: (n: number) => { let r = n; (() => { r = 0 })(); return r } }`
+/// as `{ label: string; go: (n: number) => number; }`; the invoked
+/// closure's write to a captured binding is beyond this substrate, so
+/// `go`'s RETURN is the marker — and `go` is still a one-parameter call
+/// signature, and `label` is still `string`.
 ///
 /// Mutation recipe: restoring the `?` collapses the object and the `label`
 /// lookup fails with "expected an Object graph node".
 #[test]
 fn a_nested_bodys_control_surface_failure_marks_its_return_not_the_enclosing_frame() {
     let host = make_seal_host();
-    let outcome = evaluate(&host, "objWithLoopArrow").expect("objWithLoopArrow produces a value");
+    let outcome =
+        evaluate(&host, "objWithInvokedArrow").expect("objWithInvokedArrow produces a value");
     with_dispatch(&host, |dispatch| {
-        assert_string_label(dispatch, outcome.node, "objWithLoopArrow");
+        assert_string_label(dispatch, outcome.node, "objWithInvokedArrow");
         let go = member(dispatch, outcome.node, "go");
         match dispatch.graph().node_data(go).as_deref() {
             Some(SemanticNodeData::Signature {
@@ -326,7 +329,7 @@ fn a_nested_bodys_control_surface_failure_marks_its_return_not_the_enclosing_fra
                 ..
             }) => {
                 assert_eq!(params.len(), 1, "the nested signature keeps its parameter");
-                assert_marker(dispatch, *return_type, "objWithLoopArrow.go return");
+                assert_marker(dispatch, *return_type, "objWithInvokedArrow.go return");
             }
             other => panic!("`go` publishes the nested signature, got {other:?}"),
         }

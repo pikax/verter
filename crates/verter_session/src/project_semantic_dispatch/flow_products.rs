@@ -326,6 +326,12 @@ impl FlowProductStore {
             }))
             .chain(self.values.range((4, 0)..).map(runtime))
     }
+    /// Whether two continuations of the same execution hold equal products
+    /// in every runtime domain — the loop fixed point's convergence test.
+    #[must_use]
+    pub fn same_products(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.scope, &other.scope) && self.values == other.values
+    }
     /// Structural sharing is observable only to the hermetic performance proof.
     #[cfg(any(test, feature = "test-support"))]
     pub fn shares_continuation_storage(&self, other: &Self) -> bool {
@@ -1323,6 +1329,11 @@ pub struct FlowNarrowingFact {
     pub path: Arc<[Arc<str>]>,
     /// The type the guard narrows it to.
     pub narrowed_to: SemanticNodeId,
+    /// The compared literal, when the narrow took it from the compared
+    /// VALUE rather than from the reference's own constituents (`x ===
+    /// "s"` over `x: string` reads `"s"`): the checker's fresh literal
+    /// type, which widens wherever a bare literal would.
+    pub fresh_literal: Option<SemanticNodeId>,
 }
 
 /// Identity-only ordering: display names and binding-kind metadata cannot

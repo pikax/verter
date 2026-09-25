@@ -2800,6 +2800,8 @@ fn publication_score_corpus(
                         parameters: Arc::from([Arc::from("S")]),
                     }]),
                     own_arity: 0,
+                    constructor_visibility: None,
+                    prototype: None,
                 }),
                 type_arguments: Arc::from([foo]),
                 surface: obj_a,

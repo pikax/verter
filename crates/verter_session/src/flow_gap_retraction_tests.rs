@@ -679,11 +679,6 @@ fn flow_gap_known_gap_results_are_typed_partial_and_never_warm() {
             FlowGap::ClosureCapture,
         ),
         (
-            "g9",
-            "function makeProps(v: string | number) { if (typeof v === \"string\") { return () => v } return () => \"z\" as const }",
-            FlowGap::ClosureCapture,
-        ),
-        (
             "g11_sequence",
             "function makeProps() { return (0, () => \"a\" as const) }",
             FlowGap::UnmodeledExpression,
@@ -700,6 +695,26 @@ fn flow_gap_known_gap_results_are_typed_partial_and_never_warm() {
         record_trace(id, &trace);
         assert_partial(&trace, gap);
     }
+}
+
+/// A closure created under a guard over a parameter never written again
+/// reads the guarded type: the checker extends the closure's control-flow
+/// container to the enclosing one (measured, 7.0.2: `() => string`), so
+/// the result is exact, complete and warm.
+#[test]
+fn flow_gap_closure_under_a_guard_past_the_last_assignment_is_complete() {
+    let trace = run(
+        "g9",
+        "function makeProps(v: string | number) { if (typeof v === \"string\") { return () => v } return () => \"z\" as const }",
+        "makeProps",
+    );
+    record_trace("g9", &trace);
+    assert_complete_warm(
+        &trace,
+        Some(
+            r#"{"kind":"function","parameters":[],"returnType":{"kind":"primitive","name":"string"}}"#,
+        ),
+    );
 }
 
 #[test]

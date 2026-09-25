@@ -576,9 +576,23 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                                 SkeletonObjectKey::Static(name) => Arc::from(
                                     vec![SkeletonPathSegment::Static(*name)].into_boxed_slice(),
                                 ),
-                                SkeletonObjectKey::Computed(_) => Arc::from(
-                                    vec![SkeletonPathSegment::Computed].into_boxed_slice(),
-                                ),
+                                SkeletonObjectKey::Computed(key_site) => {
+                                    // A computed key's VALUE names the
+                                    // property the entry writes, so every
+                                    // demand on the literal reads the whole
+                                    // key as an input.
+                                    edges.push((
+                                        node,
+                                        site_node(*key_site),
+                                        FlowEdgeKind::ReadProjection {
+                                            path: Arc::from(Vec::new().into_boxed_slice()),
+                                            kind: super::FlowReadKind::Input,
+                                        },
+                                    ));
+                                    Arc::from(
+                                        vec![SkeletonPathSegment::Computed].into_boxed_slice(),
+                                    )
+                                }
                             };
                             edges.push((
                                 node,

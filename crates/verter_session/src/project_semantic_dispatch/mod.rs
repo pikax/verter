@@ -2186,8 +2186,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> (SemanticQueryKey, CarrierNormalizationPrelude) {
-        // Cheap subject-shape probe — a non-carrier key skips the tracer.
-        if !self.key_subject_is_carrier(&key) {
+        // Cheap subject-shape probe — a key with neither a carrier subject
+        // nor a first step through a shared subject's apparent wrapper skips
+        // the tracer.
+        if !self.key_subject_is_carrier(&key) && !self.key_reads_apparent_wrapper(&key) {
             return (key, CarrierNormalizationPrelude::none());
         }
         let ((normalized, partial_reasons), finalise) =
@@ -2196,6 +2198,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 || {
                     let normalized = self.normalize_carrier_subject_key(key);
                     let partial_reasons = self.carrier_normalization_partial_reasons(&normalized);
+                    // The wrapper read is scoped to the demand's project here,
+                    // so its lookup's facts root the admitted entry too.
+                    let normalized = self.scope_apparent_wrapper_subject(normalized);
                     // Test-only: force a fenced (ReturnOnly) serve observation onto
                     // the prelude tracer so the suppress wiring is exercisable
                     // without a superseded-artifact fixture. Zero-cost when unset.
@@ -4166,20 +4171,40 @@ mod base_signature_tests;
 #[cfg(test)]
 mod checker_probe_lane_tests;
 #[cfg(test)]
+mod class_member_return_tests;
+#[cfg(test)]
 mod class_value_heritage_tests;
+#[cfg(test)]
+mod closure_narrowing_tests;
 #[cfg(test)]
 mod heritage_signature_tests;
 #[cfg(test)]
 mod homomorphic_mapped_tests;
 #[cfg(test)]
+mod indexed_access_name_tests;
+#[cfg(test)]
 mod indexed_access_relation_tests;
+#[cfg(test)]
+mod intersection_distribution_tests;
 #[cfg(test)]
 mod merged_declaration_signature_tests;
 #[cfg(test)]
 mod namespace_member_value_tests;
 #[cfg(test)]
+mod namespace_value_tests;
+#[cfg(test)]
+mod object_literal_key_tests;
+#[cfg(test)]
 mod projected_terminal_surface_tests;
 #[cfg(test)]
 mod projection_stack_safety_tests;
 #[cfg(test)]
+mod relation_operand_tests;
+#[cfg(test)]
+mod signature_relation_tests;
+#[cfg(test)]
+mod this_receiver_tests;
+#[cfg(test)]
 mod truthiness_domain_tests;
+#[cfg(test)]
+mod tuple_length_and_apparent_member_tests;
