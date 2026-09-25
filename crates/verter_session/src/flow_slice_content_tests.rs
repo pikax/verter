@@ -3062,12 +3062,8 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
         "export {};\nfunction isString(x: unknown): x is string { return true }\n";
     let gapped = [
         (
-            "an equality whose reference operand is a member path",
-            "export {};\nfunction f(x: { kind: \"a\" } | { kind: \"b\" }, y: \"a\") { if (x.kind === y) { return x } return 0 }",
-        ),
-        (
-            "an equality against a call's value",
-            "export {};\ndeclare function g(): \"a\";\nfunction f(x: \"a\" | \"b\") { if (x === g()) { return x } return 0 }",
+            "a strict equality through a computed access rooted at a parameter",
+            "export {};\nfunction f(x: { v: \"a\" | \"b\" }, k: \"v\") { if (x[k] === \"a\") { return x } return 0 }",
         ),
         (
             "a `typeof` compared against a represented local",
@@ -5521,8 +5517,28 @@ fn ternary_guard_shares_the_if_authority_for_a_modeled_and_an_unexpressible_test
     );
     assert_eq!(guard_gap_count(&modeled), 0, "{modeled:?}");
 
+    // An equality between two represented references narrows both, each
+    // by the other's type: the local is the other operand.
+    let reference = content_for(
+        "export {};\nfunction f(x: \"a\" | \"b\") { const k = \"a\"; return x === k ? x : 0 }",
+        "f",
+    );
+    let guard = ternary_return_guard(&reference);
+    assert!(
+        matches!(
+            guard,
+            SliceGuard::EqReference {
+                value: crate::flow_slice_content::SliceEqOther::Reference(_),
+                negated: false,
+                ..
+            }
+        ),
+        "an equality against a represented local keeps both references: {guard:?}"
+    );
+    assert_eq!(guard_gap_count(&reference), 0, "{reference:?}");
+
     let unexpressible = content_for(
-        "export {};\nfunction f(x: { k: \"a\" } | { k: \"b\" }) { const k = \"a\"; return x.k === k ? x : 0 }",
+        "export {};\nfunction f(x: { a: number } | { b: number }) { const k = \"a\"; return k in x ? x : 0 }",
         "f",
     );
     let guard = ternary_return_guard(&unexpressible);
@@ -5616,7 +5632,7 @@ fn loop_test_lowers_through_the_guard_classifier_for_both_a_modeled_and_an_unexp
 #[test]
 fn guard_narrowing_gap_lands_immediately_ahead_of_the_construct_never_inside_an_arm_or_clause() {
     let if_node = content_for(
-        "export {};\nfunction f(x: { k: \"a\" } | { k: \"b\" }) { let n = 0; const k = \"a\"; if (x.k === k) { return x; } return n; }",
+        "export {};\nfunction f(x: { a: number } | { b: number }) { let n = 0; const k = \"a\"; if (k in x) { return x; } return n; }",
         "f",
     );
     let statements = &if_node.body.statements;

@@ -4775,8 +4775,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// where a COMPOSED root (an intersection body, an object-spread
     /// program) is composed into its one-level surface first, so an
     /// `A & { kind: "a" }` versus `A & { kind: "b" }` conflict is still
-    /// proved. Different object key sets can overlap and are never declared
-    /// disjoint.
+    /// proved. Two surfaces are also disjoint when each requires a property
+    /// the other proves absent — the checker's comparable relation refuses
+    /// an unmatched required property in either direction — once their
+    /// shared members are read; any other difference in key sets overlaps.
+    /// Two arrays relate by their elements.
     fn reduce_comparable(&self, key: &RelateMemoKey) -> RelationResult {
         if !self.relation_reads_node_pair_only(key) {
             return RelationResult::Unknown;
@@ -4870,6 +4873,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             CombineAnyFrom(usize),
             /// Conjoin the results above `base` (shared required members).
             CombineAllFrom(usize),
+            /// Conjoin the results above `base` (the shared members of a
+            /// pair its property sets prove disjoint) and publish the
+            /// disjointness proof unless one is undecided: the proof's
+            /// collapse class reads those members.
+            DisjointUnlessUndecidedFrom(usize),
             Finish((SemanticNodeId, SemanticNodeId)),
         }
 
@@ -4947,6 +4955,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 break;
             }
+            // Comparability is symmetric: a top type on either side decides.
+            if self.relation_reads_unread_marker(source, target)
+                && self.relation_reads_unread_marker(target, source)
+            {
+                return RelationResult::Unknown;
+            }
             if source == target {
                 return assignable(&[]);
             }
@@ -4981,6 +4995,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Work::CombineAllFrom(base) => {
                     let combined = results.drain(base..).fold(assignable(&[]), result_and);
                     results.push(combined);
+                }
+                Work::DisjointUnlessUndecidedFrom(base) => {
+                    let combined = results.drain(base..).fold(assignable(&[]), result_and);
+                    results.push(match combined {
+                        RelationResult::Unknown => RelationResult::Unknown,
+                        _ => RelationResult::NotAssignable,
+                    });
                 }
                 Work::Finish(pair) => {
                     let result = results
@@ -5051,6 +5072,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 work.push(Work::Eval(source, target));
                             }
                         }
+                        continue;
+                    }
+                    if self.relation_reads_unread_marker(source, target)
+                        && self.relation_reads_unread_marker(target, source)
+                    {
+                        results.push(RelationResult::Unknown);
                         continue;
                     }
                     if source == target {
@@ -5145,6 +5172,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         results.push(RelationResult::Unknown);
                         continue;
                     }
+                    // Two arrays are comparable exactly when their elements
+                    // are, in either direction and whichever is readonly
+                    // (the mutable one relates to the readonly one): the
+                    // checker relates `Array<T>` by its element's variance
+                    // (measured: `x: string[] | number[]` reads `number[]`
+                    // inside `if (x === arr)` over `arr: number[]`).
+                    if let (
+                        SemanticNodeData::Array {
+                            element: source_element,
+                            ..
+                        },
+                        SemanticNodeData::Array {
+                            element: target_element,
+                            ..
+                        },
+                    ) = (&*source_data, &*target_data)
+                    {
+                        work.push(Work::Eval(*source_element, *target_element));
+                        continue;
+                    }
 
                     let (source_view, target_view) = match (
                         self.comparable_surface(source),
@@ -5195,7 +5242,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
                         self.intern_normalized_union_or_intersection(&[value, undefined], true)
                     };
-                    work.push(Work::CombineAllFrom(results.len()));
+                    budget_used = budget_used.saturating_add(
+                        (source_view.positive_members().len() as u64)
+                            .saturating_mul(target_width)
+                            .saturating_mul(2),
+                    );
+                    if budget_used > budget_limit {
+                        self.note_relation_budget_exceeded(budget_limit);
+                        return RelationResult::Unknown;
+                    }
+                    work.push(
+                        if surfaces_require_members_the_other_lacks(&source_view, &target_view) {
+                            Work::DisjointUnlessUndecidedFrom(results.len())
+                        } else {
+                            Work::CombineAllFrom(results.len())
+                        },
+                    );
                     for source_member in source_view.positive_members() {
                         budget_used = budget_used.saturating_add(1);
                         if budget_used > budget_limit {
@@ -5215,6 +5277,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         else {
                             continue;
                         };
+                        // The property pair's accessibility, as the
+                        // checker's comparable relation reads it through
+                        // `propertyRelatedTo` in either direction: a pair
+                        // neither direction admits proves the types
+                        // disjoint (TS2367 / TS2352 between `D0` and a
+                        // `Q0` redeclaring its private member).
+                        if let Some(result) =
+                            self.comparable_property_accessibility(source_member, target_member)
+                        {
+                            results.push(result);
+                            continue;
+                        }
                         work.push(Work::Eval(
                             read(source_member.value, source_member.optional),
                             read(target_member.value, target_member.optional),
@@ -5917,6 +5991,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
+    /// Whether either side is a typed marker for a value Verter did not read,
+    /// or the pair is one node that reaches such a marker anywhere inside it
+    /// — an absence, an unmodelled position, an unsupported surface, a
+    /// partial or control carrier. No relation over one is a fact: two
+    /// markers are never the same type because they are the same marker,
+    /// and a marker is never below `unknown` or above `never` because the
+    /// relation cannot read it. The checker's error type (the
+    /// `CheckerRecovery` and `Failure` dispositions) relates as `any`
+    /// does, and a recursion or declaration carrier is unwrapped before it
+    /// is compared, so neither is a marker here.
+    ///
+    /// A relation to a top type (`unknown`, `any`) holds for every type,
+    /// whatever a marker stands for, so it stays decided.
+    pub(super) fn relation_reads_unread_marker(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> bool {
+        use super::query_error_disposition::{query_error_disposition, QueryErrorDisposition};
+        let marker = |node: SemanticNodeId| match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Opaque(err)) => !matches!(
+                query_error_disposition(err),
+                QueryErrorDisposition::Failure
+                    | QueryErrorDisposition::CheckerRecovery
+                    | QueryErrorDisposition::RecursionCarrier
+                    | QueryErrorDisposition::ExpandableDecl
+            ),
+            _ => false,
+        };
+        let top = |node: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Unknown | PrimitiveKind::Any
+                ))
+            )
+        };
+        // The same node relates to itself on identity only when it is known
+        // throughout: `[marker]` is no more `[marker]` than the marker is
+        // itself.
+        let identical_unread = source == target && self.graph().node_reaches_unresolved(source);
+        (marker(source) || marker(target) || identical_unread) && !top(target)
+    }
+
     /// The O(tag) fast-reject prefilter (RI-5): decides the trivial
     /// primitive/identity/top/bottom cases inline BEFORE any recursive
     /// structural work. Non-trivial pairs return `Unknown` and fall
@@ -5926,6 +6044,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> ShallowRelation {
+        if self.relation_reads_unread_marker(source, target) {
+            return ShallowRelation::Unknown;
+        }
         if source == target {
             let mut no_bindings = Vec::new();
             if let Some(result) = self.try_identical_open_program_result(source, &mut no_bindings) {
@@ -6126,6 +6247,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(result) = self.try_relation_projection(source, target, bindings, occurrence) {
             return result;
         }
+        if self.relation_reads_unread_marker(source, target) {
+            return RelationResult::Unknown;
+        }
         if source == target {
             if let Some(result) = self.try_identical_open_program_result(source, bindings) {
                 return result;
@@ -6294,6 +6418,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   assignable to anything): no skeleton match ⇒ `NotAssignable`
     ///   (two disjoint nonempty sets); a match ⇒ `None` (subset of a
     ///   singleton needs the template to BE that singleton).
+    /// - template → template: the same quasis over structurally identical
+    ///   placeholders are ONE type (the checker interns a template by its
+    ///   texts and types) ⇒ `Assignable`; any other pair ⇒ `None`.
     ///
     /// Quasis are stored as RAW source text; a quasi carrying an escape
     /// (`\\`) is not cooked-comparable and bails to `None`.
@@ -6390,6 +6517,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 None
             }
+            (
+                SemanticNodeData::TemplateLiteral {
+                    quasis: source_quasis,
+                    expressions: source_expressions,
+                },
+                SemanticNodeData::TemplateLiteral {
+                    quasis: target_quasis,
+                    expressions: target_expressions,
+                },
+            ) if source_quasis == target_quasis
+                && source_expressions.len() == target_expressions.len() =>
+            {
+                let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+                let mut budget = super::canonical_algebra::COMPARE_WORK_BUDGET;
+                let identical = source_expressions
+                    .iter()
+                    .zip(target_expressions.iter())
+                    .all(|(source, target)| {
+                        matches!(
+                            super::canonical_algebra::compare_structural(
+                                self.graph(),
+                                *source,
+                                *target,
+                                &mut evidence,
+                                &mut budget,
+                            ),
+                            super::canonical_algebra::StructuralIdentity::Equal
+                        )
+                    });
+                identical.then(|| assignable(bindings))
+            }
             _ => None,
         }
     }
@@ -6448,6 +6606,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let occurrence = self.relation_current_occurrence();
         if let Some(result) = self.try_relation_projection(source, target, bindings, occurrence) {
             results.push(result);
+            return;
+        }
+        if self.relation_reads_unread_marker(source, target) {
+            results.push(RelationResult::Unknown);
             return;
         }
         if source == target {
@@ -8423,10 +8585,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // assignable to `{ a: string }`, and `{ [k: string]: number
                 // }` is assignable to `{ a?: string }`).
                 crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
-                    if let Some(prototype_result) =
-                        self.relate_constructor_prototype(source, &target_key, t_prop, bindings)
+                    if let Some(apparent) =
+                        self.relate_apparent_function_member(source, &target_key, t_prop, bindings)
                     {
-                        prototype_result
+                        apparent
                     } else if t_prop.optional {
                         assignable(bindings)
                     } else {
@@ -8545,6 +8707,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `{ a: string }`, `{ a: string | undefined }` or `{ a: any }`,
         // with `strictNullChecks` on or off). The strict subtype relation
         // also refuses a `readonly` member below a mutable one.
+        if let Some(decided) = self.property_accessibility_relation(source, target) {
+            return decided;
+        }
         if !target.optional
             && source.optional
             && self.current_relation_kind() != RelationKind::Comparable
@@ -8568,6 +8733,265 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bindings,
             InferPosition::Covariant,
         )
+    }
+
+    /// The accessibility half of the checker's `propertyRelatedTo`, decided
+    /// before the property types: a `private` property on either side
+    /// relates only to the same declaration; a `protected` target property
+    /// only to a property declared in a class derived from the target
+    /// property's declaring class (`isValidOverrideOf` — the same
+    /// declaration included); a `protected` source property never to a
+    /// public one. `None` when the pair passes and its types decide;
+    /// `Unknown` when a declaration or a declaring class the rule needs is
+    /// not read from the graph.
+    fn property_accessibility_relation(
+        &self,
+        source: &crate::semantic_query::SurfaceMember,
+        target: &crate::semantic_query::SurfaceMember,
+    ) -> Option<RelationResult> {
+        use verter_type_expr::MemberVisibility;
+        let same_declaration = || -> Option<bool> {
+            let (Some(source_span), Some(target_span)) =
+                (source.spans.declaration, target.spans.declaration)
+            else {
+                return None;
+            };
+            let (Some(source_file), Some(target_file)) = (
+                source.declaration_origin.as_deref(),
+                target.declaration_origin.as_deref(),
+            ) else {
+                return None;
+            };
+            Some(source_file == target_file && source_span == target_span)
+        };
+        if source.visibility == MemberVisibility::Private
+            || target.visibility == MemberVisibility::Private
+        {
+            return match same_declaration() {
+                Some(true) => None,
+                Some(false) => Some(RelationResult::NotAssignable),
+                None => Some(RelationResult::Unknown),
+            };
+        }
+        if target.visibility == MemberVisibility::Protected {
+            if same_declaration() == Some(true) {
+                return None;
+            }
+            let MemberOwner::Class(target_class) = self.member_owner(target) else {
+                return Some(RelationResult::Unknown);
+            };
+            return match self.member_owner(source) {
+                MemberOwner::NotAClass => Some(RelationResult::NotAssignable),
+                MemberOwner::Undecided => Some(RelationResult::Unknown),
+                MemberOwner::Class(source_class) => {
+                    match self.class_derives_from(&source_class, &target_class) {
+                        Some(true) => None,
+                        Some(false) => Some(RelationResult::NotAssignable),
+                        None => Some(RelationResult::Unknown),
+                    }
+                }
+            };
+        }
+        if source.visibility == MemberVisibility::Protected {
+            return Some(RelationResult::NotAssignable);
+        }
+        None
+    }
+
+    /// The accessibility of a property pair the comparable relation reads:
+    /// comparability holds when either direction relates, so the pair
+    /// proves the types disjoint (`NotAssignable`) only when
+    /// [`Self::property_accessibility_relation`] refuses it both ways.
+    /// `None` when a direction admits the pair and its types decide;
+    /// `Unknown` when a direction is undecided and none admits it.
+    fn comparable_property_accessibility(
+        &self,
+        a: &crate::semantic_query::SurfaceMember,
+        b: &crate::semantic_query::SurfaceMember,
+    ) -> Option<RelationResult> {
+        let forward = self.property_accessibility_relation(a, b)?;
+        let backward = self.property_accessibility_relation(b, a)?;
+        Some(
+            if matches!(forward, RelationResult::NotAssignable)
+                && matches!(backward, RelationResult::NotAssignable)
+            {
+                RelationResult::NotAssignable
+            } else {
+                RelationResult::Unknown
+            },
+        )
+    }
+
+    /// The class that declares `member` — the class node whose body
+    /// declares it directly, read from the file's syntactic class index —
+    /// or no class when a file-scope interface or type alias declares it.
+    /// A file-scope class is named by its declaration identity, which the
+    /// class-heritage ancestry authority reads; any other class (a class
+    /// expression, a class declared inside a body) by its node. A member
+    /// whose declaration neither reads is undecided.
+    fn member_owner(&self, member: &crate::semantic_query::SurfaceMember) -> MemberOwner {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        let (Some(span), Some(file)) =
+            (member.spans.declaration, member.declaration_origin.as_ref())
+        else {
+            return MemberOwner::Undecided;
+        };
+        let Some(indexed) = self
+            .ctx
+            .ensure_indexed_ready_serve(file.as_ref())
+            .map(|serve| serve.indexed)
+        else {
+            return MemberOwner::Undecided;
+        };
+        let decl_bodies = indexed.shallow_state.decl_bodies();
+        let headers = decl_bodies.header_index();
+        let classes = decl_bodies.function_program_index();
+        if let Some(class) = classes.class_declaring_member(span) {
+            // A file-scope class declaration is the outermost class inside
+            // its header.
+            let file_scope = (!class.expression && !classes.class_encloses(class.span))
+                .then(|| {
+                    headers.type_headers.iter().find(|(_, header)| {
+                        header.kind == TypeDeclKind::Class
+                            && header.span.start <= class.span.start
+                            && class.span.end <= header.span.end
+                    })
+                })
+                .flatten();
+            return MemberOwner::Class(match file_scope {
+                Some((key, _)) => ClassOwner::Declared(crate::semantic_query::DeclIdentity {
+                    canonical_id: Arc::clone(file),
+                    owner: key.owner,
+                    whole_hash: indexed.whole_hash,
+                    decl_name: Arc::clone(&key.name),
+                }),
+                None => ClassOwner::Syntactic {
+                    file: Arc::clone(file),
+                    span: class.span,
+                    has_heritage: class.has_heritage,
+                },
+            });
+        }
+        let within_a_type = headers.type_headers.iter().any(|(_, header)| {
+            header.kind != TypeDeclKind::Class
+                && header.span.start <= span.start
+                && span.end <= header.span.end
+        });
+        if within_a_type {
+            MemberOwner::NotAClass
+        } else {
+            MemberOwner::Undecided
+        }
+    }
+
+    /// Whether the class `source` derives from the class `target`, the
+    /// same class included — the checker's `isValidOverrideOf` over the
+    /// members' declaring classes. A file-scope class reads its transitive
+    /// ancestry from the class-heritage ancestry authority, whose decided
+    /// chain names file-scope classes only; a class with no `extends`
+    /// clause derives from itself alone. `None` when the chain is not
+    /// decided, or when a class other than a file-scope one has a
+    /// heritage clause.
+    ///
+    /// The ancestry walk reads each declaration file through an accessor
+    /// that records no fact of its own, so the files it observed join the
+    /// relation build's self-roots here: an edit to an ancestor's file
+    /// retracts the answer.
+    fn class_derives_from(&self, source: &ClassOwner, target: &ClassOwner) -> Option<bool> {
+        match (source, target) {
+            (ClassOwner::Declared(source), ClassOwner::Declared(target)) => {
+                if super::build::same_class_identity(source, target) {
+                    return Some(true);
+                }
+                let ancestry = self.class_heritage_ancestry(source);
+                self.deposit_operand_self_roots(&ancestry.observed);
+                if ancestry
+                    .ancestors
+                    .iter()
+                    .any(|ancestor| super::build::same_class_identity(ancestor, target))
+                {
+                    Some(true)
+                } else {
+                    ancestry.decided.then_some(false)
+                }
+            }
+            (ClassOwner::Declared(source), ClassOwner::Syntactic { .. }) => {
+                let ancestry = self.class_heritage_ancestry(source);
+                self.deposit_operand_self_roots(&ancestry.observed);
+                ancestry.decided.then_some(false)
+            }
+            (
+                ClassOwner::Syntactic {
+                    file,
+                    span,
+                    has_heritage,
+                },
+                target,
+            ) => {
+                if let ClassOwner::Syntactic {
+                    file: target_file,
+                    span: target_span,
+                    ..
+                } = target
+                {
+                    if file == target_file && span == target_span {
+                        return Some(true);
+                    }
+                }
+                (!has_heritage).then_some(false)
+            }
+        }
+    }
+
+    /// A property the source declares through its apparent `Function` type
+    /// — an object with call or construct signatures reads the members the
+    /// checker's `getPropertyOfType` adds after its own (`Function`'s
+    /// `prototype: any`, `length`, `name`, …; `(new () => Foo) extends {
+    /// prototype: Bar }` holds). `None` when the source has no signature or
+    /// its apparent type does not declare the key.
+    fn relate_apparent_function_member(
+        &self,
+        source: &SurfaceView,
+        key: &crate::semantic_query::PropertyKey,
+        target: &crate::semantic_query::SurfaceMember,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        if source.call_signatures.is_empty() && source.construct_signatures.is_empty() {
+            return None;
+        }
+        let node = self
+            .graph()
+            .intern_node(SemanticNodeData::Object(source.clone()));
+        let value = self.apparent_function_member_value(node, key)?;
+        Some(self.relate_member(value, target.value, bindings, InferPosition::Covariant))
+    }
+
+    /// The type of the member `key` the apparent `Function` type of the
+    /// callable `node` declares, `None` when it declares none or the
+    /// apparent type does not settle.
+    fn apparent_function_member_value(
+        &self,
+        node: SemanticNodeId,
+        key: &crate::semantic_query::PropertyKey,
+    ) -> Option<SemanticNodeId> {
+        // A rootless callable (a function type written in a type position)
+        // reads the apparent type of the project the relation is asked in.
+        let apparent = match self.apparent_type_of(node) {
+            Some(apparent) => apparent,
+            None => {
+                let demand = self.wrapper_demand_canonical()?;
+                let _scope =
+                    super::LexicalDemandScopeGuard::push(&self.lexical_demand_scope, demand);
+                self.apparent_type_of(node)?
+            }
+        };
+        let SemanticNodeData::Object(view) = &*self.graph().node_data(apparent)? else {
+            return None;
+        };
+        match view.project_known_key(key) {
+            crate::semantic_query::SurfaceKeyProjection::Exact(member) => Some(member.value),
+            crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
+        }
     }
 
     pub(super) fn relate_target_index_signature(
@@ -8829,10 +9253,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Relate a function source against an object target carrying call
     /// signatures.
-    /// A DIRECT signature source against an Object target: required target
-    /// MEMBERS reject (a bare signature has none), and every target
-    /// signature bucket must be satisfied by the source's single
-    /// matching-kind signature — a bucket of the OTHER kind is unmet.
+    /// A DIRECT signature source against an Object target: a bare signature
+    /// declares no member of its own, so a required target member relates
+    /// to the member its apparent `Function` type declares (`prototype:
+    /// any`, `length`, …) or rejects, and every target signature bucket
+    /// must be satisfied by the source's single matching-kind signature — a
+    /// bucket of the OTHER kind is unmet.
     fn relate_signature_source_to_object(
         &self,
         source_sig: SemanticNodeId,
@@ -8840,14 +9266,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: &SurfaceView,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
-        for m in target.positive_members().iter() {
-            if !m.optional {
-                return RelationResult::NotAssignable;
-            }
-        }
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
+        for m in target.positive_members().iter() {
+            if m.optional {
+                continue;
+            }
+            let value = m
+                .key
+                .cloned_known()
+                .and_then(|key| self.apparent_function_member_value(source_sig, &key));
+            let Some(value) = value else {
+                return RelationResult::NotAssignable;
+            };
+            let r = self.relate_member(value, m.value, bindings, InferPosition::Covariant);
+            acc = result_and(acc, r);
+            if matches!(acc, RelationResult::NotAssignable) {
+                return RelationResult::NotAssignable;
+            }
+        }
         for (bucket_kind, bucket) in [
             (
                 crate::semantic_query::SignatureKind::Call,
@@ -8870,29 +9308,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         acc
-    }
-
-    /// A constructor's `prototype` is a projection-time property, never a
-    /// stored member: a target that requires one relates the class instance
-    /// with `any` for its type parameters (`getTypeOfPrototypeProperty`),
-    /// read off the source's last construct signature exactly as the path
-    /// walker reads `C.prototype`. `None` for any other key or a source
-    /// with no construct signature.
-    fn relate_constructor_prototype(
-        &self,
-        source: &SurfaceView,
-        key: &crate::semantic_query::PropertyKey,
-        target: &crate::semantic_query::SurfaceMember,
-        bindings: &mut Vec<InferBinding>,
-    ) -> Option<RelationResult> {
-        if key.as_string() != Some("prototype") {
-            return None;
-        }
-        let prototype = source
-            .construct_signatures
-            .last()
-            .and_then(|signature| self.constructor_prototype(*signature))?;
-        Some(self.relate_member(prototype, target.value, bindings, InferPosition::Covariant))
     }
 
     /// The checker's `constructorVisibilitiesAreCompatible` over the FIRST
@@ -9345,6 +9760,65 @@ fn tuple_position_pairs(
 /// pair: `true` for a template below `string`, `false` for a template
 /// against a primitive or literal of another kind (either direction),
 /// `None` for every other pair.
+/// Whether each of two object surfaces requires a property the other
+/// proves absent. The checker's comparable relation, like assignability,
+/// refuses a source that lacks a required target property
+/// (`propertiesRelatedTo` reports it unmatched), and two types are
+/// comparable when either direction relates: a pair missing a required
+/// property both ways is comparable in neither (measured: `x: A | C`
+/// over `interface A { kind: 'a'; a: 1 }` and `interface C { c: 3 }`
+/// reads `C` inside `if (x === c)`). A surface with an index signature,
+/// a call or construct signature (its apparent type declares more), or a
+/// key that is not known keeps the pair to the member descent.
+fn surfaces_require_members_the_other_lacks(a: &SurfaceView, b: &SurfaceView) -> bool {
+    let closed = |view: &SurfaceView| {
+        view.index_signatures.is_empty()
+            && view.call_signatures.is_empty()
+            && view.construct_signatures.is_empty()
+            && view
+                .positive_members()
+                .iter()
+                .all(|member| member.key.as_known().is_some())
+    };
+    let lacks_a_required_member = |source: &SurfaceView, target: &SurfaceView| {
+        target.positive_members().iter().any(|member| {
+            !member.optional
+                && member.key.cloned_known().is_some_and(|key| {
+                    matches!(
+                        source.project_known_key(&key),
+                        crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                    )
+                })
+        })
+    };
+    closed(a) && closed(b) && lacks_a_required_member(a, b) && lacks_a_required_member(b, a)
+}
+
+/// What declares a property, for the checker's protected-member rule
+/// ([`ProjectSemanticDispatch::property_accessibility_relation`]).
+enum MemberOwner {
+    /// A class declares it directly.
+    Class(ClassOwner),
+    /// A file-scope interface or type alias declares it: no class does.
+    NotAClass,
+    /// Its declaration is not read from the graph.
+    Undecided,
+}
+
+/// The class that declares a member directly.
+enum ClassOwner {
+    /// A file-scope class, by its declaration identity.
+    Declared(crate::semantic_query::DeclIdentity),
+    /// Any other class — a class expression, a class declared inside a
+    /// body — by its node in the file's syntactic class index.
+    Syntactic {
+        file: Arc<str>,
+        span: verter_span::Span,
+        /// Whether the class has an `extends` clause.
+        has_heritage: bool,
+    },
+}
+
 fn template_literal_kind_verdict(
     source: &SemanticNodeData,
     target: &SemanticNodeData,

@@ -362,6 +362,13 @@ impl FlowEvaluator<'_, '_> {
                 }
                 return;
             }
+            SliceGuard::EqReference { subject, value, .. } => {
+                self.degrade_discriminant_test(subject);
+                if let crate::flow_slice_content::SliceEqOther::Reference(reference) = value {
+                    self.degrade_discriminant_test(reference);
+                }
+                return;
+            }
             SliceGuard::CalleePredicate { arguments, .. } => {
                 for subject in arguments.iter().flatten() {
                     self.degrade_discriminant_test(subject);

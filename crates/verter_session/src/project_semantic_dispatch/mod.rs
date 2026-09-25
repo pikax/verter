@@ -123,6 +123,8 @@ mod call_resolve;
 #[cfg(test)]
 mod call_resolve_tests;
 pub(crate) mod dispatch_txn;
+#[cfg(test)]
+mod equality_value_narrowing_tests;
 pub(crate) mod flow_return;
 #[cfg(test)]
 mod flow_return_accessor_tests;
@@ -4191,6 +4193,10 @@ mod checker_probe_lane_tests;
 #[cfg(test)]
 mod class_member_return_tests;
 #[cfg(test)]
+mod class_owner_tests;
+#[cfg(test)]
+mod class_prototype_property_tests;
+#[cfg(test)]
 mod class_value_heritage_tests;
 #[cfg(test)]
 mod closure_narrowing_tests;
@@ -4205,6 +4211,8 @@ mod heritage_signature_tests;
 #[cfg(test)]
 mod homomorphic_mapped_tests;
 #[cfg(test)]
+mod index_signature_access_tests;
+#[cfg(test)]
 mod indexed_access_name_tests;
 #[cfg(test)]
 mod indexed_access_relation_tests;
@@ -4214,6 +4222,8 @@ mod intersection_distribution_tests;
 mod keyof_application_tests;
 #[cfg(test)]
 mod lib_global_tests;
+#[cfg(test)]
+mod member_accessibility_relation_tests;
 #[cfg(test)]
 mod merged_declaration_signature_tests;
 #[cfg(test)]
@@ -4250,3 +4260,5 @@ mod truthiness_domain_tests;
 mod tuple_length_and_apparent_member_tests;
 #[cfg(test)]
 mod unique_symbol_widening_tests;
+#[cfg(test)]
+mod unread_marker_relation_tests;

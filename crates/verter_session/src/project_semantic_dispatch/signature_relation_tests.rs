@@ -221,7 +221,9 @@ export function plainFactory() { return class { v = 1; }; }
 /// (`1`, `PubA` has no constructor declaration) as `typeof PubA extends
 /// typeof PrivA` does (`1`); `typeof ProtA extends ReturnType<typeof
 /// plainFactory>` and `ReturnType<typeof plainFactory> extends new () =>
-/// any` are `1`.
+/// any` are `1`. `(new () => ProtCtor)` has no `prototype` of its own: it
+/// reads `Function`'s (`prototype: any`), so that row runs in a project
+/// whose library declares it.
 #[test]
 fn a_non_public_constructor_relates_by_the_checkers_visibility_rule() {
     let failures = mismatches(
@@ -253,7 +255,6 @@ fn a_non_public_constructor_relates_by_the_checkers_visibility_rule() {
             ("typeof DerivedPubOfProt extends new () => any ? 1 : 0", "1"),
             ("typeof PubCtor extends new () => any ? 1 : 0", "1"),
             ("typeof ProtCtor extends typeof ProtCtor ? 1 : 0", "1"),
-            ("(new () => ProtCtor) extends typeof ProtCtor ? 1 : 0", "1"),
             ("typeof PubA extends typeof ProtA ? 1 : 0", "1"),
             ("typeof PrivA extends typeof ProtA ? 1 : 0", "0"),
             ("typeof ProtA extends typeof PrivA ? 1 : 0", "1"),
@@ -269,6 +270,17 @@ fn a_non_public_constructor_relates_by_the_checkers_visibility_rule() {
                 "1",
             ),
         ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let with_function = super::checker_probe_lane_tests::ProbeProject {
+        files: &[],
+        compiler_options: None,
+        ambient_lib: Some("interface Function { prototype: any; }"),
+    };
+    let failures = super::checker_probe_lane_tests::mismatches_in(
+        with_function,
+        CONSTRUCTORS,
+        &[("(new () => ProtCtor) extends typeof ProtCtor ? 1 : 0", "1")],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

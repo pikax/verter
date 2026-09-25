@@ -12,7 +12,7 @@
 //!
 //! 1. the base must BE callable — a [`SemanticNodeData::Signature`], a
 //!    [`SemanticNodeData::DeferredCallable`], or an object surface carrying
-//!    call signatures — reached through alias hops;
+//!    call or construct signatures — reached through alias hops;
 //! 2. a scoping canonical resolves the project whose ambient registry is
 //!    consulted. An AUTHORED callable is scoped by its declaring canonical
 //!    (the same per-canonical env scoping every other context builder on
@@ -453,27 +453,39 @@ impl ProjectSemanticDispatch<'_> {
                 SemanticNodeData::DeferredCallable(callable) => {
                     return CallableAnchor::Authored(Arc::clone(callable.declaring_canonical()));
                 }
-                // A surface with call signatures is callable too; its FIRST
-                // call signature anchors the lookup (every signature of one
-                // callable position is authored in the same file). The
-                // signatures are the discovery authority's, never the
-                // surface's own lists: a surface merged for presentation
-                // carries lists the kernel did not produce.
+                // A surface with call or construct signatures has the
+                // `Function` apparent type too (the checker's
+                // `getPropertyOfType` reads a construct-only type's members
+                // off `NewableFunction`, which extends it); its FIRST call
+                // signature, else its first construct signature, anchors the
+                // lookup (every signature of one callable position is
+                // authored in the same file). The signatures are the
+                // discovery authority's, never the surface's own lists: a
+                // surface merged for presentation carries lists the kernel
+                // did not produce.
                 SemanticNodeData::Object(_) => {
                     drop(data);
-                    match self
-                        .shared_signature_nodes(node, crate::semantic_query::SignatureKind::Call)
-                    {
-                        super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
-                            let Some(first) = nodes.first().copied() else {
-                                return CallableAnchor::NotCallable;
-                            };
-                            node = first;
+                    let mut first = None;
+                    for kind in [
+                        crate::semantic_query::SignatureKind::Call,
+                        crate::semantic_query::SignatureKind::Construct,
+                    ] {
+                        match self.shared_signature_nodes(node, kind) {
+                            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                                first = nodes.first().copied();
+                            }
+                            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => {
+                                return CallableAnchor::Undecided;
+                            }
                         }
-                        super::signature_discovery::SharedSignatureNodes::Incomplete(_) => {
-                            return CallableAnchor::Undecided;
+                        if first.is_some() {
+                            break;
                         }
                     }
+                    let Some(first) = first else {
+                        return CallableAnchor::NotCallable;
+                    };
+                    node = first;
                 }
                 _ => return CallableAnchor::NotCallable,
             }

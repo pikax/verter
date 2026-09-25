@@ -233,7 +233,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     declaration_origin: Some(Arc::from(self.canonical)),
                 });
         }
-        self.add_computed_index_signatures(&mut instance_side, None);
+        self.add_computed_index_signatures(&mut instance_side);
         let own_instance = graph.intern_node(SemanticNodeData::Object(
             crate::semantic_query::surface_view! {
                 has_index_signature: !instance_side.index_signatures.is_empty(),
@@ -308,7 +308,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     prototype: Some(prototype),
                     ..identity
                 }),
-                type_arguments,
+                type_arguments: Arc::clone(&type_arguments),
                 surface,
             },
             self.binder_env.scope.clone(),
@@ -354,6 +354,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .collect(),
             (None, None) => vec![construct(Arc::from(Vec::new().into_boxed_slice()))],
         };
+        // The constructor's `prototype` property (`getTypeOfPrototypeProperty`):
+        // the prototype computed above. It replaces a static the class
+        // declares under that name and the base constructor's own.
+        static_side
+            .members
+            .retain(|member| member.key.as_string() != Some("prototype"));
+        static_side.members.insert(
+            0,
+            crate::project_semantic_dispatch::build::class_prototype_member(
+                prototype,
+                Some(Arc::from(self.canonical)),
+            ),
+        );
         if let Some(base) = &base {
             for inherited in base.static_members.iter() {
                 if !static_side
@@ -366,8 +379,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
         }
         // The static side's implicit string index also covers the
-        // constructor's `prototype`, the instance.
-        self.add_computed_index_signatures(&mut static_side, Some(instance));
+        // constructor's `prototype`, one of its members.
+        self.add_computed_index_signatures(&mut static_side);
         let constructor = graph.intern_node(SemanticNodeData::Object(
             crate::semantic_query::surface_view! {
                 has_index_signature: !static_side.index_signatures.is_empty(),
@@ -804,13 +817,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// that key already, the union of every applicable member's type (the
     /// checker's `getObjectLiteralIndexInfo`) — a string index reads every
     /// string- and number-named member, a number index every numeric-named
-    /// one, a symbol index every unique-symbol-named one. `prototype` is
-    /// the static side's instance.
-    pub(super) fn add_computed_index_signatures(
-        &mut self,
-        side: &mut MemberSide,
-        prototype: Option<SemanticNodeId>,
-    ) {
+    /// one, a symbol index every unique-symbol-named one.
+    pub(super) fn add_computed_index_signatures(&mut self, side: &mut MemberSide) {
         let graph = self.dispatch.graph();
         let kinds = [
             (
@@ -859,9 +867,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 if applies(member_key_kind(&member.key)) {
                     values.push(member.value);
                 }
-            }
-            if kind == ComputedKeyKind::String {
-                values.extend(prototype);
             }
             let value_type = self.union(&values);
             side.index_signatures

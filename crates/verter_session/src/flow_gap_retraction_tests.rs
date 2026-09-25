@@ -1152,3 +1152,60 @@ fn flow_gap_false_refusal_controls_remain_complete_and_warm() {
         assert_complete_warm(&trace, json);
     }
 }
+
+/// Same-host incremental evidence for the protected-member rule: the
+/// relation reads whether the source member's class derives from the
+/// target member's through the class-heritage ancestry, and an edit to
+/// the base class's file retracts the answer. Measured on TypeScript
+/// 7.0.2 (both `strictNullChecks` settings): with `export class PR {
+/// protected x = 1 }`, `makeProps` over `class Sub extends PR { protected
+/// x = 2 }` is `{ v: Sub; } | { v: 0; }`; with `PR`'s `x` public, `Sub`
+/// and `PR` are not comparable (TS2367) and the `Sub` arm is gone.
+#[test]
+fn protected_member_relation_retracts_when_the_base_class_file_changes() {
+    let host = make_audit_host();
+    let base = "/flow-gap-retraction/protected-base.ts";
+    let consumer = "/flow-gap-retraction/protected-consumer.ts";
+    upsert(
+        &host,
+        base,
+        &super::module_script("export class PR { protected x = 1 }"),
+        FileLanguage::script_ts(),
+    );
+    upsert(
+        &host,
+        consumer,
+        &super::module_script(
+            "import { PR } from \"./protected-base\";\nclass Sub extends PR { protected x = 2 }\ndeclare const pr: PR;\nfunction makeProps(x: Sub | number) { if (x === pr) { return { v: x }; } return { v: 0 as const }; }",
+        ),
+        FileLanguage::script_ts(),
+    );
+    let sub = "\"name\":\"Sub\"";
+    let before = run_on(&host, consumer, "makeProps");
+    for sample in [&before.first, &before.second] {
+        assert_eq!(sample.degradation, None, "complete: {before:#?}");
+        assert!(
+            sample.json.as_deref().unwrap_or_default().contains(sub),
+            "`x === pr` keeps the `Sub` arm: {before:#?}"
+        );
+    }
+    assert!(before.second.from_cache, "the answer warms: {before:#?}");
+
+    upsert(
+        &host,
+        base,
+        &super::module_script("export class PR { x = 1 }"),
+        FileLanguage::script_ts(),
+    );
+    let after = run_on(&host, consumer, "makeProps");
+    assert!(
+        !after.first.from_cache,
+        "the pre-edit answer never serves: {after:#?}"
+    );
+    for sample in [&after.first, &after.second] {
+        assert!(
+            !sample.json.as_deref().unwrap_or_default().contains(sub),
+            "the edit to the base class's file drops the `Sub` arm: {after:#?}"
+        );
+    }
+}

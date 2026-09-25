@@ -40,7 +40,10 @@ fn host_with(source: &str) -> Arc<VerterHost> {
     host
 }
 
-fn with_dispatch<R>(source: &str, f: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R) -> R {
+pub(super) fn with_dispatch<R>(
+    source: &str,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R,
+) -> R {
     let host = host_with(source);
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -50,7 +53,7 @@ fn with_dispatch<R>(source: &str, f: impl FnOnce(&ProjectSemanticDispatch<'_>) -
 }
 
 /// The whole-return flow key of the fixture position `name` at `part`.
-fn flow_key(
+pub(super) fn flow_key(
     dispatch: &ProjectSemanticDispatch<'_>,
     name: &str,
     part: FunctionPartIdentity,
@@ -135,7 +138,7 @@ fn assert_matches(
 
 /// Each `(probe, checker print)` pair holds on `source`.
 #[track_caller]
-fn assert_probes(source: &str, rows: &[(&str, &str)]) {
+pub(super) fn assert_probes(source: &str, rows: &[(&str, &str)]) {
     for (name, expected) in rows {
         with_probe(source, name, |dispatch, node| {
             assert_matches(dispatch, node, expected, name);

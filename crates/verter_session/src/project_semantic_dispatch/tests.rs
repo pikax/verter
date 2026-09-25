@@ -25713,10 +25713,10 @@ fn return_type_of_bare_generic_instantiates_at_unknown() {
     );
 }
 
-/// `.prototype` is a projection-time hop onto the instance side — never a
-/// stored member. `typeof C.prototype.method` reaches the instance method.
+/// `.prototype` reads the constructor type's `prototype` property, the
+/// instance side: `typeof C.prototype.method` reaches the instance method.
 #[test]
-fn prototype_hop_projects_instance_side_at_projection_time() {
+fn prototype_reads_the_instance_side() {
     let host = class_mech_host();
     assert_eq!(
         resolve_class_mech(&host, "ProtoGreetReturn"),

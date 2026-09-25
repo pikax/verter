@@ -3579,6 +3579,10 @@ mod corpus_suite {
                 "checker prints `{ v: string | null; }`; the renderer spells the same node `{ v: Union(string | null) }`",
             ),
             (
+                "N65_enum_member_discriminant",
+                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(number | string) }`",
+            ),
+            (
                 "N79_equality_against_const_literal_binding",
                 "checker prints `{ v: 5 | 15; }`; the renderer spells the same node `{ v: Union(15 | 5) }`",
             ),
@@ -3588,7 +3592,7 @@ mod corpus_suite {
             ),
             (
                 "N81_equality_against_let_widened_target_does_not_narrow",
-                "checker prints `{ v: \"a\" | \"b\"; }`; the renderer spells the same node `{ v: Union(\"a\" | \"b\") }`",
+                "checker prints `{ v: \"a\" | \"b\"; }`; the renderer spells the same node `{ v: Union(\"b\" | \"a\") }`",
             ),
             (
                 "N82_falsy_branch_keeps_empty_string_literal",

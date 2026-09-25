@@ -360,6 +360,8 @@ export function viaLocal(x: unknown) { const r = typeof x === "string"; return r
 export function eqParams(x: string, y: string) { return x === y; }
 export function closureRead(x: unknown) { const g = () => x; return typeof x === "string"; }
 export function closureMemberWrite(x: { a: number } | string) { const g = () => { if (typeof x === "object") x.a = 1; }; return typeof x === "string"; }
+export function eqParams2(x: string | number, y: string) { return x === y; }
+export function eqParams3(x: "a" | "b", y: "a") { return x === y; }
 export function nestedArrow() { return (x: string | number) => typeof x === "number"; }
 export function nestedFn() { return function (x: Foo | Bar) { return x.kind === "bar"; }; }
 export function nestedMulti() { return (x: unknown) => { if (x) return true; return typeof x === "string"; }; }
@@ -713,7 +715,13 @@ fn an_unannotated_boolean_return_infers_the_checker_type_predicate() {
 /// parameter, a `boolean` parameter, a false edge that does not narrow the
 /// true-edge type to `never` (both parameters, an opaque conjunct, a
 /// member read), a true edge that changes nothing, a literal return, a return annotation, an implicit return.
+/// An equality between two parameters narrows each by the other's type:
+/// `x === y` over two `string` parameters changes nothing on the true
+/// edge, and over `x: string | number` and `y: string` the false edge
+/// keeps `string` (a non-unit value narrows nothing there).
 const DECLINES: &[(&str, &str)] = &[
+    ("eqParams", "(x: string, y: string) => boolean"),
+    ("eqParams2", "(x: string | number, y: string) => boolean"),
     ("multiReturn", "(x: unknown) => boolean"),
     ("unreachableSecond", "(x: unknown) => boolean"),
     ("reassigned", "(x: unknown) => boolean"),
@@ -887,4 +895,19 @@ fn an_inferred_predicate_names_the_positional_parameter() {
             );
         });
     }
+}
+
+/// An equality between two parameters against a unit-typed one infers a
+/// predicate: the true edge narrows `x` to `"a"` and the false edge
+/// removes `"a"` from it. Measured on 7.0.2 (all four settings):
+/// `eqParams3(x: "a" | "b", y: "a") { return x === y }` is `x is "a"`.
+#[test]
+fn an_equality_with_a_unit_typed_parameter_infers_a_predicate() {
+    let host = host_with(&source_with_wrappers(&["eqParams3"]));
+    assert_prints(
+        &host,
+        STRICT_ROOT,
+        "sig_eqParams3",
+        "(x: \"a\" | \"b\", y: \"a\") => x is \"a\"",
+    );
 }

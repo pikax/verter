@@ -1121,6 +1121,17 @@ pub enum SliceGuardLiteral {
     Value(Arc<[Arc<str>]>),
 }
 
+/// The other operand of a [`SliceGuard::EqReference`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceEqOther {
+    /// A value read for its type: a free name, a static member path rooted
+    /// at one, or a call.
+    Value(Box<SliceExpr>),
+    /// A reference a narrow lands on: read for its type at the test, and
+    /// narrowed in turn by the subject's.
+    Reference(SliceNarrowSubject),
+}
+
 /// The narrowing facts ONE conditional test establishes, lowered once and
 /// shared by the ternary's branch join and the `if` statement's arms —
 /// the single authority over test-expression forms, so the two control
@@ -1177,6 +1188,21 @@ pub enum SliceGuard {
         /// except that `unknown` and an empty object arm are never
         /// replaced by the literal on the positive edge — the checker's
         /// double-equals rule (a literal operand is never coerced).
+        loose: bool,
+    },
+    /// `subject === value` (`!==` negates) against a VALUE that is not a
+    /// literal. The evaluator reads the value's type and narrows the
+    /// subject by it (the checker's `narrowTypeByEquality`), a member
+    /// subject's parent as a discriminant, and a value that is itself a
+    /// reference by the subject's type.
+    EqReference {
+        /// The compared reference.
+        subject: SliceNarrowSubject,
+        /// The other operand.
+        value: SliceEqOther,
+        /// Whether the comparison is negated.
+        negated: bool,
+        /// The loose spelling (`==` / `!=`).
         loose: bool,
     },
     /// `subject instanceof Ctor`, the constructor named by a bare
@@ -1345,6 +1371,11 @@ fn collect_guard_subjects(guard: &SliceGuard, visitor: &mut impl FnMut(&SliceNar
         SliceGuard::Typeof { subject, .. }
         | SliceGuard::Truthy { subject, .. }
         | SliceGuard::EqLiteral { subject, .. }
+        | SliceGuard::EqReference {
+            subject,
+            value: SliceEqOther::Value(_),
+            ..
+        }
         | SliceGuard::Instanceof { subject, .. }
         | SliceGuard::TypePredicate { subject, .. }
         | SliceGuard::In { subject, .. } => visitor(subject),
@@ -1366,6 +1397,14 @@ fn collect_guard_subjects(guard: &SliceGuard, visitor: &mut impl FnMut(&SliceNar
             for subject in left.subject.iter().chain(right.subject.iter()) {
                 visitor(subject);
             }
+        }
+        SliceGuard::EqReference {
+            subject,
+            value: SliceEqOther::Reference(reference),
+            ..
+        } => {
+            visitor(subject);
+            visitor(reference);
         }
         SliceGuard::And(parts) | SliceGuard::Or(parts) | SliceGuard::Both(parts) => {
             for part in parts.iter() {
@@ -9598,6 +9637,15 @@ impl<'a> Lowerer<'a> {
                         loose: false,
                     });
                 }
+                // A reference compared with a value that is not a literal —
+                // another reference, a free name, a member path or a call —
+                // narrows by the value's type through the comparable
+                // relation ([`SliceGuard::EqReference`]); two operands that
+                // guard cannot carry (a literal beside a reference it does not
+                // name, say) narrow each other ([`SliceGuard::EqValue`]).
+                if let Some(guard) = self.eq_value_guard(binary, negated, false) {
+                    return GuardDisposition::modeled(guard);
+                }
                 if let Some(disposition) = self.equality_value_guard(binary, false, negated) {
                     return disposition;
                 }
@@ -9659,6 +9707,15 @@ impl<'a> Lowerer<'a> {
                     } else {
                         SliceGuard::Or(arms)
                     });
+                }
+                // A reference compared with a value that is not a literal —
+                // another reference, a free name, a member path or a call —
+                // narrows by the value's type through the comparable
+                // relation ([`SliceGuard::EqReference`]); two operands that
+                // guard cannot carry (a literal beside a reference it does not
+                // name, say) narrow each other ([`SliceGuard::EqValue`]).
+                if let Some(guard) = self.eq_value_guard(binary, negated, true) {
+                    return GuardDisposition::modeled(guard);
                 }
                 if let Some(disposition) = self.equality_value_guard(binary, true, negated) {
                     return disposition;
@@ -9728,6 +9785,84 @@ impl<'a> Lowerer<'a> {
                 }
             }
             _ => GuardDisposition::NoNarrowing,
+        }
+    }
+
+    /// `subject === value` against a VALUE that is not a literal, in
+    /// either operand order: another reference a narrow can land on —
+    /// then both narrow, each by the other's type — or a name the frame
+    /// leaves free, a static member path rooted at one, or a call whose
+    /// callee is one. The checker narrows each matching reference by the
+    /// other operand's type (`narrowTypeByEquality`), and a member
+    /// reference's parent as a discriminant, so the value lowers as the
+    /// flow expression it is and the evaluator reads its type
+    /// ([`SliceGuard::EqReference`]). `None` when neither side is a
+    /// represented reference, or when a side reaches a narrowing
+    /// destination this vocabulary cannot spell.
+    fn eq_value_guard(
+        &mut self,
+        binary: &oxc_ast::ast::BinaryExpression<'_>,
+        negated: bool,
+        loose: bool,
+    ) -> Option<SliceGuard> {
+        for (subject_side, value_side) in
+            [(&binary.left, &binary.right), (&binary.right, &binary.left)]
+        {
+            let Some(subject) = self.narrow_subject_of(subject_side) else {
+                continue;
+            };
+            if self.subject_root_carries_an_unmentioned_narrowing(&subject) {
+                return None;
+            }
+            let value = if let Some(reference) = self.narrow_subject_of(value_side) {
+                if self.subject_root_carries_an_unmentioned_narrowing(&reference) {
+                    return None;
+                }
+                SliceEqOther::Reference(reference)
+            } else {
+                let value = unwrap_parenthesized(value_side);
+                if self.operand_reaches_narrow_subject(value) || !self.free_rooted_value(value) {
+                    return None;
+                }
+                SliceEqOther::Value(Box::new(self.lower_expr(value, ExprMode::Return)))
+            };
+            return Some(SliceGuard::EqReference {
+                subject,
+                value,
+                negated,
+                loose,
+            });
+        }
+        None
+    }
+
+    /// Whether `expression` is a value whose read has no effect of its
+    /// own beyond a call's: a name the frame leaves free (never
+    /// `undefined`, which is a literal operand), a static member path
+    /// rooted at one, or a call whose callee is one. A call's own effects
+    /// are the control test's to certify.
+    fn free_rooted_value(&self, expression: &Expression<'_>) -> bool {
+        match unwrap_parenthesized(expression) {
+            Expression::Identifier(identifier) => {
+                identifier.name.as_str() != "undefined"
+                    && matches!(self.classify_occurrence(identifier.span), NameBinding::Free)
+            }
+            Expression::StaticMemberExpression(member) => {
+                self.free_rooted_value(&member.object)
+                    && !matches!(
+                        unwrap_parenthesized(&member.object),
+                        Expression::CallExpression(_)
+                    )
+            }
+            Expression::CallExpression(call) => {
+                !call.optional
+                    && matches!(
+                        unwrap_parenthesized(&call.callee),
+                        Expression::Identifier(_) | Expression::StaticMemberExpression(_)
+                    )
+                    && self.free_rooted_value(&call.callee)
+            }
+            _ => false,
         }
     }
 
@@ -10099,6 +10234,15 @@ impl<'a> Lowerer<'a> {
             SliceGuard::And(parts) => return compose(self, parts).map(SliceGuard::And),
             SliceGuard::Or(parts) => return compose(self, parts).map(SliceGuard::Or),
             SliceGuard::Both(parts) => return compose(self, parts).map(SliceGuard::Both),
+            // A reference operand narrowed in turn must be constant too.
+            SliceGuard::EqReference { subject, value, .. } => {
+                if let SliceEqOther::Reference(reference) = value {
+                    if !reference.path.is_empty() || !self.is_constant_root(&reference.root) {
+                        return None;
+                    }
+                }
+                subject
+            }
             SliceGuard::Typeof { subject, .. }
             | SliceGuard::Truthy { subject, .. }
             | SliceGuard::EqLiteral { subject, .. }
@@ -16412,6 +16556,17 @@ fn negate_guard(guard: SliceGuard) -> SliceGuard {
         } => SliceGuard::EqLiteral {
             subject,
             literal,
+            negated: !negated,
+            loose,
+        },
+        SliceGuard::EqReference {
+            subject,
+            value,
+            negated,
+            loose,
+        } => SliceGuard::EqReference {
+            subject,
+            value,
             negated: !negated,
             loose,
         },
