@@ -11159,6 +11159,7 @@ mod prepared_identity_bijection {
                     nullability: crate::semantic_query::NullabilityPolicy::Strict,
                     no_implicit_any: true,
                     use_unknown_in_catch_variables: true,
+                    no_implicit_this: true,
                 },
             },
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),

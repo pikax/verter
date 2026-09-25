@@ -1751,6 +1751,11 @@ pub struct FlowReturnPolicy {
     /// `useUnknownInCatchVariables` of the project owning the function:
     /// whether an unannotated `catch` variable is `unknown` or `any`.
     pub use_unknown_in_catch_variables: bool,
+    /// `noImplicitThis` of the project owning the function: whether an
+    /// object literal's method or accessor reads `this` as the literal
+    /// (`getContextualThisParameterType`) or, with the option off, as
+    /// `any`.
+    pub no_implicit_this: bool,
 }
 
 impl FlowReturnPolicy {
@@ -1763,6 +1768,7 @@ impl FlowReturnPolicy {
             nullability: NullabilityPolicy::from_strict_null_checks(options.strict_null_checks),
             no_implicit_any: options.no_implicit_any,
             use_unknown_in_catch_variables: options.use_unknown_in_catch_variables,
+            no_implicit_this: options.no_implicit_this,
         }
     }
 }

@@ -3101,9 +3101,10 @@ pub(crate) fn build_flow_slice_content(
     carrier_module: bool,
     snapshot: &crate::decl_lowering::SnapshotKey,
     context: Option<&NestedFlowContext>,
-    nullability: crate::semantic_query::NullabilityPolicy,
+    policy: crate::semantic_query::FlowReturnPolicy,
 ) -> Option<SliceContent> {
     let FlowSliceSource { program, resolved } = retained;
+    let nullability = policy.nullability;
     let module_scope = carrier_module || program_has_module_syntax(program);
     // Whether the served function is NAMESPACE-OWNED: its locator descends
     // through a `namespace` / `module` block. Every call site in its body
@@ -3375,6 +3376,7 @@ pub(crate) fn build_flow_slice_content(
         break_target_followed_by_return: Vec::new(),
         current_statement_followed_by_return: SuffixReturn::NotGuaranteed,
         nullability,
+        no_implicit_this: policy.no_implicit_this,
         frame_is_async: match node {
             FunctionNode::Function(function) => function.r#async,
             FunctionNode::Arrow(arrow) => arrow.r#async,
@@ -5853,6 +5855,11 @@ pub enum SliceThis {
     /// an object literal: the instance (or object) the evaluator binds
     /// while it evaluates the class's members (or the literal's).
     Receiver,
+    /// A method or accessor of an object literal (or an arrow one creates)
+    /// in a project without `noImplicitThis`: the checker types the
+    /// literal's `this` only under that option
+    /// (`getContextualThisParameterType`), so `this` is `any`.
+    Untyped,
 }
 
 /// The exact lexical chain at a nested function's authored position.
@@ -6500,6 +6507,10 @@ struct Lowerer<'a> {
     /// member or an array element is the checker's widening nullable type,
     /// which the enclosing literal's widening turns into `any`.
     nullability: crate::semantic_query::NullabilityPolicy,
+    /// The function's own project's `noImplicitThis`: without it an object
+    /// literal's method or accessor has no contextual `this`, so `this` is
+    /// `any` there ([`SliceThis::Untyped`]).
+    no_implicit_this: bool,
     /// Whether the frame's function is `async`.
     frame_is_async: bool,
     frame_gate: Arc<DefiningFrameGate>,
@@ -13445,7 +13456,7 @@ impl<'a> Lowerer<'a> {
         // A `this.m()` callee: the member of the frame's receiver —
         // an object literal's own method is a direct call of it.
         if let (Some(this), Expression::StaticMemberExpression(member)) =
-            (self.this.clone(), unwrap_parenthesized(&call.callee))
+            (self.keyword_this(), unwrap_parenthesized(&call.callee))
         {
             if let (SliceThis::Value { .. } | SliceThis::Static { .. }, Some([name])) =
                 (&this, this_member_path(member).as_deref())
@@ -13663,13 +13674,13 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Expression::ThisExpression(_) if self.this.is_some() => {
-                SliceExpr::This(self.this.clone().expect("guarded"))
+                SliceExpr::This(self.keyword_this().expect("guarded"))
             }
             // A member read off an object literal's `this` lowers from the
             // member the literal declares.
             Expression::StaticMemberExpression(member)
                 if matches!(
-                    self.this,
+                    self.keyword_this(),
                     Some(SliceThis::Value { .. } | SliceThis::Static { .. })
                 ) && this_member_path(member).is_some() =>
             {
@@ -13683,7 +13694,7 @@ impl<'a> Lowerer<'a> {
             {
                 let path = this_member_path(member).expect("guarded");
                 SliceExpr::OptionalMember {
-                    root: Box::new(SliceExpr::This(self.this.clone().expect("guarded"))),
+                    root: Box::new(SliceExpr::This(self.keyword_this().expect("guarded"))),
                     links: path.into_iter().map(|name| (name, false)).collect(),
                 }
             }
@@ -14802,7 +14813,11 @@ impl<'a> Lowerer<'a> {
                     Expression::FunctionExpression(func) => {
                         // A method or accessor of the literal runs against
                         // the object the literal builds.
-                        self.member_this = Some(Some(SliceThis::Receiver));
+                        self.member_this = Some(Some(if self.no_implicit_this {
+                            SliceThis::Receiver
+                        } else {
+                            SliceThis::Untyped
+                        }));
                         self.lower_nested_function(&FunctionNode::Function(func))
                     }
                     Expression::ArrowFunctionExpression(arrow) => {
@@ -14966,6 +14981,17 @@ impl<'a> Lowerer<'a> {
 
     fn lower_nested_function(&mut self, node: &FunctionNode<'_>) -> SliceExpr {
         self.lower_function_value(node, None)
+    }
+
+    /// What the `this` KEYWORD reads in this frame: the frame's `this`,
+    /// except that an object literal's method or accessor reads `this` as
+    /// the literal only under `noImplicitThis`. A name reading the variable
+    /// that holds the literal reads the frame's `this` itself.
+    fn keyword_this(&self) -> Option<SliceThis> {
+        match &self.this {
+            Some(SliceThis::Value { .. }) if !self.no_implicit_this => Some(SliceThis::Untyped),
+            this => this.clone(),
+        }
     }
 
     /// The member `name` of the object literal the frame's `this` is, as

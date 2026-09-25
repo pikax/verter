@@ -5195,7 +5195,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             entry,
             selection,
             &bound,
-            key.context.policy.nullability,
+            key.context.policy,
         ) else {
             return degraded(FlowReturnFailure::Missing, self_roots);
         };
@@ -5458,6 +5458,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             nullability: key.context.policy.nullability,
             no_implicit_any: key.context.policy.no_implicit_any,
             use_unknown_in_catch_variables: key.context.policy.use_unknown_in_catch_variables,
+            no_implicit_this: key.context.policy.no_implicit_this,
             params: &params,
             param_names: &ir.params,
             binder_env: &binder_env,
@@ -8360,6 +8361,9 @@ struct FlowEvaluator<'d, 'b> {
     /// The function's project `useUnknownInCatchVariables`: an
     /// unannotated `catch` variable is `unknown`, else `any`.
     use_unknown_in_catch_variables: bool,
+    /// The function's project `noImplicitThis`: whether an object
+    /// literal's method or accessor reads `this` as the literal.
+    no_implicit_this: bool,
     /// The checker's AUTO-TYPED locals (`noImplicitAny` on, an unannotated
     /// `let` / `var` with no initializer or a bare `null` / free
     /// `undefined` one), by canonical subject — a fact of the declaration.
@@ -9209,6 +9213,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn union(&self, members: &[SemanticNodeId]) -> SemanticNodeId {
         self.dispatch
             .intern_normalized_union(members, self.nullability)
+    }
+
+    /// The flow policy of the function's own project, which a nested
+    /// function's content lowers under.
+    fn policy(&self) -> crate::semantic_query::FlowReturnPolicy {
+        crate::semantic_query::FlowReturnPolicy {
+            nullability: self.nullability,
+            no_implicit_any: self.no_implicit_any,
+            use_unknown_in_catch_variables: self.use_unknown_in_catch_variables,
+            no_implicit_this: self.no_implicit_this,
+        }
     }
 
     /// Promote the first statement-level gap only when evaluation found no
@@ -21198,7 +21213,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         .map(|(_, selection)| selection.clone()),
                     &bound,
                     Some(Arc::clone(context)),
-                    self.nullability,
+                    self.policy(),
                 )?;
             Some((
                 content,
@@ -21927,6 +21942,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 nullability: self.nullability,
                 no_implicit_any: self.no_implicit_any,
                 use_unknown_in_catch_variables: self.use_unknown_in_catch_variables,
+                no_implicit_this: self.no_implicit_this,
                 params: &params,
                 param_names: nested_params,
                 binder_env: &binder_env,
@@ -24021,8 +24037,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
+                let is_any = |node: SemanticNodeId| {
+                    matches!(
+                        self.dispatch.graph().node_data(node).as_deref(),
+                        Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                    )
+                };
                 let mut callee_node = receiver;
                 for name in member.iter() {
+                    // A member of an `any` receiver is `any`.
+                    if is_any(callee_node) {
+                        break;
+                    }
                     let this_source = self.this_member_source(callee_node, name);
                     let Some(read) = self.project_path_navigate(
                         this_source.unwrap_or(callee_node),
@@ -24034,6 +24060,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         Some(_) => self.dispatch.bind_this_receiver(read, callee_node),
                         None => read,
                     };
+                }
+                // A call of an `any` callee (a member of an `any` receiver)
+                // is the checker's untyped call: `any`.
+                if is_any(callee_node) {
+                    return Positional::Value(CallValue::modeled_any(self.dispatch));
                 }
                 if let Some(value) = self.eval_call_via_resolve_call(callee_node, site, arguments) {
                     return value;
