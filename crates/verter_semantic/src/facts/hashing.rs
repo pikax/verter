@@ -480,6 +480,16 @@ pub fn exporter_qualifier_salt(exporter: &str) -> FactHash {
 // Internal walker
 // ──────────────────────────────────────────────────────────────────
 
+#[cfg(test)]
+thread_local! {
+    /// How many object members this thread encoded; test-only.
+    static MEMBER_WRITES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The member sort keys of one fingerprint computation, by member address
+/// (see [`Walker::member_sort_key`]).
+type MemberSortKeys = std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashMap<usize, Arc<[u8]>>>>;
+
 /// Inner traversal state.
 struct Walker<'a> {
     buf: Vec<u8>,
@@ -490,10 +500,21 @@ struct Walker<'a> {
     lens: &'a dyn CrossDeclLens,
     default_space: SymbolSpace,
     type_param_frame: Vec<Vec<Arc<str>>>,
+    /// Owned by the computation's root walker and shared with every
+    /// scratch walker it spawns; dropped when the computation returns.
+    member_sort_keys: MemberSortKeys,
 }
 
 impl<'a> Walker<'a> {
     fn new(lens: &'a dyn CrossDeclLens, default_space: SymbolSpace) -> Self {
+        Self::with_member_sort_keys(lens, default_space, MemberSortKeys::default())
+    }
+
+    fn with_member_sort_keys(
+        lens: &'a dyn CrossDeclLens,
+        default_space: SymbolSpace,
+        member_sort_keys: MemberSortKeys,
+    ) -> Self {
         Self {
             buf: Vec::with_capacity(256),
             visited: BTreeMap::new(),
@@ -503,7 +524,38 @@ impl<'a> Walker<'a> {
             lens,
             default_space,
             type_param_frame: Vec::new(),
+            member_sort_keys,
         }
+    }
+
+    /// The bytes `member` encodes to in a fresh walker — the key an object's
+    /// members are sorted by. A fresh walker starts at depth zero with no
+    /// visited node and no type-parameter frame, so the key is a function of
+    /// the member alone, and it is computed once per member for the whole
+    /// computation. Encoding it afresh at every enclosing object re-walked
+    /// each member's subtree once per level above it: a chain of nested
+    /// object types cost `2^n` walks.
+    ///
+    /// Keyed by the member's address, which is stable and unique while the
+    /// computation runs: every object this walker sorts is borrowed from the
+    /// hashed body (or the merged fold the entry point holds for the whole
+    /// computation).
+    fn member_sort_key(&self, member: &ObjectMember) -> Arc<[u8]> {
+        let address = std::ptr::from_ref(member) as usize;
+        if let Some(key) = self.member_sort_keys.borrow().get(&address) {
+            return Arc::clone(key);
+        }
+        let mut scratch = Self::with_member_sort_keys(
+            self.lens,
+            self.default_space,
+            std::rc::Rc::clone(&self.member_sort_keys),
+        );
+        scratch.write_object_member(member);
+        let key: Arc<[u8]> = Arc::from(std::mem::take(&mut scratch.buf).into_boxed_slice());
+        self.member_sort_keys
+            .borrow_mut()
+            .insert(address, Arc::clone(&key));
+        key
     }
 
     fn walk(&mut self, root: &TypeExpr) {
@@ -970,14 +1022,15 @@ impl<'a> Walker<'a> {
         // hash) under typed keys: sort members by their canonical fact-byte
         // encoding, which totally orders string, numeric, unique-symbol, and
         // computed keys without stringifying any of them.
-        let mut encoded: Vec<(Vec<u8>, &ObjectMember)> = obj
+        // A lone member needs no key.
+        if let [member] = obj.properties.as_slice() {
+            self.write_object_member(member);
+            return;
+        }
+        let mut encoded: Vec<(Arc<[u8]>, &ObjectMember)> = obj
             .properties
             .iter()
-            .map(|member| {
-                let mut scratch = Self::new(self.lens, self.default_space);
-                scratch.write_object_member(member);
-                (std::mem::take(&mut scratch.buf), member)
-            })
+            .map(|member| (self.member_sort_key(member), member))
             .collect();
         encoded.sort_by(|a, b| a.0.cmp(&b.0));
         for (_, member) in encoded {
@@ -986,6 +1039,8 @@ impl<'a> Walker<'a> {
     }
 
     fn write_object_member(&mut self, member: &ObjectMember) {
+        #[cfg(test)]
+        MEMBER_WRITES.with(|count| count.set(count.get() + 1));
         match member {
             ObjectMember::Property(prop) => self.write_property(prop),
             ObjectMember::Method(method) => self.write_method(method),
