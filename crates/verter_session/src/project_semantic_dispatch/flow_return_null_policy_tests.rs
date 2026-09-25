@@ -11500,6 +11500,82 @@ fn a_loop_whose_locals_feed_each_other_types_each_head_once() {
     }
 }
 
+/// `lc`, returning an `&&` chain of `operands` operands cycling through its
+/// five parameters (`a0 && a1 && a2 && a3 && a4 && a0 && …`).
+fn and_chain(operands: usize) -> String {
+    let chain: Vec<String> = (0..operands)
+        .map(|operand| format!("a{}", operand % 5))
+        .collect();
+    format!(
+        "export function lc(a0: string | undefined, a1: number | null, a2: boolean, a3: \"x\" | \"\", a4: 0 | 1) {{ return {}; }}\n",
+        chain.join(" && ")
+    )
+}
+
+/// An `&&` chain applies each operand's guard to the next operands as the
+/// checker's flow walk reads it, once per earlier operand: the guards it
+/// applies grow with the square of its length, never faster (each
+/// operand's short-circuit edge reads the earlier operands' negations as
+/// one growing prefix), and its nested left operands evaluate without a
+/// native level each.
+///
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`)
+/// over 32 operands: `number | "" | false | null | undefined` with
+/// `strictNullChecks`, `number` without it.
+#[test]
+fn an_and_chain_applies_a_quadratic_count_of_guards() {
+    let source = and_chain(32);
+    assert_measured_matrix(
+        "and-chain.ts",
+        &source,
+        &[(
+            "lc",
+            "\"\" | false | null | number | undefined",
+            "number",
+            "\"\" | false | null | number | undefined",
+            "number",
+        )],
+    );
+    let guards = |operands: usize| {
+        let host = four_policy_host();
+        let path = format!("{STRICT_ROOT}/and-chain-{operands}.ts");
+        upsert(&host, &path, &and_chain(operands));
+        let before = super::flow_return::guard_applications_for_tests();
+        let _ = observe(&host, &path, "lc");
+        super::flow_return::guard_applications_for_tests() - before
+    };
+    let second_difference =
+        |operands: usize| guards(operands + 10) + guards(operands) - 2 * guards(operands + 5);
+    assert_eq!(
+        second_difference(20),
+        second_difference(40),
+        "each operand adds the same number of guard applications more than the one before it"
+    );
+}
+
+/// A 300-operand `&&` chain evaluates on a 1 MiB thread: its nested left
+/// operands are walked from the innermost one outward, never a native
+/// level each.
+///
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`):
+/// `"" | 0 | 1 | false | null | undefined` with `strictNullChecks`, `0 | 1`
+/// without it.
+#[test]
+fn a_300_operand_and_chain_evaluates_on_a_small_stack() {
+    let answer = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let host = four_policy_host();
+            let path = format!("{STRICT_ROOT}/and-chain-300.ts");
+            upsert(&host, &path, &and_chain(300));
+            observe(&host, &path, "lc")
+        })
+        .expect("spawn the evaluating thread")
+        .join()
+        .expect("the chain evaluates");
+    assert_eq!(answer, "\"\" | 0 | 1 | false | null | undefined");
+}
+
 const CAPTURE_EXTENT_SOURCE: &str = r#"
 export function memberWriteAfter(p: { y: number } | null) { let o = p; if (o) { const f = () => o.y; o.y = 2; return f; } return null; }
 export function loopExtent(n: number) { let x: string | number = 1; let f = () => 0 as string | number; for (let i = 0; i < n; i++) { x = "s"; if (typeof x === "string") { f = () => x; } } return f; }

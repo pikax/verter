@@ -278,3 +278,24 @@ Recorded plainly so no reader mistakes absence for a pass:
   source's type arguments overflows the IO thread first. The checker
   bounds the same recursion: from 100 nested levels it reports TS2321
   (excessive stack depth comparing types) and the relation is false.
+
+* **A long logical chain applies a quadratic count of guards and
+  evaluates without a native level per operand.** Each operand of `a && b
+  && c …` is evaluated under every earlier operand's guard and each
+  short-circuit edge under their negations, as the checker's flow walk
+  reads every earlier condition for each operand — a count that grows with
+  the square of the chain. The short-circuit edge's union
+  (`apply_guard_union`) reads the earlier parts' negations as one growing
+  prefix whose standing facts are kept one per subject; re-reading the
+  whole prefix for every alternative made the count grow with the cube
+  (the second difference of the count per five operands was 650 at 20 and
+  1,150 at 40 operands; it is now the same at both). The evaluator walks a
+  chain's nested left operands from the innermost one outward
+  (`eval_logical`), so a 300-operand chain answers on a 1 MiB thread
+  (`flow_return_null_policy_tests.rs` →
+  `an_and_chain_applies_a_quadratic_count_of_guards` and
+  `a_300_operand_and_chain_evaluates_on_a_small_stack`, the checker's
+  `"" | 0 | 1 | false | null | undefined`). The slice lowering of the chain
+  (`Lowerer::lower_logical_value`, on the 8 MiB declaration-lowering
+  workers) still recurses once per operand, about 21 KiB per operand
+  unoptimized: 320 operands use 6.9 MB of it.

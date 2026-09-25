@@ -8750,6 +8750,20 @@ pub(crate) fn loop_passes_for_tests() -> usize {
     LOOP_PASSES.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many guards this thread applied to a narrowing state
+    /// ([`FlowEvaluator::apply_guard_scoped`]), a compound guard and each of
+    /// its parts counted apart; test-only.
+    static GUARD_APPLICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many guards this thread applied so far (test-only).
+#[cfg(test)]
+pub(crate) fn guard_applications_for_tests() -> usize {
+    GUARD_APPLICATIONS.with(std::cell::Cell::get)
+}
+
 /// One pass of a loop body ([`FlowEvaluator::eval_loop_pass`]).
 struct LoopPass {
     contributors: Vec<FlowContribution>,
@@ -8958,6 +8972,45 @@ fn standing_narrowings(
         .into_iter()
         .map(|(_, subject, node)| (subject.clone(), node))
         .collect()
+}
+
+/// Fold a ledger `window` into `standing`, the facts standing one per
+/// subject: a fact about a subject already standing replaces it where it
+/// stands, and a kill drops what it names. Per subject, the newest fact and
+/// the place the subject first stood are those of [`standing_narrowings`]
+/// over the same entries.
+fn fold_standing_narrowings(
+    standing: &mut Vec<(
+        FlowProductSubject,
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )>,
+    window: &[NarrowingLedgerEntry],
+) {
+    for entry in window {
+        match entry {
+            NarrowingLedgerEntry::Established {
+                root,
+                subject,
+                node,
+            } => match standing
+                .iter_mut()
+                .find(|(_, candidate, _)| candidate == subject)
+            {
+                Some(fact) => *fact = (root.clone(), subject.clone(), *node),
+                None => standing.push((root.clone(), subject.clone(), *node)),
+            },
+            NarrowingLedgerEntry::Cleared { root } => {
+                standing.retain(|(candidate, _, _)| candidate != root);
+            }
+            NarrowingLedgerEntry::ClearedBelow { root, path } => {
+                standing.retain(|(candidate, subject, _)| {
+                    candidate != root
+                        || !(subject.path.len() > path.len() && subject.path.starts_with(path))
+                });
+            }
+        }
+    }
 }
 
 /// Parameter initialization also establishes its hoisted declaration aliases.
@@ -14220,6 +14273,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         positive: bool,
     ) {
         use crate::flow_slice_content::SliceGuard;
+        #[cfg(test)]
+        GUARD_APPLICATIONS.with(|count| count.set(count.get() + 1));
         let fact = match guard {
             SliceGuard::None => return,
             SliceGuard::Typeof {
@@ -14636,16 +14691,36 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 SemanticNodeId,
             )>,
         > = Vec::with_capacity(parts.len());
+        // Each alternative reads every earlier part the other way, then its
+        // own part. The earlier parts' readings are applied once, as a
+        // prefix that grows by one part per alternative, and the prefix's
+        // standing facts are kept one per subject (the newest, where the
+        // subject first stood — all the union reads), so a chain of `n`
+        // conjuncts costs `n` applications here rather than `n²`.
+        let base = self.narrowing_snapshot();
+        let mut prefix_standing = Vec::new();
         for (index, part) in parts.iter().enumerate() {
-            let mark = self.narrowing_snapshot();
-            for earlier in &parts[..index] {
-                self.apply_guard_scoped(earlier, !positive);
-            }
+            let prefix = self.narrowing_snapshot();
             self.apply_guard_scoped(part, positive);
-            let applied = self.narrowings_since(&mark);
-            self.restore_narrowings(mark);
-            alternatives.push(applied);
+            let mut alternative = prefix_standing.clone();
+            fold_standing_narrowings(
+                &mut alternative,
+                &self.narrowing_writes[prefix.writes.min(self.narrowing_writes.len())..],
+            );
+            alternatives.push(
+                alternative
+                    .into_iter()
+                    .map(|(_, subject, node)| (subject, node))
+                    .collect(),
+            );
+            self.restore_narrowings(prefix);
+            if index + 1 < parts.len() {
+                let extension = self.narrowing_writes.len();
+                self.apply_guard_scoped(part, !positive);
+                fold_standing_narrowings(&mut prefix_standing, &self.narrowing_writes[extension..]);
+            }
         }
+        self.restore_narrowings(base);
         for (subject, node) in self.union_of_alternatives(alternatives) {
             self.push_narrowing(&subject, node);
         }

@@ -2367,17 +2367,8 @@ const AND_CHAIN_320: &str = r##"export function lc(a0: string | undefined, a1: n
 "##;
 
 /// A 320-operand `&&` chain cycling five parameters is `"" | 0 | 1 | false |
-/// null | undefined` (`0 | 1` without `strictNullChecks`). The lane's time
-/// grows quadratically with the operands: 10 0.1 s, 20 0.4 s, 40 1.9 s, 80 8.4
-/// s for the four settings; at 320 every setting passes the row deadline.
-///
-/// What the lane gives:
-/// - `lc`: the checker answers `"" | 0 | 1 | false | null | undefined`
-///   (strict), `0 | 1` (strictNullChecks off), `"" | 0 | 1 | false | null |
-///   undefined` (noImplicitAny off), `0 | 1` (both off); the lane took longer
-///   than 60s.
+/// null | undefined` (`0 | 1` without `strictNullChecks`).
 #[test]
-#[ignore = "a long && chain types in time the checker takes"]
 fn a_320_operand_and_chain_answers() {
     let matrix = Matrix::new(AND_CHAIN_320);
     let failures = matrix.nullness(&[(
