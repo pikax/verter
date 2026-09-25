@@ -4886,6 +4886,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 break;
             }
+            // Comparability is symmetric: a top type on either side decides.
+            if self.relation_reads_unread_marker(source, target)
+                && self.relation_reads_unread_marker(target, source)
+            {
+                return RelationResult::Unknown;
+            }
             if source == target {
                 return assignable(&[]);
             }
@@ -4990,6 +4996,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 work.push(Work::Eval(source, target));
                             }
                         }
+                        continue;
+                    }
+                    if self.relation_reads_unread_marker(source, target)
+                        && self.relation_reads_unread_marker(target, source)
+                    {
+                        results.push(RelationResult::Unknown);
                         continue;
                     }
                     if source == target {
@@ -5868,6 +5880,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
+    /// Whether either side is a typed marker for a value Verter did not read,
+    /// or the pair is one node that reaches such a marker anywhere inside it
+    /// — an absence, an unmodelled position, an unsupported surface, a
+    /// partial or control carrier. No relation over one is a fact: two
+    /// markers are never the same type because they are the same marker,
+    /// and a marker is never below `unknown` or above `never` because the
+    /// relation cannot read it. The checker's error type (the
+    /// `CheckerRecovery` and `Failure` dispositions) relates as `any`
+    /// does, and a recursion or declaration carrier is unwrapped before it
+    /// is compared, so neither is a marker here.
+    ///
+    /// A relation to a top type (`unknown`, `any`) holds for every type,
+    /// whatever a marker stands for, so it stays decided.
+    pub(super) fn relation_reads_unread_marker(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> bool {
+        use super::query_error_disposition::{query_error_disposition, QueryErrorDisposition};
+        let marker = |node: SemanticNodeId| match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Opaque(err)) => !matches!(
+                query_error_disposition(err),
+                QueryErrorDisposition::Failure
+                    | QueryErrorDisposition::CheckerRecovery
+                    | QueryErrorDisposition::RecursionCarrier
+                    | QueryErrorDisposition::ExpandableDecl
+            ),
+            _ => false,
+        };
+        let top = |node: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Unknown | PrimitiveKind::Any
+                ))
+            )
+        };
+        // The same node relates to itself on identity only when it is known
+        // throughout: `[marker]` is no more `[marker]` than the marker is
+        // itself.
+        let identical_unread = source == target && self.graph().node_reaches_unresolved(source);
+        (marker(source) || marker(target) || identical_unread) && !top(target)
+    }
+
     /// The O(tag) fast-reject prefilter (RI-5): decides the trivial
     /// primitive/identity/top/bottom cases inline BEFORE any recursive
     /// structural work. Non-trivial pairs return `Unknown` and fall
@@ -5877,6 +5933,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> ShallowRelation {
+        if self.relation_reads_unread_marker(source, target) {
+            return ShallowRelation::Unknown;
+        }
         if source == target {
             let mut no_bindings = Vec::new();
             if let Some(result) = self.try_identical_open_program_result(source, &mut no_bindings) {
@@ -6076,6 +6135,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let occurrence = self.relation_current_occurrence();
         if let Some(result) = self.try_relation_projection(source, target, bindings, occurrence) {
             return result;
+        }
+        if self.relation_reads_unread_marker(source, target) {
+            return RelationResult::Unknown;
         }
         if source == target {
             if let Some(result) = self.try_identical_open_program_result(source, bindings) {
@@ -6399,6 +6461,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let occurrence = self.relation_current_occurrence();
         if let Some(result) = self.try_relation_projection(source, target, bindings, occurrence) {
             results.push(result);
+            return;
+        }
+        if self.relation_reads_unread_marker(source, target) {
+            results.push(RelationResult::Unknown);
             return;
         }
         if source == target {
