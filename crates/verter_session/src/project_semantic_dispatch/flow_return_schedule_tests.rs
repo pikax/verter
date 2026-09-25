@@ -595,8 +595,9 @@ fn module_chain_across_a_middle_edit(levels: usize) -> (Outcome, Outcome) {
 /// witness at its top: every instantiation read off an uninstantiated
 /// return carries that return's reads, and the functions above the edit —
 /// whose warm answers no longer validate — are re-evaluated bottom-up by
-/// the callee schedule, not one nested demand per invalidated level (which
-/// the query-depth guard refused past a dozen invalidated modules).
+/// the callee schedule, not one nested demand per invalidated level:
+/// counting a stale candidate as answered, the edited chain answers at 16
+/// modules and misses at 64, 128 and 201.
 ///
 /// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
 /// `noImplicitAny` settings alike, over the same 201 modules): with

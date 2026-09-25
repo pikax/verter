@@ -184,5 +184,5 @@ Recorded plainly so no reader mistakes absence for a pass:
   units per module. After an edit, the schedule counts only a warm answer
   that still validates as answered, so the functions above the edit are
   re-evaluated bottom-up rather than one nested demand per invalidated
-  level (the query-depth guard refused that past a dozen invalidated
-  modules).
+  level (counting a stale candidate as answered, the edited chain answered
+  at 16 modules and missed at 64, 128 and 201).
