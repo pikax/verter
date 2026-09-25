@@ -1718,18 +1718,14 @@ fn a_256_level_chain_returning_a_same_name_generic_answers() {
 }
 
 /// The same chain over a head holding a function TYPE written in the body
-/// with a same-name clause (`const id: <T>(z: T) => T = (z) => z`). That
-/// clause lowers to the enclosing `T`'s own node, so an instantiation is
-/// not read off the uninstantiated return: every level of a new
-/// instantiation is evaluated again, one nested inline evaluation per
-/// level, and the 256-level `second` ends in a typed refusal (`Miss`).
+/// with a same-name clause (`const id: <T>(z: T) => T = (z) => z`): a new
+/// instantiation of the 256-level chain answers too.
 ///
 /// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
 /// `noImplicitAny` settings alike, measured at 256 levels): `witness` is
 /// `{ v: string | number; tag: "c"; id: <T>(z: T) => T; }` and
 /// `second(v: boolean)` is `{ v: boolean; tag: "c"; id: <T>(z: T) => T; }`.
 #[test]
-#[ignore = "a function type written in a body shares the enclosing function's binder for a same-name clause, so a new instantiation of a deep chain returning one is evaluated per level instead of read off the uninstantiated return"]
 fn a_256_level_chain_returning_a_same_name_function_type_answers() {
     let source = local_arrow_chain(256).replacen(
         "function l0<T>(x: T) { return { v: x, tag: \"c\" as const }; }",

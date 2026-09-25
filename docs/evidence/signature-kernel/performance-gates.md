@@ -194,10 +194,9 @@ Recorded plainly so no reader mistakes absence for a pass:
     body with a same-name clause (`const id: <T>(z: T) => T`), whose
     binder is the outer one's node, is evaluated under the instantiation
     instead: over a 256-level chain through local arrow functions its
-    `witness` answers and a new instantiation `second(v: boolean)` is
-    refused, typed (tsc:
-    `{ v: boolean; tag: "c"; id: <T>(z: T) => T; }`; held open by the
-    skipped `schedule::a_256_level_chain_returning_a_same_name_function_type_answers`);
+    `witness` answers and so does a new instantiation `second(v:
+    boolean)` (tsc: `{ v: boolean; tag: "c"; id: <T>(z: T) => T; }`;
+    held by `schedule::a_256_level_chain_returning_a_same_name_function_type_answers`);
   * a chain whose every edge is a call in a generic call's argument inside
     a local arrow function (`aN<T>(x: T) { const f = (y: T) =>
     id(a(N-1)(y)); return f(x); }`) evaluates its uninstantiated levels

@@ -420,7 +420,6 @@ fn a_function_value_is_not_comparable_to_an_object_arm() {
 /// 7.0.2 (all four settings): `const ck = 'a'; function constRead() {
 /// return ck; }` returns `string`.
 #[test]
-#[ignore = "a const binding initialized with a literal reads as a widening literal"]
 fn a_const_literal_binding_widens_as_the_sole_return() {
     assert_probes(OPERANDS, &[("constRead", "string")]);
 }

@@ -363,7 +363,6 @@ fn a_namespace_declaring_a_value_is_a_value() {
 ///
 /// Measured on TypeScript 7.0.2: `keyof ReturnType<typeof rOP>` is `never`.
 #[test]
-#[ignore = "keyof over the ReturnType of a function returning a namespace object reduces to never"]
 fn keyof_of_a_returned_namespace_object_is_never() {
     let failures = mismatches_in(
         ProbeProject::default(),
