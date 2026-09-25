@@ -316,6 +316,7 @@ fn writes_replace_reaching_state_and_kill_only_explicit_narrowing() {
         binding: key.binding().unwrap().clone(),
         path: Arc::from([Arc::from("member")]),
         narrowed_to: number,
+        fresh_literal: None,
     };
     let mut state = execution.empty_state();
     put(&mut execution, &mut state, &key, reaching(number)).unwrap();
@@ -369,6 +370,7 @@ fn failed_transfer_bundles_preserve_prior_state_and_never_seal_evidence() {
         binding: key.binding().unwrap().clone(),
         path: Arc::from([]),
         narrowed_to,
+        fresh_literal: None,
     });
     let result = execution.apply_transfers(
         &mut store,
@@ -448,6 +450,7 @@ fn continuation_joins_use_actual_predecessors_and_preserve_domain_rules() {
             binding: key.binding().unwrap().clone(),
             path: Arc::from([]),
             narrowed_to: number,
+            fresh_literal: None,
         }])),
     )
     .unwrap();
@@ -520,6 +523,7 @@ fn product_snapshots_and_evidence_are_predecessor_permutation_invariant() {
                             binding: key.binding().unwrap().clone(),
                             path: Arc::from([]),
                             narrowed_to: number,
+                            fresh_literal: None,
                         }]))
                     }
                     FlowDomain::DeclaredType => {
@@ -816,6 +820,7 @@ fn narrowing_facts_follow_runtime_aliases_without_rewriting_declaration_evidence
         binding: keys[0].binding().unwrap().clone(),
         path: Arc::from([]),
         narrowed_to: number,
+        fresh_literal: None,
     };
     put(
         &mut execution,
@@ -962,6 +967,7 @@ fn alias_normalization_precedes_narrowing_width_accounting() {
         binding: key.binding().unwrap().clone(),
         path: Arc::from([]),
         narrowed_to: number,
+        fresh_literal: None,
     });
     let mut state = execution.empty_state();
     put(

@@ -1251,25 +1251,36 @@ fn per_callable_captures_are_shadow_exact_and_transitive() {
     );
 }
 
-/// The indexed program serves no class constructor or field initializer
-/// and no parameter-list callable, so a cell retained there is named by
-/// no index record. A class evaluated at a site is therefore an unserved
-/// callable, and a SERVED callable whose body creates one only knows a
-/// lower bound of its captures. Neither may read as an exact capture set:
-/// an exact empty set is a capture-free proof, and every fixture here
-/// really retains `a`. A class expression's method, and a callable its
-/// initializer holds, ARE served: each is its own callable at the site,
-/// with the exact capture set its index record names.
+/// The indexed program serves no class static block, no write a class's
+/// field initializer makes, and no parameter-list callable, so a cell
+/// retained there is named by no index record. A class evaluated at a site
+/// that runs such code is therefore an unserved callable, and a SERVED
+/// callable whose body creates a class only knows a lower bound of its
+/// captures. Neither may read as an exact capture set: an exact empty set
+/// is a capture-free proof, and every fixture here really retains `a`. A
+/// class expression's method, and a callable its initializer holds, ARE
+/// served: each is its own callable at the site, with the exact capture
+/// set its index record names — and a class with nothing else to run adds
+/// no callable of its own (its field initializers are the frame's own
+/// footprint).
 #[test]
 fn callables_the_index_cannot_serve_never_read_as_an_exact_capture_set() {
     use SkeletonClosureCorrelation::{Exact, Partial, Uncorrelated};
     for (source, expected) in [
         (
             "function root() { const a = 1; sink(class { m() { return a; } }); return 1; }",
-            &[Uncorrelated, Exact][..],
+            &[Exact][..],
         ),
         (
             "function root() { const a = 1; sink(class { m = () => a; }); return 1; }",
+            &[Exact][..],
+        ),
+        (
+            "function root() { let a = 1; sink(class { v = (a = 2); m() { return a; } }); return 1; }",
+            &[Uncorrelated, Exact][..],
+        ),
+        (
+            "function root() { const a = 1; sink(class { static { use(a); } m() { return a; } }); return 1; }",
             &[Uncorrelated, Exact][..],
         ),
         (
@@ -1373,6 +1384,28 @@ fn sole_closure_inventory(skeleton: &FunctionBodySkeleton) -> &[SkeletonClosure]
     let site = sites.next().expect("the fixture authors one callable");
     assert!(sites.next().is_none(), "exactly one site holds a callable");
     &site.closures
+}
+
+#[test]
+// @ai-generated - A tagged template is one call occurrence of its tag.
+fn a_tagged_template_is_a_call_occurrence_of_its_tag() {
+    let source = "function f(x: string) { return tag`a${x}b`; }";
+    let skeleton = skeleton_of(source);
+    let calls: Vec<&SkeletonCall> = skeleton
+        .expr_sites
+        .iter()
+        .flat_map(|site| site.calls.iter())
+        .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "the tagged template calls its tag once; the substitution calls nothing"
+    );
+    assert_eq!(
+        calls[0].callee,
+        SkeletonCallee::Named(skeleton.name_id("tag").expect("tag interned"))
+    );
+    assert!(!calls[0].new_construct);
 }
 
 /// An array literal opens one child site per element, but a nest of array

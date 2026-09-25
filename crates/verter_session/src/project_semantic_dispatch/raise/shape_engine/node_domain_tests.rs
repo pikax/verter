@@ -476,6 +476,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         graph.intern_node(SemanticNodeData::Mapped {
             source: dummy,
             mapper: MapperKey {
+                over_type_variable: false,
                 parameter_node: dummy,
                 key_space: dummy,
                 value_expr,
@@ -627,6 +628,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     let present = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
     let mapper_with = |key_space, value_expr| MapperKey {
+        over_type_variable: false,
         parameter_node: present,
         key_space,
         value_expr,
@@ -730,6 +732,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             graph.intern_node(SemanticNodeData::Mapped {
                 source: present,
                 mapper: MapperKey {
+                    over_type_variable: false,
                     parameter_node: present,
                     key_space: present,
                     value_expr: present,

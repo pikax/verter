@@ -686,9 +686,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                     scope.clone(),
                 );
+                let mut over_type_variable = false;
                 let (source_node, key_space, base_infer_name) = match source.as_ref() {
                     TypeExpr::KeyOf(inner) => {
                         let inner_id = self.lower_locator_shape_node(inner, ctx);
+                        over_type_variable =
+                            crate::semantic_query::keyof_operand_is_type_variable(graph, inner_id);
                         let key_space = graph.intern_node_with_scope(
                             SemanticNodeData::KeyOf { base: inner_id },
                             scope.clone(),
@@ -756,6 +759,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             readonly,
                             name_remap,
                             kind,
+                            over_type_variable,
                         },
                     },
                     scope.clone(),
@@ -1294,6 +1298,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 optional: p.optional,
                 rest: p.rest,
                 span: p.span,
+                declared_literal: crate::semantic_query::declares_literal_type(&p.ty),
             })
             .collect();
         // A body-derived return carries the predicate the checker infers
@@ -1334,7 +1339,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             }
                             _ => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
                         };
-                        (return_type, carrier)
+                        // An enclosing parameter the body reads rebinds to
+                        // this lowering's binder for it, so the receiver's
+                        // instantiation reaches the return (see
+                        // `rebind_flow_return_binders`).
+                        // The signature's own parameters stay the flow
+                        // lane's: the call resolver instantiates them
+                        // through the body-derived carrier.
+                        let own =
+                            |name: &str| func.type_parameters.iter().any(|tp| tp.name == name);
+                        let bind = |name: &str| match inner_ctx.lookup_binder(name) {
+                            Some(BinderSlot::Usable(binder)) if !own(name) => Some(binder),
+                            _ => None,
+                        };
+                        let rebound = self.rebind_flow_return_binders(
+                            return_type,
+                            scope_canonical.as_ref(),
+                            bind,
+                        );
+                        if rebound == return_type {
+                            (return_type, carrier)
+                        } else {
+                            inferred_predicate = inferred_predicate.map(|predicate| {
+                                predicate.map_type(|target| {
+                                    self.rebind_flow_return_binders(
+                                        target,
+                                        scope_canonical.as_ref(),
+                                        bind,
+                                    )
+                                })
+                            });
+                            (
+                                rebound,
+                                crate::semantic_query::SignatureReturnCarrier::Declared(rebound),
+                            )
+                        }
                     }
                     None => (
                         graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),

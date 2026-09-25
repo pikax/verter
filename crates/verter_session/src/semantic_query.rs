@@ -1123,6 +1123,18 @@ pub struct ClassExpressionIdentity {
     /// How many type parameters the class declares itself; a reference
     /// prints their arguments after the name (`(Anonymous class)<string>`).
     pub own_arity: u32,
+    /// The accessibility of the declaration behind the class's construct
+    /// signatures — its first constructor's, else its base's — that the
+    /// checker's `constructorVisibilitiesAreCompatible` reads; `None` for
+    /// a declaration-less default constructor.
+    pub constructor_visibility: Option<verter_type_expr::MemberVisibility>,
+    /// The class's `prototype`: the class instance with `any` for every
+    /// type parameter it has, outer and own (the checker's
+    /// `getTypeOfPrototypeProperty`), recorded where the class is authored
+    /// — an instantiation of the enclosing clauses substitutes into the
+    /// instance but never re-types the prototype, which has no parameter
+    /// left. `None` for the prototype instance itself.
+    pub prototype: Option<SemanticNodeId>,
 }
 
 /// One type-parameter clause enclosing a class expression.
@@ -1841,9 +1853,9 @@ pub enum FlowReturnDegradation {
     /// structure composed AROUND it.
     ///
     /// One reason for the whole class of "this position has no modelled
-    /// value": an unmodelled CALL form (`` tag`...` ``, `f?.()`,
-    /// `await f()`, `` (0, tag`...`) ``, `z = f()`, a leaf answer
-    /// embedding an unreduced `ReturnType<callee>` carrier), and a name
+    /// value": an unmodelled CALL form (`f?.()`, `(0, f?.())`,
+    /// `z = f()`, a leaf answer embedding an unreduced
+    /// `ReturnType<callee>` carrier), and a name
     /// the frame's lexical authority resolved to a FUNCTION-LOCAL binding
     /// the flow content does not model (a destructuring element, a local
     /// `class` / `enum` / `namespace` / `import =`, a `catch` parameter, a
@@ -2576,6 +2588,24 @@ impl MapperKind {
     }
 }
 
+/// Whether a mapped type's lowered `keyof` operand is a TYPE VARIABLE — a
+/// type parameter binder or an `infer` declaration or reference — so the
+/// mapping is homomorphic over it ([`MapperKey::over_type_variable`]).
+#[must_use]
+pub fn keyof_operand_is_type_variable(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    operand: SemanticNodeId,
+) -> bool {
+    matches!(
+        graph.node_data(operand).as_deref(),
+        Some(
+            SemanticNodeData::TypeParam { .. }
+                | SemanticNodeData::Infer { .. }
+                | SemanticNodeData::InferRef { .. }
+        )
+    )
+}
+
 /// Mapper identity for mapped-type queries. Separates the key space from the
 /// value expression so two mappers that share the same key space but differ
 /// in the value expression do not alias.
@@ -2599,6 +2629,14 @@ pub struct MapperKey {
     /// Lowering-time classification of `value_expr`. See
     /// [`MapperKind`].
     pub kind: MapperKind,
+    /// Whether the mapping was declared over `keyof T` for a TYPE
+    /// PARAMETER `T` — TypeScript's homomorphic type variable — so `source`
+    /// is `T` or the type that instantiated it. Such a mapping maps each
+    /// union constituent of its source, passes a primitive through and
+    /// maps an array or tuple element-wise (`instantiateMappedType`); one
+    /// written over a concrete type (`{ [K in keyof (A | B)]: … }`) maps
+    /// that type's own keys.
+    pub over_type_variable: bool,
 }
 
 /// Indexed-access key operand. Mirrors the three TypeScript forms:
@@ -4141,6 +4179,37 @@ pub enum SurfaceKeyProjection<'a> {
     AbsentProven,
 }
 
+/// The accessor members one key names on a surface
+/// ([`SurfaceView::project_known_key_accessor`]); at least one is present.
+pub(crate) struct KnownKeyAccessor<'a> {
+    getter: Option<&'a SurfaceMember>,
+    setter: Option<&'a SurfaceMember>,
+}
+
+impl KnownKeyAccessor<'_> {
+    /// The accessor's VALUE type as a read sees it: the getter's return,
+    /// else the setter's parameter. `None` when the accessor's signature
+    /// carries neither.
+    pub(crate) fn read_value(
+        &self,
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+    ) -> Option<SemanticNodeId> {
+        if let Some(getter) = self.getter {
+            return match graph.node_data(getter.value).as_deref() {
+                Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
+                _ => None,
+            };
+        }
+        let setter = self.setter?;
+        match graph.node_data(setter.value).as_deref() {
+            Some(SemanticNodeData::Signature { params, .. }) => {
+                split_this_receiver(params).1.first().map(|param| param.ty)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl SurfaceView {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -4322,6 +4391,42 @@ impl SurfaceView {
                 .map(|ordinal| group[ordinal].value)
                 .collect(),
         )
+    }
+
+    /// The ACCESSOR a key names: the public `get` and / or `set` members
+    /// colliding with `key`, when every public member colliding with it is
+    /// an accessor. `None` for a key with no accessor member.
+    ///
+    /// An accessor is one PROPERTY to every reader: reading it reads its
+    /// value type — the getter's return, else the setter's parameter — never
+    /// the accessor function, and a get/set pair reads through the getter
+    /// whichever of the two was declared first.
+    pub(crate) fn project_known_key_accessor(
+        &self,
+        key: &PropertyKey,
+    ) -> Option<KnownKeyAccessor<'_>> {
+        let mut accessor = KnownKeyAccessor {
+            getter: None,
+            setter: None,
+        };
+        for member in self.members.iter().filter(|member| {
+            member.visibility.is_public()
+                && member
+                    .key
+                    .as_known()
+                    .is_some_and(|known| known.element_access_collides(&key.as_ref()))
+        }) {
+            match member.method_kind {
+                Some(verter_type_expr::ObjectMethodKind::Get) => {
+                    accessor.getter.get_or_insert(member);
+                }
+                Some(verter_type_expr::ObjectMethodKind::Set) => {
+                    accessor.setter.get_or_insert(member);
+                }
+                _ => return None,
+            }
+        }
+        (accessor.getter.is_some() || accessor.setter.is_some()).then_some(accessor)
     }
 
     /// Project an ordinary string key supplied by a string-only external
@@ -10068,6 +10173,24 @@ pub struct FunctionParam {
     /// include it) but never enters `parse_stable_hash`. `None` for a synthetic
     /// parameter with no source site.
     pub span: Option<verter_span::Span>,
+    /// The parameter's DECLARED type is a literal type — a string, number,
+    /// bigint or boolean literal, or `null` (TypeScript's
+    /// `HasLiteralTypes`). A declaration fact: an instantiation keeps it, so
+    /// `(x: T)` instantiated at `'a'` is not literal-declared.
+    pub declared_literal: bool,
+}
+
+/// Whether a declared parameter type is a literal type in TypeScript's
+/// syntax (`LiteralType`): a string, number, bigint or boolean literal, or
+/// `null`. A reference to a literal alias, a union of literals, a template
+/// literal type and `undefined` are not.
+#[must_use]
+pub fn declares_literal_type(ty: &verter_type_expr::TypeExpr) -> bool {
+    matches!(
+        ty,
+        verter_type_expr::TypeExpr::Literal(_)
+            | verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Null)
+    )
 }
 
 impl FunctionParam {
@@ -10086,6 +10209,7 @@ impl FunctionParam {
             optional,
             rest,
             span: None,
+            declared_literal: false,
         }
     }
 }

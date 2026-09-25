@@ -25,12 +25,12 @@ use crate::semantic_query::{
     CONTEXT_FREE_EVALUATION, CONTEXT_FREE_EVIDENCE,
 };
 use crate::signature_kernel::{
-    heritage_signatures, intersection_signatures, publish_signature, set_from_candidates,
-    union_signatures, AppliedResult, AppliedResultId, BinderInput, DeclarationGroupId,
-    DeclarationParentId, DiscoveryError, DiscoveryTypes, ParamInput, RestInput, ResultDemand,
-    ResultInput, SemanticReadView, SignatureCandidate, SignatureDescriptorId, SignatureInput,
-    SignatureKind, SignatureProvenance, SignatureResultRecipe, SignatureSemanticFlags,
-    SignatureStore, SlotTypeFacts, SourceLocatorId, TypeToken,
+    heritage_signatures, intersection_signatures, merged_declaration_signatures, publish_signature,
+    set_from_candidates, union_signatures, AppliedResult, AppliedResultId, BinderInput,
+    DeclarationGroupId, DeclarationParentId, DiscoveryError, DiscoveryTypes, ParamInput, RestInput,
+    ResultDemand, ResultInput, SemanticReadView, SignatureCandidate, SignatureDescriptorId,
+    SignatureInput, SignatureKind, SignatureProvenance, SignatureResultRecipe,
+    SignatureSemanticFlags, SignatureStore, SlotTypeFacts, SourceLocatorId, TypeToken,
 };
 use verter_semantic::analysis::type_solver::arena::PrimitiveKind;
 
@@ -305,16 +305,10 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 drop(data);
                 self.discover(surface)
             }
-            SemanticNodeData::MergedDecl { .. } => {
+            SemanticNodeData::MergedDecl { contributors } => {
+                let contributors = Arc::clone(contributors);
                 drop(data);
-                match self.dispatch().unwrap_identity_carrier_for_relation(node) {
-                    super::relation::IdentityCarrierUnwrap::Concrete(settled)
-                        if settled != node =>
-                    {
-                        self.discover(settled)
-                    }
-                    _ => unsettled(),
-                }
+                self.discover_merged_declaration(&contributors)
             }
             SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
                 drop(data);
@@ -326,18 +320,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                     GraphSignatureKind::Construct => Arc::clone(&surface.construct_signatures),
                 };
                 drop(data);
-                let mut out = Vec::with_capacity(list.len());
-                for (ordinal, sig) in list.iter().enumerate() {
-                    let sig = self.dispatch().resolve_signature_source_carrier(
-                        *sig,
-                        ProjectionReductionContext::structural_transit(),
-                    );
-                    match self.leaf(sig, ordinal as u32)? {
-                        Some(candidate) => out.push(candidate),
-                        None => return unsupported(),
-                    }
-                }
-                Ok(out)
+                self.signature_list(&list, 0)
             }
             SemanticNodeData::TypeParam { constraint, .. } => {
                 let constraint = *constraint;
@@ -363,25 +346,42 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 union_signatures(self.types.store, self.types, &lists)
             }
             SemanticNodeData::Intersection(members) => {
-                // An interface or class body with heritage is a
-                // declaration, not an intersection type: it inherits its
-                // bases' signatures by concatenation, own first.
-                let heritage = members.origin_category() == CompositeOriginCategory::Heritage;
+                let category = members.origin_category();
                 let members: Vec<SemanticNodeId> = members.iter().copied().collect();
                 drop(data);
                 let mut lists = Vec::with_capacity(members.len());
                 for member in members {
                     lists.push(self.discover(member)?);
                 }
-                if heritage {
-                    Ok(heritage_signatures(&lists))
-                } else {
-                    intersection_signatures(
+                match category {
+                    // An interface or class body with heritage is a
+                    // declaration, not an intersection type: it inherits
+                    // its bases' signatures by concatenation, own first.
+                    CompositeOriginCategory::Heritage => Ok(heritage_signatures(&lists)),
+                    // One method's overloads are its signature list, every
+                    // declaration's kept.
+                    CompositeOriginCategory::OverloadGroup => Ok(lists.concat()),
+                    CompositeOriginCategory::MergedOverloadGroup => {
+                        merged_declaration_signatures(self.types.store, &lists)
+                    }
+                    CompositeOriginCategory::Canonical(_)
+                    | CompositeOriginCategory::CanonicalUnproven
+                    | CompositeOriginCategory::AuthoredShell
+                    | CompositeOriginCategory::OrderedCarrier
+                    | CompositeOriginCategory::PreservingRebuild
+                    | CompositeOriginCategory::QuerySubject => intersection_signatures(
                         self.types.store,
                         self.types,
                         kernel_kind(self.kind),
                         &lists,
-                    )
+                    ),
+                    #[cfg(any(test, feature = "test-support"))]
+                    CompositeOriginCategory::TestFixture => intersection_signatures(
+                        self.types.store,
+                        self.types,
+                        kernel_kind(self.kind),
+                        &lists,
+                    ),
                 }
             }
             SemanticNodeData::Primitive(primitive) => {
@@ -532,35 +532,71 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
         else {
             return unsettled();
         };
-        let Some(project) = d.project_stable_key_for_canonical(canonical.as_ref()) else {
-            return unsettled();
-        };
-        let Some(hit) = d.ctx.lookup_ambient_symbol(project, name) else {
-            return Ok(Vec::new());
-        };
-        d.ctx
-            .record_ambient_dependency(canonical.as_ref(), hit.virtual_id.as_ref());
-        let slot = d.type_slot_for(
-            Arc::clone(&hit.virtual_id),
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
-        );
-        let surface = d.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                slot,
-                Arc::from(args.to_vec().into_boxed_slice()),
-                d.instantiate_context_for(
-                    hit.virtual_id.as_ref(),
-                    ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Expanded,
-                    ),
-                ),
-            ),
-        ));
-        match surface.value {
-            crate::semantic_query::QueryResult::Value(surface) => self.discover(surface),
-            _ => unsettled(),
+        match d.global_wrapper_surface(name, args, canonical.as_ref()) {
+            super::apparent_type::GlobalWrapper::Surface(surface) => self.discover(surface),
+            super::apparent_type::GlobalWrapper::Absent => Ok(Vec::new()),
+            super::apparent_type::GlobalWrapper::Unsettled => unsettled(),
         }
+    }
+
+    /// The candidates of an ordered list of signature nodes — one object's
+    /// call or construct list — whose ordinals start at `first_ordinal`.
+    fn signature_list(&mut self, list: &[SemanticNodeId], first_ordinal: u32) -> Found {
+        let mut out = Vec::with_capacity(list.len());
+        for (offset, sig) in list.iter().enumerate() {
+            let sig = self.dispatch().resolve_signature_source_carrier(
+                *sig,
+                ProjectionReductionContext::structural_transit(),
+            );
+            match self.leaf(sig, first_ordinal + offset as u32)? {
+                Some(candidate) => out.push(candidate),
+                None => return unsupported(),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The signatures of a merged declaration: every contributor's own
+    /// signatures in contributor order — one symbol, each contributor its
+    /// own declaration ([`merged_declaration_signatures`]) — then its
+    /// `extends` bases in clause order, each base once (the heritage rule
+    /// over the peer-merged body `reduce_merged_decl_with_graph` builds).
+    fn discover_merged_declaration(&mut self, contributors: &[SemanticNodeId]) -> Found {
+        let graph = self.dispatch().graph();
+        let mut own: Vec<Vec<SemanticNodeId>> = Vec::with_capacity(contributors.len());
+        let mut bases: Vec<SemanticNodeId> = Vec::new();
+        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        for contributor in contributors {
+            let mut surfaces = Vec::new();
+            super::walk::collect_merged_contributor_arms(
+                graph,
+                *contributor,
+                &mut surfaces,
+                &mut bases,
+            );
+            own.push(
+                surfaces
+                    .iter()
+                    .flat_map(|surface| match self.kind {
+                        GraphSignatureKind::Call => surface.call_signatures.iter(),
+                        GraphSignatureKind::Construct => surface.construct_signatures.iter(),
+                    })
+                    .copied()
+                    .filter(|signature| seen.insert(*signature))
+                    .collect(),
+            );
+        }
+        let mut lists = Vec::with_capacity(own.len());
+        let mut ordinal = 0u32;
+        for signatures in &own {
+            lists.push(self.signature_list(signatures, ordinal)?);
+            ordinal += signatures.len() as u32;
+        }
+        let mut out = merged_declaration_signatures(self.types.store, &lists)?;
+        for base in bases {
+            out.extend(self.discover(base)?);
+        }
+        Ok(out)
     }
 
     /// One authored signature node as a published candidate, or `None` when
@@ -748,6 +784,11 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
             )
         });
+        // TypeScript's `HasLiteralTypes`: a parameter (the `this`
+        // receiver included) whose DECLARED type is a literal type makes
+        // the signature a specialized one, which call resolution tries
+        // first. A declaration fact, kept through instantiation.
+        let specialized = params.iter().any(|param| param.declared_literal);
         let locator = span.map_or(0, |s| hash_u64(&(s.start, s.end)));
         let input = SignatureInput {
             kind: kernel_kind(kind),
@@ -758,10 +799,12 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             receiver: receiver.map(to_param),
             params: fixed,
             rest,
-            flags: if untyped_js {
-                SignatureSemanticFlags::UNTYPED_JS
-            } else {
-                SignatureSemanticFlags::NONE
+            flags: match (untyped_js, specialized) {
+                (true, true) => SignatureSemanticFlags::UNTYPED_JS
+                    .union(SignatureSemanticFlags::LITERAL_SPECIALIZATION),
+                (true, false) => SignatureSemanticFlags::UNTYPED_JS,
+                (false, true) => SignatureSemanticFlags::LITERAL_SPECIALIZATION,
+                (false, false) => SignatureSemanticFlags::NONE,
             },
             result,
             provenance: SignatureProvenance::authored(
@@ -1339,6 +1382,55 @@ pub(super) struct PositionalRead {
 /// single type.
 pub(super) type SharedPositionalReads = Result<Vec<PositionalRead>, IncompleteReason>;
 
+/// The parameter positions one signature comparison relates — see
+/// [`ProjectSemanticDispatch::signature_comparison_plan`].
+#[derive(Debug, Clone)]
+pub(super) struct SignatureComparisonPlan {
+    /// The source demands more arguments than the target supplies.
+    pub source_has_more_parameters: bool,
+    /// Each signature's authored `this` receiver, when it declares one.
+    pub source_receiver: Option<SemanticNodeId>,
+    pub target_receiver: Option<SemanticNodeId>,
+    /// `(source type, target type)` at each position both signatures
+    /// declare a type at, in position order.
+    pub positions: Vec<(SemanticNodeId, SemanticNodeId)>,
+}
+
+/// [`SignatureComparisonPlan`] as read under a pinned view, before any
+/// node is interned.
+struct RawComparisonPlan {
+    source_has_more_parameters: bool,
+    source_receiver: Option<SemanticNodeId>,
+    target_receiver: Option<SemanticNodeId>,
+    positions: Vec<(RawPosition, RawPosition)>,
+}
+
+/// The type one signature declares at one compared position.
+enum RawPosition {
+    Absent,
+    One(SemanticNodeId),
+    /// A rest run with a tail: the union of the run element and the tail.
+    Run(Vec<SemanticNodeId>),
+    /// A still-generic rest indexed by the position (`T[index]`).
+    GenericIndex {
+        rest: SemanticNodeId,
+        index: usize,
+    },
+    /// The rest of the parameter list from the position on.
+    Remaining(Vec<RawRestElement>),
+}
+
+/// One element of the rest of a parameter list.
+enum RawRestElement {
+    /// A rest: its array (`array`, over the element `node`) or its
+    /// still-generic type.
+    Whole { node: SemanticNodeId, array: bool },
+    Element {
+        node: SemanticNodeId,
+        optional: bool,
+    },
+}
+
 /// The ordered shared candidates of one subject as graph signature nodes.
 pub(super) enum SharedSignatureNodes {
     /// Every candidate, in candidate order. Empty is a complete negative.
@@ -1439,6 +1531,20 @@ impl ProjectSemanticDispatch<'_> {
         self.shared_signature_nodes_from(subject, kind, first)
     }
 
+    /// [`Self::shared_signature_nodes`] in the order call resolution tries
+    /// them: the kernel's [`crate::signature_kernel::resolution_order`]
+    /// (TypeScript's `reorderCandidates`) over the same candidates. Only
+    /// call resolution reads this order; conditional inference, which reads
+    /// the LAST signature, reads declaration order.
+    pub(super) fn shared_signature_nodes_in_resolution_order(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+    ) -> SharedSignatureNodes {
+        let first = self.signature_set_value(subject, kind);
+        self.shared_signature_nodes_ordered(subject, kind, first, true)
+    }
+
     /// [`Self::shared_signature_nodes`] over an already-dispatched first
     /// read.
     fn shared_signature_nodes_from(
@@ -1447,8 +1553,20 @@ impl ProjectSemanticDispatch<'_> {
         kind: GraphSignatureKind,
         first: Result<crate::signature_kernel::SignatureSetValue, IncompleteReason>,
     ) -> SharedSignatureNodes {
+        self.shared_signature_nodes_ordered(subject, kind, first, false)
+    }
+
+    /// The shared read in declaration order, or with `resolution` in the
+    /// order call resolution tries the candidates.
+    fn shared_signature_nodes_ordered(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        first: Result<crate::signature_kernel::SignatureSetValue, IncompleteReason>,
+        resolution: bool,
+    ) -> SharedSignatureNodes {
         match self.read_signature_set(subject, kind, first, |value| {
-            self.signature_nodes_of(kind, value)
+            self.signature_nodes_of(kind, value, resolution)
         }) {
             Ok(nodes) => SharedSignatureNodes::Nodes(nodes),
             Err(reason) => SharedSignatureNodes::Incomplete(reason),
@@ -1456,31 +1574,49 @@ impl ProjectSemanticDispatch<'_> {
     }
 
     /// The node form of every candidate of one dispatched set, in candidate
-    /// order.
+    /// order — or, with `resolution`, in the kernel's resolution order.
     fn signature_nodes_of(
         &self,
         kind: GraphSignatureKind,
         value: &crate::signature_kernel::SignatureSetValue,
+        resolution: bool,
     ) -> Result<Vec<SemanticNodeId>, SignatureSetReadFailure> {
         let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
         let store = self.graph().signature_store();
-        let candidates: Vec<SignatureCandidate> = {
+        let (candidates, order): (Vec<SignatureCandidate>, Vec<usize>) = {
             let view = SemanticReadView::pin(store);
             if value.set.epoch().is_some_and(|epoch| epoch != view.epoch()) {
                 return Err(SignatureSetReadFailure::Retired);
             }
-            match view.read_set(value.set) {
+            let candidates = match view.read_set(value.set) {
                 Ok(crate::signature_kernel::BorrowedSet::Empty) => Vec::new(),
                 Ok(crate::signature_kernel::BorrowedSet::One { candidate, .. }) => vec![candidate],
                 Ok(crate::signature_kernel::BorrowedSet::Many(list)) => list.to_vec(),
                 Err(_) => return Err(unsettled),
-            }
+            };
+            let order = if resolution {
+                match crate::signature_kernel::resolution_order(&view, &candidates) {
+                    Ok(order) => order,
+                    Err(error) if is_retired_handle(&error) => {
+                        return Err(SignatureSetReadFailure::Retired)
+                    }
+                    Err(error) => {
+                        return Err(SignatureSetReadFailure::Incomplete(
+                            error.incomplete_reason(),
+                        ))
+                    }
+                }
+            } else {
+                (0..candidates.len()).collect()
+            };
+            (candidates, order)
         };
         if candidates.len() != value.nodes.len() {
             return Err(unsettled);
         }
         let mut nodes = Vec::with_capacity(candidates.len());
-        for (index, candidate) in candidates.iter().enumerate() {
+        for index in order {
+            let candidate = &candidates[index];
             let node = match value.nodes[index].authored {
                 Some(node) => node,
                 // The composite's node form is built after the view above is
@@ -1644,6 +1780,312 @@ impl ProjectSemanticDispatch<'_> {
             }
         };
         raw.map_err(|()| unsettled)
+    }
+
+    /// The parameter positions one signature comparison relates, read
+    /// through the ONE positional model for both signatures — the checker's
+    /// `compareSignaturesRelated` over `getParameterCount`,
+    /// `tryGetTypeAtPosition` and `getRestOrAnyTypeAtPosition`:
+    ///
+    /// - the arity half is [`crate::signature_kernel::PositionalShape::source_has_more_parameters`]:
+    ///   a target with a rest run accepts every source, any other target
+    ///   rejects a source whose minimum exceeds its parameter count — or,
+    ///   under `strict_arity` (the checker's `StrictArity` mode, which its
+    ///   strict subtype relation uses), a source with a rest parameter or
+    ///   with more parameters than the target takes;
+    /// - without a still-generic rest on either side, every position up to
+    ///   the LARGER parameter count is related where both signatures declare
+    ///   a type there — a rest run supplies its element at every position
+    ///   past the fixed ones (`(...args: any[])` is `any` at 0, 1, …);
+    /// - with a still-generic rest, positions run to the SMALLER count and
+    ///   the last one relates the rest of each parameter list from there as
+    ///   one tuple (`any` when that is an array of `any`).
+    ///
+    /// Measured on 7.0.2: `((a: string) => void) extends ((...args: any[]) =>
+    /// void)` and the `new` form are true, `((a: string, b: number) => void)
+    /// extends ((...args: string[]) => void)` is false, `((...a: string[]) =>
+    /// void) extends ((x: string, y: string) => void)` is true.
+    pub(super) fn signature_comparison_plan(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        kind: GraphSignatureKind,
+        strict_arity: bool,
+    ) -> Result<SignatureComparisonPlan, IncompleteReason> {
+        let unsettled = IncompleteReason::UnsettledInput;
+        let mut attempt = 0;
+        let read = loop {
+            let source_set = self.signature_set_value(source, kind)?;
+            let target_set = self.signature_set_value(target, kind)?;
+            match self.raw_comparison_plan(&source_set, &target_set, strict_arity) {
+                Err(SignatureSetReadFailure::Retired) if attempt == 0 => attempt += 1,
+                Err(SignatureSetReadFailure::Retired) => return Err(unsettled),
+                Err(SignatureSetReadFailure::Incomplete(reason)) => return Err(reason),
+                Ok(read) => break read,
+            }
+        };
+        let graph = self.graph();
+        let materialize = |position: RawPosition| -> Option<SemanticNodeId> {
+            match position {
+                RawPosition::Absent => None,
+                RawPosition::One(node) => Some(node),
+                RawPosition::Run(members) => {
+                    Some(self.intern_normalized_union_or_intersection(&members, true))
+                }
+                RawPosition::GenericIndex { rest, index } => {
+                    let index = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(
+                        index as f64,
+                    )));
+                    Some(graph.intern_node(SemanticNodeData::IndexedAccess {
+                        object: rest,
+                        index: crate::semantic_query::IndexKey::Computed(index),
+                    }))
+                }
+                RawPosition::Remaining(elements) => {
+                    let any_array = |node: SemanticNodeId| {
+                        matches!(
+                            graph.node_data(node).as_deref(),
+                            Some(SemanticNodeData::Array { element, .. })
+                                if matches!(
+                                    graph.node_data(*element).as_deref(),
+                                    Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                                )
+                        )
+                    };
+                    let rest_or_any = |node: SemanticNodeId| {
+                        if any_array(node) {
+                            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                        } else {
+                            node
+                        }
+                    };
+                    let whole = |node: SemanticNodeId, array: bool| {
+                        if array {
+                            graph.intern_node(SemanticNodeData::Array {
+                                element: node,
+                                readonly: false,
+                            })
+                        } else {
+                            node
+                        }
+                    };
+                    Some(match elements.as_slice() {
+                        [RawRestElement::Whole { node, array }] => {
+                            rest_or_any(whole(*node, *array))
+                        }
+                        _ => rest_or_any(
+                            graph.intern_node(SemanticNodeData::Tuple {
+                                elements: elements
+                                    .iter()
+                                    .map(|element| match element {
+                                        RawRestElement::Whole { node, array } => {
+                                            crate::semantic_query::TupleElement {
+                                                label: None,
+                                                value: whole(*node, *array),
+                                                optional: false,
+                                                rest: true,
+                                            }
+                                        }
+                                        RawRestElement::Element { node, optional } => {
+                                            crate::semantic_query::TupleElement {
+                                                label: None,
+                                                value: *node,
+                                                optional: *optional,
+                                                rest: false,
+                                            }
+                                        }
+                                    })
+                                    .collect(),
+                                readonly: false,
+                            }),
+                        ),
+                    })
+                }
+            }
+        };
+        let positions = read
+            .positions
+            .into_iter()
+            .filter_map(|(source, target)| Some((materialize(source)?, materialize(target)?)))
+            .collect();
+        Ok(SignatureComparisonPlan {
+            source_has_more_parameters: read.source_has_more_parameters,
+            source_receiver: read.source_receiver,
+            target_receiver: read.target_receiver,
+            positions,
+        })
+    }
+
+    /// Both signatures' positional reads under ONE pinned view of the
+    /// sets' epoch; no semantics is dispatched while it is held.
+    fn raw_comparison_plan(
+        &self,
+        source: &crate::signature_kernel::SignatureSetValue,
+        target: &crate::signature_kernel::SignatureSetValue,
+        strict_arity: bool,
+    ) -> Result<RawComparisonPlan, SignatureSetReadFailure> {
+        use crate::signature_kernel::{
+            PositionalMode, PositionalShape, ProjectedKind, ProjectedTuple, RestKind, TypeAt,
+        };
+
+        let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
+        let store = self.graph().signature_store();
+        let view = SemanticReadView::pin(store);
+        for set in [source, target] {
+            if set.set.epoch().is_some_and(|epoch| epoch != view.epoch()) {
+                return Err(SignatureSetReadFailure::Retired);
+            }
+        }
+        let facts = GraphTypes {
+            dispatch: self,
+            store,
+        };
+        let only =
+            |value: &crate::signature_kernel::SignatureSetValue| match view.read_set(value.set) {
+                Ok(crate::signature_kernel::BorrowedSet::One { candidate, .. }) => Ok(candidate),
+                _ => Err(unsettled),
+            };
+        let parts = |candidate: SignatureCandidate| {
+            let descriptor = view
+                .descriptor(candidate.signature)
+                .map_err(|_| unsettled)?;
+            let template = view.template(descriptor.template).map_err(|_| unsettled)?;
+            let shape = view.shape(template.input_shape).map_err(|_| unsettled)?;
+            let layout = view.layout(shape.parameter_layout).map_err(|_| unsettled)?;
+            let receiver = match shape.this_parameter {
+                Some(id) => Some(*view.slot(id).map_err(|_| unsettled)?),
+                None => None,
+            };
+            Ok((layout, receiver, shape.signature_semantic_flags))
+        };
+        let (source_layout, source_this, source_flags) = parts(only(source)?)?;
+        let (target_layout, target_this, target_flags) = parts(only(target)?)?;
+        let source_shape = PositionalShape::new(source_layout, source_this, source_flags, &facts);
+        let target_shape = PositionalShape::new(target_layout, target_this, target_flags, &facts);
+        let node = |token| view.type_token_node(token).map_err(|_| unsettled);
+        // A rest of type `any` is `any` at every position, never a
+        // still-generic rest (`getNonArrayRestType` excludes it).
+        let generic_rest = |shape: &PositionalShape<'_>| -> Result<bool, SignatureSetReadFailure> {
+            match shape.rest() {
+                Some(rest) if rest.kind == RestKind::GenericTuple => {
+                    let rest_node = node(rest.slot.ty)?;
+                    Ok(!matches!(
+                        self.graph().node_data(rest_node).as_deref(),
+                        Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                    ))
+                }
+                _ => Ok(false),
+            }
+        };
+        let count = |shape: &PositionalShape<'_>| {
+            shape.parameter_count() + shape.rest().map_or(0, |rest| rest.tail.len())
+        };
+        let source_generic = generic_rest(&source_shape)?;
+        let target_generic = generic_rest(&target_shape)?;
+        let (source_count, target_count) = (count(&source_shape), count(&target_shape));
+        let generic = source_generic || target_generic;
+        let compared = if generic {
+            source_count.min(target_count)
+        } else {
+            source_count.max(target_count)
+        };
+        let rest_index = generic.then(|| compared.checked_sub(1)).flatten();
+        let at = |shape: &PositionalShape<'_>,
+                  pos: usize|
+         -> Result<RawPosition, SignatureSetReadFailure> {
+            Ok(match shape.type_at(pos) {
+                TypeAt::Absent => RawPosition::Absent,
+                TypeAt::One(slot) => RawPosition::One(node(slot.ty)?),
+                TypeAt::Run { element, tail } => {
+                    let mut members = vec![node(element)?];
+                    for slot in tail {
+                        members.push(node(slot.ty)?);
+                    }
+                    RawPosition::Run(members)
+                }
+                TypeAt::GenericRest { rest, index } => {
+                    let rest = node(rest)?;
+                    if matches!(
+                        self.graph().node_data(rest).as_deref(),
+                        Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                    ) {
+                        RawPosition::One(rest)
+                    } else {
+                        RawPosition::GenericIndex { rest, index }
+                    }
+                }
+            })
+        };
+        // `getRestTypeAtPosition`: the rest of the parameter list from
+        // `pos` on, as the rest type itself at its own position, an array of
+        // its element past it, else a tuple of the remaining positions.
+        let remaining = |shape: &PositionalShape<'_>,
+                         pos: usize|
+         -> Result<RawPosition, SignatureSetReadFailure> {
+            let rest_node = |rest: &crate::signature_kernel::RestSlot| -> Result<RawRestElement, SignatureSetReadFailure> {
+                Ok(RawRestElement::Whole {
+                    node: node(rest.slot.ty)?,
+                    array: rest.kind == RestKind::Array,
+                })
+            };
+            Ok(RawPosition::Remaining(
+                match shape.project_tuple(pos, PositionalMode::Comparison) {
+                    ProjectedTuple::Rest { exact: true, .. } => {
+                        let rest = shape.rest().ok_or(unsettled)?;
+                        vec![rest_node(rest)?]
+                    }
+                    ProjectedTuple::Rest { ty, exact: false } => {
+                        let rest = shape.rest().ok_or(unsettled)?;
+                        let element = match rest.kind {
+                            RestKind::Array => node(ty)?,
+                            RestKind::GenericTuple => return Ok(RawPosition::Absent),
+                        };
+                        vec![RawRestElement::Whole {
+                            node: element,
+                            array: true,
+                        }]
+                    }
+                    ProjectedTuple::Elements(elements) => {
+                        let mut out = Vec::with_capacity(elements.len());
+                        for element in elements {
+                            out.push(match element.kind {
+                                ProjectedKind::Variadic => {
+                                    let rest = shape.rest().ok_or(unsettled)?;
+                                    rest_node(rest)?
+                                }
+                                kind => RawRestElement::Element {
+                                    node: node(element.ty)?,
+                                    optional: kind == ProjectedKind::Optional,
+                                },
+                            });
+                        }
+                        out
+                    }
+                },
+            ))
+        };
+        let mut positions = Vec::with_capacity(compared);
+        for pos in 0..compared {
+            if Some(pos) == rest_index {
+                positions.push((
+                    remaining(&source_shape, pos)?,
+                    remaining(&target_shape, pos)?,
+                ));
+            } else {
+                positions.push((at(&source_shape, pos)?, at(&target_shape, pos)?));
+            }
+        }
+        Ok(RawComparisonPlan {
+            source_has_more_parameters: PositionalShape::source_has_more_parameters(
+                &source_shape,
+                &target_shape,
+                strict_arity,
+                PositionalMode::Comparison,
+            ),
+            source_receiver: source_this.map(|slot| node(slot.ty)).transpose()?,
+            target_receiver: target_this.map(|slot| node(slot.ty)).transpose()?,
+            positions,
+        })
     }
 
     /// `node`'s union arms without `null` / `undefined` (the checker's

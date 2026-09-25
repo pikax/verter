@@ -46,6 +46,14 @@ export function subLoopReturn(n: number) {
   return 0;
 }
 
+export function subInvokedWrite(n: number) {
+  let x = n;
+  (() => {
+    x = 0;
+  })();
+  return x;
+}
+
 export function subSwitchReturn(value: number) {
   switch (value) {
     case 1:
@@ -102,12 +110,12 @@ export function subNonCallableCall() {
 }
 
 export function subObservesBrokenInit() {
-  const x = subLoopReturn(1);
+  const x = subInvokedWrite(1);
   return x;
 }
 
 export function subIgnoresBrokenInit() {
-  const x = subLoopReturn(1);
+  const x = subInvokedWrite(1);
   return 2;
 }
 
@@ -156,6 +164,11 @@ export function subUnappliedParamWrite(x: string | number) {
 
 export function subCompoundParamWrite(x: string | number) {
   x += "s";
+  return x;
+}
+
+export function subLogicalParamWrite(x: string | number) {
+  x ||= "s";
   return x;
 }
 
@@ -492,28 +505,15 @@ fn flow_return_symbolic_call_resolves_complete() {
     });
 }
 
-/// `return this.helper()` FAILS CLOSED — it does not publish `any`.
+/// `return this.helper()` reads `helper` off the class's receiver and
+/// resolves the call over its signature: the method's own class member,
+/// read where it is declared, so the reading member never re-enters its
+/// own return. Complete and warm.
 ///
-/// `this` is not a modeled receiver, so the call reaches none of the
-/// content half's structural call arms and the shared shallow pass
-/// answers the whole expression with a bare `any`. That `any` carries no
-/// `ReturnType<callee>` carrier, so the leaf carrier gate never saw it
-/// and it published clean and WARM — a fabricated value at a call
-/// position, under a promise that a call with no structural arm fails
-/// closed. The call-position verdict is taken on the expression FORM, so
-/// the promise holds here.
-///
-/// The DISPOSITION is positional: the whole return of this member IS the
-/// call, so the marker is the whole-return value and the result is a
-/// degraded success admitting nothing — not a fabricated `any`, and not
-/// a discarded composite (there is no sibling to keep at this position).
-/// The composite-position TWIN — the same unmodelled call as ONE member
-/// of an object literal — is in `flow_return_positional_tests`.
-///
-/// Oracle (TypeScript 7.0.2 `tsc`, for the record — the answer the
-/// fail-closed arm declines to produce): `number`.
+/// Oracle (TypeScript 7.0.2 `tsc`): `ReturnType<SubThisCall['run']>` is
+/// `number`.
 #[test]
-fn flow_return_this_call_fails_closed() {
+fn flow_return_this_call_reads_the_receiver_member() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
         let key = flow_key(
@@ -524,17 +524,17 @@ fn flow_return_this_call_fails_closed() {
             },
             0,
         );
-        super::flow_return_lexical_tests::assert_flow_fails_closed(
-            dispatch,
-            "SubThisCall",
-            dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))),
+        let (expr, _) = flow_result(dispatch, &host, key.clone());
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         );
         assert_eq!(
             dispatch
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "SubThisCall must admit nothing"
+            1,
+            "SubThisCall is complete and warm"
         );
     });
 }
@@ -561,25 +561,32 @@ fn flow_return_return_free_loop_stays_transparent() {
 }
 
 #[test]
-fn flow_return_return_bearing_loop_stays_degraded_switch_and_try_resolve() {
+fn flow_return_return_bearing_loop_switch_and_try_resolve() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        // A return-bearing LOOP stays the unmodelled control surface:
-        // typed miss, nothing admitted — a repeat demand runs cold again.
-        let name = "subLoopReturn";
-        assert!(
-            flow_is_miss(
-                dispatch,
-                flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0)
-            ),
-            "{name} must stay degraded"
+        // A return-bearing LOOP joins its body's return with the return
+        // past it at the loop's fixed point: TypeScript 7.0.2 `tsc`:
+        // `number` (the `0` is absorbed by `n`'s `number`). The clean
+        // result admits warm.
+        let key = flow_key(
+            dispatch,
+            "subLoopReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
         );
-        assert!(
-            flow_is_miss(
-                dispatch,
-                flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0)
-            ),
-            "{name} must not admit a warm entry"
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None);
+        assert_eq!(
+            host.project_node_to_type_expr_for_test(result.return_type())
+                .expect("the clean result projects"),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean loop result admits warm"
         );
         // A `switch` joins its arms' returns; both fresh literals stay
         // pinned (the multi-contributor join widens nothing). TypeScript
@@ -1125,21 +1132,23 @@ fn function_return_declared_rail_keeps_the_literal_union_member() {
 fn function_return_helper_degraded_and_absent_arms() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let loop_source = verter_type_expr::facts::FunctionReturnSource::Flow(return_identity(
-            "subLoopReturn",
+        let invoked_source = verter_type_expr::facts::FunctionReturnSource::Flow(return_identity(
+            "subInvokedWrite",
             FunctionPartIdentity::DeclarationBody,
             0,
         ));
         // The machinery root admits nothing; the TYPED failure rides the
         // transaction's root-failure channel to the caller (`Unresolved`
         // only when the cold build never ran).
-        match dispatch.execute_function_return_source(&loop_source, CANONICAL) {
+        match dispatch.execute_function_return_source(&invoked_source, CANONICAL) {
             super::flow_return::FunctionReturnNode::NoValue(
                 crate::semantic_query::FlowReturnFailure::Unsupported(
-                    crate::semantic_query::FlowReturnUnsupported::Loop,
+                    crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
                 ),
             ) => {}
-            other => panic!("a return-bearing loop degrades with the typed failure, got {other:?}"),
+            other => {
+                panic!("an invoked closure's write degrades with the typed failure, got {other:?}")
+            }
         }
         let absent = verter_type_expr::facts::FunctionReturnSource::Absent;
         assert!(matches!(
@@ -1158,8 +1167,8 @@ fn function_return_helper_degraded_and_absent_arms() {
 ///
 /// The fixture composes it naturally: evaluating `subObservesBrokenInit`
 /// as the machinery root opens its frame, and its binding initializer's
-/// callee (`subLoopReturn`, a return-bearing loop — a typed no-value
-/// failure) evaluates INLINE under that open frame and closes as its own
+/// callee (`subInvokedWrite`, whose invoked closure writes a captured
+/// binding — a typed no-value failure) evaluates INLINE under that open frame and closes as its own
 /// failed component root. The OUTER build degrades positionally
 /// (`FLOW_RETURN_UNINFERRED` — its member set is faithful); the observed
 /// completeness must ALSO carry the inner failure's
@@ -2230,10 +2239,10 @@ fn flow_return_degraded_success_returns_value_and_admits_nothing() {
             0
         );
 
-        // NO-VALUE failure: an unsupported return-bearing `loop` body.
+        // NO-VALUE failure: an invoked closure writing a captured binding.
         let failure_key = flow_key(
             dispatch,
-            "subLoopReturn",
+            "subInvokedWrite",
             FunctionPartIdentity::DeclarationBody,
             0,
         );
@@ -2312,23 +2321,51 @@ fn flow_return_shadowed_outer_initializer_stays_clean_and_admits() {
     });
 }
 
+/// A statement-position COMPOUND write (`x += "s"`) retypes its target to
+/// the base type of what it held — the checker's flow type for a compound
+/// assignment, whatever the operand (TypeScript 7.0.2 `tsc`: `string |
+/// number` here, the parameter's own type) — and publishes clean.
+#[test]
+fn flow_return_compound_write_applies_the_base_type() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subCompoundParamWrite",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key);
+        assert_eq!(result.degradation(), None);
+        assert_eq!(
+            host.project_node_to_type_expr_for_test(result.return_type())
+                .expect("the clean result projects"),
+            verter_type_expr::TypeExpr::union(vec![
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ])
+        );
+    });
+}
+
 /// Unapplied write effects (defect B rail): a whole-slot write the
-/// evaluator has NO evaluation-order application for — the COMPOUND
-/// operator (`x += "s"`), which neither the statement nor the expression
-/// application arm models — MUST fail closed as the `UnappliedWriteEffect`
-/// DEGRADED SUCCESS: a usable value, ReturnOnly, never warm-admitted.
-/// (The plain-`=` statement and expression positions now APPLY their
-/// writes in source/evaluation order — see
+/// evaluator has NO evaluation-order application for — the LOGICAL
+/// assignment (`x ||= "s"`), which neither the statement nor the
+/// expression application arm models — MUST fail closed as the
+/// `UnappliedWriteEffect` DEGRADED SUCCESS: a usable value, ReturnOnly,
+/// never warm-admitted. (The plain-`=` statement and expression positions
+/// APPLY their writes in source/evaluation order — see
 /// `flow_return_standalone_preceding_write_applies_and_publishes_clean`
 /// and `flow_return_source_order_object_read_before_write_publishes_clean`
-/// — so the rail is the residual guard for everything they do not model.)
+/// — and a statement-position compound write applies its base type, so the
+/// rail is the residual guard for everything they do not model.)
 #[test]
 fn flow_return_unapplied_write_effect_degrades_and_admits_nothing() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
         let key = flow_key(
             dispatch,
-            "subCompoundParamWrite",
+            "subLogicalParamWrite",
             FunctionPartIdentity::DeclarationBody,
             0,
         );
@@ -3672,27 +3709,34 @@ fn flow_return_hoisted_var_redeclaring_a_parameter_wins_over_the_parameter() {
 
 /// A return-free loop is fall-through TRANSPARENT only while it binds
 /// nothing that outlives it. A `var` declared in its body is
-/// function-scoped and its reaching definition depends on the loop's
-/// iteration count, which the substrate does not model: `while (flag) {
-/// var v = 1 } return v` published a clean, warm `any` where the oracle is
-/// `number`. It now fails closed through the existing typed loop rail,
-/// exactly like `switch` / `try`. A loop binding only block-scoped names
-/// stays transparent.
+/// function-scoped and escapes the loop: `while (flag) { var v = 1 } return
+/// v` published a clean, warm `any` where the oracle is `number` (with
+/// TS2454, used before being assigned). The loop lowers structurally, and
+/// the `var` the entering path never defines keeps the
+/// conditional-definition degradation, exactly like an `if` arm's. A loop
+/// binding only block-scoped names stays transparent.
 #[test]
-fn flow_return_return_free_loop_declaring_a_var_fails_closed() {
+fn flow_return_return_free_loop_declaring_a_var_degrades() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        assert!(
-            flow_is_miss(
+        let result = flow_result_value(
+            dispatch,
+            flow_key(
                 dispatch,
-                flow_key(
-                    dispatch,
-                    "subLoopBodyVar",
-                    FunctionPartIdentity::DeclarationBody,
-                    0
-                )
+                "subLoopBodyVar",
+                FunctionPartIdentity::DeclarationBody,
+                0,
             ),
-            "a return-free loop declaring a `var` must fail closed"
+        );
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
+            "a `var` a loop body first defines is conditionally defined past the loop"
+        );
+        assert_eq!(
+            host.project_node_to_type_expr_for_test(result.return_type())
+                .expect("the degraded result projects"),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         );
         assert_clean_warm(
             &host,
@@ -3712,10 +3756,10 @@ const SCC_CANONICAL: &str = "/ws/flow-scc.ts";
 /// Two mutual components. `scCleanA`/`scCleanB` close cleanly (both
 /// members admit warm); `scDegradedA`/`scDegradedB` carry an unapplied
 /// write effect, so the whole component is a degraded success —
-/// `ReturnOnly`, never warm. The write is a COMPOUND assignment: a plain
-/// `=` write at statement position is applied by the evaluator and stays
-/// clean, so the degradation fixture rides the operator form nobody
-/// applies.
+/// `ReturnOnly`, never warm. The write is a LOGICAL assignment: a plain
+/// `=` or compound write at statement position is applied by the
+/// evaluator and stays clean, so the degradation fixture rides the
+/// operator form nobody applies.
 const SCC_FIXTURE: &str = r#"
 export function scCleanA(c: boolean) {
   if (c) return 1;
@@ -3734,7 +3778,7 @@ export function scDegradedA(c: boolean) {
 
 export function scDegradedB(c: boolean) {
   let z = 1;
-  z += 2;
+  z ||= 2;
   return scDegradedA(!!z);
 }
 
@@ -4807,11 +4851,6 @@ fn expect_refused_flow_as(script: &str, expected: crate::semantic_query::FlowRet
     }
 }
 
-#[track_caller]
-fn expect_refused_flow(script: &str) {
-    expect_refused_flow_as(script, crate::semantic_query::FlowReturnUnsupported::Loop);
-}
-
 #[test]
 fn flow_return_guard_union_joins_each_alternatives_final_overlay() {
     let expected = verter_type_expr::TypeExpr::union(vec![
@@ -4864,24 +4903,30 @@ fn flow_return_guard_union_omits_impossible_conjunction_alternative() {
     );
 }
 
-/// A disjunct that RE-ESTABLISHES the fact its position already holds
-/// still contributes its edge to the union. A member-path guard is where
-/// that is reachable: the subject's current node is the root's narrow
-/// projected down the path, never the path's own standing fact, so the
-/// enclosing conjunct's `typeof x.v === "string"` and the disjunct's
-/// identical test both write `string` at `x.v`. The disjunction's edges
-/// prove `string` and `number`, so `x.v` reads `string | number` inside
-/// it.
-///
-/// Reading each disjunct's contribution as a before/after diff of the
-/// overlay instead cannot see the second write at all: the `string`
-/// alternative comes out empty, `x.v` fails "narrowed in every
-/// alternative", and the branch publishes the enclosing `string` — a
-/// type NO edge of the disjunction proves on its own.
+/// A disjunction over a member path reads each disjunct from the
+/// member's STANDING fact. Inside `typeof x.v === "string" && (typeof x.v
+/// === "string" || typeof x.v === "number")` the second disjunct narrows
+/// the already-`string` member to `never`, so `x.v` reads `string`
+/// (TypeScript 7.0.2: `{ r: string; }`, with and without
+/// `strictNullChecks`). Reading the disjuncts from the root's projection
+/// instead publishes `string | number`, a type the enclosing conjunct
+/// already excluded. Disjuncts that each narrow the member contribute
+/// their union: `typeof x.v !== "boolean" && (typeof x.v === "string" ||
+/// typeof x.v === "number")` over `string | number | boolean` reads
+/// `string | number` (TypeScript 7.0.2: `{ r: string | number; }`).
 #[test]
-fn flow_return_guard_union_counts_a_disjunct_that_re_establishes_a_held_fact() {
+fn flow_return_guard_union_reads_each_disjunct_from_the_standing_member_fact() {
     let expr = expect_clean_flow_value(
         "function makeProps(x: { v: string | number }) { if (typeof x.v === \"string\" && (typeof x.v === \"string\" || typeof x.v === \"number\")) return { r: x.v }; throw 0 }",
+    );
+    assert_eq!(
+        member_types(&expr, "r"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String,
+        )]
+    );
+    let expr = expect_clean_flow_value(
+        "function makeProps(x: { v: string | number | boolean }) { if (typeof x.v !== \"boolean\" && (typeof x.v === \"string\" || typeof x.v === \"number\")) return { r: x.v }; throw 0 }",
     );
     assert_eq!(
         member_types(&expr, "r"),
@@ -4889,12 +4934,6 @@ fn flow_return_guard_union_counts_a_disjunct_that_re_establishes_a_held_fact() {
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
         ])]
-    );
-    assert_ne!(
-        member_types(&expr, "r"),
-        vec![verter_type_expr::TypeExpr::Primitive(
-            verter_type_expr::PrimitiveName::String,
-        )]
     );
 }
 
@@ -5063,10 +5102,13 @@ fn flow_return_switch_merges_actual_predecessors_in_one_canonical_batch() {
     );
     assert_eq!(joins[0].predecessors, 3);
     assert!(joins[0].unions.iter().all(|width| *width == 3), "{joins:?}");
+    // One bounded inspection per subject carrying literal provenance:
+    // `tag`'s fresh arms, and `out`'s fresh `true` (a fresh boolean
+    // literal the declared union keeps fresh).
     assert_eq!(
         joins[0].provenance,
-        [3],
-        "all literal predecessor provenance must share one bounded inspection"
+        [3, 3],
+        "all literal predecessor provenance must share one bounded inspection per subject"
     );
 }
 
@@ -5097,11 +5139,13 @@ fn flow_return_switch_fallthrough_keeps_successive_control_merges_separate() {
     else {
         panic!("{result:?}");
     };
+    // TypeScript 7.0.2 `tsc`: `number | true` — `x = true` keeps the
+    // `true` constituent of the declared `boolean`.
     assert_eq!(
         expr,
         verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(true)),
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
         ])
     );
     assert_eq!(
@@ -5261,12 +5305,28 @@ pub(crate) fn a_labeled_try_or_throw_suffix_never_admits_a_fabricated_undefined_
     }
 
     // A destination it cannot classify returns the same derivation it
-    // always did and is refused admission.
-    for suffix in [
-        " S: { return \"b\" as const; }",
-        " try { return \"b\" as const; } finally { }",
-        " throw new Error();",
-        " switch (1) { default: return \"b\" as const; }",
+    // always did and is refused admission. No path reaches the
+    // destination (the finally's return ends every path through the
+    // label), so its own return joins as unreachable code's does — the
+    // checker aggregates it (TypeScript 7.0.2 `tsc`: `"a" | "b"` for the
+    // returning suffixes, `"a"` for the throwing one) — while the
+    // undecided pending break keeps its `undefined` behind the typed gap.
+    let b_a_or_undefined = verter_type_expr::TypeExpr::union(vec![
+        string_literal("b"),
+        string_literal("a"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+    ]);
+    for (suffix, expected) in [
+        (" S: { return \"b\" as const; }", &b_a_or_undefined),
+        (
+            " try { return \"b\" as const; } finally { }",
+            &b_a_or_undefined,
+        ),
+        (" throw new Error();", &a_or_undefined),
+        (
+            " switch (1) { default: return \"b\" as const; }",
+            &b_a_or_undefined,
+        ),
     ] {
         match flow_source_probe(&script(suffix)) {
             FlowSourceProbe::Value {
@@ -5283,7 +5343,7 @@ pub(crate) fn a_labeled_try_or_throw_suffix_never_admits_a_fabricated_undefined_
                 );
                 assert_eq!(candidates, 0, "a gapped result never warms: {suffix}");
                 assert_eq!(
-                    expr, a_or_undefined,
+                    &expr, expected,
                     "the returned value is the unchanged derivation: {suffix}"
                 );
             }
@@ -5390,23 +5450,19 @@ fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachabi
         crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
     );
 
-    // Negative controls: a directly invoked write and a same-path write
-    // remain effectful and fail closed.
+    // Negative control: a directly invoked write remains effectful and
+    // fails closed.
     expect_refused_flow_as(
         "function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { (() => { x = \"b\" })() } while (false); return x }",
         crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
     );
-    expect_refused_flow(
-        "function makeProps() { let o: { y: \"a\" | \"b\" } = { y: \"a\" }; do { o.y = \"b\" } while (false); return o.y }",
-    );
-    // A reachable write to a local resolves through the loop head: tsc 7.0.2
-    // answers `"a" | "b"` under all four strictNullChecks x noImplicitAny
-    // settings.
+    // A reachable write inside the loop body joins the entering value at
+    // the loop's exit (TypeScript 7.0.2 `tsc`: `"a" | "b"`).
     assert_eq!(
         expect_clean_flow_value(
             "function makeProps(flag: boolean) { let x: \"a\" | \"b\" = \"a\"; do { if (flag) x = \"b\" } while (false); return x }",
         ),
-        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")]),
+        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")])
     );
 }
 
@@ -7395,8 +7451,8 @@ fn lower_lib_global_mints_only_a_global_the_environment_provides() {
 /// The D10 heritage controls for `instanceof` derivation: the
 /// declaration-identity chain decides both edges, a STRUCTURAL TWIN with
 /// no heritage relation takes the checker's OWN subtype fallback (clean,
-/// warm), a twin whose carrier the relation authority cannot decide
-/// stays behind the typed guard gap, the cold walk reads one heritage
+/// warm), a twin of a class WITH heritage takes the same fallback through
+/// the heritage carrier (clean, warm), the cold walk reads one heritage
 /// bundle per visited ancestor, and an identical warm demand adds zero
 /// dispatches of any class.
 #[test]
@@ -7543,15 +7599,12 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
 
         // (5) The same fallback over a tested class that HAS heritage:
         // `Twin` is shape-identical to `KSub`'s composed instance
-        // surface and heritage proves the two unrelated, but `KSub`'s
-        // carrier unwraps to the heritage INTERSECTION (`K & { s }`) and
-        // the shared relation authority answers that pair undecided in
-        // one direction. An undecided relation is no fact: the fallback
-        // is never entered on a guess, so the subject stays possible
-        // behind the typed guard gap and never warms. The missing
-        // capability is the relation authority's, not this evaluator's —
-        // deciding a class-vs-class structural pair through a composed
-        // heritage carrier is outside D10's mutation boundary.
+        // surface (`K & { s }`) and heritage proves the two unrelated, so
+        // the checker's subtype fallback narrows the subject to the tested
+        // class — TypeScript 7.0.2 (`tsc --declaration
+        // --emitDeclarationOnly --strict`) returns `0 | KSub` from
+        // `carrierTwin`. The relation reads the heritage carrier through
+        // its declaration, so the narrow is clean and warms.
         let key = whole_return_key(dispatch, CANONICAL, "carrierTwin");
         let result = flow_result_value(dispatch, key.clone());
         let expr = host
@@ -7561,23 +7614,24 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
             matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
             if arms.iter().any(|arm| matches!(
                 arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "KSub"
+            )) && !arms.iter().any(|arm| matches!(
+                arm,
                 verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "Twin"
             ))),
-            "an undecided structural relation never narrows the arm away, got {expr:?}"
+            "the structural twin narrows to the tested class, got {expr:?}"
         );
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
-            )),
-            "the undecided structural relation stays behind the typed guard gap"
+            None,
+            "a decided structural fallback is clean"
         );
         assert_eq!(
             dispatch
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "a structurally-undecided arm never warms"
+            1,
+            "the clean structural fallback warms"
         );
 
         // (6) D10-AC4, the COLD half: ONE heritage read per arm per cold
@@ -10966,12 +11020,28 @@ fn flow_return_reunion_keeps_the_surviving_arms_in_source_order() {
 /// the result, and the result is `ReturnOnly` — never a guessed
 /// absorption promoted warm.
 ///
-/// `L & K` is assignable to `L`, so the pair IS an admitted reduction
-/// candidate; the reverse direction (`L` against the intersection) is the
-/// judgement the authority does not give.
+/// `L & Absent` (over an import that does not resolve) is assignable to
+/// `L`, so the pair IS an admitted reduction candidate; the reverse
+/// direction (`L` against the intersection) reaches the unresolved
+/// `Absent` and is the judgement the authority does not give. Over a
+/// resolved `L & K` both directions decide and the checker's reduction
+/// runs: TypeScript 7.0.2 (`tsc --declaration --emitDeclarationOnly
+/// --strict`) returns `L` from `makeProps(x: L | null) { if (x
+/// instanceof K) { return x } return anL }`, and so does the lane.
 #[test]
 fn flow_return_reunion_undecided_reverse_relation_keeps_every_arm_and_never_warms() {
-    let script = "class K { readonly k = \"k\" }\nclass L { readonly l = \"l\" }\ndeclare const anL: L\nfunction makeProps(x: L | null) { if (x instanceof K) { return x } return anL }";
+    let decided = "class K { readonly k = \"k\" }\nclass L { readonly l = \"l\" }\ndeclare const anL: L\nfunction makeProps(x: L | null) { if (x instanceof K) { return x } return anL }";
+    let (expr, degradation) = flow_expr_for_script(decided);
+    assert_eq!(
+        degradation, None,
+        "a decided reduction is complete: {expr:?}"
+    );
+    assert!(
+        matches!(&expr, verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "L"),
+        "the intersection arm is absorbed into its supertype: {expr:?}"
+    );
+
+    let script = "import type { Absent } from \"./absent-reunion-source\"\nclass L { readonly l = \"l\" }\ndeclare const anL: L\ndeclare const both: L & Absent\nfunction makeProps(c: boolean) { if (c) { return both } return anL }";
     let (expr, degradation) = flow_expr_for_script(script);
     assert_eq!(
         degradation,
@@ -10984,18 +11054,6 @@ fn flow_return_reunion_undecided_reverse_relation_keeps_every_arm_and_never_warm
         panic!("every arm must survive an undecided reduction, got {expr:?}");
     };
     assert_eq!(arms.len(), 2, "both arms survive: {expr:?}");
-    assert!(
-        arms.iter().any(|arm| matches!(
-            arm,
-            verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "L"
-        )),
-        "the supertype arm survives: {expr:?}"
-    );
-    assert!(
-        arms.iter()
-            .any(|arm| matches!(arm, verter_type_expr::TypeExpr::Intersection(_))),
-        "the candidate subtype arm survives unabsorbed: {expr:?}"
-    );
     assert_eq!(
         flow_return_slot_candidates(script, "makeProps"),
         0,
@@ -11003,8 +11061,32 @@ fn flow_return_reunion_undecided_reverse_relation_keeps_every_arm_and_never_warm
     );
 }
 
+/// An intersection arm is absorbed into its own member class: `L & K`
+/// (the `instanceof K` narrowing of an `L`) is below `L` in the strict
+/// subtype relation, and `L` is not below the intersection, so the join
+/// is `L` (TypeScript 7.0.2: `L`), clean and warm.
+#[test]
+fn flow_return_reunion_absorbs_an_intersection_into_its_member_class() {
+    let script = "class K { readonly k = \"k\" }\nclass L { readonly l = \"l\" }\ndeclare const anL: L\nfunction makeProps(x: L | null) { if (x instanceof K) { return x } return anL }";
+    let (expr, degradation) = flow_expr_for_script(script);
+    assert_eq!(degradation, None, "the reduction is decided");
+    assert!(
+        matches!(
+            &expr,
+            verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "L"
+        ),
+        "the intersection is absorbed into `L`: {expr:?}"
+    );
+    assert_eq!(
+        flow_return_slot_candidates(script, "makeProps"),
+        1,
+        "the decided reduction warms"
+    );
+}
+
 /// A cold join asks the relation authority at most once per ORDERED arm
-/// pair, and a warm replay of the same demand asks NOTHING.
+/// pair — the reduction visits each arm once and stops at the first peer
+/// it is below — and a warm replay of the same demand asks NOTHING.
 #[test]
 fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() {
     // Three arms: `{ v: "a" }`, `{ v: string }`, `{ v: number }`.
@@ -11045,12 +11127,10 @@ fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() 
     assert_eq!(cold.degradation(), None, "the join is clean");
     // The whole request's relation budget, PINNED. Most of it belongs to
     // the `typeof` guard's own narrowing; the reunion's share is bounded
-    // by "once per ordered arm pair and relation" — assignability forward,
-    // and for an admitted pair the SUBTYPE relation in reverse (`{ v: "a" }`
-    // below `{ v: string }` asks `{ v: string }` ≤ `{ v: "a" }` under the
-    // subtype relation once) — and dropping the per-join memo (so a pair
-    // is re-asked once per scan) raises this number. A pin rather than an
-    // inequality: an inequality with slack cannot see the memo disappear.
+    // by "once per ordered arm pair", and a reduction that re-asks a pair
+    // (or asks past the first peer an arm is below) raises this number. A
+    // pin rather than an inequality: an inequality with slack cannot see
+    // the extra asks.
     assert_eq!(
         cold_reads, 15,
         "the cold relation budget of this three-arm join moved; a reunion that re-asks a \
@@ -11113,8 +11193,9 @@ fn flow_return_slot_candidates(script: &str, function: &str) -> usize {
 /// The call value of a generic callee whose declared return intersects
 /// the empty object type reduces to the bare constituent, at the whole
 /// return AND at a member position — the checker's own
-/// `getIntersectionType` reduction, applied where the call instantiates
-/// it and NOT in the canonical intersection algebra.
+/// `getIntersectionType` reduction, which the canonical intersection
+/// applies too (TypeScript 7.0.2: `{} & 'x'` is `"x"`), while a written
+/// `string & {}` keeps both arms (`string & {}`).
 #[test]
 fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() {
     let (whole, whole_degradation) = flow_expr_cold_warm(
@@ -11157,12 +11238,20 @@ fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() 
         ));
         let intersection =
             dispatch.intern_normalized_union_or_intersection(&[empty, literal], false);
+        assert_eq!(
+            intersection, literal,
+            "`{{}} & \"x\"` is `\"x\"` in the canonical layer"
+        );
+        let string = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let kept = dispatch.intern_normalized_union_or_intersection(&[string, empty], false);
         assert!(
             matches!(
-                graph.node_data(intersection).as_deref(),
+                graph.node_data(kept).as_deref(),
                 Some(crate::semantic_query::SemanticNodeData::Intersection(_))
             ),
-            "an AUTHORED `{{}} & \"x\"` keeps both constituents in the canonical layer"
+            "a written `string & {{}}` keeps both constituents"
         );
     });
 }

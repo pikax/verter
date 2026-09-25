@@ -21,40 +21,42 @@ use verter_type_expr::facts::FunctionPartIdentity;
 const SEAL_CANONICAL: &str = "/ws/flow-frame-seal.ts";
 
 const SEAL_FIXTURE: &str = r#"
-export class Box { readonly tag = "box"; }
-// A tagged template is a call form the substrate has no arm for.
-export declare function box(strings: TemplateStringsArray): Box;
-
 // ── the callee rail: a marker in a callee's RETURN position ──────────
 //
-// tsgo: `{ label: string; made: Box }`
+// `notDeclared` is declared nowhere (TS2304): the checker types its call
+// with its error type — recovery for a program that does not type-check,
+// which the flow-return lane does not model — so the call is an
+// unmodelled position by design.
+//
+// tsgo: `{ label: string; made: any }`
 export function q1LocalHelperBare() {
-  const f = () => box`b`;
+  const f = () => notDeclared();
   return { label: "x", made: f() };
 }
 
-// tsgo: `{ label: string; made: (string | Box)[] }`
+// tsgo: `{ label: string; made: any[] }`
 export function q1LocalHelperArray() {
-  const f = () => ["s", box`b`];
+  const f = () => ["s", notDeclared()];
   return { label: "x", made: f() };
 }
 
-// tsgo: `{ label: string; made: (string | Box)[] }`
+// tsgo: `{ label: string; made: any[] }`
 export function q1IifeArray() {
-  return { label: "x", made: (() => ["s", box`b`])() };
+  return { label: "x", made: (() => ["s", notDeclared()])() };
 }
 
 // ── a nested body whose CONTROL surface is unmodelled ────────────────
 //
-// tsgo: `{ label: string; go: (n: number) => number }`
-export function objWithLoopArrow() {
+// tsc: `{ label: string; go: (n: number) => number; }`
+export function objWithInvokedArrow() {
   return {
     label: "x",
     go: (n: number) => {
-      while (n > 0) {
-        return n;
-      }
-      return 0;
+      let r = n;
+      (() => {
+        r = 0;
+      })();
+      return r;
     },
   };
 }
@@ -71,9 +73,9 @@ export function localFunctionShadowCall() {
 
 // ── item 6: the ARRAY element granularity ────────────────────────────
 //
-// tsgo: `{ label: string; made: (string | Box)[] }`
+// tsgo: `{ label: string; made: any[] }`
 export function arrayWithUnmodeledElement() {
-  return { label: "x", made: ["s", box`b`] };
+  return { label: "x", made: ["s", notDeclared()] };
 }
 
 // ── the CLEAN control: nothing degraded, warm ────────────────────────
@@ -249,9 +251,11 @@ fn assert_string_label(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNod
 ///
 /// | program | TypeScript 7.0.2 `tsc` |
 /// |---|---|
-/// | `` const f = () => box`b`; return { label: "x", made: f() } `` | `{ label: string; made: Box }` |
-/// | `const f = () => ["s", box`b`]; return { label: "x", made: f() }` | `{ label: string; made: (string \| Box)[] }` |
-/// | `return { label: "x", made: (() => ["s", box`b`])() }` | same |
+/// | `const f = () => notDeclared(); return { label: "x", made: f() }` | `{ label: string; made: any }` |
+/// | `const f = () => ["s", notDeclared()]; return { label: "x", made: f() }` | `{ label: string; made: any[] }` |
+/// | `return { label: "x", made: (() => ["s", notDeclared()])() }` | same |
+///
+/// (each with TS2304: `notDeclared` is declared nowhere)
 ///
 /// The parent's answer was not right either: the first two published
 /// `Array<string \| any>` with NO degradation and WARM — a fabricated
@@ -271,7 +275,7 @@ fn a_marker_in_a_callee_return_position_is_a_value_not_a_frame_failure() {
         ("q1LocalHelperArray", true),
         ("q1IifeArray", true),
     ] {
-        let degradation = FlowReturnDegradation::UnmodeledPosition;
+        let degradation = FlowReturnDegradation::UnrepresentableCallee;
         let outcome =
             evaluate(&host, name).unwrap_or_else(|| panic!("{name} must produce a value"));
         with_dispatch(&host, |dispatch| {
@@ -301,20 +305,22 @@ fn a_marker_in_a_callee_return_position_is_a_value_not_a_frame_failure() {
 ///
 /// The nested body's frame-level failure used to propagate through the
 /// enclosing frame's `?` (`let contributors = contributors?`), deleting
-/// the whole enclosing object. tsgo types
-/// `{ label: "x", go: (n: number) => { while (n > 0) { return n } return 0 } }`
-/// as `{ label: string; go: (n: number) => number }`; the loop is beyond
-/// this substrate, so `go`'s RETURN is the marker — and `go` is still a
-/// one-parameter call signature, and `label` is still `string`.
+/// the whole enclosing object. TypeScript 7.0.2 types
+/// `{ label: "x", go: (n: number) => { let r = n; (() => { r = 0 })(); return r } }`
+/// as `{ label: string; go: (n: number) => number; }`; the invoked
+/// closure's write to a captured binding is beyond this substrate, so
+/// `go`'s RETURN is the marker — and `go` is still a one-parameter call
+/// signature, and `label` is still `string`.
 ///
 /// Mutation recipe: restoring the `?` collapses the object and the `label`
 /// lookup fails with "expected an Object graph node".
 #[test]
 fn a_nested_bodys_control_surface_failure_marks_its_return_not_the_enclosing_frame() {
     let host = make_seal_host();
-    let outcome = evaluate(&host, "objWithLoopArrow").expect("objWithLoopArrow produces a value");
+    let outcome =
+        evaluate(&host, "objWithInvokedArrow").expect("objWithInvokedArrow produces a value");
     with_dispatch(&host, |dispatch| {
-        assert_string_label(dispatch, outcome.node, "objWithLoopArrow");
+        assert_string_label(dispatch, outcome.node, "objWithInvokedArrow");
         let go = member(dispatch, outcome.node, "go");
         match dispatch.graph().node_data(go).as_deref() {
             Some(SemanticNodeData::Signature {
@@ -323,7 +329,7 @@ fn a_nested_bodys_control_surface_failure_marks_its_return_not_the_enclosing_fra
                 ..
             }) => {
                 assert_eq!(params.len(), 1, "the nested signature keeps its parameter");
-                assert_marker(dispatch, *return_type, "objWithLoopArrow.go return");
+                assert_marker(dispatch, *return_type, "objWithInvokedArrow.go return");
             }
             other => panic!("`go` publishes the nested signature, got {other:?}"),
         }
@@ -396,13 +402,16 @@ fn the_clean_control_is_undegraded_and_warms() {
 /// An unmodelled array ELEMENT marks its own position: the array survives
 /// with its modelled elements.
 ///
-/// `return { label: "x", made: ["s", box`b`] }` — TypeScript 7.0.2
-/// `tsc` types `made` as `(string | Box)[]`. The array literal is a
+/// `return { label: "x", made: ["s", notDeclared()] }` — TypeScript
+/// 7.0.2 `tsc` types `made` as `any[]`, the error type of the TS2304 call
+/// (`notDeclared` is declared nowhere) absorbing the element union; the
+/// lane does not model that recovery, so the call is the one unmodelled
+/// element. The array literal is a
 /// structural carrier in both halves (the shared value-descent classifier
 /// opens each element as a child site of the array, and the content half
 /// lowers each one as its own position), so the positional rule holds
 /// inside the array exactly as it does at the object level: `made` is
-/// `(string | MARKER)[]`, the `` box`b` `` element alone carrying the
+/// `(string | MARKER)[]`, the call element alone carrying the
 /// typed marker. The result is DEGRADED and admits nothing.
 #[test]
 fn an_unmodeled_array_element_marks_only_its_own_position() {
@@ -416,7 +425,7 @@ fn an_unmodeled_array_element_marks_only_its_own_position() {
     });
     assert_eq!(
         outcome.degradation,
-        Some(FlowReturnDegradation::UnmodeledPosition)
+        Some(FlowReturnDegradation::UnrepresentableCallee)
     );
     assert_eq!(outcome.candidates, 0);
 }

@@ -855,12 +855,19 @@ enum NumericIndexDemand {
     BroadNumber,
 }
 
+/// An intersection join's contributors split into their non-nullish parts
+/// and the `null` / `undefined` arms all of them carry.
+struct NullishSplit {
+    cores: Option<Vec<SemanticNodeId>>,
+    common_nullish: Vec<SemanticNodeId>,
+}
+
 /// Whether a string key is a CANONICAL non-negative integer key —
 /// TS's numeric-key coercion rule `String(Number(s)) === s` restricted
 /// to the integer positions a tuple can hold: nonempty, ASCII digits
 /// only, and no leading zero unless the key is exactly `"0"`. `"01"`,
 /// `"+1"`, `"1.0"`, `" 1"` all fail.
-fn is_canonical_index_digits(key: &str) -> bool {
+pub(super) fn is_canonical_index_digits(key: &str) -> bool {
     let bytes = key.as_bytes();
     match bytes {
         [] => false,
@@ -945,9 +952,75 @@ pub(super) struct PathWalker<'a, 'b> {
     /// [`Self::expand_empty_path_terminal`] (the slot-binding indexed-
     /// access preservation policy at the empty-path terminal expander).
     original_path_non_empty: bool,
+    /// The file the walk's subject was declared in, when it was: an
+    /// apparent-wrapper read on the way is scoped to that file's project, so
+    /// the entry's key names the project it read
+    /// ([`Self::apparent_wrapper_read`]).
+    origin_file: Option<Arc<str>>,
 }
 
 impl<'a> super::ProjectSemanticDispatch<'a> {
+    /// The instance a constructor's `prototype` reads through one construct
+    /// signature: the class instantiated with `any` for every type
+    /// parameter it has (the checker's `getTypeOfPrototypeProperty`) — the
+    /// signature's own (a generic class's), and a class expression's outer
+    /// ones (`inside<T>`'s `C.prototype` is `inside.C`, measured on
+    /// 7.0.2). A class expression carries its prototype from where it is
+    /// authored, so an instantiated one (`ReturnType<typeof
+    /// make<string>>['prototype']`) still reads every parameter as `any`.
+    pub(super) fn constructor_prototype(
+        &self,
+        signature: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let any = self.graph().intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Any,
+        ));
+        let instance = match self.graph().node_data(signature).as_deref() {
+            Some(SemanticNodeData::Signature {
+                type_parameters,
+                return_type,
+                ..
+            }) if type_parameters.is_empty() => *return_type,
+            Some(SemanticNodeData::Signature {
+                type_parameters, ..
+            }) => {
+                let instantiated =
+                    self.instantiate_call_candidate(signature, &vec![any; type_parameters.len()])?;
+                match self.graph().node_data(instantiated).as_deref() {
+                    Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let Some(SemanticNodeData::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            ..
+        }) = self.graph().node_data(instance).as_deref().cloned()
+        else {
+            return Some(instance);
+        };
+        if let Some(prototype) = identity.prototype {
+            return Some(prototype);
+        }
+        let parameters = identity
+            .outer_clauses
+            .iter()
+            .flat_map(|clause| clause.parameters.iter());
+        let mut prototype = instance;
+        for (name, argument) in parameters.zip(type_arguments.iter()) {
+            let at_parameter = matches!(
+                self.graph().node_data(*argument).as_deref(),
+                Some(SemanticNodeData::TypeParam { display_name, .. }) if display_name == name
+            );
+            if at_parameter {
+                prototype = self.substitute_semantic_type_param(prototype, *argument, any);
+            }
+        }
+        Some(prototype)
+    }
+
     /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
     /// `Object` node. Each contributor's surface is extracted (an interface
     /// body is an `Object`; an interface-with-`extends` body is an
@@ -979,14 +1052,16 @@ pub(crate) struct MergedDeclSurface {
 
 /// One peer-merged member. `values` holds a single value for an ordinary member
 /// and the ORDERED, deduplicated overload value list for an accumulated
-/// same-name method group (length > 1 only for methods). The graph reducer
-/// interns a multi-value method group into an `Intersection`; the display
-/// projection renders it as a property holding that intersection — both yield
-/// the identical surface.
+/// same-name method group (length > 1 only for methods), with
+/// `declarations` naming, per value, the contributor that declared it. The
+/// graph reducer interns a multi-value method group into an overload group
+/// `Intersection`; the display projection renders it as a property holding
+/// that intersection — both yield the identical surface.
 #[derive(Debug, Clone)]
 pub(crate) struct MergedDeclMember {
     pub(crate) member: ShallowSurfaceMember,
     pub(crate) values: Vec<SemanticNodeId>,
+    pub(crate) declarations: Vec<usize>,
 }
 
 /// The full display surface of a `MergedDecl` carrier: the preserved
@@ -1072,7 +1147,7 @@ pub(crate) fn reduce_merged_decl_display_surface(
 /// `Intersection` bodies (interface/class with heritage) contribute their
 /// object-surface arms as own-body and their remaining reference arms as
 /// heritage (de-duplicated). Any other shape yields nothing.
-fn collect_merged_contributor_arms(
+pub(super) fn collect_merged_contributor_arms(
     graph: &SemanticGraphStore,
     node: SemanticNodeId,
     own_surfaces: &mut Vec<ShallowSurface>,
@@ -1139,11 +1214,13 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
         first: ShallowSurfaceMember,
         /// Ordered overload values when accumulating same-name methods.
         method_values: Vec<SemanticNodeId>,
+        /// The contributor that declared each accumulated value.
+        method_declarations: Vec<usize>,
     }
 
     let mut by_key: indexmap::IndexMap<crate::semantic_query::AuthoredPropertyKey, Accum> =
         indexmap::IndexMap::new();
-    for surface in contributor_surfaces {
+    for (declaration, surface) in contributor_surfaces.iter().enumerate() {
         for member in &surface.members {
             match by_key.get_mut(&member.key) {
                 None => {
@@ -1152,6 +1229,7 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
                         Accum {
                             first: member.clone(),
                             method_values: vec![member.value],
+                            method_declarations: vec![declaration],
                         },
                     );
                 }
@@ -1163,6 +1241,7 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
                         accum.first.has_implementation_body |= member.has_implementation_body;
                         if !accum.method_values.contains(&member.value) {
                             accum.method_values.push(member.value);
+                            accum.method_declarations.push(declaration);
                         }
                     }
                 }
@@ -1173,15 +1252,16 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
     let members = by_key
         .into_values()
         .map(|accum| {
-            let values =
+            let (values, declarations) =
                 if accum.first.method_kind == Some(verter_type_expr::ObjectMethodKind::Method) {
-                    accum.method_values
+                    (accum.method_values, accum.method_declarations)
                 } else {
-                    vec![accum.first.value]
+                    (vec![accum.first.value], vec![accum.method_declarations[0]])
                 };
             MergedDeclMember {
                 member: accum.first,
                 values,
+                declarations,
             }
         })
         .collect();
@@ -1276,6 +1356,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             open_spread_partial: false,
             original_path_non_empty: false,
+            origin_file: None,
         }
     }
 
@@ -1336,62 +1417,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
 
     fn opaque_miss(&self) -> SemanticNodeId {
         self.dispatch.opaque(QueryError::Miss)
-    }
-
-    /// The instance a constructor's `prototype` reads through one construct
-    /// signature: the class instantiated with `any` for every type
-    /// parameter it has (the checker's `getTypeOfPrototypeProperty`) — the
-    /// signature's own (a generic class's), and a class expression's outer
-    /// ones still at their own parameters (`inside<T>`'s `C.prototype` is
-    /// `inside.C`, measured on 7.0.2).
-    fn prototype_instance_of(&self, signature: SemanticNodeId) -> Option<SemanticNodeId> {
-        let any = self.graph().intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Any,
-        ));
-        let instance = match self.graph().node_data(signature).as_deref() {
-            Some(SemanticNodeData::Signature {
-                type_parameters,
-                return_type,
-                ..
-            }) if type_parameters.is_empty() => *return_type,
-            Some(SemanticNodeData::Signature {
-                type_parameters, ..
-            }) => {
-                let instantiated = self
-                    .dispatch
-                    .instantiate_call_candidate(signature, &vec![any; type_parameters.len()])?;
-                match self.graph().node_data(instantiated).as_deref() {
-                    Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
-                    _ => return None,
-                }
-            }
-            _ => return None,
-        };
-        let Some(SemanticNodeData::ClassExpressionInstance {
-            identity,
-            type_arguments,
-            ..
-        }) = self.graph().node_data(instance).as_deref().cloned()
-        else {
-            return Some(instance);
-        };
-        let parameters = identity
-            .outer_clauses
-            .iter()
-            .flat_map(|clause| clause.parameters.iter());
-        let mut prototype = instance;
-        for (name, argument) in parameters.zip(type_arguments.iter()) {
-            let at_parameter = matches!(
-                self.graph().node_data(*argument).as_deref(),
-                Some(SemanticNodeData::TypeParam { display_name, .. }) if display_name == name
-            );
-            if at_parameter {
-                prototype = self
-                    .dispatch
-                    .substitute_semantic_type_param(prototype, *argument, any);
-            }
-        }
-        Some(prototype)
     }
 
     /// Dispatch a nested subquery and FOLD its A2 partiality flag into the
@@ -1461,7 +1486,118 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         }
     }
 
+    /// The type an indexed access reads off a property whose declared type
+    /// is `value`, declared in `declaring_file` — TypeScript's indexed-access
+    /// read. Under the declaring project's `strictNullChecks` an OPTIONAL
+    /// property reads `value | undefined` (`{ o?: 3 }['o']` is
+    /// `3 | undefined`; `exactOptionalPropertyTypes` does not change the
+    /// read). With it off, `null` and `undefined` are not types of their
+    /// own: the read is the declared type with them erased (`o?: 3 |
+    /// undefined` reads `3`), the checker's union construction under that
+    /// option.
+    fn index_read(
+        &self,
+        value: SemanticNodeId,
+        optional: bool,
+        declaring_file: Option<&str>,
+    ) -> SemanticNodeId {
+        use crate::semantic_query::{NullabilityPolicy, PrimitiveKind};
+        let strict = declaring_file.is_none_or(|canonical| {
+            self.dispatch
+                .ctx
+                .host_for_fact_tracer_install()
+                .semantic_compiler_options_for(canonical)
+                .strict_null_checks
+        });
+        let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(2);
+        self.push_union_flattened(&mut arms, value);
+        if strict {
+            if !optional {
+                return value;
+            }
+            arms.push(
+                self.graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
+            );
+            return self
+                .dispatch
+                .intern_normalized_union(&arms, NullabilityPolicy::Strict);
+        }
+        let nullable = |arm: &SemanticNodeId| {
+            matches!(
+                self.graph().node_data(*arm).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        };
+        if arms.len() < 2 || !arms.iter().any(nullable) {
+            return value;
+        }
+        self.dispatch
+            .intern_normalized_union(&arms, NullabilityPolicy::Erased)
+    }
+
+    /// A tuple's `length`: `number` with a rest element, else the union of
+    /// the lengths from its required count to its element count
+    /// (`[1, 2?]['length']` is `1 | 2`).
+    fn tuple_length(&self, elements: &[crate::semantic_query::TupleElement]) -> SemanticNodeId {
+        use crate::semantic_query::PrimitiveKind;
+        if elements.iter().any(|element| element.rest) {
+            return self
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        }
+        let required = elements.iter().filter(|element| !element.optional).count();
+        let lengths: Vec<SemanticNodeId> = (required..=elements.len())
+            .map(|length| {
+                self.graph().intern_node(SemanticNodeData::Literal(
+                    crate::semantic_query::LiteralValue::Number(length as f64),
+                ))
+            })
+            .collect();
+        self.dispatch
+            .intern_normalized_union_or_intersection(&lengths, true)
+    }
+
+    /// The apparent wrapper surface a primitive, an array or a tuple reads
+    /// its non-index keys from
+    /// ([`ProjectSemanticDispatch::apparent_wrapper_of`]); `None` when the
+    /// project declares none or no project settles.
+    ///
+    /// The read is scoped to the project of the file the walk's subject was
+    /// declared in, so the entry's key names that project. A path whose
+    /// FIRST step reads a shared subject's wrapper arrives already rewritten
+    /// to the demand project's wrapper
+    /// ([`ProjectSemanticDispatch::scope_apparent_wrapper_subject`]); a
+    /// later step under a shared subject, or a read with no demand site at
+    /// all, is scoped to the demand, which the key cannot name — that entry
+    /// stays out of the shared memo.
+    fn apparent_wrapper_read(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        use super::apparent_type::GlobalWrapper;
+        let (name, args) = self.dispatch.apparent_wrapper_of(node)?;
+        if let Some(origin) = self.origin_file.as_deref() {
+            match self.dispatch.global_wrapper_surface(name, &args, origin) {
+                GlobalWrapper::Surface(surface) => return Some(surface),
+                GlobalWrapper::Absent => return None,
+                GlobalWrapper::Unsettled => {}
+            }
+        }
+        self.dispatch.fold_into_top_build_local_taint(false, true);
+        let demand = self.dispatch.wrapper_demand_canonical()?;
+        match self
+            .dispatch
+            .global_wrapper_surface(name, &args, demand.as_ref())
+        {
+            GlobalWrapper::Surface(surface) => Some(surface),
+            GlobalWrapper::Absent | GlobalWrapper::Unsettled => None,
+        }
+    }
+
     /// Project a numeric demand into a tuple's element set.
+    ///
+    /// Reads follow `declaring_file`'s `strictNullChecks` as
+    /// [`Self::index_read`] does.
     ///
     /// - `Position(i)`: element `i`'s value type; an optional slot widens
     ///   to `value | undefined`; the label never flows (only
@@ -1480,30 +1616,30 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         &self,
         elements: &[crate::semantic_query::TupleElement],
         demand: NumericIndexDemand,
+        declaring_file: Option<&str>,
     ) -> Option<SemanticNodeId> {
-        use crate::semantic_query::PrimitiveKind;
         match demand {
             NumericIndexDemand::Position(position) => {
                 if let Some(rest_start) = elements.iter().position(|element| element.rest) {
                     if position >= rest_start {
-                        return None;
+                        let mut arms: Vec<SemanticNodeId> =
+                            Vec::with_capacity(elements.len() - rest_start);
+                        for element in &elements[rest_start..] {
+                            let read = if element.rest {
+                                self.rest_element_item_type(element.value)?
+                            } else {
+                                self.index_read(element.value, element.optional, declaring_file)
+                            };
+                            self.push_union_flattened(&mut arms, read);
+                        }
+                        return Some(
+                            self.dispatch
+                                .intern_normalized_union_or_intersection(&arms, true),
+                        );
                     }
                 }
                 let element = elements.get(position)?;
-                if element.optional {
-                    let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(2);
-                    self.push_union_flattened(&mut arms, element.value);
-                    arms.push(
-                        self.graph()
-                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
-                    );
-                    Some(
-                        self.dispatch
-                            .intern_normalized_union_or_intersection(&arms, true),
-                    )
-                } else {
-                    Some(element.value)
-                }
+                Some(self.index_read(element.value, element.optional, declaring_file))
             }
             NumericIndexDemand::BroadNumber => {
                 let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(elements.len() + 1);
@@ -1511,12 +1647,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     if element.rest {
                         arms.push(self.rest_element_item_type(element.value)?);
                     } else {
-                        self.push_union_flattened(&mut arms, element.value);
-                        if element.optional {
-                            arms.push(self.graph().intern_node(SemanticNodeData::Primitive(
-                                PrimitiveKind::Undefined,
-                            )));
-                        }
+                        let read = self.index_read(element.value, element.optional, declaring_file);
+                        self.push_union_flattened(&mut arms, read);
                     }
                 }
                 Some(
@@ -1594,6 +1726,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // terminal under the caller's mode (path-precision), whereas the
         // empty whole-surface projection stays carrier-preserving.
         self.original_path_non_empty = !path.is_empty();
+        self.origin_file = self
+            .graph()
+            .node_scope(base)
+            .and_then(|scope| scope.canonical_file());
         let initial_path: Arc<[PathSegment]> = Arc::from(path.to_vec().into_boxed_slice());
         let mut frames: Vec<WalkFrame> = vec![WalkFrame::Step {
             node: base,
@@ -1929,12 +2065,40 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // what `build_typeof` already mints for a top-level
                     // function overload group, so `obj.m` and a same-shaped
                     // `f` answer alike from here on.
+                    //
+                    // An INDEXED ACCESS (`T['k']`) reads a property the
+                    // checker's way: an optional property reads its declared
+                    // type plus `undefined` (`index_read`); a property
+                    // navigation step reads the declared type alone.
+                    let index_read = matches!(segment, PathSegment::Index(_));
+                    let object_scope = self
+                        .graph()
+                        .node_scope(current)
+                        .and_then(|scope| scope.canonical_file());
+                    // An ACCESSOR is a property: its read is the accessor's
+                    // VALUE type (the getter's return, else the setter's
+                    // parameter), whichever of a get/set pair came first.
+                    let graph = self.dispatch.graph();
                     let first_wins = |needle: &crate::semantic_query::PropertyKey| {
+                        if let Some(accessor) = surface.project_known_key_accessor(needle) {
+                            return accessor.read_value(graph);
+                        }
                         match surface.project_known_key(needle) {
                             crate::semantic_query::SurfaceKeyProjection::Exact(member)
                                 if member.visibility.is_public() =>
                             {
-                                Some(member.value)
+                                Some(if index_read {
+                                    self.index_read(
+                                        member.value,
+                                        member.optional,
+                                        member
+                                            .declaration_origin
+                                            .as_deref()
+                                            .or(object_scope.as_deref()),
+                                    )
+                                } else {
+                                    member.value
+                                })
                             }
                             _ => None,
                         }
@@ -2023,7 +2187,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 if let Some(instance) = surface
                                     .construct_signatures
                                     .last()
-                                    .and_then(|sig| self.prototype_instance_of(*sig))
+                                    .and_then(|sig| self.dispatch.constructor_prototype(*sig))
                                 {
                                     self.graph().record_origin_edge(
                                         instance,
@@ -2915,8 +3079,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     drop(data);
                     let typeof_context = self.context;
                     let typeof_key = self.dispatch.typeof_key_with_path(
-                        value_root,
-                        typeof_path,
+                        value_root.clone(),
+                        Arc::clone(&typeof_path),
                         typeof_context,
                     );
                     let mut resolved = match self.execute_read_folding_partial(typeof_key) {
@@ -2936,8 +3100,37 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     #[cfg(test)]
                     LAST_WALK_TYPEOF_RESOLVED.with(|c| c.set(Some(resolved)));
                     if resolved == current {
-                        results.push(current);
-                        return;
+                        // A carrier that stays deferred (the global object,
+                        // whose whole surface is not enumerated) reads a
+                        // pending MEMBER through its own root: `(typeof x).m`
+                        // is `typeof x.m`.
+                        let member = match segment {
+                            PathSegment::Member(key) if type_args.is_empty() => {
+                                key.as_string().map(Arc::<str>::from)
+                            }
+                            _ => None,
+                        };
+                        let Some(member) = member else {
+                            results.push(current);
+                            return;
+                        };
+                        let mut extended = typeof_path.to_vec();
+                        extended.push(member);
+                        let member_key = self.dispatch.typeof_key_with_path(
+                            value_root,
+                            Arc::from(extended.into_boxed_slice()),
+                            typeof_context,
+                        );
+                        current = match self.execute_read_folding_partial(member_key) {
+                            QueryResult::Value(id) => id,
+                            _ => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        };
+                        index += 1;
+                        self.intermediate_nodes.push(Some(current));
+                        continue;
                     }
                     current = resolved;
                 }
@@ -3237,15 +3430,62 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // projects the union of every element's contribution
                     // (optional slots contribute `undefined`, a rest
                     // element contributes its array ELEMENT type). On a
-                    // rest-bearing tuple, fixed positions BEFORE the rest
-                    // start resolve exactly; positions at/after the rest
-                    // start miss conservatively (suffix-dependent
-                    // arithmetic is never guessed).
+                    // rest-bearing tuple, a position before the rest start
+                    // resolves exactly and one at or past it reads every
+                    // element from the rest start on (the rest may be
+                    // empty). `length` is the tuple's possible lengths;
+                    // any other key is a member of the tuple's apparent
+                    // `Array`.
                     let elements = elements.clone();
                     drop(data);
+                    let member = self.dispatch.apparent_member_name(segment);
+                    if member.as_deref() == Some("length") {
+                        let length = self.tuple_length(&elements);
+                        let (edge_kind, meta) = match segment {
+                            PathSegment::Index(ix) => {
+                                (OriginEdgeKind::ProjectIndex, OriginMeta::Index(ix.clone()))
+                            }
+                            PathSegment::Member(key) => (
+                                OriginEdgeKind::ProjectMember,
+                                OriginMeta::ProjectedMember {
+                                    key: key.clone(),
+                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                },
+                            ),
+                        };
+                        self.graph().record_origin_edge(
+                            length,
+                            edge_kind,
+                            Arc::from(vec![current].into_boxed_slice()),
+                            meta,
+                            Arc::clone(self.fence),
+                        );
+                        current = length;
+                        index += 1;
+                        self.intermediate_nodes.push(Some(current));
+                        continue;
+                    }
+                    if member.is_some() {
+                        match self.apparent_wrapper_read(current) {
+                            Some(surface) => {
+                                current = surface;
+                                continue;
+                            }
+                            None => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        }
+                    }
                     let projected = self
                         .classify_numeric_index_segment(segment)
-                        .and_then(|demand| self.project_tuple_index(&elements, demand));
+                        .and_then(|demand| {
+                            let declaring_file = self
+                                .graph()
+                                .node_scope(current)
+                                .and_then(|scope| scope.canonical_file());
+                            self.project_tuple_index(&elements, demand, declaring_file.as_deref())
+                        });
                     match projected {
                         Some(value) => {
                             let meta = match segment {
@@ -3275,9 +3515,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 SemanticNodeData::Array { element, .. } => {
                     // Array indexed access: any numeric demand — a
                     // literal position or the broad `number` key —
-                    // projects the element type.
+                    // projects the element type; any other key is a
+                    // member of the apparent `Array` (`length`, `map`).
                     let element = *element;
                     drop(data);
+                    if self.dispatch.apparent_member_name(segment).is_some() {
+                        match self.apparent_wrapper_read(current) {
+                            Some(surface) => {
+                                current = surface;
+                                continue;
+                            }
+                            None => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        }
+                    }
                     match self.classify_numeric_index_segment(segment) {
                         Some(_) => {
                             let meta = match segment {
@@ -3347,6 +3600,26 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     match self.dispatch.apparent_type_of(current) {
                         Some(apparent) if apparent != current => {
                             current = apparent;
+                            continue;
+                        }
+                        _ => {
+                            results.push(self.opaque_miss());
+                            return;
+                        }
+                    }
+                }
+                // A primitive's members are its apparent wrapper's
+                // (`string['length']` is `String['length']`, `number`),
+                // read with the same segment.
+                SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::TemplateLiteral { .. }
+                    if self.dispatch.apparent_wrapper_of(current).is_some() =>
+                {
+                    drop(data);
+                    match self.apparent_wrapper_read(current) {
+                        Some(surface) if surface != current => {
+                            current = surface;
                             continue;
                         }
                         _ => {
@@ -3941,7 +4214,211 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .collect();
         if contributors.is_empty() {
             results.push(self.opaque_miss());
-        } else if contributors.len() >= 2
+            return;
+        }
+        if contributors.len() >= 2 {
+            if let Some(split) = self.split_nullish_arms(&contributors) {
+                // The checker intersects the member's types and then
+                // distributes the intersection over their unions, where a
+                // `null` / `undefined` arm meets only itself: the joined
+                // value is the intersection of the contributors'
+                // non-nullish parts plus the nullish arms EVERY contributor
+                // carries (measured against the pinned checker: `(H & {
+                // onClick?: (p: PE) => void })['onClick']` over `H.onClick?:
+                // (p: FE) => void` is `((p: FE) => void) & ((p: PE) => void)
+                // | undefined`; `{ a: X | undefined } & { a: Y }` reads
+                // `X & Y`).
+                let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(3);
+                if let Some(cores) = split.cores {
+                    let mut joined: Vec<SemanticNodeId> = Vec::with_capacity(1);
+                    self.join_intersection_contributors(cores, &mut joined);
+                    arms.extend(joined);
+                }
+                arms.extend(split.common_nullish);
+                results.push(match arms.as_slice() {
+                    [] => self
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+                    [only] => *only,
+                    _ => self
+                        .dispatch
+                        .intern_normalized_union_or_intersection(&arms, true),
+                });
+                return;
+            }
+        }
+        self.join_intersection_contributors(contributors, results);
+    }
+
+    /// The nullish split of an intersection join's `contributors` — the
+    /// checker's distribution of an intersection over its members' `null` /
+    /// `undefined` arms — or `None` when no contributor carries one or the
+    /// split is not provable from the graph (the join then keeps the
+    /// undistributed intersection).
+    ///
+    /// A nullish kind EVERY contributor carries as a union arm is lifted
+    /// out whole: `(T | undefined) & (U | undefined)` is `(T & U) |
+    /// undefined` for any `T`, `U` (the checker strips `undefined`, then
+    /// `null`, the same way). Any other nullish arm must meet, in some
+    /// other contributor, only arms provably disjoint from it, so every
+    /// term it enters is `never`: `(T | undefined) & QA` is `T & QA`, while
+    /// `(T | undefined) & U` stays undistributed. `cores` is each
+    /// contributor's non-nullish part in order, `None` when some
+    /// contributor has none (the non-nullish product is empty);
+    /// `common_nullish` is the lifted nullish arms.
+    fn split_nullish_arms(&self, contributors: &[SemanticNodeId]) -> Option<NullishSplit> {
+        let nullish_kind = |arm: SemanticNodeId| match self.graph().node_data(arm).as_deref() {
+            Some(SemanticNodeData::Primitive(
+                kind @ (PrimitiveKind::Null | PrimitiveKind::Undefined),
+            )) => Some(*kind),
+            _ => None,
+        };
+        let arm_lists: Vec<Vec<SemanticNodeId>> = contributors
+            .iter()
+            .map(
+                |&contributor| match self.graph().node_data(contributor).as_deref() {
+                    Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
+                    _ => vec![contributor],
+                },
+            )
+            .collect();
+        if !arm_lists
+            .iter()
+            .flatten()
+            .any(|arm| nullish_kind(*arm).is_some())
+        {
+            return None;
+        }
+        let common: Vec<PrimitiveKind> = [PrimitiveKind::Undefined, PrimitiveKind::Null]
+            .into_iter()
+            .filter(|kind| {
+                arm_lists
+                    .iter()
+                    .all(|arms| arms.iter().any(|arm| nullish_kind(*arm) == Some(*kind)))
+            })
+            .collect();
+        // A contributor that is nothing but nullish arms is no union the
+        // checker strips: its pairing with every other arm must vanish.
+        if arm_lists
+            .iter()
+            .any(|arms| arms.iter().all(|arm| nullish_kind(*arm).is_some()))
+            && !arm_lists
+                .iter()
+                .flatten()
+                .all(|arm| nullish_kind(*arm).is_some() || self.provably_non_nullish(*arm, 0))
+        {
+            return None;
+        }
+        let stripped: Vec<Vec<SemanticNodeId>> = arm_lists
+            .into_iter()
+            .map(|arms| {
+                arms.into_iter()
+                    .filter(|arm| !nullish_kind(*arm).is_some_and(|kind| common.contains(&kind)))
+                    .collect()
+            })
+            .collect();
+        let disjoint_from = |arm: SemanticNodeId, kind: PrimitiveKind| match nullish_kind(arm) {
+            Some(other) => other != kind,
+            None => self.provably_non_nullish(arm, 0),
+        };
+        for (position, arms) in stripped.iter().enumerate() {
+            for &arm in arms {
+                let Some(kind) = nullish_kind(arm) else {
+                    continue;
+                };
+                let vanishes = stripped.iter().enumerate().any(|(other, other_arms)| {
+                    other != position && other_arms.iter().all(|a| disjoint_from(*a, kind))
+                });
+                if !vanishes {
+                    return None;
+                }
+            }
+        }
+        let mut cores: Option<Vec<SemanticNodeId>> = Some(Vec::with_capacity(stripped.len()));
+        for arms in stripped {
+            let core: Vec<SemanticNodeId> = arms
+                .into_iter()
+                .filter(|arm| nullish_kind(*arm).is_none())
+                .collect();
+            cores = match (cores, core.as_slice()) {
+                (None, _) | (_, []) => None,
+                (Some(mut cores), [only]) => {
+                    cores.push(*only);
+                    Some(cores)
+                }
+                (Some(mut cores), _) => {
+                    cores.push(
+                        self.dispatch
+                            .intern_normalized_union_or_intersection(&core, true),
+                    );
+                    Some(cores)
+                }
+            };
+        }
+        Some(NullishSplit {
+            cores,
+            common_nullish: common
+                .into_iter()
+                .map(|kind| self.graph().intern_node(SemanticNodeData::Primitive(kind)))
+                .collect(),
+        })
+    }
+
+    /// Whether `node` provably excludes both `null` and `undefined`, so the
+    /// checker's intersection of it with either is `never`: a literal, a
+    /// non-nullish primitive (`object` included), an object, array, tuple
+    /// or template-literal type, a signature, an interface or class
+    /// reference, or an intersection with such an arm.
+    fn provably_non_nullish(&self, node: SemanticNodeId, depth: usize) -> bool {
+        const MAX_NESTING: usize = 4;
+        if depth > MAX_NESTING {
+            return false;
+        }
+        let Some(data) = self.graph().node_data(node) else {
+            return false;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Literal(_)
+            | SemanticNodeData::Object(_)
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::Signature { .. } => true,
+            SemanticNodeData::Primitive(kind) => matches!(
+                kind,
+                PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Symbol
+                    | PrimitiveKind::Object
+            ),
+            SemanticNodeData::DeclRef { identity }
+            | SemanticNodeData::InstantiationRef { base: identity, .. } => matches!(
+                self.dispatch.prepared_decl_kind(identity),
+                Some(
+                    verter_semantic::analysis::type_eval::TypeDeclKind::Interface
+                        | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                )
+            ),
+            SemanticNodeData::Intersection(arms) => {
+                let arms = arms.members_arc();
+                drop(data);
+                arms.iter()
+                    .any(|arm| self.provably_non_nullish(*arm, depth + 1))
+            }
+            _ => false,
+        }
+    }
+
+    /// Join intersection `contributors` (at least one) the member-value
+    /// way, pushing the joined value onto `results`.
+    fn join_intersection_contributors(
+        &self,
+        contributors: Vec<SemanticNodeId>,
+        results: &mut Vec<SemanticNodeId>,
+    ) {
+        if contributors.len() >= 2
             && contributors
                 .iter()
                 .any(|v| value_may_contribute_call_signatures(self.graph(), *v))
@@ -4373,7 +4850,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// Whether a projected path's terminal has a one-level surface to
     /// synthesise (see [`ProjectedTerminalSurface`]). Syntactic over the
     /// terminal's own node: a transparent `Alias` classifies its target,
-    /// a union classifies from its arms, and nothing is dispatched.
+    /// a union or an intersection classifies from its arms (`1 & (1 | 2)`
+    /// and `string & { tag: 1 }` are types of their own, not the members
+    /// of a surface), and nothing is dispatched.
     fn projected_terminal_surface(&self, node: SemanticNodeId) -> ProjectedTerminalSurface {
         let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
         let mut stack = vec![node];
@@ -4387,11 +4866,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             };
             match &*data {
                 SemanticNodeData::Object(_)
-                | SemanticNodeData::Intersection(_)
                 | SemanticNodeData::MergedDecl { .. }
                 | SemanticNodeData::ObjectSpreadProgram(_) => {}
                 SemanticNodeData::Alias(target) => stack.push(*target),
                 SemanticNodeData::Union(arms) => stack.extend(arms.iter().copied()),
+                SemanticNodeData::Intersection(arms) => stack.extend(arms.iter().copied()),
                 SemanticNodeData::DeclRef { .. }
                 | SemanticNodeData::InstantiationRef { .. }
                 | SemanticNodeData::BareRef(_)
@@ -6924,6 +7403,43 @@ fn arm_is_object_surface(graph: &SemanticGraphStore, arm: SemanticNodeId) -> boo
 /// this wrapper then interns each accumulated same-name method overload group
 /// into an `Intersection` value node, while a single-signature method or an
 /// ordinary property keeps its verbatim value.
+/// The overload group of one merged method: its `values` in source order,
+/// `declarations` naming each value's declaration. The overloads of one
+/// declaration form an `OverloadGroup`; overloads from several
+/// declarations form a `MergedOverloadGroup` with one arm per declaration.
+/// Both are ORDERED carriers — a commutative sort would reverse the observed
+/// overload set — and both are one method's signature list, never an
+/// intersection type.
+fn intern_merged_overloads(
+    graph: &SemanticGraphStore,
+    values: &[SemanticNodeId],
+    declarations: &[usize],
+) -> SemanticNodeId {
+    use crate::semantic_query::composite::CompositeList;
+    let mut arms: Vec<SemanticNodeId> = Vec::new();
+    let mut start = 0;
+    while start < values.len() {
+        let mut end = start + 1;
+        while end < values.len() && declarations[end] == declarations[start] {
+            end += 1;
+        }
+        arms.push(if end - start == 1 {
+            values[start]
+        } else {
+            graph.intern_node(SemanticNodeData::Intersection(
+                CompositeList::overload_group(Arc::from(&values[start..end])),
+            ))
+        });
+        start = end;
+    }
+    match arms.as_slice() {
+        [single_declaration] => *single_declaration,
+        _ => graph.intern_node(SemanticNodeData::Intersection(
+            CompositeList::merged_overload_group(Arc::from(arms.into_boxed_slice())),
+        )),
+    }
+}
+
 fn merge_declaration_surfaces(
     graph: &SemanticGraphStore,
     contributor_surfaces: &[ShallowSurface],
@@ -6940,16 +7456,8 @@ fn merge_declaration_surfaces(
                 == Some(verter_type_expr::ObjectMethodKind::Method)
                 && merged.values.len() > 1
             {
-                // ORDERED carrier: a same-name method overload group in
-                // source order — commutative sorting would reverse the
-                // observed overload set.
-                let group = graph.intern_node(SemanticNodeData::Intersection(
-                    crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
-                        merged.values.into_boxed_slice(),
-                    )),
-                ));
                 ShallowSurfaceMember {
-                    value: group,
+                    value: intern_merged_overloads(graph, &merged.values, &merged.declarations),
                     ..merged.member
                 }
             } else {

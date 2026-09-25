@@ -627,6 +627,84 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.resolve_structural_fact_demand(node, context, true, false)
     }
 
+    /// The named declaration an indexed access reads, when its terminal is
+    /// one: the object evaluated, the member read at navigate altitude, and
+    /// the read kept only when it is a declaration or class reference.
+    /// `None` for any other access (a computed index, a partial read, a
+    /// terminal that is not a named reference).
+    fn named_indexed_access(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<EvaluateDeferredOutcome> {
+        let (object, index) = match self.graph().node_data(node)?.as_ref() {
+            SemanticNodeData::IndexedAccess { object, index }
+                if !matches!(index, IndexKey::Computed(_)) =>
+            {
+                (*object, clone_index_key(index))
+            }
+            _ => return None,
+        };
+        let base =
+            self.evaluate_deferred_outcome(object, context.with_mode(ProjectionMode::Navigate));
+        if !matches!(base.completeness, ResultCompleteness::Complete) {
+            return None;
+        }
+        let read = self.execute_read(SemanticQueryKey::IndexedAccess {
+            base: base.node,
+            index,
+            mode: ProjectionMode::Navigate,
+        });
+        if read.result_is_partial {
+            return None;
+        }
+        let QueryResult::Value(value) = read.value else {
+            return None;
+        };
+        self.is_named_reference(value)
+            .then(|| EvaluateDeferredOutcome::complete(value))
+    }
+
+    /// Whether `node` is a type the checker prints by name: a declaration
+    /// or class reference, or a union or intersection of them.
+    fn is_named_reference(&self, node: SemanticNodeId) -> bool {
+        match self.graph().node_data(node).as_deref() {
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::ClassExpressionInstance { .. },
+            ) => true,
+            Some(SemanticNodeData::Union(arms)) => {
+                arms.iter().all(|arm| self.is_named_reference(*arm))
+            }
+            Some(SemanticNodeData::Intersection(arms)) => {
+                arms.iter().all(|arm| self.is_named_reference(*arm))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether reading `index` off the evaluated `object` at navigate
+    /// altitude ends at a named declaration or class reference.
+    pub(super) fn indexed_access_reads_named_declaration(
+        &self,
+        object: SemanticNodeId,
+        index: &IndexKey,
+    ) -> bool {
+        let read = self.execute_read(SemanticQueryKey::IndexedAccess {
+            base: object,
+            index: clone_index_key(index),
+            mode: ProjectionMode::Navigate,
+        });
+        if read.result_is_partial {
+            return false;
+        }
+        let QueryResult::Value(value) = read.value else {
+            return false;
+        };
+        self.is_named_reference(value)
+    }
+
     /// Shared residual-carrier resolution loop backing
     /// [`Self::normalize_node_for_structural_fact_demand`] (both residual arms
     /// resolve), [`Self::peel_node_for_uninstantiated_carrier_fact_demand`]
@@ -650,7 +728,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Step 1: evaluate deferred shells (Alias / KeyOf / IndexedAccess /
         // Mapped / Conditional / TemplateLiteral / DeclPlaceholder / bare-import),
         // merging the evaluation's typed completeness into the demand outcome.
-        let first = self.evaluate_deferred_outcome(node, context);
+        // The declaration-keeping mode prints an indexed access that reads
+        // a named declaration by that name, as the checker does (`W['d']`
+        // over `d: Decl` is `Decl`, a class constructor's `prototype` its
+        // class): the read stops at the reference its terminal holds.
+        let first = match (!resolve_declaration_refs)
+            .then(|| self.named_indexed_access(node, context))
+            .flatten()
+        {
+            Some(named) => named,
+            None => self.evaluate_deferred_outcome(node, context),
+        };
         let mut completeness = first.completeness;
         let mut n = first.node;
         // Step 2: resolve residual DeclRef / InstantiationRef carriers the
@@ -1255,6 +1343,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// The keys a `keyof` carrier over a declaration, an application or a
+    /// mapped type settles to under a demand that reduces operators
+    /// ([`Self::key_of_through_carrier`]); `None` when `keys` is no such
+    /// carrier or its keys stay the carrier.
+    fn settled_key_of_carrier(
+        &self,
+        keys: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        if !crate::semantic_query::may_reduce_operator(context) {
+            return None;
+        }
+        let base = match self.graph().node_data(keys).as_deref() {
+            Some(SemanticNodeData::KeyOf { base }) => *base,
+            _ => return None,
+        };
+        if !matches!(
+            self.graph().node_data(base).as_deref(),
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::Mapped { .. }
+                    | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
+            )
+        ) {
+            return None;
+        }
+        self.key_of_through_carrier(base, context)
+    }
+
     /// Entry-scoped workhorse for the deferred-shell evaluator. Returns the
     /// resolved node PLUS the typed completeness of THIS evaluation (see
     /// [`EvaluateDeferredOutcome`]).
@@ -1349,10 +1467,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match std::mem::replace(&mut frame.stage, DeferredEvaluationStage::EvaluateCurrent)
                 {
                     DeferredEvaluationStage::AwaitKeyOfBase => {
-                        let read = self.execute_read(SemanticQueryKey::KeyOf {
+                        let mut read = self.execute_read(SemanticQueryKey::KeyOf {
                             base: child.node,
                             context: frame.context,
                         });
+                        // A `keyof` the builder kept as a carrier over a
+                        // declaration, an application or a mapped type is
+                        // evaluated here, at a demand for its value: its
+                        // keys where they settle, as the checker prints
+                        // them.
+                        if let QueryResult::Value(keys) = read.value {
+                            if let Some(settled) = self.settled_key_of_carrier(keys, frame.context)
+                            {
+                                read.value = QueryResult::Value(settled);
+                            }
+                        }
                         let fallback = self.opaque(QueryError::Miss);
                         self.deferred_read_action(frame, read, fallback)
                     }

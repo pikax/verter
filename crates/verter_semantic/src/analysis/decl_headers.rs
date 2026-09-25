@@ -240,6 +240,13 @@ pub struct DeclHeaderIndex {
     /// construct signatures. Empty in the `from_eval_env` mirror (the
     /// lowered env carries no class modifiers).
     pub abstract_classes: FxHashSet<DeclBindingKey>,
+    /// The accessibility each file-scope class declaration's FIRST
+    /// constructor is authored with — the declaration fact behind the
+    /// checker's `constructorVisibilitiesAreCompatible` over the class's
+    /// construct signatures. A class that declares no constructor is
+    /// absent (its construct signatures are its base's). Empty in the
+    /// `from_eval_env` mirror.
+    pub constructor_visibility: FxHashMap<DeclBindingKey, verter_type_expr::MemberVisibility>,
 }
 
 impl DeclHeaderIndex {
@@ -581,7 +588,7 @@ fn index_top_level_statement(
             index_interface(decl, decl.id.name.as_str(), ctx, &mut index.type_headers);
         }
         Statement::TSModuleDeclaration(module) => {
-            index_module_declaration(module, ctx, index, None);
+            index_module_declaration(module, ctx, index, None, false);
         }
         Statement::TSGlobalDeclaration(global) => {
             index_augmentation_block(&global.body, ctx, index, &AugmentationScopeKind::Global);
@@ -663,7 +670,7 @@ fn index_declaration(
             index_interface(iface, iface.id.name.as_str(), ctx, &mut index.type_headers);
         }
         Declaration::TSModuleDeclaration(module) => {
-            index_module_declaration(module, ctx, index, None);
+            index_module_declaration(module, ctx, index, None, false);
         }
         Declaration::TSGlobalDeclaration(global) => {
             index_augmentation_block(&global.body, ctx, index, &AugmentationScopeKind::Global);
@@ -784,6 +791,7 @@ fn index_module_declaration(
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     prefix: Option<&str>,
+    ambient: bool,
 ) {
     if let TSModuleDeclarationName::StringLiteral(spec) = &decl.id {
         if let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = decl.body.as_ref() {
@@ -803,6 +811,7 @@ fn index_module_declaration(
     let Some(body) = decl.body.as_ref() else {
         return;
     };
+    let ambient = ambient || decl.declare;
 
     // Record the namespace BLOCK itself (EMPTY blocks included — a
     // block with zero members is still a named lexical scope). Recorded
@@ -816,27 +825,30 @@ fn index_module_declaration(
 
     match body {
         TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
-            index_module_declaration(inner, ctx, index, Some(module_name.as_str()));
+            index_module_declaration(inner, ctx, index, Some(module_name.as_str()), ambient);
         }
         TSModuleDeclarationBody::TSModuleBlock(block) => {
             for stmt in &block.body {
-                index_namespaced_statement(stmt, ctx, index, module_name.as_str());
+                index_namespaced_statement(stmt, ctx, index, module_name.as_str(), ambient);
             }
         }
     }
 }
 
-/// Mirror of `extract_namespaced_statement`: type aliases, interfaces and
+/// Mirror of `collect_namespaced_statement`: type aliases, interfaces and
 /// nested modules register under their qualified `Ns.Name`. Namespace VALUE
-/// indexing is EXPORT-ONLY — only an `export const`/`let`/`var` (routed via the
-/// `ExportNamedDeclaration` path to `index_namespaced_declaration`) registers a
-/// qualified value member such as `N.VERSION`; a non-exported `const hidden = …`
-/// is private to the namespace body and is intentionally NOT indexed.
+/// indexing is EXPORT-ONLY — only an exported `const`/`let`/`var`/`function`
+/// (routed via the `ExportNamedDeclaration` path to
+/// `index_namespaced_declaration`) registers a qualified value member such as
+/// `N.VERSION`; a non-exported `const hidden = …` is private to the namespace
+/// body and is NOT indexed — except in an `ambient` namespace, which exports
+/// every member.
 fn index_namespaced_statement(
     stmt: &Statement<'_>,
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
+    ambient: bool,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
@@ -854,16 +866,30 @@ fn index_namespaced_statement(
             }
         }
         Statement::TSModuleDeclaration(module) => {
-            index_module_declaration(module, ctx, index, Some(namespace));
+            index_module_declaration(module, ctx, index, Some(namespace), ambient);
         }
-        // Export-only: a DIRECT (non-exported) `VariableDeclaration` is private
-        // to the namespace body and is intentionally NOT indexed. Only the
-        // exported path below (`export const VERSION = …` →
-        // `index_namespaced_declaration`) registers a qualified value member.
+        // Export-only: a DIRECT (non-exported) value declaration is private to
+        // a non-ambient namespace body and is NOT indexed. The exported path
+        // below (`export const VERSION = …` → `index_namespaced_declaration`)
+        // registers a qualified value member.
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
-                index_namespaced_declaration(decl, ctx, index, namespace);
+                index_namespaced_declaration(decl, ctx, index, namespace, ambient);
             }
+        }
+        Statement::VariableDeclaration(var_decl) if ambient => {
+            for decl in &var_decl.declarations {
+                index_variable(
+                    decl,
+                    var_decl.kind,
+                    ctx,
+                    &mut index.value_headers,
+                    Some(namespace),
+                );
+            }
+        }
+        Statement::FunctionDeclaration(func) if ambient => {
+            index_function_in(func, ctx, &mut index.value_headers, Some(namespace));
         }
         _ => {}
     }
@@ -874,6 +900,7 @@ fn index_namespaced_declaration(
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
+    ambient: bool,
 ) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
@@ -891,7 +918,7 @@ fn index_namespaced_declaration(
             }
         }
         Declaration::TSModuleDeclaration(module) => {
-            index_module_declaration(module, ctx, index, Some(namespace));
+            index_module_declaration(module, ctx, index, Some(namespace), ambient);
         }
         Declaration::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
@@ -903,6 +930,9 @@ fn index_namespaced_declaration(
                     Some(namespace),
                 );
             }
+        }
+        Declaration::FunctionDeclaration(func) => {
+            index_function_in(func, ctx, &mut index.value_headers, Some(namespace));
         }
         _ => {}
     }
@@ -1013,6 +1043,29 @@ fn index_class(decl: &Class<'_>, ctx: HeaderStatementContext<'_>, index: &mut De
     index_named_class(decl, id.name.as_str(), ctx, index);
 }
 
+/// The accessibility a class's FIRST authored constructor declares (the
+/// checker reads the first construct signature's declaration); `None`
+/// when the class declares no constructor.
+fn constructor_visibility(decl: &Class<'_>) -> Option<verter_type_expr::MemberVisibility> {
+    let constructor = decl.body.body.iter().find_map(|element| match element {
+        ClassElement::MethodDefinition(method)
+            if method.kind == oxc_ast::ast::MethodDefinitionKind::Constructor =>
+        {
+            Some(method)
+        }
+        _ => None,
+    })?;
+    Some(match constructor.accessibility {
+        Some(oxc_ast::ast::TSAccessibility::Private) => verter_type_expr::MemberVisibility::Private,
+        Some(oxc_ast::ast::TSAccessibility::Protected) => {
+            verter_type_expr::MemberVisibility::Protected
+        }
+        Some(oxc_ast::ast::TSAccessibility::Public) | None => {
+            verter_type_expr::MemberVisibility::Public
+        }
+    })
+}
+
 fn index_named_class(
     decl: &Class<'_>,
     name: &str,
@@ -1024,6 +1077,29 @@ fn index_named_class(
     };
     if decl.r#abstract {
         index.abstract_classes.insert(ctx.key(name));
+    }
+    if let Some(visibility) = constructor_visibility(decl) {
+        index
+            .constructor_visibility
+            .insert(ctx.key(name), visibility);
+    }
+    // A heritage EXPRESSION's synthetic value (see
+    // `class_heritage_value_name`), mirroring `collect_named_class`.
+    if let Some(heritage) = decl.super_class.as_ref().filter(|heritage| {
+        crate::analysis::type_eval_build::heritage_expression_name(heritage).is_none()
+    }) {
+        let span: Span = heritage.span().into();
+        let entry = index
+            .value_headers
+            .entry(ctx.key(&crate::analysis::type_eval_build::class_heritage_value_name(name)))
+            .or_insert_with(|| ValueDeclHeader {
+                kind: ValueDeclKind::Const,
+                span,
+                name_span: span,
+                object_member_headers: Vec::new(),
+                contributors: Vec::new(),
+            });
+        push_contributor(&mut entry.contributors, ctx, span, span);
     }
 
     let params = type_param_headers(decl.type_parameters.as_deref());
@@ -1126,6 +1202,17 @@ fn index_function(
     ctx: HeaderStatementContext<'_>,
     table: &mut DeclMap<ValueDeclHeader>,
 ) {
+    index_function_in(func, ctx, table, None);
+}
+
+/// [`index_function`] for a function declared in `namespace`: indexed under
+/// its QUALIFIED name `NS.f`, as a namespaced variable is.
+fn index_function_in(
+    func: &oxc_ast::ast::Function<'_>,
+    ctx: HeaderStatementContext<'_>,
+    table: &mut DeclMap<ValueDeclHeader>,
+    namespace: Option<&str>,
+) {
     let Some(id) = &func.id else {
         return;
     };
@@ -1134,8 +1221,12 @@ fn index_function(
     } else {
         ValueDeclKind::Function
     };
+    let key = match namespace {
+        Some(ns) => format!("{ns}.{}", id.name),
+        None => id.name.to_string(),
+    };
     let entry = table
-        .entry(ctx.key(id.name.as_str()))
+        .entry(ctx.key(&key))
         .or_insert_with(|| ValueDeclHeader {
             kind,
             span: func.span.into(),

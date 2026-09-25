@@ -170,6 +170,7 @@ impl<'s> Lowerer<'s> {
         let mut index_signatures = Vec::new();
         let mut constructor_overloads: Vec<Arc<[SliceClassParam]>> = Vec::new();
         let mut constructor_implementation: Option<Arc<[SliceClassParam]>> = None;
+        let mut constructor_visibility: Option<verter_type_expr::MemberVisibility> = None;
         for element in &class.body.body {
             match element {
                 // A static block runs at class evaluation but declares no
@@ -206,9 +207,11 @@ impl<'s> Lowerer<'s> {
                             annotation.span,
                             &own_binders,
                         )),
-                        (None, Some(initializer)) => {
-                            self.lower_class_initializer(initializer, property.readonly)
-                        }
+                        (None, Some(initializer)) => self.lower_class_initializer(
+                            initializer,
+                            property.readonly,
+                            property.r#static,
+                        ),
                         (None, None) => SliceClassMemberValue::Declared(self.gate(
                             TypeExpr::Primitive(PrimitiveName::Any),
                             property.span,
@@ -250,7 +253,7 @@ impl<'s> Lowerer<'s> {
                             &own_binders,
                         )),
                         (None, Some(initializer)) => {
-                            self.lower_class_initializer(initializer, false)
+                            self.lower_class_initializer(initializer, false, property.r#static)
                         }
                         (None, None) => SliceClassMemberValue::Declared(self.gate(
                             TypeExpr::Primitive(PrimitiveName::Any),
@@ -285,6 +288,8 @@ impl<'s> Lowerer<'s> {
                     // `private constructor(a)` class's `new (a)`), so every
                     // constructor lowers alike.
                     if method.kind == MethodDefinitionKind::Constructor {
+                        constructor_visibility
+                            .get_or_insert(class_member_visibility(method.accessibility));
                         let parameters = self.lower_class_constructor(
                             &method.value.params,
                             &own_binders,
@@ -410,6 +415,7 @@ impl<'s> Lowerer<'s> {
                 (true, Some(implementation)) => Some(Arc::from(vec![implementation])),
                 (true, None) => None,
             },
+            constructor_visibility,
             members: Arc::from(lowered.into_boxed_slice()),
             index_signatures: Arc::from(index_signatures.into_boxed_slice()),
         }))
@@ -455,6 +461,10 @@ impl<'s> Lowerer<'s> {
                         ))
                     }
                     (None, None, Some(getter)) if getter.value.body.is_some() => {
+                        self.member_this = Some(
+                            (!group.is_static)
+                                .then_some(crate::flow_slice_content::SliceThis::Receiver),
+                        );
                         match self.lower_nested_function(&FunctionNode::Function(&getter.value)) {
                             SliceExpr::UnmodeledBinding => SliceClassMemberValue::Unmodeled,
                             function => SliceClassMemberValue::Getter(Box::new(function)),
@@ -496,6 +506,10 @@ impl<'s> Lowerer<'s> {
                         continue;
                     };
                     let value = if method.value.body.is_some() {
+                        self.member_this = Some(
+                            (!group.is_static)
+                                .then_some(crate::flow_slice_content::SliceThis::Receiver),
+                        );
                         match self.lower_nested_function(&FunctionNode::Function(&method.value)) {
                             SliceExpr::UnmodeledBinding => {
                                 match self.lower_class_signature(&method.value, own_binders) {
@@ -557,7 +571,6 @@ impl<'s> Lowerer<'s> {
                             preserve_literal: true,
                         },
                     )),
-                    authored: verter_type_expr_oxc::lower_property_key(key, self.source),
                 })
             }
         }
@@ -572,6 +585,7 @@ impl<'s> Lowerer<'s> {
         &mut self,
         initializer: &Expression<'_>,
         readonly: bool,
+        is_static: bool,
     ) -> SliceClassMemberValue {
         if !self.nullability.is_strict() && expr_is_widening_nullish(initializer) {
             return SliceClassMemberValue::Declared(self.gate(
@@ -580,13 +594,23 @@ impl<'s> Lowerer<'s> {
                 &[],
             ));
         }
+        // An instance initializer's `this` is the instance under
+        // construction; a static one's is the class, which is not modeled.
+        let enclosing_this = std::mem::replace(
+            &mut self.this,
+            (!is_static).then_some(crate::flow_slice_content::SliceThis::Receiver),
+        );
+        self.class_property_initializers += 1;
+        let value = self.lower_expr(
+            initializer,
+            ExprMode::BindingInit {
+                preserve_literal: readonly,
+            },
+        );
+        self.class_property_initializers -= 1;
+        self.this = enclosing_this;
         SliceClassMemberValue::Initializer {
-            value: Box::new(self.lower_expr(
-                initializer,
-                ExprMode::BindingInit {
-                    preserve_literal: readonly,
-                },
-            )),
+            value: Box::new(value),
             widen: !readonly,
         }
     }

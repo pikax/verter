@@ -452,6 +452,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         optional: parameter.optional,
                         rest: parameter.rest,
                         span: parameter.span,
+                        declared_literal: parameter.declared_literal,
                     })
                     .collect();
                 let type_parameters: Vec<_> = type_parameters

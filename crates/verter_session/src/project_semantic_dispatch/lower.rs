@@ -1782,6 +1782,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                     scope.clone(),
                 );
+                // A `keyof` operand the environment binds names a type
+                // parameter even once it lowers to its argument: the mapping
+                // stays homomorphic over it. An unbound operand is read off
+                // its lowered node below.
+                let over_type_variable = match source.as_ref() {
+                    TypeExpr::KeyOf(inner) => match inner.as_ref() {
+                        TypeExpr::TypeParameter(param) => env.contains_key(param.name.as_str()),
+                        TypeExpr::Ref {
+                            name,
+                            type_arguments,
+                        } => type_arguments.is_empty() && env.contains_key(name.as_ref()),
+                        _ => false,
+                    },
+                    _ => false,
+                };
                 let (source_sem, key_space_sem, base_infer_name) = match source.as_ref() {
                     // `{ [K in keyof T]: ... }` — extract T.
                     TypeExpr::KeyOf(inner) => {
@@ -1939,6 +1954,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     readonly: readonly_mod,
                     name_remap,
                     kind,
+                    over_type_variable: over_type_variable
+                        || (matches!(source.as_ref(), TypeExpr::KeyOf(_))
+                            && crate::semantic_query::keyof_operand_is_type_variable(
+                                graph, source_sem,
+                            )),
                 };
 
                 // Route/mode-INDEPENDENT L1 carrier-stop (LOWERING
@@ -2123,7 +2143,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     || !matches!(
                         graph.node_data(obj_id).as_deref(),
                         Some(SemanticNodeData::Object(_))
-                    );
+                    )
+                    // A terminal that reads a named declaration (`(typeof
+                    // C)['prototype']` is `C`) stays the access: each
+                    // consumer reads it at its own altitude, and a printed
+                    // answer keeps the name.
+                    || self.indexed_access_reads_named_declaration(obj_id, &index_key);
                 if should_defer {
                     graph.intern_node_with_scope(
                         SemanticNodeData::IndexedAccess {
@@ -2553,6 +2578,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         rest: param.rest,
                         // Carry the IR parameter's OXC span verbatim.
                         span: param.span,
+                        declared_literal: crate::semantic_query::declares_literal_type(&param.ty),
                     })
                     .collect();
                 // A body-derived return carries the predicate the checker infers

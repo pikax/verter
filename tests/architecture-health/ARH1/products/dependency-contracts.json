@@ -697,7 +697,7 @@
       "snapshot": {
         "pubFn": 0,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 15,
+        "pubCrateFn": 17,
         "pubType": 0,
         "pubCrateMod": 1,
         "inlinePubMod": 0,
@@ -1009,13 +1009,13 @@
         }
       ],
       "snapshot": {
-        "pubFn": 175,
+        "pubFn": 177,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 42,
+        "pubCrateFn": 44,
         "pubType": 200,
         "pubCrateMod": 2,
         "inlinePubMod": 15,
-        "pubStructField": 294
+        "pubStructField": 298
       },
       "authority": [
         {
@@ -1358,11 +1358,11 @@
       "snapshot": {
         "pubFn": 17,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 11,
-        "pubType": 44,
+        "pubCrateFn": 12,
+        "pubType": 51,
         "pubCrateMod": 1,
         "inlinePubMod": 0,
-        "pubStructField": 77
+        "pubStructField": 98
       },
       "authority": [
         {

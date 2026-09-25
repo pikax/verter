@@ -2855,15 +2855,11 @@ mod matrix_suite {
             script: "function makeProps(v: string | number) { if (typeof v === \"string\") { return () => v } return () => \"z\" as const }",
             checker: "() => string",
             outcome: CellOutcome::Value {
-                rendered: "() => Union(number | string)",
-                degradation: Degr::FlowGap(FlowGap::ClosureCapture),
-                warm_replay: false,
+                rendered: "() => string",
+                degradation: Degr::None,
+                warm_replay: true,
             },
-            gap: "the typeof guard established BEFORE closure creation does not narrow the \
-                  captured read, so the guarded arm evaluates to `() => string | number` where \
-                  the checker preserves `string`. Return-position subtype reduction then \
-                  absorbs the `() => \"z\"` peer into it, so the collapse the checker performs \
-                  DOES happen — onto an over-broad arm; owner U6.LOOP_CLOSURE",
+            gap: "",
         },
         FixedCell {
             id: "iife_write_in_try_finally",
@@ -3472,12 +3468,13 @@ mod expectation_controls {
     }
 
     /// The degraded (`ReturnOnly`, cold-replay) control program — the
-    /// D12_helper_tagged shape. Shared by every control that needs a REAL
-    /// degraded trace.
-    const DEGRADED_SCRIPT: &str = "class Box { readonly tag = \"box\" }\n\
-                                   declare function box(strings: TemplateStringsArray): Box\n\
-                                   function makeProps() { \
-                                   const f = () => box`b`; return { label: \"x\", made: f() } \
+    /// D16_helper_undeclared_callee shape. Shared by every control that
+    /// needs a REAL degraded trace. `notDeclared` is declared nowhere, so
+    /// its call is TS2304 and the checker's error type is recovery the
+    /// flow-return lane does not model: `made` is an unmodelled position
+    /// by design.
+    const DEGRADED_SCRIPT: &str = "function makeProps() { \
+                                   const f = () => notDeclared(); return { label: \"x\", made: f() } \
                                    }";
 
     /// CONTROL — exact literal values, BOTH live variants: `"a"` accepts
@@ -4842,7 +4839,7 @@ mod expectation_controls {
             "a wrong degradation pin must fail EXACTLY the typed-degradation clause: {fails:?}"
         );
 
-        // Degraded program (the D12_helper_tagged shape): ReturnOnly, never warm.
+        // Degraded program (the D16_helper_undeclared_callee shape): ReturnOnly, never warm.
         let degraded =
             drive_expect_boundary("", "ctl_degraded", DEGRADED_SCRIPT, "makeProps", None);
         let degraded_json = degraded
@@ -4853,7 +4850,7 @@ mod expectation_controls {
         assert!(
             check_boundary(
                 &degraded_json,
-                Degr::UnmodeledPosition,
+                Degr::UnrepresentableCallee,
                 false,
                 &degraded.boundary
             )
@@ -4864,7 +4861,7 @@ mod expectation_controls {
         );
         let fails = check_boundary(
             &degraded_json,
-            Degr::UnmodeledPosition,
+            Degr::UnrepresentableCallee,
             true,
             &degraded.boundary,
         );
@@ -4909,7 +4906,12 @@ mod expectation_controls {
             second_error: None,
             second_error_kind: None,
         };
-        let fails = check_boundary(&degraded_json, Degr::UnmodeledPosition, false, &flagless);
+        let fails = check_boundary(
+            &degraded_json,
+            Degr::UnrepresentableCallee,
+            false,
+            &flagless,
+        );
         assert!(
             fails.len() == 1 && fails[0].contains("COLD-COMPUTE again"),
             "warm_replay=false with from_cache=false but ZERO cold computes must fail exactly \
@@ -4995,7 +4997,7 @@ mod expectation_controls {
         };
         let fails = check_boundary(
             &degraded_json,
-            Degr::UnmodeledPosition,
+            Degr::UnrepresentableCallee,
             false,
             &degr_drifted,
         );
@@ -5177,20 +5179,20 @@ mod expectation_controls {
 
         // (h) Refusal IDENTITY drift across the replay: the real trace
         // with ONLY the second call's typed kind substituted by a
-        // DIFFERENT program's real measured refusal kind (a
-        // return-bearing loop, which refuses with a distinct typed
-        // kind). Only the identity-drift clause may fire.
+        // DIFFERENT program's real measured refusal kind (a `for await`
+        // loop, which refuses with a distinct typed kind). Only the
+        // identity-drift clause may fire.
         let loop_refused = drive_expect_boundary(
             "",
             "ctl_refusal_loop",
-            "function makeProps() { while (true) { return \"a\" as const } }",
+            "async function makeProps(xs: string[]) { for await (const x of xs) { return x } return \"b\" as const }",
             "makeProps",
             None,
         );
         let lr = &loop_refused.boundary;
         assert!(
             lr.error_kind.is_some() && lr.error_kind != r.error_kind,
-            "control precondition: the return-bearing loop refuses with a DIFFERENT typed \
+            "control precondition: the `for await` loop refuses with a DIFFERENT typed \
              kind than the IIFE-write program; measured loop {:?} vs iife {:?}",
             lr.error_kind,
             r.error_kind
@@ -5287,7 +5289,7 @@ mod expectation_controls {
         );
     }
 
-    /// CONTROL — the typed unmodelled-position marker: the D12_helper_tagged shape's
+    /// CONTROL — the typed unmodelled-position marker: the D16_helper_undeclared_callee shape's
     /// `made` member measures `Opaque(UnmodeledPosition)`; the pin matches
     /// it there and REJECTS a modelled member, so the variant is
     /// exercised and discriminating, not a dead vocabulary row.
@@ -5303,7 +5305,7 @@ mod expectation_controls {
                     &ExpectedNode::Object(&[("label", STR), ("made", OPAQUE)])
                 )
                 .is_empty(),
-                "the D12_helper_tagged shape must pin its unmodelled member with the TYPED marker \
+                "the D16_helper_undeclared_callee shape must pin its unmodelled member with the TYPED marker \
                      (measured {})",
                 render_node(dispatch, node, 0)
             );
@@ -5521,7 +5523,7 @@ mod expectation_controls {
         };
         let fails = check_boundary(
             &degraded_json,
-            Degr::UnmodeledPosition,
+            Degr::UnrepresentableCallee,
             true,
             &cold_but_flagless,
         );
@@ -5659,22 +5661,18 @@ mod expectation_controls {
 
 /// A control test written INSIDE a nested function value, over a binding
 /// an ENCLOSING frame declares, establishes a narrowing the checker
-/// applies to every read that follows it in that nested body. The
-/// lowering carries no such fact, so the demanded answer is a SUPERSET —
-/// and a superset is only ever admissible behind the typed gap.
+/// applies to every read that follows it in that nested body — and the
+/// nested frame carries it: a captured binding is a narrowing subject like
+/// any other, so the answer is exact, complete and warm (measured, 7.0.2:
+/// `() => string | 0` for the two returned arrows and `string | 0` for the
+/// invoked value).
 ///
-/// A captured binding is a landing slot like any other here: the
-/// evaluator resolves the nested read against the enclosing frame's
-/// binding, so classifying it as "no slot to land on" would be a POSITIVE
-/// claim of inertness that the checker contradicts.
-///
-/// The controls are what make this discriminating rather than a blanket
-/// refusal of closures: a nested value narrowing its OWN parameter still
-/// publishes complete and warm, an outer-frame guard is untouched, and a
-/// closure that never mentions the capture keeps its clean result.
+/// The controls stay as they were: a nested value narrowing its OWN
+/// parameter, the same guard one frame out, and a closure that never
+/// mentions the capture.
 #[test]
-fn narrowing_over_a_captured_binding_degrades_and_never_warms() {
-    let degraded = [
+fn narrowing_over_a_captured_binding_is_carried_and_warms() {
+    let carried = [
         (
             "a `typeof` guard inside a returned arrow",
             "export {};\nfunction makeProps(x: string | number) { return () => { if (typeof x === \"string\") return x; return 0 } }",
@@ -5688,19 +5686,6 @@ fn narrowing_over_a_captured_binding_degrades_and_never_warms() {
             "export {};\nfunction makeProps(x: string | number) { return (() => { if (typeof x === \"string\") return x; return 0 })() }",
         ),
     ];
-    for (case, script) in degraded {
-        let measured = drive_expect_boundary("", "cap_deg", script, "makeProps", None);
-        assert_eq!(
-            measured.boundary.degradation,
-            Some(Degr::FlowGap(FlowGap::GuardNarrowing)),
-            "{case}: the uncarried narrowing takes the typed gap"
-        );
-        assert!(
-            !measured.boundary.second_from_cache,
-            "{case}: a degraded result is never served warm"
-        );
-    }
-
     let clean = [
         (
             "a nested value narrowing its OWN parameter",
@@ -5715,7 +5700,7 @@ fn narrowing_over_a_captured_binding_degrades_and_never_warms() {
             "export {};\nfunction makeProps(x: string | number) { return () => 1 }",
         ),
     ];
-    for (case, script) in clean {
+    for (case, script) in carried.into_iter().chain(clean) {
         let measured = drive_expect_boundary("", "cap_ok", script, "makeProps", None);
         assert_eq!(
             measured.boundary.degradation,
@@ -5805,9 +5790,9 @@ fn unclassifiable_guard_arms_remain_possible_degrade_and_never_warm() {
             id: "guard_typeof_unknown_negated_undefined",
             script: "export function f(x: unknown) { if (typeof x !== \"undefined\") return x; return 0; }",
             checker: "{} | null",
-            // Extensionally the checker's answer: its return reunion
-            // absorbs `0` into `{}`, which this join keeps as an arm.
-            rendered: "Union({  } | null | 0)",
+            // The return reunion absorbs `0` into the `{}` member of the
+            // narrowed `{} | null`.
+            rendered: "Union({  } | null)",
             degradation: Degr::None,
             warm: true,
         },

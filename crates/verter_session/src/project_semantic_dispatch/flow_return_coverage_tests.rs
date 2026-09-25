@@ -1819,10 +1819,9 @@ fn assignment_expression_return_is_the_assigned_type() {
 /// Oracle: `ReturnType<typeof leafClassExpr>` is
 /// `typeof (Anonymous class)`, declaration-emitted as `{ new (): {}; }`.
 ///
-/// The value is complete and undegraded, and still `ReturnOnly`: the
-/// class's constructor and field initializers are callables no indexed
-/// function position serves, so the capture family keeps its typed gap
-/// over them and the result never warms.
+/// The value is complete and undegraded, and warms: the class's implicit
+/// constructor only runs its field initializers, which are the enclosing
+/// frame's own footprint, so no capture obligation is left open over it.
 #[test]
 fn class_expression_return_is_its_constructor_type() {
     let host = ts_host();
@@ -1842,7 +1841,7 @@ fn class_expression_return_is_its_constructor_type() {
                 )],
             })),
             degradation: None,
-            candidates: 0,
+            candidates: 1,
         },
         "leafClassExpr"
     );
@@ -2053,11 +2052,13 @@ fn generic_chain_work(levels: usize) -> (Outcome, usize) {
 /// own transaction, every repeat re-evaluated the body and the work
 /// DOUBLED per level (20504 units at eleven levels, against 306 now); the
 /// host's audited entry ran out of connected-work budget at eleven. Every
-/// added level must now cost the same.
+/// added level must now cost the same — at nine, ten and eleven levels,
+/// and on through 32, 64 and 128, which the callee schedule evaluates
+/// without nesting a level per call.
 ///
-/// Runs on the production worker stack (`host_cpu_pool`'s 8 MiB): eleven
-/// levels nest 22 connected queries, deeper than a default test thread
-/// holds in an unoptimized build.
+/// Runs on the production worker stack (`host_cpu_pool`'s 8 MiB), so a
+/// chain evaluated recursively reaches its typed depth refusal rather than
+/// the end of an unoptimized build's default test-thread stack.
 #[test]
 fn a_generic_call_chain_reuses_each_completed_callee() {
     let worker = std::thread::Builder::new()
@@ -2088,6 +2089,22 @@ fn a_generic_call_chain_reuses_each_completed_callee() {
                 work_ten - work_nine,
                 "every added level must cost the same connected work \
                  ({work_nine} / {work_ten} / {work_eleven} at 9 / 10 / 11 levels)"
+            );
+            let (thirty_two, work_32) = generic_chain_work(32);
+            let (sixty_four, work_64) = generic_chain_work(64);
+            let (long, work_128) = generic_chain_work(128);
+            for (levels, outcome) in [(32, thirty_two), (64, sixty_four), (128, long)] {
+                assert_eq!(
+                    outcome, short,
+                    "a {levels}-level chain answers exactly like a two-level one"
+                );
+            }
+            let per_level = work_eleven - work_ten;
+            assert_eq!(
+                (work_64 - work_32, work_128 - work_64),
+                (32 * per_level, 64 * per_level),
+                "every added level must cost the same connected work \
+                 ({work_32} / {work_64} / {work_128} at 32 / 64 / 128 levels)"
             );
         })
         .expect("spawn the chain worker");
@@ -2124,6 +2141,12 @@ fn a_reused_callee_still_invalidates_its_consumers_on_edit() {
         "an edit to the reused callee must reach the chain's answer: {after:?}"
     );
 }
+
+/// The callee schedule's chains: deep, on a small stack, under a reduced
+/// budget, through other call shapes, and around recursive components.
+#[path = "flow_return_schedule_tests.rs"]
+mod schedule;
+
 /// CANARY (landed) — a `super.m()` call in a derived class method
 /// resolves to the base member's declared return.
 ///
@@ -2553,28 +2576,16 @@ fn optional_chained_call_return_unions_undefined() {
     );
 }
 
-/// CANARY — a TAGGED TEMPLATE call returns the tag function's return.
+/// CANARY (landed) — a TAGGED TEMPLATE call returns the tag function's
+/// return.
 ///
 /// Oracle: `ReturnType<typeof callTagged>` is `boolean`.
 ///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: callTagged
-///   left: Value { ty: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
-///  right: Value { ty: Primitive(Boolean), degradation: None, candidates: 1 }
-/// ```///
-/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
-/// result is a degraded success and nothing warms — so the row observes a
-/// VALUE rather than `Miss`. The capability gap named below is unchanged.
-///
-/// Owning layer: the TAGGED-TEMPLATE call capability — the tag
-/// function's signature is never consulted. The admission half is
-/// settled: it fails closed as a `ValueDescent::UnmodeledCall` rather
-/// than publishing `any` warm.
+/// The tagged template rides the one call carrier as a call of its tag
+/// (`SliceCall::TaggedTemplate`), whose first argument is the template
+/// strings and whose remaining arguments are the substitutions, so the
+/// value is the tag's return, clean and warm.
 #[test]
-#[ignore = "TaggedTemplateExpression has no call arm: the tag call fails closed as an unmodeled call position"]
 fn tagged_template_call_return_is_the_tag_return() {
     let host = ts_host();
     assert_clean_warm(&host, CALLS, "callTagged", boolean());
@@ -3939,28 +3950,15 @@ fn a_derived_constructor_with_a_super_call_is_not_served() {
     );
 }
 
-/// CANARY — a `this.<field>` read inside an instance method resolves to
-/// the field's declared type.
+/// A `this.<field>` read inside an instance method resolves to the
+/// field's declared type, complete and warm: `this` is the class's
+/// receiver, and the inherited field is read off the base where it is
+/// declared.
 ///
 /// Oracle: `ReturnType<typeof SuperCtorDerived.prototype.read>` is
 /// `number` — the parameter-property `public v: number` inherited from
 /// the base constructor.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed
-///   left: Value { ty: Primitive(Any), degradation: None, candidates: 1 }
-///  right: Value { ty: Primitive(Number), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: the flow evaluator's member arm again, this time with a
-/// `this` root rather than a parameter root. Note the answer differs from
-/// the parameter-root family: `this.v` lands on a WARM `any` rather than
-/// the warm `Opaque(Miss)` a parameter root produces, so the two roots
-/// take different paths to the same missing capability.
 #[test]
-#[ignore = "a `this.<field>` read has no member arm: it evaluates to `any` and is admitted warm"]
 fn this_field_read_inside_an_instance_method_resolves_to_the_field_type() {
     let host = host_with(&[(EXTRA, EXTRA_SRC)]);
     assert_eq!(
@@ -4183,33 +4181,32 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// therefore broader than the mechanism, which is the defect.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
-/// --ignoreConfig`) — the answers the fail-closed arm declines to
-/// produce, every one of them different from `any`:
+/// --ignoreConfig`) — the answer the fail-closed arm declines to
+/// produce, different from `any`:
 ///
 /// ```text
 /// callOptional    maybeFn?.()                     number | undefined
-/// callTagged      tag`a${1}b`                     boolean
 /// ```
 ///
 /// `await asyncSrc()` is NOT in this set: an awaited
 /// call is a modelled form (`ValueDescent::Awaited`) whose operand rides
 /// the call carrier, so `callAwait` publishes `Promise<number>` (see
 /// `awaited_call_return_is_the_awaited_value_wrapped_again`). Neither is
-/// `new`: a construction rides the call carrier to the construct
-/// signatures (see `construct_expression_return_is_the_instance_type`).
+/// `new` nor a tagged template: a construction rides the call carrier to
+/// the construct signatures (see
+/// `construct_expression_return_is_the_instance_type`), and a tagged
+/// template to its tag's call signatures (see
+/// `tagged_template_call_return_is_the_tag_return`).
 ///
 /// Mutation recipe: `value_is_unmodeled_call` is the single authority
 /// (both `value_descent`'s guarded arm and the content half's residual
 /// type-carrier check delegate to it), so flipping one of its arms flips
-/// exactly the matching rows — `TaggedTemplateExpression` to `false`
-/// flips `callTagged` back to a warm `any`, and
-/// `ChainElement::CallExpression` to `false` flips `callOptional`.
+/// exactly the matching rows — `ChainElement::CallExpression` to `false`
+/// flips `callOptional` back to a warm `any`.
 #[test]
 fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() {
     let host = ts_host();
-    for name in ["callOptional", "callTagged"] {
-        assert_fails_closed(&host, CALLS, name);
-    }
+    assert_fails_closed(&host, CALLS, "callOptional");
 }
 
 /// D7 — the SEQUENCE wrapping of a call does not change the call's
@@ -4218,14 +4215,15 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// The sequence's value is its last operand, so a call there lowers
 /// through the SAME structural call rails its bare spelling takes:
 /// `(0, restFn(1, 2, 3))` surfaces `restFn`'s `"rest"` clean and warm,
-/// exactly like the bare `callRest` twin, and `(0, new CtorC(1))`
-/// surfaces the constructed `CtorC` exactly like the bare `callNew` —
-/// the sequence context never converts a resolved call into a
-/// fail-closed marker.
+/// exactly like the bare `callRest` twin, `(0, new CtorC(1))` surfaces
+/// the constructed `CtorC` exactly like the bare `callNew`, and
+/// `` (0, tag`a${1}b`) `` surfaces the tag's `boolean` exactly like the
+/// bare `callTagged` — the sequence context never converts a resolved
+/// call into a fail-closed marker.
 ///
-/// The discriminator runs the other way with the same fixture: every
-/// call form with NO structural arm (an optional call, a tagged
-/// template) keeps the fail-closed verdict when a sequence wraps it —
+/// The discriminator runs the other way with the same fixture: a call
+/// form with NO structural arm (an optional call) keeps the fail-closed
+/// verdict when a sequence wraps it —
 /// the sequence context never converts an unmodeled call into a
 /// published value either. The delegation answers the CALL's own
 /// question; it invents no arm. An `await` last operand is a MODELLED
@@ -4238,22 +4236,23 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 ///
 /// ```text
 /// callSeqNew       CtorC                (published)
+/// callSeqTagged    boolean              (published)
 /// callSeqOptional  number | undefined   (declined — fails closed)
-/// callSeqTagged    boolean              (declined — fails closed)
 /// ```
 ///
 /// Mutation recipe: dropping the sequence delegation from the content
-/// half's sequence arm flips `callSeqRest`, `callSeqNew` and
-/// `callSeqAwait` to the fail-closed marker; widening the delegation past
-/// the paren-transparent `CallExpression` / `NewExpression` forms (a chain
-/// / tagged last operand) flips the two negative rows to a published
-/// value.
+/// half's sequence arm flips `callSeqRest`, `callSeqNew`, `callSeqTagged`
+/// and `callSeqAwait` to the fail-closed marker; widening the delegation
+/// past the paren-transparent `CallExpression` / `NewExpression` /
+/// `TaggedTemplateExpression` forms (a chain last operand) flips the
+/// negative row to a published value.
 #[test]
 fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
     let host = ts_host();
     // A resolved call surfaces through the sequence, clean and warm.
     assert_clean_warm(&host, CALLS, "callSeqRest", string_lit("rest"));
     assert_clean_warm(&host, CALLS, "callSeqNew", type_ref("CtorC"));
+    assert_clean_warm(&host, CALLS, "callSeqTagged", boolean());
     // An awaited call keeps its own modelled verdict through the
     // sequence: resolved operand, `Awaited` unwrap, async re-wrap.
     assert_clean_warm(
@@ -4265,10 +4264,8 @@ fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
             type_arguments: Arc::from(vec![number()].into_boxed_slice()),
         },
     );
-    // Every form with no structural arm keeps failing closed.
-    for name in ["callSeqOptional", "callSeqTagged"] {
-        assert_fails_closed(&host, CALLS, name);
-    }
+    // A form with no structural arm keeps failing closed.
+    assert_fails_closed(&host, CALLS, "callSeqOptional");
 }
 
 /// The DISCRIMINATOR for the call-position rule: the forms that are NOT
@@ -6681,14 +6678,13 @@ export function instantiatedOverloads() { const x: ReturnType<typeof O<string>> 
 
 /// How a CLASSES probe's answer is admitted.
 ///
-/// An answer read through a class expression's value is `ReturnOnly`: the
-/// class's constructor and field initializers are callables no indexed
-/// function position serves, so the capture family keeps its typed gap
-/// over them — the answer is complete and undegraded, and it never warms.
+/// An answer read through a class expression's value warms: the class's
+/// methods and declared constructor are nested callables the index serves,
+/// and its field initializers are the enclosing frame's own footprint, so
+/// no capture obligation is left open over it.
 #[derive(Clone, Copy, Debug)]
 enum ClassProbeAdmission {
     Warm,
-    ReturnOnly,
 }
 
 /// Evaluate one CLASSES probe CLEAN (undegraded) under `admission`, and
@@ -6718,7 +6714,6 @@ fn with_class_probe<R>(
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
             match admission {
                 ClassProbeAdmission::Warm => 1,
-                ClassProbeAdmission::ReturnOnly => 0,
             },
             "{name} must be admitted {admission:?}"
         );
@@ -6757,7 +6752,7 @@ fn assert_class_probe(name: &str, admission: ClassProbeAdmission, expected: &str
 fn class_probe_tuple(name: &str) -> Vec<(Option<String>, bool, bool)> {
     with_class_probe(
         name,
-        ClassProbeAdmission::ReturnOnly,
+        ClassProbeAdmission::Warm,
         |dispatch, node| match dispatch.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Tuple { elements, .. }) => elements
                 .iter()
@@ -6794,19 +6789,15 @@ fn class_probe_tuple(name: &str) -> Vec<(Option<String>, bool, bool)> {
 fn class_expression_value_is_its_constructor_over_its_own_members() {
     assert_class_probe(
         "plainInstance",
-        ClassProbeAdmission::ReturnOnly,
+        ClassProbeAdmission::Warm,
         "(Anonymous class)",
     );
-    assert_class_probe("plainExtra", ClassProbeAdmission::ReturnOnly, "number");
-    assert_class_probe("plainLit", ClassProbeAdmission::ReturnOnly, "1");
-    assert_class_probe(
-        "plainMethod",
-        ClassProbeAdmission::ReturnOnly,
-        "() => number",
-    );
-    assert_class_probe("plainGetter", ClassProbeAdmission::ReturnOnly, "boolean");
-    assert_class_probe("plainStatic", ClassProbeAdmission::ReturnOnly, "string");
-    assert_class_probe("protoRead", ClassProbeAdmission::ReturnOnly, "C");
+    assert_class_probe("plainExtra", ClassProbeAdmission::Warm, "number");
+    assert_class_probe("plainLit", ClassProbeAdmission::Warm, "1");
+    assert_class_probe("plainMethod", ClassProbeAdmission::Warm, "() => number");
+    assert_class_probe("plainGetter", ClassProbeAdmission::Warm, "boolean");
+    assert_class_probe("plainStatic", ClassProbeAdmission::Warm, "string");
+    assert_class_probe("protoRead", ClassProbeAdmission::Warm, "C");
     assert_eq!(class_probe_tuple("plainCtorParams"), Vec::new());
 }
 
@@ -6825,7 +6816,7 @@ fn class_expression_declared_constructor_types_the_construct_signature() {
             (Some("b".to_owned()), true, false),
         ]
     );
-    assert_class_probe("ctorProperty", ClassProbeAdmission::ReturnOnly, "string");
+    assert_class_probe("ctorProperty", ClassProbeAdmission::Warm, "string");
 }
 
 /// A class expression extending a named class inherits the base
@@ -6841,7 +6832,7 @@ fn class_expression_declared_constructor_types_the_construct_signature() {
 fn class_expression_extending_a_class_inherits_its_constructor_and_members() {
     assert_class_probe(
         "derivedInstance",
-        ClassProbeAdmission::ReturnOnly,
+        ClassProbeAdmission::Warm,
         "(Anonymous class)",
     );
     assert_eq!(
@@ -6851,13 +6842,9 @@ fn class_expression_extending_a_class_inherits_its_constructor_and_members() {
             (Some("b".to_owned()), true, false),
         ]
     );
-    assert_class_probe(
-        "derivedInherited",
-        ClassProbeAdmission::ReturnOnly,
-        "number",
-    );
-    assert_class_probe("derivedOwn", ClassProbeAdmission::ReturnOnly, "number");
-    assert_class_probe("derivedStatic", ClassProbeAdmission::ReturnOnly, "string");
+    assert_class_probe("derivedInherited", ClassProbeAdmission::Warm, "number");
+    assert_class_probe("derivedOwn", ClassProbeAdmission::Warm, "number");
+    assert_class_probe("derivedStatic", ClassProbeAdmission::Warm, "string");
 }
 
 /// The mixin form: a class expression extending a parameter typed by a
@@ -6877,12 +6864,12 @@ fn class_expression_extending_a_class_inherits_its_constructor_and_members() {
 fn mixin_class_expression_composes_with_its_instantiated_base() {
     assert_class_probe(
         "mixinInstance",
-        ClassProbeAdmission::ReturnOnly,
+        ClassProbeAdmission::Warm,
         "Mixin.(Anonymous class) & Base",
     );
-    assert_class_probe("mixinCtorParams", ClassProbeAdmission::ReturnOnly, "any[]");
-    assert_class_probe("mixinInherited", ClassProbeAdmission::ReturnOnly, "string");
-    assert_class_probe("mixinOwn", ClassProbeAdmission::ReturnOnly, "number");
+    assert_class_probe("mixinCtorParams", ClassProbeAdmission::Warm, "any[]");
+    assert_class_probe("mixinInherited", ClassProbeAdmission::Warm, "string");
+    assert_class_probe("mixinOwn", ClassProbeAdmission::Warm, "number");
 }
 
 /// A DECLARED mixin factory's result composes the same way: the
@@ -7086,8 +7073,9 @@ fn a_member_read_through_a_self_reference_walks_on_through_the_declaration() {
 /// tsc 7.0.2: `Chain['next']` is `Chain` and `Chain['next']['v']` is
 /// `number`. The flow lane publishes the authored annotation; a consumer
 /// that reduces it (the corpus lane's structural-fact demand) used to read
-/// a miss at the self-reference. Under that expanded demand
-/// `Chain['next']` now reduces to `Chain`'s own surface, `next` the
+/// a miss at the self-reference. The printing demand keeps the
+/// declaration by its name, as the checker prints it; the fully resolving
+/// demand reduces `Chain['next']` to `Chain`'s own surface, `next` the
 /// self-reference and `v` a `number`.
 #[test]
 fn an_indexed_access_of_a_self_reference_is_the_declaration() {
@@ -7097,15 +7085,48 @@ fn an_indexed_access_of_a_self_reference_is_the_declaration() {
     assert_eq!(raised, number());
     let (data, raised) = reduced_annotation_in(&host, SELF_REFERENCE, "indexedNext");
     assert!(
-        matches!(&data, SemanticNodeData::Object(_)),
-        "`Chain['next']` reduces to `Chain`'s surface, got {data:?}"
+        matches!(&data, SemanticNodeData::DeclRef { identity } if identity.decl_name.as_ref() == "Chain"),
+        "`Chain['next']` prints `Chain`, got {data:?}"
     );
-    assert_eq!(projected_member(&raised, "v"), &number());
     assert!(
-        matches!(projected_member(&raised, "next"), TypeExpr::RecursiveRef { name, .. }
-            | TypeExpr::Ref { name, .. } if name.as_ref() == "Chain"),
-        "`next` is the self-reference, got {raised:?}"
+        matches!(&raised, TypeExpr::Ref { name, .. } if name.as_ref() == "Chain"),
+        "`Chain['next']` raises to `Chain`, got {raised:?}"
     );
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch, SELF_REFERENCE, "indexedNext");
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
+        else {
+            panic!("indexedNext must produce a value");
+        };
+        let node = dispatch
+            .normalize_node_for_structural_fact_demand(
+                result.return_type(),
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Expanded,
+                ),
+            )
+            .into_complete_node()
+            .expect("the resolving demand completes");
+        let raised = host
+            .project_node_to_type_expr_for_test(node)
+            .expect("the surface raises");
+        assert!(
+            matches!(
+                dispatch.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            ),
+            "the resolving demand reduces `Chain['next']` to `Chain`'s surface, got {raised:?}"
+        );
+        assert_eq!(projected_member(&raised, "v"), &number());
+        assert!(
+            matches!(projected_member(&raised, "next"), TypeExpr::RecursiveRef { name, .. }
+                | TypeExpr::Ref { name, .. } if name.as_ref() == "Chain"),
+            "`next` is the self-reference, got {raised:?}"
+        );
+    });
 }
 
 // ──────────────────────────────────────────────────────────────────────

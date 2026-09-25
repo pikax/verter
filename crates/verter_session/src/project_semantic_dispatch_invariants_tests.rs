@@ -375,6 +375,7 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
     });
     let value_expr = parameter_node;
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -488,6 +489,7 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
         index: IndexKey::Computed(parameter_node),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -607,6 +609,7 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
         display_name: Arc::from("K"),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -888,6 +891,7 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
         display_name: Arc::from("K"),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -3398,6 +3402,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
         index: IndexKey::Computed(parameter_node),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -3511,6 +3516,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
         index: IndexKey::Computed(parameter_node),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         // Userland-style: key_space is a literal `'a'` union (one key).
         key_space: graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -4251,9 +4257,11 @@ fn comparable_budget_exhaustion_is_typed_and_non_admissible() {
 
 /// Strictness is a per-project tsconfig fact that reaches the relation
 /// engine through the project owning the REQUEST's canonical. Two projects
-/// in one workspace differing only in `strict` judge `null → string` and an
-/// optional-vs-required property row differently (the TS-default strict
-/// project rejects, the relaxed project admits), the two judgements occupy
+/// in one workspace differing only in `strict` judge `null → string`
+/// differently (the TS-default strict project rejects, the relaxed project
+/// admits) and an optional-vs-required property row alike (TypeScript
+/// 7.0.2 refuses `{ a?: string }` against `{ a: string }` with
+/// `strictNullChecks` on and off), the two judgements occupy
 /// DISTINCT memo slots because the request project's `type_env_hash`
 /// differs, and neither slot is ever served to the other project's request
 /// — a warm strict-on payload never answers a relaxed request, and
@@ -4333,9 +4341,10 @@ fn strict_family_flip_changes_verdict_without_cross_hit() {
         matches!(relaxed_verdict, RelationResult::Assignable { .. }),
         "strictNullChecks OFF admits null into string — the BEHAVIORAL branch"
     );
-    assert!(
-        matches!(relaxed_row_verdict, RelationResult::Assignable { .. }),
-        "strictNullChecks OFF relates the optional row on its value type alone"
+    assert_eq!(
+        relaxed_row_verdict,
+        RelationResult::NotAssignable,
+        "an optional row never fills a required slot, strictNullChecks off included"
     );
 
     // No cross-hit: each slot holds its own verdict.
@@ -5376,6 +5385,7 @@ fn mapped_extends_infer_declaration_shadows_outer_binder() {
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: lit_a,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: k_param,
             key_space: lit_a,
             value_expr: infer_u,
@@ -5472,6 +5482,7 @@ fn mapped_own_key_param_shadows_same_named_outer_infer_binder() {
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: lit_a,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: k_param,
             key_space: lit_a,
             value_expr: k_param,
@@ -5750,6 +5761,7 @@ fn mapped_constructor_value_substitutes_per_key() {
     let surface = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source: lit_a,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: k_param,
             key_space: lit_a,
             value_expr: ctor,
