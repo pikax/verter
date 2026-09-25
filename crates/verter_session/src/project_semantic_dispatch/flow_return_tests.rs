@@ -4579,17 +4579,20 @@ fn flow_return_conditional_finally_keeps_pending_break_on_fallthrough() {
     let verter_type_expr::TypeExpr::Union(_) = &expr else {
         panic!("the finally return and the trailing return join as a union, got {expr:?}");
     };
+    // Each arm carries the other's property as `?: undefined`.
     assert_eq!(
         member_types(&expr, "one"),
-        vec![verter_type_expr::TypeExpr::Primitive(
-            verter_type_expr::PrimitiveName::Number
-        )]
+        vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+        ]
     );
     assert_eq!(
         member_types(&expr, "s"),
-        vec![verter_type_expr::TypeExpr::Primitive(
-            verter_type_expr::PrimitiveName::String
-        )]
+        vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+        ]
     );
 }
 
@@ -11453,8 +11456,10 @@ fn flow_return_slot_candidates(script: &str, function: &str) -> usize {
 /// the empty object type reduces to the bare constituent, at the whole
 /// return AND at a member position — the checker's own
 /// `getIntersectionType` reduction, which the canonical intersection
-/// applies too (TypeScript 7.0.2: `{} & 'x'` is `"x"`), while a written
-/// `string & {}` keeps both arms (`string & {}`).
+/// applies too (TypeScript 7.0.2: `{} & 'x'` is `"x"`). A constructed
+/// `string & {}` is `string` (`type NN<T> = T & {}` makes `NN<string>`
+/// `string`), while a written `string & {}` keeps both arms (`string &
+/// {}`).
 #[test]
 fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() {
     let (whole, whole_degradation) = flow_expr_cold_warm(
@@ -11504,12 +11509,23 @@ fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() 
         let string = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
             crate::semantic_query::PrimitiveKind::String,
         ));
-        let kept = dispatch.intern_normalized_union_or_intersection(&[string, empty], false);
-        assert!(
-            matches!(
-                graph.node_data(kept).as_deref(),
-                Some(crate::semantic_query::SemanticNodeData::Intersection(_))
+        let derived = dispatch.intern_normalized_union_or_intersection(&[string, empty], false);
+        assert_eq!(
+            derived, string,
+            "a constructed `string & {{}}` (an instantiated `T & {{}}`) is `string`"
+        );
+        let written = graph.intern_node(crate::semantic_query::SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
+                vec![string, empty].into_boxed_slice(),
+            )),
+        ));
+        assert_eq!(
+            super::canonical_algebra::reduced_authored_intersection(
+                graph,
+                written,
+                crate::semantic_query::NullabilityPolicy::Strict,
             ),
+            None,
             "a written `string & {{}}` keeps both constituents"
         );
     });

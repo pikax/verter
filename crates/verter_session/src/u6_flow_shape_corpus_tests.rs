@@ -2260,6 +2260,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "41baf142492e8d5ee16af8ede53eed028fb9d2ce07c0f8851d42a9fa82a17699",
     ),
     (
+        "E02_spread_index_signature",
+        "960d72b092800067340f3f1b7376cd11f44de9c8fa99c713638b036f7983709e",
+    ),
+    (
         "G07_emits_tagged_spread",
         "e211bc306e0c4ddd199f847077c17ce96a250b23c1ca729e889d38ac629ee6a9",
     ),
@@ -3828,11 +3832,11 @@ mod corpus_suite {
             ),
             (
                 "H02_union_spread_source",
-                "checker prints `{ label: string; n?: undefined; m: number; } | { label?: undefined; n: number; m: number; }`; the renderer prints `ObjectSpreadProgram` — the composed alternatives omit the normal-form cross members the KnownOwed arm pins",
+                "checker prints `{ label: string; n?: undefined; m: number; } | { label?: undefined; n: number; m: number; }`; the renderer prints `ObjectSpreadProgram` — the semantic comparison composes the program, cross members included",
             ),
             (
                 "X10_destructured_default_conditional",
-                "checker prints `{ label: string; n: number; } | { n?: undefined; label: string; }`; the renderer spells the same union `Union({ label: string, n: number } | { label: string })` — union spelling, member terminators, and the normal-form `n?: undefined` cross member differ",
+                "checker prints `{ label: string; n: number; } | { n?: undefined; label: string; }`; the renderer spells the same union `Union({ label: string, n: number } | { label: string, n: undefined })` — union spelling, member terminators and the optional marker differ",
             ),
             (
                 "X14_accessor_pair",
@@ -3848,7 +3852,7 @@ mod corpus_suite {
             ),
             (
                 "X27_finally_fallthrough_break_override",
-                "checker prints `{ one: number; s?: undefined; } | { one?: undefined; s: string; }`; the renderer spells the same union `Union({ one: number } | { s: string })` — union spelling, member terminators, and the normal-form cross members differ",
+                "checker prints `{ one: number; s?: undefined; } | { one?: undefined; s: string; }`; the renderer spells the same union `Union({ s: string, one: undefined } | { one: number, s: undefined })` — union spelling, member terminators and the optional markers differ",
             ),
             (
                 "CC03_as_const_plain_return",
@@ -3942,7 +3946,11 @@ mod corpus_suite {
     /// * a [`Verdict::MatchesChecker`] row's live surface must EQUAL
     ///   its parsed checker — editing the checker column (or regressing
     ///   the surface) fails here;
-    /// * every OTHER verdict (KnownOwed / Degraded) must NOT match —
+    /// * a Degraded row listed in [`DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE`]
+    ///   must EQUAL it too: its flow type is the checker's and only its
+    ///   runtime is erased, and the list's own check requires that
+    ///   erasure;
+    /// * every OTHER verdict (KnownOwed / unlisted Degraded) must NOT match —
     ///   the recorded divergence must be REAL in the tree, so silently
     ///   repairing the debt, or editing the checker column to the live
     ///   value, fails here and forces the deliberate re-pin.
@@ -3988,33 +3996,161 @@ mod corpus_suite {
                     None => (false, "<no value>".to_owned()),
                 },
             );
-            match row.verdict {
-                Verdict::MatchesChecker => {
-                    if !matches {
-                        failures.push(format!(
-                            "{}: labelled MatchesChecker but the LIVE semantic surface does \
-                             not equal the parsed checker `{}` — measured `{rendered}`. \
-                             Either the surface regressed or the checker column was edited; \
-                             re-measure against the pinned oracle before re-pinning.",
-                            row.id, row.checker
-                        ));
-                    }
+            failures.extend(deep_pin_verdict_failure(row, matches, &rendered));
+        }
+        failures.extend(flow_type_matching_degraded_list_failures(CORPUS));
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The flip law for ONE deep-pinned row, given whether its LIVE
+    /// semantic surface equals its parsed checker: a `MatchesChecker` row
+    /// must match; a Degraded row listed in
+    /// [`DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE`] pins BOTH halves — the
+    /// flow type equals the checker's while the runtime is erased — so it
+    /// must match too; every other verdict (KnownOwed, an unlisted
+    /// Degraded) records a divergence that must be REAL, so it must not
+    /// match. Each direction fails, so every move is a deliberate re-pin.
+    pub(super) fn deep_pin_verdict_failure(
+        row: &Row,
+        matches: bool,
+        rendered: &str,
+    ) -> Option<String> {
+        let flow_type_pinned = DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE
+            .iter()
+            .any(|(id, _)| *id == row.id);
+        match row.verdict {
+            Verdict::MatchesChecker if !matches => Some(format!(
+                "{}: labelled MatchesChecker but the LIVE semantic surface does not equal \
+                 the parsed checker `{}` — measured `{rendered}`. Either the surface \
+                 regressed or the checker column was edited; re-measure against the pinned \
+                 oracle before re-pinning.",
+                row.id, row.checker
+            )),
+            Verdict::MatchesChecker => None,
+            Verdict::Degraded(_) if flow_type_pinned && !matches => Some(format!(
+                "{}: listed in DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE (its flow type equals \
+                 the checker's, its runtime is erased) but the LIVE semantic surface does not \
+                 equal the parsed checker `{}` — measured `{rendered}`. The flow half of the \
+                 pin regressed; re-measure before re-pinning.",
+                row.id, row.checker
+            )),
+            Verdict::Degraded(_) if flow_type_pinned => None,
+            _ if matches => Some(format!(
+                "{}: labelled {:?} but the LIVE semantic surface EQUALS the parsed checker \
+                 `{}` — the recorded divergence is GONE. This failure is the INTENDED \
+                 signal: the debt looks repaired (or the checker column was edited to the \
+                 live value); re-pin the row and close its ledger entries in the same \
+                 change. A Degraded row whose flow type now matches while its runtime stays \
+                 erased is listed in DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE.",
+                row.id, row.verdict, row.checker
+            )),
+            _ => None,
+        }
+    }
+
+    /// CONTROL — the flip law fires in BOTH directions for both Degraded
+    /// pin shapes: a Degraded row at the checker's flow type fails when its
+    /// flow type stops matching and passes while it matches; an unlisted
+    /// Degraded row fails when its flow type starts matching and passes
+    /// while it diverges; and the list check refuses an entry whose row
+    /// lost its Degraded label or its runtime erasure.
+    #[test]
+    fn degraded_flow_type_pins_flip_in_both_directions() {
+        let row = |id: &str| {
+            *CORPUS
+                .iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("corpus row `{id}`"))
+        };
+        let listed = row("X10_destructured_default_conditional");
+        assert!(deep_pin_verdict_failure(&listed, true, "").is_none());
+        assert!(
+            deep_pin_verdict_failure(&listed, false, "").is_some(),
+            "a listed Degraded row whose flow type stops matching must fail"
+        );
+        let unlisted = row("D16_helper_undeclared_callee");
+        assert!(matches!(unlisted.verdict, Verdict::Degraded(_)));
+        assert!(deep_pin_verdict_failure(&unlisted, false, "").is_none());
+        assert!(
+            deep_pin_verdict_failure(&unlisted, true, "").is_some(),
+            "an unlisted Degraded row whose flow type starts matching must fail"
+        );
+        assert!(flow_type_matching_degraded_list_failures(CORPUS).is_empty());
+        let relabelled: Vec<Row> = CORPUS
+            .iter()
+            .map(|candidate| {
+                let mut candidate = *candidate;
+                if candidate.id == listed.id {
+                    candidate.verdict = Verdict::MatchesChecker;
                 }
-                _ => {
-                    if matches {
-                        failures.push(format!(
-                            "{}: labelled {:?} but the LIVE semantic surface EQUALS the \
-                             parsed checker `{}` — the recorded divergence is GONE. This \
-                             failure is the INTENDED signal: the debt looks repaired (or \
-                             the checker column was edited to the live value); re-pin the \
-                             row and close its ledger entries in the same change.",
-                            row.id, row.verdict, row.checker
-                        ));
-                    }
+                candidate
+            })
+            .collect();
+        assert!(
+            !flow_type_matching_degraded_list_failures(&relabelled).is_empty(),
+            "a listed row no longer labelled Degraded must fail the list check"
+        );
+        let unerased: Vec<Row> = CORPUS
+            .iter()
+            .map(|candidate| {
+                let mut candidate = *candidate;
+                if candidate.id == listed.id {
+                    candidate.runtime = Runtime::Emitted {
+                        has: &["label: { type: String"],
+                        hasnt: &[],
+                    };
                 }
+                candidate
+            })
+            .collect();
+        assert!(
+            !flow_type_matching_degraded_list_failures(&unerased).is_empty(),
+            "a listed row whose runtime pins no erased member must fail the list check"
+        );
+    }
+
+    /// Every [`DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE`] entry names a
+    /// corpus row that is deep-pinned, labelled `Degraded`, and whose
+    /// runtime lane pins the erased `type: null` member — the second half
+    /// of the two-sided pin; each entry appears once.
+    pub(super) fn flow_type_matching_degraded_list_failures(corpus: &[Row]) -> Vec<String> {
+        let mut failures = Vec::new();
+        for (index, (id, reason)) in DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE.iter().enumerate() {
+            if reason.is_empty() {
+                failures.push(format!("{id}: listed with no reason"));
+            }
+            if DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE[..index]
+                .iter()
+                .any(|(earlier, _)| earlier == id)
+            {
+                failures.push(format!("{id}: listed twice"));
+            }
+            let Some(row) = corpus.iter().find(|row| row.id == *id) else {
+                failures.push(format!("{id}: listed but no corpus row has this id"));
+                continue;
+            };
+            if !matches!(row.verdict, Verdict::Degraded(_)) {
+                failures.push(format!(
+                    "{id}: listed as a Degraded row at the checker's flow type but labelled \
+                     {:?}",
+                    row.verdict
+                ));
+            }
+            if !matches!(row.expect, Expect::Node(_)) {
+                failures.push(format!(
+                    "{id}: listed but not deep-pinned — its flow half is never compared"
+                ));
+            }
+            let erased = matches!(row.runtime, Runtime::Emitted { has, .. }
+                if has.iter().any(|needle| needle.contains("type: null")));
+            if !erased {
+                failures.push(format!(
+                    "{id}: listed but its runtime lane pins no erased `type: null` member — \
+                     the runtime half of the pin is missing"
+                ));
             }
         }
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        failures
     }
 
     /// CONTROL — the checker columns of the deep rows the byte lists
@@ -5237,7 +5373,6 @@ const OPEN_DEBTS: &[&str] = &[
     "D19_callee_undeclared_spread_key",
     "G08_emits_undeclared_spread",
     "E01_spread_any",
-    "E02_spread_index_signature",
     "E03_spread_array",
     // ── `as const` SPREAD MODIFIER LOSS (D14 deep pins) ─────────────────
     // The enclosing `as const` reaches the fresh members but is lost on
@@ -5246,14 +5381,6 @@ const OPEN_DEBTS: &[&str] = &[
     "B03_as_const_call",
     "B04_as_const_spread_only",
     "B10_as_const_ident",
-    // ── UNION NORMAL-FORM CROSS MEMBERS (D14 deep pins) ────────────────
-    // The checker's union-of-objects arms carry `x?: undefined` cross
-    // members the published arms omit (extensionally equal); the
-    // full-depth pins flip when the composed/published unions grow the
-    // normal-form members.
-    "H02_union_spread_source",
-    "X10_destructured_default_conditional",
-    "X27_finally_fallthrough_break_override",
     // ── NARROWING ────────────────────────────────────────────────────
     // The narrowing blocks landed: every seeded narrowing row now matches
     // the checker except N09_narrow_then_write, whose remaining debt is
@@ -5324,6 +5451,32 @@ const OPEN_DEBTS: &[&str] = &[
     "X109_optional_index_read_through_optional_chain",
 ];
 
+/// Degraded rows whose FLOW type equals the checker's, `(row id, why)`: the
+/// row pins both halves — the deep semantic surface MATCHES the parsed
+/// checker, and the runtime lane erases a member to `type: null` because
+/// that member's type (`T | undefined`, from the checker's union
+/// normal-form cross member) has no single runtime constructor. The flip
+/// law holds in both directions for these rows too
+/// (`corpus_suite::deep_pin_verdict_failure`): a listed row whose flow type
+/// stops matching fails, and every UNLISTED Degraded row still fails the
+/// moment its flow type starts matching.
+#[cfg(test)]
+const DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE: &[(&str, &str)] = &[
+    (
+        "H02_union_spread_source",
+        "the composed spread alternatives carry the cross members `label?: undefined` / `n?: \
+         undefined`, which publish `type: null`",
+    ),
+    (
+        "X10_destructured_default_conditional",
+        "the no-`n` arm carries the cross member `n?: undefined`, so `n` publishes `type: null`",
+    ),
+    (
+        "X27_finally_fallthrough_break_override",
+        "each arm carries the other's member as `?: undefined`, so both publish `type: null`",
+    ),
+];
+
 // Per-owner conformance — the merge go/no-go
 
 /// Per-owner conformance, pinned.
@@ -5366,8 +5519,11 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // the one-branch and default-less-switch joins that keep `undefined` —
     // to MatchesChecker: 83 matching, 7 parked. The satisfies target
     // contextually typing its operand moves X21 to MatchesChecker: 84
-    // matching, 6 parked.
-    (Owner::U6ValueInference, 93, 84, 6),
+    // matching, 6 parked. The return join's object literals take the
+    // checker's union normal-form cross members, so X10 and X27 publish the
+    // checker's type, degraded only by the `type: null` their `T |
+    // undefined` members take: 84 matching, 4 parked.
+    (Owner::U6ValueInference, 93, 84, 4),
     // Loops iterate to the checker's fixed point: D05's return-bearing loop
     // is the substrate's, and the N52–N54 downstream narrows and X82's
     // loop break crossing an abrupt finally match the checker. A capture
@@ -5424,15 +5580,15 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // drops the erroneous clause too), and the dropped-arm debt rides C26
     // and C30.
     (Owner::SharedTypeResolution, 24, 20, 2),
-    // H02's D14 deep pin re-labelled the row KnownOwed: the checker's
-    // union normal form carries `?: undefined` cross members the composed
-    // spread alternatives omit (extensionally equal), so matching drops
-    // to zero and every row here is parked.
     // D10 and D11 construct their spread source, and their tagged-template
     // twins D14 and D15 call a tag for it: all four match the checker. The
     // TSX-fault debt rides the undeclared-call spreads D17, D18, D19 and G08
-    // beside E01-E03.
-    (Owner::SharedCompilePipeline, 14, 4, 10),
+    // beside E01 and E03. A mapped source read through its index signature
+    // spreads `Record<string, string>` as the checker does, so E02 matches;
+    // H02's composed alternatives carry the union normal-form cross members
+    // and the row publishes the checker's type, degraded only by the
+    // `type: null` its `T | undefined` members take.
+    (Owner::SharedCompilePipeline, 14, 5, 8),
     // C06 constructs its member and its twin C20 calls a tag for it: both
     // match. C27 keeps the degraded member over an undeclared call.
     (Owner::FrameworkOnly, 9, 7, 0),
@@ -5555,14 +5711,9 @@ const UNASSIGNED_PARKED_ROWS: &[&str] = &[
     "D18_callee_undeclared_spread_only",
     "D19_callee_undeclared_spread_key",
     "E01_spread_any",
-    "E02_spread_index_signature",
     "E03_spread_array",
     "E05_scalar_flow_answer_keeps_tsx_surface",
     "G08_emits_undeclared_spread",
-    // H02's D14 deep pin re-labelled the row KnownOwed under this owner:
-    // the checker's union normal form carries `?: undefined` cross
-    // members the composed spread alternatives omit.
-    "H02_union_spread_source",
     // The generator-return shape: the macro lane's rejection and the TSX
     // projection are both correct; the return wrap's lib head is not
     // resolvable in this environment.

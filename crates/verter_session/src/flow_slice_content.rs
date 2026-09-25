@@ -68,7 +68,7 @@ use oxc_ast::ast::{
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::GetSpan;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::flow_completion_inventory::{
     transports_completion, CompletionConstruction, CompletionDischarge, NormalCompletion,
@@ -236,6 +236,15 @@ pub struct SliceContent {
     /// reached. Absolute spans: the report rebases them onto the frame
     /// anchor when pairing against the skeleton footprint.
     pub decided_above_call_spans: Vec<verter_span::Span>,
+    /// The argument values of each authored call, lowered in THIS frame
+    /// as whole values (every member and element of a literal argument,
+    /// every read from the frame), keyed by the call's span — the values
+    /// the call executor infers from and selects an overload by. A call
+    /// is absent when an argument spreads or its lowering reached a side
+    /// channel (a budget edge, a decided-above call, a control-test gap);
+    /// the executor then reads that call's arguments from the indexed
+    /// program.
+    pub call_arguments: Arc<FxHashMap<verter_span::Span, Arc<[SliceExpr]>>>,
 }
 
 /// What a function body models as when it contributes no return arm and
@@ -1188,7 +1197,9 @@ pub enum SliceExpr {
     /// `undefined` exactly when a strip removed arms — the checker's
     /// `T | undefined` for a nullable base, plain `T` for a non-nullable
     /// one. Every link is STATIC (a computed key or a terminal call keeps
-    /// the optional-`any`-chain / fail-closed rails instead).
+    /// the optional-`any`-chain / fail-closed rails instead). A plain
+    /// static member chain over a CALL (`f(c).a`) rides the same carrier
+    /// with no optional link: its root is the call's value.
     OptionalMember {
         root: Box<SliceExpr>,
         /// The member links in evaluation order, each with its own
@@ -2450,6 +2461,7 @@ pub(crate) fn build_flow_slice_content(
                 budget_failure: Some(reason),
                 inert_write_spans: FxHashSet::default(),
                 decided_above_call_spans: Vec::new(),
+                call_arguments: Arc::default(),
             });
         }
     };
@@ -2576,6 +2588,8 @@ pub(crate) fn build_flow_slice_content(
         budget_failure: None,
         inert_write_spans: FxHashSet::default(),
         decided_above_call_spans: Vec::new(),
+        call_arguments: FxHashMap::default(),
+        whole_value_nesting: 0,
         predicate_guard_call_spans: FxHashSet::default(),
         non_narrowing_call_spans: FxHashSet::default(),
         predicate_parameters: predicate_parameters(
@@ -2691,6 +2705,7 @@ pub(crate) fn build_flow_slice_content(
     let budget_failure = lowerer.budget_failure;
     let inert_write_spans = lowerer.inert_write_spans;
     let decided_above_call_spans = lowerer.decided_above_call_spans;
+    let call_arguments = lowerer.call_arguments;
     Some(SliceContent {
         bindings,
         declared_return,
@@ -2709,6 +2724,7 @@ pub(crate) fn build_flow_slice_content(
         budget_failure,
         inert_write_spans,
         decided_above_call_spans,
+        call_arguments: Arc::new(call_arguments),
     })
 }
 
@@ -2947,6 +2963,30 @@ fn discarded_value_holds_write(expression: &Expression<'_>) -> bool {
 }
 
 /// Unwrap a parenthesized expression (the IIFE callee shape).
+/// A chain of static member reads (`.a.b`, through parentheses) whose base
+/// is a call expression: the call and the member names, first read first.
+/// `None` for any other form — a computed or private member, an optional
+/// link, a base that is not a call.
+fn call_rooted_member_path<'a>(
+    expression: &'a Expression<'a>,
+) -> Option<(&'a Expression<'a>, Vec<Arc<str>>)> {
+    let mut names = Vec::new();
+    let mut current = expression;
+    loop {
+        match current {
+            Expression::StaticMemberExpression(member) if !member.optional => {
+                names.push(Arc::<str>::from(member.property.name.as_str()));
+                current = unwrap_parenthesized(&member.object);
+            }
+            Expression::CallExpression(call) if !names.is_empty() && !call.optional => {
+                names.reverse();
+                return Some((current, names));
+            }
+            _ => return None,
+        }
+    }
+}
+
 fn unwrap_parenthesized<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
     match expression {
         Expression::ParenthesizedExpression(paren) => unwrap_parenthesized(&paren.expression),
@@ -5234,6 +5274,13 @@ struct Lowerer<'a> {
     /// Call / construct spans of decided-above positions — see
     /// [`SliceContent::decided_above_call_spans`].
     decided_above_call_spans: Vec<verter_span::Span>,
+    /// The frame-lowered argument values of each call — see
+    /// [`SliceContent::call_arguments`].
+    call_arguments: FxHashMap<verter_span::Span, Arc<[SliceExpr]>>,
+    /// Nonzero while a call argument lowers as a WHOLE value: every
+    /// position inside it is a value position, whatever the demand
+    /// selected.
+    whole_value_nesting: u32,
     /// The authored call spans whose [`SliceGuard::TypePredicate`] fact
     /// this lowering MINTED: evidence-backed at guard application, so the
     /// control-position recorder neither certifies them decided-above nor
@@ -5356,8 +5403,10 @@ impl<'a> Lowerer<'a> {
     /// slice. Body lowering always carries a selection; None is reserved
     /// for signature-only preparation, whose body remains empty.
     fn value_span_selected(&self, span: oxc_span::Span) -> bool {
-        self.selection
-            .is_none_or(|selection| selection.value_span(self.rebase(span)))
+        self.whole_value_nesting > 0
+            || self
+                .selection
+                .is_none_or(|selection| selection.value_span(self.rebase(span)))
     }
 
     /// Whether a binding slot (identified by its binding-identifier
@@ -7955,16 +8004,17 @@ impl<'a> Lowerer<'a> {
                     _ => None,
                 };
                 match (key, self.narrow_subject_of(&binary.right)) {
-                    (Some(key), Some(subject)) => {
-                        if self.subject_root_carries_an_unmentioned_narrowing(&subject) {
-                            return GuardDisposition::Unexpressible;
-                        }
-                        GuardDisposition::modeled(SliceGuard::In {
-                            key,
-                            subject,
-                            negated: false,
-                        })
-                    }
+                    // The checker narrows by `in` only the reference the
+                    // test names (`narrowTypeByInKeyword` never inlines an
+                    // alias's initializer nor retypes a destructured
+                    // sibling), so a subject rooted at a narrowing alias
+                    // or a correlated element carries no fact the guard
+                    // leaves unmentioned.
+                    (Some(key), Some(subject)) => GuardDisposition::modeled(SliceGuard::In {
+                        key,
+                        subject,
+                        negated: false,
+                    }),
                     // Anything outside that exact pair — a computed or
                     // dynamic key, a private name, an inexpressible
                     // subject access — still selects the subject's union
@@ -9826,6 +9876,7 @@ impl<'a> Lowerer<'a> {
                 tagged_template_site(tagged),
             ),
             Expression::CallExpression(call) => {
+                self.record_call_arguments(call);
                 if let Expression::Identifier(callee) = &call.callee {
                     let name = callee.name.as_str();
                     // ONE lexical binding authority (the frame's
@@ -10092,6 +10143,22 @@ impl<'a> Lowerer<'a> {
                             return modeled;
                         }
                     }
+                }
+                // A static member read off a CALL's value (`f(c).a.b`): the
+                // call rides the one call sink and each member is read off
+                // its value through the shared path walk, as an optional
+                // member chain reads its links.
+                if let Some((call, links)) = call_rooted_member_path(unwrapped) {
+                    return SliceExpr::OptionalMember {
+                        root: Box::new(self.lower_expr(call, mode)),
+                        links: Arc::from(
+                            links
+                                .into_iter()
+                                .map(|name| (name, false))
+                                .collect::<Vec<_>>()
+                                .into_boxed_slice(),
+                        ),
+                    };
                 }
                 match value_descent(other) {
                     ValueDescent::Transparent(inner) => self.lower_expr(inner, mode),
@@ -10792,6 +10859,41 @@ impl<'a> Lowerer<'a> {
     /// resolved at this function value's own position. The descriptor retains
     /// exact captured identities and lexical signature facts. Its body lowers
     /// only when evaluated, through the child's own indexed graph and demand.
+    /// Lower every argument of `call` in this frame as a whole value
+    /// ([`SliceContent::call_arguments`]). The lowering leaves no trace
+    /// beside the recorded values: a side channel it reached is undone
+    /// and the call keeps its indexed arguments.
+    fn record_call_arguments(&mut self, call: &oxc_ast::ast::CallExpression<'_>) {
+        if call
+            .arguments
+            .iter()
+            .any(|argument| argument.as_expression().is_none())
+        {
+            return;
+        }
+        let budget_failure = self.budget_failure;
+        let decided_above = self.decided_above_call_spans.len();
+        let control_test_gap = self.control_test_gap;
+        self.whole_value_nesting += 1;
+        let arguments: Vec<SliceExpr> = call
+            .arguments
+            .iter()
+            .filter_map(|argument| argument.as_expression())
+            .map(|argument| self.lower_expr(argument, ExprMode::Return))
+            .collect();
+        self.whole_value_nesting -= 1;
+        let side_channel = self.budget_failure != budget_failure
+            || self.decided_above_call_spans.len() != decided_above
+            || self.control_test_gap != control_test_gap;
+        self.budget_failure = budget_failure;
+        self.decided_above_call_spans.truncate(decided_above);
+        self.control_test_gap = control_test_gap;
+        if !side_channel {
+            self.call_arguments
+                .insert(call.span.into(), Arc::from(arguments.into_boxed_slice()));
+        }
+    }
+
     fn lower_nested_function(&mut self, node: &FunctionNode<'_>) -> SliceExpr {
         self.lower_function_value(node, None)
     }
@@ -12709,9 +12811,14 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         }
         walk::walk_expression_statement(self, it);
     }
+    /// A comparison against a boolean literal keeps its other side on the
+    /// narrowing spine; every other operator's operands leave it. That
+    /// includes an operand of `in` / `instanceof`, a VALUE position even
+    /// inside a control test: the checker narrows by those operators only
+    /// the reference an operand names, so a call there is never a predicate
+    /// condition, and only an `asserts` callee could narrow — the
+    /// discarded-operand rule.
     fn visit_binary_expression(&mut self, it: &oxc_ast::ast::BinaryExpression<'a>) {
-        // A comparison against a boolean literal keeps its other side on
-        // the narrowing spine; every other operator's operands leave it.
         let boolean_comparison = matches!(
             it.operator,
             oxc_ast::ast::BinaryOperator::Equality

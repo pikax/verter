@@ -2918,8 +2918,11 @@ pub(crate) struct FlowReturnDomainRuntime {
 }
 
 /// The call-resolution domain runtime.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ResolveCallDomainRuntime {
+    /// The relation the candidate being checked is applicable under: the
+    /// subtype pass of a multi-candidate call, else assignability.
+    pub(crate) applicability: crate::semantic_query::RelationKind,
     /// Mixed-component members awaiting the root carrier's drain (fenced
     /// backfill behind the root's committing admission).
     pub(crate) completed_members: Vec<CompletedResolveCallMember>,
@@ -2933,6 +2936,17 @@ pub(crate) struct ResolveCallDomainRuntime {
     /// decided, so the call's relation obligations have no decided
     /// evidence to claim.
     pub(crate) undecided_relations: u64,
+}
+
+impl Default for ResolveCallDomainRuntime {
+    fn default() -> Self {
+        Self {
+            applicability: crate::semantic_query::RelationKind::Assignable,
+            completed_members: Vec::new(),
+            last_root_failure: None,
+            undecided_relations: 0,
+        }
+    }
 }
 
 /// The per-obligation-root cold-compute frame (design §2.1 /

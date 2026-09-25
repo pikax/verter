@@ -820,16 +820,20 @@ pub(crate) fn intern_ordered_union(
 }
 
 /// Private ordered-intersection intern. Operand order is preserved. An
-/// intersection runs the strict-null algebra.
+/// intersection runs the strict-null algebra. The intersection is one the
+/// construction derives (an instantiation, a merge), so every redundant
+/// supertype drops: the written `string & {}` the checker keeps is an
+/// authored shell, reduced by [`reduced_authored_intersection`].
 pub(crate) fn intern_ordered_intersection(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],
 ) -> CanonicalComposite {
-    canonicalize(
+    canonicalize_with(
         graph,
         members,
         /* is_union */ false,
         NullabilityPolicy::Strict,
+        SupertypeReduction::Always,
     )
 }
 
@@ -854,11 +858,14 @@ fn canonicalize(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SupertypeReduction {
     /// Every shape — an intersection the construction itself produced
-    /// (a constituent of a distributed intersection).
+    /// (an instantiation, a merge, a constituent of a distributed
+    /// intersection).
     Always,
-    /// Every shape but exactly `string & {}` (`number`, `bigint`): the
-    /// checker keeps that written pair (`NoSupertypeReduction`), the
-    /// idiom that keeps a literal union's suggestions open.
+    /// Every shape but exactly `string & {}` (`number`, `bigint`) as
+    /// WRITTEN: the checker keeps that authored pair
+    /// (`NoSupertypeReduction`), the idiom that keeps a literal union's
+    /// suggestions open, and reduces it once instantiated (`type NN<T> = T
+    /// & {}` makes `NN<string>` `string`).
     ExceptPrimitiveOverEmptyObject,
 }
 
@@ -1264,7 +1271,10 @@ fn canonicalize_with(
     //    undecided relation is never guessed. Single pass over the deduped
     //    arms — exactly the pairwise [`tag_level_disjoint`] judgement,
     //    computed in O(n) over the childless scalar domain.
-    if !is_union && scalar_domain_provably_empty(graph, &kept) {
+    if !is_union
+        && (scalar_domain_provably_empty(graph, &kept)
+            || nullable_beside_object_type(graph, &kept, &mut evidence))
+    {
         return CanonicalComposite {
             node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
             evidence,
@@ -1273,10 +1283,17 @@ fn canonicalize_with(
 
     // 5a. Intersection redundant supertypes and union distribution — the
     //     checker's `getIntersectionType` over what is left.
+    //     A single surviving arm is the intersection itself (the checker's
+    //     `typeSet.length === 1`): a union arm left alone is returned as
+    //     it is, never rebuilt by distributing over it.
     if !is_union {
         remove_redundant_supertypes(graph, &mut kept, supertype_reduction);
-        if let Some(distributed) = distribute_over_unions(graph, &kept, nullability, &mut evidence)
-        {
+        let distributed = if kept.len() < 2 {
+            None
+        } else {
+            distribute_over_unions(graph, &kept, nullability, &mut evidence)
+        };
+        if let Some(distributed) = distributed {
             return CanonicalComposite {
                 node: distributed,
                 evidence,
@@ -2313,6 +2330,36 @@ fn scalar_domain_provably_empty(graph: &SemanticGraphStore, arms: &[SemanticNode
         }
     }
     false
+}
+
+/// Whether an intersection's arms hold `null` or `undefined` beside an
+/// object type — an object, array, tuple or function type, the empty
+/// object `{}` or `object` — which the checker's strict `null` algebra
+/// makes empty (`getIntersectionType`: `null & {}` and `undefined &
+/// { a: 1 }` are `never`, so `(string | null) & {}` distributes to
+/// `string`). Only structure read off the arms decides: a declaration
+/// carrier is not an object type here.
+fn nullable_beside_object_type(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+    evidence: &mut CanonicalEvidence,
+) -> bool {
+    let nullable = arms
+        .iter()
+        .any(|arm| peek_nullable_via_graph(graph, *arm, evidence).is_some());
+    nullable
+        && arms.iter().any(|arm| {
+            matches!(
+                graph.node_data(*arm).as_deref(),
+                Some(
+                    SemanticNodeData::Object(_)
+                        | SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Tuple { .. }
+                        | SemanticNodeData::Signature { .. }
+                        | SemanticNodeData::Primitive(PrimitiveKind::Object)
+                )
+            )
+        })
 }
 
 /// The scope-insensitive structural comparator. See the module docs for the

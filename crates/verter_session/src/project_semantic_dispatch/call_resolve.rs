@@ -1222,79 +1222,105 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // signature list, in list order: the first applicable candidate
         // wins. A union callee arrives as its common or synthesized union
         // signatures, so there is no per-arm acceptance here.
+        //
+        // Several candidates are tried twice, as the checker's
+        // `resolveCall` does: first under the SUBTYPE relation, then under
+        // assignability, so an argument `{ a: any }` selects `(v: unknown)`
+        // before an earlier `(v: { a: string })` it is only assignable to.
+        let passes: &[crate::semantic_query::RelationKind] = if visible.len() > 1 {
+            &[
+                crate::semantic_query::RelationKind::Subtype,
+                crate::semantic_query::RelationKind::Assignable,
+            ]
+        } else {
+            &[crate::semantic_query::RelationKind::Assignable]
+        };
+        let outer_applicability = self.dispatch_txn.borrow().call.applicability;
         let mut only_candidate = None;
-        for (position, candidate) in visible.iter().enumerate() {
-            let Some(kind) = bucket_kind(candidate.node) else {
-                return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
-            };
-            // The set was demanded for exactly this bucket; a candidate of
-            // the other bucket is a producer contract violation, and the
-            // call fails closed rather than deciding on it.
-            if kind != bucket {
-                return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
-            }
-            // Pair the (possibly instantiated) candidate with its RAW form
-            // through the content-free authored origin — instantiation
-            // preserves the occurrence but mints a new graph node, so a
-            // node-id pairing would lose the raw type parameters. A
-            // ROOTLESS candidate has no occurrence to compare: both lists
-            // are the same callee's ordered bucket, so its raw form is the
-            // candidate at the same flat position.
-            let raw_candidate = match candidate.occurrence.authored() {
-                Some(occurrence) => raw.iter().find(|raw| {
-                    raw.occurrence.authored() == Some(occurrence)
-                        && bucket_kind(raw.node) == Some(kind)
-                }),
-                None => raw.get(position).filter(|raw| {
-                    raw.occurrence.authored().is_none() && bucket_kind(raw.node) == Some(kind)
-                }),
-            };
-            let Some(raw_candidate) = raw_candidate else {
-                return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
-            };
-            if !budget.start_candidate() {
-                self.abandon_call_sessions_since(session_watermark);
-                return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
-            }
-            match self.check_call_candidate(
-                key,
-                candidate,
-                raw_candidate,
-                &arguments,
-                &mut budget,
-                false,
-            ) {
-                CandidateVerdict::Selected(result) => return CandidateVerdict::Selected(result),
-                CandidateVerdict::Mismatch => {}
-                CandidateVerdict::Degraded(failure) => {
-                    if failure == ResolveCallFailure::Budget {
-                        self.abandon_call_sessions_since(session_watermark);
-                    }
-                    return CandidateVerdict::Degraded(failure);
+        for &applicability in passes {
+            for (position, candidate) in visible.iter().enumerate() {
+                let Some(kind) = bucket_kind(candidate.node) else {
+                    return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
+                };
+                // The set was demanded for exactly this bucket; a candidate of
+                // the other bucket is a producer contract violation, and the
+                // call fails closed rather than deciding on it.
+                if kind != bucket {
+                    return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
                 }
-            }
-            if visible.len() == 1 {
-                only_candidate = Some((candidate, raw_candidate));
+                // Pair the (possibly instantiated) candidate with its RAW form
+                // through the content-free authored origin — instantiation
+                // preserves the occurrence but mints a new graph node, so a
+                // node-id pairing would lose the raw type parameters. A
+                // ROOTLESS candidate has no occurrence to compare: both lists
+                // are the same callee's ordered bucket, so its raw form is the
+                // candidate at the same flat position.
+                let raw_candidate = match candidate.occurrence.authored() {
+                    Some(occurrence) => raw.iter().find(|raw| {
+                        raw.occurrence.authored() == Some(occurrence)
+                            && bucket_kind(raw.node) == Some(kind)
+                    }),
+                    None => raw.get(position).filter(|raw| {
+                        raw.occurrence.authored().is_none() && bucket_kind(raw.node) == Some(kind)
+                    }),
+                };
+                let Some(raw_candidate) = raw_candidate else {
+                    return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
+                };
+                if !budget.start_candidate() {
+                    self.abandon_call_sessions_since(session_watermark);
+                    return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
+                }
+                self.dispatch_txn.borrow_mut().call.applicability = applicability;
+                let verdict = self.check_call_candidate(
+                    key,
+                    candidate,
+                    raw_candidate,
+                    &arguments,
+                    &mut budget,
+                    false,
+                );
+                self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
+                match verdict {
+                    CandidateVerdict::Selected(result) => {
+                        return CandidateVerdict::Selected(result)
+                    }
+                    CandidateVerdict::Mismatch => {}
+                    CandidateVerdict::Degraded(failure) => {
+                        if failure == ResolveCallFailure::Budget {
+                            self.abandon_call_sessions_since(session_watermark);
+                        }
+                        return CandidateVerdict::Degraded(failure);
+                    }
+                }
+                if visible.len() == 1 {
+                    only_candidate = Some((candidate, raw_candidate));
+                }
             }
         }
         // Every candidate of the bucket was a definite mismatch. A call with
         // ONE candidate continues with it as the checker's error-recovery
         // candidate (`getCandidateForOverloadFailure` picks the only one,
         // re-inferred from the arguments), carrying the diagnostic the
-        // checker reports.
+        // checker reports. It is checked under assignability, the one pass
+        // a single candidate has.
         if let Some((candidate, raw_candidate)) = only_candidate {
             if !budget.start_candidate() {
                 self.abandon_call_sessions_since(session_watermark);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
             }
-            match self.check_call_candidate(
+            self.dispatch_txn.borrow_mut().call.applicability =
+                crate::semantic_query::RelationKind::Assignable;
+            let verdict = self.check_call_candidate(
                 key,
                 candidate,
                 raw_candidate,
                 &arguments,
                 &mut budget,
                 true,
-            ) {
+            );
+            self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
+            match verdict {
                 CandidateVerdict::Selected(result) => return CandidateVerdict::Selected(result),
                 CandidateVerdict::Mismatch => {}
                 CandidateVerdict::Degraded(failure) => {
@@ -2612,7 +2638,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 limit: MAX_APPLICABILITY_RELATIONS as u32,
             });
         }
-        let mut key = self.relate_key_for(source, target);
+        let applicability = self.dispatch_txn.borrow().call.applicability;
+        let mut key = self.relate_key_for_kind(source, target, applicability);
         key.source_freshness = self.freshness_for_source_node(freshness_origin);
         key.policy.excess_property_check =
             excess_property_check && key.source_freshness == FreshnessKey::Fresh;
