@@ -15350,18 +15350,30 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let parent_fact = self.narrow_arms_by(&parent_subject, |this, arm| {
                 let member = this.project_segments_navigate(arm, &last)?;
                 let leaves = this.enumerated_union_arms_or_self(member);
-                Some(
-                    leaves
-                        .iter()
-                        .any(|leaf| match this.arm_truthiness_edge(*leaf, negated) {
-                            crate::semantic_query::TruthinessInhabitance::Yes => true,
-                            crate::semantic_query::TruthinessInhabitance::No => false,
-                            crate::semantic_query::TruthinessInhabitance::Undecided => {
-                                undecided = true;
-                                true
-                            }
-                        }),
-                )
+                Some(leaves.iter().any(|leaf| {
+                    // Without `strictNullChecks` a `null` or `undefined`
+                    // member is comparable to the narrowed member type, so
+                    // its arm stays on the truthy edge too.
+                    if !negated
+                        && !this.nullability.is_strict()
+                        && matches!(
+                            this.dispatch.graph().node_data(*leaf).as_deref(),
+                            Some(SemanticNodeData::Primitive(
+                                PrimitiveKind::Null | PrimitiveKind::Undefined
+                            ))
+                        )
+                    {
+                        return true;
+                    }
+                    match this.arm_truthiness_edge(*leaf, negated) {
+                        crate::semantic_query::TruthinessInhabitance::Yes => true,
+                        crate::semantic_query::TruthinessInhabitance::No => false,
+                        crate::semantic_query::TruthinessInhabitance::Undecided => {
+                            undecided = true;
+                            true
+                        }
+                    }
+                }))
             });
             match parent_fact {
                 // Every parent arm is proved off the tested edge. The

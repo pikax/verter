@@ -412,6 +412,11 @@ export function dExhaustNever(s: Shape) { switch (s.kind) { case "circle": case 
 export function dIn(s: Shape) { if ("r" in s) return s; throw 0; }
 export function dTypeofMember(x: { v: string } | { v: number }) { if (typeof x.v === "string") return x; throw 0; }
 export function dTruthyMember(x: { v: string; a: 1 } | { v?: undefined; b: 2 }) { if (x.v) return x; throw 0; }
+type NullK = { k: "a"; a: 1 } | { k: null; n: 0 };
+export function dOptionalNe(o: Opt) { if (o.k !== "a") return o; throw 0; }
+export function dNullK(o: NullK) { if (o.k === "a") return o; throw 0; }
+export function dLiteralTruthy(x: { v: ""; a: 1 } | { v: "x"; b: 2 }) { if (x.v) return x; throw 0; }
+export function dOptionalSwitch(o: Opt) { switch (o.k) { case "a": return o; default: throw 0; } }
 "##;
 
 /// A comparison of a discriminant property narrows the union it is read from:
@@ -506,26 +511,30 @@ fn an_exhaustive_switch_default_is_never() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Without `strictNullChecks` a union whose discriminant is `undefined` (or
-/// optional) in one member is not narrowed by comparing or testing that
-/// property: `o.k === "a"` and `if (x.v)` keep the whole union.
-/// Wrong-but-clean: the lane narrows.
-///
-/// What the lane gives:
-/// - `dOptionalElse`: the checker answers `{ k: "a"; a: 1; }` (strict), `Opt`
-///   (strictNullChecks off), `{ k: "a"; a: 1; }` (noImplicitAny off), `Opt`
-///   (both off); the lane measured `{ k: "a"; a: 1; }` (strictNullChecks off,
-///   both off).
-/// - `dTruthyMember`: the checker answers `{ v: string; a: 1; }` (strict), `{
-///   v: string; a: 1; } | { v?: undefined; b: 2; }` (strictNullChecks off), `{
-///   v: string; a: 1; }` (noImplicitAny off), `{ v: string; a: 1; } | { v?:
-///   undefined; b: 2; }` (both off); the lane measured `{ v: string; a: 1; }`
-///   (strictNullChecks off, both off).
+/// Without `strictNullChecks` `null` and `undefined` are comparable to every
+/// type, so a member whose discriminant is `undefined` or `null` survives a
+/// comparison with a literal and a truthiness test of that property: `o.k ===
+/// "a"` and `if (x.v)` keep the whole union, and `o.k !== "a"` keeps nothing.
 #[test]
-#[ignore = "a discriminant with an undefined member does not narrow without strictNullChecks"]
-fn wrong_clean_an_undefined_discriminant_does_not_narrow_without_strict_null_checks() {
+fn a_nullish_discriminant_narrows_as_the_checker_compares_it() {
     let matrix = Matrix::new(DISCRIMINANTS);
     let failures = matrix.nullness(&[
+        (
+            Read::Return("dOptionalNe"),
+            "{ k?: undefined; none: 0; }",
+            "never",
+        ),
+        (Read::Return("dNullK"), "{ k: \"a\"; a: 1; }", "NullK"),
+        (
+            Read::Return("dLiteralTruthy"),
+            "{ v: \"x\"; b: 2; }",
+            "{ v: \"x\"; b: 2; }",
+        ),
+        (
+            Read::Return("dOptionalSwitch"),
+            "{ k: \"a\"; a: 1; }",
+            "Opt",
+        ),
         (Read::Return("dOptionalElse"), "{ k: \"a\"; a: 1; }", "Opt"),
         (
             Read::Return("dTruthyMember"),

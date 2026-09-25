@@ -5025,6 +5025,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Without `strictNullChecks` `null` and `undefined` are comparable to every
+    /// type (the checker's `isSimpleTypeRelatedTo`): `undefined` overlaps
+    /// `"a"`, so an equality with `"a"` keeps an arm whose discriminant is
+    /// `undefined`.
+    fn nullish_comparable_without_strict_null_checks(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> bool {
+        if self.relation_strict_config().strict_null_checks {
+            return false;
+        }
+        let graph = self.graph();
+        [source, target].into_iter().any(|node| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        })
+    }
+
+    /// The members of a union the comparable relation distributes over.
+    /// Without `strictNullChecks` a union holds no `null` or `undefined`
+    /// beside another member (the checker's `getUnionType` leaves them out),
+    /// so `'a' | null` compares as `'a'`.
+    fn comparable_union_members(&self, members: &[SemanticNodeId]) -> Vec<SemanticNodeId> {
+        let graph = self.graph();
+        let nullish = |node: &SemanticNodeId| {
+            matches!(
+                graph.node_data(*node).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        };
+        if self.relation_strict_config().strict_null_checks || members.iter().all(nullish) {
+            return members.to_vec();
+        }
+        members
+            .iter()
+            .copied()
+            .filter(|member| !nullish(member))
+            .collect()
+    }
+
     fn comparable_worklist(
         &self,
         source: SemanticNodeId,
@@ -5125,6 +5172,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return RelationResult::Unknown;
             }
             if source == target {
+                return assignable(&[]);
+            }
+            if self.nullish_comparable_without_strict_null_checks(source, target) {
                 return assignable(&[]);
             }
             if let (Some(source_data), Some(target_data)) =
@@ -5247,6 +5297,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         results.push(assignable(&[]));
                         continue;
                     }
+                    if self.nullish_comparable_without_strict_null_checks(source, target) {
+                        results.push(assignable(&[]));
+                        continue;
+                    }
                     let (Some(source_data), Some(target_data)) =
                         (graph.node_data(source), graph.node_data(target))
                     else {
@@ -5255,7 +5309,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     };
 
                     if let SemanticNodeData::Union(members) = &*source_data {
-                        let members = members.members_arc();
+                        let members = self.comparable_union_members(&members.members_arc());
                         work.push(Work::CombineAnyFrom(results.len()));
                         for member in members.iter() {
                             work.push(Work::Eval(*member, target));
@@ -5263,7 +5317,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         continue;
                     }
                     if let SemanticNodeData::Union(members) = &*target_data {
-                        let members = members.members_arc();
+                        let members = self.comparable_union_members(&members.members_arc());
                         work.push(Work::CombineAnyFrom(results.len()));
                         for member in members.iter() {
                             work.push(Work::Eval(source, *member));
