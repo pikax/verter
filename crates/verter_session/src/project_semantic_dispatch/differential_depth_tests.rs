@@ -1326,13 +1326,8 @@ export function last(x: K) {
 "##;
 
 /// 799 `if (x === "k<i>") throw 0;` guards narrow the 800-member union to
-/// `"k799"`. The lane's time grows super-linearly: 50 guards 0.8 s, 200 13.1 s
-/// for the four settings; at 800 every setting passes the row deadline.
-///
-/// What the lane gives:
-/// - `last`: the checker answers `"k799"`; the lane took longer than 60s.
+/// `"k799"`.
 #[test]
-#[ignore = "a long chain of equality guards narrows in time the checker takes"]
 fn an_800_guard_narrowing_chain_answers() {
     let matrix = Matrix::new(NARROW_CHAIN_800);
     let failures = matrix.returns(&[("last", "\"k799\"")]);
@@ -2146,8 +2141,11 @@ const RETURN_CHAIN_800: &str = r##"export function chain(x: number) {
 "##;
 
 /// A function with 800 `if (x === i) return "r<i>" as const;` statements
-/// returns the union of the 801 literals. The lane fails with
-/// `Budget(WorkBudgetExceeded)` (200 guards answer in 0.4 s).
+/// returns the union of the 801 literals. The lane refuses it with
+/// `Budget(WorkBudgetExceeded)`: the demand slice plans at most 256 return
+/// sites (255 guards and the final return answer; 256 guards are refused
+/// before evaluating). The work each guard costs is constant: the relation
+/// checks and guard applications grow linearly with the guards.
 ///
 /// What the lane gives:
 /// - `chain`: the checker answers `"none" | "r0" | "r1" | "r10" | "r100" |
@@ -2252,7 +2250,7 @@ const RETURN_CHAIN_800: &str = r##"export function chain(x: number) {
 ///   "r90" | "r91" | "r92" | "r93" | "r94" | "r95" | "r96" | "r97" | "r98" |
 ///   "r99"`; the lane produced no value: Failure(Budget(WorkBudgetExceeded)).
 #[test]
-#[ignore = "a function with 800 returning guards infers its return within the work budget"]
+#[ignore = "a function with more return sites than the demand slice plans infers its return"]
 fn an_800_return_if_chain_answers_within_the_work_budget() {
     let matrix = Matrix::new(RETURN_CHAIN_800);
     let failures = matrix.returns(&[
