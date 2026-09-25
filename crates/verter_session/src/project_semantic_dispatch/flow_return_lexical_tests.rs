@@ -2059,8 +2059,6 @@ fn flow_return_unmodelable_local_binding_never_falls_through_to_file_scope() {
         "r5DestructuredParamNested",
         // A local `class` declaration's name.
         "r5LocalClass",
-        // A hoisted nested function declaration's name read as a value.
-        "r5NestedFnRead",
         // A local `enum` declaration's name.
         "r5LocalEnum",
         // A local `namespace` declaration's name.
@@ -2068,6 +2066,23 @@ fn flow_return_unmodelable_local_binding_never_falls_through_to_file_scope() {
     ] {
         assert_fails_closed(&host, name);
     }
+}
+
+/// A hoisted nested function declaration's name read as a value is the
+/// function value it declares, never the file-scope bait of the same
+/// name. TypeScript 7.0.2: `r5NestedFnRead` is `() => number`.
+#[test]
+fn flow_return_nested_function_declaration_read_is_its_value() {
+    let host = make_r5_host();
+    assert_clean_warm(
+        &host,
+        "r5NestedFnRead",
+        TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(number())),
+            Vec::new(),
+        ))),
+    );
 }
 
 /// A destructured object-pattern parameter element binds its annotation
@@ -4041,15 +4056,12 @@ fn reachable_type_param_names(
 /// new RvHolder<number>().ownRL(): RL
 /// ```
 ///
-/// The local-binding and parameter routes now resolve through argument
+/// The local-binding, parameter and IIFE routes resolve through argument
 /// inference: the published value is the un-widened literal of the
-/// checker's widened `string`. Both callees keep Rootless origin as
-/// provenance (a local arrow and a parameter's function type have no
-/// authored function occurrence) but their dependency proof is complete,
-/// so the enclosing FlowReturn warms. The IIFE route is not
-/// call-resolved: `unknown` is the recorded interim there — not the
-/// checker's answer, but a leaked binder is not either, and it is the
-/// answer that cannot be substituted into.
+/// checker's widened `string`. The callees keep Rootless origin as
+/// provenance (a local arrow, a parameter's function type and an invoked
+/// function expression have no authored function occurrence) but their
+/// dependency proof is complete, so the enclosing FlowReturn warms.
 ///
 /// Mutation recipes (each verified to flip exactly these rows):
 ///
@@ -4066,7 +4078,7 @@ fn flow_return_every_call_route_instantiates_the_callees_clause() {
     // Rootless-origin callees whose inputs are fully rooted: a local
     // arrow and a generic function-typed parameter resolve from the
     // literal argument and warm-admit under the dependency proof.
-    for name in ["rvLocalLambdaCall", "rvParamCall"] {
+    for name in ["rvLocalLambdaCall", "rvParamCall", "rvIife"] {
         r5_node(
             &host,
             name,
@@ -4081,20 +4093,6 @@ fn flow_return_every_call_route_instantiates_the_callees_clause() {
             },
         );
     }
-
-    // The IIFE route is not call-resolved: the recorded interim stands.
-    r5_node(
-        &host,
-        "rvIife",
-        FunctionPartIdentity::DeclarationBody,
-        |dispatch, node| {
-            assert_eq!(
-                node_shape(dispatch, node),
-                NodeShape::Primitive(PrimitiveKind::Unknown),
-                "rvIife keeps the interim: the IIFE route is not call-resolved"
-            );
-        },
-    );
 
     // The MEMBER-ALIASING pair: the local lambda's clause is spelled
     // `RL`, exactly the enclosing class's, so before the fix both members

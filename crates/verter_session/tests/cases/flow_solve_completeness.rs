@@ -80,8 +80,8 @@ function rich(x) {
 /// installs the family's accepted typed gap.
 const CAPTURE_FIXTURE_SOURCE: &str = r#"
 function with_capture(x) {
-  function helper() { return x; }
-  return helper();
+  class Helper { m() { return x; } }
+  return new Helper();
 }
 "#;
 
@@ -2003,9 +2003,9 @@ fn every_call_occurrence_has_its_own_identity() {
     assert!(outcome.warm_candidate().is_some());
 }
 
-/// A required subject the structural authority cannot name — a nested
-/// function's capture set — installs the family's accepted typed gap at
-/// install, anchored on the nested function's real binding identity. It is
+/// A required subject the structural authority cannot name — a local
+/// class declaration's capture set — installs the family's accepted typed
+/// gap at install, anchored on the class's real binding identity. It is
 /// never omitted and never discharged, so the solve can never complete.
 #[test]
 fn unnameable_capture_subject_installs_the_family_typed_gap() {
@@ -2018,19 +2018,15 @@ fn unnameable_capture_subject_installs_the_family_typed_gap() {
         .iter()
         .filter(|spec| matches!(spec.basis(), FlowObligationBasis::Capture { .. }))
         .collect();
-    assert_eq!(
-        captures.len(),
-        1,
-        "the nested function is one capture subject"
-    );
+    assert_eq!(captures.len(), 1, "the local class is one capture subject");
     let FlowObligationBasis::Capture { identity, .. } = captures[0].basis() else {
         unreachable!()
     };
     // Anchored on the capturer's real FlowBindingIdentity.
     let identity = identity
         .as_ref()
-        .expect("the nested function resolves an identity");
-    assert_eq!(identity.name.as_ref(), "helper");
+        .expect("the local class resolves an identity");
+    assert_eq!(identity.name.as_ref(), "Helper");
 
     let mut runtime = ObligationRuntime::default();
     let handle = runtime.install_flow_demand(&plan);

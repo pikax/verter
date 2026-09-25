@@ -3201,6 +3201,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // cannot seal, and the result finalizes unproven — at the
                 // root and at SCC publication alike, both of which
                 // finalize through this one report.
+                // A local function DECLARATION's value is the declaration
+                // itself, hoisted to the frame's entry: it has no slot
+                // product to produce, and every read evaluates the
+                // declaration where it stands.
+                FlowObligationBasis::Binding { node, slot }
+                    if binding_is_local_function_declaration(&slot.binding, witness.skeleton) =>
+                {
+                    witness
+                        .executed_selection
+                        .is_some_and(|selection| selection.is_selected(*node))
+                }
                 FlowObligationBasis::Binding { node, slot } => {
                     witness
                         .executed_selection
@@ -3211,6 +3222,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             witness.products,
                             &carrier.plan,
                         )
+                }
+                // A closure capturing a local function declaration reads
+                // the declaration itself, as its own frame does.
+                FlowObligationBasis::CapturedBinding { node, identity, .. }
+                    if identity.kind
+                        == verter_semantic::analysis::function_program::FunctionBindingKind::NestedFunction =>
+                {
+                    witness
+                        .executed_selection
+                        .is_some_and(|selection| selection.is_selected(*node))
                 }
                 FlowObligationBasis::Site { node, .. }
                 | FlowObligationBasis::Guard { node, .. }
@@ -5032,6 +5053,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut evaluator = FlowEvaluator {
             dispatch: self,
             self_slot: Some(key),
+            resolving_functions: std::rc::Rc::default(),
             canonical,
             owner,
             nullability: key.context.policy.nullability,
@@ -5967,6 +5989,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 contributors = other;
             }
         }
+        // A `never` return contributes nothing beside another (the checker's
+        // aggregate drops it before widening): `if (c) return 0; return
+        // fail()` over `fail(): never` is `number`, as is a bare self-call.
+        if contributors
+            .iter()
+            .any(|contribution| !is_never_node(graph, contribution.node))
+        {
+            contributors.retain(|contribution| !is_never_node(graph, contribution.node));
+        }
         // Literal widening is a SINGLE-contributor rule (tsc aggregates
         // the return-expression types with `pushIfUnique`, then widens
         // only when the aggregate is one type): `return 1` is `number`,
@@ -6506,6 +6537,36 @@ fn is_nullable_node(
         Some(SemanticNodeData::Primitive(
             PrimitiveKind::Null | PrimitiveKind::Undefined
         ))
+    )
+}
+
+/// Whether `binding` names a function DECLARATION of a function body, in
+/// this frame or captured from an enclosing one: its value is the
+/// declaration itself, hoisted to its frame's entry, so it has no slot
+/// product.
+fn binding_is_local_function_declaration(
+    binding: &verter_semantic::analysis::flow::FlowBindingRef,
+    skeleton: &verter_semantic::analysis::flow::FunctionBodySkeleton,
+) -> bool {
+    match binding {
+        verter_semantic::analysis::flow::FlowBindingRef::Local(local) => {
+            skeleton.binding(*local).kind
+                == verter_semantic::analysis::flow::SkeletonBindingKind::NestedFunction
+        }
+        verter_semantic::analysis::flow::FlowBindingRef::Captured(identity) => {
+            identity.kind
+                == verter_semantic::analysis::function_program::FunctionBindingKind::NestedFunction
+        }
+    }
+}
+
+fn is_never_node(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: SemanticNodeId,
+) -> bool {
+    matches!(
+        graph.node_data(node).as_deref(),
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
     )
 }
 
@@ -7142,6 +7203,19 @@ struct FlowEvaluator<'d, 'b> {
     /// and holding the enclosing frame's key would name the wrong
     /// function. The `Option` is what makes that mistake unexpressible.
     self_slot: Option<&'b FlowReturnKey>,
+    /// The nested function values whose returns are being evaluated, the
+    /// outermost first, each flagged once a return it depends on is found
+    /// to read it again: the checker's return-type resolution stack
+    /// (`pushTypeResolution`), shared by every nested evaluator of one
+    /// root evaluation.
+    resolving_functions: std::rc::Rc<
+        std::cell::RefCell<
+            Vec<(
+                verter_semantic::analysis::function_program::FunctionProgramKey,
+                bool,
+            )>,
+        >,
+    >,
     canonical: &'d str,
     owner: verter_type_expr::TopLevelOwnerId,
     /// The `null` / `undefined` algebra of the function's own project
@@ -16546,7 +16620,29 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             );
             return self.unmodeled_position();
         }
-        self.eval_nested_function_signature(
+        // A return read again while it is being resolved (a local
+        // function reached from its own body other than as a bare tail
+        // call, or mutually recursive declarations) is the checker's
+        // circular return: every return from the re-entered one inward is
+        // `any` (`getReturnTypeOfSignature` when `popTypeResolution`
+        // fails). A declared return is never resolved from the body.
+        let reentered = self
+            .resolving_functions
+            .borrow()
+            .iter()
+            .position(|(resolving, _)| resolving == function);
+        if let Some(position) = reentered {
+            for (_, circular) in self.resolving_functions.borrow_mut()[position..].iter_mut() {
+                *circular = true;
+            }
+        }
+        let circular = reentered.is_some() && content.declared_return.is_none();
+        if !circular {
+            self.resolving_functions
+                .borrow_mut()
+                .push((function.clone(), false));
+        }
+        let signature = self.eval_nested_function_signature(
             &content.params,
             &content.type_parameters,
             context,
@@ -16563,7 +16659,47 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             &key,
             outer_env,
             extended_captures,
-        )
+            circular,
+        );
+        let found_circular = !circular
+            && self
+                .resolving_functions
+                .borrow_mut()
+                .pop()
+                .is_some_and(|(_, circular)| circular);
+        if found_circular && content.declared_return.is_none() {
+            return self.signature_returning_any(signature);
+        }
+        signature
+    }
+
+    /// `signature` with its return (and any predicate beside it) replaced by
+    /// `any` — a nested function whose return was read while it was being
+    /// resolved.
+    fn signature_returning_any(&self, signature: SemanticNodeId) -> SemanticNodeId {
+        let graph = self.dispatch.graph();
+        let Some(SemanticNodeData::Signature {
+            kind,
+            params,
+            type_parameters,
+            ..
+        }) = graph.node_data(signature).as_deref().cloned()
+        else {
+            return signature;
+        };
+        let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        graph.intern_node(SemanticNodeData::Signature {
+            kind,
+            params,
+            return_type: any,
+            type_parameters,
+            signature_span: None,
+            return_type_span: None,
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(any),
+            predicate: None,
+            is_abstract: false,
+        })
     }
 
     fn capture_source_products(
@@ -16659,6 +16795,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         key: &FlowReturnKey,
         outer_env: &FlowBinderEnv,
         extended_captures: &[verter_semantic::analysis::flow::SkeletonBindingId],
+        circular: bool,
     ) -> SemanticNodeId {
         let graph = self.dispatch.graph();
         // The nested function's OWN type parameters are binders in scope
@@ -16816,6 +16953,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     return_type,
                 ),
                 predicate,
+                is_abstract: false,
+            });
+        }
+        // A return read while it is being resolved is `any`; its body is
+        // not evaluated again.
+        if circular {
+            let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+            return graph.intern_node(SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Call,
+                params: Arc::from(signature_params.into_boxed_slice()),
+                return_type: any,
+                type_parameters: Arc::from(type_param_decls.into_boxed_slice()),
+                signature_span: None,
+                return_type_span: None,
+                occurrence: None,
+                return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(any),
+                predicate: None,
                 is_abstract: false,
             });
         }
@@ -17056,6 +17210,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let mut nested_evaluator = FlowEvaluator {
                 dispatch: self.dispatch,
                 self_slot: None,
+                resolving_functions: std::rc::Rc::clone(&self.resolving_functions),
                 canonical: self.canonical,
                 owner: self.owner,
                 nullability: self.nullability,
@@ -17139,6 +17294,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     use super::dispatch_txn::flow_obligation_state::FlowObligationBasis;
                     let products_complete = plan.obligation_specs().iter().all(|spec| {
                         let subject = match spec.basis() {
+                            // A local function declaration's value is the
+                            // declaration itself: it has no slot product.
+                            FlowObligationBasis::Binding { slot, .. }
+                                if binding_is_local_function_declaration(
+                                    &slot.binding,
+                                    &nested_evaluator.skeleton,
+                                ) =>
+                            {
+                                return true;
+                            }
                             FlowObligationBasis::Binding { slot, .. } => Some(slot.binding.clone()),
                             FlowObligationBasis::CapturedBinding { node, identity, demand, .. } => {
                                 let completed = nested_evaluator.executed_walk
@@ -18296,6 +18461,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
+                // A generic callee infers its clause from the arguments
+                // through the executor, as a binding-held one does.
+                if self.call_group_needs_executor(signature, site) {
+                    if let Some(value) = self.eval_call_via_resolve_call(signature, site) {
+                        return value;
+                    }
+                }
                 // A nested function value's signature is COMPOSED here:
                 // its return is the flow join of its own body, evaluated
                 // with its clause bound. A resolved same-named

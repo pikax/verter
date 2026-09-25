@@ -341,33 +341,30 @@ fn a_nested_bodys_control_surface_failure_marks_its_return_not_the_enclosing_fra
     assert_eq!(outcome.candidates, 0);
 }
 
-/// A CALL FORM the substrate does not model is one position: a hoisted
-/// nested function declaration read as a callee.
-///
-/// `SliceCall::LocalFunctionShadow` returned a frame-level `Err`, so
-/// `function outer() { function g() { return 1 } return { label: "x",
-/// made: g() } }` published nothing at all. tsgo:
-/// `{ label: string; made: number }`. Recovering the nested declaration's
-/// own return is downstream work; publishing NOTHING for the enclosing
-/// object is not the same fact.
+/// A hoisted nested function declaration read as a callee is called as
+/// the function value it declares: `function outer() { function g() {
+/// return 1 } return { label: "x", made: g() } }` is `{ label: string;
+/// made: number }` on TypeScript 7.0.2, and the answer is clean.
 #[test]
-fn an_unmodeled_call_form_marks_its_position_only() {
+fn a_local_function_declaration_is_called_as_its_value() {
     let host = make_seal_host();
     let outcome =
         evaluate(&host, "localFunctionShadowCall").expect("localFunctionShadowCall has a value");
     with_dispatch(&host, |dispatch| {
         assert_string_label(dispatch, outcome.node, "localFunctionShadowCall");
-        assert_marker(
-            dispatch,
-            member(dispatch, outcome.node, "made"),
-            "localFunctionShadowCall",
+        assert!(
+            matches!(
+                dispatch
+                    .graph()
+                    .node_data(member(dispatch, outcome.node, "made"))
+                    .as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+            ),
+            "the local declaration's call is its return"
         );
     });
-    assert_eq!(
-        outcome.degradation,
-        Some(FlowReturnDegradation::UnmodeledPosition)
-    );
-    assert_eq!(outcome.candidates, 0);
+    assert_eq!(outcome.degradation, None);
+    assert_eq!(outcome.candidates, 1);
 }
 
 /// The CLEAN control: an ordinary body still answers cleanly and warms

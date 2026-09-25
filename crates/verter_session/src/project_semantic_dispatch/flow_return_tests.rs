@@ -457,6 +457,41 @@ fn assert_whole_return_is_unmodeled_marker(
     );
 }
 
+/// Assert a whole-return position evaluates CLEAN to the primitive
+/// `expected` and warms.
+#[track_caller]
+fn assert_whole_return_is_clean(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+    canonical: &str,
+    what: &str,
+    expected: PrimitiveKind,
+) {
+    match dispatch.execute_function_return_source(
+        &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+        canonical,
+    ) {
+        super::flow_return::FunctionReturnNode::Flow(result) => {
+            assert_eq!(
+                dispatch.graph().node_data(result.return_type()).as_deref(),
+                Some(&SemanticNodeData::Primitive(expected)),
+                "{what}: the return"
+            );
+            assert_eq!(result.degradation(), None, "{what}: clean");
+        }
+        other => panic!("{what}: a clean success, got {other:?}"),
+    }
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                dispatch.flow_return_key_for(identity)
+            ))),
+        1,
+        "{what}: a clean success warms"
+    );
+}
+
 fn flow_is_miss(dispatch: &ProjectSemanticDispatch<'_>, key: FlowReturnKey) -> bool {
     matches!(
         execute_flow(dispatch, key),
@@ -1745,12 +1780,13 @@ fn a_budget_truncated_flow_return_folds_a_faulting_class_not_a_contained_one() {
 }
 
 /// ONE lexical binding authority: a hoisted nested function declaration
-/// shadows the outer same-name callee, and its own return is beyond the
-/// direct-call inventory — the call FAILS CLOSED (Unresolved), never
-/// binding the outer `g(): number`. Mutation recipe: firing the index
+/// shadows the outer same-name callee, and the call is the nested
+/// declaration's own return, never the outer `g(): number`. TypeScript
+/// 7.0.2 (all four `strictNullChecks` × `noImplicitAny` settings):
+/// `ReturnType<typeof f>` is `string`. Mutation recipe: firing the index
 /// DirectCall edge on the shadowed name admits `number` here.
 #[test]
-fn flow_return_direct_call_fails_closed_on_nested_function_declaration_shadow() {
+fn flow_return_direct_call_reads_the_shadowing_nested_function_declaration() {
     let host = make_host();
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/ws/fn-shadow.ts".to_string()),
@@ -1774,22 +1810,24 @@ fn flow_return_direct_call_fails_closed_on_nested_function_declaration_shadow() 
             function_part: FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         };
-        assert_whole_return_is_unmodeled_marker(
+        assert_whole_return_is_clean(
             dispatch,
             &identity,
             "/ws/fn-shadow.ts",
             "the shadowed direct call",
+            PrimitiveKind::String,
         );
     });
 }
 
 /// The same authority covers the self name: a nested `function f(): number`
-/// inside `f` shadows BOTH the self-recursion hold and the declared nested
-/// return — the call fails closed (Unresolved), never EmptyCycle, never
-/// `number`. Mutation recipe: treating the call as a DirectSelfCall
-/// degrades this with EmptyCycle instead.
+/// inside `f` shadows the self-recursion hold, so the call is the nested
+/// declaration's declared return, never a self edge. TypeScript 7.0.2 (all
+/// four settings): `ReturnType<typeof f>` is `number`. Mutation recipe:
+/// treating the call as a DirectSelfCall degrades this with EmptyCycle
+/// instead.
 #[test]
-fn flow_return_self_call_shadowed_by_nested_function_declaration_fails_closed() {
+fn flow_return_self_call_shadowed_by_nested_function_declaration_reads_it() {
     let host = make_host();
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/ws/self-fn-shadow.ts".to_string()),
@@ -1813,11 +1851,12 @@ fn flow_return_self_call_shadowed_by_nested_function_declaration_fails_closed() 
             function_part: FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         };
-        assert_whole_return_is_unmodeled_marker(
+        assert_whole_return_is_clean(
             dispatch,
             &identity,
             "/ws/self-fn-shadow.ts",
             "the shadowed self call",
+            PrimitiveKind::Number,
         );
     });
 }
@@ -1967,10 +2006,10 @@ fn flow_return_nested_function_value_return_free_loop_stays_transparent() {
 
 /// The lexical binding authority reaches INSIDE nested function values: a
 /// hoisted nested declaration in the nested value's own body shadows the
-/// outer same-name callee, and its return is beyond the direct-call
-/// inventory — the call FAILS CLOSED (Unresolved), never binding the
-/// outer `g(): number`. Mutation recipe: seeding the nested Lowerer with
-/// an empty shadow set admits `number` here.
+/// outer same-name callee, and the call is that declaration's return,
+/// never the outer `g(): number`. TypeScript 7.0.2 (all four settings):
+/// `ReturnType<typeof outer>` is `string`. Mutation recipe: seeding the
+/// nested Lowerer with an empty shadow set admits `number` here.
 #[test]
 fn flow_return_nested_value_hoisted_declaration_shadows_the_outer_callee() {
     let host = make_host();
@@ -1996,22 +2035,25 @@ fn flow_return_nested_value_hoisted_declaration_shadows_the_outer_callee() {
             function_part: FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         };
-        assert_whole_return_is_unmodeled_marker(
+        assert_whole_return_is_clean(
             dispatch,
             &identity,
             "/ws/nested-fn-shadow.ts",
             "the nested-value shadowed call",
+            PrimitiveKind::String,
         );
     });
 }
 
 /// The same authority covers a nested value's OWN name: an inner hoisted
 /// declaration of the nested function's name shadows it — the call is
-/// NEVER a DirectSelfCall (no self edge, no EmptyCycle); it fails closed
-/// (Unresolved). Mutation recipe: an empty nested shadow set fires the
-/// DirectSelfCall arm and degrades with EmptyCycle instead.
+/// NEVER a DirectSelfCall (no self edge, no EmptyCycle); it calls the inner
+/// declaration. TypeScript 7.0.2 (all four `strictNullChecks` ×
+/// `noImplicitAny` settings): `ReturnType<typeof outer>` is `number`.
+/// Mutation recipe: an empty nested shadow set fires the DirectSelfCall arm
+/// and degrades with EmptyCycle instead.
 #[test]
-fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_fails_closed() {
+fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_reads_it() {
     let host = make_host();
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/ws/nested-self-shadow.ts".to_string()),
@@ -2035,11 +2077,12 @@ fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_fails_closed
             function_part: FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         };
-        assert_whole_return_is_unmodeled_marker(
+        assert_whole_return_is_clean(
             dispatch,
             &identity,
             "/ws/nested-self-shadow.ts",
             "the nested-value self-name shadow",
+            PrimitiveKind::Number,
         );
     });
 }
@@ -7539,21 +7582,18 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
 
         // (3) The negated edge drops the whole tested family: both `K`
         // and `KSub` are instances of `K`, so the guarded subject reads
-        // `never` and ONLY the fall-through `return 0` contributes —
-        // the published result is exactly that literal, not a union.
+        // `never` and ONLY the fall-through `return 0` contributes — the
+        // `never` return drops beside it and the lone fresh literal widens:
+        // TypeScript 7.0.2 (all four settings) answers `number`.
         let key = whole_return_key(dispatch, CANONICAL, "negated");
         let result = flow_result_value(dispatch, key.clone());
         let expr = host
             .project_node_to_type_expr_for_test(result.return_type())
             .expect("return node must project to TypeExpr");
-        assert!(
-            matches!(
-                &expr,
-                verter_type_expr::TypeExpr::Literal(
-                    verter_type_expr::LiteralValue::Number(value)
-                ) if *value == 0.0
-            ),
-            "the negated family drop leaves only the fall-through arm, got {expr:?}"
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "the negated family drop leaves only the widened fall-through arm"
         );
         assert_eq!(
             result.degradation(),

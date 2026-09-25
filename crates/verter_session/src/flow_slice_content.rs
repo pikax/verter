@@ -2483,6 +2483,10 @@ pub(crate) fn build_flow_slice_content(
         break_target_followed_by_return: Vec::new(),
         current_statement_followed_by_return: SuffixReturn::NotGuaranteed,
         nullability,
+        frame_is_async: match node {
+            FunctionNode::Function(function) => function.r#async,
+            FunctionNode::Arrow(arrow) => arrow.r#async,
+        },
     };
     if selection.is_some() {
         lowerer.unsafe_invoked_closure_effects =
@@ -4876,6 +4880,8 @@ struct Lowerer<'a> {
     /// member or an array element is the checker's widening nullable type,
     /// which the enclosing literal's widening turns into `any`.
     nullability: crate::semantic_query::NullabilityPolicy,
+    /// Whether the frame's function is `async`.
+    frame_is_async: bool,
     frame_gate: Arc<DefiningFrameGate>,
     bindings: &'a verter_semantic::analysis::flow::FlowBindingMap,
     index: &'a verter_semantic::analysis::function_program::FunctionProgramIndex,
@@ -5380,6 +5386,17 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    /// Whether any write other than its declarator's initializer assigns
+    /// `binding`.
+    fn binding_is_reassigned(&self, binding: SkeletonBindingId) -> bool {
+        let initializer = self.skeleton.binding(binding).initializer;
+        self.skeleton.writes.iter().any(|write| {
+            (write.value.is_none() || write.value != initializer)
+                && matches!(write.binding, Some(FlowBindingRef::Local(local))
+                    if self.bindings.canonical_local(local) == self.bindings.canonical_local(binding))
+        })
+    }
+
     fn binding_has_write_before(
         &self,
         binding: SkeletonBindingId,
@@ -5814,13 +5831,28 @@ impl<'a> Lowerer<'a> {
             let statement_start = out.len();
             match statement {
                 Statement::ReturnStatement(ret) => {
-                    let freshness = ret
+                    // A bare call of the frame's own declaration contributes
+                    // nothing to the return type: `never`, which leaves the
+                    // freshness of every other return untouched.
+                    let bare_self_call = ret
                         .argument
                         .as_ref()
-                        .map_or(SliceFreshness::Pinned, expression_freshness);
+                        .is_some_and(|arg| self.returns_bare_self_call(arg));
+                    let freshness = if bare_self_call {
+                        SliceFreshness::Fresh
+                    } else {
+                        ret.argument
+                            .as_ref()
+                            .map_or(SliceFreshness::Pinned, expression_freshness)
+                    };
                     let mut predicate_test = None;
                     let argument = ret.argument.as_ref().map(|arg| {
-                        if self.value_span_selected(arg.span()) {
+                        if bare_self_call {
+                            SliceExpr::Type(GatedLeaf(
+                                TypeExpr::Primitive(PrimitiveName::Never),
+                                None,
+                            ))
+                        } else if self.value_span_selected(arg.span()) {
                             let lowered = self.lower_expr(arg, ExprMode::Return);
                             predicate_test = self.return_predicate_test(arg);
                             lowered
@@ -8890,10 +8922,25 @@ impl<'a> Lowerer<'a> {
                         // A hoisted nested function declaration shadows
                         // every outer same-name callee; exact recovery of
                         // its own return is not implemented (fail closed).
-                        NameBinding::NestedFunction => {
-                            return SliceExpr::Call(SliceCall::LocalFunctionShadow, call_site(call))
+                        // A local function declaration — this frame's or an
+                        // enclosing one's — is called as the value it
+                        // declares.
+                        NameBinding::NestedFunction | NameBinding::Unmodeled => {
+                            return match self.lower_local_function_declaration(callee.span) {
+                                Some(function) => SliceExpr::Call(
+                                    SliceCall::Nested(Box::new(function)),
+                                    call_site(call),
+                                ),
+                                None if matches!(
+                                    self.classify_occurrence(callee.span),
+                                    NameBinding::NestedFunction
+                                ) =>
+                                {
+                                    SliceExpr::Call(SliceCall::LocalFunctionShadow, call_site(call))
+                                }
+                                None => SliceExpr::UnmodeledBinding,
+                            };
                         }
-                        NameBinding::Unmodeled => return SliceExpr::UnmodeledBinding,
                         // A parameter or local SHADOWS the file-level
                         // declaration: the call goes through the binding's
                         // signature, never a flow obligation edge.
@@ -9346,7 +9393,11 @@ impl<'a> Lowerer<'a> {
                 param: None,
                 captured: true,
             },
-            NameBinding::NestedFunction | NameBinding::Unmodeled => SliceExpr::UnmodeledBinding,
+            // A local function declaration is the function value it
+            // declares.
+            NameBinding::NestedFunction | NameBinding::Unmodeled => self
+                .lower_local_function_declaration(identifier.span)
+                .unwrap_or(SliceExpr::UnmodeledBinding),
             // A free `undefined` is not a declaration the owner scope can
             // answer: its value IS the `undefined` type (the shared shallow
             // pass reads it the same way).
@@ -10012,6 +10063,235 @@ impl<'a> Lowerer<'a> {
                 root: Box::new(root),
                 links: rest.iter().map(|name| (Arc::clone(name), false)).collect(),
             }
+        }
+    }
+
+    /// The local function DECLARATION the name at `span` binds — declared in
+    /// this frame or an enclosing one — as the function value it is, read
+    /// where the name is referenced. `None` when the name binds anything
+    /// else.
+    ///
+    /// A declaration is hoisted: its value exists from its frame's entry,
+    /// so it is read wherever the name is, before the declaration too. And
+    /// it is never a control-flow container the checker extends a capture's
+    /// narrowing into (`getControlFlowContainer` stops at a function
+    /// declaration): every capture reads its declared type.
+    fn lower_local_function_declaration(&mut self, span: oxc_span::Span) -> Option<SliceExpr> {
+        let (function, gate, own_frame) = self.local_function_declaration(span)?;
+        Some(self.lower_declared_function_value(function, &gate, own_frame, span))
+    }
+
+    /// The local function DECLARATION the name at `span` binds, with the
+    /// frame that declares it and whether that frame is this one.
+    fn local_function_declaration(
+        &self,
+        span: oxc_span::Span,
+    ) -> Option<(&'a oxc_ast::ast::Function<'a>, Arc<DefiningFrameGate>, bool)> {
+        use verter_semantic::analysis::flow::FlowBindingOccurrence;
+        let (gate, local) = match self.bindings.occurrence(self.rebase(span)) {
+            // The declaration the occurrence names exactly — never its
+            // runtime alias (a function expression's own name and a body
+            // declaration of that name share one runtime variable).
+            FlowBindingOccurrence::Resolved(FlowBindingRef::Local(binding)) => {
+                (Arc::clone(&self.frame_gate), *binding)
+            }
+            FlowBindingOccurrence::Resolved(FlowBindingRef::Captured(identity)) => {
+                let mut current = self.captures.enclosing.as_deref();
+                loop {
+                    let frame = current?;
+                    if frame.gate.bindings.function() == &identity.defining_function {
+                        break (
+                            Arc::clone(&frame.gate),
+                            frame.gate.bindings.local(identity)?,
+                        );
+                    }
+                    current = frame.gate.outer.enclosing.as_deref();
+                }
+            }
+            _ => return None,
+        };
+        if gate.skeleton.binding(local).kind != SkeletonBindingKind::NestedFunction {
+            return None;
+        }
+        let own_frame = Arc::ptr_eq(&gate, &self.frame_gate);
+        // The declaration node, found by its name: the walk descends only
+        // into nodes that contain it.
+        struct Finder<'a> {
+            name: verter_span::Span,
+            found: Option<&'a oxc_ast::ast::Function<'a>>,
+        }
+        impl<'a> Visit<'a> for Finder<'a> {
+            fn visit_statement(&mut self, statement: &Statement<'a>) {
+                let span = statement.span();
+                if self.found.is_none()
+                    && span.start <= self.name.start
+                    && span.end >= self.name.end
+                {
+                    walk::walk_statement(self, statement);
+                }
+            }
+            fn visit_expression(&mut self, expression: &Expression<'a>) {
+                let span = expression.span();
+                if self.found.is_none()
+                    && span.start <= self.name.start
+                    && span.end >= self.name.end
+                {
+                    walk::walk_expression(self, expression);
+                }
+            }
+            fn visit_function(
+                &mut self,
+                function: &oxc_ast::ast::Function<'a>,
+                flags: oxc_syntax::scope::ScopeFlags,
+            ) {
+                if self.found.is_some() {
+                    return;
+                }
+                if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration
+                    && function.id.as_ref().is_some_and(|id| {
+                        id.span.start == self.name.start && id.span.end == self.name.end
+                    })
+                {
+                    self.found = Some(self.alloc(function));
+                    return;
+                }
+                walk::walk_function(self, function, flags);
+            }
+        }
+        // The occurrence's own declaration, else the last function
+        // declaration of its runtime variable: a body declaration of a
+        // function expression's own name is the value the name reads.
+        let candidates = std::iter::once(local).chain(
+            gate.bindings
+                .runtime_declarations(local)
+                .iter()
+                .rev()
+                .copied(),
+        );
+        for candidate in candidates {
+            let fact = gate.skeleton.binding(candidate);
+            if fact.kind != SkeletonBindingKind::NestedFunction {
+                continue;
+            }
+            let mut finder = Finder {
+                name: fact.span.to_absolute(gate.anchor),
+                found: None,
+            };
+            finder.visit_program(self.program);
+            if let Some(function) = finder.found {
+                return Some((function, gate, own_frame));
+            }
+        }
+        None
+    }
+
+    /// Whether `argument` of a `return` is a bare call of this frame's own
+    /// function declaration (`return rec(n - 1)` inside `function rec`):
+    /// the checker's `checkAndAggregateReturnExpressionTypes` lets such a
+    /// return contribute nothing (parentheses, and an `await` in an async
+    /// function, peeled).
+    fn returns_bare_self_call(&self, argument: &Expression<'_>) -> bool {
+        let mut expression = unwrap_parenthesized(argument);
+        if let Expression::AwaitExpression(awaited) = expression {
+            if self.frame_is_async {
+                expression = unwrap_parenthesized(&awaited.argument);
+            }
+        }
+        let Expression::CallExpression(call) = expression else {
+            return false;
+        };
+        let Expression::Identifier(callee) = &call.callee else {
+            return false;
+        };
+        let Some((function, gate, _)) = self.local_function_declaration(callee.span) else {
+            return false;
+        };
+        self.index
+            .nested_at(gate.bindings.function(), function.span.into())
+            .is_some_and(|entry| &entry.entry().key == self.bindings.function())
+    }
+
+    /// The function value of the local function DECLARATION `function`,
+    /// declared in the frame `gate` (this frame when `own_frame`) and read
+    /// at `reference`. See [`Self::lower_local_function_declaration`].
+    fn lower_declared_function_value(
+        &mut self,
+        function: &oxc_ast::ast::Function<'_>,
+        gate: &Arc<DefiningFrameGate>,
+        own_frame: bool,
+        reference: oxc_span::Span,
+    ) -> SliceExpr {
+        let node = FunctionNode::Function(function);
+        let Some(entry) = self
+            .index
+            .nested_at(gate.bindings.function(), node_span(&node).into())
+        else {
+            return SliceExpr::UnmodeledBinding;
+        };
+        let entry = entry.entry();
+        let captures = CaptureScope {
+            enclosing: Some(Arc::new(CapturedFrame {
+                gate: Arc::clone(gate),
+                region: gate.skeleton.innermost_region_containing(FrameSpan::rebase(
+                    gate.anchor,
+                    function.span.into(),
+                )),
+            })),
+        };
+        // Every capture reads its declared type where the value is read. A
+        // capture of the declaring frame whose value there may differ from
+        // its declared type takes the typed gap: a `let` any write retypes,
+        // an unannotated `var` a write retypes before the read, a binding
+        // under an active guard whose declared authority is not read, and
+        // any mutable binding of an ENCLOSING frame.
+        let mut gap = None;
+        let mut checked = rustc_hash::FxHashSet::default();
+        for read in entry.captured_reads.iter() {
+            let identity = &read.binding;
+            if !checked.insert(identity) {
+                continue;
+            }
+            let Some(binding) = gate.bindings.local(identity) else {
+                continue;
+            };
+            let binding = gate.bindings.canonical_local(binding);
+            let fact = gate.skeleton.binding(binding);
+            let retyped = if own_frame {
+                match fact.kind {
+                    SkeletonBindingKind::Let => {
+                        self.nested_free_writes.contains(&binding)
+                            || self.binding_is_reassigned(binding)
+                    }
+                    SkeletonBindingKind::Var | SkeletonBindingKind::Param => {
+                        !self.capture_reads_declared_type(binding, reference)
+                    }
+                    _ => false,
+                }
+            } else {
+                matches!(
+                    fact.kind,
+                    SkeletonBindingKind::Let | SkeletonBindingKind::Var
+                ) || (fact.kind == SkeletonBindingKind::Param && fact.destructured)
+            };
+            if retyped
+                || (own_frame
+                    && self.active_guard_bindings.contains(&binding)
+                    && !self.capture_reads_declared_type(binding, reference))
+            {
+                gap = Some(crate::semantic_query::FlowGap::ClosureCapture);
+                break;
+            }
+        }
+        SliceExpr::NestedFunctionValue {
+            function: entry.key.clone(),
+            context: Arc::new(NestedFlowContext {
+                captures,
+                // A function declaration's `this` is its own.
+                this: None,
+            }),
+            has_declared_return: function.return_type.is_some(),
+            gap,
+            extended_captures: Arc::from([]),
         }
     }
 

@@ -189,3 +189,182 @@ fn a_literal_returning_its_this_is_one_recursive_type() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+const LITERAL_GETTER: &str = "\
+export const og = { n: 1, get self() { return this; } };
+export function useOg() { return og.self.n; }
+export function useOgDeep() { return og.self.self.n; }
+export function getterFn() { return { n: 'a' as string, get self() { return this; } }; }
+";
+
+/// An object literal's getter returning its own `this` reads as the
+/// literal, as a method returning `this` does.
+///
+/// Measured on TypeScript 7.0.2 (all four settings under `strict`):
+/// `typeof og.self.n` is `number`, `typeof og extends typeof og.self` is
+/// `1`, `ReturnType<typeof useOg>` and `ReturnType<typeof useOgDeep>` are
+/// `number`; over `getterFn`, the return's `self`'s `n` and its `self`'s
+/// `self`'s `n` are `string`, and the return's `self` extends the return
+/// (`1`).
+#[test]
+fn a_literal_getter_returning_its_this_reads_the_literal() {
+    let failures = mismatches(
+        LITERAL_GETTER,
+        &[
+            ("typeof og.self.n", "number"),
+            ("typeof og extends typeof og.self ? 1 : 0", "1"),
+            ("ReturnType<typeof useOg>", "number"),
+            ("ReturnType<typeof useOgDeep>", "number"),
+            ("ReturnType<typeof getterFn>['self']['n']", "string"),
+            ("ReturnType<typeof getterFn>['self']['self']['n']", "string"),
+            (
+                "ReturnType<typeof getterFn>['self'] extends ReturnType<typeof getterFn> ? 1 : 0",
+                "1",
+            ),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An object literal's getter is a PROPERTY of its return type on the
+/// literal's whole type, never a method.
+///
+/// Measured on TypeScript 7.0.2 (all four settings): over `const q = { get
+/// g() { return 1; } }`, `typeof q extends { g: number }` is `1`; over
+/// `og`, `typeof og extends { self: Function }` is `0` and `typeof og.self
+/// extends typeof og` is `1`. The lane reads the getter as a method on the
+/// whole type (`{ g: () => number }`), so the first two answer `0` and `1`
+/// and the last stays an unreduced conditional.
+#[test]
+#[ignore = "an object literal's getter is a property of its return type on the literal's whole type"]
+fn a_literal_getter_is_a_property_of_the_whole_literal() {
+    let source = "\
+export const q = { get g() { return 1; } };
+export const og = { n: 1, get self() { return this; } };
+";
+    let failures = mismatches(
+        source,
+        &[
+            ("typeof q extends { g: number } ? 1 : 0", "1"),
+            ("typeof og extends { self: Function } ? 1 : 0", "0"),
+            ("typeof og.self extends typeof og ? 1 : 0", "1"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Without `noImplicitThis` an object literal's method or getter reads
+/// `this` as `any`.
+///
+/// Measured on TypeScript 7.0.2 with `--strict --noImplicitThis false`
+/// (all four `strictNullChecks` × `noImplicitAny` settings):
+/// `ReturnType<typeof own.me>` and `typeof og.self` are `any` (`0 extends 1
+/// & T` holds). The lane gives the literal under every `noImplicitThis`
+/// setting.
+#[test]
+#[ignore = "without `noImplicitThis` an object literal's `this` is `any`"]
+fn a_literal_this_is_any_without_no_implicit_this() {
+    let source = "\
+export const own = { v: 1, me() { return this; } };
+export const og = { n: 1, get self() { return this; } };
+";
+    let failures = super::checker_probe_lane_tests::mismatches_in(
+        super::checker_probe_lane_tests::ProbeProject {
+            files: &[],
+            compiler_options: Some(r#"{ "strict": true, "noImplicitThis": false }"#),
+            ambient_lib: None,
+        },
+        source,
+        &[
+            ("ReturnType<typeof own.me>", "any"),
+            ("typeof og.self", "any"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A class expression's members read through the value holding it: a
+/// top-level `const` initializer, an instance property initializer read
+/// through an instantiation of its class, and a static property
+/// initializer.
+///
+/// Measured on TypeScript 7.0.2 (all four settings):
+/// `ReturnType<InstanceType<typeof K>['m']>` is `number`, `…['s']>` is
+/// `string`, `ReturnType<typeof K.st>` is `number`, and
+/// `ReturnType<ReturnType<InstanceType<typeof K>['me']>['m']>` is
+/// `number`; `InstanceType<Outer2<string>['inner']>['u']` is `string`,
+/// `ReturnType<InstanceType<Outer2<string>['inner']>['g']>` is `number`,
+/// and `ReturnType<InstanceType<typeof Outer2.sinner>['m']>` is `number`.
+/// The lane answers every row with the missing-member marker.
+#[test]
+#[ignore = "a class expression held by a `const` or a property initializer serves its members"]
+fn a_class_expression_initializer_serves_its_members() {
+    let source = "\
+export class Outer2<U> { inner = class { u!: U; me() { return this; } g() { return 1; } }; static sinner = class { w = 1; m() { return this.w; } }; }
+export const K = class { v = 1; m() { return this.v; } s() { return 'a' as string; } me() { return this; } static st() { return 2; } };
+";
+    let failures = mismatches(
+        source,
+        &[
+            ("ReturnType<InstanceType<typeof K>['m']>", "number"),
+            ("ReturnType<InstanceType<typeof K>['s']>", "string"),
+            ("ReturnType<typeof K.st>", "number"),
+            (
+                "ReturnType<ReturnType<InstanceType<typeof K>['me']>['m']>",
+                "number",
+            ),
+            ("InstanceType<Outer2<string>['inner']>['u']", "string"),
+            (
+                "ReturnType<InstanceType<Outer2<string>['inner']>['g']>",
+                "number",
+            ),
+            (
+                "ReturnType<InstanceType<typeof Outer2.sinner>['m']>",
+                "number",
+            ),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A method called directly on a `new` expression or on a call's result
+/// reads the method through the constructed or returned value, and a
+/// method reading `this.v` or calling `this.m()` reads the receiver's
+/// instantiation.
+///
+/// Measured on TypeScript 7.0.2 (all four settings): `ReturnType<typeof
+/// …>` of `n1`, `n2`, `g1`, `g6` and `useOwn` is `number`, of `g2`
+/// `string`, and `ReturnType<typeof g3>['v']` is `boolean`. The lane reads
+/// the member call on such a receiver as an unmodelled position (the same
+/// methods called through a `const` or a parameter of the class type
+/// already read `number` and `string`).
+#[test]
+#[ignore = "a method called on a `new` expression or a call's result reads the receiver's member"]
+fn a_method_called_on_a_constructed_value_reads_the_receiver() {
+    let source = "\
+export class G<T> { constructor(public v: T) {} get() { return this.v; } call() { return this.get(); } me() { return this; } }
+export class N { v = 1; get() { return this.v; } call() { return this.get(); } }
+export class GF<T> { f!: T; get() { return this.f; } }
+export function n1() { return new N().get(); }
+export function n2() { return new N().call(); }
+export function g1() { return new G(1).get(); }
+export function g2() { return new G('s').call(); }
+export function g3() { return new G(true).me(); }
+export function g6() { return new GF<number>().get(); }
+export const own = { v: 1, me() { return this; } };
+export function useOwn() { return own.me().v; }
+";
+    let failures = mismatches(
+        source,
+        &[
+            ("ReturnType<typeof n1>", "number"),
+            ("ReturnType<typeof n2>", "number"),
+            ("ReturnType<typeof g1>", "number"),
+            ("ReturnType<typeof g2>", "string"),
+            ("ReturnType<typeof g3>['v']", "boolean"),
+            ("ReturnType<typeof g6>", "number"),
+            ("ReturnType<typeof useOwn>", "number"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
