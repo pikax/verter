@@ -5,7 +5,10 @@
 // hand-written constructor with six construct overloads, a component whose
 // publisher erased its generic, an untyped (`any`) component, a hand-written
 // constructor whose precise overloads precede an open `...args: any[]`
-// catch-all, and a functional component with three call overloads.
+// catch-all, a functional component with three call overloads, a functional
+// component whose later overload only adds a prop, a hand-written constructor
+// whose generic overload precedes an open catch-all, and a functional
+// component whose generic overload precedes a non-generic one.
 import {
   defineComponent,
   h,
@@ -80,4 +83,21 @@ export function Toggle(props: { mode: "off"; reason: string }, ctx: SetupContext
 export function Toggle(props: { mode: "auto"; enabled: boolean }): VNode;
 export function Toggle(props: { mode: string }): VNode {
   return h("button", props.mode);
+}
+
+export function Menu(props: { items: string[] }): VNode;
+export function Menu(props: { items: string[]; flag: boolean }): VNode;
+export function Menu(props: { items: string[]; flag?: boolean }): VNode {
+  return h("menu", props.items);
+}
+
+export declare const Select: {
+  new <T extends string>(props: { value: T; options: T[] }): { readonly $props: { value: T; options: T[] }; readonly value: T };
+  new (...args: any[]): { readonly $props: { label: string }; readonly label: string };
+};
+
+export function Mix<T extends string>(props: { kind: "g"; value: T }): VNode;
+export function Mix(props: { kind: "z"; size: number }): VNode;
+export function Mix(props: { kind: string }): VNode {
+  return h("div", props.kind);
 }

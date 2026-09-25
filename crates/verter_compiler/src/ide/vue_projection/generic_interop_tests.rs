@@ -39,15 +39,14 @@ const POSITIVE_TEMPLATE: &str = concat!(
     "  <Shape kind=\"circle\" :radius=\"1\" />\n",
     "  <Shape kind=\"polygon\" :sides=\"5\" />\n",
     "  <ErasedList :items=\"rows\" />\n",
-    "  <Untyped :anything=\"rows\" />
-",
-    "  <Gauge unit=\"celsius\" :value=\"21\" />
-",
-    "  <Gauge unit=\"percent\" :ratio=\"0.5\" />
-",
-    "  <Toggle mode=\"on\" :level=\"2\" />
-",
-    "  <Toggle mode=\"off\" reason=\"idle\" />"
+    "  <Untyped :anything=\"rows\" />\n",
+    "  <Gauge unit=\"celsius\" :value=\"21\" />\n",
+    "  <Gauge unit=\"percent\" :ratio=\"0.5\" />\n",
+    "  <Toggle mode=\"on\" :level=\"2\" />\n",
+    "  <Toggle mode=\"off\" reason=\"idle\" />\n",
+    "  <Menu :items=\"['a']\" :flag=\"true\" />\n",
+    "  <Select value=\"a\" :options=\"['a']\" />\n",
+    "  <Mix kind=\"g\" value=\"v\" />"
 );
 
 /// Setup statements the positive probe supplies to the scope, including the
@@ -97,7 +96,10 @@ function observe() {
   const percent: "percent" = __VerterUse_d206613c79de26f0.unit;
   const toggledOn: number = __VerterUse_b5063f18761348d2.$props.level;
   const toggledOff: string = __VerterUse_254f2d410a2b7939.$props.reason;
-  return [forwarded, forwardedLabel, stp19HoverTarget, labels, formatted, explicitItem, explicitValue, explicitListener, namespaceInstance, bump, counted, chosen, level, cellValue, circle, polygon, erasedIsUnknown, untypedIsAny, celsius, percent, toggledOn, toggledOff];
+  const flagged: boolean = __VerterUse_8465246605fe46b7.$props.flag;
+  const selected: string = __VerterUse_593dab2aba76bd47.value;
+  const mixed: "g" = __VerterUse_9b18a6441c8960f4.$props.kind;
+  return [forwarded, forwardedLabel, stp19HoverTarget, labels, formatted, explicitItem, explicitValue, explicitListener, namespaceInstance, bump, counted, chosen, level, cellValue, circle, polygon, erasedIsUnknown, untypedIsAny, celsius, percent, toggledOn, toggledOff, flagged, selected, mixed];
 }
 "#;
 
@@ -135,7 +137,8 @@ const CONSTRUCTION_TEMPLATE: &str = concat!(
     "  <Picker :items=\"props.items\" field=\"missing\" :format=\"String\" />\n",
     "  <BarrelPicker :items=\"rows\" field=\"label\" :format=\"describe\" />\n",
     "  <Counter :count=\"'1'\" />\n",
-    "  <Shape kind=\"polygon\" :sides=\"'five'\" />"
+    "  <Shape kind=\"polygon\" :sides=\"'five'\" />\n",
+    "  <Select :label=\"1\" />"
 );
 
 const CONSTRUCTION_SETUP: &str = r#"const props = defineProps<{ items: T[] }>();
@@ -216,6 +219,9 @@ fn generic_use_construction_applies_the_exact_contract_first() {
             "Gauge",
             "Toggle",
             "Toggle",
+            "Menu",
+            "Select",
+            "Mix",
         ]
     );
     for witness in &projection.witnesses.witnesses {

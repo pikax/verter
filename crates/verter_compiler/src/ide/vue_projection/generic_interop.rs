@@ -25,9 +25,9 @@
 //!     its context's `slots` / `emit` the instance's `$slots` / `$emit`.
 //!     A single call signature goes through higher-order inference, so a
 //!     generic functional component keeps its binder; an overload set is
-//!     rebuilt signature by signature, in declaration order, so every
-//!     overload stays selectable. Generated SFC defaults are never made
-//!     callable.
+//!     rebuilt signature by signature, in declaration order, each overload
+//!     taking exactly its declared props, so every overload stays
+//!     selectable. Generated SFC defaults are never made callable.
 //!
 //!   Rebuilding walks the signature list from its end, one signature per
 //!   step, with no signature count: each step intersects the signatures
@@ -35,15 +35,18 @@
 //!   identical copy, and conditional inference reads the next one. A
 //!   per-step marker signature ends the walk once the component's list is
 //!   exhausted. A signature with its own type parameters has no identical
-//!   non-generic copy, so the walk cannot pass it: TypeScript's type system
-//!   cannot enumerate such an overload set. That set is never rebuilt
-//!   partially — a constructor keeps its own declared type and a callable
-//!   keeps TypeScript's own relation to its last call signature.
+//!   non-generic copy, so the walk cannot pass it: TypeScript reads it with
+//!   its type parameters at their constraints and cannot enumerate the
+//!   signatures declared ahead of it. The walk then keeps what it read —
+//!   every signature from that one to the end, never the component itself,
+//!   so an open `...args: any[]` signature is never reopened. A lone generic
+//!   call signature is left to higher-order inference, which keeps its
+//!   binder.
 //!
 //!   The attribute-tolerant signature (an `unknown` attribute index on the
-//!   props of the component's last signature) is the fallback only: an
-//!   undeclared fallthrough attribute is not an excess-key error, while an
-//!   exact overload always wins over it.
+//!   props of the component's last signature) is the fallback only, never
+//!   part of a rebuilt overload: an undeclared fallthrough attribute is not
+//!   an excess-key error, while an exact overload always wins over it.
 //! - [`AdvancedGenericUseProjection`] — every use of a parent carrier,
 //!   rendered through the adapter inside one scope over the parent's
 //!   authored `generic` binder, so a parent parameter forwarded to a child
@@ -104,9 +107,9 @@ macro_rules! foreign_contract_declarations {
             "type __VerterUsePeeled<N> = { readonly __verterUsePeeled: N };\n",
             "type __VerterUseOrdered<T, Acc> = T extends readonly [infer H, ...infer R] ? __VerterUseOrdered<R, Acc & H> : Acc;\n",
             "type __VerterUseConstruct<A extends readonly unknown[], I> = __VerterUseOpenArgs<A> extends true ? (I extends { readonly $props: infer P } ? new (props: P) => I : new (...args: A) => I) : new (...args: A) => I;\n",
-            "type __VerterUseConstructs<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends abstract new (...args: infer A) => infer I ? (A extends readonly [__VerterUsePeeled<number>] ? __VerterUseOrdered<Out, unknown> : __VerterUseSame<[A, I], Prev> extends true ? C : __VerterUseConstructs<C, Seen & { new (...args: A): I; new (...args: [__VerterUsePeeled<Out[\"length\"]>]): never }, [A, I], [__VerterUseConstruct<A, I>, ...Out]>) : C;\n",
-            "type __VerterUseCall<A> = A extends readonly [infer P, ...infer X] ? new (props: P & Record<string, unknown>) => __VerterUseFunctional<P, X extends readonly [infer Y, ...unknown[]] ? Y : unknown> : new (props: Record<string, unknown>) => __VerterUseFunctional<unknown, unknown>;\n",
-            "type __VerterUseCalls<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends (...args: infer A) => infer R ? (A extends readonly [__VerterUsePeeled<number>] ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseSame<[A, R], Prev> extends true ? unknown : __VerterUseCalls<C, Seen & { (...args: A): R; (...args: [__VerterUsePeeled<Out[\"length\"]>]): never }, [A, R], [__VerterUseCall<A>, ...Out]>) : unknown;\n",
+            "type __VerterUseConstructs<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends abstract new (...args: infer A) => infer I ? (A extends readonly [__VerterUsePeeled<number>] ? __VerterUseOrdered<Out, unknown> : __VerterUseSame<[A, I], Prev> extends true ? __VerterUseOrdered<Out, unknown> : __VerterUseConstructs<C, Seen & { new (...args: A): I; new (...args: [__VerterUsePeeled<Out[\"length\"]>]): never }, [A, I], [__VerterUseConstruct<A, I>, ...Out]>) : C;\n",
+            "type __VerterUseCall<A> = A extends readonly [infer P, ...infer X] ? new (props: P) => __VerterUseFunctional<P, X extends readonly [infer Y, ...unknown[]] ? Y : unknown> : new (props: Record<string, never>) => __VerterUseFunctional<unknown, unknown>;\n",
+            "type __VerterUseCalls<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends (...args: infer A) => infer R ? (A extends readonly [__VerterUsePeeled<number>] ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseSame<[A, R], Prev> extends true ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseCalls<C, Seen & { (...args: A): R; (...args: [__VerterUsePeeled<Out[\"length\"]>]): never }, [A, R], [__VerterUseCall<A>, ...Out]>) : unknown;\n",
             "type __VerterUseContract<C> = C extends abstract new (...args: infer A) => unknown ? (__VerterUseOpenArgs<A> extends true ? __VerterUseConstructs<C, unknown, never, []> : C) : __VerterUseCalls<C, unknown, never, []>;\n",
             "type __VerterUseTolerant<P, I> = (0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : P) : P) & Record<string, unknown>;\n",
             "type __VerterUseFunctional<P, X> = { readonly $props: P; readonly $slots: X extends { slots: infer S } ? S : {}; $emit: X extends { emit: infer E } ? E : never };\n",

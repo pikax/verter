@@ -64,6 +64,13 @@ export const DIRTY_ADAPTER_ANY = { contract: { callable: "any" } };
 export const DIRTY_ALIAS_ERASED = { callee: { alias: "base-component" } };
 export const DIRTY_OPEN_CATCH_ALL_REPLACES_OVERLOADS = { contract: { openArguments: "last-only" } };
 export const DIRTY_CALL_OVERLOADS_COLLAPSE = { contract: { callable: "last-only" } };
+export const DIRTY_CALL_OVERLOADS_INDEXED = { contract: { callable: "tolerant-overloads" } };
+export const DIRTY_GENERIC_STALL_REOPENS_CATCH_ALL = {
+  contract: { openArguments: "declared-on-generic" },
+};
+export const DIRTY_GENERIC_STALL_DROPS_READ_OVERLOADS = {
+  contract: { callable: "last-only-on-generic" },
+};
 
 const RUST_CASES = Object.freeze({
   "STP19-explicit": [
@@ -194,6 +201,42 @@ const TS_TWINS = Object.freeze({
       text.replace(": C) : __VerterUseCalls<C, unknown, never, []>;", ": C) : unknown;"),
     expect: { gains: '"mode": "on"' },
   }),
+  // Every rebuilt call overload tolerates unknown attributes: an earlier
+  // overload absorbs the prop that selects a later one.
+  DIRTY_CALL_OVERLOADS_INDEXED: Object.freeze({
+    caseId: "STP19-overloads",
+    probe: "positive.ts",
+    rewrite: (text) =>
+      text.replace(
+        "new (props: P) => __VerterUseFunctional<P, X extends",
+        "new (props: P & Record<string, unknown>) => __VerterUseFunctional<P, X extends",
+      ),
+    expect: { gains: ".$props.flag;" },
+  }),
+  // A generic construct signature stops the rebuild and the declared
+  // constructor returns: its open catch-all accepts any props again.
+  DIRTY_GENERIC_STALL_REOPENS_CATCH_ALL: Object.freeze({
+    caseId: "STP19-overloads",
+    probe: "negative-construction.ts",
+    rewrite: (text) =>
+      text.replace(
+        "__VerterUseSame<[A, I], Prev> extends true ? __VerterUseOrdered<Out, unknown> :",
+        "__VerterUseSame<[A, I], Prev> extends true ? C :",
+      ),
+    expect: { loses: '"label": (1)' },
+  }),
+  // A generic call signature stops the rebuild and every overload already
+  // read is discarded: only the last call signature stays selectable.
+  DIRTY_GENERIC_STALL_DROPS_READ_OVERLOADS: Object.freeze({
+    caseId: "STP19-overloads",
+    probe: "positive.ts",
+    rewrite: (text) =>
+      text.replace(
+        "__VerterUseSame<[A, R], Prev> extends true ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) :",
+        "__VerterUseSame<[A, R], Prev> extends true ? unknown :",
+      ),
+    expect: { gains: '"kind": "g", "value": "v"' },
+  }),
   DIRTY_ALIAS_ERASED: Object.freeze({
     caseId: "STP19-instantiation-alias",
     probe: "negative-construction.ts",
@@ -216,6 +259,7 @@ const CONSTRUCTION_ANCHORS = Object.freeze([
   { caseId: "STP19-instantiation-alias", line: '"field": "label"', at: '"field"' },
   { caseId: "STP19-foreign", line: "\"count\": ('1')", at: '"count"' },
   { caseId: "STP19-overloads", line: "\"sides\": ('five')", at: '"kind"' },
+  { caseId: "STP19-overloads", line: '"label": (1)', at: '"label"' },
 ]);
 
 // Explicit-argument violations: each line marked `// violates` carries
@@ -368,6 +412,9 @@ export function assertRustCases(run) {
     DIRTY_ALIAS_ERASED,
     DIRTY_OPEN_CATCH_ALL_REPLACES_OVERLOADS,
     DIRTY_CALL_OVERLOADS_COLLAPSE,
+    DIRTY_CALL_OVERLOADS_INDEXED,
+    DIRTY_GENERIC_STALL_REOPENS_CATCH_ALL,
+    DIRTY_GENERIC_STALL_DROPS_READ_OVERLOADS,
   };
   for (const [twin, value] of Object.entries(twins)) {
     if (value === undefined || (!DIRTY_TWIN_PATCHES[twin] && !TS_TWINS[twin])) {
