@@ -3580,7 +3580,7 @@ fn collect_nested_function_values<'a>(region: &'a SliceRegion, found: &mut Vec<&
                     scan(arm, found);
                 }
             }
-            SliceExpr::Call(SliceCall::Nested(nested), _) => scan(nested, found),
+            SliceExpr::Call(SliceCall::Nested(nested), _, _) => scan(nested, found),
             _ => {}
         }
     }
@@ -4213,6 +4213,7 @@ fn direct_self_call_is_recursion_hold() {
             argument: Some(SliceExpr::Call(
                 SliceCall::DirectSelf,
                 SliceCallSite::new(0, false, false, verter_span::Span::new(26, 33)),
+                crate::flow_slice_content::SliceCallArguments::none(),
             )),
             freshness: SliceFreshness::Pinned,
             predicate_test: None,
@@ -4229,7 +4230,7 @@ fn symbolic_and_unrepresentable_calls() {
         "run",
     );
     let [SliceStatement::Return {
-        argument: Some(SliceExpr::Call(SliceCall::Direct(target), _)),
+        argument: Some(SliceExpr::Call(SliceCall::Direct(target), _, _)),
         ..
     }] = node.body.statements.as_ref()
     else {
@@ -4276,6 +4277,7 @@ fn symbolic_and_unrepresentable_calls() {
                     member: Arc::from([Arc::from("helper")]),
                 },
                 SliceCallSite::new(0, false, false, verter_span::Span::new(58, 71)),
+                crate::flow_slice_content::SliceCallArguments::none(),
             )),
             freshness: SliceFreshness::Pinned,
             predicate_test: None,
@@ -4311,7 +4313,7 @@ fn sequence_wrapped_call_rides_the_bare_calls_rail() {
         "run",
     );
     let [SliceStatement::Return {
-        argument: Some(SliceExpr::Call(SliceCall::Direct(target), _)),
+        argument: Some(SliceExpr::Call(SliceCall::Direct(target), _, _)),
         ..
     }] = node.body.statements.as_ref()
     else {

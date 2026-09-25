@@ -41,8 +41,8 @@ guard that fails on regression.
 
 | Gate | Evidence |
 |---|---|
-| A finite linear call chain consumes connected work, not native stack or connected-query depth per level | The flow-return callee schedule (`project_semantic_dispatch/flow_return_schedule.rs`) evaluates the callee returns a frame's body will demand bottom-up from an explicit stack before the body runs, and records each as a reusable completed member exactly as the inline path does, so the body reuses it instead of recursing. `flow_return_coverage_tests.rs` → `schedule::a_128_level_generic_chain_needs_no_more_query_depth_than_a_short_one` (the 128-level chain answers like the three-level one under the smallest depth cap the three-level one needs), `schedule::a_128_level_generic_chain_runs_on_the_short_chains_native_stack` (the 128-level chain on a 512 KiB thread), `schedule::chains_through_other_call_shapes_consume_no_depth_per_level` (non-generic, `const`-arrow and local-arrow chains), `schedule::a_chain_across_modules_needs_no_more_query_depth_than_a_short_one` (generic and non-generic chains of imported callees: 32 modules under the 4-module chain's depth cap and on its stack), `schedule::a_new_instantiation_of_a_warm_chain_runs_on_the_short_chains_native_stack` (a new call site instantiating a warm 128-level chain, on a 512 KiB thread), `schedule::a_deep_chain_over_a_reduced_budget_ends_on_the_work_rail` (a reduced work budget ends the 128-level chain on `PROJECTION_WORK_LIMIT`, never the depth rail), and `schedule::recursive_components_evaluate_exactly_as_the_recursive_path` (self-recursive and mutually recursive components answer from the same connected work as with the schedule off: a cycle is never evaluated out of order). |
-| Native recursion the schedule does not predict ends typed, never in a stack overflow | An inline flow evaluation that would open more nested frames than the connected demand's depth cap (24) is refused with `CONNECTED_QUERY_DEPTH_LIMIT` — the same typed incompleteness the connected-query depth guard ends query nesting with. `flow_return_coverage_tests.rs` → `schedule::an_unpredicted_deep_chain_ends_in_the_typed_depth_refusal` (an unpredicted 16-level chain answers; at 256 levels, which overflows the 8 MiB worker stack without the bound in an unoptimized build, it is refused partial and never admitted). |
+| A finite linear call chain consumes connected work, not native stack or connected-query depth per level | The flow-return callee schedule (`project_semantic_dispatch/flow_return_schedule.rs`) evaluates the callee returns a frame's body will demand bottom-up from an explicit stack before the body runs, and records each as a reusable completed member exactly as the inline path does, so the body reuses it instead of recursing. `flow_return_coverage_tests.rs` → `schedule::a_128_level_generic_chain_needs_no_more_query_depth_than_a_short_one` (the 128-level chain answers like the three-level one under the smallest depth cap the three-level one needs), `schedule::a_128_level_generic_chain_runs_on_the_short_chains_native_stack` (the 128-level chain on a 512 KiB thread), `schedule::chains_through_other_call_shapes_consume_no_depth_per_level` (non-generic, `const`-arrow and local-arrow chains), `schedule::a_chain_across_modules_needs_no_more_query_depth_than_a_short_one` (generic and non-generic chains of imported callees: 32 modules under the 4-module chain's depth cap and on its stack), `schedule::a_new_instantiation_of_a_warm_chain_runs_on_the_short_chains_native_stack` (a new call site instantiating a warm 128-level chain, on a 512 KiB thread), `schedule::a_200_level_nested_argument_chain_answers_on_the_default_stack` and `schedule::a_nested_argument_chain_costs_the_same_work_per_level` (every edge a call inside a generic call's argument: 200 levels on the default test stack under the three-level chain's depth cap, the same work per level at 16, 64 and 200 levels), `schedule::a_200_level_type_position_chain_answers_on_the_default_stack`, `schedule::a_type_position_chain_costs_the_same_work_per_level` and `schedule::a_1000_level_type_position_chain_answers` (every edge a `ReturnType<typeof f>` type position: 200 levels on the default test stack under the three-level chain's depth cap, the same work per level at 16, 64 and 200 levels, and 1,000 levels answer), `schedule::a_new_instantiation_of_a_warm_200_level_local_arrow_chain_answers_on_the_default_stack` and `schedule::a_new_instantiation_of_a_warm_local_arrow_chain_costs_the_same_work_per_level` (a new call site instantiating a warm 200-level chain whose levels call through local arrow functions, on the default test stack, the same work per level), `schedule::a_200_level_nested_argument_chain_in_local_arrows_answers_on_the_default_stack` and `schedule::a_nested_argument_chain_in_local_arrows_costs_the_same_work_per_level` (every edge a call in a generic call's argument inside a local arrow function), `schedule::a_warm_chain_passing_a_parameter_member_read_instantiates_stacklessly`, `…_a_local_member_read_…`, `…_a_literal_…` and `…_a_call_on_its_parameter_…` (a new call site instantiating a warm 200-level chain whose levels pass the next a member read, a literal or a call: on the default test stack, the same work per level at 16, 32 and 64 levels), `schedule::a_deep_chain_over_a_reduced_budget_ends_on_the_work_rail` (a reduced work budget ends the 128-level chain on `PROJECTION_WORK_LIMIT`, never the depth rail), and `schedule::recursive_components_evaluate_exactly_as_the_recursive_path` (self-recursive and mutually recursive components answer from the same connected work as with the schedule off: a cycle is never evaluated out of order). |
+| Native recursion the schedule does not predict ends typed, never in a stack overflow | An inline flow evaluation that would open more nested frames than the connected demand's depth cap (24) is refused with `CONNECTED_QUERY_DEPTH_LIMIT` — the same typed incompleteness the connected-query depth guard ends query nesting with. `flow_return_coverage_tests.rs` → `schedule::an_unpredicted_deep_chain_ends_in_the_typed_depth_refusal` (a new instantiation of a warm local-arrow chain evaluated with the schedule off, one native evaluation per level: 16 levels answer; at 256 levels, which overflows the 8 MiB worker stack without the bound in an unoptimized build, it is refused partial and never admitted). |
 
 ## Regression policy
 
@@ -118,17 +118,39 @@ Recorded plainly so no reader mistakes absence for a pass:
 ## Known limits
 
 * **Connected-query depth and native nesting are backstops.** A call chain
-  the callee schedule discovers consumes connected work and no native stack
-  or connected-query depth per level (see *Candidate gates*): a same-file
-  direct call, one made through a local arrow function, a callee imported
-  from another module, and the instantiations each of them demands — read
-  from the uninstantiated frame's recorded call resolution when it
-  evaluated in the same demand, and from the two signatures the call
-  executor reads when it was already warm and the call forwards the
-  frame's own binders. The 128-level generic chain needs the depth (3) and
-  stack of a three-level one, and a 32-module chain the depth (5) of a
-  4-module one. Two typed bounds end whatever the schedule leaves to the
-  recursive path, each with the depth rail's `CONNECTED_QUERY_DEPTH_LIMIT`
+  the callee schedule reaches consumes connected work and no native stack
+  or connected-query depth per level (see *Candidate gates*). Discovery
+  predicts a same-file direct call, one made through a local arrow
+  function, a callee imported from another module, a call inside the
+  argument of a call the executor resolves (`return id(c(x))` with a
+  generic `id`), a function read through a `typeof` in a type position
+  (`let r!: ReturnType<typeof f>`), and the instantiations each of them
+  demands — read from the uninstantiated frame's recorded call resolution
+  when it evaluated in the same demand, and from the two signatures the
+  call executor reads when it was already warm and the call — by the
+  frame or by a local function value it composes — forwards the frame's
+  own binders. Every other callee return an evaluation demands under an
+  open schedule is found when it is demanded: beneath a scheduled
+  evaluation the probe records it and refuses it (typed, inside the
+  probe's private rails), and the entry is evaluated again once the
+  recorded return is; outside one it is scheduled where it is made. So an
+  instantiation read from an argument of any form (a member read, a
+  literal, a call on a parameter), and a call nested in an argument inside
+  a local arrow function, are evaluated from the explicit stack too. The
+  128-level generic chain needs the depth (3) and stack of a three-level
+  one, a 32-module chain the depth (5) of a 4-module one, the 200-level
+  nested-argument, type-position, warm local-arrow and warm argument-form
+  chains answer on the default test stack, and the 1,000-level
+  type-position chain answers. A scheduled evaluation is reusable only
+  when its reads are recorded, which takes a live fact tracer, and every
+  flow frame has one: an obligation frame is pushed only inside a flow,
+  relation or call-resolution evaluation (`flow_frame_open`,
+  `relate` frame open, `resolve_call_frame_open`), the root of each is a
+  cold build through the dispatch choke point
+  (`execute_via_cold_build_helper_with_publication_capture`), and that
+  build installs the tracer around everything it computes. The schedule
+  asserts it in debug builds, over every lib and integration test. Two typed bounds end whatever still
+  recurses, each with the depth rail's `CONNECTED_QUERY_DEPTH_LIMIT`
   incompleteness rather than a stack overflow: the connected-query depth
   guard (24 nested query boundaries —
   `projection_stack_safety_tests.rs` →
@@ -136,29 +158,30 @@ Recorded plainly so no reader mistakes absence for a pass:
   `connected_query_depth_limit_is_distinct_diagnostic_and_is_not_cached`),
   and the native nesting bound (24 nested inline flow evaluations —
   `flow_return_coverage_tests.rs` →
-  `schedule::an_unpredicted_deep_chain_ends_in_the_typed_depth_refusal`).
-  What the schedule still leaves recursive, with the level each bound
-  refuses it at, measured:
-  * a chain whose edges are `typeof f` reads in TYPE positions
-    (`let r!: ReturnType<typeof f>`) is demanded through type lowering,
-    which the schedule does not predict: two nested queries per level, so
-    the query guard refuses it from 13 levels, exactly as before;
-  * a chain whose edges are calls nested in another call's arguments
-    (`return id(c(x))` with a generic `id`): a nested argument call is
-    evaluated in the file's owner scope rather than the frame (a separate
-    gap — it answers `v` as a semantic miss where tsc answers
-    `{ v: string | number; tag: "c"; }`), two nested queries per level,
-    refused from 12 levels, exactly as before; a non-generic `id` evaluates
-    no argument and nests nothing;
-  * a new instantiation of a warm chain that does not forward its binders
-    through a direct or imported call — every level calling the next
-    through a local arrow function, or passing anything but a bare
-    parameter read: one nested inline evaluation per level and no query
-    boundary, so the native nesting bound refuses it from 24 levels (tsc:
-    `{ v: boolean; tag: "c"; }`);
+  `schedule::an_unpredicted_deep_chain_ends_in_the_typed_depth_refusal`,
+  which drives it with the schedule off). What still recurses:
   * a callee whose evaluation is not reusable (a degraded or unproven
     return) is left to its demand; the first unreusable callee of a branch
-    costs one extra evaluation before the schedule leaves that branch;
+    costs one extra evaluation before the schedule leaves that branch, and
+    a chain of them nests natively, one evaluation and two nested queries
+    per level, and each level evaluates the one below twice, so its work
+    doubles per level (13,238 units at 9 levels, 26,543 at 10). An
+    argument the flow lane types only as a degraded value — an object or
+    array literal holding a frame binding (`b(N-1)({ a: o.a })`), which
+    the call sink still types in the file's owner scope — makes every
+    level such a callee. The two typed bounds end that chain from 12
+    levels, partial and never admitted, on the 8 MiB production worker
+    stack (`schedule::a_chain_of_degraded_callees_ends_in_the_typed_refusal_on_the_worker_stack`;
+    with both bounds disabled the 200-level chain overflows that stack).
+    An unoptimized build overflows the 2 MiB default test stack before
+    they trip: the bounds are sized for the worker stack, not for a test
+    thread. Skipped until the literal argument is typed in its frame:
+    `schedule::an_object_or_array_literal_argument_evaluates_in_its_own_frame`,
+    `schedule::a_chain_of_degraded_callees_answers_on_the_default_stack`
+    and `schedule::an_object_literal_argument_chain_costs_the_same_work_per_level`;
+  * a cycle among callee returns is evaluated from its first-discovered
+    member through the ordinary path, where the re-entry intercept holds
+    each back-edge; its members nest natively beneath that root;
   * a `this.m()` method chain nests nothing, because the flow lane answers
     its first hop with the typed `UnresolvedValue` degradation (tsc:
     `{ v: string | number; tag: "c"; }`) — a separate gap.
@@ -166,7 +189,21 @@ Recorded plainly so no reader mistakes absence for a pass:
   A generic chain across modules is flat in depth but QUADRATIC in
   connected work: each module's binder is its own, so every level
   instantiates the chain beneath it afresh (4 / 32 / 64 / 128 modules cost
-  143 / 6989 / 27293 / 107837 units). The work budget, not depth, ends it:
-  200 modules cost 262,097 of the 262,144 units and answer, and from 201
-  modules the work rail refuses the chain, typed. A same-file chain
-  shares one binder per name and stays linear.
+  185 / 7423 / 28175 / 109615 units). The work budget, not depth, ends it:
+  198 modules cost 259,660 of the 262,144 units and answer, and from 199
+  modules the work rail refuses the chain, typed. Each module's
+  instantiation of the module below is one no discovery predicts, so it
+  costs one refused probe (about 14 units) on top of the evaluation
+  itself; before probes it was evaluated where it was demanded, and the
+  boundary was 200 modules. A same-file chain shares one binder per name
+  and stays linear.
+
+  A body's signature-utility application over a function or object type
+  (`ReturnType<typeof f>`, `Parameters<…>`, …) resolves where the body
+  builds it, as the checker resolves a conditional type whose check type
+  is not generic, so a chain through type positions is linear in work
+  too: 12 units per level at 16, 64 and 200 levels, 11,990 in all at
+  1,000 (`schedule::a_type_position_chain_costs_the_same_work_per_level`,
+  `schedule::a_1000_level_type_position_chain_answers`). An application
+  over a type parameter stays the deferred carrier, as the checker defers
+  it (`schedule::a_return_type_in_a_body_resolves_unless_its_check_type_is_generic`).

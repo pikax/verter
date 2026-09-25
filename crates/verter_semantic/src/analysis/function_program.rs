@@ -137,6 +137,11 @@ pub struct FunctionParamRecord {
     pub rest: bool,
     /// Whether the parameter carries an authored TS type annotation.
     pub has_ts_annotation: bool,
+    /// The name the authored annotation spells when it is a bare type
+    /// reference without type arguments (`x: T`), which names a type
+    /// parameter when one is in scope. `None` for any other annotation and
+    /// for the rest parameter.
+    pub annotation_reference: Option<Arc<str>>,
 }
 
 /// The kind of one local binding.
@@ -252,6 +257,33 @@ pub struct FunctionSourceTypeQuery {
     pub name: Arc<str>,
     pub span: verter_span::Span,
     pub binding: FunctionReferenceBinding,
+}
+
+/// A `typeof name` written in a TYPE position of this frame: its own
+/// parameter list, a declarator's annotation, or a type an expression
+/// carries (`as`, `satisfies`, a type assertion, a call's type
+/// arguments). Only a bare identifier without type arguments is recorded.
+/// Like [`FunctionSourceTypeQuery`], it neither executes nor captures its
+/// operand; it names the value whose type the position reads.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FunctionTypeQuery {
+    pub name: Arc<str>,
+    pub span: verter_span::Span,
+    pub binding: FunctionReferenceBinding,
+    pub position: FunctionTypeQueryPosition,
+}
+
+/// Where a [`FunctionTypeQuery`] sits, which decides when the frame's
+/// evaluation reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FunctionTypeQueryPosition {
+    /// The frame's own parameter list: read whenever the frame evaluates.
+    Parameter,
+    /// The annotation of the declarator binding at this span: read with
+    /// that binding's value.
+    Declarator(verter_span::Span),
+    /// A type an expression carries: read with that expression.
+    Expression,
 }
 
 /// The exact lexical answer for an indexed occurrence.
@@ -624,6 +656,9 @@ pub struct FunctionProgramEntry {
     /// Identifier references in the current function body.
     pub references: Arc<[FunctionReferenceRecord]>,
     pub source_type_queries: Arc<[FunctionSourceTypeQuery]>,
+    /// Every `typeof name` in a type position of this frame, in source
+    /// order.
+    pub type_queries: Arc<[FunctionTypeQuery]>,
     /// Return sites in source order.
     pub return_sites: Arc<[FunctionReturnSite]>,
     /// Write sites (assignments / updates).
@@ -1253,6 +1288,9 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
         }
         captured_sites.sort_by_key(|(span, _)| *span);
         for query in Arc::make_mut(&mut entries[index].source_type_queries) {
+            query.binding = resolve(&query.name, query.span);
+        }
+        for query in Arc::make_mut(&mut entries[index].type_queries) {
             query.binding = resolve(&query.name, query.span);
         }
         let mut seen = rustc_hash::FxHashSet::default();
@@ -3232,6 +3270,21 @@ fn formal_params(params: &oxc_ast::ast::FormalParameters<'_>) -> Arc<[FunctionPa
             optional: param.optional,
             rest: false,
             has_ts_annotation: param.type_annotation.is_some(),
+            annotation_reference: param.type_annotation.as_ref().and_then(|annotation| {
+                match &annotation.type_annotation {
+                    oxc_ast::ast::TSType::TSTypeReference(reference)
+                        if reference.type_arguments.is_none() =>
+                    {
+                        match &reference.type_name {
+                            oxc_ast::ast::TSTypeName::IdentifierReference(name) => {
+                                Some(Arc::from(name.name.as_str()))
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            }),
         })
         .collect();
     if let Some(rest) = params.rest.as_ref() {
@@ -3243,6 +3296,7 @@ fn formal_params(params: &oxc_ast::ast::FormalParameters<'_>) -> Arc<[FunctionPa
             optional: false,
             rest: true,
             has_ts_annotation: false,
+            annotation_reference: None,
         });
     }
     Arc::from(out.into_boxed_slice())
@@ -3428,6 +3482,12 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
         for param in &node.params().items {
             inventory.record_pattern(&param.pattern, FunctionBindingKind::Param, frame_span);
             inventory.visit_binding_pattern(&param.pattern);
+            if let Some(annotation) = &param.type_annotation {
+                inventory.record_type_queries(
+                    &annotation.type_annotation,
+                    FunctionTypeQueryPosition::Parameter,
+                );
+            }
             if let Some(initializer) = &param.initializer {
                 inventory.visit_expression(initializer);
             }
@@ -3435,6 +3495,12 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
         if let Some(rest) = &node.params().rest {
             inventory.record_pattern(&rest.rest.argument, FunctionBindingKind::Param, frame_span);
             inventory.visit_binding_pattern(&rest.rest.argument);
+            if let Some(annotation) = &rest.type_annotation {
+                inventory.record_type_queries(
+                    &annotation.type_annotation,
+                    FunctionTypeQueryPosition::Parameter,
+                );
+            }
         }
         inventory.in_parameter_list = false;
         for stmt in statements {
@@ -3450,6 +3516,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             unserved_assignments,
             references,
             source_type_queries,
+            type_queries,
             return_sites,
             writes,
             effects,
@@ -3517,6 +3584,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             unmodeled_bindings: unmodeled_bindings.into(),
             references: Arc::from(references.into_boxed_slice()),
             source_type_queries: source_type_queries.into(),
+            type_queries: type_queries.into(),
             return_sites: Arc::from(return_sites.into_boxed_slice()),
             writes: Arc::from(writes.into_boxed_slice()),
             descendant_writes: Arc::from([]),
@@ -3603,6 +3671,7 @@ struct InventoryVisitor<'sink, 'ast> {
     unserved_assignments: Vec<FunctionReferenceRecord>,
     references: Vec<FunctionReferenceRecord>,
     source_type_queries: Vec<FunctionSourceTypeQuery>,
+    type_queries: Vec<FunctionTypeQuery>,
     return_sites: Vec<FunctionReturnSite>,
     writes: Vec<FunctionWriteRecord>,
     effects: Vec<FunctionEffectRecord>,
@@ -3676,6 +3745,38 @@ impl InventoryVisitor<'_, '_> {
         self.scope_stack.last().copied().unwrap_or(self.frame_span)
     }
 
+    /// Record every bare `typeof name` inside `ty` at `position`.
+    fn record_type_queries(
+        &mut self,
+        ty: &oxc_ast::ast::TSType<'_>,
+        position: FunctionTypeQueryPosition,
+    ) {
+        struct TypeQueries<'q> {
+            out: &'q mut Vec<FunctionTypeQuery>,
+            position: FunctionTypeQueryPosition,
+        }
+        impl<'a> Visit<'a> for TypeQueries<'_> {
+            fn visit_ts_type_query(&mut self, query: &oxc_ast::ast::TSTypeQuery<'a>) {
+                if let (oxc_ast::ast::TSTypeQueryExprName::IdentifierReference(id), None) =
+                    (&query.expr_name, &query.type_arguments)
+                {
+                    self.out.push(FunctionTypeQuery {
+                        name: Arc::from(id.name.as_str()),
+                        span: id.span.into(),
+                        binding: FunctionReferenceBinding::Free,
+                        position: self.position,
+                    });
+                }
+                walk::walk_ts_type_query(self, query);
+            }
+        }
+        TypeQueries {
+            out: &mut self.type_queries,
+            position,
+        }
+        .visit_ts_type(ty);
+    }
+
     fn record_reference(
         &mut self,
         id: &oxc_ast::ast::IdentifierReference<'_>,
@@ -3717,9 +3818,29 @@ impl<'a> InventoryVisitor<'_, 'a> {
 }
 
 impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
-    fn visit_ts_type(&mut self, _it: &oxc_ast::ast::TSType<'a>) {}
+    fn visit_ts_type(&mut self, it: &oxc_ast::ast::TSType<'a>) {
+        self.record_type_queries(it, FunctionTypeQueryPosition::Expression);
+    }
 
-    fn visit_ts_type_annotation(&mut self, _it: &oxc_ast::ast::TSTypeAnnotation<'a>) {}
+    fn visit_ts_type_annotation(&mut self, it: &oxc_ast::ast::TSTypeAnnotation<'a>) {
+        self.record_type_queries(&it.type_annotation, FunctionTypeQueryPosition::Expression);
+    }
+
+    fn visit_variable_declarator(&mut self, it: &oxc_ast::ast::VariableDeclarator<'a>) {
+        self.visit_binding_pattern(&it.id);
+        if let Some(annotation) = &it.type_annotation {
+            let position = match &it.id {
+                BindingPattern::BindingIdentifier(id) => {
+                    FunctionTypeQueryPosition::Declarator(id.span.into())
+                }
+                _ => FunctionTypeQueryPosition::Expression,
+            };
+            self.record_type_queries(&annotation.type_annotation, position);
+        }
+        if let Some(init) = &it.init {
+            self.visit_expression(init);
+        }
+    }
 
     fn visit_expression(&mut self, it: &Expression<'a>) {
         let previous = self.read_role;
