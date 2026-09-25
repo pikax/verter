@@ -264,6 +264,150 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
     }
 
+    /// Bind a function's OWN clause in its body-derived return by
+    /// declaration order, exactly as an instantiated frame's binder
+    /// environment binds it: every binder the flow lane interned for
+    /// `names[i]` in `canonical`'s `owner` scope becomes `args[i]`, all
+    /// at once.
+    ///
+    /// A nested function value's clause interns its own binder identities
+    /// (see the flow lane's binder environment), so a returned generic
+    /// function value re-declaring one of `names` keeps its own parameter.
+    /// A signature that declares one of the binders being replaced — the
+    /// same node, as a function TYPE written in the body with a same-name
+    /// clause lowers to — answers `None`, and so does an ordinal `args`
+    /// does not cover.
+    ///
+    /// The binding is simultaneous: `g<A, B>` instantiated at `[B, A]`
+    /// from a same-file `f<A, B>` (whose root clause shares `g`'s
+    /// name-keyed binders) swaps them, as the instantiated frame's
+    /// environment does, rather than collapsing both onto one.
+    pub(super) fn bind_flow_return_own_clause(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        names: &[Arc<str>],
+        args: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        let mut binders: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
+        let mut declared: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let data = self.graph().node_data(current)?;
+            match data.as_ref() {
+                SemanticNodeData::TypeParam {
+                    decl,
+                    param_index: 0,
+                    display_name,
+                    ..
+                } => {
+                    if decl.canonical_id.as_ref() == canonical
+                        && decl.owner == owner
+                        && decl.decl_name == *display_name
+                    {
+                        if let Some(ordinal) = names.iter().position(|name| name == display_name) {
+                            binders.push((current, *args.get(ordinal)?));
+                        }
+                    }
+                    continue;
+                }
+                SemanticNodeData::Signature {
+                    type_parameters, ..
+                } => declared.extend(type_parameters.iter().map(|param| param.param)),
+                _ => {}
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        binders.retain(|(binder, argument)| binder != argument);
+        if binders.iter().any(|(binder, _)| declared.contains(binder)) {
+            return None;
+        }
+        let replaced: Vec<SemanticNodeId> = binders.iter().map(|(binder, _)| *binder).collect();
+        // One binder at a time is already simultaneous unless an argument
+        // mentions a binder being replaced; then every binder first moves
+        // to a placeholder no argument can mention.
+        if !binders
+            .iter()
+            .any(|(_, argument)| self.mentions_any(*argument, &replaced))
+        {
+            return Some(
+                binders
+                    .into_iter()
+                    .fold(node, |result, (binder, argument)| {
+                        self.substitute_semantic_type_param(result, binder, argument)
+                    }),
+            );
+        }
+        let placeholders: Vec<SemanticNodeId> = (0..binders.len())
+            .map(|ordinal| self.simultaneous_binding_placeholder(canonical, owner, ordinal))
+            .collect();
+        let parked =
+            binders
+                .iter()
+                .zip(&placeholders)
+                .fold(node, |result, ((binder, _), placeholder)| {
+                    self.substitute_semantic_type_param(result, *binder, *placeholder)
+                });
+        Some(binders.iter().zip(&placeholders).fold(
+            parked,
+            |result, ((_, argument), placeholder)| {
+                self.substitute_semantic_type_param(result, *placeholder, *argument)
+            },
+        ))
+    }
+
+    /// The `ordinal`-th placeholder binder of a simultaneous binding in
+    /// `canonical`'s `owner` scope: a `TypeParam` whose identity no
+    /// authored or flow-minted clause produces (its name begins with the
+    /// `\u{1}` separator no identifier can hold), interned once per
+    /// ordinal and never left in a bound value.
+    fn simultaneous_binding_placeholder(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        ordinal: usize,
+    ) -> SemanticNodeId {
+        let name: Arc<str> = Arc::from(format!("\u{1}{ordinal}").as_str());
+        self.graph().intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::from(canonical),
+                owner,
+                whole_hash: crate::semantic_query::HashValue::default(),
+                decl_name: Arc::clone(&name),
+            },
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: name,
+        })
+    }
+
+    /// Whether `node` is, or reaches through its children, any of `targets`.
+    fn mentions_any(&self, node: SemanticNodeId, targets: &[SemanticNodeId]) -> bool {
+        if targets.is_empty() {
+            return false;
+        }
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if targets.contains(&current) {
+                return true;
+            }
+            if !visited.insert(current) {
+                continue;
+            }
+            if let Some(data) = self.graph().node_data(current) {
+                let _ = data.for_each_child(|child| stack.push(child));
+            }
+        }
+        false
+    }
+
     /// Apply a stored positional substitution frame to a demanded winner
     /// (or to an open branch that a consumer has already selected). Empty
     /// frames are identity.

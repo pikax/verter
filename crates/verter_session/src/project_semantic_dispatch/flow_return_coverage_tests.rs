@@ -2104,6 +2104,118 @@ fn a_reused_callee_still_invalidates_its_consumers_on_edit() {
     );
 }
 
+/// A generic function returned from a generic function keeps its own
+/// clause when the outer function is instantiated, even when both clauses
+/// name it `T`: a nested function value's or class expression's clause is
+/// its own declaration, so its binder is a node distinct from the outer
+/// `T` and the instantiated return read off the uninstantiated one leaves
+/// it alone. A function TYPE written in the body with a same-name clause
+/// shares the outer binder's node; that return is evaluated under the
+/// instantiation instead, and keeps its parameter too.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike): `w` is
+/// `{ v: boolean; id: <T>(z: T) => T; }`, `wm` is
+/// `{ v: boolean; pair: <U>(u: U) => { t: boolean; u: U; }; }`, `wh` is
+/// `{ v: boolean; id: <T>(z: T) => T; }` and `wk` is
+/// `{ new <T>(): { own: T; outer: boolean; }; }`.
+#[test]
+fn an_instantiated_return_keeps_a_nested_clause_of_the_same_name() {
+    const PATH: &str = "/ws/cov/transfer/nested_clause.ts";
+    let host = host_with(&[(
+        PATH,
+        "function g<T>(x: T) { return { v: x, id: <T,>(z: T) => z }; }\n\
+         export function w(v: boolean) { return g(v); }\n\
+         function m<T>(x: T) { return { v: x, pair: <U,>(u: U) => ({ t: x, u }) }; }\n\
+         export function wm(v: boolean) { return m(v); }\n\
+         function h<T>(x: T) { const id: <T>(z: T) => T = (z) => z; return { v: x, id }; }\n\
+         export function wh(v: boolean) { return h(v); }\n\
+         function k<T>(x: T) { return class<T> { own!: T; outer = x; }; }\n\
+         export function wk(v: boolean) { return k(v); }\n",
+    )]);
+    let binder = |ty: &TypeExpr, name: &str| matches!(ty, TypeExpr::TypeParameter(param) if param.name == name);
+    // `<name>(z: name) => name`, its clause printed.
+    let identity = |ty: &TypeExpr, name: &str| {
+        matches!(ty, TypeExpr::Function(function)
+            if function.type_parameters.len() == 1
+                && function.type_parameters[0].name == name
+                && function.parameters.len() == 1
+                && binder(&function.parameters[0].ty, name)
+                && function.return_type.as_deref().is_some_and(|ret| binder(ret, name)))
+    };
+    for name in ["w", "wh"] {
+        let value = value_of(&host, PATH, name);
+        assert_eq!(projected_member(&value, "v"), &boolean(), "{value:?}");
+        assert!(
+            identity(projected_member(&value, "id"), "T"),
+            "`id` keeps its own `<T>(z: T) => T`: {value:?}"
+        );
+    }
+    let value = value_of(&host, PATH, "wm");
+    assert_eq!(projected_member(&value, "v"), &boolean(), "{value:?}");
+    let TypeExpr::Function(pair) = projected_member(&value, "pair") else {
+        panic!("`pair` is a function: {value:?}");
+    };
+    let returned = pair.return_type.as_deref().expect("a return");
+    assert!(
+        pair.type_parameters.len() == 1
+            && pair.type_parameters[0].name == "U"
+            && binder(&pair.parameters[0].ty, "U")
+            && projected_member(returned, "t") == &boolean()
+            && binder(projected_member(returned, "u"), "U"),
+        "`pair` is `<U>(u: U) => {{ t: boolean; u: U; }}`: {value:?}"
+    );
+    let value = value_of(&host, PATH, "wk");
+    let TypeExpr::Object(constructor) = &value else {
+        panic!("`wk` is a constructor type: {value:?}");
+    };
+    let [verter_type_expr::ObjectMember::ConstructSignature(construct)] =
+        constructor.properties.as_slice()
+    else {
+        panic!("`wk` has one construct signature: {value:?}");
+    };
+    let instance = construct.return_type.as_deref().expect("an instance type");
+    assert!(
+        construct.type_parameters.len() == 1
+            && construct.type_parameters[0].name == "T"
+            && binder(projected_member(instance, "own"), "T")
+            && projected_member(instance, "outer") == &boolean(),
+        "`wk` is `{{ new <T>(): {{ own: T; outer: boolean; }}; }}`: {value:?}"
+    );
+}
+
+/// A same-file call that swaps the caller's binders into the callee's
+/// clause binds both at once: `g(b, a)` inside `f<A, B>` instantiates
+/// `g<A, B>` at `[B, A]`, and in one file the flow lane interns each
+/// root function's binders by name, so `f`'s and `g`'s of one name are
+/// one node. `f`'s return is read off `g`'s uninstantiated one with the
+/// binding simultaneous; one binder after the other would collapse both
+/// onto one.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike): `f` is `<A, B>(a: A, b: B) => { a: B;
+/// b: A; }` and `w` is `{ a: string; b: number; }`.
+#[test]
+fn an_instantiation_swapping_same_file_binders_binds_them_at_once() {
+    const PATH: &str = "/ws/cov/transfer/swap.ts";
+    let host = host_with(&[(
+        PATH,
+        "function g<A, B>(a: A, b: B) { return { a, b }; }\n\
+         export function f<A, B>(a: A, b: B) { return g(b, a); }\n\
+         export function w(n: number, s: string) { return f(n, s); }\n",
+    )]);
+    let generic = value_of(&host, PATH, "f");
+    let binder = |ty: &TypeExpr, name: &str| matches!(ty, TypeExpr::TypeParameter(param) if param.name == name);
+    assert!(
+        binder(projected_member(&generic, "a"), "B")
+            && binder(projected_member(&generic, "b"), "A"),
+        "{generic:?}"
+    );
+    let value = value_of(&host, PATH, "w");
+    assert_eq!(projected_member(&value, "a"), &string(), "{value:?}");
+    assert_eq!(projected_member(&value, "b"), &number(), "{value:?}");
+}
+
 /// The callee schedule's chains: deep, on a small stack, under a reduced
 /// budget, through other call shapes, and around recursive components.
 #[path = "flow_return_schedule_tests.rs"]

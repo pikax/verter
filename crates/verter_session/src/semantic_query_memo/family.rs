@@ -1199,12 +1199,6 @@ impl FamilySlots {
         self.slot_list(slot).clone()
     }
 
-    /// Whether `slot` holds any candidate, valid or not — a presence peek
-    /// that clones and validates nothing.
-    pub(super) fn slot_has_candidates(&self, slot: ModeSlot) -> bool {
-        !self.slot_list(slot).is_empty()
-    }
-
     /// Move the candidate matching `(validated_at_generation, facts)`
     /// to the back of `slot`'s LRU order — the bookkeeping the
     /// snapshot/validate-outside-lock path's caller invokes after a

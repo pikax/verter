@@ -144,6 +144,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.owner,
                 &class.type_parameters,
                 Some(self.binder_env),
+                Some(class.offset),
             )
         });
         let frame_env = self.binder_env;

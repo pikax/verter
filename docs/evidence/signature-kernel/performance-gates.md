@@ -42,7 +42,8 @@ guard that fails on regression.
 | Gate | Evidence |
 |---|---|
 | A finite linear call chain consumes connected work, not native stack or connected-query depth per level | The flow-return callee schedule (`project_semantic_dispatch/flow_return_schedule.rs`) evaluates the callee returns a frame's body will demand bottom-up from an explicit stack before the body runs, and records each as a reusable completed member exactly as the inline path does, so the body reuses it instead of recursing. `flow_return_coverage_tests.rs` → `schedule::a_128_level_generic_chain_needs_no_more_query_depth_than_a_short_one` (the 128-level chain answers like the three-level one under the smallest depth cap the three-level one needs), `schedule::a_128_level_generic_chain_runs_on_the_short_chains_native_stack` (the 128-level chain on a 512 KiB thread), `schedule::chains_through_other_call_shapes_consume_no_depth_per_level` (non-generic, `const`-arrow and local-arrow chains), `schedule::a_chain_across_modules_needs_no_more_query_depth_than_a_short_one` (generic and non-generic chains of imported callees: 32 modules under the 4-module chain's depth cap and on its stack), `schedule::a_new_instantiation_of_a_warm_chain_runs_on_the_short_chains_native_stack` (a new call site instantiating a warm 128-level chain, on a 512 KiB thread), `schedule::a_200_level_nested_argument_chain_answers_on_the_default_stack` and `schedule::a_nested_argument_chain_costs_the_same_work_per_level` (every edge a call inside a generic call's argument: 200 levels on the default test stack under the three-level chain's depth cap, the same work per level at 16, 64 and 200 levels), `schedule::a_200_level_type_position_chain_answers_on_the_default_stack`, `schedule::a_type_position_chain_costs_the_same_work_per_level` and `schedule::a_1000_level_type_position_chain_answers` (every edge a `ReturnType<typeof f>` type position: 200 levels on the default test stack under the three-level chain's depth cap, the same work per level at 16, 64 and 200 levels, and 1,000 levels answer), `schedule::a_new_instantiation_of_a_warm_200_level_local_arrow_chain_answers_on_the_default_stack` and `schedule::a_new_instantiation_of_a_warm_local_arrow_chain_costs_the_same_work_per_level` (a new call site instantiating a warm 200-level chain whose levels call through local arrow functions, on the default test stack, the same work per level), `schedule::a_200_level_nested_argument_chain_in_local_arrows_answers_on_the_default_stack` and `schedule::a_nested_argument_chain_in_local_arrows_costs_the_same_work_per_level` (every edge a call in a generic call's argument inside a local arrow function), `schedule::a_warm_chain_passing_a_parameter_member_read_instantiates_stacklessly`, `…_a_local_member_read_…`, `…_a_literal_…` and `…_a_call_on_its_parameter_…` (a new call site instantiating a warm 200-level chain whose levels pass the next a member read, a literal or a call: on the default test stack, the same work per level at 16, 32 and 64 levels), `schedule::a_deep_chain_over_a_reduced_budget_ends_on_the_work_rail` (a reduced work budget ends the 128-level chain on `PROJECTION_WORK_LIMIT`, never the depth rail), and `schedule::recursive_components_evaluate_exactly_as_the_recursive_path` (self-recursive and mutually recursive components answer from the same connected work as with the schedule off: a cycle is never evaluated out of order). |
-| Native recursion the schedule does not predict ends typed, never in a stack overflow | An inline flow evaluation that would open more nested frames than the connected demand's depth cap (24) is refused with `CONNECTED_QUERY_DEPTH_LIMIT` — the same typed incompleteness the connected-query depth guard ends query nesting with. `flow_return_coverage_tests.rs` → `schedule::an_unpredicted_deep_chain_ends_in_the_typed_depth_refusal` (a new instantiation of a warm local-arrow chain evaluated with the schedule off, one native evaluation per level: 16 levels answer; at 256 levels, which overflows the 8 MiB worker stack without the bound in an unoptimized build, it is refused partial and never admitted). |
+| Native recursion the schedule does not predict ends typed, never in a stack overflow | An inline flow evaluation that would open more nested frames than the connected demand's depth cap (24) is refused with `CONNECTED_QUERY_DEPTH_LIMIT` — the same typed incompleteness the connected-query depth guard ends query nesting with. `flow_return_coverage_tests.rs` → `schedule::an_unpredicted_deep_chain_ends_in_the_typed_depth_refusal` (a same-file chain evaluated with the schedule off, so every level nests its callee natively: 16 levels answer; at 256 levels, which overflows the 8 MiB worker stack without the bound in an unoptimized build, it is refused partial and never admitted). |
+| An instantiated callee return is read off its uninstantiated return, so a generic chain across modules costs the same connected work per module | `ProjectSemanticDispatch::instantiated_from_uninstantiated` (`project_semantic_dispatch/flow_return.rs`) answers an instantiated `FlowReturn` key whose uninstantiated return is already answered (a validated warm candidate or a reusable completed member) with that return under the instantiation — the checker's rule, the return type of an instantiated signature is its target's return type under the mapper — instead of re-evaluating the body; nothing new is stored (the substitution goes through the store-owned substitution memo). `flow_return_coverage_tests.rs` → `schedule::a_generic_chain_across_modules_costs_the_same_work_per_module` (9 / 10 / 11 and 32 / 64 / 128 modules: every added module costs the same work, asserted structurally), `schedule::a_generic_chain_across_201_modules_answers_without_a_refusal` (the checker's `{ v: string \| number; tag: "c"; }`, clean and admitted, under the production budget), `schedule::an_edit_in_the_middle_of_a_module_chain_reaches_the_top` (an edit to module 100 of 201 reaches the witness), `schedule::a_new_instantiation_of_a_warm_local_arrow_chain_is_read_off_its_uninstantiated_return` (256 levels, on a 512 KiB stack), and `schedule::a_256_level_chain_returning_a_same_name_generic_answers` (a head returning `id: <T,>(z: T) => z` or `K: class<T> { own!: T; }`: the nested clause interns its own binders, 256 levels answer and a new instantiation answers on 512 KiB), `an_instantiated_return_keeps_a_nested_clause_of_the_same_name` (every nested clause keeps its own parameter; a function type written in the body with a same-name clause is evaluated under the instantiation) and `an_instantiation_swapping_same_file_binders_binds_them_at_once` (the frame's clause is bound simultaneously). The schedule's warm check validates a candidate as the warm read does: measured on the unoptimized test profile, it adds 7–20 µs per check only where a candidate exists (one validation of that candidate's recorded facts — 204 to 1,004 facts in single-file chains of 200 and 1,000 functions, up to 605 across 201 modules), 3.5 ms of a 2.6 s re-evaluation of the 201-module chain after an edit, 29 ms of 22 s for the 1,000-function file; with no candidate it costs the lookup alone. |
 
 ## Regression policy
 
@@ -181,6 +182,22 @@ Recorded plainly so no reader mistakes absence for a pass:
     thread. Skipped: a `const` type parameter's frame literal argument,
     read in its const context
     (`schedule::a_const_type_parameter_reads_a_frame_literal_argument_in_its_const_context`);
+  * a new instantiation of a warm chain nests nothing, whatever shape its
+    calls take: it is read off the warm uninstantiated returns, so a
+    256-level chain through local arrow functions answers
+    `{ v: boolean; tag: "c"; }` on a 512 KiB stack. A nested function
+    value's or class expression's clause interns its own binders
+    (qualified by the declaration's offset), so a return holding one that
+    re-declares a chain binder's name (`id: <T,>(z: T) => z`,
+    `K: class<T> { own!: T; }`) is read off the same way: both 256-level
+    chains answer. Only a return holding a function TYPE written in the
+    body with a same-name clause (`const id: <T>(z: T) => T`), whose
+    binder is the outer one's node, is evaluated under the instantiation
+    instead: over a 256-level chain through local arrow functions its
+    `witness` answers and a new instantiation `second(v: boolean)` is
+    refused, typed (tsc:
+    `{ v: boolean; tag: "c"; id: <T>(z: T) => T; }`; held open by the
+    skipped `schedule::a_256_level_chain_returning_a_same_name_function_type_answers`);
   * a cycle among callee returns is evaluated from its first-discovered
     member through the ordinary path, where the re-entry intercept holds
     each back-edge; its members nest natively beneath that root;
@@ -188,17 +205,22 @@ Recorded plainly so no reader mistakes absence for a pass:
     its first hop with the typed `UnresolvedValue` degradation (tsc:
     `{ v: string | number; tag: "c"; }`) — a separate gap.
 
-  A generic chain across modules is flat in depth but QUADRATIC in
-  connected work: each module's binder is its own, so every level
-  instantiates the chain beneath it afresh (4 / 32 / 64 / 128 modules cost
-  185 / 7423 / 28175 / 109615 units). The work budget, not depth, ends it:
-  198 modules cost 259,660 of the 262,144 units and answer, and from 199
-  modules the work rail refuses the chain, typed. Each module's
-  instantiation of the module below is one no discovery predicts, so it
-  costs one refused probe (about 14 units) on top of the evaluation
-  itself; before probes it was evaluated where it was demanded, and the
-  boundary was 200 modules. A same-file chain shares one binder per name
-  and stays linear.
+  A generic chain across modules is flat in depth and LINEAR in connected
+  work. Each module's binder is its own, so no two levels share an
+  instantiation (`c(j)` is demanded over the binder of every module above
+  it); re-evaluating the body under each instantiation re-instantiated the
+  chain beneath every level, and the work grew with the square of the
+  chain (25 / 50 / 100 / 200 modules cost 4,322 / 16,772 / 66,047 /
+  262,097 units, and from 201 modules the work rail refused the chain,
+  typed). An instantiated return is read off the uninstantiated one
+  instead, as the checker instantiates a signature's return type, so each
+  function's body is evaluated once: 25 / 50 / 100 / 200 / 201 modules
+  cost 397 / 797 / 1,597 / 3,197 / 3,213 units, one evaluation and 16
+  units per module. After an edit, the schedule counts only a warm answer
+  that still validates as answered, so the functions above the edit are
+  re-evaluated bottom-up rather than one nested demand per invalidated
+  level (counting a stale candidate as answered, the edited chain answered
+  at 16 modules and missed at 64, 128 and 201).
 
   A body's signature-utility application over a function or object type
   (`ReturnType<typeof f>`, `Parameters<…>`, …) resolves where the body

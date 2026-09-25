@@ -1911,7 +1911,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    transaction as a proven inline SCC root whose reads were recorded
     ///    clean; they are replayed into the scopes live now (see
     ///    [`Self::reusable_completed_flow_member`]).
-    /// 4. **Cold compute** — the machinery ROOT goes through the family
+    /// 4. **Instantiation transfer** — an instantiated key whose
+    ///    uninstantiated answer is already in hand (warm, or reusable on
+    ///    this transaction) is that answer under the key's substitution,
+    ///    never a re-evaluation of the body (see
+    ///    [`Self::instantiated_from_uninstantiated`]).
+    /// 5. **Cold compute** — the machinery ROOT goes through the family
     ///    singleflight (`execute(FlowReturn)` → `build_flow_return`); a
     ///    nested flow evaluation computes INLINE on the transaction (its
     ///    publish is batched at its SCC's close and drained by the root).
@@ -1952,7 +1957,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(result) = self.reusable_completed_flow_member(&key) {
             return FlowReturnStep::Complete(result);
         }
-        // (4) Cold compute. Root versus inline is decided by the generic
+        // (4) Instantiation transfer.
+        if let Some(result) = self.instantiated_from_uninstantiated(&key) {
+            return FlowReturnStep::Complete(result);
+        }
+        // (5) Cold compute. Root versus inline is decided by the generic
         // obligation transaction: any open frame — of any domain — makes
         // this evaluation inline.
         if self.dispatch_txn.borrow().obligations.decides_root() {
@@ -2001,6 +2010,93 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .set(self.canonical_evidence_epoch.get().wrapping_add(1));
         }
         Some(value)
+    }
+
+    /// The return of an instantiated `key` read off its function's
+    /// uninstantiated return, when that is already answered — a validated
+    /// warm candidate or a reusable completed member of this transaction —
+    /// and clean: the uninstantiated value under `key`'s substitution,
+    /// closed exactly as a frame's outgoing value is.
+    ///
+    /// This is the checker's rule: the return type of an instantiated
+    /// signature is its target's return type under the instantiation's
+    /// mapper; the body is inferred once, over the function's own binders.
+    /// It is also what keeps a generic chain across modules linear: every
+    /// level instantiates its callee over its OWN module's binder, so a
+    /// re-evaluated instantiation would re-instantiate the whole chain beneath
+    /// it, level after level.
+    ///
+    /// The frame's own clause is bound by declaration order, exactly as
+    /// the instantiated frame's binder environment binds it
+    /// ([`Self::bind_flow_return_own_clause`]), then the key's
+    /// substitution applies as it does to an evaluated frame's outgoing
+    /// value.
+    ///
+    /// Nothing new is stored: the value is recomputed from the
+    /// uninstantiated answer through the store-owned substitution memo on
+    /// every demand, and reading that answer records its facts (the warm
+    /// read's validation, or the member's replayed reads) in the demanding
+    /// scopes, so an edit anywhere beneath the function reaches every
+    /// instantiation read from it. `None` when the key is uninstantiated;
+    /// when its uninstantiated return is unanswered, in flight or degraded;
+    /// or when a signature in the return declares one of the binders being
+    /// bound (a function type written in the body whose clause re-declares
+    /// one of the function's binder names): the body is then evaluated
+    /// under the instantiation.
+    fn instantiated_from_uninstantiated(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
+        if schedule::is_uninstantiated(key) {
+            return None;
+        }
+        let uninstantiated = schedule::uninstantiated(key);
+        let result = match self
+            .graph()
+            .get_flow_return_result(self.ctx, &uninstantiated)
+        {
+            Some(result) => result,
+            None => self.reusable_completed_flow_member(&uninstantiated)?,
+        };
+        if result.degradation().is_some() {
+            return None;
+        }
+        let names = self.own_type_parameter_names(key)?;
+        if names.len() != key.normalized_type_args.len() {
+            return None;
+        }
+        let slot = &key.function.declaration_slot;
+        let bind = |node| {
+            self.bind_flow_return_own_clause(
+                node,
+                slot.defining_canonical.as_ref(),
+                slot.owner,
+                &names,
+                &key.normalized_type_args,
+            )
+        };
+        let return_type = bind(result.return_type())?;
+        let predicate = match result.inferred_predicate() {
+            Some(predicate) => {
+                let target = match predicate.ty {
+                    Some(target) => Some(bind(target)?),
+                    None => None,
+                };
+                Some(crate::semantic_query::SignaturePredicate {
+                    ty: target,
+                    ..predicate
+                })
+            }
+            None => None,
+        };
+        let result = if return_type == result.return_type() {
+            result
+        } else {
+            result.with_return_type(self.graph().as_ref(), return_type)
+        };
+        let result = match predicate {
+            Some(predicate) => result.with_inferred_predicate(predicate),
+            None => result,
+        };
+        let result = self.apply_frame_key_substitution(key, result);
+        Some(self.close_flow_result_pre_seal(result, key.context.policy.nullability))
     }
 
     /// The machinery ROOT path: the full family singleflight. After a
@@ -4583,12 +4679,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// this environment. TS2300 constrains only one frame
     /// (`function f<T>() { class T {} }`); across frames the two
     /// genuinely coexist and the nearest wins, in both directions.
+    ///
+    /// The clause's DECLARATION is its binders' identity, as each checker
+    /// type parameter is its own symbol. The root frame's clause interns
+    /// by name in the file scope (`nested_at` `None`) — the identity the
+    /// declaration lowering's signature-scoped binders, the enclosing-class
+    /// rebinding and the instantiation's by-name binding all read. A
+    /// nested declaration's clause — a function value's or a class
+    /// expression's, `nested_at` its start offset in the defining file —
+    /// interns under a name qualified by that offset, so `g<T>`'s `T` and
+    /// the `T` of an `id: <T,>(z: T) => z` it returns are distinct nodes:
+    /// substituting the one never rewrites the other.
+    /// The qualified name is an identity mint (the `\u{1}` separator
+    /// cannot appear in an authored identifier); the display name stays
+    /// the authored one.
     fn flow_binder_env(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         type_parameters: &[crate::flow_slice_content::SliceTypeParam],
         outer: Option<&FlowBinderEnv>,
+        nested_at: Option<u32>,
     ) -> FlowBinderEnv {
         let graph = self.graph();
         let whole_hash = self
@@ -4621,8 +4732,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let intern_binder = |name: &Arc<str>,
                              constraint: Option<SemanticNodeId>,
                              default: Option<SemanticNodeId>| {
+            let decl_name = match nested_at {
+                Some(offset) => Arc::from(format!("{name}\u{1}{offset}").as_str()),
+                None => Arc::clone(name),
+            };
             graph.intern_node(SemanticNodeData::TypeParam {
-                decl: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::clone(name)),
+                decl: crate::semantic_query::DeclIdentity::from_scope(&scope, decl_name),
                 param_index: 0,
                 constraint,
                 default,
@@ -5170,13 +5285,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // The ENCLOSING declaration's clause seeds it: a class member's
         // signature and body see `class C<T>`'s binders, which appear in
         // no clause of the member itself.
-        let enclosing_binder_env = (!ir.enclosing_type_parameters.is_empty())
-            .then(|| self.flow_binder_env(canonical, owner, &ir.enclosing_type_parameters, None));
+        let enclosing_binder_env = (!ir.enclosing_type_parameters.is_empty()).then(|| {
+            self.flow_binder_env(canonical, owner, &ir.enclosing_type_parameters, None, None)
+        });
         let binder_env = self.flow_binder_env(
             canonical,
             owner,
             &ir.type_parameters,
             enclosing_binder_env.as_ref(),
+            None,
         );
         // The instantiation overlay: a flow key demanded under a call's
         // FINAL ordered type-argument mapping binds this frame's OWN
@@ -19384,6 +19501,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.owner,
             type_parameters,
             Some(outer_env),
+            Some(anchor),
         );
         // The SAME signature gate the root evaluation takes. A nested
         // signature sits inside the enclosing frame's body, so its

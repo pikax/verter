@@ -480,7 +480,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return CalleeStanding::Left;
             }
         }
-        if self.graph().has_flow_return_candidate(key) {
+        if self
+            .graph()
+            .has_serving_flow_return_candidate(self.ctx, key)
+        {
             return CalleeStanding::Answered;
         }
         CalleeStanding::Unsettled
@@ -1221,6 +1224,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
+    /// The names of the type parameters `key`'s function declares itself,
+    /// in declaration order — the clause an instantiated frame binds by
+    /// ordinal. `None` when its served position is not read.
+    pub(super) fn own_type_parameter_names(&self, key: &FlowReturnKey) -> Option<Vec<Arc<str>>> {
+        let site = self.flow_slice_demand_site(key).ok()?;
+        let index = site
+            .indexed
+            .shallow_state
+            .decl_bodies()
+            .function_program_index();
+        let entry = frame_entry(&index, key)?;
+        Some(
+            entry
+                .type_parameters
+                .iter()
+                .map(|param| Arc::clone(&param.name))
+                .collect(),
+        )
+    }
+
     /// Whether `key` is answered without evaluating it here: a warm
     /// candidate, or a reusable completed member.
     fn is_answered(&self, key: &FlowReturnKey) -> bool {
@@ -1230,7 +1253,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .completed_members
             .iter()
             .any(|member| &member.key == key && member.reuse.is_some())
-            || self.graph().has_flow_return_candidate(key)
+            || self
+                .graph()
+                .has_serving_flow_return_candidate(self.ctx, key)
     }
 
     /// The direct calls of one composed function value's return sites
@@ -1472,13 +1497,13 @@ fn push_unique(out: &mut Vec<FlowReturnKey>, key: FlowReturnKey) {
 }
 
 /// Whether `key` addresses its function under no instantiation.
-fn is_uninstantiated(key: &FlowReturnKey) -> bool {
+pub(super) fn is_uninstantiated(key: &FlowReturnKey) -> bool {
     key.normalized_type_args.is_empty() && key.context.type_substitution.bindings().is_empty()
 }
 
 /// `key` without its instantiation: the same function under the same
 /// demand, its own binders unbound.
-fn uninstantiated(key: &FlowReturnKey) -> FlowReturnKey {
+pub(super) fn uninstantiated(key: &FlowReturnKey) -> FlowReturnKey {
     let mut uninstantiated = key.clone();
     uninstantiated.normalized_type_args = Arc::from(Vec::new().into_boxed_slice());
     uninstantiated.context.type_substitution =
