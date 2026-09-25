@@ -7349,12 +7349,15 @@ fn loop_carried_subjects(
                 SliceStatement::CompoundAssignment { target, .. } => {
                     written.push(narrow_root_subject(&target.root));
                 }
-                // A member write retypes no binding; its value evaluates.
-                SliceStatement::MemberWrite { write, .. } => {
+                // A member write narrows a member path of its root: the
+                // root's head carries that path's narrowing joined with the
+                // back edges.
+                SliceStatement::MemberWrite { target, write, .. } => {
                     if let crate::flow_slice_content::SliceMemberWrite::Assign { value, .. } = write
                     {
                         expression(value, written);
                     }
+                    written.push(narrow_root_subject(&target.root));
                 }
                 SliceStatement::DestructureAssign { pattern, value, .. } => {
                     expression(value, written);
@@ -12456,7 +12459,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let narrowed = self
             .products
             .narrowing(subject)
-            .is_some_and(|narrowing| narrowing.facts().iter().any(|fact| fact.path.is_empty()));
+            .is_some_and(|narrowing| !narrowing.facts().is_empty());
         if narrowed {
             return false;
         }
