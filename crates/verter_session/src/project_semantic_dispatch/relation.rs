@@ -8805,6 +8805,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.resolve_recursive_member_value(source.value, source.declaration_origin.as_ref());
         let target_value =
             self.resolve_recursive_member_value(target.value, target.declaration_origin.as_ref());
+        // An optional target property's type includes `undefined` under
+        // `strictNullChecks` (the checker's `addOptionality`), unless
+        // `exactOptionalPropertyTypes` keeps it to the declared type:
+        // `{ a: string | undefined }` fits `{ a?: string }`.
+        let strict = self
+            .dispatch_txn
+            .borrow()
+            .relation
+            .strict
+            .unwrap_or(StrictFamilyConfig::TS_STRICT);
+        let target_value = if target.optional
+            && strict.strict_null_checks
+            && !strict.exact_optional_property_types
+        {
+            let undefined = self
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+            self.intern_normalized_union_or_intersection(&[target_value, undefined], true)
+        } else {
+            target_value
+        };
         self.relate_member(
             source_value,
             target_value,

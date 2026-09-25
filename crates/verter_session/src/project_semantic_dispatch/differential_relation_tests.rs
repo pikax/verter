@@ -842,22 +842,33 @@ fn signatures_relate_by_parameters_and_return() {
 
 /// Under `strictNullChecks` an optional parameter's type includes `undefined`,
 /// so a source whose same parameter is a required `string` does not fit `(a?:
-/// string) => void`. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[(a: string) => void] extends [(a?: string) => void] ? 1 : 2`: the
-///   checker answers `2` (strict), `1` (strictNullChecks off), `2`
-///   (noImplicitAny off), `1` (both off); the lane measured `1` (strict,
-///   noImplicitAny off).
+/// string) => void` (`2`, and `1` with `strictNullChecks` off), while an
+/// optional source parameter fits a required one and `(a: string | undefined)
+/// => void` and `(a?: string) => void` fit each other (`1` under every
+/// setting, measured on TypeScript 7.0.2).
 #[test]
-#[ignore = "an optional target parameter's type includes undefined under strictNullChecks"]
-fn wrong_clean_an_optional_target_parameter_takes_undefined() {
+fn an_optional_parameter_relates_as_the_checker_relates_its_undefined() {
     let matrix = Matrix::new(SIGNATURES);
-    let failures = matrix.nullness(&[(
+    let mut failures = matrix.nullness(&[(
         Read::Type("[(a: string) => void] extends [(a?: string) => void] ? 1 : 2"),
         "2",
         "1",
     )]);
+    failures.extend(matrix.types(&[
+        (
+            "[(a?: string) => void] extends [(a: string) => void] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[(a: string | undefined) => void] extends [(a?: string) => void] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[(a?: string) => void] extends [(a: string | undefined) => void] ? 1 : 2",
+            "1",
+        ),
+        ("[(a?: string) => void] extends [() => void] ? 1 : 2", "1"),
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -976,14 +987,9 @@ fn wrong_clean_a_weak_target_needs_a_shared_property() {
 }
 
 /// Under `strictNullChecks` `{ a: string | undefined }` fits `{ a?: string }`:
-/// the optional target's read type includes `undefined`. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[{ a: string | undefined }] extends [{ a?: string }] ? 1 : 2`: the
-///   checker answers `1`; the lane measured `2` (strict, noImplicitAny off).
+/// the optional target's read type includes `undefined`.
 #[test]
-#[ignore = "a required property typed with undefined fits an optional property"]
-fn wrong_clean_a_required_property_including_undefined_fits_an_optional_one() {
+fn an_optional_property_relates_as_the_checker_relates_its_undefined() {
     let matrix = Matrix::new(RECURSIVE_AND_WEAK);
     let failures = matrix.types(&[(
         "[{ a: string | undefined }] extends [{ a?: string }] ? 1 : 2",
