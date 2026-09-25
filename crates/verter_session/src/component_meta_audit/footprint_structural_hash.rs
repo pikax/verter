@@ -584,10 +584,12 @@ impl StructuralEncoder<'_> {
                 signature_span,
                 return_type_span,
                 predicate,
+                is_abstract,
             } => {
                 self.buf.push(SemanticNodeTag::Signature.stable_id());
                 self.buf.push(match kind {
                     crate::semantic_query::SignatureKind::Call => 0,
+                    crate::semantic_query::SignatureKind::Construct if *is_abstract => 2,
                     crate::semantic_query::SignatureKind::Construct => 1,
                 });
                 self.buf

@@ -904,6 +904,7 @@ impl ProjectSemanticDispatch<'_> {
                 // producer of a composed function fact (a payload-less
                 // slot's synthesized callable) authors no return at all.
                 predicate: inferred_predicate,
+                is_abstract: false,
             },
             scope,
         ))

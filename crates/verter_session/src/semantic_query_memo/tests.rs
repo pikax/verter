@@ -418,6 +418,7 @@ fn intern_span_participates_in_identity() {
         signature_span: Some(verter_span::Span::new(0, end)),
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     };
     let id_a = store.intern_node(mk(10));
     let id_a_again = store.intern_node(mk(10));

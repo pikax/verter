@@ -689,19 +689,17 @@ fn flow_return_block_level_function_declaration_does_not_reach_function_scope() 
 ///
 /// A ROOT-region function declaration still reaches function scope: the
 /// read at `return hoistBait()` — written BEFORE the declaration —
-/// resolves to it and takes the substrate's documented fail-closed rail
-/// for a nested function declaration's own return (tsgo: `number`; the
-/// exact recovery is separate substrate debt). The file-scope
-/// `declare const hoistBait: () => "OUTERHOISTED"` is what makes this
-/// discriminating: without the root-region hoist the name would be FREE
-/// and the read would publish `"OUTERHOISTED"`, clean and warm.
+/// resolves to it and calls the value it declares (tsgo: `number`). The
+/// file-scope `declare const hoistBait: () => "OUTERHOISTED"` is what
+/// makes this discriminating: without the root-region hoist the name
+/// would be FREE and the read would publish `"OUTERHOISTED"`.
 ///
 /// A block `var` still hoists out of its block unconditionally — the
 /// region gate narrows the nested-function arm ONLY.
 #[test]
 fn flow_return_root_function_and_block_var_still_hoist() {
     let host = make_host();
-    assert_fails_closed(&host, "rootFunctionStillHoists");
+    assert_clean_warm(&host, "rootFunctionStillHoists", number());
     assert_clean_warm(&host, "blockVarStillHoists", number());
 }
 

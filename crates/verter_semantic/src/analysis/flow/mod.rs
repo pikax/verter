@@ -1189,7 +1189,139 @@ fn prepare_function_body_skeleton(
             write.binding = bindings.required_occurrence(span)?;
         }
     }
+    attach_declaration_closures(&mut skeleton, &bindings, entry)?;
     Ok(PreparedFunctionBodySkeleton { skeleton, bindings })
+}
+
+/// A local function DECLARATION is hoisted: its value is created at its
+/// frame's entry, not at an expression site, and is read wherever its name
+/// is. Each site that reads (or calls) such a declaration of this frame
+/// therefore retains the declaration's captures exactly as a site creating
+/// the callable would — its own [`SkeletonClosure`], its capture subjects
+/// and its captured reads — so demanding the read selects what the
+/// declaration's body reads from this frame.
+fn attach_declaration_closures(
+    skeleton: &mut FunctionBodySkeleton,
+    bindings: &FlowBindingMap,
+    entry: &FunctionProgramEntry,
+) -> Result<(), FlowBindingMapError> {
+    let anchor = entry.span.start;
+    let declaration_of = |binding: &FlowBindingRef| -> Option<SkeletonBindingId> {
+        let FlowBindingRef::Local(local) = binding else {
+            return None;
+        };
+        (skeleton.bindings[local.index()].kind == SkeletonBindingKind::NestedFunction)
+            .then_some(*local)
+    };
+    let mut attachments: Vec<(usize, SkeletonBindingId)> = Vec::new();
+    for (index, site) in skeleton.expr_sites.iter().enumerate() {
+        let mut seen: Vec<SkeletonBindingId> = Vec::new();
+        let referenced = site
+            .reads
+            .iter()
+            .filter_map(|read| read.binding.as_ref())
+            .chain(site.calls.iter().filter_map(|call| call.binding.as_ref()));
+        for binding in referenced {
+            if let Some(local) = declaration_of(binding) {
+                if !seen.contains(&local) {
+                    seen.push(local);
+                    attachments.push((index, local));
+                }
+            }
+        }
+    }
+    for (index, local) in attachments {
+        // The declaration's own capture record: the nested callable whose
+        // span holds the declared name.
+        let name = skeleton.bindings[local.index()].span.to_absolute(anchor);
+        let Some(captures) = entry
+            .nested_captures
+            .iter()
+            .find(|child| child.span.start <= name.start && child.span.end >= name.end)
+        else {
+            continue;
+        };
+        let mut own: Vec<FlowBindingRef> = Vec::new();
+        for identity in captures.bindings.0.iter() {
+            let binding = bindings.resolve_identity(identity)?;
+            if !own.contains(&binding) {
+                own.push(binding);
+            }
+        }
+        let mut own_reads: Vec<FlowBindingRef> = Vec::new();
+        let mut reads: Vec<SkeletonRead> = Vec::new();
+        for read in captures.reads.iter() {
+            let binding = bindings.resolve_identity(&read.binding)?;
+            if !own_reads.contains(&binding) {
+                own_reads.push(binding.clone());
+            }
+            let name = intern_skeleton_name(skeleton, &read.binding.name);
+            let path: Arc<[SkeletonPathSegment]> = read
+                .path
+                .iter()
+                .map(|segment| SkeletonPathSegment::Static(intern_skeleton_name(skeleton, segment)))
+                .collect::<Vec<_>>()
+                .into();
+            reads.push(SkeletonRead {
+                name,
+                path,
+                span: FrameSpan::rebase(anchor, read.span),
+                binding: Some(binding),
+                kind: FlowReadKind::Input,
+            });
+        }
+        let names: Vec<FlowNameId> = captures
+            .bindings
+            .0
+            .iter()
+            .map(|identity| intern_skeleton_name(skeleton, &identity.name))
+            .collect();
+        let site = &mut Arc::make_mut(&mut skeleton.expr_sites)[index];
+        for binding in &own {
+            if !site.capture_bindings.contains(binding) {
+                arc_push(&mut site.capture_bindings, binding.clone());
+            }
+        }
+        for name in names {
+            if !site.captures.contains(&name) {
+                arc_push(&mut site.captures, name);
+            }
+        }
+        arc_push(
+            &mut site.closures,
+            SkeletonClosure {
+                span: FrameSpan::rebase(anchor, captures.span),
+                correlation: if captures.exhaustive {
+                    SkeletonClosureCorrelation::Exact
+                } else {
+                    SkeletonClosureCorrelation::Partial
+                },
+                captures: Arc::from(own.into_boxed_slice()),
+                read_captures: Arc::from(own_reads.into_boxed_slice()),
+            },
+        );
+        for read in reads {
+            arc_push(&mut site.reads, read);
+        }
+    }
+    Ok(())
+}
+
+/// The id of `text` in the skeleton's name table, interning it when new.
+fn intern_skeleton_name(skeleton: &mut FunctionBodySkeleton, text: &str) -> FlowNameId {
+    if let Some(id) = skeleton.name_id(text) {
+        return id;
+    }
+    let id = FlowNameId(u32::try_from(skeleton.names.len()).unwrap_or(u32::MAX));
+    arc_push(&mut skeleton.names, Arc::from(text));
+    id
+}
+
+/// `slot` with `value` appended.
+fn arc_push<T: Clone>(slot: &mut Arc<[T]>, value: T) {
+    let mut values = slot.to_vec();
+    values.push(value);
+    *slot = Arc::from(values.into_boxed_slice());
 }
 
 fn build_body_skeleton(

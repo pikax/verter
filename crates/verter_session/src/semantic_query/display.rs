@@ -812,10 +812,12 @@ fn display_resolved_type_node(
             return_type,
             type_parameters,
             predicate,
+            is_abstract,
             ..
         } => {
             let new_prefix = match kind {
                 crate::semantic_query::SignatureKind::Call => "",
+                crate::semantic_query::SignatureKind::Construct if *is_abstract => "abstract new ",
                 crate::semantic_query::SignatureKind::Construct => "new ",
             };
             let tps = render_type_parameters(store, type_parameters, needs, child_depth, visited);
@@ -840,7 +842,12 @@ fn display_resolved_type_node(
         // A class expression renders by the name the checker prints for a
         // reference to it (`Mixin.(Anonymous class)`, `(Anonymous
         // class)<string>`) — like a lazy reference, its body is never
-        // re-rendered here.
+        // re-rendered here. An object literal's recursive anonymous type has
+        // no name: it renders as its surface, whose own `this` renders as
+        // `this`.
+        SemanticNodeData::ClassExpressionInstance {
+            identity, surface, ..
+        } if identity.object_literal => display_type_node(store, *surface, needs, depth, visited).0,
         SemanticNodeData::ClassExpressionInstance {
             identity,
             type_arguments,

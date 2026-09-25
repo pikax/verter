@@ -1107,6 +1107,7 @@ fn printed_name_qualifies_exactly_the_instantiated_clauses() {
         own_arity: 0,
         constructor_visibility: None,
         prototype: None,
+        object_literal: false,
     };
     let (u, t, other) = (SemanticNodeId(1), SemanticNodeId(2), SemanticNodeId(3));
     let is_parameter = |argument: SemanticNodeId, name: &str| {

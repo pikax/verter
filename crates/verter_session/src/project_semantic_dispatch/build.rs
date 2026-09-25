@@ -35,6 +35,35 @@ use crate::semantic_query::{
 /// proof silently.
 pub(super) const SELF_ROOT_WALK_CAP: usize = 4096;
 
+/// Whether a value's type is the object literal it is initialized with —
+/// no authored annotation, no `unique symbol`, no evaluated initializer
+/// expression, and an object shape — the anonymous object type whose
+/// members `build_typeof` lowers from the literal's own positions.
+pub(super) fn value_is_own_object_literal(
+    prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+) -> bool {
+    use verter_type_expr::facts::{SemanticTypeSource, ValueAnnotationClass};
+    let annotation = &prepared.type_annotation;
+    prepared.object_shape.is_some()
+        && !annotation.is_unique_symbol
+        && annotation.expression_source.is_none()
+        && match annotation.classification {
+            ValueAnnotationClass::Absent => true,
+            ValueAnnotationClass::Direct => !matches!(
+                annotation.annotation,
+                Some(
+                    SemanticTypeSource::Authored(_)
+                        | SemanticTypeSource::Closed(
+                            verter_type_expr::facts::ClosedTypeFact::Leaf(_)
+                        )
+                )
+            ),
+            ValueAnnotationClass::TypeOfAlias | ValueAnnotationClass::InferenceUnavailable(_) => {
+                false
+            }
+        }
+}
+
 /// The effective prepared VALUE-decl identity resolved by
 /// [`ProjectSemanticDispatch::effective_prepared_value_decl`]: the declaring
 /// `(canonical, owner, symbol)` (post value-export-target fallback) plus the
@@ -1245,6 +1274,76 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } else {
                 None
             };
+        // A member path reads the member where the value declares it — a
+        // class's own static, an object literal's own member — never the
+        // whole surface: the checker resolves a value's members one at a
+        // time, so `typeof C.m` whose return names `C` does not build `C`.
+        if let (Some(first), None) = (path.first(), synthesised_default) {
+            let is_class =
+                prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class;
+            let own_literal = !is_class && value_is_own_object_literal(&prepared);
+            if (is_class && first.as_ref() != "prototype") || own_literal {
+                let member_context = if is_class {
+                    crate::semantic_query::ProjectionReductionContext::published(context.mode)
+                } else {
+                    context
+                };
+                let mut base_partial = false;
+                let source = self
+                    .value_member_source(
+                        effective_canonical.as_ref(),
+                        effective_owner,
+                        effective_symbol.as_ref(),
+                        &prepared,
+                        first.as_ref(),
+                        member_context,
+                    )
+                    .or_else(|| {
+                        // A static the class inherits reads off the base
+                        // statics that declare it.
+                        if !is_class {
+                            return None;
+                        }
+                        let (bases, partial) = self.class_base_static_surfaces(
+                            effective_canonical.as_ref(),
+                            effective_owner,
+                            effective_symbol.as_ref(),
+                            context.mode,
+                        );
+                        base_partial = partial;
+                        let declaring: Vec<SemanticNodeId> = bases
+                            .into_iter()
+                            .filter(|base| self.surface_declares_member(*base, first.as_ref()))
+                            .collect();
+                        declaring
+                            .into_iter()
+                            .reduce(|composed, base| self.merge_static_surfaces(composed, base))
+                    });
+                if let Some(own) = source {
+                    let mut output =
+                        self.project_typeof_path(own, path, context, observed_hash, value_root);
+                    output.result_is_partial |= base_partial;
+                    // The member lowered from the DECLARING file roots on
+                    // its content version as the composed surface would.
+                    if effective_canonical.as_ref() == value_root.scope.canonical_id.as_ref() {
+                        return output;
+                    }
+                    return match self
+                        .ctx
+                        .ensure_indexed_ready_serve(effective_canonical.as_ref())
+                    {
+                        Some(serve) => output.with_observed_self_roots([(
+                            Arc::clone(&effective_canonical),
+                            serve.indexed.whole_hash,
+                        )]),
+                        None => {
+                            output.cache_suppress = true;
+                            output
+                        }
+                    };
+                }
+            }
+        }
         let mut composed_partial = false;
         // The files whose `declare module` blocks the value merged, and
         // whether one of them could not be observed.
@@ -2433,6 +2532,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 signature_span: None,
                 return_type_span: None,
                 predicate: None,
+                is_abstract: false,
             },
             scope.clone(),
         );
@@ -2608,68 +2708,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     return output.with_observed_self_roots(observed_self_roots);
                 };
-                let mut composed_node = own_node;
-                let mut composed_partial = false;
-                for (base_canonical, base_owner, base_name, base_args) in self.class_heritage_bases(
+                let (base_surfaces, composed_partial) = self.class_base_static_surfaces(
                     own_canonical.as_ref(),
                     own_owner,
                     own_symbol.as_ref(),
-                ) {
-                    let lowered_args: Vec<SemanticNodeId> = if base_args.is_empty() {
-                        Vec::new()
-                    } else {
-                        match self.lower_class_heritage_args(
-                            own_canonical.as_ref(),
-                            own_owner,
-                            own_symbol.as_ref(),
-                            base_args.as_ref(),
-                            context.mode,
-                        ) {
-                            Some(nodes) => nodes,
-                            // The authored argument positions could not be
-                            // re-borrowed (broken lease / drift) — never
-                            // fabricate a differently-instantiated base; this
-                            // base contributes nothing.
-                            None => continue,
-                        }
-                    };
-                    // A base that names a value the type space does not
-                    // declare contributes its constructor type's members
-                    // and construct signatures.
-                    if self.heritage_names_value_only(&base_canonical, base_owner, &base_name) {
-                        if let Some(base) = self.class_value_base(
-                            &base_canonical,
-                            base_owner,
-                            &base_name,
-                            &lowered_args,
-                            ProjectionReductionContext::published(context.mode),
-                        ) {
-                            let base_node = self.class_value_base_static_surface(
-                                &base,
-                                ProjectionReductionContext::published(context.mode),
-                            );
-                            composed_node = self.merge_static_surfaces(composed_node, base_node);
-                        }
-                        continue;
-                    }
-                    let base_slot = self.type_slot_for(
-                        Arc::clone(&base_canonical),
-                        base_owner,
-                        Arc::clone(&base_name),
-                    );
-                    let base_context =
-                        self.class_surface_context_for(base_canonical.as_ref(), context.mode);
-                    let read = self.execute_read(SemanticQueryKey::ResolveClassSurface {
-                        decl_slot: base_slot,
-                        type_args: Arc::from(lowered_args.into_boxed_slice()),
-                        side: ClassSurfaceSide::Static,
-                        context: base_context,
+                    context.mode,
+                );
+                let mut composed_node =
+                    base_surfaces.into_iter().fold(own_node, |composed, base| {
+                        self.merge_static_surfaces(composed, base)
                     });
-                    composed_partial |= read.result_is_partial;
-                    if let QueryResult::Value(base_node) = read.value {
-                        composed_node = self.merge_static_surfaces(composed_node, base_node);
-                    }
-                }
                 composed_node = self.with_class_prototype_property(
                     own_canonical.as_ref(),
                     own_owner,
@@ -2974,6 +3022,80 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &mut substitutions,
             context,
         ))
+    }
+
+    /// The static surfaces a class's heritage contributes, base by base in
+    /// clause order — each base's composed static side (or a value base's
+    /// constructor surface), instantiated with the clause's type arguments —
+    /// and whether any base read was partial.
+    fn class_base_static_surfaces(
+        &self,
+        own_canonical: &str,
+        own_owner: verter_type_expr::TopLevelOwnerId,
+        own_symbol: &str,
+        mode: ProjectionMode,
+    ) -> (Vec<SemanticNodeId>, bool) {
+        use crate::semantic_query::{ClassSurfaceSide, ProjectionReductionContext};
+        let mut surfaces = Vec::new();
+        let mut partial = false;
+        for (base_canonical, base_owner, base_name, base_args) in
+            self.class_heritage_bases(own_canonical, own_owner, own_symbol)
+        {
+            let lowered_args: Vec<SemanticNodeId> = if base_args.is_empty() {
+                Vec::new()
+            } else {
+                match self.lower_class_heritage_args(
+                    own_canonical,
+                    own_owner,
+                    own_symbol,
+                    base_args.as_ref(),
+                    mode,
+                ) {
+                    Some(nodes) => nodes,
+                    // The authored argument positions could not be
+                    // re-borrowed (broken lease / drift) — never
+                    // fabricate a differently-instantiated base; this
+                    // base contributes nothing.
+                    None => continue,
+                }
+            };
+            // A base that names a value the type space does not
+            // declare contributes its constructor type's members
+            // and construct signatures.
+            if self.heritage_names_value_only(&base_canonical, base_owner, &base_name) {
+                if let Some(base) = self.class_value_base(
+                    &base_canonical,
+                    base_owner,
+                    &base_name,
+                    &lowered_args,
+                    ProjectionReductionContext::published(mode),
+                ) {
+                    let base_node = self.class_value_base_static_surface(
+                        &base,
+                        ProjectionReductionContext::published(mode),
+                    );
+                    surfaces.push(base_node);
+                }
+                continue;
+            }
+            let base_slot = self.type_slot_for(
+                Arc::clone(&base_canonical),
+                base_owner,
+                Arc::clone(&base_name),
+            );
+            let base_context = self.class_surface_context_for(base_canonical.as_ref(), mode);
+            let read = self.execute_read(SemanticQueryKey::ResolveClassSurface {
+                decl_slot: base_slot,
+                type_args: Arc::from(lowered_args.into_boxed_slice()),
+                side: ClassSurfaceSide::Static,
+                context: base_context,
+            });
+            partial |= read.result_is_partial;
+            if let QueryResult::Value(base_node) = read.value {
+                surfaces.push(base_node);
+            }
+        }
+        (surfaces, partial)
     }
 
     /// Interned `TypeParam` shell nodes for a class declaration's own type
@@ -3401,6 +3523,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 signature_span,
                 return_type_span,
                 predicate,
+                is_abstract,
             }) = self.graph().node_data(rebound).as_deref().cloned()
             else {
                 return signature;
@@ -3440,6 +3563,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 signature_span,
                 return_type_span,
                 predicate,
+                is_abstract,
             })
         };
         let entries: Vec<SurfaceEntry> = view
@@ -3914,12 +4038,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // construct signature's return IS the derived instance ref).
                 let own_instance_return = own_view.construct_signatures.first().and_then(|sig| {
                     match self.graph().node_data(*sig).as_deref() {
-                        Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
+                        Some(SemanticNodeData::Signature {
+                            return_type,
+                            is_abstract,
+                            ..
+                        }) => Some((*return_type, *is_abstract)),
                         _ => None,
                     }
                 });
                 match own_instance_return {
-                    Some(derived_return) => base_view
+                    // The inherited signatures are the DERIVED class's: they
+                    // are abstract exactly when it is
+                    // (`getDefaultConstructSignatures`).
+                    Some((derived_return, derived_abstract)) => base_view
                         .construct_signatures
                         .iter()
                         .map(
@@ -3949,6 +4080,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     // A construct signature carries no
                                     // predicate.
                                     predicate: None,
+                                    is_abstract: derived_abstract,
                                 }),
                                 _ => *base_sig,
                             },
@@ -6942,6 +7074,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         };
 
+        let self_value = match &locator {
+            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)
+                if slot.anchor.space == verter_type_expr::locators::LocatorSymbolSpace::Value =>
+            {
+                Some(slot.anchor.clone())
+            }
+            _ => None,
+        };
+
         // 1. Fetch the fixed authored shape (one reusable body-shape family
         //    per locator/source-env).
         let shape = match self.lower_locator(locator) {
@@ -6987,6 +7128,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             scope_payload,
             shadowing,
             authored_resolution_debt,
+            self_value: self_value.as_ref(),
         };
         let projected =
             self.project_located_decl_body(substituted, decl_kind, &inputs, substitutions, context);
@@ -7303,6 +7445,177 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the member keeps the polymorphic `this` the reading receiver binds.
         let prefix = heritage.into_iter().next()?;
         Some(lower_at(prefix, &mut substitutions, context))
+    }
+
+    /// Whether the object surface `node` declares a member spelled `name`.
+    fn surface_declares_member(&self, node: SemanticNodeId, name: &str) -> bool {
+        matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Object(surface))
+                if surface
+                    .positive_members()
+                    .iter()
+                    .any(|member| member.key.as_string() == Some(name))
+        )
+    }
+
+    /// Where member `name` of the value `prepared` declares reads from,
+    /// found without lowering its other members: an object of the value's
+    /// OWN members of that name — a class's statics, or the members of the
+    /// object literal a variable is initialized with — each lowered from
+    /// its own member position. The checker resolves a value's members one
+    /// at a time, so a member whose return names the value itself (a static
+    /// `return this`, a literal's `obj.v`) never builds the whole surface
+    /// it is part of.
+    ///
+    /// `None` when the member is not the value's own (a base class's
+    /// static), or when the own shape cannot prove which member a name
+    /// reads: a spread or a computed key may supply it.
+    pub(super) fn value_member_source(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol: &str,
+        prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+        name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        use verter_type_expr::facts::ObjectMemberFact;
+        let shape = prepared.object_shape.as_ref()?;
+        // Each own member position of the name, with its modifiers.
+        type MemberFacts = (
+            bool,
+            bool,
+            Option<verter_type_expr::ObjectMethodKind>,
+            bool,
+            verter_type_expr::MemberVisibility,
+        );
+        let mut positions: Vec<(u32, MemberFacts)> = Vec::new();
+        for (raw_index, member) in shape.members.iter().enumerate() {
+            let ordinal = u32::try_from(raw_index).unwrap_or(u32::MAX);
+            let (key, optional, readonly, method_kind, has_body, visibility) = match member {
+                ObjectMemberFact::Property(property) => (
+                    &property.key,
+                    property.optional,
+                    property.readonly,
+                    None,
+                    false,
+                    property.visibility,
+                ),
+                ObjectMemberFact::Method(method) => (
+                    &method.key,
+                    method.optional,
+                    false,
+                    Some(method.method_kind),
+                    method.function.has_implementation_body,
+                    method.visibility,
+                ),
+                ObjectMemberFact::Spread(_) => return None,
+                ObjectMemberFact::CallSignature(_)
+                | ObjectMemberFact::ConstructSignature(_)
+                | ObjectMemberFact::IndexSignature(_) => continue,
+            };
+            let Some(spelling) = key.as_string() else {
+                // A computed key may name the member.
+                key.cloned_known()?;
+                continue;
+            };
+            if spelling != name {
+                continue;
+            }
+            positions.push((
+                ordinal,
+                (optional, readonly, method_kind, has_body, visibility),
+            ));
+        }
+        if positions.is_empty() {
+            return None;
+        }
+        let indexed = self.ctx.ensure_indexed_ready_serve(canonical)?.indexed;
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from(canonical),
+            owner,
+            whole_hash: indexed.whole_hash,
+            local_scope: None,
+        };
+        let scope_payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
+            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                &bundle, owner,
+            )
+        });
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            scope_payload.as_ref(),
+        );
+        // A class's own type parameters bind as the shells its constructor
+        // shape lowers them to (statics cannot name them otherwise).
+        let is_class = prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class;
+        let (env, class_type_params) = if is_class {
+            (
+                self.class_type_param_shell_env(
+                    canonical,
+                    owner,
+                    symbol,
+                    indexed.whole_hash,
+                    &scope,
+                ),
+                self.ctx
+                    .prepared_type_decl_return_only(canonical, owner, symbol)
+                    .map(|type_side| type_side.type_parameters.clone())
+                    .unwrap_or_default(),
+            )
+        } else {
+            (FxHashMap::default(), Vec::new())
+        };
+        let mut substitutions = Vec::new();
+        let mut own: Vec<SurfaceEntry> = Vec::with_capacity(positions.len());
+        for (ordinal, (optional, readonly, method_kind, has_body, visibility)) in positions {
+            let value = self.lower_located_body_with_provenance(
+                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                    verter_type_expr::locators::TypeBodySlot {
+                        anchor: verter_type_expr::locators::AuthoredAnchor {
+                            canonical_id: Arc::from(canonical),
+                            owner,
+                            symbol: Arc::from(symbol),
+                            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                        },
+                        path: Arc::from(
+                            vec![
+                                verter_type_expr::locators::TypeBodyPathStep::Member { ordinal },
+                                verter_type_expr::locators::TypeBodyPathStep::MemberValue,
+                            ]
+                            .into_boxed_slice(),
+                        ),
+                    },
+                ),
+                verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                &class_type_params,
+                &prepared.name_resolution,
+                &env,
+                &scope,
+                scope_payload.as_ref(),
+                &shadowing,
+                &mut substitutions,
+                context,
+            );
+            own.push(SurfaceEntry::Member(SurfaceMember {
+                key: crate::semantic_query::AuthoredPropertyKey::string(name),
+                value,
+                optional,
+                readonly,
+                method_kind,
+                has_implementation_body: has_body,
+                visibility,
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: Some(Arc::from(canonical)),
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
+                merge_role: crate::semantic_query::MergeRoleStamp::default(),
+            }));
+        }
+        Some(self.graph().intern_node_with_scope(
+            SemanticNodeData::Object(SurfaceView::from_entries(own, None, false)),
+            scope,
+        ))
     }
 
     pub(super) fn backfill_member_index_surface(
@@ -8689,6 +9002,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             signature_span,
             return_type_span,
             predicate,
+            is_abstract,
         } = data.as_ref()
         else {
             return node;
@@ -8704,6 +9018,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             signature_span: *signature_span,
             return_type_span: *return_type_span,
             predicate: *predicate,
+            is_abstract: *is_abstract,
         };
         drop(data);
         graph.intern_preserving_scope(node, twin)
@@ -9239,6 +9554,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 signature_span,
                 return_type_span,
                 predicate,
+                is_abstract,
                 ..
             }) => self.graph().intern_node(SemanticNodeData::Signature {
                 kind: *kind,
@@ -9261,6 +9577,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // The substituted predicate target rides through: an
                 // instantiated `x is T` narrows to the argument.
                 predicate: *predicate,
+                is_abstract: *is_abstract,
             }),
             _ => result,
         }
@@ -9714,6 +10031,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let SemanticNodeData::Signature {
             kind,
+            is_abstract,
             return_type,
             type_parameters,
             occurrence,
@@ -9735,6 +10053,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             signature_span: *signature_span,
             return_type_span: *return_type_span,
             predicate: None,
+            is_abstract: *is_abstract,
         };
         drop(data);
         self.graph().intern_preserving_scope(function_node, rebuilt)

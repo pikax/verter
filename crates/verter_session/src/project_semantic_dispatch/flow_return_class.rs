@@ -284,6 +284,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .constructor_visibility
                 .or_else(|| base.as_ref().and_then(|base| base.constructor_visibility)),
             prototype: None,
+            object_literal: false,
         };
         // The prototype: the class as authored — every argument its own
         // parameter — with each parameter erased to `any`.
@@ -325,6 +326,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return_type_span: None,
                 // A constructor declares no type predicate.
                 predicate: None,
+                is_abstract: false,
             })
         };
         let construct_signatures: Vec<SemanticNodeId> = match (&class.constructors, &base) {
@@ -709,6 +711,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             decl.owner,
             &decl.decl_name,
             &args,
+            name,
+        )
+    }
+
+    /// Where member `name` of `receiver` reads from when `receiver` is a
+    /// reference to a class declaration's instance (`H` or `G<string>`):
+    /// the class's own member position (or the base's) — never the whole
+    /// class body, whose lowering would re-enter a member body reading its
+    /// own class through a value of the class's type.
+    pub(super) fn class_reference_member_source(
+        &self,
+        receiver: SemanticNodeId,
+        name: &str,
+    ) -> Option<SemanticNodeId> {
+        let data = self.dispatch.graph().node_data(receiver)?;
+        let (identity, args): (&crate::semantic_query::DeclIdentity, &[SemanticNodeId]) =
+            match data.as_ref() {
+                SemanticNodeData::DeclRef { identity } => (identity, &[]),
+                SemanticNodeData::InstantiationRef { base, args } => (base, args),
+                _ => return None,
+            };
+        self.dispatch.class_member_source(
+            &identity.canonical_id,
+            identity.owner,
+            &identity.decl_name,
+            args,
             name,
         )
     }

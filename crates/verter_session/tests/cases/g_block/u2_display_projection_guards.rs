@@ -274,6 +274,7 @@ fn func_node(
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     })
 }
 
@@ -670,6 +671,7 @@ fn function_type_parameters_render_constraint_and_default() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     // DISCRIMINATING: the name-only impl renders `<T>() => void`.
     assert_eq!(

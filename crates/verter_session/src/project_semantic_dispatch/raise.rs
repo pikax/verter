@@ -1632,6 +1632,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 signature_span,
                 return_type_span,
                 predicate,
+                is_abstract: _,
             } => rebuild_function(
                 self,
                 node,
@@ -2105,6 +2106,7 @@ fn rebuild_function(
         node,
         SemanticNodeData::Signature {
             kind,
+            is_abstract: dispatch.signature_is_abstract(node),
             params: Arc::from(new_params.into_boxed_slice()),
             return_type: new_return,
             type_parameters: Arc::from(new_type_params.into_boxed_slice()),

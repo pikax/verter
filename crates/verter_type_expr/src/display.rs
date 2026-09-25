@@ -547,6 +547,9 @@ pub fn render_type_expr_display(
                 push_type_parameters(&mut work, &function.type_parameters);
                 match style {
                     FunctionStyle::Arrow => {}
+                    FunctionStyle::ConstructorArrow if function.is_abstract => {
+                        work.push(Frame::Text("abstract new "))
+                    }
                     FunctionStyle::ConstructorArrow => work.push(Frame::Text("new ")),
                     FunctionStyle::Signature => {}
                     FunctionStyle::ConstructSignature => work.push(Frame::Text("new ")),

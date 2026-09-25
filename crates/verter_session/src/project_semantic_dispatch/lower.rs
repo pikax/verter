@@ -2748,6 +2748,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         signature_span: func.spans.signature,
                         return_type_span: func.spans.return_type,
                         predicate,
+                        is_abstract: func.is_abstract,
                     },
                     scope.clone(),
                 )

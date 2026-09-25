@@ -4181,6 +4181,8 @@ mod broad_runtime_tests;
 mod cycle_gate_tests;
 
 #[cfg(test)]
+mod abstract_construct_tests;
+#[cfg(test)]
 mod ambient_module_value_tests;
 #[cfg(test)]
 mod base_signature_tests;
@@ -4196,6 +4198,8 @@ mod class_member_return_tests;
 mod class_owner_tests;
 #[cfg(test)]
 mod class_prototype_property_tests;
+#[cfg(test)]
+mod class_self_reference_tests;
 #[cfg(test)]
 mod class_value_heritage_tests;
 #[cfg(test)]
@@ -4222,6 +4226,8 @@ mod intersection_distribution_tests;
 mod keyof_application_tests;
 #[cfg(test)]
 mod lib_global_tests;
+#[cfg(test)]
+mod local_declaration_tests;
 #[cfg(test)]
 mod member_accessibility_relation_tests;
 #[cfg(test)]

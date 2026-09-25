@@ -659,6 +659,7 @@ fn encode_data(
                 }
             }
             enc.u32(identity.own_arity);
+            enc.u8(u8::from(identity.object_literal));
             enc.u16(type_arguments.len() as u16);
             for argument in type_arguments.iter() {
                 encode_child(graph, *argument, seen, &mut enc, depth);
@@ -682,10 +683,12 @@ fn encode_data(
             signature_span: _,
             return_type_span: _,
             predicate,
+            is_abstract,
         } => {
             enc.header(category::AUTHORED, subtag::SIGNATURE);
             enc.u8(match kind {
                 SignatureKind::Call => 1,
+                SignatureKind::Construct if *is_abstract => 3,
                 SignatureKind::Construct => 2,
             });
             enc.u16(params.len() as u16);

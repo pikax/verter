@@ -303,6 +303,10 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             SemanticNodeData::ClassExpressionInstance { surface, .. } => {
                 let surface = *surface;
                 drop(data);
+                let surface = self
+                    .dispatch()
+                    .class_expression_read_surface(node)
+                    .unwrap_or(surface);
                 self.discover(surface)
             }
             SemanticNodeData::MergedDecl { contributors } => {
@@ -2271,6 +2275,7 @@ impl ProjectSemanticDispatch<'_> {
             // The composite's effect: the union rule over its constituents,
             // or a mixin construct's base.
             predicate,
+            is_abstract: false,
         }))
     }
 

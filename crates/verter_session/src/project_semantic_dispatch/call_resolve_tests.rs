@@ -100,6 +100,7 @@ fn signature_with_carrier(
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     })
 }
 
@@ -1117,6 +1118,7 @@ fn anonymous_signature(
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     })
 }
 
@@ -2631,6 +2633,7 @@ fn prototype_call_rebase_onto_a_rootless_callable_keeps_its_return() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let key = prototype_call_key(&dispatch, call_member, extracted, vec![undefined, string]);
     let result = match dispatch.execute_resolve_call(key) {

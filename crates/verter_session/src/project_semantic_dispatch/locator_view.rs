@@ -120,6 +120,10 @@ pub(super) struct LocatorViewInputs<'a> {
     pub(super) scope_payload: Option<&'a DeclarationScopePayload>,
     pub(super) shadowing: &'a ScopeShadowing,
     pub(super) authored_resolution_debt: Option<&'a super::carrier::AuthoredResolutionDebtFrame>,
+    /// The value whose declared body is being projected, when the body is
+    /// a value's: a `typeof` naming that value inside it is the value's
+    /// own type, read by reference.
+    pub(super) self_value: Option<&'a verter_type_expr::locators::AuthoredAnchor>,
 }
 
 /// Per-projection memo so shared sub-graphs project once per context.
@@ -278,6 +282,7 @@ impl<'a> ProjectionBenchHarness<'a> {
             scope_payload: case.scope_payload.as_ref(),
             shadowing: &case.shadowing,
             authored_resolution_debt: None,
+            self_value: None,
         };
         let outcome = self.dispatch.project_view_node_worklist(
             case.root,

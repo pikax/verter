@@ -207,6 +207,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let path = Arc::clone(path);
                 let type_args: Arc<[SemanticNodeId]> =
                     Arc::from(data.carrier_type_args().to_vec().into_boxed_slice());
+                // A value's own type named inside its declared body — a
+                // static method returning its class, a literal's method
+                // returning the literal — is the type being declared, read
+                // by reference as the checker reads it: its members resolve
+                // one at a time where a consumer demands them. Resolving it
+                // here would build the very surface this body is part of.
+                if path.is_empty()
+                    && type_args.is_empty()
+                    && inputs.self_value.is_some_and(|anchor| {
+                        value_root.scope.local_scope.is_none()
+                            && value_root.scope.canonical_id == anchor.canonical_id
+                            && value_root.scope.owner == anchor.owner
+                            && value_root.name == anchor.symbol
+                    })
+                {
+                    return ReferenceProjectionPlan::Ready(node);
+                }
                 let result = match self.execute_type_node(self.typeof_key_with_path(
                     value_root.clone(),
                     Arc::clone(&path),

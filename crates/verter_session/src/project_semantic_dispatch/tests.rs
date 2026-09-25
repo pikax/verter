@@ -955,6 +955,7 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
     let object = |members: Vec<SurfaceMember>,
@@ -2012,6 +2013,7 @@ fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
     let contravariant = reverse_test_conditional(
@@ -2105,6 +2107,7 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
     assert_eq!(
@@ -3206,6 +3209,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
             signature_span: Some(verter_span::Span::new(span_start, span_start + 20)),
             return_type_span: Some(verter_span::Span::new(span_start + 15, span_start + 20)),
             predicate: None,
+            is_abstract: false,
         })
     };
     let sig_a = signature_node(30);
@@ -11654,6 +11658,7 @@ fn parameters_tuple_widens_optional_slot_and_keeps_label() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
 
     let result = instantiate_utility(&dispatch, &graph, "Parameters", &[function]);
@@ -13612,6 +13617,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     // check = `(x: string) => any` — concrete Function.
     let check = graph.intern_node(SemanticNodeData::Signature {
@@ -13632,6 +13638,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     // true_branch = bare `P` reference (re-uses the same Infer node).
     let true_branch = infer_p;
@@ -13693,6 +13700,7 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
 
@@ -13921,6 +13929,7 @@ fn reverse_homomorphic_raw_fallback_projection_candidate_stays_deferred() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let source =
         intern_object_with_members(&graph, vec![surface_member("a", signature, false, false)]);
@@ -14028,6 +14037,7 @@ fn reverse_homomorphic_nested_signature_parameter_bare_ref_stays_deferred() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let source =
         intern_object_with_members(&graph, vec![surface_member("a", signature, false, false)]);
@@ -14273,6 +14283,7 @@ fn watched_red_reverse_homomorphic_discards_noncontributing_call_signature_poiso
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let source = graph.intern_node(SemanticNodeData::Object(
         crate::semantic_query::surface_view! {
@@ -14699,6 +14710,7 @@ fn relate_function_rest_never_exempts_uncallable_source_arity() {
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
     // `(a: string, b: number, ...rest: any[])` — last required position 2.
@@ -14937,6 +14949,7 @@ fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
 
@@ -16019,6 +16032,7 @@ fn reverse_projection_candidates_from_a_losing_signature_alternative_roll_back()
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
     let overloaded = graph.intern_node(SemanticNodeData::Object(
@@ -16223,6 +16237,7 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
 
@@ -16447,6 +16462,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let shadow_source_value = graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
@@ -16466,6 +16482,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let shadow_source = intern_object_with_members(
         &graph,
@@ -16588,6 +16605,7 @@ fn substitute_recurses_into_function_params_and_return_type() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
 
     // Substitute T → string. Expect `(x: string) => string`.
@@ -17242,6 +17260,7 @@ fn unary_function(
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     })
 }
 
@@ -19805,6 +19824,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let node_fn_open = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: inst("Wrap2", vec![fn_open]),
@@ -19831,6 +19851,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let node_fn_closed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: inst("Wrap2", vec![fn_closed]),
@@ -20733,6 +20754,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -20761,6 +20783,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -26302,7 +26325,8 @@ fn reexport_class_host() -> VerterHost {
         "/w/reexp_use.ts",
         "import { ReClass } from './reexp_barrel';\n\
          export type ReOwnReturn = ReturnType<typeof ReClass.own>;\n\
-         export type ReOriginReturn = ReturnType<typeof ReClass.origin>;\n",
+         export type ReOriginReturn = ReturnType<typeof ReClass.origin>;\n\
+         export type ReStatics = typeof ReClass;\n",
     );
     host
 }
@@ -26337,6 +26361,9 @@ fn reexported_class_static_surface_composes_heritage_under_origin_scope() {
         "heritage static must compose — the slot must carry the ORIGIN canonical \
          (the barrel has no type-side sibling decl to read heritage from)"
     );
+    // A member read resolves where the class declares the member; the whole
+    // constructor type is what composes the surface.
+    let _ = resolve_named_in(&host, "/w/reexp_use.ts", "ReStatics");
     // Slot attribution: the admitted `ResolveClassSurface(Static)` slot is
     // keyed by the ORIGIN canonical; NO barrel-keyed slot exists (across
     // every projection mode — the probe is mode-agnostic on purpose).
@@ -26731,6 +26758,7 @@ fn resolve_overload_set_occurrence_less_candidate_is_rootless_not_a_node_keyed_o
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
     let first = anonymous();
@@ -27090,6 +27118,7 @@ fn generic_fn_with_carrier_return(host: &VerterHost) -> (SemanticNodeId, Semanti
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     (func, t_param)
 }
@@ -30571,6 +30600,7 @@ fn shallow_intersection_signature_entries_are_the_discovery_authoritys() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let members = intern_file_scoped_object(
         &graph,
@@ -32021,6 +32051,7 @@ fn substituted_union_interns_global_while_callable_intersection_preserves_scope(
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let intersection_node = graph.intern_node_with_scope(
         SemanticNodeData::Intersection(
@@ -32231,6 +32262,7 @@ fn composite_rebuild_re_decision_is_per_category_with_callable_fail_closed() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let with_callable = [callable, number_node];
 
