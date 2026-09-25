@@ -447,15 +447,29 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                 edges.push((binding_node(runtime), node, FlowEdgeKind::ValueDef));
             }
         }
+        // A destructured binding's value is COMPUTED from its whole
+        // initializer and its pattern's defaults and computed keys (its
+        // parent's member, a default replacing `undefined`), never the
+        // initializer's value at the binding's own demanded path.
+        let pattern_input = || FlowEdgeKind::ReadProjection {
+            path: Arc::from(Vec::new().into_boxed_slice()),
+            kind: super::FlowReadKind::Input,
+        };
         if let Some(initializer) = binding.initializer {
-            edges.push((node, site_node(initializer), FlowEdgeKind::ValueDef));
+            let kind = if binding.destructured {
+                pattern_input()
+            } else {
+                FlowEdgeKind::ValueDef
+            };
+            edges.push((node, site_node(initializer), kind));
         }
         // Binding a pattern evaluates its defaults and computed keys, so a
         // slice that demands the binding also selects their evaluation —
         // unconditionally, because a default callable retains its captures
-        // without any write / call footprint.
+        // without any write / call footprint — and their values.
         for site in binding.pattern_sites.iter() {
             edges.push((node, site_node(*site), FlowEdgeKind::EvalEffect));
+            edges.push((node, site_node(*site), pattern_input()));
         }
     }
 
