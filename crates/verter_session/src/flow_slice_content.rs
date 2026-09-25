@@ -2768,6 +2768,174 @@ pub(crate) struct FlowSliceSource<'a> {
     pub resolved: ResolvedFunctionNode<'a>,
 }
 
+/// One namespace block enclosing a namespace-owned function, and the value
+/// names a free read in the function's body finds there before the file's
+/// top level.
+#[derive(Debug, Default)]
+struct NamespaceBlockScope {
+    /// The block's qualified name (`N.Inner`).
+    qualified: String,
+    /// Every value name the block itself declares, and the names its
+    /// same-name sibling blocks export, each with whether it is exported
+    /// (and so a qualified declaration of its own).
+    names: rustc_hash::FxHashMap<String, bool>,
+}
+
+/// The namespace declaration a statement is — `namespace N { … }` or
+/// `export namespace N { … }` — with its block body.
+fn namespace_block_of<'s, 'a>(
+    statement: &'s Statement<'a>,
+) -> Option<(&'s str, &'s oxc_ast::ast::TSModuleBlock<'a>)> {
+    let module = match statement {
+        Statement::TSModuleDeclaration(module) => module,
+        Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
+            oxc_ast::ast::Declaration::TSModuleDeclaration(module) => module,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &module.id else {
+        return None;
+    };
+    match module.body.as_ref()? {
+        oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block) => {
+            Some((id.name.as_str(), block))
+        }
+        oxc_ast::ast::TSModuleDeclarationBody::TSModuleDeclaration(_) => None,
+    }
+}
+
+/// The value names one namespace-block statement declares, and whether it
+/// exports them.
+fn namespace_statement_value_names<'s>(statement: &'s Statement<'_>) -> (Vec<&'s str>, bool) {
+    use oxc_ast::ast::Declaration;
+    fn declaration_names<'s>(declaration: &'s Declaration<'_>) -> Vec<&'s str> {
+        match declaration {
+            Declaration::VariableDeclaration(variables) => variables
+                .declarations
+                .iter()
+                .filter_map(|declarator| match &declarator.id {
+                    BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            Declaration::FunctionDeclaration(function) => {
+                function.id.iter().map(|id| id.name.as_str()).collect()
+            }
+            Declaration::ClassDeclaration(class) => {
+                class.id.iter().map(|id| id.name.as_str()).collect()
+            }
+            Declaration::TSEnumDeclaration(declaration) => vec![declaration.id.name.as_str()],
+            Declaration::TSModuleDeclaration(module) => match &module.id {
+                oxc_ast::ast::TSModuleDeclarationName::Identifier(id) => vec![id.name.as_str()],
+                oxc_ast::ast::TSModuleDeclarationName::StringLiteral(_) => Vec::new(),
+            },
+            Declaration::TSImportEqualsDeclaration(declaration) => {
+                vec![declaration.id.name.as_str()]
+            }
+            _ => Vec::new(),
+        }
+    }
+    match statement {
+        Statement::ExportNamedDeclaration(export) => (
+            export
+                .declaration
+                .as_ref()
+                .map(declaration_names)
+                .unwrap_or_default(),
+            true,
+        ),
+        other => (
+            other
+                .as_declaration()
+                .map(declaration_names)
+                .unwrap_or_default(),
+            false,
+        ),
+    }
+}
+
+/// The namespace blocks enclosing the function `descent` reaches from
+/// `statement`, outermost first: at each level the block the descent
+/// enters, with the names it declares and the names every same-name sibling
+/// block at that level exports (a namespace declared in several blocks is
+/// one namespace whose EXPORTED members every block sees).
+fn enclosing_namespace_scopes(
+    program: &Program<'_>,
+    contributor: usize,
+    descent: &[FunctionDescentStep],
+) -> Vec<NamespaceBlockScope> {
+    let mut scopes = Vec::new();
+    let Some(mut statement) = program.body.get(contributor) else {
+        return scopes;
+    };
+    let mut siblings: &[Statement<'_>] = &program.body;
+    let mut parent_siblings: Vec<&oxc_ast::ast::TSModuleBlock<'_>> = Vec::new();
+    let mut qualified = String::new();
+    for step in descent {
+        let FunctionDescentStep::NamespaceMember { statement_ordinal } = step else {
+            break;
+        };
+        let Some((name, block)) = namespace_block_of(statement) else {
+            break;
+        };
+        if !qualified.is_empty() {
+            qualified.push('.');
+        }
+        qualified.push_str(name);
+        let mut scope = NamespaceBlockScope {
+            qualified: qualified.clone(),
+            names: rustc_hash::FxHashMap::default(),
+        };
+        for inner in &block.body {
+            let (names, exported) = namespace_statement_value_names(inner);
+            for declared in names {
+                let entry = scope.names.entry(declared.to_string()).or_insert(false);
+                *entry |= exported;
+            }
+        }
+        // Same-name sibling blocks at this level: the top level's own
+        // statements, or every same-name sibling of the enclosing block.
+        let sibling_statements: Vec<&Statement<'_>> = if parent_siblings.is_empty() {
+            siblings.iter().collect()
+        } else {
+            parent_siblings
+                .iter()
+                .flat_map(|sibling| sibling.body.iter())
+                .collect()
+        };
+        let mut same_name_blocks = Vec::new();
+        for sibling in sibling_statements {
+            let Some((sibling_name, sibling_block)) = namespace_block_of(sibling) else {
+                continue;
+            };
+            if sibling_name != name {
+                continue;
+            }
+            same_name_blocks.push(sibling_block);
+            if std::ptr::eq(sibling_block, block) {
+                continue;
+            }
+            for inner in &sibling_block.body {
+                let (names, exported) = namespace_statement_value_names(inner);
+                if exported {
+                    for declared in names {
+                        scope.names.insert(declared.to_string(), true);
+                    }
+                }
+            }
+        }
+        scopes.push(scope);
+        parent_siblings = same_name_blocks;
+        siblings = &[];
+        let Some(next) = block.body.get(*statement_ordinal as usize) else {
+            break;
+        };
+        statement = next;
+    }
+    scopes
+}
+
 /// Build the slice content for one indexed function entry against the
 /// retained parse snapshot, lowering ONLY `selection`-selected expression
 /// content. Runs inside the memo's lease-only job: pure, owned output, no
@@ -2799,6 +2967,15 @@ pub(crate) fn build_flow_slice_content(
         .descent
         .iter()
         .any(|step| matches!(step, FunctionDescentStep::NamespaceMember { .. }));
+    let namespace_scopes = if namespace_owned {
+        enclosing_namespace_scopes(
+            program,
+            entry.locator.contributor.contributor_index as usize,
+            &entry.locator.descent,
+        )
+    } else {
+        Vec::new()
+    };
     let node = resolved.node;
     let self_name = resolved.self_name;
     // The ROOT function's OWN signature resolves in the OUTER scope: its
@@ -3003,6 +3180,7 @@ pub(crate) fn build_flow_slice_content(
         program,
         module_scope,
         namespace_owned,
+        namespace_scopes: &namespace_scopes,
         contributor: entry.locator.contributor.contributor_index,
         budget_failure: None,
         inert_write_spans: FxHashSet::default(),
@@ -4451,6 +4629,15 @@ fn expr_is_bare_literal(expression: &Expression<'_>) -> bool {
         | Expression::BigIntLiteral(_)
         | Expression::BooleanLiteral(_) => true,
         Expression::TemplateLiteral(template) => template.expressions.is_empty(),
+        // A signed numeric literal (`-1`, `+1`) and a negated bigint
+        // literal (`-1n`) are literals of their own value.
+        Expression::UnaryExpression(unary) => matches!(
+            (unary.operator, &unary.argument),
+            (
+                UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus,
+                Expression::NumericLiteral(_)
+            ) | (UnaryOperator::UnaryNegation, Expression::BigIntLiteral(_))
+        ),
         _ => false,
     }
 }
@@ -6120,6 +6307,10 @@ struct Lowerer<'a> {
     /// declared inside a function, so the block chain between a call site
     /// and the top level is fixed by the served function's own position.
     namespace_owned: bool,
+    /// The namespace blocks enclosing a namespace-owned function, outermost
+    /// first (empty otherwise): a free value read in the body names a
+    /// block's member before the file's top level.
+    namespace_scopes: &'a [NamespaceBlockScope],
     /// The contributing top-level statement the served function (and every
     /// frame enclosing it) sits in — where a class expression's enclosing
     /// clauses are named.
@@ -13322,13 +13513,15 @@ impl<'a> Lowerer<'a> {
                 TypeExpr::Primitive(PrimitiveName::Undefined),
                 None,
             )),
-            NameBinding::Free => SliceExpr::Type(GatedLeaf(
-                TypeExpr::TypeOf(verter_type_expr::ValueRef {
+            NameBinding::Free => {
+                match self.namespace_scoped_leaf(TypeExpr::TypeOf(verter_type_expr::ValueRef {
                     path: vec![name.to_owned()],
                     type_args: Vec::new(),
-                }),
-                None,
-            )),
+                })) {
+                    LeafLowering::Free(ty) => SliceExpr::Type(GatedLeaf(ty, None)),
+                    _ => SliceExpr::UnmodeledBinding,
+                }
+            }
         }
     }
 
@@ -14797,13 +14990,55 @@ impl<'a> Lowerer<'a> {
         // behind the skeleton.
         let shadowed = self.answer_names_frame_bound(&ty, expr.span(), &[]);
         if shadowed.is_empty() {
-            LeafLowering::Free(ty)
+            self.namespace_scoped_leaf(ty)
         } else {
             LeafLowering::FrameShadowed {
                 ty,
                 shadowed: Arc::from(shadowed.into_boxed_slice()),
             }
         }
+    }
+
+    /// A free leaf answer of a namespace-owned function: a value name an
+    /// enclosing namespace block declares is that block's member, not the
+    /// file's top-level name — the innermost block first. A read of an
+    /// EXPORTED member is its qualified declaration (`N.k`); a member the
+    /// block does not export has no declaration of its own the lane can
+    /// address, and an answer that embeds a block member in a composite
+    /// is not rewritten, so both fail closed.
+    fn namespace_scoped_leaf(&self, ty: TypeExpr) -> LeafLowering {
+        if self.namespace_scopes.is_empty() {
+            return LeafLowering::Free(ty);
+        }
+        let names = verter_type_expr::referenced_names(&ty);
+        let block_member = |root: &str| {
+            self.namespace_scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.names.get(root).map(|exported| (scope, *exported)))
+        };
+        if !names
+            .value_roots
+            .iter()
+            .any(|root| block_member(root).is_some())
+        {
+            return LeafLowering::Free(ty);
+        }
+        let TypeExpr::TypeOf(value) = &ty else {
+            return LeafLowering::Unmodeled;
+        };
+        let Some((scope, true)) = value.path.first().and_then(|root| block_member(root)) else {
+            return LeafLowering::Unmodeled;
+        };
+        if !value.type_args.is_empty() {
+            return LeafLowering::Unmodeled;
+        }
+        let mut path: Vec<String> = scope.qualified.split('.').map(str::to_string).collect();
+        path.extend(value.path.iter().cloned());
+        LeafLowering::Free(TypeExpr::TypeOf(verter_type_expr::ValueRef {
+            path,
+            type_args: Vec::new(),
+        }))
     }
 }
 

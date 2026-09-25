@@ -104,6 +104,7 @@ pub(crate) mod locator_shape;
 pub(crate) mod locator_view;
 mod locator_view_worklist;
 pub(crate) mod lower;
+mod module_object;
 pub(crate) mod output_materialization;
 pub(crate) mod query_error_disposition;
 pub(crate) mod signature_discovery;
@@ -2188,10 +2189,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> (SemanticQueryKey, CarrierNormalizationPrelude) {
-        // Cheap subject-shape probe — a key with neither a carrier subject
-        // nor a first step through a shared subject's apparent wrapper skips
-        // the tracer.
-        if !self.key_subject_is_carrier(&key) && !self.key_reads_apparent_wrapper(&key) {
+        // Cheap subject-shape probe — a key with neither a carrier subject,
+        // nor a first step through a shared subject's apparent wrapper, nor a
+        // subject taking its signatures from a global wrapper skips the
+        // tracer.
+        if !self.key_subject_is_carrier(&key)
+            && !self.key_reads_apparent_wrapper(&key)
+            && !self.key_reads_apparent_signatures(&key)
+        {
             return (key, CarrierNormalizationPrelude::none());
         }
         let ((normalized, partial_reasons), finalise) =
@@ -2201,8 +2206,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let normalized = self.normalize_carrier_subject_key(key);
                     let partial_reasons = self.carrier_normalization_partial_reasons(&normalized);
                     // The wrapper read is scoped to the demand's project here,
-                    // so its lookup's facts root the admitted entry too.
+                    // so its lookup's facts root the admitted entry too: a
+                    // member path through an apparent wrapper, or a
+                    // signature read of a subject taking its signatures from
+                    // one.
                     let normalized = self.scope_apparent_wrapper_subject(normalized);
+                    let normalized = self.scope_apparent_signature_subject(normalized);
                     // Test-only: force a fenced (ReturnOnly) serve observation onto
                     // the prelude tracer so the suppress wiring is exercisable
                     // without a superseded-artifact fixture. Zero-cost when unset.
@@ -4169,6 +4178,8 @@ mod broad_runtime_tests;
 mod cycle_gate_tests;
 
 #[cfg(test)]
+mod ambient_module_value_tests;
+#[cfg(test)]
 mod base_signature_tests;
 #[cfg(test)]
 mod callee_signature_effect_tests;
@@ -4185,6 +4196,8 @@ mod closure_narrowing_tests;
 #[cfg(test)]
 mod conditional_indexed_check_tests;
 #[cfg(test)]
+mod const_literal_widening_tests;
+#[cfg(test)]
 mod heritage_signature_tests;
 #[cfg(test)]
 mod homomorphic_mapped_tests;
@@ -4197,7 +4210,13 @@ mod intersection_distribution_tests;
 #[cfg(test)]
 mod keyof_application_tests;
 #[cfg(test)]
+mod lib_global_tests;
+#[cfg(test)]
 mod merged_declaration_signature_tests;
+#[cfg(test)]
+mod module_object_tests;
+#[cfg(test)]
+mod module_value_surface_tests;
 #[cfg(test)]
 mod namespace_member_value_tests;
 #[cfg(test)]

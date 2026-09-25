@@ -10,6 +10,41 @@
 
 use super::*;
 
+/// The names an ambient module block exports as its `default`
+/// (`export default function / class Name`) and assigns the module to
+/// (`export = X`).
+pub(crate) fn ambient_block_module_exports(
+    block: &TSModuleBlock<'_>,
+) -> (Option<String>, Option<String>) {
+    let mut default_export = None;
+    let mut export_assignment = None;
+    for stmt in &block.body {
+        match stmt {
+            Statement::ExportDefaultDeclaration(export) => {
+                default_export = match &export.declaration {
+                    oxc_ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                        func.id.as_ref().map(|id| id.name.to_string())
+                    }
+                    oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
+                        cls.id.as_ref().map(|id| id.name.to_string())
+                    }
+                    oxc_ast::ast::ExportDefaultDeclarationKind::Identifier(id) => {
+                        Some(id.name.to_string())
+                    }
+                    _ => None,
+                };
+            }
+            Statement::TSExportAssignment(assignment) => {
+                if let oxc_ast::ast::Expression::Identifier(id) = &assignment.expression {
+                    export_assignment = Some(id.name.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    (default_export, export_assignment)
+}
+
 /// Mirror of `extract_augmentation_block` + `extract_augmentation_declaration`
 /// + `retain_value_statement_into_augmentation`.
 ///
@@ -27,12 +62,37 @@ pub(super) fn index_augmentation_block(
     // Record the augmentation BLOCK itself (EMPTY blocks included — an
     // empty `declare module "X" {}` / `declare global {}` still
     // introduces the augmentation scope + target).
+    let (default_export, export_assignment) = ambient_block_module_exports(block);
     index.augmentation_blocks.push(AugmentationBlockRecord {
         scope: scope.clone(),
         owner: ctx.anchor.owner,
         span: block.span.into(),
+        default_export,
+        export_assignment,
     });
     for stmt in &block.body {
+        // `export default function / class Name` declares `Name` in the
+        // block, as the unexported declaration does.
+        if let Statement::ExportDefaultDeclaration(export) = stmt {
+            match &export.declaration {
+                oxc_ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(func)
+                    if func.id.is_some() =>
+                {
+                    let scoped = index
+                        .augmentation_value_headers
+                        .entry(scope.clone())
+                        .or_default();
+                    index_function(func, ctx, scoped);
+                }
+                oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(cls)
+                    if cls.id.is_some() =>
+                {
+                    index_augmentation_class_value(cls, ctx, index, scope);
+                }
+                _ => {}
+            }
+            continue;
+        }
         match stmt {
             Statement::TSInterfaceDeclaration(iface) => {
                 let scoped = index
@@ -83,6 +143,9 @@ pub(super) fn index_augmentation_block(
                         }
                         Declaration::ClassDeclaration(cls) => {
                             index_augmentation_class_value(cls, ctx, index, scope);
+                        }
+                        Declaration::TSModuleDeclaration(module) => {
+                            index_augmentation_module_declaration(module, ctx, index, scope, None);
                         }
                         _ => {}
                     }
@@ -143,6 +206,17 @@ fn index_augmentation_module_declaration(
     let Some(body) = decl.body.as_ref() else {
         return;
     };
+    if matches!(scope, AugmentationScopeKind::Module(_)) {
+        index.augmentation_namespace_blocks.push((
+            scope.clone(),
+            NamespaceBlockRecord {
+                owner: ctx.anchor.owner,
+                qualified_name: namespace.clone(),
+                span: decl.span.into(),
+                instantiated: module_body_instantiated(body),
+            },
+        ));
+    }
     match body {
         TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
             index_augmentation_module_declaration(
@@ -154,6 +228,7 @@ fn index_augmentation_module_declaration(
             );
         }
         TSModuleDeclarationBody::TSModuleBlock(block) => {
+            let implicit_export = !statements_have_export_declarations(&block.body);
             for stmt in &block.body {
                 index_namespaced_statement_into_augmentation(
                     stmt,
@@ -161,6 +236,7 @@ fn index_augmentation_module_declaration(
                     index,
                     namespace.as_str(),
                     scope,
+                    implicit_export,
                 );
             }
         }
@@ -174,6 +250,7 @@ fn index_namespaced_statement_into_augmentation(
     index: &mut DeclHeaderIndex,
     namespace: &str,
     scope: &AugmentationScopeKind,
+    implicit_export: bool,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
@@ -195,15 +272,16 @@ fn index_namespaced_statement_into_augmentation(
         Statement::TSModuleDeclaration(module) => {
             index_augmentation_module_declaration(module, ctx, index, scope, Some(namespace));
         }
-        // An augmentation block is ambient, so every member of a namespace
-        // inside it is exported, written `export` or not (mirror of an ambient
-        // namespace in `index_namespaced_statement`).
+        // An augmentation block is ambient, so a namespace body inside it
+        // without an export declaration exports every member, written
+        // `export` or not (mirror of an ambient namespace in
+        // `index_namespaced_statement`).
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
                 index_namespaced_declaration_into_augmentation(decl, ctx, index, namespace, scope);
             }
         }
-        Statement::VariableDeclaration(var_decl) => {
+        Statement::VariableDeclaration(var_decl) if implicit_export => {
             let scoped = index
                 .augmentation_value_headers
                 .entry(scope.clone())
@@ -212,7 +290,7 @@ fn index_namespaced_statement_into_augmentation(
                 index_variable(d, var_decl.kind, ctx, scoped, Some(namespace));
             }
         }
-        Statement::FunctionDeclaration(func) => {
+        Statement::FunctionDeclaration(func) if implicit_export => {
             let scoped = index
                 .augmentation_value_headers
                 .entry(scope.clone())
@@ -271,8 +349,9 @@ fn index_namespaced_declaration_into_augmentation(
     }
 }
 
-/// An ambient-augmentation class contributes its VALUE side only (mirrors
-/// `move_value_symbols_into_augmentation`, which drops the type side).
+/// An ambient-augmentation class contributes its value side and the
+/// instance type it declares to the block's scope (mirrors
+/// `move_value_parts_into_augmentation`).
 fn index_augmentation_class_value(
     cls: &Class<'_>,
     ctx: HeaderStatementContext<'_>,
@@ -282,6 +361,30 @@ fn index_augmentation_class_value(
     let Some(id) = &cls.id else {
         return;
     };
+    // The file-scope class walk computes the instance type header; it is
+    // re-homed into the block's type scope.
+    let mut scratch = DeclHeaderIndex::default();
+    index_named_class(cls, id.name.as_str(), ctx, &mut scratch);
+    if let Some(header) = scratch
+        .type_headers
+        .get(&ctx.key(id.name.as_str()))
+        .cloned()
+    {
+        upsert_type_header(
+            index
+                .augmentation_type_headers
+                .entry(scope.clone())
+                .or_default(),
+            id.name.as_str(),
+            header.kind,
+            header.span,
+            header.name_span,
+            header.type_params,
+            header.member_headers,
+            &[],
+            ctx,
+        );
+    }
     let scoped = index
         .augmentation_value_headers
         .entry(scope.clone())

@@ -37,6 +37,7 @@ use verter_type_expr_oxc::lower_property_key;
 
 use crate::analysis::top_level_owners::{DeclMap, TopLevelOwnerTable, TopLevelStatementOwner};
 use crate::analysis::type_eval::{AugmentationScopeKind, TypeDeclKind, ValueDeclKind};
+use verter_parser::utils::oxc::script::route_inventory::statements_have_export_declarations;
 
 #[path = "decl_headers_augmentation.rs"]
 mod augmentation;
@@ -47,6 +48,9 @@ struct HeaderStatementContext<'a> {
     anchor: DeclContributorAnchor,
     vue_ignore_attachment_starts: &'a FxHashSet<u32>,
     source: &'a str,
+    /// The statement belongs to a declaration file, where every
+    /// declaration is ambient.
+    declaration_file: bool,
 }
 
 impl<'a> HeaderStatementContext<'a> {
@@ -55,6 +59,7 @@ impl<'a> HeaderStatementContext<'a> {
         owner: TopLevelStatementOwner,
         vue_ignore_attachment_starts: &'a FxHashSet<u32>,
         source: &'a str,
+        declaration_file: bool,
     ) -> Option<Self> {
         Some(Self {
             anchor: DeclContributorAnchor {
@@ -64,6 +69,7 @@ impl<'a> HeaderStatementContext<'a> {
             },
             vue_ignore_attachment_starts,
             source,
+            declaration_file,
         })
     }
 
@@ -91,6 +97,46 @@ pub struct NamespaceBlockRecord {
     pub owner: TopLevelOwnerId,
     pub qualified_name: String,
     pub span: Span,
+    /// Whether the block is INSTANTIATED — it declares a value, exported
+    /// or not (a variable, a function, a class, a non-`const` enum, a
+    /// statement, an instantiated nested namespace) — so the namespace is
+    /// a value too. A block holding only types, `const` enums and
+    /// uninstantiated namespaces is none (the checker's TS2708).
+    pub instantiated: bool,
+}
+
+/// Whether a namespace body is instantiated ([`NamespaceBlockRecord::instantiated`]).
+pub(crate) fn module_body_instantiated(body: &TSModuleDeclarationBody<'_>) -> bool {
+    match body {
+        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+            inner.body.as_ref().is_some_and(module_body_instantiated)
+        }
+        TSModuleDeclarationBody::TSModuleBlock(block) => {
+            block.body.iter().any(statement_instantiates)
+        }
+    }
+}
+
+fn statement_instantiates(statement: &Statement<'_>) -> bool {
+    match statement {
+        Statement::TSInterfaceDeclaration(_) | Statement::TSTypeAliasDeclaration(_) => false,
+        Statement::TSEnumDeclaration(enum_decl) => !enum_decl.r#const,
+        Statement::TSModuleDeclaration(module) => {
+            module.body.as_ref().is_some_and(module_body_instantiated)
+        }
+        Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
+            Some(
+                Declaration::TSInterfaceDeclaration(_) | Declaration::TSTypeAliasDeclaration(_),
+            ) => false,
+            Some(Declaration::TSEnumDeclaration(enum_decl)) => !enum_decl.r#const,
+            Some(Declaration::TSModuleDeclaration(module)) => {
+                module.body.as_ref().is_some_and(module_body_instantiated)
+            }
+            Some(_) => true,
+            None => false,
+        },
+        _ => true,
+    }
 }
 
 /// A `declare module "X" { … }` / `declare global { … }` augmentation
@@ -102,6 +148,11 @@ pub struct AugmentationBlockRecord {
     pub scope: AugmentationScopeKind,
     pub owner: TopLevelOwnerId,
     pub span: Span,
+    /// The name of the block's `export default function / class Name`
+    /// declaration — what the module's `default` export names.
+    pub default_export: Option<String>,
+    /// The local name the block assigns the module to with `export = X`.
+    pub export_assignment: Option<String>,
 }
 
 /// Exact parser-authored locator for a JSDoc typedef declaration.
@@ -247,9 +298,36 @@ pub struct DeclHeaderIndex {
     /// absent (its construct signatures are its base's). Empty in the
     /// `from_eval_env` mirror.
     pub constructor_visibility: FxHashMap<DeclBindingKey, verter_type_expr::MemberVisibility>,
+    /// The qualified names of namespace members their namespace does not
+    /// export — a type, class or nested namespace declared without
+    /// `export` in a namespace body that is not an export context. The
+    /// qualified name serves references inside that body; a reference from
+    /// outside it cannot name the member (the checker's TS2694). Empty in
+    /// the `from_eval_env` mirror (same block-level-view limitation).
+    pub namespace_private_members: FxHashSet<DeclBindingKey>,
+    /// Every `namespace N { … }` block a `declare module "…"` block
+    /// declares, with that block's scope, in source order. Empty in the
+    /// `from_eval_env` mirror (same block-level-view limitation).
+    pub augmentation_namespace_blocks: Vec<(AugmentationScopeKind, NamespaceBlockRecord)>,
 }
 
 impl DeclHeaderIndex {
+    /// Whether a reference from outside the namespace body can name the
+    /// qualified member `name` (`Ns.Inner.T`): neither it nor a namespace
+    /// on its path is private to its enclosing namespace.
+    #[must_use]
+    pub fn namespace_member_is_exported(&self, owner: TopLevelOwnerId, name: &str) -> bool {
+        name.match_indices('.')
+            .map(|(dot, _)| dot)
+            .skip(1)
+            .chain([name.len()])
+            .all(|end| {
+                !self
+                    .namespace_private_members
+                    .contains(&DeclBindingKey::new(owner, &name[..end]))
+            })
+    }
+
     /// Look up a file-scope type header.
     pub fn type_header(&self, name: &str) -> Option<&TypeDeclHeader> {
         self.type_header_in(TopLevelOwnerId::ordinary_file(), name)
@@ -308,6 +386,133 @@ impl DeclHeaderIndex {
         self.augmentation_value_headers
             .get(scope)?
             .get(&DeclBindingKey::new(owner, name))
+    }
+
+    /// The one `declare module "…" { … }` block scope that declares the
+    /// type `(owner, name)`; `None` when none or several do.
+    pub fn sole_module_augmentation_type_scope(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<&AugmentationScopeKind> {
+        let key = DeclBindingKey::new(owner, name);
+        let mut declaring = self
+            .augmentation_type_headers
+            .iter()
+            .filter(|(scope, types)| {
+                matches!(scope, AugmentationScopeKind::Module(_)) && types.contains_key(&key)
+            })
+            .map(|(scope, _)| scope);
+        let scope = declaring.next()?;
+        declaring.next().is_none().then_some(scope)
+    }
+
+    /// The one `declare module "…" { … }` block scope that declares the
+    /// value `(owner, name)`; `None` when none or several do.
+    pub fn sole_module_augmentation_value_scope(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<&AugmentationScopeKind> {
+        let key = DeclBindingKey::new(owner, name);
+        let mut declaring = self
+            .augmentation_value_headers
+            .iter()
+            .filter(|(scope, values)| {
+                matches!(scope, AugmentationScopeKind::Module(_)) && values.contains_key(&key)
+            })
+            .map(|(scope, _)| scope);
+        let scope = declaring.next()?;
+        declaring.next().is_none().then_some(scope)
+    }
+
+    /// The value members a reference from outside `namespace` can read
+    /// (the properties of the namespace's object), sorted: every exported
+    /// value declared directly in it, and every exported namespace nested
+    /// in it that is instantiated (a namespace holding only types is no
+    /// value). `scope` selects the file's own declarations (`None`) or one
+    /// augmentation block's; `namespace` `None` reads the block's own
+    /// top level.
+    #[must_use]
+    pub fn namespace_value_members(
+        &self,
+        scope: Option<&AugmentationScopeKind>,
+        owner: TopLevelOwnerId,
+        namespace: Option<&str>,
+    ) -> Vec<String> {
+        let values = match scope {
+            None => Some(&self.value_headers),
+            Some(scope) => self.augmentation_value_headers.get(scope),
+        };
+        let mut members: Vec<String> = values
+            .into_iter()
+            .flat_map(DeclMap::keys)
+            .filter(|key| key.owner == owner)
+            .filter_map(|key| {
+                let rest = match namespace {
+                    Some(namespace) => key
+                        .name
+                        .strip_prefix(namespace)
+                        .and_then(|rest| rest.strip_prefix('.'))?,
+                    None => key.name.as_ref(),
+                };
+                let member = rest.split('.').next()?;
+                let qualified = match namespace {
+                    Some(namespace) => format!("{namespace}.{member}"),
+                    None => member.to_string(),
+                };
+                self.namespace_member_is_exported(owner, &qualified)
+                    .then(|| member.to_string())
+            })
+            .collect();
+        let child_of = |qualified: &str| -> Option<String> {
+            let rest = match namespace {
+                Some(namespace) => qualified.strip_prefix(namespace)?.strip_prefix('.')?,
+                None => qualified,
+            };
+            (!rest.contains('.')).then(|| rest.to_string())
+        };
+        let blocks: Vec<&NamespaceBlockRecord> = match scope {
+            None => self.namespace_blocks.iter().collect(),
+            Some(scope) => self
+                .augmentation_namespace_blocks
+                .iter()
+                .filter(|(block_scope, _)| block_scope == scope)
+                .map(|(_, block)| block)
+                .collect(),
+        };
+        members.extend(
+            blocks
+                .into_iter()
+                .filter(|block| block.owner == owner && block.instantiated)
+                .filter(|block| self.namespace_member_is_exported(owner, &block.qualified_name))
+                .filter_map(|block| child_of(&block.qualified_name)),
+        );
+        members.sort();
+        members.dedup();
+        members
+    }
+
+    /// Whether the namespace `namespace` declared by `owner` (in its own
+    /// scope, or in the `declare module` block `scope`) is instantiated in
+    /// some block ([`NamespaceBlockRecord::instantiated`]).
+    #[must_use]
+    pub fn namespace_is_instantiated(
+        &self,
+        scope: Option<&AugmentationScopeKind>,
+        owner: TopLevelOwnerId,
+        namespace: &str,
+    ) -> bool {
+        let matches = |block: &NamespaceBlockRecord| {
+            block.owner == owner && block.qualified_name == namespace && block.instantiated
+        };
+        match scope {
+            None => self.namespace_blocks.iter().any(matches),
+            Some(scope) => self
+                .augmentation_namespace_blocks
+                .iter()
+                .any(|(block_scope, block)| block_scope == scope && matches(block)),
+        }
     }
 }
 
@@ -489,6 +694,7 @@ pub fn build_decl_header_index_with_owners(
             owners.statement(stmt_index),
             &vue_ignore_attachment_starts,
             source,
+            program.source_type.is_typescript_definition(),
         ) else {
             break;
         };
@@ -580,6 +786,17 @@ fn index_top_level_statement(
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
 ) {
+    // Mirror of `collect_hoisted_vars`: a `var` inside a nested block
+    // belongs to the top level.
+    crate::analysis::type_eval_build::for_each_hoisted_var(stmt, &mut |declarator, _| {
+        index_variable(
+            declarator,
+            VariableDeclarationKind::Var,
+            ctx,
+            &mut index.value_headers,
+            None,
+        );
+    });
     match stmt {
         Statement::TSTypeAliasDeclaration(decl) => {
             index_type_alias(decl, decl.id.name.as_str(), ctx, &mut index.type_headers);
@@ -588,7 +805,7 @@ fn index_top_level_statement(
             index_interface(decl, decl.id.name.as_str(), ctx, &mut index.type_headers);
         }
         Statement::TSModuleDeclaration(module) => {
-            index_module_declaration(module, ctx, index, None, false);
+            index_module_declaration(module, ctx, index, None, ctx.declaration_file);
         }
         Statement::TSGlobalDeclaration(global) => {
             index_augmentation_block(&global.body, ctx, index, &AugmentationScopeKind::Global);
@@ -670,7 +887,7 @@ fn index_declaration(
             index_interface(iface, iface.id.name.as_str(), ctx, &mut index.type_headers);
         }
         Declaration::TSModuleDeclaration(module) => {
-            index_module_declaration(module, ctx, index, None, false);
+            index_module_declaration(module, ctx, index, None, ctx.declaration_file);
         }
         Declaration::TSGlobalDeclaration(global) => {
             index_augmentation_block(&global.body, ctx, index, &AugmentationScopeKind::Global);
@@ -821,6 +1038,7 @@ fn index_module_declaration(
         owner: ctx.anchor.owner,
         qualified_name: module_name.clone(),
         span: decl.span.into(),
+        instantiated: module_body_instantiated(body),
     });
 
     match body {
@@ -828,8 +1046,16 @@ fn index_module_declaration(
             index_module_declaration(inner, ctx, index, Some(module_name.as_str()), ambient);
         }
         TSModuleDeclarationBody::TSModuleBlock(block) => {
+            let implicit_export = ambient && !statements_have_export_declarations(&block.body);
             for stmt in &block.body {
-                index_namespaced_statement(stmt, ctx, index, module_name.as_str(), ambient);
+                index_namespaced_statement(
+                    stmt,
+                    ctx,
+                    index,
+                    module_name.as_str(),
+                    ambient,
+                    implicit_export,
+                );
             }
         }
     }
@@ -841,31 +1067,49 @@ fn index_module_declaration(
 /// (routed via the `ExportNamedDeclaration` path to
 /// `index_namespaced_declaration`) registers a qualified value member such as
 /// `N.VERSION`; a non-exported `const hidden = …` is private to the namespace
-/// body and is NOT indexed — except in an `ambient` namespace, which exports
-/// every member.
+/// body and is NOT indexed — except in an export context (an ambient
+/// namespace body without an export declaration), which exports every
+/// member.
 fn index_namespaced_statement(
     stmt: &Statement<'_>,
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
     ambient: bool,
+    implicit_export: bool,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
             let name = format!("{namespace}.{}", alias.id.name);
             index_type_alias(alias, name.as_str(), ctx, &mut index.type_headers);
+            if !implicit_export {
+                index.namespace_private_members.insert(ctx.key(&name));
+            }
         }
         Statement::TSInterfaceDeclaration(iface) => {
             let name = format!("{namespace}.{}", iface.id.name);
             index_interface(iface, name.as_str(), ctx, &mut index.type_headers);
+            if !implicit_export {
+                index.namespace_private_members.insert(ctx.key(&name));
+            }
         }
         Statement::ClassDeclaration(class) => {
             if let Some(identifier) = &class.id {
                 let name = format!("{namespace}.{}", identifier.name);
                 index_named_class(class, &name, ctx, index);
+                if !implicit_export {
+                    index.namespace_private_members.insert(ctx.key(&name));
+                }
             }
         }
         Statement::TSModuleDeclaration(module) => {
+            if !implicit_export {
+                if let TSModuleDeclarationName::Identifier(id) = &module.id {
+                    index
+                        .namespace_private_members
+                        .insert(ctx.key(&format!("{namespace}.{}", id.name)));
+                }
+            }
             index_module_declaration(module, ctx, index, Some(namespace), ambient);
         }
         // Export-only: a DIRECT (non-exported) value declaration is private to
@@ -877,7 +1121,7 @@ fn index_namespaced_statement(
                 index_namespaced_declaration(decl, ctx, index, namespace, ambient);
             }
         }
-        Statement::VariableDeclaration(var_decl) if ambient => {
+        Statement::VariableDeclaration(var_decl) if implicit_export => {
             for decl in &var_decl.declarations {
                 index_variable(
                     decl,
@@ -888,7 +1132,7 @@ fn index_namespaced_statement(
                 );
             }
         }
-        Statement::FunctionDeclaration(func) if ambient => {
+        Statement::FunctionDeclaration(func) if implicit_export => {
             index_function_in(func, ctx, &mut index.value_headers, Some(namespace));
         }
         _ => {}

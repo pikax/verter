@@ -316,6 +316,9 @@ fn ordinary_script_file_scope_globals_index_before_population_lookup() {
         "declare var dv: number;\n",
         "declare function df(): void;\n",
         "declare const dc: string;\n",
+        // A `var` in a nested block hoists to the top level.
+        "if (ok) { var nested = 1; }\n",
+        "for (var i = 0; i < 1; i++) {}\n",
     ] {
         assert!(
             source_may_have_file_scope_global_contribution(source),

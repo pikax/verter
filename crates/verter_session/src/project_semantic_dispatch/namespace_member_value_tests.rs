@@ -306,3 +306,186 @@ fn declare_global_blocks_merge_later_first() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+const NAMESPACE_FUNCTIONS: &str = "\
+import { L } from './lib';
+import * as LL from './lib';
+export namespace N {
+  export function lit() { return 1; }
+  export function obj() { return { a: 1, b: \"s\" }; }
+  export function decl(): 2 { return 2; }
+  export function arr() { return [1, 2]; }
+  export function callsLit() { return lit(); }
+  export function usesPriv() { return priv(); }
+  function priv() { return true; }
+  export const k = 3;
+  export function readK() { return k; }
+  export namespace Inner { export function deep() { return \"d\" as const; } }
+  export function cond(b: boolean) { return b ? 1 : \"x\"; }
+  export const arrow = () => 5;
+}
+namespace G { export function g() { return 7n; } export function neg() { return -7n; } }
+function t() { return 7n; }
+export function callN() { return N.lit(); }
+export function callInner() { return N.Inner.deep(); }
+export function callG() { return G.g(); }
+export function callGNeg() { return G.neg(); }
+export function callT() { return t(); }
+export function callL() { return L.lit(); }
+export function callLL() { return LL.L.str(); }
+";
+
+const NAMESPACE_FUNCTIONS_LIB: &str = "\
+export namespace L { export function lit() { return 1; } export function str() { return \"s\" as const; } }
+";
+
+/// A function declared in a namespace, exported or not, has an inferred
+/// return as any function does: its body reads the namespace's own
+/// members unqualified (a sibling function, a private one, an exported
+/// `const`), and its literal returns widen as a bare literal's do — a
+/// `bigint` and a signed literal among them.
+///
+/// Measured on TypeScript 7.0.2: `N.lit` returns `number`, `N.obj`
+/// `{ a: number; b: string; }`, `N.decl` `2`, `N.arr` `number[]`,
+/// `N.callsLit` `number`, `N.usesPriv` `boolean`, `N.readK` `number`,
+/// `N.Inner.deep` `"d"`, `N.cond` `"x" | 1`, `N.arrow` `number`; `callN`
+/// is `number`, `callInner` `"d"`, `callG`, `callGNeg` and `callT`
+/// `bigint`, `callL` `number`, `callLL` `"s"`.
+///
+/// Mutation: indexing no function of an exported namespace leaves every
+/// `N.*` row but the annotated `N.decl` a typed miss; reading a namespace
+/// body's free name only at file scope leaves `N.readK` a typed miss;
+/// keeping a `bigint` literal's type answers `callG` and `callT` `7n`.
+#[test]
+fn a_namespace_function_returns_its_inferred_type() {
+    let files = [("lib.ts", NAMESPACE_FUNCTIONS_LIB)];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            compiler_options: None,
+            ambient_lib: None,
+        },
+        NAMESPACE_FUNCTIONS,
+        &[
+            ("ReturnType<typeof N.lit>", "number"),
+            ("ReturnType<typeof N.obj>", "{ a: number; b: string; }"),
+            ("ReturnType<typeof N.decl>", "2"),
+            ("ReturnType<typeof N.arr>", "number[]"),
+            ("ReturnType<typeof N.callsLit>", "number"),
+            ("ReturnType<typeof N.usesPriv>", "boolean"),
+            ("ReturnType<typeof N.readK>", "number"),
+            ("ReturnType<typeof N.Inner.deep>", "\"d\""),
+            ("ReturnType<typeof N.cond>", "\"x\" | 1"),
+            ("ReturnType<typeof N.arrow>", "number"),
+            ("ReturnType<typeof callN>", "number"),
+            ("ReturnType<typeof callInner>", "\"d\""),
+            ("ReturnType<typeof callG>", "bigint"),
+            ("ReturnType<typeof callGNeg>", "bigint"),
+            ("ReturnType<typeof callT>", "bigint"),
+            ("ReturnType<typeof callL>", "number"),
+            ("ReturnType<typeof callLL>", "\"s\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const AUGMENTED_FUNCTION_MODULE: &str =
+    "export function f(x: number): \"m-num\";\nexport function f(x: any): any { return x; }\n";
+const AUGMENTING_FUNCTION_MODULE: &str = "\
+import './m';
+declare module './m' {
+  function f(x: string): \"aug-str\";
+  function f(x: boolean): \"aug-bool\";
+}
+export {};
+";
+const AUGMENTED_FUNCTION_USE: &str = "\
+import { f } from './m';
+import * as M from './m';
+export function fs() { return f(\"a\"); }
+export function fb() { return f(true); }
+export function fn() { return f(1); }
+export function mfs() { return M.f(\"a\"); }
+";
+
+/// A module's function merges the declarations a `declare module` block
+/// augmenting that module adds, after its own: `typeof f` lists every
+/// declaration's signatures in that order, so `ReturnType` and
+/// `Parameters` read the augmentation's last one, and a call resolves
+/// against all of them.
+///
+/// Measured on TypeScript 7.0.2 (`--module commonjs`, alike on the four
+/// `strictNullChecks` × `noImplicitAny` settings): `ReturnType<typeof f>`
+/// is `"aug-bool"`, `Parameters<typeof f>[0]` `boolean`, `fs` and `mfs`
+/// `"aug-str"`, `fb` `"aug-bool"`, `fn` `"m-num"`.
+///
+/// Mutation: merging no augmenting declaration answers
+/// `ReturnType<typeof f>`, `fs`, `fb` and `mfs` `"m-num"` and
+/// `Parameters<typeof f>[0]` `number`.
+#[test]
+fn a_module_function_merges_its_augmentations() {
+    let files = [
+        ("m.ts", AUGMENTED_FUNCTION_MODULE),
+        ("aug.ts", AUGMENTING_FUNCTION_MODULE),
+    ];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            compiler_options: None,
+            ambient_lib: None,
+        },
+        AUGMENTED_FUNCTION_USE,
+        &[
+            ("ReturnType<typeof f>", "\"aug-bool\""),
+            ("Parameters<typeof f>[0]", "boolean"),
+            ("ReturnType<typeof fs>", "\"aug-str\""),
+            ("ReturnType<typeof fb>", "\"aug-bool\""),
+            ("ReturnType<typeof fn>", "\"m-num\""),
+            ("ReturnType<typeof mfs>", "\"aug-str\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const SCRIPT_OVERLOAD_ONE: &str = "declare function gf(x: number): \"s1-num\";\n";
+const SCRIPT_OVERLOAD_TWO: &str =
+    "declare function gf(x: string): \"s2-str\";\ndeclare function gf(x: boolean): \"s2-bool\";\n";
+const SCRIPT_OVERLOAD_USE: &str = "\
+export function gs() { return gf(\"a\"); }
+export function gb() { return gf(true); }
+export function gn() { return gf(1); }
+";
+
+/// A global function declared in several scripts is one function whose
+/// signatures are every script's, in program order.
+///
+/// Measured on TypeScript 7.0.2 (alike on the four settings), the scripts
+/// in the order listed: `ReturnType<typeof gf>` is `"s2-bool"`,
+/// `Parameters<typeof gf>[0]` `boolean`, `gs` `"s2-str"`, `gb`
+/// `"s2-bool"`, `gn` `"s1-num"`.
+///
+/// Mutation: reading the first script's declaration alone answers
+/// `ReturnType<typeof gf>` `"s1-num"`.
+#[test]
+fn a_global_function_merges_every_scripts_overloads() {
+    let files = [
+        ("s1.ts", SCRIPT_OVERLOAD_ONE),
+        ("s2.ts", SCRIPT_OVERLOAD_TWO),
+    ];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            compiler_options: None,
+            ambient_lib: None,
+        },
+        SCRIPT_OVERLOAD_USE,
+        &[
+            ("ReturnType<typeof gf>", "\"s2-bool\""),
+            ("Parameters<typeof gf>[0]", "boolean"),
+            ("ReturnType<typeof gs>", "\"s2-str\""),
+            ("ReturnType<typeof gb>", "\"s2-bool\""),
+            ("ReturnType<typeof gn>", "\"s1-num\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

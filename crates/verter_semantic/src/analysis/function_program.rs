@@ -2146,9 +2146,10 @@ fn discover_statement<'ast>(
                         discover_class(class, contributor_index, namespace_prefix, ctx);
                     }
                     oxc_ast::ast::Declaration::TSModuleDeclaration(module) => {
-                        discover_namespace(
+                        discover_namespace_block(
                             module,
                             contributor_index,
+                            &[],
                             namespace_prefix,
                             overload_tracker,
                             ctx,
@@ -2228,9 +2229,10 @@ fn discover_statement<'ast>(
             }
         },
         Statement::TSModuleDeclaration(module) => {
-            discover_namespace(
+            discover_namespace_block(
                 module,
                 contributor_index,
+                &[],
                 namespace_prefix,
                 overload_tracker,
                 ctx,
@@ -2240,13 +2242,17 @@ fn discover_statement<'ast>(
     }
 }
 
-/// Discover the served positions of a top-level namespace, exported or
-/// not. `declare module "specifier" { .. }` is an ambient augmentation,
-/// not a file-scope function owner — never indexed here. Identifier
-/// namespaces recurse with qualified names.
-fn discover_namespace<'ast>(
+/// Discover the served positions of one namespace declaration — written
+/// `namespace N { … }` or `export namespace N { … }` — at the statement
+/// `descent` reaches: its members are qualified `N.name` under
+/// `namespace_prefix`, and every locator extends `descent` with one
+/// [`FunctionDescentStep::NamespaceMember`] step. `declare module
+/// "specifier" { .. }` is an ambient augmentation, not a file-scope function
+/// owner — never indexed here.
+fn discover_namespace_block<'ast>(
     module: &'ast oxc_ast::ast::TSModuleDeclaration<'ast>,
     contributor_index: usize,
+    descent: &[FunctionDescentStep],
     namespace_prefix: Option<&str>,
     overload_tracker: &mut OverloadTracker,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
@@ -2258,19 +2264,20 @@ fn discover_namespace<'ast>(
         Some(prefix) => format!("{prefix}.{}", id.name),
         None => id.name.to_string(),
     };
-    let Some(oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block)) = module.body.as_ref()
-    else {
-        return;
-    };
-    for (statement_ordinal, inner) in block.body.iter().enumerate() {
-        discover_namespaced_statement(
-            inner,
-            contributor_index,
-            &[namespace_member_step(statement_ordinal)],
-            &prefix,
-            overload_tracker,
-            ctx,
-        );
+    if let Some(oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block)) = module.body.as_ref()
+    {
+        for (statement_ordinal, inner) in block.body.iter().enumerate() {
+            let mut inner_descent = descent.to_vec();
+            inner_descent.push(namespace_member_step(statement_ordinal));
+            discover_namespaced_statement(
+                inner,
+                contributor_index,
+                &inner_descent,
+                &prefix,
+                overload_tracker,
+                ctx,
+            );
+        }
     }
 }
 
@@ -2323,11 +2330,11 @@ fn discover_namespaced_statement<'ast>(
                         discover_class_ns(class, contributor_index, descent, namespace, ctx);
                     }
                     oxc_ast::ast::Declaration::TSModuleDeclaration(module) => {
-                        discover_nested_namespace(
+                        discover_namespace_block(
                             module,
                             contributor_index,
                             descent,
-                            namespace,
+                            Some(namespace),
                             overload_tracker,
                             ctx,
                         );
@@ -2353,48 +2360,16 @@ fn discover_namespaced_statement<'ast>(
             discover_class_ns(class, contributor_index, descent, namespace, ctx);
         }
         Statement::TSModuleDeclaration(module) => {
-            discover_nested_namespace(
+            discover_namespace_block(
                 module,
                 contributor_index,
                 descent,
-                namespace,
+                Some(namespace),
                 overload_tracker,
                 ctx,
             );
         }
         _ => {}
-    }
-}
-
-/// Discover the served positions of a namespace nested in `namespace`,
-/// exported or not, extending `descent` by one block per level.
-fn discover_nested_namespace<'ast>(
-    module: &'ast oxc_ast::ast::TSModuleDeclaration<'ast>,
-    contributor_index: usize,
-    descent: &[FunctionDescentStep],
-    namespace: &str,
-    overload_tracker: &mut OverloadTracker,
-    ctx: &mut DiscoveryCtx<'_, 'ast>,
-) {
-    let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &module.id else {
-        return;
-    };
-    let prefix = format!("{namespace}.{}", id.name);
-    let Some(oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block)) = module.body.as_ref()
-    else {
-        return;
-    };
-    for (inner_ordinal, inner) in block.body.iter().enumerate() {
-        let mut inner_descent = descent.to_vec();
-        inner_descent.push(namespace_member_step(inner_ordinal));
-        discover_namespaced_statement(
-            inner,
-            contributor_index,
-            &inner_descent,
-            &prefix,
-            overload_tracker,
-            ctx,
-        );
     }
 }
 

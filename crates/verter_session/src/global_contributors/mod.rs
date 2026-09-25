@@ -1146,8 +1146,9 @@ fn source_has_file_module_syntax(source: &str) -> bool {
 }
 
 /// File-level `interface` / `namespace` / value declaration (`var`, `let`,
-/// `const`, `function`, `class`, `enum`) in a script (no import/export).
-/// Nested declarations and module files are not file-scope globals.
+/// `const`, `function`, `class`, `enum`) in a script (no import/export), or
+/// a `var` in a nested block, which hoists to the file's top level. Other
+/// nested declarations and module files are not file-scope globals.
 #[must_use]
 pub(crate) fn source_may_have_file_scope_global_contribution(source: &str) -> bool {
     if source_has_file_module_syntax(source) {
@@ -1165,12 +1166,16 @@ pub(crate) fn source_may_have_file_scope_global_contribution(source: &str) -> bo
     let mut in_block = false;
     let mut string: Option<u8> = None;
     let mut at_statement = true;
+    // A statement boundary at ANY depth: a `var` in a nested block hoists to
+    // the file's top level.
+    let mut at_any_statement = true;
     let mut brace_depth: u32 = 0;
     while i < bytes.len() {
         let b = bytes[i];
         if in_line {
             if b == b'\n' {
                 in_line = false;
+                at_any_statement = true;
                 if brace_depth == 0 {
                     at_statement = true;
                 }
@@ -1210,22 +1215,32 @@ pub(crate) fn source_may_have_file_scope_global_contribution(source: &str) -> bo
             b'\'' | b'"' | b'`' => {
                 string = Some(b);
                 at_statement = false;
+                at_any_statement = false;
                 i += 1;
             }
             b'{' => {
                 brace_depth = brace_depth.saturating_add(1);
                 at_statement = true;
+                at_any_statement = true;
                 i += 1;
             }
             b'}' => {
                 brace_depth = brace_depth.saturating_sub(1);
                 at_statement = brace_depth == 0;
+                at_any_statement = true;
                 i += 1;
             }
             b'\n' | b';' => {
                 if brace_depth == 0 {
                     at_statement = true;
                 }
+                at_any_statement = true;
+                i += 1;
+            }
+            // `for (var …` and `if (c) var …` open a statement too.
+            b'(' | b')' => {
+                at_statement = false;
+                at_any_statement = true;
                 i += 1;
             }
             b if b.is_ascii_whitespace() => i += 1,
@@ -1262,8 +1277,10 @@ pub(crate) fn source_may_have_file_scope_global_contribution(source: &str) -> bo
             {
                 return true;
             }
+            _ if at_any_statement && starts_with_ident(bytes, i, b"var") => return true,
             _ => {
                 at_statement = false;
+                at_any_statement = false;
                 i += 1;
             }
         }

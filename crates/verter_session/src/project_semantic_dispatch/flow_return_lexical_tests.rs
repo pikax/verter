@@ -6858,3 +6858,40 @@ fn flow_return_terminated_if_arm_contributes_nothing() {
     let host = make_r2_host();
     assert_r2_clean_warm(&host, "r2TerminatedArmContributesNothing", number());
 }
+
+const MEMBER_CALL_SHADOW: &str = "\
+declare class DK { m(): \"km\"; }
+function c() { return 1; }
+export function shadow() { const c = new DK(); return c.m(); }
+export function shadowObject() { const c = { m: () => \"om\" as const }; return c.m(); }
+export function shadowLet() { let c = new DK(); return c.m(); }
+export function shadowParam(c: DK) { return c.m(); }
+export function unshadowed() { return c(); }
+";
+
+/// A member call rooted at a local or parameter reads that binding, not a
+/// same-name declaration of the file it shadows: the callee references no
+/// other name, and the call resolves its root through the frame.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --declaration
+/// --emitDeclarationOnly --strict`, alike on the four `strictNullChecks` ×
+/// `noImplicitAny` settings): `shadow`, `shadowLet` and `shadowParam` are
+/// `"km"`, `shadowObject` `"om"`, and `unshadowed` (the file's `c`)
+/// `number`.
+///
+/// Mutation: failing every frame-shadowed member call whose root the owner
+/// scope also answers leaves the four shadowed rows a typed miss.
+#[test]
+fn a_member_call_on_a_shadowing_binding_reads_the_binding() {
+    let failures = super::checker_probe_lane_tests::mismatches(
+        MEMBER_CALL_SHADOW,
+        &[
+            ("ReturnType<typeof shadow>", "\"km\""),
+            ("ReturnType<typeof shadowObject>", "\"om\""),
+            ("ReturnType<typeof shadowLet>", "\"km\""),
+            ("ReturnType<typeof shadowParam>", "\"km\""),
+            ("ReturnType<typeof unshadowed>", "number"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

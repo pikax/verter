@@ -660,12 +660,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         {
             return false;
         }
-        if let Some(project) = self.project_stable_key_for_canonical(scope_canonical_id) {
-            if let Some(hit) = self.ctx.lookup_ambient_symbol(project, name) {
-                self.ctx
-                    .record_ambient_dependency(scope_canonical_id, hit.virtual_id.as_ref());
-                return true;
-            }
+        if self
+            .lib_global_declaration(scope_canonical_id, name, super::build::GlobalSpace::Type)
+            .is_some()
+        {
+            return true;
         }
         self.runtime_nominal_global_name(name).is_some()
             || verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name)
@@ -762,13 +761,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 name.as_ref(),
             )
             // A bare name nothing in scope declares or imports is a GLOBAL
-            // name: it names the program's merged global declaration, whose
-            // identity is its first declaration in declaration precedence
-            // order (the declaration's `Instantiate` folds in the rest).
+            // name: it names the merged global declaration of the project's
+            // library and the program, whose identity is its first
+            // declaration in declaration precedence order (the
+            // declaration's `Instantiate` folds in the rest).
             .or_else(|| {
                 (!name.contains('.')
                     && !self.unresolved_head_is_authored_import(scope, name.as_ref()))
-                .then(|| self.first_global_declaration(name.as_ref()))
+                .then(|| self.first_global_declaration(canonical_id.as_ref(), name.as_ref()))
                 .flatten()
             })
         } else {

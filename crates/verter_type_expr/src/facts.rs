@@ -1947,6 +1947,50 @@ pub struct ValueTypeAnnotationFact {
     /// fabricated type expression.
     #[serde(default)]
     pub expression_source: Option<SemanticExpressionSource>,
+    /// Whether the declared type's literals are the checker's WIDENING
+    /// literal types — read, they widen wherever a bare literal would.
+    #[serde(default)]
+    pub literal_freshness: DeclaredLiteralFreshness,
+}
+
+/// Whether a value declaration's declared type is the checker's WIDENING
+/// literal type: a `const` without an annotation takes the FRESH literal
+/// type of its initializer (`const c = 1` declares `1`, and a read of `c`
+/// returns `number` from a function, as `return 1` does), while an
+/// annotation, an assertion or a mutable declaration declares a regular
+/// type (`const c: 1 = 1`, `1 as const`).
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum DeclaredLiteralFreshness {
+    /// The declared type's literals are regular.
+    #[default]
+    Regular,
+    /// Every literal of the declared type is fresh: the initializer is a
+    /// literal, or a conditional whose every branch is one.
+    Widening,
+    /// The initializer reads another value (`const d = c`): the literals are
+    /// fresh exactly when that value's are. The path is the value's
+    /// reference in the declaring scope.
+    Follows(Arc<[String]>),
+    /// A class: the named static members are `readonly` properties without
+    /// an annotation whose initializer is a literal (`static readonly s =
+    /// 1`), whose declared types are fresh as a `const`'s are — a read of
+    /// `C.s` widens.
+    WideningStaticMembers(Arc<[String]>),
+    /// The initializer is `null`, `undefined` or a `void` expression and
+    /// there is no annotation: with `strictNullChecks` off the checker
+    /// widens the declared type to `any`.
+    WideningNullish,
 }
 
 /// Locator for one authored reference argument. Macro payloads need the macro

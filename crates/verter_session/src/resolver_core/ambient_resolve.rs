@@ -4,11 +4,9 @@
 //! import graph. Looks the symbol up against the workspace's per-project
 //! ambient lib symbol_index (A2) and produces a `ResolvedRootIdentity`
 //! whose `canonical_id` is the project-scoped ambient virtual id
-//! (`ambient:/<tag>/<canonical>`).
-//!
-//! The caller re-roots its query at the returned identity in the ambient
-//! lib file, whose own scope serves the declaration (a `typeof` of a free
-//! global value reads `declare var Array: ArrayConstructor;` there).
+//! (`ambient:/<tag>/<canonical>`). The dispatch's library-global lookup
+//! (`ProjectSemanticDispatch::lib_global_declaration`) is its caller, and
+//! every reader of a library global asks that lookup.
 
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_semantic::resolver_core::ProjectStableKey;
@@ -26,8 +24,6 @@ use crate::resolver_core::ResolverContext;
 /// - returns a `ResolvedRootIdentity` whose `canonical_id` is the ambient
 ///   virtual id, so the recorded fact reaches the ambient `WholeHash`
 ///   arm on warm-read validation through the live `StoreView`.
-///
-/// The `typeof` builder calls it for a value name its file does not bind.
 pub(crate) fn resolve_ambient_global(
     ctx: &dyn ResolverContext,
     consumer_canonical: &str,

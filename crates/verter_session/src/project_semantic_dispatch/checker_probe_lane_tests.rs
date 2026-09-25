@@ -161,12 +161,13 @@ fn probe_host(project: ProbeProject<'_>) -> Arc<crate::VerterHost> {
             .expect("the probe's ambient library registers against its project");
     }
     for (name, file_source) in project.files {
-        crate::u6_flow_shape_corpus_tests::upsert(
-            &host,
-            &format!("{PROBE_ROOT}/{name}"),
-            file_source,
-            crate::FileLanguage::script_ts(),
-        );
+        let path = format!("{PROBE_ROOT}/{name}");
+        // A sibling is classified by its name, as the host classifies it: a
+        // `.d.ts` sibling is a declaration file.
+        let language = crate::LanguageRegistry::global()
+            .classify_static(&path)
+            .static_resolution();
+        crate::u6_flow_shape_corpus_tests::upsert(&host, &path, file_source, language);
     }
     host
 }
