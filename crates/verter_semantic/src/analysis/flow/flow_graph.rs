@@ -569,6 +569,37 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                 }
             }
             SkeletonExprShape::ObjectLiteral { entries } => {
+                // A literal's methods and accessors run against the object
+                // it builds and read its other members through `this`, so a
+                // spread-free literal holding one is evaluated whole: every
+                // demand on it reads every entry's value.
+                let receiver_bound = entries
+                    .iter()
+                    .all(|entry| matches!(entry, SkeletonObjectEntry::Property { .. }))
+                    && entries.iter().any(|entry| {
+                        matches!(
+                            entry,
+                            SkeletonObjectEntry::Property {
+                                kind: super::SkeletonPropertyKind::Method
+                                    | super::SkeletonPropertyKind::Accessor,
+                                ..
+                            }
+                        )
+                    });
+                if receiver_bound {
+                    for entry in entries.iter() {
+                        if let SkeletonObjectEntry::Property { value, .. } = entry {
+                            edges.push((
+                                node,
+                                site_node(*value),
+                                FlowEdgeKind::ReadProjection {
+                                    path: Arc::from(Vec::new().into_boxed_slice()),
+                                    kind: super::FlowReadKind::Input,
+                                },
+                            ));
+                        }
+                    }
+                }
                 for entry in entries.iter() {
                     match entry {
                         SkeletonObjectEntry::Property { key, value, .. } => {

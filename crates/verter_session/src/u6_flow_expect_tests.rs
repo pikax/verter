@@ -1174,6 +1174,13 @@ pub(crate) mod checker_syntax {
         /// live `keyof` carrier whose base matches `T`, never the key
         /// union it settles to.
         KeyOf(Box<CheckerType>),
+        /// `` `text${T}text` `` — a template literal type print. Matches a
+        /// live template literal node with the same texts and recursively
+        /// equal holes.
+        Template {
+            texts: Vec<String>,
+            holes: Vec<CheckerType>,
+        },
         Union(Vec<CheckerType>),
         Array(Box<CheckerType>),
         Intersection(Vec<CheckerType>),
@@ -1418,6 +1425,7 @@ pub(crate) mod checker_syntax {
                     }
                 }
                 Some('{') => self.object(),
+                Some('`') => self.template(),
                 Some('"') => {
                     let inner = &rest[1..];
                     let close = inner
@@ -1513,6 +1521,35 @@ pub(crate) mod checker_syntax {
                         _ => CheckerType::Ref(name),
                     })
                 }
+            }
+        }
+
+        /// One `` `text${T}text` `` print: its texts, one more than its
+        /// holes.
+        fn template(&mut self) -> Result<CheckerType, String> {
+            self.pos += 1;
+            let mut texts = vec![String::new()];
+            let mut holes = Vec::new();
+            loop {
+                let Some(c) = self.rest().chars().next() else {
+                    return Err(format!("unterminated template literal in `{}`", self.text));
+                };
+                if c == '`' {
+                    self.pos += 1;
+                    return Ok(CheckerType::Template { texts, holes });
+                }
+                if self.rest().starts_with("${") {
+                    self.pos += 2;
+                    holes.push(self.union()?);
+                    self.expect('}')?;
+                    texts.push(String::new());
+                    continue;
+                }
+                texts
+                    .last_mut()
+                    .expect("one text per hole plus one")
+                    .push(c);
+                self.pos += c.len_utf8();
             }
         }
 
@@ -1904,6 +1941,24 @@ pub(crate) mod checker_syntax {
             (CheckerType::Primitive(e), SemanticNodeData::Primitive(g)) => e == g,
             (CheckerType::KeyOf(expected), SemanticNodeData::KeyOf { base }) => {
                 matches_node(dispatch, *base, expected, depth + 1)
+            }
+            (
+                CheckerType::Template { texts, holes },
+                SemanticNodeData::TemplateLiteral {
+                    quasis,
+                    expressions,
+                },
+            ) => {
+                quasis.len() == texts.len()
+                    && quasis
+                        .iter()
+                        .zip(texts)
+                        .all(|(got, want)| got.as_ref() == want)
+                    && expressions.len() == holes.len()
+                    && expressions
+                        .iter()
+                        .zip(holes)
+                        .all(|(node, want)| matches_node(dispatch, *node, want, depth + 1))
             }
             (CheckerType::UniqueSymbol(name), nominal @ SemanticNodeData::TypeOfNominal(_)) => {
                 nominal.typeof_nominal_identity().is_some_and(|identity| {

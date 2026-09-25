@@ -1684,6 +1684,18 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "67937178ac7fa11755183b7de413da72c13210550a6606d39e40cd8e160a87b9",
     ),
     (
+        "N56_arrow_predicate_annotated_binding",
+        "5e13ff7e34b9b95087901ab09fc4cfae178a35dd8917d03768936bbe9bb63a17",
+    ),
+    (
+        "N61_unannotated_const_assertion_does_not_narrow",
+        "5949a3900fb8e02527cc4f60c06ad1c63e135fe0b2b72a6e82e6aede41bb1d24",
+    ),
+    (
+        "N62_annotated_const_assertion_narrows",
+        "19be328abd0ed8ddac111c9fbd3bc8ead5dfbf7563621780a177c3be2ae73c6a",
+    ),
+    (
         "N63_two_discriminants_conjunction",
         "b7d1e5359cb077889bb12447e27a7590144da48791ce7e3270d27a845dc10d5c",
     ),
@@ -3390,7 +3402,7 @@ mod corpus_suite {
             ),
             (
                 "N56_arrow_predicate_annotated_binding",
-                "checker prints `{ v: string | A; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(DeclRef(A) | DeclRef(B) | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string | A; }`; the renderer spells the same node `{ v: Union(DeclRef(A) | string) }`",
             ),
             (
                 "N57_object_literal_method_predicate",
@@ -3405,8 +3417,12 @@ mod corpus_suite {
                 "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
+                "N61_unannotated_const_assertion_does_not_narrow",
+                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(string | number) }`",
+            ),
+            (
                 "N62_annotated_const_assertion_narrows",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same node `{ v: string }` — member terminators differ",
             ),
             (
                 "N64_boolean_literal_discriminant",
@@ -5093,11 +5109,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
     ),
     (
-        "N61_unannotated_const_assertion_does_not_narrow",
-        Owner::U6NarrowSubstitution,
-        "member Union — the published value EQUALS the checker, so a recursive pin would assert the divergence this KnownOwed row records does not exist",
-    ),
-    (
         // `Array.isArray` is not applied as a predicate on either edge.
     "N74_array_isarray_true_arm",
         Owner::U6NarrowTypeof,
@@ -5235,18 +5246,12 @@ const OPEN_DEBTS: &[&str] = &[
     "N47_correlated_tuple_discriminant",
     "N50_sequence_discriminant_test",
     // Predicate / assertion CALL TARGETS the guard rail does not accept: an
-    // arrow-expression binding, an object-literal method, a class method, an
-    // annotated `const`, and a generic predicate instantiated at the call
-    // site. Each publishes the unnarrowed union as a typed ReturnOnly. The
-    // two `does_not_narrow` rows are the paired over-narrow CONTROLS: their
-    // published value is already correct and only the admission is owed, so
-    // a repair must leave their surfaces alone.
-    "N56_arrow_predicate_annotated_binding",
+    // object-literal method, a class method, and a generic predicate
+    // instantiated at the call site. Each publishes the unnarrowed union as
+    // a typed ReturnOnly.
     "N57_object_literal_method_predicate",
     "N59_generic_predicate_instantiated_at_call",
     "N60_class_method_assertion_narrows",
-    "N61_unannotated_const_assertion_does_not_narrow",
-    "N62_annotated_const_assertion_narrows",
     // Discriminant / `in` key SPELLINGS outside the decidable-guard set:
     // an enum member reference, a const-typed literal key, a numeric key,
     // and a `typeof`-narrowed callable. The optional-member row is the one
@@ -5353,7 +5358,12 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // narrows inside the invoked body, dropping N25's dead contributor:
     // 26 matching, 12 parked.
     (Owner::U6NarrowLattice, 38, 26, 12),
-    (Owner::U6NarrowSubstitution, 12, 6, 6),
+    // A control or statement call through a callee whose declaration set
+    // the file closes reads the callee's declared signatures: the arrow
+    // predicate bound to a `const` narrows (N56), the annotated `const`
+    // assertion narrows (N62) and the unannotated one does not (N61), all
+    // complete: 9 matching, 3 parked.
+    (Owner::U6NarrowSubstitution, 12, 9, 3),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     // A `new` and a tagged template resolve to the instance: C02, C04, C08,
     // C11 and C12 and their tagged-template twins C18, C19, C21, C23 and C24

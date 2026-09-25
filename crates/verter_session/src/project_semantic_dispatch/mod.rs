@@ -4167,6 +4167,8 @@ mod cycle_gate_tests;
 #[cfg(test)]
 mod base_signature_tests;
 #[cfg(test)]
+mod callee_signature_effect_tests;
+#[cfg(test)]
 mod captured_declared_type_tests;
 #[cfg(test)]
 mod checker_probe_lane_tests;
@@ -4197,6 +4199,8 @@ mod namespace_member_value_tests;
 #[cfg(test)]
 mod namespace_value_tests;
 #[cfg(test)]
+mod object_literal_accessor_tests;
+#[cfg(test)]
 mod object_literal_key_tests;
 #[cfg(test)]
 mod projected_terminal_surface_tests;
@@ -4206,6 +4210,8 @@ mod projection_stack_safety_tests;
 mod relation_operand_tests;
 #[cfg(test)]
 mod signature_relation_tests;
+#[cfg(test)]
+mod string_mapping_template_tests;
 #[cfg(test)]
 mod this_receiver_tests;
 #[cfg(test)]

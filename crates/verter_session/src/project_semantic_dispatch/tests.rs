@@ -9248,11 +9248,11 @@ fn same_utility_and_args_dedup_to_one_entry() {
     );
 }
 
-/// String intrinsics (`Uppercase`, `Lowercase`, `Capitalize`,
-/// `Uncapitalize`) return the `String` primitive. Literal-type
-/// transformation is a later extension.
+/// A string intrinsic over `string` keeps its application, as the checker
+/// does: measured on TypeScript 7.0.2, `Uppercase<string>` is
+/// `Uppercase<string>`, not `string`.
 #[test]
-fn string_intrinsics_return_string_primitive() {
+fn string_intrinsics_keep_the_application_over_string() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -9277,8 +9277,9 @@ fn string_intrinsics_return_string_primitive() {
     };
     let data = graph.node_data(result).expect("result data");
     assert!(
-        matches!(&*data, SemanticNodeData::Primitive(PrimitiveKind::String)),
-        "Uppercase<string> produces a String primitive, got {:?}",
+        matches!(&*data, SemanticNodeData::InstantiationRef { base, args }
+            if base.decl_name.as_ref() == "Uppercase" && args.as_ref() == [s]),
+        "Uppercase<string> keeps its application, got {:?}",
         data
     );
 }

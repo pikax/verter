@@ -405,6 +405,19 @@ pub enum SliceStatement {
         /// an assertion signature with no type predicate).
         target: Option<GatedType>,
     },
+    /// A statement call whose bare callee names a value this file does not
+    /// declare as ONE closed function (an import, a declared constant, an
+    /// overload group): the checker reads the call's effect from the
+    /// callee's declared signatures alone. None asserting ⇒ no effect; one
+    /// non-generic `asserts x is T` / `asserts x` ⇒ its argument narrows
+    /// for the rest of the region; any other signature set — a declared
+    /// `never` return included — takes the typed guard-narrowing gap.
+    CalleeEffect {
+        /// `typeof callee`, resolved in owner scope.
+        callee: GatedType,
+        /// Each argument's narrowable reference, positionally.
+        arguments: Arc<[Option<SliceNarrowSubject>]>,
+    },
     /// A nested block, as its own region.
     Block(SliceRegion),
     /// A `break` whose target an enclosing modelled construct absorbs
@@ -963,6 +976,24 @@ pub enum SliceGuard {
         /// guard application against exactly this span.
         call: verter_span::Span,
     },
+    /// A call whose bare callee names a value this file does not declare
+    /// as ONE closed function — an import, a declared constant or `let`,
+    /// an overload group, a script global. The checker reads the call's
+    /// narrowing from the callee's declared signatures alone: none carries
+    /// a type predicate ⇒ no narrowing; one non-generic signature with
+    /// `x is T` ⇒ its argument narrows to `T`. The evaluator reads those
+    /// signatures through `SignaturesOfType`; any other signature set
+    /// takes the typed guard-narrowing gap.
+    CalleePredicate {
+        /// `typeof callee`, resolved in owner scope.
+        callee: GatedType,
+        /// Each argument's narrowable reference, positionally.
+        arguments: Arc<[Option<SliceNarrowSubject>]>,
+        /// Whether this is the predicate's negative reading.
+        negated: bool,
+        /// The authored call's span (absolute).
+        call: verter_span::Span,
+    },
     /// A conjunction: every fact applies at once.
     And(Arc<[SliceGuard]>),
     /// A disjunction: the positive reading unions each disjunct's
@@ -1009,6 +1040,11 @@ fn collect_guard_subjects(guard: &SliceGuard, visitor: &mut impl FnMut(&SliceNar
         | SliceGuard::Instanceof { subject, .. }
         | SliceGuard::TypePredicate { subject, .. }
         | SliceGuard::In { subject, .. } => visitor(subject),
+        SliceGuard::CalleePredicate { arguments, .. } => {
+            for subject in arguments.iter().flatten() {
+                visitor(subject);
+            }
+        }
         SliceGuard::And(parts) | SliceGuard::Or(parts) => {
             for part in parts.iter() {
                 collect_guard_subjects(part, visitor);
@@ -2024,6 +2060,10 @@ pub struct SliceObjectMember {
     /// same-shaped return objects at distinct source sites distinct at
     /// interning.
     pub spans: verter_type_expr::MemberSpans,
+    /// Whether an accessor declares its type: a getter's return
+    /// annotation, a setter's parameter annotation. `false` for every
+    /// other member.
+    pub accessor_annotated: bool,
 }
 
 /// The unsupported-construct classification.
@@ -7780,6 +7820,9 @@ impl<'a> Lowerer<'a> {
         if !matches!(self.classify_occurrence(callee.span), NameBinding::Free) {
             return SliceGuard::None;
         }
+        if self.closed_callee_declaration(name).is_none() {
+            return self.lower_callee_signature_guard(call, callee);
+        }
         let Some((ordinal, Some(target))) = self.same_file_predicate(name, false, call.span) else {
             return SliceGuard::None;
         };
@@ -7800,6 +7843,183 @@ impl<'a> Lowerer<'a> {
             target,
             negated: false,
             call: span,
+        }
+    }
+
+    /// The [`SliceGuard::CalleePredicate`] of a control call whose bare
+    /// callee resolves free to a value that is not ONE closed same-file
+    /// function: the evaluator reads its declared signatures. A call site
+    /// inside a namespace block (whose bare names bind through the block
+    /// first), explicit type arguments and a spread argument keep the
+    /// control-call rail.
+    fn lower_callee_signature_guard(
+        &mut self,
+        call: &oxc_ast::ast::CallExpression<'_>,
+        callee: &oxc_ast::ast::IdentifierReference<'_>,
+    ) -> SliceGuard {
+        if self.namespace_owned
+            || call.type_arguments.is_some()
+            || call.arguments.iter().any(|argument| argument.is_spread())
+            || !self.callee_declaration_set_closed(callee.name.as_str())
+        {
+            return SliceGuard::None;
+        }
+        let ty = TypeExpr::TypeOf(verter_type_expr::ValueRef {
+            path: vec![callee.name.to_string()],
+            type_args: Vec::new(),
+        });
+        let callee = self.gate(ty, callee.span, &[]);
+        let arguments: Vec<Option<SliceNarrowSubject>> = call
+            .arguments
+            .iter()
+            .map(|argument| {
+                argument
+                    .as_expression()
+                    .and_then(|argument| self.narrow_subject_of(argument))
+            })
+            .collect();
+        let span: verter_span::Span = call.span.into();
+        self.predicate_guard_call_spans.insert(span);
+        SliceGuard::CalleePredicate {
+            callee,
+            arguments: Arc::from(arguments.into_boxed_slice()),
+            negated: false,
+            call: span,
+        }
+    }
+
+    /// Whether the checker-visible declaration set of the top-level value
+    /// `name` is exactly this file's own declarations of it, so its
+    /// declared signatures are the ones the owner-scope lowering reads. A
+    /// variable (`const` / `let` / `var`, declared or not, exported or not)
+    /// never merges with another declaration; a function merges with every
+    /// same-name global in a script and with any augmentation of an
+    /// exported one, so its set is closed only when it is a module's
+    /// unexported function (an overload group included). An import, a
+    /// class, an enum or a namespace of the name, and a name this file does
+    /// not declare, are not closed here.
+    fn callee_declaration_set_closed(&self, name: &str) -> bool {
+        self.closed_callee_declaration_kind(name).is_some()
+    }
+
+    /// [`Self::callee_declaration_set_closed`], answering whether the closed
+    /// declaration carries an EXPLICIT type (`getExplicitTypeOfSymbol`): a
+    /// function always does, a variable only through its annotation. Only
+    /// an explicitly typed callee gives a call statement an effect.
+    fn closed_callee_declaration_kind(&self, name: &str) -> Option<ClosedCalleeKind> {
+        use oxc_ast::ast::{Declaration, ImportDeclarationSpecifier};
+        let mut variable = false;
+        let mut annotated_variable = false;
+        let mut functions = 0usize;
+        let mut other = false;
+        for statement in &self.program.body {
+            let declaration = match statement {
+                Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                    Some(declaration) => declaration,
+                    None => continue,
+                },
+                Statement::ImportDeclaration(import) => {
+                    other |= import.specifiers.iter().flatten().any(|specifier| {
+                        let local = match specifier {
+                            ImportDeclarationSpecifier::ImportSpecifier(s) => &s.local,
+                            ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => &s.local,
+                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => &s.local,
+                        };
+                        local.name.as_str() == name
+                    });
+                    continue;
+                }
+                Statement::ExportDefaultDeclaration(_)
+                | Statement::TSImportEqualsDeclaration(_) => {
+                    continue;
+                }
+                statement => match statement.as_declaration() {
+                    Some(declaration) => declaration,
+                    None => continue,
+                },
+            };
+            match declaration {
+                Declaration::VariableDeclaration(variables) => {
+                    for declarator in variables.declarations.iter() {
+                        if matches!(&declarator.id, BindingPattern::BindingIdentifier(id)
+                            if id.name.as_str() == name)
+                        {
+                            variable = true;
+                            annotated_variable |= declarator.type_annotation.is_some();
+                        }
+                    }
+                }
+                Declaration::FunctionDeclaration(function) => {
+                    if function
+                        .id
+                        .as_ref()
+                        .is_some_and(|id| id.name.as_str() == name)
+                    {
+                        functions += 1;
+                    }
+                }
+                Declaration::ClassDeclaration(class) => {
+                    other |= class.id.as_ref().is_some_and(|id| id.name.as_str() == name);
+                }
+                Declaration::TSEnumDeclaration(declaration) => {
+                    other |= declaration.id.name.as_str() == name;
+                }
+                Declaration::TSModuleDeclaration(_) | Declaration::TSGlobalDeclaration(_) => {
+                    other = true;
+                }
+                Declaration::TSImportEqualsDeclaration(declaration) => {
+                    other |= declaration.id.name.as_str() == name;
+                }
+                Declaration::TSTypeAliasDeclaration(_) | Declaration::TSInterfaceDeclaration(_) => {
+                }
+            }
+        }
+        if other {
+            return None;
+        }
+        match (variable, functions) {
+            (true, 0) => Some(ClosedCalleeKind {
+                explicit: annotated_variable,
+            }),
+            (false, 1..) if self.module_scope && !self.top_level_name_is_exported(name) => {
+                Some(ClosedCalleeKind { explicit: true })
+            }
+            _ => None,
+        }
+    }
+
+    /// The [`SliceStatement::CalleeEffect`] of a statement call whose bare
+    /// callee resolves free to a value that is not ONE closed same-file
+    /// function, under the same refusals as
+    /// [`Self::lower_callee_signature_guard`].
+    fn lower_callee_effect_statement(
+        &mut self,
+        call: &oxc_ast::ast::CallExpression<'_>,
+    ) -> Option<SliceStatement> {
+        let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
+            return None;
+        };
+        if !matches!(self.classify_occurrence(callee.span), NameBinding::Free)
+            || self
+                .closed_callee_declaration(callee.name.as_str())
+                .is_some()
+        {
+            return None;
+        }
+        // A callee with no explicit type — a variable without an annotation
+        // — gives the call no effect at all, whatever function it holds.
+        if !self.namespace_owned
+            && self
+                .closed_callee_declaration_kind(callee.name.as_str())
+                .is_some_and(|kind| !kind.explicit)
+        {
+            return Some(SliceStatement::ThrowPoint);
+        }
+        match self.lower_callee_signature_guard(call, callee) {
+            SliceGuard::CalleePredicate {
+                callee, arguments, ..
+            } => Some(SliceStatement::CalleeEffect { callee, arguments }),
+            _ => None,
         }
     }
 
@@ -8574,6 +8794,14 @@ impl<'a> Lowerer<'a> {
                     }
                     StatementCallEffect::NeverReturns => Some(SliceStatement::Throw),
                     StatementCallEffect::Unprovable => {
+                        // A free callee this file does not declare as ONE
+                        // closed function: its declared signatures decide
+                        // the effect at evaluation. The call's result is
+                        // discarded either way.
+                        if let Some(effect) = self.lower_callee_effect_statement(call) {
+                            self.decided_above_call_spans.push(call.span.into());
+                            return Some(effect);
+                        }
                         self.control_test_gap = true;
                         Some(SliceStatement::ThrowPoint)
                     }
@@ -9796,6 +10024,7 @@ impl<'a> Lowerer<'a> {
                     method_kind,
                     readonly: policy.readonly(),
                     spans,
+                    accessor_annotated: false,
                 })));
                 continue;
             }
@@ -9804,6 +10033,21 @@ impl<'a> Lowerer<'a> {
             // the same flow machinery); a method without a body
             // keeps the whole-literal leaf lowering.
             if method_kind.is_some() {
+                let accessor_annotated = match (method_kind, value_expression) {
+                    (
+                        Some(verter_type_expr::ObjectMethodKind::Get),
+                        Expression::FunctionExpression(func),
+                    ) => func.return_type.is_some(),
+                    (
+                        Some(verter_type_expr::ObjectMethodKind::Set),
+                        Expression::FunctionExpression(func),
+                    ) => func
+                        .params
+                        .items
+                        .first()
+                        .is_some_and(|param| param.type_annotation.is_some()),
+                    _ => false,
+                };
                 let value = match value_expression {
                     Expression::FunctionExpression(func) => {
                         // A method or accessor of the literal runs against
@@ -9830,6 +10074,7 @@ impl<'a> Lowerer<'a> {
                     // to data properties.
                     readonly: false,
                     spans,
+                    accessor_annotated,
                 })));
                 continue;
             }
@@ -9862,6 +10107,7 @@ impl<'a> Lowerer<'a> {
                     method_kind,
                     readonly: policy.readonly(),
                     spans,
+                    accessor_annotated: false,
                 })));
                 continue;
             }
@@ -9912,6 +10158,7 @@ impl<'a> Lowerer<'a> {
                 method_kind,
                 readonly: policy.readonly(),
                 spans,
+                accessor_annotated: false,
             })));
         }
         if structural {
@@ -10932,6 +11179,14 @@ impl<'a> Visit<'a> for AssignmentExtent {
     }
 }
 
+/// A top-level callee whose declaration set this file closes.
+#[derive(Debug, Clone, Copy)]
+struct ClosedCalleeKind {
+    /// Whether the declaration carries an explicit type — a function, or
+    /// an annotated variable.
+    explicit: bool,
+}
+
 /// What one declaration's explicit type says about the control-flow effect
 /// of a statement call through it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11897,6 +12152,17 @@ fn negate_guard(guard: SliceGuard) -> SliceGuard {
         } => SliceGuard::TypePredicate {
             subject,
             target,
+            negated: !negated,
+            call,
+        },
+        SliceGuard::CalleePredicate {
+            callee,
+            arguments,
+            negated,
+            call,
+        } => SliceGuard::CalleePredicate {
+            callee,
+            arguments,
             negated: !negated,
             call,
         },

@@ -6332,6 +6332,7 @@ fn collect_assignment_spans(
             }
             crate::flow_slice_content::SliceStatement::Gap(_)
             | crate::flow_slice_content::SliceStatement::Assertion { .. }
+            | crate::flow_slice_content::SliceStatement::CalleeEffect { .. }
             | crate::flow_slice_content::SliceStatement::Break { .. }
             | crate::flow_slice_content::SliceStatement::Continue { .. }
             | crate::flow_slice_content::SliceStatement::Throw
@@ -7002,6 +7003,39 @@ enum PredicateNarrowConsumption {
     Undecided,
 }
 
+/// What a control call's declared signatures decide about the narrowing
+/// its result controls.
+enum CalleeControlEffect {
+    /// No signature carries a type predicate: nothing narrows.
+    Inert,
+    /// The lone non-generic signature's `x is T` over the parameter at
+    /// `parameter`.
+    Predicate {
+        parameter: usize,
+        target: SemanticNodeId,
+    },
+    /// The signatures do not decide it here: several of them carry a
+    /// predicate (overload resolution picks one), a generic or `this`
+    /// predicate, a body-derived return (whose predicate the checker may
+    /// infer), or a callee that does not settle.
+    Undecided,
+}
+
+/// What a statement call's declared signatures decide about its effect.
+enum CalleeStatementEffect {
+    /// No signature asserts or returns `never`: no effect.
+    Inert,
+    /// The lone non-generic signature's `asserts x is T` (`None` for a
+    /// targetless `asserts x`) over the parameter at `parameter`.
+    Assertion {
+        parameter: usize,
+        target: Option<SemanticNodeId>,
+    },
+    /// Several asserting signatures, a generic or `this` assertion, a
+    /// declared `never` return, or a callee that does not settle.
+    Undecided,
+}
+
 fn slice_expr_is_exact_subject_read(
     expr: &crate::flow_slice_content::SliceExpr,
     subject: &crate::flow_slice_content::SliceNarrowSubject,
@@ -7087,6 +7121,7 @@ fn slice_statements_have_non_subject_return<'a>(
         SliceStatement::Gap(_)
         | SliceStatement::Assignment { .. }
         | SliceStatement::Assertion { .. }
+        | SliceStatement::CalleeEffect { .. }
         | SliceStatement::Break { .. }
         | SliceStatement::Continue { .. }
         | SliceStatement::CompoundAssignment { .. }
@@ -8511,12 +8546,96 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 },
             ))
         };
+        self.apply_accessor_annotation_precedence(entries, &mut surface_members);
+        self.apply_accessor_annotation_precedence(entries, &mut unwidened_members);
         let node = intern(surface_members);
         if unwidened_differs {
             let unwidened = intern(unwidened_members);
             self.unwidened_views.insert(node, unwidened);
         }
         Positional::Value(node)
+    }
+
+    /// The checker's `getTypeOfAccessors` precedence over one literal's
+    /// get / set pairs: the property's type is the getter's annotation,
+    /// else the setter's parameter annotation, else the getter's inferred
+    /// return. An accessor is read through its getter's return
+    /// ([`crate::semantic_query::KnownKeyAccessor::read_value`]), so an
+    /// unannotated getter paired with an annotated setter returns the
+    /// setter's parameter type (`{ get v() { return "a" }, set v(x: string
+    /// | number) {} }.v` is `string | number`).
+    fn apply_accessor_annotation_precedence(
+        &self,
+        entries: &[crate::flow_slice_content::SliceObjectEntry],
+        members: &mut [crate::semantic_query::SurfaceMember],
+    ) {
+        use verter_type_expr::ObjectMethodKind;
+        let annotated = |name: &str, kind: ObjectMethodKind| {
+            entries.iter().any(|entry| {
+                matches!(entry, crate::flow_slice_content::SliceObjectEntry::Member(member)
+                    if member.method_kind == Some(kind)
+                        && member.accessor_annotated
+                        && matches!(&member.key,
+                            crate::flow_slice_content::SliceObjectKey::Static(key) if key.as_ref() == name))
+            })
+        };
+        let graph = self.dispatch.graph();
+        let setter_type = |members: &[crate::semantic_query::SurfaceMember], name: &str| {
+            members.iter().find_map(|member| {
+                (member.method_kind == Some(ObjectMethodKind::Set)
+                    && member.key.as_string() == Some(name))
+                .then_some(member.value)
+                .and_then(|signature| match graph.node_data(signature).as_deref() {
+                    Some(SemanticNodeData::Signature { params, .. }) => {
+                        crate::semantic_query::split_this_receiver(params)
+                            .1
+                            .first()
+                            .map(|param| param.ty)
+                    }
+                    _ => None,
+                })
+            })
+        };
+        for index in 0..members.len() {
+            if members[index].method_kind != Some(ObjectMethodKind::Get) {
+                continue;
+            }
+            let Some(name) = members[index].key.as_string().map(str::to_owned) else {
+                continue;
+            };
+            if annotated(&name, ObjectMethodKind::Get) || !annotated(&name, ObjectMethodKind::Set) {
+                continue;
+            }
+            let Some(property) = setter_type(members, &name) else {
+                continue;
+            };
+            let rewritten = match graph.node_data(members[index].value).as_deref() {
+                Some(SemanticNodeData::Signature {
+                    kind,
+                    params,
+                    type_parameters,
+                    signature_span,
+                    return_type_span,
+                    occurrence,
+                    predicate,
+                    ..
+                }) => SemanticNodeData::Signature {
+                    kind: *kind,
+                    params: Arc::clone(params),
+                    return_type: property,
+                    type_parameters: Arc::clone(type_parameters),
+                    signature_span: *signature_span,
+                    return_type_span: *return_type_span,
+                    occurrence: occurrence.clone(),
+                    return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(
+                        property,
+                    ),
+                    predicate: *predicate,
+                },
+                _ => continue,
+            };
+            members[index].value = graph.intern_node(rewritten);
+        }
     }
 
     /// Evaluate `expr` CONTEXTUALLY typed by `contextual` — the checker's
@@ -12027,6 +12146,61 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 fact
             }
+            // A call through a callee's declared signatures: the same
+            // evidence discipline as a same-file predicate, and the typed
+            // gap where the signatures do not decide the narrowing.
+            SliceGuard::CalleePredicate {
+                callee,
+                arguments,
+                negated,
+                call,
+            } => match self.callee_control_effect(callee) {
+                CalleeControlEffect::Inert => {
+                    self.call_evidence.push(FlowCallEvidence {
+                        span: *call,
+                        relations_decided: true,
+                    });
+                    GuardNarrowing::Unchanged
+                }
+                CalleeControlEffect::Predicate { parameter, target } => {
+                    let Some(Some(subject)) = arguments.get(parameter) else {
+                        // The predicate talks about an argument that is
+                        // no narrowable reference: nothing narrows.
+                        self.call_evidence.push(FlowCallEvidence {
+                            span: *call,
+                            relations_decided: true,
+                        });
+                        return;
+                    };
+                    let (fact, consumption) = self.narrow_to_predicate_node_consuming(
+                        subject,
+                        target,
+                        *negated == positive,
+                    );
+                    match consumption {
+                        PredicateNarrowConsumption::NotConsumed => {}
+                        PredicateNarrowConsumption::Decided => {
+                            self.call_evidence.push(FlowCallEvidence {
+                                span: *call,
+                                relations_decided: true,
+                            });
+                        }
+                        PredicateNarrowConsumption::Undecided => {
+                            self.call_evidence.push(FlowCallEvidence {
+                                span: *call,
+                                relations_decided: false,
+                            });
+                        }
+                    }
+                    fact
+                }
+                CalleeControlEffect::Undecided => {
+                    self.record_degradation(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                        crate::semantic_query::FlowGap::GuardNarrowing,
+                    ));
+                    GuardNarrowing::Unchanged
+                }
+            },
             // A conjunction applies every fact at once; its NEGATION is
             // the disjunction of the negated facts (De Morgan — the same
             // symmetry the lowering's `!` uses). A later conjunct that
@@ -14341,6 +14515,152 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return (GuardNarrowing::Unchanged, Consumption::NotConsumed);
         }
         let target_node = self.lower_body_type(target.ty());
+        self.narrow_to_predicate_node_consuming(subject, target_node, negated)
+    }
+
+    /// The narrowing a control call through `callee` controls, read from the
+    /// callee's declared call signatures (`SignaturesOfType`), as the
+    /// checker reads it: only a type predicate narrows, so a callee none of
+    /// whose signatures declares one narrows nothing.
+    fn callee_control_effect(
+        &mut self,
+        callee: &crate::flow_slice_content::GatedType,
+    ) -> CalleeControlEffect {
+        let Some(signatures) = self.callee_call_signatures(callee) else {
+            return CalleeControlEffect::Undecided;
+        };
+        let graph = self.dispatch.graph();
+        let mut predicates = Vec::new();
+        for signature in &signatures {
+            match graph.node_data(*signature).as_deref() {
+                Some(SemanticNodeData::Signature {
+                    predicate,
+                    return_carrier,
+                    type_parameters,
+                    ..
+                }) => match predicate {
+                    Some(predicate) => predicates.push((*predicate, type_parameters.is_empty())),
+                    None if matches!(
+                        return_carrier,
+                        crate::semantic_query::SignatureReturnCarrier::Function(_)
+                    ) =>
+                    {
+                        return CalleeControlEffect::Undecided;
+                    }
+                    None => {}
+                },
+                _ => return CalleeControlEffect::Undecided,
+            }
+        }
+        match predicates.as_slice() {
+            [] => CalleeControlEffect::Inert,
+            [(
+                crate::semantic_query::SignaturePredicate {
+                    subject: crate::semantic_query::PredicateSubject::Parameter(parameter),
+                    asserts: false,
+                    ty: Some(target),
+                },
+                true,
+            )] if signatures.len() == 1 => CalleeControlEffect::Predicate {
+                parameter: *parameter as usize,
+                target: *target,
+            },
+            _ => CalleeControlEffect::Undecided,
+        }
+    }
+
+    /// The effect a statement call through `callee` has, read from the
+    /// callee's declared call signatures as the checker reads it
+    /// (`getEffectsSignature`): an assertion signature narrows its
+    /// argument, a declared `never` return ends the path, and a signature
+    /// whose return the body derives is neither (assertions and `never`
+    /// are never inferred for a call's effect).
+    fn callee_statement_effect(
+        &mut self,
+        callee: &crate::flow_slice_content::GatedType,
+    ) -> CalleeStatementEffect {
+        let Some(signatures) = self.callee_call_signatures(callee) else {
+            return CalleeStatementEffect::Undecided;
+        };
+        let graph = self.dispatch.graph();
+        let mut assertions = Vec::new();
+        for signature in &signatures {
+            match graph.node_data(*signature).as_deref() {
+                Some(SemanticNodeData::Signature {
+                    predicate,
+                    return_carrier,
+                    type_parameters,
+                    ..
+                }) => {
+                    if let Some(predicate) = predicate.filter(|predicate| predicate.asserts) {
+                        assertions.push((predicate, type_parameters.is_empty()));
+                    } else if let crate::semantic_query::SignatureReturnCarrier::Declared(ret) =
+                        return_carrier
+                    {
+                        if matches!(
+                            graph.node_data(*ret).as_deref(),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+                        ) {
+                            return CalleeStatementEffect::Undecided;
+                        }
+                    }
+                }
+                _ => return CalleeStatementEffect::Undecided,
+            }
+        }
+        match assertions.as_slice() {
+            [] => CalleeStatementEffect::Inert,
+            [(
+                crate::semantic_query::SignaturePredicate {
+                    subject: crate::semantic_query::PredicateSubject::Parameter(parameter),
+                    ty,
+                    ..
+                },
+                true,
+            )] if signatures.len() == 1 => CalleeStatementEffect::Assertion {
+                parameter: *parameter as usize,
+                target: *ty,
+            },
+            _ => CalleeStatementEffect::Undecided,
+        }
+    }
+
+    /// The call signatures of the callee a guard or effect statement names,
+    /// lowered in owner scope; `None` when they do not settle.
+    fn callee_call_signatures(
+        &mut self,
+        callee: &crate::flow_slice_content::GatedType,
+    ) -> Option<Vec<SemanticNodeId>> {
+        if callee
+            .shadowed()
+            .iter()
+            .any(|name| self.owner_scope_answers_name(name))
+        {
+            return None;
+        }
+        let node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+            self.canonical,
+            self.owner,
+            callee.ty(),
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )?;
+        match self
+            .dispatch
+            .shared_signature_nodes(node, crate::semantic_query::SignatureKind::Call)
+        {
+            super::signature_discovery::SharedSignatureNodes::Nodes(signatures) => Some(signatures),
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => None,
+        }
+    }
+
+    /// [`Self::narrow_to_predicate_target_consuming`] over a lowered target.
+    fn narrow_to_predicate_node_consuming(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        target_node: SemanticNodeId,
+        negated: bool,
+    ) -> (GuardNarrowing, PredicateNarrowConsumption) {
+        use PredicateNarrowConsumption as Consumption;
         if self.subject_current_node(subject).is_none() {
             return (GuardNarrowing::Unchanged, Consumption::NotConsumed);
         }
@@ -16458,6 +16778,36 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             self.push_narrowing(&subject, node);
                         }
                         GuardNarrowing::Unchanged => {}
+                    }
+                }
+                crate::flow_slice_content::SliceStatement::CalleeEffect { callee, arguments } => {
+                    // The call throws before any effect it asserts.
+                    self.capture_throw_point();
+                    match self.callee_statement_effect(callee) {
+                        CalleeStatementEffect::Inert => {}
+                        CalleeStatementEffect::Assertion { parameter, target } => {
+                            if let Some(Some(subject)) = arguments.get(parameter) {
+                                let fact = match target {
+                                    Some(target) => {
+                                        self.narrow_to_predicate_node_consuming(
+                                            subject, target, false,
+                                        )
+                                        .0
+                                    }
+                                    None => self.narrow_truthy(subject, false),
+                                };
+                                if let GuardNarrowing::Narrowed(subject, node) = fact {
+                                    self.push_narrowing(&subject, node);
+                                }
+                            }
+                        }
+                        CalleeStatementEffect::Undecided => {
+                            self.record_degradation(
+                                crate::semantic_query::FlowReturnDegradation::FlowGap(
+                                    crate::semantic_query::FlowGap::GuardNarrowing,
+                                ),
+                            );
+                        }
                     }
                 }
                 crate::flow_slice_content::SliceStatement::TransparentLoop => {}

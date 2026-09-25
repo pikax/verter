@@ -7932,10 +7932,51 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
+        // An accessor is ONE property on either side — its getter's return,
+        // else its setter's parameter — related once per key, never as the
+        // accessor functions.
+        let graph = self.graph();
+        let mut accessor_keys: Vec<crate::semantic_query::PropertyKey> = Vec::new();
         for t_prop in closed_target.complete_members() {
             let Some(target_key) = t_prop.key.cloned_known() else {
                 return RelationResult::Unknown;
             };
+            let target_property;
+            let t_prop = match t_prop.method_kind {
+                Some(
+                    verter_type_expr::ObjectMethodKind::Get
+                    | verter_type_expr::ObjectMethodKind::Set,
+                ) => {
+                    if accessor_keys.contains(&target_key) {
+                        continue;
+                    }
+                    accessor_keys.push(target_key.clone());
+                    match target
+                        .project_known_key_accessor(&target_key)
+                        .and_then(|accessor| accessor.property_member(graph))
+                    {
+                        Some(property) => {
+                            target_property = property;
+                            &target_property
+                        }
+                        None => return RelationResult::Unknown,
+                    }
+                }
+                _ => t_prop,
+            };
+            if let Some(accessor) = source.project_known_key_accessor(&target_key) {
+                let prop_result = match accessor.property_member(graph) {
+                    Some(source_member) => {
+                        self.relate_property_pair(&source_member, t_prop, bindings)
+                    }
+                    None => RelationResult::Unknown,
+                };
+                acc = result_and(acc, prop_result);
+                if matches!(acc, RelationResult::NotAssignable) {
+                    return RelationResult::NotAssignable;
+                }
+                continue;
+            }
             let prop_result = match source.project_known_key(&target_key) {
                 crate::semantic_query::SurfaceKeyProjection::Exact(source_member) => {
                     self.relate_property_pair(source_member, t_prop, bindings)
