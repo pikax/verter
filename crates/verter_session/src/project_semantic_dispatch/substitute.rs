@@ -264,6 +264,104 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
     }
 
+    /// Bind a function's OWN clause in its body-derived return by
+    /// declaration order, exactly as an instantiated frame's binder
+    /// environment binds it: every binder the flow lane interned for
+    /// `names[i]` in `canonical`'s `owner` scope becomes `args[i]`.
+    ///
+    /// The flow lane interns a nested generic signature's binder in the
+    /// same file scope, so a returned signature re-declaring one of
+    /// `names` shares that binder's node while meaning its own parameter;
+    /// such a return is ambiguous by name and answers `None`.
+    pub(super) fn bind_flow_return_own_clause(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        names: &[Arc<str>],
+        args: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        let mut binders: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let data = self.graph().node_data(current)?;
+            match data.as_ref() {
+                SemanticNodeData::TypeParam {
+                    decl,
+                    param_index: 0,
+                    display_name,
+                    ..
+                } => {
+                    if decl.canonical_id.as_ref() == canonical
+                        && decl.owner == owner
+                        && decl.decl_name == *display_name
+                    {
+                        if let Some(ordinal) = names.iter().position(|name| name == display_name) {
+                            binders.push((current, *args.get(ordinal)?));
+                        }
+                    }
+                    continue;
+                }
+                SemanticNodeData::Signature {
+                    type_parameters, ..
+                } if type_parameters
+                    .iter()
+                    .any(|declared| names.contains(&declared.name)) =>
+                {
+                    return None;
+                }
+                _ => {}
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        // One binder at a time is simultaneous only when no argument
+        // mentions a binder being replaced (a same-file `g<B, A>` read
+        // from `f<A, B>` would otherwise collapse both onto one).
+        let replaced: Vec<SemanticNodeId> = binders
+            .iter()
+            .filter(|(binder, argument)| binder != argument)
+            .map(|(binder, _)| *binder)
+            .collect();
+        if binders
+            .iter()
+            .any(|(binder, argument)| binder != argument && self.mentions_any(*argument, &replaced))
+        {
+            return None;
+        }
+        Some(
+            binders
+                .into_iter()
+                .fold(node, |result, (binder, argument)| {
+                    self.substitute_semantic_type_param(result, binder, argument)
+                }),
+        )
+    }
+
+    /// Whether `node` is, or reaches through its children, any of `targets`.
+    fn mentions_any(&self, node: SemanticNodeId, targets: &[SemanticNodeId]) -> bool {
+        if targets.is_empty() {
+            return false;
+        }
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if targets.contains(&current) {
+                return true;
+            }
+            if !visited.insert(current) {
+                continue;
+            }
+            if let Some(data) = self.graph().node_data(current) {
+                let _ = data.for_each_child(|child| stack.push(child));
+            }
+        }
+        false
+    }
+
     /// Apply a stored positional substitution frame to a demanded winner
     /// (or to an open branch that a consumer has already selected). Empty
     /// frames are identity.

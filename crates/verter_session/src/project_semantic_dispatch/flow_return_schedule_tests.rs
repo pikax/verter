@@ -475,6 +475,170 @@ fn a_chain_across_modules_needs_no_more_query_depth_than_a_short_one() {
     }
 }
 
+/// The witness of a generic module chain `levels` modules long, in a fresh
+/// host under the production caps: its outcome and the connected work its
+/// demand charged.
+fn module_chain_work(levels: usize) -> (Outcome, usize) {
+    let files = module_chain(levels, true);
+    let sources: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect();
+    let host = host_with(&sources);
+    let entry = files.last().expect("a chain has a last module").0.as_str();
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch, entry, "witness");
+        let outcome = eval_key_on(&host, dispatch, key);
+        (outcome, dispatch.connected_demand.work_used_for_tests())
+    })
+}
+
+/// Every module added to a generic chain costs the same connected work.
+///
+/// Each module's `c(k)` instantiates its callee over its OWN binder, a
+/// type parameter of another file, so no two levels share an
+/// instantiation. The instantiated return is read off the callee's
+/// uninstantiated return under the instantiation, as the checker
+/// instantiates a signature's return type, so each function's body is
+/// evaluated once, generically, whatever instantiates it. Re-evaluating
+/// the body under each instantiation instead would re-instantiate the whole
+/// chain beneath every level, and the work would grow with the square of
+/// the chain (measured with the read disabled: 25 / 50 / 100 / 200 modules cost
+/// 4322 / 16772 / 66047 / 262097 units, against 397 / 797 / 1597 / 3197).
+///
+/// Oracle: as for [`a_generic_chain_across_201_modules_answers_without_a_refusal`].
+#[test]
+fn a_generic_chain_across_modules_costs_the_same_work_per_module() {
+    on_stack(8 << 20, || {
+        let (short, _) = module_chain_work(4);
+        assert_tagged_value(&short, &[number(), string()]);
+        let (nine, work_nine) = module_chain_work(9);
+        let (ten, work_ten) = module_chain_work(10);
+        let (eleven, work_eleven) = module_chain_work(11);
+        for (levels, outcome) in [(9, nine), (10, ten), (11, eleven)] {
+            assert_eq!(
+                outcome, short,
+                "a {levels}-module chain answers exactly like a four-module one"
+            );
+        }
+        assert_eq!(
+            work_eleven - work_ten,
+            work_ten - work_nine,
+            "every added module must cost the same connected work \
+             ({work_nine} / {work_ten} / {work_eleven} at 9 / 10 / 11 modules)"
+        );
+        let per_module = work_eleven - work_ten;
+        let (_, work_32) = module_chain_work(32);
+        let (_, work_64) = module_chain_work(64);
+        let (_, work_128) = module_chain_work(128);
+        assert_eq!(
+            (work_64 - work_32, work_128 - work_64),
+            (32 * per_module, 64 * per_module),
+            "every added module must cost the same connected work \
+             ({work_32} / {work_64} / {work_128} at 32 / 64 / 128 modules)"
+        );
+    });
+}
+
+/// A generic chain across 201 modules answers the checker's value, clean
+/// and admitted warm, under the production work budget.
+///
+/// Oracle (the pinned TypeScript 7.0.2, measured over the same 201
+/// modules; `noImplicitAny` does not apply, every parameter is annotated):
+///
+/// | `strictNullChecks` | `noImplicitAny` | `witness` |
+/// |---|---|---|
+/// | on | on / off | `{ v: string \| number; tag: "c"; }` |
+/// | off | on / off | `{ v: string \| number; tag: "c"; }` |
+///
+/// and every `c(k)` is `<T>(x: T) => { v: T; tag: "c"; }`.
+#[test]
+fn a_generic_chain_across_201_modules_answers_without_a_refusal() {
+    let (outcome, _) = on_stack(8 << 20, || module_chain_work(201));
+    assert_tagged_value(&outcome, &[number(), string()]);
+}
+
+/// The witness of a generic module chain `levels` modules long, before and
+/// after its middle module `m(levels / 2)` is edited to wrap its callee's
+/// return: `{ inner: c(k-1)(x), depth: k as const }`.
+fn module_chain_across_a_middle_edit(levels: usize) -> (Outcome, Outcome) {
+    let files = module_chain(levels, true);
+    let sources: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect();
+    let host = host_with(&sources);
+    let entry = files.last().expect("a chain has a last module").0.clone();
+    let witness = |host: &Arc<VerterHost>| {
+        with_dispatch(host, |dispatch| {
+            eval_key_on(host, dispatch, key_of(dispatch, &entry, "witness"))
+        })
+    };
+    let before = witness(&host);
+    let level = levels / 2;
+    let previous = level - 1;
+    let middle = &files[level].0;
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(middle.clone()),
+        input_id: middle.clone(),
+        source: Arc::from(format!(
+            "import {{ c{previous} }} from \"./m{previous}\";\n\
+             export function c{level}<T>(x: T) {{ return {{ inner: c{previous}(x), depth: {level} as const }}; }}\n"
+        )),
+        file_language: lang(middle),
+        aliases: Vec::new(),
+    });
+    (before, witness(&host))
+}
+
+/// An edit to a module in the middle of a warm generic chain reaches the
+/// witness at its top: every instantiation read off an uninstantiated
+/// return carries that return's reads, and the functions above the edit —
+/// whose warm answers no longer validate — are re-evaluated bottom-up by
+/// the callee schedule, not one nested demand per invalidated level (which
+/// the query-depth guard refused past a dozen invalidated modules).
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike, over the same 201 modules): with
+/// `m100` edited to
+/// `export function c100<T>(x: T) { return { inner: c99(x), depth: 100 as const }; }`,
+/// `witness` is `{ inner: { v: string | number; tag: "c"; }; depth: 100; }`.
+#[test]
+fn an_edit_in_the_middle_of_a_module_chain_reaches_the_top() {
+    let (before, after) = on_stack(8 << 20, || module_chain_across_a_middle_edit(201));
+    assert_tagged_value(&before, &[number(), string()]);
+    // Admitted beside the pre-edit candidate, which no longer validates.
+    let Outcome::Value {
+        ty: TypeExpr::Object(object),
+        degradation: None,
+        candidates: 2,
+    } = &after
+    else {
+        panic!("expected a clean, admitted object after the edit: {after:?}");
+    };
+    let property = |name: &str| {
+        object.properties.iter().find_map(|member| match member {
+            ObjectMember::Property(property) if property.key == name.into() => Some(&property.ty),
+            _ => None,
+        })
+    };
+    assert_eq!(object.properties.len(), 2, "{after:?}");
+    assert_eq!(
+        property("depth"),
+        Some(&TypeExpr::Literal(LiteralValue::Number(100.0))),
+        "{after:?}"
+    );
+    let inner = property("inner").unwrap_or_else(|| panic!("no `inner` member: {after:?}"));
+    assert_tagged_value(
+        &Outcome::Value {
+            ty: inner.clone(),
+            degradation: None,
+            candidates: 1,
+        },
+        &[number(), string()],
+    );
+}
+
 /// A new instantiation of a chain whose uninstantiated answers are already
 /// warm — a second call site after the first request warmed the chain —
 /// runs on the short chain's stack too.
@@ -510,29 +674,23 @@ fn a_new_instantiation_of_a_warm_chain_runs_on_the_short_chains_native_stack() {
     assert_tagged_value(&second, &[TypeExpr::Primitive(PrimitiveName::Boolean)]);
 }
 
-/// The second request's answer for `second` over a warm chain of `levels`
-/// local-arrow levels: whether it answered, its partial rails, and how many
-/// warm candidates it admitted — with the first request's `witness`.
-fn warm_local_chain_second(levels: usize) -> (Outcome, bool, bool, PartialReasonSet, usize) {
+/// The witness of a same-file chain of `levels` non-generic direct calls,
+/// evaluated with the callee schedule off, so every level's callee is
+/// evaluated where the call sits: whether it answered, whether it is
+/// partial and never admitted, its partial rails, and how many warm
+/// candidates it admitted.
+fn unscheduled_plain_chain(levels: usize) -> (bool, bool, PartialReasonSet, usize) {
     on_stack(8 << 20, move || {
-        let mut source = local_arrow_chain(levels);
-        source.push_str(&format!(
-            "export function second(v: boolean) {{ return l{}(v); }}\n",
-            levels - 1
-        ));
-        let host = host_with(&[(PATH, source.as_str())]);
-        let warm = with_dispatch(&host, |dispatch| {
-            eval_key_on(&host, dispatch, key_of(dispatch, PATH, "witness"))
-        });
+        let _recursive = disable_flow_return_schedule_for_tests();
+        let host = host_with(&[(PATH, plain_chain(levels).as_str())]);
         with_dispatch(&host, |dispatch| {
-            let key = key_of(dispatch, PATH, "second");
+            let key = key_of(dispatch, PATH, "witness");
             let read = dispatch
                 .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
             let candidates = dispatch
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
             (
-                warm,
                 matches!(read.value, QueryResult::Value(_)),
                 read.result_is_partial && read.cache_suppress,
                 read.partial_reasons,
@@ -547,26 +705,24 @@ fn warm_local_chain_second(levels: usize) -> (Outcome, bool, bool, PartialReason
 /// nest past the connected demand's depth bound is refused with
 /// `CONNECTED_QUERY_DEPTH_LIMIT`, partial and never admitted.
 ///
-/// The witness is a new instantiation of a warm chain whose every level
-/// calls the next through a local arrow function: the schedule reads a
-/// forwarded instantiation only through a direct call, so each level nests
-/// one evaluation natively. Below the bound (16 levels) it answers; past
-/// it (256 levels, which without the bound overflows the 8 MiB production
-/// worker stack in an unoptimized build) it is refused, typed.
+/// The witness is a same-file chain of direct calls evaluated with the
+/// schedule off: each level nests its callee's evaluation natively, with no
+/// query boundary between them. Below the bound (16 levels) it answers;
+/// past it (256 levels, which without the bound overflows the 8 MiB
+/// production worker stack in an unoptimized build) it is refused, typed.
 ///
-/// Oracle (the pinned TypeScript 7.0.2, `--strict`): `second(v: boolean)`
-/// is `{ v: boolean; tag: "c"; }` at both lengths (measured at 64), so the
+/// Oracle (the pinned TypeScript 7.0.2, `--strict`): `witness` is
+/// `{ v: number; tag: "c"; }` at both lengths (see
+/// [`chains_through_other_call_shapes_consume_no_depth_per_level`]), so the
 /// refusal is a typed gap, not an answer.
 #[test]
 fn an_unpredicted_deep_chain_ends_in_the_typed_depth_refusal() {
-    let (warm, answered, partial, reasons, candidates) = warm_local_chain_second(16);
-    assert_tagged_value(&warm, &[number(), string()]);
+    let (answered, partial, reasons, candidates) = unscheduled_plain_chain(16);
     assert!(
         answered && !partial && candidates == 1,
         "a 16-level chain stays within the bound and answers: {reasons:?}"
     );
-    let (warm, answered, partial, reasons, candidates) = warm_local_chain_second(256);
-    assert_tagged_value(&warm, &[number(), string()]);
+    let (answered, partial, reasons, candidates) = unscheduled_plain_chain(256);
     assert!(
         !answered && partial && candidates == 0,
         "a 256-level unpredicted chain ends typed, partial and never admitted \
@@ -576,4 +732,34 @@ fn an_unpredicted_deep_chain_ends_in_the_typed_depth_refusal() {
         reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT),
         "the refusal is the depth rail's: {reasons:?}"
     );
+}
+
+/// A new instantiation of a warm chain through local arrow functions is
+/// read off the chain's uninstantiated return: no level is evaluated again
+/// under the new instantiation, so the 256-level chain answers, clean and
+/// admitted, on a 512 KiB stack.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike, measured at 256 levels):
+/// `second(v: boolean)` is `{ v: boolean; tag: "c"; }`.
+#[test]
+fn a_new_instantiation_of_a_warm_local_arrow_chain_is_read_off_its_uninstantiated_return() {
+    let mut source = local_arrow_chain(256);
+    source.push_str("export function second(v: boolean) { return l255(v); }\n");
+    let host = host_with(&[(PATH, source.as_str())]);
+    let warm = {
+        let host = Arc::clone(&host);
+        on_stack(8 << 20, move || {
+            with_dispatch(&host, |dispatch| {
+                eval_key_on(&host, dispatch, key_of(dispatch, PATH, "witness"))
+            })
+        })
+    };
+    assert_tagged_value(&warm, &[number(), string()]);
+    let second = on_stack(512 << 10, move || {
+        with_dispatch(&host, |dispatch| {
+            eval_key_on(&host, dispatch, key_of(dispatch, PATH, "second"))
+        })
+    });
+    assert_tagged_value(&second, &[TypeExpr::Primitive(PrimitiveName::Boolean)]);
 }

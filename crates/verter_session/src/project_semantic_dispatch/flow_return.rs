@@ -1659,7 +1659,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    transaction as a proven inline SCC root whose reads were recorded
     ///    clean; they are replayed into the scopes live now (see
     ///    [`Self::reusable_completed_flow_member`]).
-    /// 4. **Cold compute** — the machinery ROOT goes through the family
+    /// 4. **Instantiation transfer** — an instantiated key whose
+    ///    uninstantiated answer is already in hand (warm, or reusable on
+    ///    this transaction) is that answer under the key's substitution,
+    ///    never a re-evaluation of the body (see
+    ///    [`Self::instantiated_from_uninstantiated`]).
+    /// 5. **Cold compute** — the machinery ROOT goes through the family
     ///    singleflight (`execute(FlowReturn)` → `build_flow_return`); a
     ///    nested flow evaluation computes INLINE on the transaction (its
     ///    publish is batched at its SCC's close and drained by the root).
@@ -1700,7 +1705,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(result) = self.reusable_completed_flow_member(&key) {
             return FlowReturnStep::Complete(result);
         }
-        // (4) Cold compute. Root versus inline is decided by the generic
+        // (4) Instantiation transfer.
+        if let Some(result) = self.instantiated_from_uninstantiated(&key) {
+            return FlowReturnStep::Complete(result);
+        }
+        // (5) Cold compute. Root versus inline is decided by the generic
         // obligation transaction: any open frame — of any domain — makes
         // this evaluation inline.
         if self.dispatch_txn.borrow().obligations.decides_root() {
@@ -1749,6 +1758,92 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .set(self.canonical_evidence_epoch.get().wrapping_add(1));
         }
         Some(value)
+    }
+
+    /// The return of an instantiated `key` read off its function's
+    /// uninstantiated return, when that is already answered — a validated
+    /// warm candidate or a reusable completed member of this transaction —
+    /// and clean: the uninstantiated value under `key`'s substitution,
+    /// closed exactly as a frame's outgoing value is.
+    ///
+    /// This is the checker's rule: the return type of an instantiated
+    /// signature is its target's return type under the instantiation's
+    /// mapper; the body is inferred once, over the function's own binders.
+    /// It is also what keeps a generic chain across modules linear: every
+    /// level instantiates its callee over its OWN module's binder, so a
+    /// re-evaluated instantiation would re-instantiate the whole chain beneath
+    /// it, level after level.
+    ///
+    /// The frame's own clause is bound by declaration order, exactly as
+    /// the instantiated frame's binder environment binds it
+    /// ([`Self::bind_flow_return_own_clause`]), then the key's
+    /// substitution applies as it does to an evaluated frame's outgoing
+    /// value.
+    ///
+    /// Nothing new is stored: the value is recomputed from the
+    /// uninstantiated answer through the store-owned substitution memo on
+    /// every demand, and reading that answer records its facts (the warm
+    /// read's validation, or the member's replayed reads) in the demanding
+    /// scopes, so an edit anywhere beneath the function reaches every
+    /// instantiation read from it. `None` when the key is uninstantiated;
+    /// when its uninstantiated return is unanswered, in flight or degraded;
+    /// or when the return cannot be bound by name (a nested clause
+    /// re-declaring one of the function's binder names): the body is then
+    /// evaluated under the instantiation.
+    fn instantiated_from_uninstantiated(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
+        if schedule::is_uninstantiated(key) {
+            return None;
+        }
+        let uninstantiated = schedule::uninstantiated(key);
+        let result = match self
+            .graph()
+            .get_flow_return_result(self.ctx, &uninstantiated)
+        {
+            Some(result) => result,
+            None => self.reusable_completed_flow_member(&uninstantiated)?,
+        };
+        if result.degradation().is_some() {
+            return None;
+        }
+        let names = self.own_type_parameter_names(key)?;
+        if names.len() != key.normalized_type_args.len() {
+            return None;
+        }
+        let slot = &key.function.declaration_slot;
+        let bind = |node| {
+            self.bind_flow_return_own_clause(
+                node,
+                slot.defining_canonical.as_ref(),
+                slot.owner,
+                &names,
+                &key.normalized_type_args,
+            )
+        };
+        let return_type = bind(result.return_type())?;
+        let predicate = match result.inferred_predicate() {
+            Some(predicate) => {
+                let target = match predicate.ty {
+                    Some(target) => Some(bind(target)?),
+                    None => None,
+                };
+                Some(crate::semantic_query::SignaturePredicate {
+                    ty: target,
+                    ..predicate
+                })
+            }
+            None => None,
+        };
+        let result = if return_type == result.return_type() {
+            result
+        } else {
+            result.with_return_type(self.graph().as_ref(), return_type)
+        };
+        let result = match predicate {
+            Some(predicate) => result.with_inferred_predicate(predicate),
+            None => result,
+        };
+        let result = self.apply_frame_key_substitution(key, result);
+        Some(self.close_flow_result_pre_seal(result, key.context.policy.nullability))
     }
 
     /// The machinery ROOT path: the full family singleflight. After a

@@ -2142,6 +2142,67 @@ fn a_reused_callee_still_invalidates_its_consumers_on_edit() {
     );
 }
 
+/// A generic function returned from a generic function keeps its own
+/// binder when the outer function is instantiated, even when both clauses
+/// name it `T`: the flow lane interns both binders in the same file scope,
+/// so an instantiated return is not read off the uninstantiated one by
+/// binder name there, and the body is evaluated under the instantiation.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike): `w` is
+/// `{ v: boolean; id: <T>(z: T) => T; }`.
+#[test]
+fn an_instantiated_return_keeps_a_nested_clause_of_the_same_name() {
+    const PATH: &str = "/ws/cov/transfer/nested_clause.ts";
+    let host = host_with(&[(
+        PATH,
+        "function g<T>(x: T) { return { v: x, id: <T,>(z: T) => z }; }\n\
+         export function w(v: boolean) { return g(v); }\n",
+    )]);
+    let value = value_of(&host, PATH, "w");
+    assert_eq!(projected_member(&value, "v"), &boolean(), "{value:?}");
+    let TypeExpr::Function(id) = projected_member(&value, "id") else {
+        panic!("`id` is a function: {value:?}");
+    };
+    let binder = |ty: &TypeExpr| matches!(ty, TypeExpr::TypeParameter(param) if param.name == "T");
+    assert!(
+        id.parameters.len() == 1
+            && binder(&id.parameters[0].ty)
+            && id.return_type.as_deref().is_some_and(binder),
+        "`id` keeps its own `T`: {value:?}"
+    );
+}
+
+/// A same-file call that swaps the caller's binders into the callee's
+/// clause binds both at once: `g(b, a)` inside `f<A, B>` instantiates
+/// `g<A, B>` at `[B, A]`, and in one file the flow lane interns `f`'s and
+/// `g`'s binders of one name as one node, so binding them one after the
+/// other would collapse both onto one.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike): `f` is `<A, B>(a: A, b: B) => { a: B;
+/// b: A; }` and `w` is `{ a: string; b: number; }`.
+#[test]
+fn an_instantiation_swapping_same_file_binders_binds_them_at_once() {
+    const PATH: &str = "/ws/cov/transfer/swap.ts";
+    let host = host_with(&[(
+        PATH,
+        "function g<A, B>(a: A, b: B) { return { a, b }; }\n\
+         export function f<A, B>(a: A, b: B) { return g(b, a); }\n\
+         export function w(n: number, s: string) { return f(n, s); }\n",
+    )]);
+    let generic = value_of(&host, PATH, "f");
+    let binder = |ty: &TypeExpr, name: &str| matches!(ty, TypeExpr::TypeParameter(param) if param.name == name);
+    assert!(
+        binder(projected_member(&generic, "a"), "B")
+            && binder(projected_member(&generic, "b"), "A"),
+        "{generic:?}"
+    );
+    let value = value_of(&host, PATH, "w");
+    assert_eq!(projected_member(&value, "a"), &string(), "{value:?}");
+    assert_eq!(projected_member(&value, "b"), &number(), "{value:?}");
+}
+
 /// The callee schedule's chains: deep, on a small stack, under a reduced
 /// budget, through other call shapes, and around recursive components.
 #[path = "flow_return_schedule_tests.rs"]
