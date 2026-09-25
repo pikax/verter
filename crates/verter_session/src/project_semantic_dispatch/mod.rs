@@ -4265,6 +4265,8 @@ mod truthiness_domain_tests;
 #[cfg(test)]
 mod tuple_length_and_apparent_member_tests;
 #[cfg(test)]
+mod type_syntax_depth_tests;
+#[cfg(test)]
 mod unique_symbol_widening_tests;
 #[cfg(test)]
 mod unread_marker_relation_tests;

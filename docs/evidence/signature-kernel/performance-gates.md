@@ -230,3 +230,36 @@ Recorded plainly so no reader mistakes absence for a pass:
   `schedule::a_1000_level_type_position_chain_answers`). An application
   over a type parameter stays the deferred carrier, as the checker defers
   it (`schedule::a_return_type_in_a_body_resolves_unless_its_check_type_is_generic`).
+
+* **Type syntax lowers from an explicit stack; the relation still recurses
+  per structural level.** `lower_type_expr_with_infer_factory`
+  (`project_semantic_dispatch/lower.rs`) lowers the positions whose child
+  shares the node's scope, binder environment and infer factory — a named
+  reference's arguments (planned through `plan_bare_ref_head`, finished
+  through its owned continuation once every argument is lowered), union
+  and intersection arms, array and tuple elements, template holes, a
+  parenthesised type, a `keyof` operand, an indexed access's object and
+  index, and an object type's property values and index signatures — from
+  an explicit stack of frames, in the order and under the contexts the
+  recursive descent used, so interning, queries and substitutions happen
+  in the same sequence. Each such position recursed natively before, about
+  24 KiB of stack per level in an unoptimized build: an 80-deep
+  `Box<Box<…<1>>>` overflowed the 2 MiB default test stack, and a 400-long
+  `R['v']…` chain the 8 MiB worker stack. Both answer now
+  (`type_syntax_depth_tests.rs` →
+  `an_80_deep_nested_generic_application_reads_on_the_default_stack`, the
+  checker's `1` for 80 member reads and for the application as either
+  side of a relation, and
+  `a_1000_long_indexed_access_chain_lowers_on_the_default_stack`, the
+  checker's `R`). A conditional, mapped, function, `typeof` or import type
+  still costs one native level per nesting. What still recurses per
+  structural level is the relation engine: relating two nested
+  applications (`[D] extends [Box<…<number>>]`) opens one inline relation
+  frame per level (`execute_relate_inline` → `reduce_relation` → …
+  `relate_property_pair` → `relate_member`, about 16 KiB per level
+  unoptimized). It answers 85 levels on the 2 MiB default test stack and
+  overflows it from 90; on an 8 MiB thread it answers 400 levels and
+  overflows at 500, where at 600 the oxc parser's own recursion over the
+  source's type arguments overflows the IO thread first. The checker
+  bounds the same recursion: from 100 nested levels it reports TS2321
+  (excessive stack depth comparing types) and the relation is false.
