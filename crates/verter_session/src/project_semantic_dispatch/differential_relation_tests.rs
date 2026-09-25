@@ -257,25 +257,21 @@ fn union_types_relate_as_the_checker_relates_them() {
 
 /// An object source whose discriminant property is a union relates to a target
 /// union by splitting on the discriminant (`typeRelatedToDiscriminatedType`):
-/// each combination of discriminant values finds a target member.
-/// Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[{ kind: "cat" | "dog" }] extends [{ kind: "cat" } | { kind: "dog" }] ? 1
-///   : 2`: the checker answers `1`; the lane measured `2`.
-/// - `[{ kind: "circle" | "square"; r: number; s: number }] extends [Shape] ? 1
-///   : 2`: the checker answers `1`; the lane measured `2`.
-/// - `[{ a: 1 | 2 }] extends [{ a: 1 } | { a: 2 }] ? 1 : 2`: the checker
-///   answers `1`; the lane measured `2`.
-/// - `[{ a: 1 | 2; b: string }] extends [{ a: 1; b: string } | { a: 2; b:
-///   string }] ? 1 : 2`: the checker answers `1`; the lane measured `2`.
-/// - `[{ a: boolean }] extends [{ a: true } | { a: false }] ? 1 : 2`: the
-///   checker answers `1`; the lane measured `2`.
+/// each combination of discriminant values finds a target member, and a
+/// combination no member takes fails the whole (TypeScript 7.0.2, all four
+/// settings alike).
 #[test]
-#[ignore = "an object source with a union discriminant relates to a discriminated target union"]
-fn wrong_clean_a_discriminated_object_source_relates_to_a_target_union() {
+fn a_discriminated_object_source_relates_as_the_checker_splits_it() {
     let matrix = Matrix::new(UNIONS);
     let failures = matrix.types(&[
+        (
+            "[{ kind: \"cat\" | \"dog\" | \"fish\" }] extends [{ kind: \"cat\" } | { kind: \"dog\" }] ? 1 : 2",
+            "2",
+        ),
+        (
+            "[{ a: 1 | 2; b: string }] extends [{ a: 1; b: string } | { a: 2; b: number }] ? 1 : 2",
+            "2",
+        ),
         (
             "[{ kind: \"cat\" | \"dog\" }] extends [{ kind: \"cat\" } | { kind: \"dog\" }] ? 1 : 2",
             "1",

@@ -3656,6 +3656,145 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.relate_pair_alternatives_with_freshness(alternatives, bindings, position, true)
     }
 
+    /// The checker's `typeRelatedToDiscriminatedType`: an object `source`
+    /// whose discriminant properties — those a member of the target union
+    /// `members` declares with a unit type — hold unions of unit types is
+    /// related once per combination of those units, each combination
+    /// narrowing the source's discriminants to it (`{ kind: "cat" | "dog" }`
+    /// fits `{ kind: "cat" } | { kind: "dog" }`). At most 25 combinations
+    /// are generated, as the checker's limit. `None` when the source is not
+    /// an object, declares no such discriminant, or has too many
+    /// combinations.
+    fn relate_discriminated_object_source(
+        &self,
+        source: SemanticNodeId,
+        members: &[SemanticNodeId],
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        const MAX_DISCRIMINATED_COMBINATIONS: usize = 25;
+        let graph = self.graph();
+        let source_view = match graph.node_data(source)?.as_ref() {
+            SemanticNodeData::Object(view) => view.clone(),
+            _ => return None,
+        };
+        let transit = ProjectionReductionContext::structural_transit_with_mode(
+            crate::semantic_query::ProjectionMode::Navigate,
+        );
+        let target_views: Vec<SurfaceView> = members
+            .iter()
+            .filter_map(|member| {
+                match self.normalize_node_for_structural_fact_demand(*member, transit) {
+                    super::evaluate::StructuralFactDemandOutcome::Complete(node) => {
+                        match graph.node_data(node)?.as_ref() {
+                            SemanticNodeData::Object(view) => Some(view.clone()),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        let is_unit = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(
+                    SemanticNodeData::Literal(_)
+                        | SemanticNodeData::EnumLiteral(_)
+                        | SemanticNodeData::Primitive(
+                            PrimitiveKind::Null | PrimitiveKind::Undefined
+                        )
+                )
+            )
+        };
+        // The unit constituents of a discriminant value: its literals, or
+        // `boolean` as `true | false`.
+        let units_of = |node: SemanticNodeId| -> Option<Vec<SemanticNodeId>> {
+            let literal = |value: bool| {
+                graph.intern_node(SemanticNodeData::Literal(LiteralValue::Boolean(value)))
+            };
+            let arms: Vec<SemanticNodeId> = match graph.node_data(node)?.as_ref() {
+                SemanticNodeData::Union(arms) => arms.iter().copied().collect(),
+                _ => vec![node],
+            };
+            let mut units = Vec::new();
+            for arm in arms {
+                if matches!(
+                    graph.node_data(arm).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+                ) {
+                    units.push(literal(true));
+                    units.push(literal(false));
+                } else if is_unit(arm) {
+                    units.push(arm);
+                } else {
+                    return None;
+                }
+            }
+            Some(units)
+        };
+        let mut discriminants: Vec<(usize, Vec<SemanticNodeId>)> = Vec::new();
+        for (index, member) in source_view.positive_members().iter().enumerate() {
+            if member.optional || member.method_kind.is_some() {
+                continue;
+            }
+            let discriminant = target_views.iter().any(|view| {
+                view.positive_members().iter().any(|target| {
+                    target.key == member.key
+                        && target.method_kind.is_none()
+                        && units_of(target.value).is_some()
+                })
+            });
+            if !discriminant {
+                continue;
+            }
+            let Some(units) = units_of(member.value) else {
+                continue;
+            };
+            if units.len() > 1 {
+                discriminants.push((index, units));
+            }
+        }
+        if discriminants.is_empty() {
+            return None;
+        }
+        let combinations = discriminants
+            .iter()
+            .try_fold(1usize, |count, (_, units)| count.checked_mul(units.len()))?;
+        if combinations > MAX_DISCRIMINATED_COMBINATIONS {
+            return None;
+        }
+        let mut any_unknown = false;
+        for combination in 0..combinations {
+            let mut rest = combination;
+            let mut narrowed: Vec<crate::semantic_query::SurfaceMember> =
+                source_view.positive_members().to_vec();
+            for (index, units) in &discriminants {
+                narrowed[*index].value = units[rest % units.len()];
+                rest /= units.len();
+            }
+            let narrowed = graph.intern_node(SemanticNodeData::Object(
+                source_view
+                    .clone()
+                    .with_positive_members(Arc::from(narrowed.into_boxed_slice())),
+            ));
+            let alternatives: Vec<_> = members.iter().map(|member| (narrowed, *member)).collect();
+            match self.relate_union_target_alternatives(
+                &alternatives,
+                bindings,
+                InferPosition::Covariant,
+            ) {
+                RelationResult::Assignable { .. } => {}
+                RelationResult::Unknown => any_unknown = true,
+                RelationResult::NotAssignable => return Some(RelationResult::NotAssignable),
+            }
+        }
+        Some(if any_unknown {
+            RelationResult::Unknown
+        } else {
+            assignable(bindings)
+        })
+    }
+
     fn relate_pair_alternatives_with_freshness(
         &self,
         alternatives: &[(SemanticNodeId, SemanticNodeId)],
@@ -7136,11 +7275,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             drop(source_data);
             drop(target_data);
             let alternatives: Vec<_> = members.iter().map(|member| (source, *member)).collect();
-            results.push(self.relate_union_target_alternatives(
+            let result = self.relate_union_target_alternatives(
                 &alternatives,
                 bindings,
                 InferPosition::Covariant,
-            ));
+            );
+            // An object source no member takes whole may still split on its
+            // discriminants (`typeRelatedToDiscriminatedType`).
+            let result = match result {
+                RelationResult::NotAssignable => self
+                    .relate_discriminated_object_source(source, &members, bindings)
+                    .unwrap_or(RelationResult::NotAssignable),
+                result => result,
+            };
+            results.push(result);
             return;
         }
         // An intersection TARGET is related arm by arm before an
