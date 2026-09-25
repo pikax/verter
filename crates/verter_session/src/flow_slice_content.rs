@@ -1298,10 +1298,12 @@ pub enum SliceExpr {
     /// the substrate cannot type keeps its typed gap and degrades.
     /// A comma sequence whose operands include calls the checker enters
     /// into control flow as `asserts` calls: `before` narrows ahead of the
-    /// value (the discarded operands, in order), `after` once the value
-    /// operand — itself the assertion call — has evaluated.
+    /// value (the discarded operands' entered effects, in order — each an
+    /// [`SliceStatement::Assertion`] or the [`SliceStatement::If`] join of
+    /// a conditional's arms), `after` once the value operand — itself the
+    /// assertion call — has evaluated.
     Sequence {
-        before: Arc<[SliceAssertion]>,
+        before: Arc<[SliceStatement]>,
         value: Box<SliceExpr>,
         after: Option<SliceAssertion>,
     },
@@ -3112,12 +3114,18 @@ fn narrowing_spine_calls<'e, 'a>(
     }
 }
 
-/// The statements that apply collected entered `asserts` calls, in order.
-fn assertion_statements(assertions: Vec<SliceAssertion>) -> Vec<SliceStatement> {
-    assertions
-        .into_iter()
-        .map(|SliceAssertion { subject, target }| SliceStatement::Assertion { subject, target })
-        .collect()
+/// The statement one applied `asserts` call lowers to.
+fn assertion_statement(SliceAssertion { subject, target }: SliceAssertion) -> SliceStatement {
+    SliceStatement::Assertion { subject, target }
+}
+
+/// A region of entered effects: assertions and joins, which always
+/// complete.
+fn entered_effect_region(statements: Vec<SliceStatement>) -> Box<SliceRegion> {
+    Box::new(SliceRegion {
+        statements: Arc::from(statements.into_boxed_slice()),
+        can_fall_through: NormalCompletion::minted(true, CompletionConstruction::SynthesizedRegion),
+    })
 }
 
 /// Whether a statement ends the path: a `throw`, a never-returning call,
@@ -5257,7 +5265,7 @@ struct Lowerer<'a> {
     /// finds (outside any conditional arm) are collected here to be
     /// applied after the scanned position, instead of taking the typed
     /// gap.
-    entered_assertion_sink: Option<Vec<SliceAssertion>>,
+    entered_assertion_sink: Option<Vec<SliceStatement>>,
     /// The same-frame `const`-kind locals whose initializer is a form the
     /// checker can bind a narrowing FACT to (a comparison, an
     /// `instanceof` / `in` test, a call, a composition of those, or
@@ -6150,7 +6158,7 @@ impl<'a> Lowerer<'a> {
                     let test_assertions = self.collecting_entered_assertions(|this| {
                         unprovable_control_call = this.record_control_position_calls(&if_stmt.test);
                     });
-                    out.extend(assertion_statements(test_assertions));
+                    out.extend(test_assertions);
                     let active_guard_base = self.active_guard_bindings.len();
                     let guard_bindings = self.guard_bindings(&guard, if_stmt.test.span());
                     self.active_guard_bindings
@@ -6273,7 +6281,7 @@ impl<'a> Lowerer<'a> {
                     let entered = self.collecting_entered_assertions(|this| {
                         this.scan_unmodeled_position_effects(&throw_stmt.argument)
                     });
-                    out.extend(assertion_statements(entered));
+                    out.extend(entered);
                     out.push(SliceStatement::Throw);
                     can_fall_through = false;
                 }
@@ -6797,7 +6805,7 @@ impl<'a> Lowerer<'a> {
                                 let entered = self.collecting_entered_assertions(|this| {
                                     this.scan_unmodeled_position_effects(initializer)
                                 });
-                                out.extend(assertion_statements(entered));
+                                out.extend(entered);
                             }
                         }
                     }
@@ -7148,7 +7156,7 @@ impl<'a> Lowerer<'a> {
                     let entered = self.collecting_entered_assertions(|this| {
                         this.scan_unmodeled_position_effects(init)
                     });
-                    out.extend(assertion_statements(entered));
+                    out.extend(entered);
                 }
                 continue;
             };
@@ -9224,7 +9232,7 @@ impl<'a> Lowerer<'a> {
                 if nested.is_empty() {
                     return Some(own);
                 }
-                let mut statements = assertion_statements(nested);
+                let mut statements = nested;
                 statements.push(own);
                 Some(sequential_block(statements))
             }
@@ -9268,7 +9276,7 @@ impl<'a> Lowerer<'a> {
     fn collecting_entered_assertions(
         &mut self,
         scan: impl FnOnce(&mut Self),
-    ) -> Vec<SliceAssertion> {
+    ) -> Vec<SliceStatement> {
         let previous = self.entered_assertion_sink.replace(Vec::new());
         scan(self);
         std::mem::replace(&mut self.entered_assertion_sink, previous).unwrap_or_default()
@@ -9610,7 +9618,7 @@ impl<'a> Lowerer<'a> {
                 let entered = self.collecting_entered_assertions(|this| {
                     this.scan_unmodeled_position_effects(expression)
                 });
-                out.extend(assertion_statements(entered));
+                out.extend(entered);
             }
         }
     }
@@ -9650,7 +9658,7 @@ impl<'a> Lowerer<'a> {
             return throw_point;
         }
         let mut statements: Vec<SliceStatement> = throw_point.into_iter().collect();
-        statements.extend(assertion_statements(entered));
+        statements.extend(entered);
         Some(sequential_block(statements))
     }
 
@@ -11329,37 +11337,46 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// The `asserts` narrowings one entered item applies once it has run,
-    /// with the spans of the calls that apply them: a call's own, and for
-    /// a conditional whose every arm entered calls, the narrowings every
-    /// arm applies alike (`c ? (0, a(x)) : (0, a(x))` narrows `x` as
-    /// `a(x)` does). `None` when the arms narrow differently: the join is
-    /// neither arm's narrowing, and the calls keep their certification.
-    fn entered_item_assertions(
+    /// The effects one entered item applies once it has run, pushing the
+    /// spans of the calls that apply them: a call's own `asserts`
+    /// narrowing, and for a conditional the checker's join of its arms —
+    /// an `if` over the test whose arms apply each arm's effects, so every
+    /// reference reads the union of its per-arm narrowed types past it.
+    /// Arms that apply the same effects are that effect list alone.
+    fn entered_item_effects(
         &mut self,
         item: &ArmEntered<'_>,
         spans: &mut Vec<verter_span::Span>,
-    ) -> Option<Vec<SliceAssertion>> {
+    ) -> Vec<SliceStatement> {
         match item {
             ArmEntered::Call(call) => {
                 let assertion = self.entered_assertion(call);
                 if assertion.is_some() {
                     spans.push(call.span.into());
                 }
-                Some(assertion.into_iter().collect())
+                assertion.map(assertion_statement).into_iter().collect()
             }
             ArmEntered::Join {
+                test,
                 consequent,
                 alternate,
             } => {
                 let mut arms = [Vec::new(), Vec::new()];
                 for (arm, items) in arms.iter_mut().zip([consequent, alternate]) {
                     for item in items {
-                        arm.extend(self.entered_item_assertions(item, spans)?);
+                        arm.extend(self.entered_item_effects(item, spans));
                     }
                 }
                 let [consequent, alternate] = arms;
-                (consequent == alternate).then_some(consequent)
+                if consequent == alternate {
+                    return consequent;
+                }
+                let guard = self.lower_guard(test);
+                vec![SliceStatement::If {
+                    guard,
+                    consequent: entered_effect_region(consequent),
+                    alternate: Some(entered_effect_region(alternate)),
+                }]
             }
         }
     }
@@ -11388,12 +11405,9 @@ impl<'a> Lowerer<'a> {
         let mut applied: Vec<verter_span::Span> = Vec::new();
         if self.entered_assertion_sink.is_some() {
             for item in &scanner.entered {
-                let mut spans = Vec::new();
-                if let Some(assertions) = self.entered_item_assertions(item, &mut spans) {
-                    applied.extend(spans);
-                    if let Some(sink) = self.entered_assertion_sink.as_mut() {
-                        sink.extend(assertions);
-                    }
+                let effects = self.entered_item_effects(item, &mut applied);
+                if let Some(sink) = self.entered_assertion_sink.as_mut() {
+                    sink.extend(effects);
                 }
             }
         }
@@ -12153,12 +12167,13 @@ impl ControlCall {
 /// either: the operand's value cannot depend on it, and a read after it
 /// rides the slice's unapplied-write ledger like any statement write's.
 /// A call the checker enters into control flow, or the join of a
-/// conditional whose every arm entered one: the flow after the conditional
-/// is the union of the arms' ends, so an `asserts` narrowing persists past
-/// it only when every arm applies it.
+/// conditional (a ternary, or a `&&` / `||` whose right operand is the one
+/// arm) with an entered call in an arm: the flow after it is the union of
+/// the arms' ends, each under its reading of `test`.
 enum ArmEntered<'a> {
     Call(&'a oxc_ast::ast::CallExpression<'a>),
     Join {
+        test: &'a Expression<'a>,
         consequent: Vec<ArmEntered<'a>>,
         alternate: Vec<ArmEntered<'a>>,
     },
@@ -12172,6 +12187,7 @@ impl<'a> ArmEntered<'a> {
             Self::Join {
                 consequent,
                 alternate,
+                ..
             } => {
                 for item in consequent.into_iter().chain(alternate) {
                     item.flatten_into(out);
@@ -12206,10 +12222,9 @@ struct LeafCallScanner<'a> {
     conditional_nesting: usize,
     /// Entered calls (and joins) inside a conditional arm, not yet joined.
     conditional_entered: Vec<ArmEntered<'a>>,
-    /// Entered calls of a conditional arm whose path joins one with no
-    /// entered call under a non-literal test: an `asserts` narrowing they
-    /// make does not persist past the conditional (the join is the
-    /// unnarrowed type).
+    /// Entered calls of an operand no path runs, or of a `??` right
+    /// operand, whose path joins one that skipped it: an `asserts`
+    /// narrowing they make does not persist past it.
     joined_away: Vec<&'a oxc_ast::ast::CallExpression<'a>>,
     /// The spans of calls that are an expression statement's own
     /// expression (the scanned position's own, or one inside a class
@@ -12257,6 +12272,28 @@ impl<'a> LeafCallScanner<'a> {
         self.visit_expression(expr);
         self.conditional_nesting -= 1;
         self.join_away_from(start);
+    }
+
+    /// Record the join of a conditional's arms, when an arm entered a call.
+    fn push_join(
+        &mut self,
+        test: &'a Expression<'a>,
+        consequent: Vec<ArmEntered<'a>>,
+        alternate: Vec<ArmEntered<'a>>,
+    ) {
+        if consequent.is_empty() && alternate.is_empty() {
+            return;
+        }
+        let join = ArmEntered::Join {
+            test,
+            consequent,
+            alternate,
+        };
+        if self.conditional_nesting == 0 {
+            self.entered.push(join);
+        } else {
+            self.conditional_entered.push(join);
+        }
     }
 
     /// The arm items from `start` join a path that entered none: their
@@ -12476,26 +12513,11 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         let middle = self.conditional_entered.len();
         self.visit_expression(&it.alternate);
         self.conditional_nesting -= 1;
-        let end = self.conditional_entered.len();
-        if middle == start || end == middle {
-            // At most one arm enters calls, so the other path joins
-            // unnarrowed.
-            self.join_away_from(start);
-        } else {
-            // Every arm entered calls: the join narrows by what the arms
-            // apply alike.
-            let alternate: Vec<_> = self.conditional_entered.drain(middle..).collect();
-            let consequent: Vec<_> = self.conditional_entered.drain(start..).collect();
-            let join = ArmEntered::Join {
-                consequent,
-                alternate,
-            };
-            if self.conditional_nesting == 0 {
-                self.entered.push(join);
-            } else {
-                self.conditional_entered.push(join);
-            }
-        }
+        // The flow past the conditional joins its arms' ends.
+        let alternate: Vec<_> = self.conditional_entered.drain(middle..).collect();
+        let consequent: Vec<_> = self.conditional_entered.drain(start..).collect();
+        let test = self.alloc(&it.test);
+        self.push_join(test, consequent, alternate);
     }
     fn visit_logical_expression(&mut self, it: &oxc_ast::ast::LogicalExpression<'a>) {
         if self.nested_frame_nesting > 0 {
@@ -12526,8 +12548,21 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         self.conditional_nesting += 1;
         self.visit_expression(&it.right);
         self.conditional_nesting -= 1;
-        // The path that skips the right operand joins unnarrowed.
-        self.join_away_from(start);
+        let right: Vec<_> = self.conditional_entered.drain(start..).collect();
+        let left = self.alloc(&it.left);
+        match it.operator {
+            // The right operand runs on the left's truthy edge for `&&`,
+            // its falsy edge for `||`; the other edge skips it.
+            oxc_ast::ast::LogicalOperator::And => self.push_join(left, right, Vec::new()),
+            oxc_ast::ast::LogicalOperator::Or => self.push_join(left, Vec::new(), right),
+            // `??` has no guard reading here: the path that skips the
+            // right operand joins it unnarrowed.
+            oxc_ast::ast::LogicalOperator::Coalesce => {
+                for item in right {
+                    item.flatten_into(&mut self.joined_away);
+                }
+            }
+        }
     }
     // Statement TESTS are control positions. Statements are reachable
     // inside a leaf-lowered expression only through an immediately

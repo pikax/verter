@@ -12189,6 +12189,172 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// Evaluate one `if`: its contributions and whether it completes.
+    ///
+    /// Bindings are block-scoped: each arm evaluates under its own local
+    /// scope, and the consequent reads the test's POSITIVE narrow, the
+    /// alternate its NEGATED one. A WHOLE-BINDING WRITE inside an arm
+    /// escapes through the branch JOIN, never the raw arm value: after the
+    /// `if`, a rebound binding holds the union of its arm value and the
+    /// value it had on the paths that never took that arm (tsc's own join
+    /// of reaching definitions). An arm whose path TERMINATES (return /
+    /// throw / break) does not reach the join at all: its writes leave
+    /// with it, and the SURVIVING edge carries the other reading's guard
+    /// facts — the negated reading when the consequent terminated, the
+    /// positive one when the alternate did (the checker's own rule for
+    /// `if (guard) exit; …`). The lexical layer restores; the
+    /// function-scoped `var` layer (and parameter writes) join by the same
+    /// rule. A reference both continuing arms narrowed reads the union of
+    /// its per-arm narrows past the `if`.
+    fn eval_if(
+        &mut self,
+        guard: &crate::flow_slice_content::SliceGuard,
+        consequent: &crate::flow_slice_content::SliceRegion,
+        alternate: Option<&crate::flow_slice_content::SliceRegion>,
+    ) -> Result<(Vec<FlowContribution>, bool), FlowReturnFailure> {
+        let mut contributors: Vec<FlowContribution> = Vec::new();
+        let entry_products = self.products.clone();
+        let entry_writes = self.products.observe_writes();
+        let narrow_mark = self.narrowing_snapshot();
+        let shadow_base = self.scope_shadows.len();
+        let break_base = self.break_exits.len();
+        let return_base = self.return_edges.len();
+        let throw_base = self.throw_points.len();
+        self.conditional_arm_nesting += 1;
+        self.apply_guard_scoped(guard, true);
+        let (consequent_result, consequent_falls) = self.eval_region(consequent);
+        // Close the arm's lexical scope BEFORE snapshotting its
+        // contribution to the post-if join, and replay the same
+        // close on every abrupt edge that crossed the arm.
+        let shadows =
+            self.split_scope_shadows_close_exits(shadow_base, break_base, return_base, throw_base);
+        let mut consequent_state = self.layer_state();
+        Self::close_lexical_scope(&mut consequent_state, &shadows);
+        let consequent_products = consequent_state.products;
+        let consequent_narrowings = self.narrowings_since(&narrow_mark);
+        self.restore_narrowings(narrow_mark.clone());
+        self.restore_arm_entry(&entry_products);
+        let consequent_contributors = match consequent_result {
+            Ok(contributors) => contributors,
+            Err(failure) => {
+                self.conditional_arm_nesting -= 1;
+                return Err(failure);
+            }
+        };
+        contributors.extend(consequent_contributors);
+        let (alternate_products, alternate_falls, alternate_narrowings) =
+            if let Some(alternate) = alternate {
+                let shadow_base = self.scope_shadows.len();
+                let break_base = self.break_exits.len();
+                let return_base = self.return_edges.len();
+                let throw_base = self.throw_points.len();
+                self.apply_guard_scoped(guard, false);
+                let (alternate_result, alternate_falls) = self.eval_region(alternate);
+                let shadows = self.split_scope_shadows_close_exits(
+                    shadow_base,
+                    break_base,
+                    return_base,
+                    throw_base,
+                );
+                let mut alternate_state = self.layer_state();
+                Self::close_lexical_scope(&mut alternate_state, &shadows);
+                let alternate_products = alternate_state.products;
+                let alternate_narrowings = self.narrowings_since(&narrow_mark);
+                self.restore_narrowings(narrow_mark.clone());
+                self.restore_arm_entry(&entry_products);
+                let alternate_contributors = match alternate_result {
+                    Ok(contributors) => contributors,
+                    Err(failure) => {
+                        self.conditional_arm_nesting -= 1;
+                        return Err(failure);
+                    }
+                };
+                contributors.extend(alternate_contributors);
+                (alternate_products, alternate_falls, alternate_narrowings)
+            } else {
+                // The implicit alternate is a real false-edge
+                // predecessor, with no authored body or writes.
+                self.apply_guard_scoped(guard, false);
+                let products = self.products.clone();
+                let narrowings = self.narrowings_since(&narrow_mark);
+                self.restore_narrowings(narrow_mark.clone());
+                (products, true, narrowings)
+            };
+        self.conditional_arm_nesting -= 1;
+        self.restore_arm_entry(&entry_products);
+        self.join_arm_writes(
+            &consequent_products,
+            consequent_falls,
+            &alternate_products,
+            alternate_falls,
+            &entry_products,
+            &entry_writes,
+        );
+        // The checker's join of the two arms: a reference both continuing
+        // arms narrowed reads the union of its per-arm narrowed types.
+        if consequent_falls && alternate_falls {
+            self.join_arm_narrowings(vec![consequent_narrowings, alternate_narrowings]);
+        }
+        // A single continuing predecessor already carries its final
+        // facts. Reapplying its original test here would revive a guard
+        // invalidated by a later arm write.
+        Ok((contributors, consequent_falls || alternate_falls))
+    }
+
+    /// Land the union of the per-arm narrows of every reference each
+    /// alternative narrowed — the checker's union of the arms' flow types
+    /// at a join. Each alternative is the facts standing at its end, newest
+    /// last; a reference some alternative leaves unnarrowed reads its type
+    /// there, which contains every narrow, so no narrow lands for it, and
+    /// a union that does not narrow the reference's current type lands
+    /// nothing either.
+    fn join_arm_narrowings(
+        &mut self,
+        alternatives: Vec<
+            Vec<(
+                crate::flow_slice_content::SliceNarrowSubject,
+                SemanticNodeId,
+            )>,
+        >,
+    ) {
+        for (subject, node) in self.union_of_alternatives(alternatives) {
+            let narrows = self
+                .subject_current_node(&subject)
+                .is_none_or(|current| self.assignable(current, node) != Some(true));
+            if narrows {
+                self.push_narrowing(&subject, node);
+            }
+        }
+    }
+
+    /// Apply one entered effect of a comma sequence's discarded operands:
+    /// an `asserts` call, or the join of a conditional's arms.
+    fn apply_entered_effect(&mut self, effect: &crate::flow_slice_content::SliceStatement) {
+        match effect {
+            crate::flow_slice_content::SliceStatement::Assertion { subject, target } => {
+                self.apply_assertion(subject, target.as_ref());
+            }
+            crate::flow_slice_content::SliceStatement::If {
+                guard,
+                consequent,
+                alternate,
+            } => {
+                // Its arms hold only entered effects, which cannot fail.
+                if self
+                    .eval_if(guard, consequent, alternate.as_deref())
+                    .is_err()
+                {
+                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                        crate::semantic_query::FlowGap::GuardNarrowing,
+                    ));
+                }
+            }
+            _ => self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            )),
+        }
+    }
+
     /// The union-of-facts reading of a disjunction: each disjunct's
     /// narrow is computed against the starting overlay as the operands
     /// before it LEFT it — `a || b` is true through `a`, or through `b`
@@ -12217,18 +12383,51 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.apply_guard_scoped(part, positive);
             let applied = self.narrowings_since(&mark);
             self.restore_narrowings(mark);
-            let mut final_overlay = Vec::with_capacity(applied.len());
-            for (subject, node) in applied {
-                match final_overlay
-                    .iter_mut()
-                    .find(|(candidate, _)| *candidate == subject)
-                {
-                    Some((_, current)) => *current = node,
-                    None => final_overlay.push((subject, node)),
-                }
-            }
-            alternatives.push(final_overlay);
+            alternatives.push(applied);
         }
+        for (subject, node) in self.union_of_alternatives(alternatives) {
+            self.push_narrowing(&subject, node);
+        }
+    }
+
+    /// The per-reference union over `alternatives`, each the facts one
+    /// path established in write order (the newest fact about a reference
+    /// is the one standing at its end): a reference every alternative
+    /// narrowed, with the union of its per-alternative narrows. A
+    /// reference some alternative leaves unnarrowed has its original type
+    /// on that path, which the union would be, so it is left out.
+    fn union_of_alternatives(
+        &mut self,
+        alternatives: Vec<
+            Vec<(
+                crate::flow_slice_content::SliceNarrowSubject,
+                SemanticNodeId,
+            )>,
+        >,
+    ) -> Vec<(
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )> {
+        let alternatives: Vec<Vec<_>> = alternatives
+            .into_iter()
+            .map(|applied| {
+                let mut final_overlay: Vec<(
+                    crate::flow_slice_content::SliceNarrowSubject,
+                    SemanticNodeId,
+                )> = Vec::with_capacity(applied.len());
+                for (subject, node) in applied {
+                    match final_overlay
+                        .iter_mut()
+                        .find(|(candidate, _)| *candidate == subject)
+                    {
+                        Some((_, current)) => *current = node,
+                        None => final_overlay.push((subject, node)),
+                    }
+                }
+                final_overlay
+            })
+            .collect();
+        let mut unions = Vec::new();
         let mut subjects: Vec<crate::flow_slice_content::SliceNarrowSubject> = Vec::new();
         for alternative in &alternatives {
             for (subject, _) in alternative {
@@ -12256,8 +12455,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 })
                 .collect();
             let node = self.union(&nodes);
-            self.push_narrowing(&subject, node);
+            unions.push((subject, node));
         }
+        unions
     }
 
     /// Read the type predicate the function's single return establishes
@@ -16341,119 +16541,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     guard,
                     consequent,
                     alternate,
-                } => {
-                    // Bindings are block-scoped: each `if` arm evaluates
-                    // under its own local scope, and the consequent reads
-                    // the test's POSITIVE narrow, the alternate its
-                    // NEGATED one. The shared kernel keeps only narrowing
-                    // facts established on every actual continuing arm.
-                    //
-                    // A WHOLE-BINDING WRITE inside an arm does escape —
-                    // through the branch JOIN, never the raw arm value:
-                    // after the `if`, a rebound binding holds the union of
-                    // its arm value and the value it had on the paths that
-                    // never took that arm (tsc's own join of reaching
-                    // definitions). An arm whose path TERMINATES (return /
-                    // throw / break) does not reach the join at all: its
-                    // writes leave with it, and the SURVIVING edge carries
-                    // the other reading's guard facts — the negated
-                    // reading when the consequent terminated, the positive
-                    // one when the alternate did (the checker's own rule
-                    // for `if (guard) exit; …`). The lexical layer
-                    // restores; the function-scoped `var` layer (and
-                    // parameter writes) join by the same rule.
-                    let entry_products = self.products.clone();
-                    let entry_writes = self.products.observe_writes();
-                    let narrow_mark = self.narrowing_snapshot();
-                    let shadow_base = self.scope_shadows.len();
-                    let break_base = self.break_exits.len();
-                    let return_base = self.return_edges.len();
-                    let throw_base = self.throw_points.len();
-                    self.conditional_arm_nesting += 1;
-                    self.apply_guard_scoped(guard, true);
-                    let (consequent_result, consequent_falls) = self.eval_region(consequent);
-                    // Close the arm's lexical scope BEFORE snapshotting its
-                    // contribution to the post-if join, and replay the same
-                    // close on every abrupt edge that crossed the arm.
-                    let shadows = self.split_scope_shadows_close_exits(
-                        shadow_base,
-                        break_base,
-                        return_base,
-                        throw_base,
-                    );
-                    let mut consequent_state = self.layer_state();
-                    Self::close_lexical_scope(&mut consequent_state, &shadows);
-                    let consequent_products = consequent_state.products;
-                    self.restore_narrowings(narrow_mark.clone());
-                    self.restore_arm_entry(&entry_products);
-                    let consequent_contributors = match consequent_result {
-                        Ok(contributors) => contributors,
-                        Err(failure) => {
-                            self.conditional_arm_nesting -= 1;
-                            return (
-                                Err(failure),
-                                region
-                                    .can_fall_through
-                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                            );
-                        }
-                    };
-                    contributors.extend(consequent_contributors);
-                    let (alternate_products, alternate_falls) = if let Some(alternate) = alternate {
-                        let shadow_base = self.scope_shadows.len();
-                        let break_base = self.break_exits.len();
-                        let return_base = self.return_edges.len();
-                        let throw_base = self.throw_points.len();
-                        self.apply_guard_scoped(guard, false);
-                        let (alternate_result, alternate_falls) = self.eval_region(alternate);
-                        let shadows = self.split_scope_shadows_close_exits(
-                            shadow_base,
-                            break_base,
-                            return_base,
-                            throw_base,
-                        );
-                        let mut alternate_state = self.layer_state();
-                        Self::close_lexical_scope(&mut alternate_state, &shadows);
-                        let alternate_products = alternate_state.products;
-                        self.restore_narrowings(narrow_mark.clone());
-                        self.restore_arm_entry(&entry_products);
-                        let alternate_contributors = match alternate_result {
-                            Ok(contributors) => contributors,
-                            Err(failure) => {
-                                self.conditional_arm_nesting -= 1;
-                                return (
-                                    Err(failure),
-                                    region
-                                        .can_fall_through
-                                        .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                                );
-                            }
-                        };
-                        contributors.extend(alternate_contributors);
-                        (alternate_products, alternate_falls)
-                    } else {
-                        // The implicit alternate is a real false-edge
-                        // predecessor, with no authored body or writes.
-                        self.apply_guard_scoped(guard, false);
-                        let products = self.products.clone();
-                        self.restore_narrowings(narrow_mark.clone());
-                        (products, true)
-                    };
-                    self.conditional_arm_nesting -= 1;
-                    self.restore_arm_entry(&entry_products);
-                    self.join_arm_writes(
-                        &consequent_products,
-                        consequent_falls,
-                        &alternate_products,
-                        alternate_falls,
-                        &entry_products,
-                        &entry_writes,
-                    );
-                    // A single continuing predecessor already carries its
-                    // final facts. Reapplying its original test here would
-                    // revive a guard invalidated by a later arm write.
-                    path_alive = consequent_falls || alternate_falls;
-                }
+                } => match self.eval_if(guard, consequent, alternate.as_deref()) {
+                    Ok((arm_contributors, falls)) => {
+                        contributors.extend(arm_contributors);
+                        path_alive = falls;
+                    }
+                    Err(failure) => {
+                        return (
+                            Err(failure),
+                            region
+                                .can_fall_through
+                                .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                        )
+                    }
+                },
                 crate::flow_slice_content::SliceStatement::Switch {
                     discriminant,
                     cases,
@@ -19311,8 +19412,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 value,
                 after,
             } => {
-                for assertion in before.iter() {
-                    self.apply_assertion(&assertion.subject, assertion.target.as_ref());
+                for effect in before.iter() {
+                    self.apply_entered_effect(effect);
                 }
                 let outcome = self.eval_expr(value);
                 if let Some(assertion) = after {

@@ -5234,3 +5234,172 @@ fn unreachable_returns_contribute_their_declared_reads() {
         mismatches.join("\n")
     );
 }
+
+/// Entered `asserts` calls in a conditional's arms — a ternary's, or a
+/// `&&` / `||` right operand — and the statement `if` twins.
+const CONDITIONAL_JOIN_SOURCE: &str = r#"
+function isStr(x: unknown): asserts x is string { if (typeof x !== "string") throw 0; }
+function isNum(x: unknown): asserts x is number { if (typeof x !== "number") throw 0; }
+function notStr(x: unknown): asserts x is number | boolean { if (typeof x === "string") throw 0; }
+export function sameArms(x: string | number | boolean, c: boolean) { c ? (0, isStr(x)) : (0, isStr(x)); return x; }
+export function diffArms(x: string | number | boolean, c: boolean) { c ? (0, isStr(x)) : (0, isNum(x)); return x; }
+export function overlapArms(x: string | number | boolean, c: boolean) { c ? (0, isStr(x)) : (0, notStr(x)); return x; }
+export function oneArm(x: string | number | boolean, c: boolean) { c ? (0, isStr(x)) : 0; return x; }
+export function twoRefs(x: string | number | boolean, y: string | number | boolean, c: boolean) { c ? (0, isStr(x), isStr(y)) : (0, isNum(x), isNum(y)); return { x, y }; }
+export function crossRefs(x: string | number | boolean, y: string | number | boolean, c: boolean) { c ? (0, isStr(x)) : (0, isNum(y)); return { x, y }; }
+export function guardedDiff(x: string | number | boolean) { typeof x === "string" ? (0, isNum(x)) : (0, isStr(x)); return x; }
+export function guardedOne(x: string | number | boolean) { typeof x === "boolean" ? (0, isStr(x)) : 0; return x; }
+export function andArm(x: string | number | boolean) { typeof x === "boolean" && (0, isStr(x)); return x; }
+export function orArm(x: string | number | boolean) { typeof x !== "boolean" || (0, isStr(x)); return x; }
+export function nestedDiff(x: string | number | boolean, c: boolean, d: boolean) { c ? (d ? (0, isStr(x)) : (0, isNum(x))) : (0, isStr(x)); return x; }
+export function inSequence(x: string | number | boolean, c: boolean) { const y = (c ? (0, isStr(x)) : (0, isNum(x)), x); return y; }
+export function inInitializer(x: string | number | boolean, c: boolean) { const u = c ? (0, isStr(x)) : (0, isNum(x)); return x; }
+export function ifDiff(x: string | number | boolean, c: boolean) { if (c) { isStr(x); } else { isNum(x); } return x; }
+export function ifGuardedOne(x: string | number | boolean) { if (typeof x === "boolean") { isStr(x); } return x; }
+export function nullableArms(x: string | null | undefined, c: boolean) { c ? (0, isStr(x)) : 0; return x; }
+export function guardedInInitializer(x: string | number | boolean) { const u = typeof x === "string" ? (0, isNum(x)) : (0, isStr(x)); return x; }
+export function andInInitializer(x: string | number | boolean) { const u = typeof x === "boolean" && (0, isStr(x)); return x; }
+export function guardedInSequence(x: string | number | boolean) { const y = (typeof x === "string" ? (0, isNum(x)) : (0, isStr(x)), x); return y; }
+"#;
+
+/// `(symbol, strict, strictNullChecks off, noImplicitAny off, both off)`
+/// for [`CONDITIONAL_JOIN_SOURCE`], each the lane's spelling of that
+/// project's TypeScript 7.0.2 `.d.ts` answer.
+const CONDITIONAL_JOIN_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    ("sameArms", "string", "string", "string", "string"),
+    (
+        "diffArms",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "overlapArms",
+        "boolean | number | string",
+        "boolean | number | string",
+        "boolean | number | string",
+        "boolean | number | string",
+    ),
+    (
+        "oneArm",
+        "boolean | number | string",
+        "boolean | number | string",
+        "boolean | number | string",
+        "boolean | number | string",
+    ),
+    (
+        "twoRefs",
+        "{ x: number | string; y: number | string }",
+        "{ x: number | string; y: number | string }",
+        "{ x: number | string; y: number | string }",
+        "{ x: number | string; y: number | string }",
+    ),
+    (
+        "crossRefs",
+        "{ x: boolean | number | string; y: boolean | number | string }",
+        "{ x: boolean | number | string; y: boolean | number | string }",
+        "{ x: boolean | number | string; y: boolean | number | string }",
+        "{ x: boolean | number | string; y: boolean | number | string }",
+    ),
+    ("guardedDiff", "never", "never", "never", "never"),
+    (
+        "guardedOne",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "andArm",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "orArm",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "nestedDiff",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "inSequence",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "inInitializer",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "ifDiff",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "ifGuardedOne",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "nullableArms",
+        "null | string | undefined",
+        "string",
+        "null | string | undefined",
+        "string",
+    ),
+    ("guardedInInitializer", "never", "never", "never", "never"),
+    (
+        "andInInitializer",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    ("guardedInSequence", "never", "never", "never", "never"),
+];
+
+/// The checker's flow graph joins a conditional's arms: past it, each
+/// reference reads the union of its narrowed types at the ends of the
+/// arms, each arm under its reading of the test. The same targets narrow
+/// to that target (`sameArms`), different ones to their union
+/// (`diffArms`, `nestedDiff`, in a sequence or an initializer too), an
+/// overlapping pair or an arm that asserts nothing to what their union
+/// covers (`overlapArms`, `oneArm`), and each reference joins on its own
+/// (`twoRefs`, `crossRefs`). The test's reading applies inside each arm
+/// (`guardedDiff` is `never` in every position, `guardedOne`, `andArm` and `orArm` drop the
+/// asserted-away arm), exactly as for an `if`. Each cell matches its own
+/// project's TypeScript 7.0.2 answer.
+#[test]
+fn a_conditional_join_unions_its_arms_narrowed_types() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "conditional-join.ts",
+        CONDITIONAL_JOIN_SOURCE,
+        CONDITIONAL_JOIN_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}

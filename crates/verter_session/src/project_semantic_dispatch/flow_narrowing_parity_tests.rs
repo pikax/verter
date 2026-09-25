@@ -2001,26 +2001,21 @@ export function g1(x: string | number | boolean, c: boolean) { c ? (0, a(x)) : (
 "#;
 
 /// The flow after a conditional joins its arms' ends, so an entered
-/// `asserts` call narrows past it only when every arm applies it — nested
-/// conditionals included, the other operands of an arm aside. Measured on
+/// `asserts` call every arm applies narrows past it — nested conditionals
+/// included, the other operands of an arm aside. Measured on
 /// 7.0.2 under every `strictNullChecks` × `noImplicitAny` setting: `c1` to
 /// `c7` return `string`; a call that is an arm itself is not entered
 /// (`o1`), and an arm that asserts nothing joins the unnarrowed path
 /// (`o2`, `o3`, `o4`), each `string | number`. Arms that assert different
-/// targets join to their union (`g1` is `string | number`), which this
-/// lane leaves behind the typed guard gap.
+/// targets join to their union (`g1` is `string | number`).
 #[test]
 fn an_assertion_every_conditional_arm_applies_narrows_past_it() {
     let mut rows = Vec::new();
     for name in ["c1", "c2", "c3", "c4", "c5", "c6", "c7"] {
         rows.push((name, "string", "string"));
     }
-    for name in ["o1", "o2", "o3", "o4"] {
+    for name in ["o1", "o2", "o3", "o4", "g1"] {
         rows.push((name, "string | number", "string | number"));
     }
     check_rows(CONDITIONAL_ASSERTIONS, &rows);
-    let host = host_with(CONDITIONAL_ASSERTIONS);
-    for root in [STRICT_ROOT, LOOSE_ROOT] {
-        super::signature_predicate_inference_tests::assert_degrades(&host, root, "g1");
-    }
 }
