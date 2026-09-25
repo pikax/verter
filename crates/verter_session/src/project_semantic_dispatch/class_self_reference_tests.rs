@@ -404,3 +404,42 @@ export function useOwn() { return own.me().v; }
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// `this` in a module-level function declaration has no receiver the
+/// checker can type: it is `any` (with TS2683 under `noImplicitThis`),
+/// read directly or through a local copy.
+///
+/// Measured on TypeScript 7.0.2 (all four `strictNullChecks` ×
+/// `noImplicitAny` settings alike, `noImplicitThis` on and off):
+/// `ReturnType<typeof f>` and `ReturnType<typeof g>` are `any`, and `0
+/// extends 1 & ReturnType<typeof f> ? 1 : 0` is `1`. The lane answers the
+/// unmodelled-position marker, and the conditional over it stays
+/// undecided.
+#[test]
+#[ignore = "`this` in a module-level function declaration is `any`"]
+fn this_in_a_module_function_is_any() {
+    let source = "\
+export function f() { return this; }
+export function g() { const t = this; return t; }
+";
+    for compiler_options in [None, Some(r#"{ "strict": true, "noImplicitThis": false }"#)] {
+        let failures = super::checker_probe_lane_tests::mismatches_in(
+            super::checker_probe_lane_tests::ProbeProject {
+                files: &[],
+                compiler_options,
+                ambient_lib: None,
+            },
+            source,
+            &[
+                ("ReturnType<typeof f>", "any"),
+                ("ReturnType<typeof g>", "any"),
+                ("0 extends 1 & ReturnType<typeof f> ? 1 : 0", "1"),
+            ],
+        );
+        assert!(
+            failures.is_empty(),
+            "{compiler_options:?}:\n{}",
+            failures.join("\n")
+        );
+    }
+}
