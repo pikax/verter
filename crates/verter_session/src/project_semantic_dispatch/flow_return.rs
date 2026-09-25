@@ -14448,9 +14448,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         let literal_node = self.lower_body_type(&literal_ty);
         // A value operand narrows as a literal does only when its type is
-        // a unit type; any other value type relates to the subject's arms
-        // by comparability alone, which this narrow does not carry.
+        // a unit type; any other value type narrows the subject by
+        // equality with it (`narrowTypeByEquality` over comparability).
         if !self.is_guard_unit(literal_node) {
+            if matches!(
+                literal,
+                crate::flow_slice_content::SliceGuardLiteral::Value(_)
+            ) {
+                return self.narrow_reference_by_value(
+                    subject,
+                    literal_node,
+                    negated,
+                    comparison == LiteralComparison::Loose,
+                );
+            }
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 crate::semantic_query::FlowGap::GuardNarrowing,
             ));
@@ -14710,6 +14721,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 SemanticNodeData::Primitive(PrimitiveKind::Void) => return None,
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
+                | SemanticNodeData::EnumLiteral(_)
                 | SemanticNodeData::Object(_)
                 | SemanticNodeData::ObjectSpreadProgram(_)
                 | SemanticNodeData::Array { .. }
@@ -14760,18 +14772,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let unit = values.len() == 1
                 && matches!(
                     data(values[0]).as_deref(),
-                    Some(SemanticNodeData::Literal(_))
+                    Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_))
                 );
             if !unit {
                 return Some(ty);
             }
             let mut survivors = Vec::new();
             for arm in arms {
-                let unit_arm = matches!(data(arm).as_deref(), Some(SemanticNodeData::Literal(_)))
-                    || matches!(
-                        primitive_of(arm),
-                        Some(PrimitiveKind::Null | PrimitiveKind::Undefined)
-                    );
+                let unit_arm = matches!(
+                    data(arm).as_deref(),
+                    Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_))
+                ) || matches!(
+                    primitive_of(arm),
+                    Some(PrimitiveKind::Null | PrimitiveKind::Undefined)
+                );
                 if unit_arm && self.comparable_either_way(arm, value)? {
                     continue;
                 }
