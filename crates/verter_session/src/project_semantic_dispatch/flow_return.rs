@@ -12467,14 +12467,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// The loop-head products of `carried[subject]` while the references
     /// `in_analysis` holds are under analysis: the entry state joined with
     /// one pass from the entry state in which every reference of its
-    /// dependency closure outside the analysis reads its own head. Memoized
-    /// on the reference and the analysed references its closure holds.
+    /// dependency closure outside the analysis reads its own head.
+    ///
+    /// Memoized on the reference for the whole head analysis, as the
+    /// checker caches each reference's loop-label type once it has one: a
+    /// reference first typed while others are under analysis keeps that
+    /// type wherever else the analysis reads it. Keyed on the analysed
+    /// references too, a loop whose references feed each other (`v0 = v1;
+    /// v1 = v2; …`) re-typed every reference once per subset of the others
+    /// — twenty such locals never finished.
     fn loop_reference_head(
         &mut self,
         input: LoopHeadInput<'_, '_>,
         subject: usize,
         in_analysis: &mut Vec<usize>,
-        memo: &mut rustc_hash::FxHashMap<(usize, Vec<usize>), FlowProductStore>,
+        memo: &mut rustc_hash::FxHashMap<usize, FlowProductStore>,
     ) -> Result<FlowProductStore, FlowReturnFailure> {
         // A reference entering the loop at its declared type holds it
         // at the head: every antecedent the checker's loop label would
@@ -12484,14 +12491,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return Ok(input.entry.products.clone());
         }
         let closure = &input.dependencies[subject];
-        let mut frozen: Vec<usize> = in_analysis
-            .iter()
-            .copied()
-            .filter(|reference| closure.contains(reference))
-            .collect();
-        frozen.sort_unstable();
-        let key = (subject, frozen);
-        if let Some(known) = memo.get(&key) {
+        if let Some(known) = memo.get(&subject) {
             return Ok(known.clone());
         }
         let mut start = input.entry.clone();
@@ -12526,7 +12526,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             None => input.entry.products.clone(),
         };
-        memo.insert(key, products.clone());
+        memo.insert(subject, products.clone());
         Ok(products)
     }
 

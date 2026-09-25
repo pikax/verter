@@ -2325,15 +2325,8 @@ export function lv() {
 "##;
 
 /// `while (cond()) { v0 = v1; …; v19 = v0; v19 = "s"; } return v0;` over twenty
-/// `let v<i>: string | number = 0` is `string | number`. The lane's time grows
-/// exponentially with the locals: 5 locals 0.2 s, 10 23.5 s for the four
-/// settings; at 20 every setting passes the row deadline.
-///
-/// What the lane gives:
-/// - `lv`: the checker answers `string | number`; the lane took longer than
-///   60s.
+/// `let v<i>: string | number = 0` is `string | number`.
 #[test]
-#[ignore = "a loop whose locals feed each other reaches its fixed point in time the checker takes"]
 fn a_loop_rotating_twenty_locals_reaches_its_fixed_point() {
     let matrix = Matrix::new(LOOP_LOCALS_20);
     let failures = matrix.returns(&[("lv", "string | number")]);
