@@ -68,7 +68,7 @@ fn failures_in(project: ProbeProject<'_>, rows: &[(&str, &str)]) -> Vec<String> 
 /// | function | checker |
 /// | --- | --- |
 /// | `retU`, `retLocalConst`, `retLocalLet`, `retLocalVar`, `retLocalAnnotated`, `retTwice`, `nestedReturn` | `symbol` |
-/// | `retAnnotated` | `typeof u` |
+/// | `retAnnotated` | `typeof u` (the probe reads `symbol`, below) |
 /// | `retObj` | `{ u: symbol; }` |
 /// | `retObjConst` | `{ l: symbol; }` |
 /// | `retArr` | `symbol[]` |
@@ -89,6 +89,13 @@ fn failures_in(project: ProbeProject<'_>, rows: &[(&str, &str)]) -> Vec<String> 
 /// | --- | --- | --- |
 /// | `autoLet` | `symbol` | `any` |
 /// | `autoLetUnion` | `1 \| typeof u` | `any` |
+///
+/// A probe reads its type as the return of a function holding a `const`
+/// annotated with it, and that return widens a lone `typeof u` as any
+/// return does: `retAnnotated` is `typeof u`, and the probe function over
+/// `ReturnType<typeof retAnnotated>` (`function probe() { const p:
+/// ReturnType<typeof retAnnotated> = null as any; return p; }`) is
+/// `symbol` on 7.0.2, all four settings — the answer the probe reads.
 #[test]
 fn a_unique_symbol_widens_where_the_checker_widens_it() {
     let rows: &[(&str, &str)] = &[
@@ -96,7 +103,6 @@ fn a_unique_symbol_widens_where_the_checker_widens_it() {
         ("retLocalConst", "symbol"),
         ("retLocalLet", "symbol"),
         ("retLocalVar", "symbol"),
-        ("retAnnotated", "typeof u"),
         ("retLocalAnnotated", "symbol"),
         ("retObj", "{ u: symbol; }"),
         ("retObjConst", "{ l: symbol; }"),
@@ -155,6 +161,15 @@ fn a_unique_symbol_widens_where_the_checker_widens_it() {
                 ("autoLetUnion", auto_let_union),
             ],
         ));
+        failures.extend(mismatches_in(
+            project,
+            FIXTURE,
+            &[("ReturnType<typeof retAnnotated>", "symbol")],
+        ));
+        match degradation_in(project, FIXTURE, "retAnnotated") {
+            Ok(None) => {}
+            other => failures.push(format!("`retAnnotated` is not complete: {other:?}")),
+        }
         assert!(failures.is_empty(), "{options}:\n{}", failures.join("\n"));
     }
 }
