@@ -4209,7 +4209,11 @@ mod conditional_indexed_check_tests;
 #[cfg(test)]
 mod const_literal_widening_tests;
 #[cfg(test)]
+mod differential_global_library_tests;
+#[cfg(test)]
 mod differential_harness_tests;
+#[cfg(test)]
+mod differential_module_tests;
 #[cfg(test)]
 mod differential_relation_tests;
 #[cfg(test)]

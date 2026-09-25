@@ -93,6 +93,7 @@ pub(super) struct Matrix<'a> {
     source: &'a str,
     lib: Option<&'a str>,
     script: bool,
+    files: &'a [(&'a str, &'a str)],
 }
 
 impl<'a> Matrix<'a> {
@@ -103,7 +104,15 @@ impl<'a> Matrix<'a> {
             source,
             lib: None,
             script: false,
+            files: &[],
         }
+    }
+
+    /// With `(file name, source)` modules beside the probe module in
+    /// each project.
+    pub(super) fn files(mut self, files: &'a [(&'a str, &'a str)]) -> Self {
+        self.files = files;
+        self
     }
 
     /// The source is a global script: no `export {}` is appended to it.
@@ -207,6 +216,15 @@ impl<'a> Matrix<'a> {
                     lib,
                 );
             }
+            for (name, source) in self.files {
+                let path = format!("{}/{name}", setting.root);
+                // A sibling is classified by its name, as the host classifies
+                // it: a `.d.ts` sibling is a declaration file.
+                let language = crate::LanguageRegistry::global()
+                    .classify_static(&path)
+                    .static_resolution();
+                crate::u6_flow_shape_corpus_tests::upsert(&host, &path, source, language);
+            }
             crate::u6_flow_shape_corpus_tests::upsert(
                 &host,
                 &canonical,
@@ -248,10 +266,13 @@ impl<'a> Matrix<'a> {
     fn module(&self, rows: &[(Read<'_>, Vec<&str>)]) -> String {
         let mut module = String::from(self.source);
         module.push('\n');
+        // A global script's probes are not exported: an export would make it
+        // a module.
+        let export = if self.script { "" } else { "export " };
         for (index, (read, _)) in rows.iter().enumerate() {
             if let Read::Type(probe) = read {
                 module.push_str(&format!(
-                    "export function __probe_{index}() {{ const __p: {probe} = null as any; return __p; }}\n"
+                    "{export}function __probe_{index}() {{ const __p: {probe} = null as any; return __p; }}\n"
                 ));
             }
         }
@@ -591,8 +612,13 @@ fn operand(
     let text = print(dispatch, node, depth + 1);
     let needs = match dispatch.graph().node_data(node).as_deref() {
         Some(SemanticNodeData::Signature { .. }) => true,
-        Some(SemanticNodeData::Union(_)) => !in_union,
+        // A union the checker prints as one enum name needs none.
+        Some(SemanticNodeData::Union(members)) => {
+            !in_union
+                && crate::semantic_query::printed_union_arms(dispatch.graph(), members).len() > 1
+        }
         Some(SemanticNodeData::Intersection(_)) => !in_union,
+        Some(SemanticNodeData::KeyOf { .. }) => !in_union,
         _ => false,
     };
     if needs {
