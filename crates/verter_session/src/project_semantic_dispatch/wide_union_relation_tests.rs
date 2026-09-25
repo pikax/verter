@@ -54,3 +54,45 @@ fn relating_a_wide_literal_union_to_its_superset_costs_the_same_checks_per_membe
         "relation checks at 100 / 200 / 300 members: {at_100} / {at_200} / {at_300}"
     );
 }
+
+/// `type K = "k0" | … `, `width` members, and `last(x: K)` returning `x`
+/// past a `throw` on each of its first `width - 1` members.
+fn equality_guard_chain(width: usize) -> String {
+    let members: Vec<String> = (0..width).map(|index| format!("\"k{index}\"")).collect();
+    let mut guards = String::new();
+    for index in 0..width - 1 {
+        guards.push_str(&format!("  if (x === \"k{index}\") throw 0;\n"));
+    }
+    format!(
+        "type K = {};\nexport function last(x: K) {{\n{guards}  return x;\n}}\n",
+        members.join(" | ")
+    )
+}
+
+/// A chain of `x === "k<i>"` guards over a literal union filters every
+/// remaining arm against each guard's literal, as the checker's
+/// `filterType` does; each such pair is two literal types, decided by
+/// value, so no relation of the chain reaches the structural reducer.
+///
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`,
+/// all four settings): `last` is `"k799"` over an 800-member union and
+/// `"k99"` over a 100-member one.
+#[test]
+fn an_equality_guard_chain_over_a_literal_union_reduces_no_relation() {
+    let before = super::ProjectSemanticDispatch::relation_reductions_for_tests();
+    let failures = mismatches(
+        &equality_guard_chain(100),
+        &[("ReturnType<typeof last>", "\"k99\"")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_eq!(
+        super::ProjectSemanticDispatch::relation_reductions_for_tests() - before,
+        0,
+        "every relation a literal guard chain asks is a pair of literals"
+    );
+    let failures = mismatches(
+        &equality_guard_chain(800),
+        &[("ReturnType<typeof last>", "\"k799\"")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -420,6 +420,12 @@ type MixedDischargeResult = Result<
     crate::semantic_query::ResolveCallFailure,
 >;
 
+#[cfg(test)]
+thread_local! {
+    /// How many relations this thread reduced structurally; test-only.
+    static RELATION_REDUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The relation-root outcome of [`ProjectSemanticDispatch::relation_discharge_and_route`].
 pub(super) struct RelationDischargeOutcome {
     /// The machinery relation root's family payload (its build output).
@@ -1138,6 +1144,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // their outer session context even though their immediate target is
         // no longer the mapped root.
         let key = self.relation_key_with_inference(key);
+        // (0) Two literal types relate exactly when they are one value.
+        if let Some(step) = self.literal_pair_relation(&key) {
+            return step;
+        }
         // (1) Reentry intercept.
         {
             let identity = ObligationIdentity::Relate {
@@ -1168,6 +1178,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             self.execute_relate_inline(key, occurrence)
         }
+    }
+
+    /// How many relations this thread reduced structurally
+    /// ([`Self::reduce_relation`]); test-only.
+    #[cfg(test)]
+    pub(crate) fn relation_reductions_for_tests() -> usize {
+        RELATION_REDUCTIONS.with(std::cell::Cell::get)
+    }
+
+    /// A pair of literal types relates, under every relation kind and
+    /// policy, exactly when the two are one value (`"a"` to `"a"`, never
+    /// `"a"` to `"b"` or `1` to `"1"`), and deciding it reads nothing and
+    /// cannot re-enter itself — the checker's `isSimpleTypeRelatedTo`
+    /// answers it by identity. So it is decided before the reentry
+    /// intercept, the memo and the cold build, whose query machinery a
+    /// guard filtering a wide literal union otherwise paid twice per
+    /// remaining arm. The operands' file roots are deposited as the cold
+    /// build's read would record them. `None` for any other pair, and while
+    /// an inference session collects (its candidate bookkeeping runs the
+    /// ordinary path).
+    fn literal_pair_relation(&self, key: &RelateMemoKey) -> Option<RelationStep> {
+        if self.dispatch_txn.borrow().active_session().is_some() {
+            return None;
+        }
+        let graph = self.graph();
+        let related = match (
+            graph.node_data(key.source).as_deref(),
+            graph.node_data(key.target).as_deref(),
+        ) {
+            (Some(SemanticNodeData::Literal(source)), Some(SemanticNodeData::Literal(target))) => {
+                source == target
+            }
+            _ => return None,
+        };
+        self.deposit_operand_self_roots(
+            &self.observed_self_roots_from_nodes([key.source, key.target]),
+        );
+        Some(if related {
+            RelationStep::Assignable {
+                bindings: Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
+            }
+        } else {
+            RelationStep::NotAssignable
+        })
     }
 
     pub(super) fn relation_redischarge_active(&self) -> bool {
@@ -5356,6 +5410,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key: &RelateMemoKey,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
+        #[cfg(test)]
+        RELATION_REDUCTIONS.with(|count| count.set(count.get() + 1));
         // Axis refusal: a key on a not-yet-implemented axis (`Subtype` /
         // `StrictSubtype`, a non-default overload-selection policy) must
         // REFUSE — undecided, ReturnOnly, zero admission — never route the

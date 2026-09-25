@@ -299,3 +299,27 @@ Recorded plainly so no reader mistakes absence for a pass:
   (`Lowerer::lower_logical_value`, on the 8 MiB declaration-lowering
   workers) still recurses once per operand, about 21 KiB per operand
   unoptimized: 320 operands use 6.9 MB of it.
+
+* **A pair of literal types relates without a query.** Two literal types
+  relate, under every relation kind, exactly when they are one value, so
+  the relation authority decides such a pair before its reentry intercept,
+  memo and cold build (`literal_pair_relation`, depositing the operands'
+  file roots as the cold read would), unless an inference session
+  collects. A chain of `if (x === "k<i>") throw` guards over an
+  `N`-member literal union filters the remaining arms at every guard, as
+  the checker's `filterType` does — about `2N²` relation checks, the
+  checker's own count — and paid a cold relation query for each: 200
+  guards took 4.9 s unoptimized, 800 minutes. Now none of them reaches the
+  structural reducer, 200 guards take 0.33 s, and 800 answer the checker's
+  `"k799"` (`wide_union_relation_tests.rs` →
+  `an_equality_guard_chain_over_a_literal_union_reduces_no_relation`).
+* **The demand slice plans at most 256 return sites.** A function with
+  more `return` statements on its demanded paths is refused before
+  evaluating, with `Budget(WorkBudgetExceeded)`
+  (`FlowSliceBudget::max_return_sites`): 255 `if (x === i) return …`
+  guards and the final return answer, 256 are refused. The work each such
+  guard costs is constant (relation checks `5N + 2`, guard applications
+  `2N` at 50, 100 and 200 guards), so the refusal is the planner's
+  return-site cap, not super-linear work; the skipped
+  `differential_depth_tests.rs` →
+  `an_800_return_if_chain_answers_within_the_work_budget` holds it open.
