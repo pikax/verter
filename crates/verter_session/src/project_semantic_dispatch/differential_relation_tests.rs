@@ -147,17 +147,94 @@ fn a_function_property_relates_to_a_method_as_the_checker_relates_it() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Only an object LITERAL type gets an implicit index signature; an interface
-/// does not, so `P` is not below `{ [k: string]: number }`. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[P] extends [{ [k: string]: number }] ? 1 : 2`: the checker answers `2`;
-///   the lane measured `1`.
+/// Interfaces, aliases, classes and mapped types against index signatures.
+const INDEXES: &str = r##"
+interface P { x: number; y: number }
+interface E {}
+type TL = { x: number; y: number };
+type TP = P;
+class C { x = 1; y = 2 }
+interface PM { m(): void }
+type TM = { m(): void };
+declare const obj: { x: number };
+interface Q extends TL {}
+interface Q2 extends TL { z: number }
+interface Q3 extends P {}
+interface Q10 extends Pick<P, "x"> {}
+interface Q11 extends Q {}
+interface Q16 extends Q3 {}
+type TL2 = { z: number };
+interface Q14 extends TL, TL2 {}
+interface Dict { [k: string]: number }
+interface PD extends Dict { x: number }
+interface NI { [k: number]: number; x: number }
+"##;
+
+/// Only an object type with an inferable index — from a type literal, an
+/// object literal or a mapped type, with no call or construct signature —
+/// relates to an index signature it does not declare through its
+/// properties (the checker's `isObjectTypeWithInferableIndex`). A declared
+/// interface or class instance, `object`, and an intersection holding one
+/// need an applicable index signature of their own; an alias reads as the
+/// type it names, an interface that declares no member and extends one type
+/// as that type, and a string index signature of type `any` takes every
+/// object. TypeScript 7.0.2 answers each row alike under all four settings.
 #[test]
-#[ignore = "an interface has no implicit index signature"]
-fn wrong_clean_an_interface_is_not_below_an_implicit_string_index_signature() {
-    let matrix = Matrix::new(OBJECTS);
-    let failures = matrix.types(&[("[P] extends [{ [k: string]: number }] ? 1 : 2", "2")]);
+fn an_implicit_index_signature_relates_as_the_checker_infers_it() {
+    let matrix = Matrix::new(INDEXES);
+    let failures = matrix.types(&[
+        ("[P] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[E] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[TL] extends [{ [k: string]: number }] ? 1 : 2", "1"),
+        ("[C] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[P & TL] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        (
+            "[Partial<P>] extends [{ [k: string]: number | undefined }] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[typeof obj] extends [{ [k: string]: number }] ? 1 : 2",
+            "1",
+        ),
+        ("[{}] extends [{ [k: string]: number }] ? 1 : 2", "1"),
+        ("[P] extends [{ [k: string]: unknown }] ? 1 : 2", "2"),
+        ("[P] extends [{ [k: string]: any }] ? 1 : 2", "1"),
+        ("[TP] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[P] extends [{ [k: number]: number }] ? 1 : 2", "2"),
+        (
+            "[TL & { z: 1 }] extends [{ [k: string]: number }] ? 1 : 2",
+            "1",
+        ),
+        ("[P | TL] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        (
+            "[Pick<P, \"x\">] extends [{ [k: string]: number }] ? 1 : 2",
+            "1",
+        ),
+        ("[PM] extends [{ [k: string]: unknown }] ? 1 : 2", "2"),
+        ("[TM] extends [{ [k: string]: unknown }] ? 1 : 2", "1"),
+        ("[Q] extends [{ [k: string]: number }] ? 1 : 2", "1"),
+        ("[Q2] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[Q3] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[Q10] extends [{ [k: string]: number }] ? 1 : 2", "1"),
+        ("[Q11] extends [{ [k: string]: number }] ? 1 : 2", "1"),
+        ("[Q16] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[Q14] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[object] extends [{ a?: 1 }] ? 1 : 2", "1"),
+        ("[object] extends [{ a: 1 }] ? 1 : 2", "2"),
+        ("[object] extends [{ [k: string]: unknown }] ? 1 : 2", "2"),
+        ("[object] extends [{ (): void }] ? 1 : 2", "2"),
+        ("[object] extends [{ [k: string]: any }] ? 1 : 2", "1"),
+        (
+            "[{ (): void; x: number }] extends [{ [k: string]: unknown }] ? 1 : 2",
+            "2",
+        ),
+        ("[PD] extends [{ [k: string]: number }] ? 1 : 2", "1"),
+        ("[P] extends [Dict] ? 1 : 2", "2"),
+        ("[{ x: number }] extends [Dict] ? 1 : 2", "1"),
+        ("[NI] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[NI] extends [{ [k: number]: number }] ? 1 : 2", "1"),
+        ("[Dict] extends [{ [k: number]: number }] ? 1 : 2", "1"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

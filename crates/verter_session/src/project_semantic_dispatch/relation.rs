@@ -5610,6 +5610,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             return acc;
         }
+        // A source with no inferable index — a declared interface or class
+        // instance among them — takes an index signature only through an
+        // index signature of its own.
+        if self.implicit_index_rejects(key.source, key.target) {
+            return RelationResult::NotAssignable;
+        }
         match self.shallow_relation_check(key.source, key.target) {
             ShallowRelation::Assignable => return assignable(bindings),
             ShallowRelation::NotAssignable => return RelationResult::NotAssignable,
@@ -6885,6 +6891,209 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
     }
 
+    /// Whether a source that declares no index signature applicable to one
+    /// of `target`'s is refused it outright, as the checker's
+    /// `typeRelatedToIndexInfo` refuses it when the source is not an
+    /// object type with an inferable index
+    /// ([`Self::infers_index_signature`]); only such a source relates its
+    /// properties to the index signature instead. A string index signature
+    /// of type `any` takes every source.
+    fn implicit_index_rejects(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        if !matches!(
+            graph.node_data(source).as_deref(),
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::Intersection(_)
+                    | SemanticNodeData::MergedDecl { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. }
+                    | SemanticNodeData::Primitive(PrimitiveKind::Object)
+                    | SemanticNodeData::Object(_)
+            )
+        ) {
+            return false;
+        }
+        if self.infers_index_signature(source, &mut FxHashSet::default()) {
+            return false;
+        }
+        let IdentityCarrierUnwrap::Concrete(target) =
+            self.unwrap_identity_carrier_for_relation(target)
+        else {
+            return false;
+        };
+        let target = self.follow_relation_aliases(target);
+        let target_indexes = match graph.node_data(target).as_deref() {
+            Some(SemanticNodeData::Object(surface)) if !surface.index_signatures.is_empty() => {
+                surface.index_signatures.clone()
+            }
+            _ => return false,
+        };
+        let required: Vec<SemanticNodeId> = target_indexes
+            .iter()
+            .filter(|index| {
+                !matches!(
+                    (
+                        graph.node_data(index.key_type).as_deref(),
+                        graph.node_data(index.value_type).as_deref(),
+                    ),
+                    (
+                        Some(SemanticNodeData::Primitive(PrimitiveKind::String)),
+                        Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                    )
+                )
+            })
+            .map(|index| index.key_type)
+            .collect();
+        if required.is_empty() {
+            return false;
+        }
+        let Some(declared) = self.declared_index_keys(source, &mut FxHashSet::default()) else {
+            return false;
+        };
+        required.iter().any(|target_key| {
+            !declared
+                .iter()
+                .any(|source_key| index_key_applies(graph, *source_key, *target_key))
+        })
+    }
+
+    /// The checker's `isObjectTypeWithInferableIndex`: an object type from a
+    /// type literal, an object literal or a mapped type relates to an index
+    /// signature through its properties; a declared interface or class
+    /// instance, `object`, a type with a call or construct signature, and an
+    /// intersection holding any of them do not. An alias reads as the type it
+    /// names, and an interface that declares no member of its own and extends
+    /// one type reads as that type (measured: `interface Q extends { x:
+    /// number } {}` takes `{ [k: string]: number }`, with a member of its own
+    /// or a second base it does not). `true` whenever undecided.
+    fn infers_index_signature(
+        &self,
+        node: SemanticNodeId,
+        seen: &mut FxHashSet<SemanticNodeId>,
+    ) -> bool {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        if !seen.insert(node) {
+            return true;
+        }
+        let graph = self.graph();
+        let Some(data) = graph.node_data(node) else {
+            return true;
+        };
+        match &*data {
+            SemanticNodeData::Alias(inner) => self.infers_index_signature(*inner, seen),
+            SemanticNodeData::Primitive(PrimitiveKind::Object)
+            | SemanticNodeData::MergedDecl { .. }
+            | SemanticNodeData::ClassExpressionInstance { .. }
+            | SemanticNodeData::Signature { .. } => false,
+            SemanticNodeData::Object(surface) => {
+                surface.call_signatures.is_empty() && surface.construct_signatures.is_empty()
+            }
+            SemanticNodeData::Intersection(members) => members
+                .members_arc()
+                .iter()
+                .all(|member| self.infers_index_signature(*member, seen)),
+            SemanticNodeData::DeclRef { identity }
+            | SemanticNodeData::InstantiationRef { base: identity, .. } => {
+                let kind = self.prepared_decl_kind(identity);
+                drop(data);
+                let IdentityCarrierUnwrap::Concrete(body) =
+                    self.unwrap_identity_carrier_one_step(node)
+                else {
+                    return true;
+                };
+                match kind {
+                    Some(TypeDeclKind::Alias) => self.infers_index_signature(body, seen),
+                    Some(TypeDeclKind::Interface) => match self.sole_extended_type(body) {
+                        Some(base) => self.infers_index_signature(base, seen),
+                        None => false,
+                    },
+                    Some(TypeDeclKind::Class) => false,
+                    None => true,
+                }
+            }
+            _ => true,
+        }
+    }
+
+    /// The one type an interface body extends when it declares no member of
+    /// its own: the body is that type's carrier, or an intersection of it
+    /// and empty objects.
+    fn sole_extended_type(&self, body: SemanticNodeId) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let is_carrier = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. })
+            )
+        };
+        if is_carrier(body) {
+            return Some(body);
+        }
+        let members = match graph.node_data(body).as_deref() {
+            Some(SemanticNodeData::Intersection(members)) => members.members_arc(),
+            _ => return None,
+        };
+        let mut base = None;
+        for member in members.iter() {
+            let empty = matches!(
+                graph.node_data(*member).as_deref(),
+                Some(SemanticNodeData::Object(surface)) if surface.closed().is_empty()
+            );
+            if empty {
+                continue;
+            }
+            if base.is_some() || !is_carrier(*member) {
+                return None;
+            }
+            base = Some(*member);
+        }
+        base
+    }
+
+    /// The key types of the index signatures `source` declares, its
+    /// intersection's members', heritage's and merged declarations'
+    /// included. `None` when they cannot be read.
+    fn declared_index_keys(
+        &self,
+        source: SemanticNodeId,
+        seen: &mut FxHashSet<SemanticNodeId>,
+    ) -> Option<Vec<SemanticNodeId>> {
+        if !seen.insert(source) {
+            return Some(Vec::new());
+        }
+        let IdentityCarrierUnwrap::Concrete(resolved) =
+            self.unwrap_identity_carrier_for_relation(source)
+        else {
+            return None;
+        };
+        let resolved = self.follow_relation_aliases(resolved);
+        let graph = self.graph();
+        match graph.node_data(resolved).as_deref()? {
+            SemanticNodeData::Object(surface) => {
+                if surface.has_known_index_signature() && surface.index_signatures.is_empty() {
+                    return None;
+                }
+                Some(
+                    surface
+                        .index_signatures
+                        .iter()
+                        .map(|index| index.key_type)
+                        .collect(),
+                )
+            }
+            SemanticNodeData::Intersection(members) => {
+                let mut keys = Vec::new();
+                for member in members.members_arc().iter() {
+                    keys.extend(self.declared_index_keys(*member, seen)?);
+                }
+                Some(keys)
+            }
+            SemanticNodeData::Primitive(PrimitiveKind::Object) => Some(Vec::new()),
+            _ => None,
+        }
+    }
+
     /// The file whose library an apparent type is read from while relating
     /// to `target`: the demand's, else the one the target was declared in.
     fn relation_wrapper_canonical(&self, target: SemanticNodeId) -> Option<Arc<str>> {
@@ -7631,6 +7840,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let object_target = matches!(&*target_data, SemanticNodeData::Object(_));
             drop(source_data);
             drop(target_data);
+            // An intersection infers an index signature only when every
+            // member does, and no member alone stands in for it then.
+            if self.implicit_index_rejects(source, target) {
+                results.push(RelationResult::NotAssignable);
+                return;
+            }
             let alternatives: Vec<_> = members.iter().map(|member| (*member, target)).collect();
             let result = if self.infers_from_last_source_signature(target) {
                 self.relate_overloads_inferring_from_last(
@@ -8118,6 +8333,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let t_surf = t_surf.clone();
             drop(source_data);
             drop(target_data);
+            if self.implicit_index_rejects(source, target) {
+                results.push(RelationResult::NotAssignable);
+                return;
+            }
             results.push(self.relate_objects(&s_surf, &t_surf, bindings));
             return;
         }
@@ -8237,6 +8456,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 return;
             }
+        }
+
+        // `object` relates to an object type as its apparent type, the empty
+        // object type, which infers no index signature.
+        if matches!(
+            (&*source_data, &*target_data),
+            (
+                SemanticNodeData::Primitive(PrimitiveKind::Object),
+                SemanticNodeData::Object(_)
+            )
+        ) {
+            drop(source_data);
+            drop(target_data);
+            if self.implicit_index_rejects(source, target) {
+                results.push(RelationResult::NotAssignable);
+            } else {
+                work.push(same_pair(self.empty_object(), target));
+            }
+            return;
         }
 
         // Different concrete kinds → NotAssignable.
@@ -10675,6 +10913,36 @@ fn surface_is_object_literal(surface: &SurfaceView) -> bool {
         .positive_members()
         .iter()
         .any(|member| member.excess_origin != verter_type_expr::ExcessPropertyOrigin::NonLiteral)
+}
+
+/// Whether a source index signature keyed by `source_key` applies to a target
+/// index signature keyed by `target_key` (the checker's
+/// `getApplicableIndexInfo`): a `string` key applies to `string` and `number`
+/// keys, a `number` key to `number` keys only, and any other key as its
+/// domain overlaps the target's.
+fn index_key_applies(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    source_key: SemanticNodeId,
+    target_key: SemanticNodeId,
+) -> bool {
+    match (
+        graph.node_data(source_key).as_deref(),
+        graph.node_data(target_key).as_deref(),
+    ) {
+        (
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String)),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String | PrimitiveKind::Number)),
+        )
+        | (
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number)),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number)),
+        ) => true,
+        (
+            Some(SemanticNodeData::Primitive(_)),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String | PrimitiveKind::Number)),
+        ) => false,
+        _ => source_key == target_key || index_domains_overlap(graph, source_key, target_key),
+    }
 }
 
 /// Build and push the worklist fan-out for a distribution whose reducer
