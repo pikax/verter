@@ -43,7 +43,12 @@
     {
       "id": "STP19-overloads",
       "disposition": "accept",
-      "twins": ["six-construct-overloads-preserved", "fixed-single-signature-adapter"]
+      "twins": [
+        "six-construct-overloads-preserved",
+        "fixed-single-signature-adapter",
+        "open-catch-all-replaces-earlier-overloads",
+        "call-overloads-collapse-to-the-last"
+      ]
     },
     {
       "id": "STP19-foreign",
@@ -68,5 +73,5 @@
   "verify": "node scripts/sfc-projection/verify-node.mjs --node STP19 --engine all --require-all --json",
   "test": "cargo test -p verter_compiler --lib ide::vue_projection::generic_interop",
   "runtimeCorrectness": true,
-  "notes": "Advanced generic binders and foreign component interoperability. Each component use is constructed through the foreign component contract adapter: the component's exact contract (a typed constructor with every construct overload and binder, an Options API constructor rebuilt from its published $props, a functional component through its own call signature) intersected with an attribute-tolerant fallback signature, so TypeScript's own overload resolution selects the signature with no fixed overload count. Every use of a parent is placed in one scope over the parent's authored generic binder, so forwarded parameters stay parameters. Vue IDE routing stays on project_ide; this node exposes a dormant VueProjectionBackend::advanced_generic_uses. STP58 owns atomic Vue activation."
+  "notes": "Advanced generic binders and foreign component interoperability. Each component use is constructed through the foreign component contract adapter: the component's exact contract (a typed constructor with every construct overload and binder, an Options API constructor rebuilt from its published $props, a functional component through its own call signature, and a constructor ending in an open catch-all or an overloaded callable rebuilt signature by signature in declaration order) intersected with an attribute-tolerant fallback signature, so TypeScript's own overload resolution selects the signature with no fixed overload count. Every use of a parent is placed in one scope over the parent's authored generic binder, so forwarded parameters stay parameters. Vue IDE routing stays on project_ide; this node exposes a dormant VueProjectionBackend::advanced_generic_uses. STP58 owns atomic Vue activation."
 }

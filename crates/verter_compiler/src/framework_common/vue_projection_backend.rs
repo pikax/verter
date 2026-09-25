@@ -79,8 +79,8 @@ pub use crate::ide::vue_projection::component_use::{
 /// name the same types as this backend.
 pub use crate::ide::vue_projection::generic_interop::{
     AdvancedGenericUse, AdvancedGenericUseProjection, ForeignComponentContractAdapter,
-    UseContractAvailability, USE_COMPONENT, USE_CONTRACT, USE_FUNCTIONAL, USE_OPEN_ARGS, USE_SCOPE,
-    USE_TOLERANT,
+    UseContractAvailability, USE_CALLS, USE_COMPONENT, USE_CONSTRUCTS, USE_CONTRACT,
+    USE_FUNCTIONAL, USE_OPEN_ARGS, USE_SCOPE, USE_TOLERANT,
 };
 
 /// STP15 named products: the acceptance surface of

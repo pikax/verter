@@ -22,6 +22,10 @@
 //   <Shape kind="polygon" :sides="5" />
 //   <ErasedList :items="rows" />
 //   <Untyped :anything="rows" />
+//   <Gauge unit="celsius" :value="21" />
+//   <Gauge unit="percent" :ratio="0.5" />
+//   <Toggle mode="on" :level="2" />
+//   <Toggle mode="off" reason="idle" />
 // </template>
 //
 // STP19-forward: `Picker` receives the parent's own `T` (never its
@@ -31,10 +35,12 @@
 // fixes every channel. STP19-foreign: Options API, generic setup-function,
 // functional and generic functional components keep their published
 // contracts. STP19-overloads: the fifth of six construct overloads is
-// selected. STP19-erasure: an erased generic stays `unknown`, an untyped
+// selected, the precise overloads ahead of an open catch-all constructor and
+// the non-last call overloads of a functional component stay selectable.
+// STP19-erasure: an erased generic stays `unknown`, an untyped
 // component stays `any`.
 import Picker from "./components/Picker.vue";
-import { Badge, Cell, Choice, Counter, ErasedList, Shape, Untyped } from "./foreign";
+import { Badge, Cell, Choice, Counter, ErasedList, Gauge, Shape, Toggle, Untyped } from "./foreign";
 import { BarrelPicker, pickers } from "./barrel";
 import type { Row } from "./aliases";
 
@@ -43,7 +49,14 @@ type IsAny<X> = 0 extends 1 & X ? true : false;
 type IsExactlyUnknown<X> = IsAny<X> extends true ? false : unknown extends X ? true : false;
 
 type __VerterUseOpenArgs<A> = A extends readonly any[] ? (number extends A["length"] ? (0 extends 1 & A[number] ? true : false) : false) : false;
-type __VerterUseContract<C> = C extends abstract new (...args: infer A) => infer I ? (__VerterUseOpenArgs<A> extends true ? (I extends { readonly $props: infer P } ? new (props: P) => I : C) : C) : unknown;
+type __VerterUseSame<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;
+type __VerterUsePeeled<N> = { readonly __verterUsePeeled: N };
+type __VerterUseOrdered<T, Acc> = T extends readonly [infer H, ...infer R] ? __VerterUseOrdered<R, Acc & H> : Acc;
+type __VerterUseConstruct<A extends readonly unknown[], I> = __VerterUseOpenArgs<A> extends true ? (I extends { readonly $props: infer P } ? new (props: P) => I : new (...args: A) => I) : new (...args: A) => I;
+type __VerterUseConstructs<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends abstract new (...args: infer A) => infer I ? (A extends readonly [__VerterUsePeeled<number>] ? __VerterUseOrdered<Out, unknown> : __VerterUseSame<[A, I], Prev> extends true ? C : __VerterUseConstructs<C, Seen & { new (...args: A): I; new (...args: [__VerterUsePeeled<Out["length"]>]): never }, [A, I], [__VerterUseConstruct<A, I>, ...Out]>) : C;
+type __VerterUseCall<A> = A extends readonly [infer P, ...infer X] ? new (props: P & Record<string, unknown>) => __VerterUseFunctional<P, X extends readonly [infer Y, ...unknown[]] ? Y : unknown> : new (props: Record<string, unknown>) => __VerterUseFunctional<unknown, unknown>;
+type __VerterUseCalls<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends (...args: infer A) => infer R ? (A extends readonly [__VerterUsePeeled<number>] ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseSame<[A, R], Prev> extends true ? unknown : __VerterUseCalls<C, Seen & { (...args: A): R; (...args: [__VerterUsePeeled<Out["length"]>]): never }, [A, R], [__VerterUseCall<A>, ...Out]>) : unknown;
+type __VerterUseContract<C> = C extends abstract new (...args: infer A) => unknown ? (__VerterUseOpenArgs<A> extends true ? __VerterUseConstructs<C, unknown, never, []> : C) : __VerterUseCalls<C, unknown, never, []>;
 type __VerterUseTolerant<P, I> = (0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : P) : P) & Record<string, unknown>;
 type __VerterUseFunctional<P, X> = { readonly $props: P; readonly $slots: X extends { slots: infer S } ? S : {}; $emit: X extends { emit: infer E } ? E : never };
 declare function __VerterUseComponent<C, A>(component: C, tolerant: A): __VerterUseContract<C> & A;
@@ -95,7 +108,11 @@ function observe() {
   const erasedSlot = {} as __VerterUseSlotProps<typeof __VerterUse_fe63724fd35964d9, "default">;
   const erasedIsUnknown: IsExactlyUnknown<typeof erasedSlot.item> = true;
   const untypedIsAny: IsAny<typeof __VerterUse_88698eb00ab7e0aa> = true;
-  return [forwarded, forwardedLabel, stp19HoverTarget, labels, formatted, explicitItem, explicitValue, explicitListener, namespaceInstance, bump, counted, chosen, level, cellValue, circle, polygon, erasedIsUnknown, untypedIsAny];
+  const celsius: "celsius" = __VerterUse_0f68882e583e0974.unit;
+  const percent: "percent" = __VerterUse_d206613c79de26f0.unit;
+  const toggledOn: number = __VerterUse_b5063f18761348d2.$props.level;
+  const toggledOff: string = __VerterUse_254f2d410a2b7939.$props.reason;
+  return [forwarded, forwardedLabel, stp19HoverTarget, labels, formatted, explicitItem, explicitValue, explicitListener, namespaceInstance, bump, counted, chosen, level, cellValue, circle, polygon, erasedIsUnknown, untypedIsAny, celsius, percent, toggledOn, toggledOff];
 }
 const __VerterUse_7d12abeb7579a548 = new (__VerterUseComponent(Picker, __VerterUseConstructor(Picker)))({ "items": (props.items), "field": "label", "format": ((value) => String(value)), "onPick": ((item, key) => onPick(item, key)) });
 const __VerterUse_de28af435ed10d58 = new (__VerterUseComponent(BarrelPicker, __VerterUseConstructor(BarrelPicker)))({ "items": (rows), "field": "id", "format": (describe), "onPick": ((row) => log(row.label)) });
@@ -108,6 +125,10 @@ const __VerterUse_69386ace753053c3 = new (__VerterUseComponent(Shape, __VerterUs
 const __VerterUse_be4d6146599d76b8 = new (__VerterUseComponent(Shape, __VerterUseConstructor(Shape)))({ "kind": "polygon", "sides": (5) });
 const __VerterUse_fe63724fd35964d9 = new (__VerterUseComponent(ErasedList, __VerterUseConstructor(ErasedList)))({ "items": (rows) });
 const __VerterUse_88698eb00ab7e0aa = new (__VerterUseComponent(Untyped, __VerterUseConstructor(Untyped)))({ "anything": (rows) });
+const __VerterUse_0f68882e583e0974 = new (__VerterUseComponent(Gauge, __VerterUseConstructor(Gauge)))({ "unit": "celsius", "value": (21) });
+const __VerterUse_d206613c79de26f0 = new (__VerterUseComponent(Gauge, __VerterUseConstructor(Gauge)))({ "unit": "percent", "ratio": (0.5) });
+const __VerterUse_b5063f18761348d2 = new (__VerterUseComponent(Toggle, __VerterUseConstructor(Toggle)))({ "mode": "on", "level": (2) });
+const __VerterUse_254f2d410a2b7939 = new (__VerterUseComponent(Toggle, __VerterUseConstructor(Toggle)))({ "mode": "off", "reason": "idle" });
 }
 
 export type Instance = InstanceType<typeof pickers.RowPicker>;

@@ -62,11 +62,14 @@ export const DIRTY_SCOPE_DROPS_BINDER = { scope: { binder: "dropped" } };
 export const DIRTY_FABRICATED_WITNESS = { availability: { unavailable: "fabricated" } };
 export const DIRTY_ADAPTER_ANY = { contract: { callable: "any" } };
 export const DIRTY_ALIAS_ERASED = { callee: { alias: "base-component" } };
+export const DIRTY_OPEN_CATCH_ALL_REPLACES_OVERLOADS = { contract: { openArguments: "last-only" } };
+export const DIRTY_CALL_OVERLOADS_COLLAPSE = { contract: { callable: "last-only" } };
 
 const RUST_CASES = Object.freeze({
   "STP19-explicit": [
     "generic_use_scope_carries_the_authored_binder",
     "picker_probe_fixture_is_the_rendered_declaration",
+    "generic_use_witness_values_keep_their_authored_origin",
   ],
   "STP19-higher-rank": ["generic_use_explicit_aliases_construct_the_alias_itself"],
   "STP19-forward": ["generic_use_scope_carries_the_authored_binder"],
@@ -102,8 +105,8 @@ const DIRTY_TWIN_PATCHES = Object.freeze({
   }),
   DIRTY_OPEN_ARGS_WIDENED: Object.freeze({
     caseId: "STP19-foreign",
-    find: "(I extends { readonly $props: infer P } ? new (props: P) => I : C)",
-    replace: "C",
+    find: "(I extends { readonly $props: infer P } ? new (props: P) => I : new (...args: A) => I)",
+    replace: "new (...args: A) => I",
     discriminators: Object.freeze([
       "foreign_contract_declarations_keep_published_shapes",
       "probe_fixtures_are_the_rendered_products",
@@ -131,8 +134,8 @@ const DIRTY_TWIN_PATCHES = Object.freeze({
   }),
   DIRTY_ADAPTER_ANY: Object.freeze({
     caseId: "STP19-erasure",
-    find: ': C) : C) : unknown;\\n",',
-    replace: ': C) : C) : any;\\n",',
+    find: ": C) : __VerterUseCalls<C, unknown, never, []>;",
+    replace: ": C) : any;",
     discriminators: Object.freeze(["foreign_contract_declarations_keep_published_shapes"]),
   }),
 });
@@ -156,15 +159,40 @@ const TS_TWINS = Object.freeze({
     probe: "negative-construction.ts",
     rewrite: (text) =>
       text
-        .replace("(I extends { readonly $props: infer P } ? new (props: P) => I : C)", "C")
+        .replace(
+          "(I extends { readonly $props: infer P } ? new (props: P) => I : new (...args: A) => I)",
+          "new (...args: A) => I",
+        )
         .replace("(0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : P) : P)", "P"),
     expect: { loses: "\"count\": ('1')" },
   }),
   DIRTY_ADAPTER_ANY: Object.freeze({
     caseId: "STP19-erasure",
     probe: "negative.ts",
-    rewrite: (text) => text.replace(": C) : C) : unknown;", ": C) : C) : any;"),
+    rewrite: (text) =>
+      text.replace(": C) : __VerterUseCalls<C, unknown, never, []>;", ": C) : any;"),
     expect: { loses: '"level": (4)' },
+  }),
+  // The open catch-all replaces the whole constructor with its own `$props`
+  // signature: an earlier precise overload is no longer selectable.
+  DIRTY_OPEN_CATCH_ALL_REPLACES_OVERLOADS: Object.freeze({
+    caseId: "STP19-overloads",
+    probe: "positive.ts",
+    rewrite: (text) =>
+      text.replace(
+        "__VerterUseConstructs<C, unknown, never, []>",
+        "(C extends abstract new (...args: infer _) => infer I ? (I extends { readonly $props: infer P } ? new (props: P) => I : C) : C)",
+      ),
+    expect: { gains: '"unit": "celsius"' },
+  }),
+  // An overloaded callable is matched to one call signature: only its last
+  // overload is selectable.
+  DIRTY_CALL_OVERLOADS_COLLAPSE: Object.freeze({
+    caseId: "STP19-overloads",
+    probe: "positive.ts",
+    rewrite: (text) =>
+      text.replace(": C) : __VerterUseCalls<C, unknown, never, []>;", ": C) : unknown;"),
+    expect: { gains: '"mode": "on"' },
   }),
   DIRTY_ALIAS_ERASED: Object.freeze({
     caseId: "STP19-instantiation-alias",
@@ -338,6 +366,8 @@ export function assertRustCases(run) {
     DIRTY_FABRICATED_WITNESS,
     DIRTY_ADAPTER_ANY,
     DIRTY_ALIAS_ERASED,
+    DIRTY_OPEN_CATCH_ALL_REPLACES_OVERLOADS,
+    DIRTY_CALL_OVERLOADS_COLLAPSE,
   };
   for (const [twin, value] of Object.entries(twins)) {
     if (value === undefined || (!DIRTY_TWIN_PATCHES[twin] && !TS_TWINS[twin])) {

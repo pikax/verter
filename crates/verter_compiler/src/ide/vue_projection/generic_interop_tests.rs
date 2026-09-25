@@ -22,7 +22,8 @@ const PARENT_GENERIC: &str = "T extends { id: number; label: string }";
 /// explicit aliases through a re-export and a namespace, Options API,
 /// generic setup-function, functional and generic functional components,
 /// two uses of a six-overload constructor, an erased and an untyped
-/// component.
+/// component, and non-last overloads of a constructor ending in an open
+/// catch-all and of an overloaded functional component.
 const POSITIVE_TEMPLATE: &str = concat!(
     "  <Picker :items=\"props.items\" field=\"label\" :format=\"(value) => String(value)\" @pick=\"(item, key) => onPick(item, key)\">\n",
     "    <template #default=\"{ item, map }\">{{ item.label }}{{ map((entry) => entry.id) }}</template>\n",
@@ -38,7 +39,15 @@ const POSITIVE_TEMPLATE: &str = concat!(
     "  <Shape kind=\"circle\" :radius=\"1\" />\n",
     "  <Shape kind=\"polygon\" :sides=\"5\" />\n",
     "  <ErasedList :items=\"rows\" />\n",
-    "  <Untyped :anything=\"rows\" />"
+    "  <Untyped :anything=\"rows\" />
+",
+    "  <Gauge unit=\"celsius\" :value=\"21\" />
+",
+    "  <Gauge unit=\"percent\" :ratio=\"0.5\" />
+",
+    "  <Toggle mode=\"on\" :level=\"2\" />
+",
+    "  <Toggle mode=\"off\" reason=\"idle\" />"
 );
 
 /// Setup statements the positive probe supplies to the scope, including the
@@ -84,7 +93,11 @@ function observe() {
   const erasedSlot = {} as __VerterUseSlotProps<typeof __VerterUse_fe63724fd35964d9, "default">;
   const erasedIsUnknown: IsExactlyUnknown<typeof erasedSlot.item> = true;
   const untypedIsAny: IsAny<typeof __VerterUse_88698eb00ab7e0aa> = true;
-  return [forwarded, forwardedLabel, stp19HoverTarget, labels, formatted, explicitItem, explicitValue, explicitListener, namespaceInstance, bump, counted, chosen, level, cellValue, circle, polygon, erasedIsUnknown, untypedIsAny];
+  const celsius: "celsius" = __VerterUse_0f68882e583e0974.unit;
+  const percent: "percent" = __VerterUse_d206613c79de26f0.unit;
+  const toggledOn: number = __VerterUse_b5063f18761348d2.$props.level;
+  const toggledOff: string = __VerterUse_254f2d410a2b7939.$props.reason;
+  return [forwarded, forwardedLabel, stp19HoverTarget, labels, formatted, explicitItem, explicitValue, explicitListener, namespaceInstance, bump, counted, chosen, level, cellValue, circle, polygon, erasedIsUnknown, untypedIsAny, celsius, percent, toggledOn, toggledOff];
 }
 "#;
 
@@ -199,6 +212,10 @@ fn generic_use_construction_applies_the_exact_contract_first() {
             "Shape",
             "ErasedList",
             "Untyped",
+            "Gauge",
+            "Gauge",
+            "Toggle",
+            "Toggle",
         ]
     );
     for witness in &projection.witnesses.witnesses {
@@ -226,10 +243,12 @@ fn generic_use_construction_applies_the_exact_contract_first() {
 }
 
 /// The adapter declarations keep every published component shape: a typed
-/// constructor passes through whole, an open-argument (`...args: any[]`)
-/// constructor is rebuilt from the `$props` its instance publishes, a
-/// callable component reaches the construction only through its own call
-/// signature, and no declared result introduces `any`.
+/// constructor passes through whole, a constructor ending in an
+/// open-argument (`...args: any[]`) signature is rebuilt signature by
+/// signature with each open signature taking the `$props` its instance
+/// publishes, an overloaded callable is rebuilt signature by signature, a
+/// single call signature reaches the construction through higher-order
+/// inference, and no declared result introduces `any`.
 #[test]
 fn foreign_contract_declarations_keep_published_shapes() {
     let declarations = ForeignComponentContractAdapter::DECLARATIONS;
@@ -240,8 +259,11 @@ fn foreign_contract_declarations_keep_published_shapes() {
         .find(|line| line.starts_with(&format!("type {USE_CONTRACT}<C> = ")))
         .expect("contract declaration");
     assert!(contract.contains(&format!(
-        "({USE_OPEN_ARGS}<A> extends true ? (I extends {{ readonly $props: infer P }} ? new (props: P) => I : C) : C) : unknown;"
+        "({USE_OPEN_ARGS}<A> extends true ? {USE_CONSTRUCTS}<C, unknown, never, []> : C) : {USE_CALLS}<C, unknown, never, []>;"
     )));
+    assert!(declarations.contains(
+        "(I extends { readonly $props: infer P } ? new (props: P) => I : new (...args: A) => I)"
+    ));
     let tolerant = declarations
         .lines()
         .find(|line| line.starts_with(&format!("type {USE_TOLERANT}<P, I> = ")))
@@ -328,6 +350,58 @@ fn generic_use_availability_keeps_unavailable_uses_unwitnessed() {
     let rendered = projection.render("");
     assert_eq!(rendered.matches(" = new (").count(), 1);
     assert_eq!(rendered.matches(WITNESS_PREFIX).count(), 1);
+}
+
+/// Every authored expression a witness carries — including the type
+/// argument tokens of a generic arrow — keeps its admitted origin: the
+/// plan's occurrence slices the SFC source to exactly the spelling the
+/// witness renders, so the mapping layer anchors each generic argument
+/// token at its authored bytes instead of at generated text.
+#[test]
+fn generic_use_witness_values_keep_their_authored_origin() {
+    let source = sfc(Some(PARENT_GENERIC), POSITIVE_TEMPLATE);
+    let parsed = crate::compile::parse_sfc(&source, None, None);
+    let plan = build_projection_plan(PlanInput {
+        canonical_id: "file:///Parent.vue",
+        source: &source,
+        parsed: &parsed,
+        parse_key: None,
+        syntax_profile: None,
+    });
+    let attributes = project_attribute_operations(&plan, &parsed, &source);
+    let uses = project_component_uses(&plan, &attributes);
+    let binder = public_binder(Some(PARENT_GENERIC)).expect("binder parses");
+    let projection = project_advanced_generic_uses(&plan, uses, binder);
+    let rendered = projection.render(POSITIVE_SETUP);
+    let mut generic_argument_origins = 0;
+    for witness in &projection.witnesses.witnesses {
+        let component = plan
+            .expression(&witness.component_expression)
+            .expect("component expression is admitted");
+        assert_eq!(
+            &source[component.start as usize..component.end as usize],
+            witness.component
+        );
+        for member in &witness.transaction.members {
+            let value = match member {
+                super::component_use::TransactionMember::Property { value, .. }
+                | super::component_use::TransactionMember::Spread { value, .. } => value,
+            };
+            let (Some(id), super::component_use::MemberValue::Expression { spelling, .. }) =
+                (value.expression(), value)
+            else {
+                continue;
+            };
+            let occurrence = plan.expression(id).expect("member expression is admitted");
+            let authored = &source[occurrence.start as usize..occurrence.end as usize];
+            assert_eq!(authored, spelling);
+            assert!(rendered.contains(&format!("({authored})")), "{authored}");
+            if authored.starts_with("<V,>") {
+                generic_argument_origins += 1;
+            }
+        }
+    }
+    assert_eq!(generic_argument_origins, 1);
 }
 
 /// Explicit instantiation aliases — reached through a renamed re-export and

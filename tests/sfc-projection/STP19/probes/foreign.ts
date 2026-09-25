@@ -3,7 +3,9 @@
 // publishes it with open `...args: any[]`), a generic setup-function
 // constructor, a functional component, a generic functional component, a
 // hand-written constructor with six construct overloads, a component whose
-// publisher erased its generic, and an untyped (`any`) component.
+// publisher erased its generic, an untyped (`any`) component, a hand-written
+// constructor whose precise overloads precede an open `...args: any[]`
+// catch-all, and a functional component with three call overloads.
 import {
   defineComponent,
   h,
@@ -66,3 +68,16 @@ export declare const ErasedList: new (props: { items: readonly unknown[] }) => {
 };
 
 export declare const Untyped: any;
+
+export declare const Gauge: {
+  new (props: { unit: "celsius"; value: number }): { readonly $props: { unit: "celsius"; value: number }; readonly unit: "celsius" };
+  new (props: { unit: "percent"; ratio: number }): { readonly $props: { unit: "percent"; ratio: number }; readonly unit: "percent" };
+  new (...args: any[]): { readonly $props: { unit: "raw"; raw: string }; readonly unit: "raw" };
+};
+
+export function Toggle(props: { mode: "on"; level: number }, ctx: SetupContext<{ flip: (level: number) => true }>): VNode;
+export function Toggle(props: { mode: "off"; reason: string }, ctx: SetupContext<{ reset: () => true }>): VNode;
+export function Toggle(props: { mode: "auto"; enabled: boolean }): VNode;
+export function Toggle(props: { mode: string }): VNode {
+  return h("button", props.mode);
+}
