@@ -7131,17 +7131,6 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-    /// Whether any write other than its declarator's initializer assigns
-    /// `binding`.
-    fn binding_is_reassigned(&self, binding: SkeletonBindingId) -> bool {
-        let initializer = self.skeleton.binding(binding).initializer;
-        self.skeleton.writes.iter().any(|write| {
-            (write.value.is_none() || write.value != initializer)
-                && matches!(write.binding, Some(FlowBindingRef::Local(local))
-                    if self.bindings.canonical_local(local) == self.bindings.canonical_local(binding))
-        })
-    }
-
     fn binding_has_write_before(
         &self,
         binding: SkeletonBindingId,
@@ -15334,12 +15323,12 @@ impl<'a> Lowerer<'a> {
                 )),
             })),
         };
-        // Every capture reads its declared type where the value is read. A
-        // capture of the declaring frame whose value there may differ from
-        // its declared type takes the typed gap: a `let` any write retypes,
-        // an unannotated `var` a write retypes before the read, a binding
-        // under an active guard whose declared authority is not read, and
-        // any mutable binding of an ENCLOSING frame. A captured EVOLVING
+        // Every capture reads its declared type where the value is read: the
+        // evaluator supplies it for a declaring-frame parameter and whole
+        // `let` / `var` ([`Self::capture_reads_declared_type`]), whatever
+        // the frame assigns. A destructured one, a binding under an active
+        // guard whose declared authority is not read, and any mutable binding
+        // of an ENCLOSING frame takes the typed gap. A captured EVOLVING
         // array reads its declared type (`any[]`) as every capture a
         // function does not extend does.
         let mut gap = None;
@@ -15361,13 +15350,9 @@ impl<'a> Lowerer<'a> {
             }
             let retyped = if own_frame {
                 match fact.kind {
-                    SkeletonBindingKind::Let => {
-                        self.nested_free_writes.contains(&binding)
-                            || self.binding_is_reassigned(binding)
-                    }
-                    SkeletonBindingKind::Var | SkeletonBindingKind::Param => {
-                        !self.capture_reads_declared_type(binding)
-                    }
+                    SkeletonBindingKind::Let
+                    | SkeletonBindingKind::Var
+                    | SkeletonBindingKind::Param => !self.capture_reads_declared_type(binding),
                     _ => false,
                 }
             } else {

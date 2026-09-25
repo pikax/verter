@@ -205,10 +205,8 @@ fn a_local_function_declaration_evaluates_clean() {
 }
 
 /// A function declaration capturing a `let` the body reassigns after the
-/// declaration reads the `let`'s declared type (`number`, measured above),
-/// which the lane gives but keeps behind a typed capture gap.
+/// declaration reads the `let`'s declared type (`number`, measured above).
 #[test]
-#[ignore = "a function declaration reads a reassigned `let` capture at its declared type"]
 fn a_local_function_capturing_a_reassigned_let_evaluates_clean() {
     assert_clean(&make_host(), "capturesReassignedLet");
 }
