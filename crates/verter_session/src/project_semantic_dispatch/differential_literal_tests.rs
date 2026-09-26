@@ -114,6 +114,8 @@ export function cNestedArr() { return [[1], [2]] as const; }
 export function cLocal() { const o = { a: 1 } as const; return o; }
 export function cLocalProp() { const o = { a: 1 } as const; return o.a; }
 export function cTemplate() { return `x${1}` as const; }
+export function cTemplateMixed() { return `${true}-${"z"}` as const; }
+export function cTemplateBranches(b: boolean) { return `x${b ? 1 : 2}` as const; }
 export function cSpread() { const base = { a: 1 } as const; return { ...base, b: 2 }; }
 export function cSpreadConst() { const base = { a: 1 } as const; return { ...base, b: 2 } as const; }
 export function cArrSpread() { const t = [1, 2] as const; return [...t, 3]; }
@@ -158,15 +160,17 @@ fn const_assertions_apply_as_the_checker_applies_them() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `\`x${1}\` as const` is `"x1"`. Wrong-but-clean: the lane answers `string`.
-///
-/// What the lane gives:
-/// - `cTemplate`: the checker answers `"x1"`; the lane measured `string`.
+/// A template literal expression under `as const` is the template literal type
+/// of its holes' literal types: `\`x${1}\` as const` is `"x1"`, and a
+/// conditional hole distributes (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "a template literal expression under as const is its literal string type"]
-fn wrong_clean_a_const_template_is_its_literal() {
+fn a_const_template_infers_as_the_checker_infers_it() {
     let matrix = Matrix::new(AS_CONST);
-    let failures = matrix.returns(&[("cTemplate", "\"x1\"")]);
+    let failures = matrix.returns(&[
+        ("cTemplate", "\"x1\""),
+        ("cTemplateMixed", "\"true-z\""),
+        ("cTemplateBranches", "\"x1\" | \"x2\""),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

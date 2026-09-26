@@ -5638,6 +5638,35 @@ fn infer_expression_type_ctx_with_read_root(
             }
             Ok(TypeExpr::string_literal(value))
         }
+        // In a const context a template is the template literal type of its
+        // holes' literal types (`` `x${1}` as const `` is `"x1"`), when every
+        // hole is a literal or primitive type this inference reads; a hole
+        // naming a value keeps the template a `string`.
+        Expression::TemplateLiteral(tpl) if policy == MemberLiteralPolicy::ConstAssert => {
+            let expressions = tpl
+                .expressions
+                .iter()
+                .map(|expression| {
+                    infer_expression_type_ctx(expression, source, policy, budget, depth + 1)
+                })
+                .collect::<InferenceResult<Vec<_>>>()?;
+            let scalar =
+                |ty: &TypeExpr| matches!(ty, TypeExpr::Literal(_) | TypeExpr::Primitive(_));
+            if !expressions.iter().all(|ty| match ty {
+                TypeExpr::Union(members) => members.iter().all(scalar),
+                other => scalar(other),
+            }) {
+                return Ok(TypeExpr::Primitive(PrimitiveName::String));
+            }
+            Ok(TypeExpr::TemplateLiteral {
+                quasis: tpl
+                    .quasis
+                    .iter()
+                    .map(|quasi| quasi.value.raw.to_string())
+                    .collect(),
+                expressions: Arc::from(expressions.into_boxed_slice()),
+            })
+        }
         Expression::TemplateLiteral(_) => Ok(TypeExpr::Primitive(PrimitiveName::String)),
         Expression::ArrowFunctionExpression(arrow) => {
             let sig = extract_arrow_signature_with_budget(arrow, source, budget, depth + 1)?;
