@@ -168,6 +168,7 @@ fn resolve_local_frontier_body(
                         constraint: param.constraint.as_ref().map(reanchor),
                         default: param.default.as_ref().map(reanchor),
                         is_const: param.is_const,
+                        variance: param.variance,
                     }
                 })
                 .collect();
@@ -1621,6 +1622,7 @@ mod tests {
                     constraint: Some(bound_slot(0, TypeParamBoundPosition::Constraint)),
                     default: Some(bound_slot(0, TypeParamBoundPosition::Default)),
                     is_const: false,
+                    variance: verter_type_expr::facts::TypeParamVariance::Unannotated,
                 },
                 NarrowTypeParam {
                     name: "U".to_string(),
@@ -1628,6 +1630,7 @@ mod tests {
                     constraint: None,
                     default: Some(bound_slot(1, TypeParamBoundPosition::Default)),
                     is_const: false,
+                    variance: verter_type_expr::facts::TypeParamVariance::Unannotated,
                 },
             ],
             "narrowed type params must carry the authored name + declaration ordinal, a \
@@ -1682,6 +1685,7 @@ mod tests {
                 constraint: Some(default_bound_slot(0, TypeParamBoundPosition::Constraint)),
                 default: Some(default_bound_slot(0, TypeParamBoundPosition::Default)),
                 is_const: false,
+                variance: verter_type_expr::facts::TypeParamVariance::Unannotated,
             }],
             "a default-export generic's frontier bound slots must stay anchored to the \
              `\"default\"` frontier symbol — never re-anchored back to the declared name \

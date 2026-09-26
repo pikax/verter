@@ -2538,6 +2538,7 @@ mod tests {
             constraint: None,
             default: None,
             is_const: false,
+            variance: verter_type_expr::facts::TypeParamVariance::Unannotated,
         }
     }
 

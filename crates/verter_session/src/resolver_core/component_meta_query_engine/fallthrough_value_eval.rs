@@ -351,6 +351,7 @@ impl ComponentMetaQueryEngine<'_> {
                 ty,
                 spread: argument.spread,
                 context_sensitive: argument.context_sensitive,
+                const_view: None,
                 literal_mode: match argument.literal_mode {
                     verter_type_expr::IndexedValueLiteralMode::Widened => {
                         crate::semantic_query::ArgumentLiteralMode::Widened

@@ -1428,6 +1428,10 @@ struct RawComparisonPlan {
 enum RawPosition {
     Absent,
     One(SemanticNodeId),
+    /// An optional parameter whose type includes `undefined` under
+    /// `strictNullChecks` (`getTypeOfParameter` adds it): its declared type
+    /// and `undefined`.
+    Optional(SemanticNodeId),
     /// A rest run with a tail: the union of the run element and the tail.
     Run(Vec<SemanticNodeId>),
     /// A still-generic rest indexed by the position (`T[index]`).
@@ -1819,6 +1823,8 @@ impl ProjectSemanticDispatch<'_> {
     /// - with a still-generic rest, positions run to the SMALLER count and
     ///   the last one relates the rest of each parameter list from there as
     ///   one tuple (`any` when that is an array of `any`).
+    /// - an optional parameter's type includes `undefined` where its slot
+    ///   says so (`strictNullChecks`, the checker's `getTypeOfParameter`).
     ///
     /// Measured on 7.0.2: `((a: string) => void) extends ((...args: any[]) =>
     /// void)` and the `new` form are true, `((a: string, b: number) => void)
@@ -1848,6 +1854,11 @@ impl ProjectSemanticDispatch<'_> {
             match position {
                 RawPosition::Absent => None,
                 RawPosition::One(node) => Some(node),
+                RawPosition::Optional(node) => {
+                    let undefined =
+                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                    Some(self.intern_normalized_union_or_intersection(&[node, undefined], true))
+                }
                 RawPosition::Run(members) => {
                     Some(self.intern_normalized_union_or_intersection(&members, true))
                 }
@@ -2014,6 +2025,9 @@ impl ProjectSemanticDispatch<'_> {
          -> Result<RawPosition, SignatureSetReadFailure> {
             Ok(match shape.type_at(pos) {
                 TypeAt::Absent => RawPosition::Absent,
+                TypeAt::One(slot) if slot.optionality.includes_undefined => {
+                    RawPosition::Optional(node(slot.ty)?)
+                }
                 TypeAt::One(slot) => RawPosition::One(node(slot.ty)?),
                 TypeAt::Run { element, tail } => {
                     let mut members = vec![node(element)?];

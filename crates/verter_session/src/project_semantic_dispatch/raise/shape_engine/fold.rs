@@ -559,6 +559,16 @@ fn push_surface_member<A: RaisedShapeAlgebra>(
     members: &mut Vec<A::Member>,
     member: &crate::semantic_query::SurfaceMember,
 ) {
+    // An ECMAScript private name (`#h`) brands its class for relations
+    // only; a raised shape names no such member, as `keyof` names none.
+    if member.visibility == verter_type_expr::MemberVisibility::Private
+        && matches!(
+            member.key.as_known(),
+            Some(verter_type_expr::PropertyKey::String(name)) if name.starts_with('#')
+        )
+    {
+        return;
+    }
     let mut active = FxHashSet::default();
     let key = member.key.clone().map(
         |computed| {

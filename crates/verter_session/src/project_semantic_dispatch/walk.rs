@@ -2363,28 +2363,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .intern_normalized_union(&arms, NullabilityPolicy::Erased)
     }
 
-    /// A tuple's `length`: `number` with a rest element, else the union of
-    /// the lengths from its required count to its element count
-    /// (`[1, 2?]['length']` is `1 | 2`).
-    fn tuple_length(&self, elements: &[crate::semantic_query::TupleElement]) -> SemanticNodeId {
-        use crate::semantic_query::PrimitiveKind;
-        if elements.iter().any(|element| element.rest) {
-            return self
-                .graph()
-                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-        }
-        let required = elements.iter().filter(|element| !element.optional).count();
-        let lengths: Vec<SemanticNodeId> = (required..=elements.len())
-            .map(|length| {
-                self.graph().intern_node(SemanticNodeData::Literal(
-                    crate::semantic_query::LiteralValue::Number(length as f64),
-                ))
-            })
-            .collect();
-        self.dispatch
-            .intern_normalized_union_or_intersection(&lengths, true)
-    }
-
     /// The apparent wrapper surface a primitive, an array or a tuple reads
     /// its non-index keys from
     /// ([`ProjectSemanticDispatch::apparent_wrapper_of`]); `None` when the
@@ -2398,6 +2376,31 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// later step under a shared subject, or a read with no demand site at
     /// all, is scoped to the demand, which the key cannot name — that entry
     /// stays out of the shared memo.
+    /// The surface a runtime nominal carrier (`Map<K, V>`, `Date`,
+    /// `Promise<T>`) reads its members from: the application carrier has no
+    /// declaration body in the graph, so a member of it is the member of
+    /// the global interface of that name instantiated with the carrier's
+    /// arguments (the checker's `Map<K, V>` IS that interface). `None` for
+    /// any other node, and when the project's interface does not settle.
+    fn runtime_nominal_member_surface(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        use super::apparent_type::GlobalWrapper;
+        let (nominal, args) = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, args }) => (
+                crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(base)?,
+                args.to_vec(),
+            ),
+            Some(SemanticNodeData::DeclRef { identity }) => (
+                crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(identity)?,
+                Vec::new(),
+            ),
+            _ => return None,
+        };
+        match self.global_surface_read(nominal.global_name(), &args) {
+            GlobalWrapper::Surface(surface) if surface != node => Some(surface),
+            GlobalWrapper::Surface(_) | GlobalWrapper::Absent | GlobalWrapper::Unsettled => None,
+        }
+    }
+
     fn apparent_wrapper_read(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         use super::apparent_type::GlobalWrapper;
         let (name, args) = self.dispatch.apparent_wrapper_of(node)?;
@@ -4339,6 +4342,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         }
                     };
                     if resolved == current {
+                        // A declaration with no body to read (a runtime
+                        // nominal) reads a pending segment off its global
+                        // interface; the reference itself is never the
+                        // member it was asked for.
+                        if index < path.len() {
+                            match self.runtime_nominal_member_surface(current) {
+                                Some(surface) => {
+                                    current = surface;
+                                    continue;
+                                }
+                                None => {
+                                    results.push(self.opaque_miss());
+                                    return;
+                                }
+                            }
+                        }
                         results.push(current);
                         return;
                     }
@@ -4476,6 +4495,18 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             }
                         };
                     if resolved == current {
+                        if still_more_path {
+                            match self.runtime_nominal_member_surface(current) {
+                                Some(surface) => {
+                                    current = surface;
+                                    continue;
+                                }
+                                None => {
+                                    results.push(self.opaque_miss());
+                                    return;
+                                }
+                            }
+                        }
                         results.push(current);
                         return;
                     }
@@ -4501,7 +4532,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     drop(data);
                     let member = self.dispatch.apparent_member_name(segment);
                     if member.as_deref() == Some("length") {
-                        let length = self.tuple_length(&elements);
+                        let length = self.dispatch.tuple_length(&elements);
                         let (edge_kind, meta) = match segment {
                             PathSegment::Index(ix) => {
                                 (OriginEdgeKind::ProjectIndex, OriginMeta::Index(ix.clone()))

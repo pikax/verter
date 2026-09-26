@@ -95,6 +95,9 @@ struct CallArgument {
     /// A function-valued argument with at least one un-annotated parameter.
     /// Its provisional type is withheld from the first inference pass.
     context_sensitive: bool,
+    /// The argument checked in its const context ([`CallArgKey::Eager`]),
+    /// the source a candidate's `const` type parameter infers from.
+    const_view: Option<SemanticNodeId>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -1359,6 +1362,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
     }
 
+    /// Whether the return of a call signature of `target` — the contextual
+    /// signature a context-sensitive function argument is checked under —
+    /// mentions one of `params`. A signature list that does not settle
+    /// answers `true`: nothing proves the return free of them.
+    fn contextual_return_mentions(
+        &self,
+        target: SemanticNodeId,
+        params: &[SemanticNodeId],
+    ) -> bool {
+        match self.shared_signature_nodes(target, SignatureKind::Call) {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                nodes.iter().any(|node| {
+                    let return_type = match self.graph().node_data(*node).as_deref() {
+                        Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
+                        _ => return false,
+                    };
+                    params
+                        .iter()
+                        .any(|param| self.mentions_node(return_type, *param))
+                })
+            }
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => true,
+        }
+    }
+
     /// Demand the ordered candidates of the callee's `bucket`, instantiated
     /// under `type_args`, and classify a set that did not come back
     /// through the SAME shared signature list the producer read — never
@@ -1517,13 +1545,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut result = Vec::new();
         for argument in key.args.iter() {
             let context_sensitive = argument.is_context_sensitive();
-            let (node, spread, literal_mode) = match argument {
+            let (node, spread, literal_mode, const_view) = match argument {
                 CallArgKey::Eager {
                     ty,
                     spread,
                     literal_mode,
+                    const_view,
                     ..
-                } => (*ty, *spread, *literal_mode),
+                } => (*ty, *spread, *literal_mode, *const_view),
                 CallArgKey::ProgramExpression {
                     point,
                     spread,
@@ -1553,7 +1582,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             expression.as_ref(),
                         )
                         .ok_or(ResolveCallFailure::Undecidable)?;
-                    (node, *spread, *literal_mode)
+                    (node, *spread, *literal_mode, None)
                 }
             };
             let freshness_origin = node;
@@ -1565,6 +1594,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     literal_mode,
                     indefinite_spread: false,
                     context_sensitive,
+                    const_view: const_view
+                        .map(|view| self.substitute_canonical(view, &key.context.substitution)),
                 });
                 continue;
             }
@@ -1595,6 +1626,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         literal_mode,
                         indefinite_spread: false,
                         context_sensitive,
+                        const_view: None,
                     }));
                 }
                 _ => result.push(CallArgument {
@@ -1603,6 +1635,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     literal_mode,
                     indefinite_spread: true,
                     context_sensitive,
+                    const_view: None,
                 }),
             }
         }
@@ -1779,6 +1812,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .expect("fresh call session")
             .checkpoint();
         let mut deferred_for_relation_scc = false;
+        // An argument whose parameter IS a `const` type parameter of this
+        // candidate is checked in its const context (`isConstContext`): a
+        // literal the calling frame computes relates, and deposits, as its
+        // const view — literals kept, members and tuples readonly.
+        let argument_source =
+            |argument: &CallArgument, target: SemanticNodeId| match argument.const_view {
+                Some(view)
+                    if visible_type_params
+                        .iter()
+                        .any(|decl| decl.is_const && decl.param == target) =>
+                {
+                    (view, view, ArgumentLiteralMode::Literal)
+                }
+                _ => (
+                    argument.node,
+                    argument.freshness_origin,
+                    argument.literal_mode,
+                ),
+            };
 
         if let (Some(receiver_param), Some(receiver)) = (receiver_param, call_receiver) {
             let deposits_before = self.accepted_inference_deposits();
@@ -1872,15 +1924,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // an inference-RESULT rule, applied at the deposit under the
             // inferring parameter's const policy — never to the
             // assignability source.
-            let source = argument.node;
+            let (source, freshness_origin, literal_mode) = argument_source(argument, target);
             let deposits_before = self.accepted_inference_deposits();
-            let step = self.call_argument_relation(
-                source,
-                target,
-                argument.freshness_origin,
-                budget,
-                argument.literal_mode,
-            );
+            let step =
+                self.call_argument_relation(source, target, freshness_origin, budget, literal_mode);
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
             {
@@ -1963,11 +2010,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         for (position, input) in inputs.into_iter().enumerate() {
             let bound = if !input.candidates.is_empty() {
                 match input.variance {
-                    VariancePhase::Covariant => self
-                        .call_common_supertype(&input.candidates)
-                        .unwrap_or_else(|| {
-                            self.relation_combine_candidates(&input.candidates, input.variance)
-                        }),
+                    VariancePhase::Covariant => self.widened_covariant_inference(
+                        self.call_common_supertype(&input.candidates)
+                            .unwrap_or_else(|| {
+                                self.relation_combine_candidates(&input.candidates, input.variance)
+                            }),
+                    ),
                     _ => self.relation_combine_candidates(&input.candidates, input.variance),
                 }
             } else {
@@ -2030,6 +2078,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             }
         }
+        let uninferred_params: Vec<SemanticNodeId> = uninferred_positions
+            .iter()
+            .map(|&position| fixed[position].param)
+            .collect();
         // The uninferred parameters that took their DEFAULT. A default names
         // earlier parameters, and the checker instantiates it with their
         // INFERRED types — after literal widening — so a widened
@@ -2223,6 +2275,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
+        let mut context_sensitive_targets: Vec<SemanticNodeId> = Vec::new();
         for (index, argument) in arguments.iter().enumerate() {
             if deferred_generic_rest.is_some_and(|(_, rest_start)| index >= rest_start) {
                 continue;
@@ -2243,17 +2296,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
+            if argument.context_sensitive {
+                context_sensitive_targets.push(target);
+            }
+            let (source, freshness_origin, _) = argument_source(argument, target);
             let target = self.substitute_canonical(target, &substitution);
-            let source = argument.node;
             match decided_call_relation(
-                self.call_relation(
-                    source,
-                    target,
-                    argument.freshness_origin,
-                    budget,
-                    false,
-                    true,
-                ),
+                self.call_relation(source, target, freshness_origin, budget, false, true),
                 own_return_function.as_ref(),
             ) {
                 Ok(Some(true)) => {}
@@ -2276,6 +2325,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if recovery && (failure.is_none() || deferred_for_relation_scc) {
             self.abandon_session(session_id);
             return CandidateVerdict::Mismatch;
+        }
+        // The checker infers a type parameter no other argument inferred
+        // from a context-sensitive function argument's RETURN: its second
+        // inference pass checks the function under the contextual signature
+        // and infers from what the body returns (`map<U>` over `x => x`).
+        // This executor types no function body under a contextual
+        // signature: the call is undecided, and no rail may answer it with
+        // the parameter's fallback.
+        if key.explicit_type_args.is_empty()
+            && !uninferred_params.is_empty()
+            && context_sensitive_targets
+                .iter()
+                .any(|target| self.contextual_return_mentions(*target, &uninferred_params))
+        {
+            self.abandon_session(session_id);
+            return CandidateVerdict::Degraded(ResolveCallFailure::ContextSensitiveInference);
         }
         let ordered_args = raw_type_params
             .iter()
@@ -3210,6 +3275,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
             .collect();
         any_widened.then(|| CanonicalTypeSubstitution::new(widened_bindings))
+    }
+
+    /// A covariant inference as the checker widens it (`getWidenedType` in
+    /// `getCovariantInference`): without `strictNullChecks` `null` and
+    /// `undefined` widen to `any`, so `id(null)` is `any`.
+    fn widened_covariant_inference(&self, bound: SemanticNodeId) -> SemanticNodeId {
+        let graph = self.graph();
+        if !self.relation_strict_config().strict_null_checks
+            && matches!(
+                graph.node_data(bound).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        {
+            return graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        }
+        bound
     }
 
     /// A call's covariant inference from several candidates (the checker's

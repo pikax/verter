@@ -612,6 +612,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Some(instance),
                 ))
             }
+            crate::flow_slice_content::SliceThis::Untyped => Positional::Value(
+                self.dispatch
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
+            ),
             crate::flow_slice_content::SliceThis::Receiver => match &self.receiver {
                 Some(receiver) => Positional::Value(receiver.binder),
                 None => {

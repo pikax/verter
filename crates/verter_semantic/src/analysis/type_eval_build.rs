@@ -37,7 +37,7 @@ use verter_type_expr::facts::{
     FunctionParamFact, FunctionPartIdentity, FunctionReturnSource, FunctionSignatureFact,
     IndexSignatureFact, InferenceUnavailableReason, KeyTypeShape, LeafTypeFact, MemberHeaderFact,
     NarrowTypeParam, ObjectMemberFact, ObjectMethodFact, ObjectPropertyFact, ObjectShapeFact,
-    SemanticTypeSource, SpreadMemberFact, TypeParamDeclFact,
+    SemanticTypeSource, SpreadMemberFact, TypeParamDeclFact, TypeParamVariance,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, FunctionReturnLocator, LocatorSymbolSpace,
@@ -255,6 +255,9 @@ pub struct LoweredTypeDeclParts {
     pub kind: TypeDeclKind,
     /// Lowered type-parameter headers (constraint/default typed IR included).
     pub type_parameters: Vec<TypeParam>,
+    /// Each type parameter's authored variance annotation, by ordinal;
+    /// shorter than `type_parameters` when the tail is unannotated.
+    pub type_parameter_variances: Vec<TypeParamVariance>,
     /// The fully-lowered declaration body.
     pub body: TypeExpr,
     /// Statically-named members whose authored annotations are exactly
@@ -858,6 +861,7 @@ fn lower_jsdoc_typedef_named_matching(
             name: typedef.name.clone(),
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
+            type_parameter_variances: Vec::new(),
             body: typedef.body.clone(),
             unique_symbol_members: Vec::new(),
         };
@@ -897,6 +901,7 @@ fn register_jsdoc_typedefs(
             name: typedef.name,
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
+            type_parameter_variances: Vec::new(),
             body: typedef.body,
             unique_symbol_members: Vec::new(),
         };
@@ -989,8 +994,28 @@ fn anchored_slot(anchor: &AuthoredAnchor, path: Vec<TypeBodyPathStep>) -> TypeBo
 /// constraint / default bound positions (`[TypeParamBound { ordinal, position }]`
 /// rooted at the declaration header — the one placement the closed path
 /// vocabulary defines for type-parameter bounds).
+/// The authored variance annotation of each parameter of a declaration's
+/// type-parameter list (`in T`, `out T`, `in out T`), by ordinal.
+fn type_param_variances(params: Option<&TSTypeParameterDeclaration<'_>>) -> Vec<TypeParamVariance> {
+    params
+        .map(|params| {
+            params
+                .params
+                .iter()
+                .map(|param| match (param.r#in, param.r#out) {
+                    (true, true) => TypeParamVariance::InOut,
+                    (true, false) => TypeParamVariance::In,
+                    (false, true) => TypeParamVariance::Out,
+                    (false, false) => TypeParamVariance::Unannotated,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn narrow_decl_header_type_params(
     params: &[TypeParam],
+    variances: &[TypeParamVariance],
     anchor: &AuthoredAnchor,
 ) -> TypeParamDeclFact {
     TypeParamDeclFact {
@@ -1017,6 +1042,7 @@ fn narrow_decl_header_type_params(
                         .is_some()
                         .then(|| bound_slot(TypeParamBoundPosition::Default)),
                     is_const: param.is_const,
+                    variance: variances.get(index).copied().unwrap_or_default(),
                 })
             })
             .collect(),
@@ -1047,6 +1073,7 @@ pub(crate) fn narrow_signature_type_params(params: &[TypeParam]) -> Arc<[NarrowT
                 constraint: None,
                 default: None,
                 is_const: param.is_const,
+                variance: TypeParamVariance::Unannotated,
             })
         })
         .collect()
@@ -1066,7 +1093,11 @@ fn mint_type_decl(
         owner,
         declaration_id: 0,
         kind: parts.kind,
-        type_parameters: narrow_decl_header_type_params(&parts.type_parameters, &anchor),
+        type_parameters: narrow_decl_header_type_params(
+            &parts.type_parameters,
+            &parts.type_parameter_variances,
+            &anchor,
+        ),
         direct_member_headers: member_header_facts_from_body(&parts.body),
         unique_symbol_members: Arc::from(parts.unique_symbol_members.clone().into_boxed_slice()),
         body: anchored_slot(&anchor, Vec::new()),
@@ -1703,6 +1734,7 @@ fn lower_named_type_alias_parts(
         name,
         kind: TypeDeclKind::Alias,
         type_parameters,
+        type_parameter_variances: type_param_variances(decl.type_parameters.as_deref()),
         body,
         unique_symbol_members: unique_symbol_members_of_ts_type(&decl.type_annotation),
     }
@@ -1781,6 +1813,7 @@ fn lower_named_interface_parts(
         name,
         kind: TypeDeclKind::Interface,
         type_parameters,
+        type_parameter_variances: type_param_variances(decl.type_parameters.as_deref()),
         body,
         unique_symbol_members: unique_symbol_members_of_interface_body(decl),
     }
@@ -2409,6 +2442,31 @@ fn alias_default_export_type_symbol(
 /// `Some(Protected)` / `Some(Private)` carry the declared accessibility. This
 /// lowers the OXC token directly — it does NOT text-scan the source
 /// (Typed-IR-Only).
+/// A class member's key. An ECMAScript private name `#name` keeps its `#`
+/// and is recorded as a private member ([`class_member_visibility`]), so it
+/// relates only to its own declaration, as the checker relates it.
+fn class_member_key(key: &PropertyKey<'_>, source: &str) -> TypeAuthoredPropertyKey {
+    match key {
+        PropertyKey::PrivateIdentifier(name) => {
+            AuthoredPropertyKey::string(format!("#{}", name.name).as_str())
+        }
+        _ => lower_property_key(key, source),
+    }
+}
+
+/// A class member's accessibility: an ECMAScript private name is private
+/// whatever modifier it carries.
+fn class_member_visibility(
+    key: &PropertyKey<'_>,
+    acc: Option<TSAccessibility>,
+) -> MemberVisibility {
+    if matches!(key, PropertyKey::PrivateIdentifier(_)) {
+        MemberVisibility::Private
+    } else {
+        visibility_from_ts_accessibility(acc)
+    }
+}
+
 fn visibility_from_ts_accessibility(acc: Option<TSAccessibility>) -> MemberVisibility {
     match acc {
         None | Some(TSAccessibility::Public) => MemberVisibility::Public,
@@ -2542,13 +2600,14 @@ fn collect_named_class(
     // `unique symbol` — the member-level nominal fact for `typeof C.A`.
     let mut static_unique_symbol_members = Vec::new();
     let mut static_widening_members: Vec<String> = Vec::new();
-    let mut ctor_sig = None;
-    let mut ctor_fn_spans = FunctionSpans::default();
+    // Every public constructor declaration with its spans and whether it
+    // has a body: the overloads, then the implementation.
+    let mut ctor_sigs: Vec<(LoweredSignatureParts, FunctionSpans, bool)> = Vec::new();
     let mut inference_unavailable = None;
     // The served function position of a body-derived member return is keyed
-    // by the RAW `ClassBody.body` index (the produced-shape ordinal skips
-    // `#private` members and interleaves fields) and the per-(name, static)
-    // overload ordinal.
+    // by the RAW `ClassBody.body` index (the produced shape interleaves
+    // fields and static members) and the per-(name, static) overload
+    // ordinal; a `#private` method serves none.
     let mut member_overload_ordinals: rustc_hash::FxHashMap<(String, bool), u32> =
         rustc_hash::FxHashMap::default();
 
@@ -2560,12 +2619,13 @@ fn collect_named_class(
                 // (a `private` / `protected` member is RECORDED; the
                 // published-prop projection re-applies a Public-only filter
                 // at the publication boundary). `static` selects the surface:
-                // instance body vs constructor shape. A `#private` brand is
-                // not a type-level member and never lands on either surface.
-                if matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
+                // instance body vs constructor shape. A `#private` instance
+                // field is a private member ([`class_member_key`]); a static
+                // one never lands on the constructor shape.
+                if prop.r#static && matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
                     continue;
                 }
-                let prop_key = lower_property_key(&prop.key, source);
+                let prop_key = class_member_key(&prop.key, source);
                 // A function-valued field initializer with NO authored
                 // annotation is a served class-member position (the index
                 // discovers it as `Member{[raw ordinal]}`): its body-derived
@@ -2656,7 +2716,7 @@ fn collect_named_class(
                                 )
                             })
                         })
-                        .unwrap_or(TypeExpr::Primitive(PrimitiveName::Unknown))
+                        .unwrap_or_else(|| implicit_property_type(decl, prop, source))
                 });
                 let spans = MemberSpans {
                     declaration: Some(prop.span.into()),
@@ -2672,7 +2732,7 @@ fn collect_named_class(
                         ty,
                         prop.optional,
                         prop.readonly,
-                        visibility_from_ts_accessibility(prop.accessibility),
+                        class_member_visibility(&prop.key, prop.accessibility),
                         spans,
                     ));
                 if prop.r#static {
@@ -2709,15 +2769,16 @@ fn collect_named_class(
                 }
             }
             ClassElement::MethodDefinition(method) => {
-                if matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
-                    // A `#private` method/accessor is not a type-level member.
+                if method.r#static && matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
+                    // A static `#private` method or accessor never lands on
+                    // the constructor shape.
                     continue;
                 }
                 if method.r#static {
                     // Static method → constructor-shape member with its
                     // declared accessibility (a static can never be the
                     // constructor — `static constructor` is invalid TS).
-                    let method_key = lower_property_key(&method.key, source);
+                    let method_key = class_member_key(&method.key, source);
                     let func = extract_function_signature(&method.value, source);
                     let flow_identity = class_method_flow_identity(
                         method,
@@ -2750,7 +2811,7 @@ fn collect_named_class(
                         method_key,
                         function_expr,
                         method.optional,
-                        visibility_from_ts_accessibility(method.accessibility),
+                        class_member_visibility(&method.key, method.accessibility),
                         member_spans,
                     );
                     signature.method_kind = object_method_kind(method.kind);
@@ -2808,15 +2869,18 @@ fn collect_named_class(
                     // non-public constructor still does not contribute a
                     // call signature to the consuming surface.
                     if matches!(method.accessibility, None | Some(TSAccessibility::Public)) {
-                        ctor_sig = Some(extract_function_signature(&method.value, source));
-                        ctor_fn_spans = FunctionSpans {
-                            signature: Some(method.span.into()),
-                            return_type: method
-                                .value
-                                .return_type
-                                .as_ref()
-                                .map(|rt| rt.type_annotation.span().into()),
-                        };
+                        ctor_sigs.push((
+                            extract_function_signature(&method.value, source),
+                            FunctionSpans {
+                                signature: Some(method.span.into()),
+                                return_type: method
+                                    .value
+                                    .return_type
+                                    .as_ref()
+                                    .map(|rt| rt.type_annotation.span().into()),
+                            },
+                            method.value.body.is_some(),
+                        ));
                     }
                 } else {
                     // Record every NON-static instance method with its
@@ -2850,10 +2914,10 @@ fn collect_named_class(
                     .with_predicate(func.predicate);
                     function_expr.flow_return = flow_identity.map(Box::new);
                     let mut signature = MethodSignature::with_key_visibility(
-                        lower_property_key(&method.key, source),
+                        class_member_key(&method.key, source),
                         function_expr,
                         method.optional,
-                        visibility_from_ts_accessibility(method.accessibility),
+                        class_member_visibility(&method.key, method.accessibility),
                         member_spans,
                     );
                     signature.method_kind = object_method_kind(method.kind);
@@ -2946,55 +3010,79 @@ fn collect_named_class(
         name: name.clone(),
         kind: TypeDeclKind::Class,
         type_parameters,
+        type_parameter_variances: type_param_variances(decl.type_parameters.as_deref()),
         body,
         unique_symbol_members: Vec::new(),
     });
 
-    // Also register as a value (for typeof ClassName / InstanceType)
-    let ctor_declared = ctor_sig.is_some();
-    let mut constructor_signature = ctor_sig.unwrap_or_else(|| LoweredSignatureParts {
-        parameters: Vec::new(),
-        return_type: Some(TypeExpr::named(name.clone())),
-        predicate: None,
-        type_parameters: Vec::new(),
-        has_implementation_body: true,
-        has_authored_return: false,
-        jsdoc_return: false,
-        origin: LoweredSignatureOrigin::Synthetic,
-    });
-    // A DECLARED constructor carries no return annotation — its construct
-    // "return" IS the class instance. Backfill the instance reference so
-    // `InstanceType<typeof C>` reads the instance type from the construct
-    // signature exactly as it does from the synthesized default. (The
-    // backfilled reference is transient inference, never an authored return
-    // position — `has_authored_return` stays false for constructors.)
-    if constructor_signature.return_type.is_none() {
-        constructor_signature.return_type = Some(TypeExpr::named(name.clone()));
+    // Also register as a value (for typeof ClassName / InstanceType). An
+    // overloaded constructor's construct signatures are its overloads; the
+    // implementation signature is not part of the type.
+    if ctor_sigs.iter().any(|(_, _, has_body)| !has_body) {
+        ctor_sigs.retain(|(_, _, has_body)| !has_body);
     }
-
-    // The declared constructor's authored function node is the construct
-    // signature at shape ordinal 0 of the produced `typeof C` constructor
-    // shape (a class with no declared constructor keeps the honest Synthetic
-    // origin instead).
-    if ctor_declared {
-        constructor_signature.origin = LoweredSignatureOrigin::ShapeMember { ordinal: 0 };
+    let ctor_declared = !ctor_sigs.is_empty();
+    let mut constructors: Vec<(LoweredSignatureParts, FunctionSpans)> = if ctor_declared {
+        ctor_sigs
+            .into_iter()
+            .map(|(signature, spans, _)| (signature, spans))
+            .collect()
+    } else {
+        vec![(
+            LoweredSignatureParts {
+                parameters: Vec::new(),
+                return_type: Some(TypeExpr::named(name.clone())),
+                predicate: None,
+                type_parameters: Vec::new(),
+                has_implementation_body: true,
+                has_authored_return: false,
+                jsdoc_return: false,
+                origin: LoweredSignatureOrigin::Synthetic,
+            },
+            FunctionSpans::default(),
+        )]
+    };
+    for (ordinal, (constructor_signature, _)) in constructors.iter_mut().enumerate() {
+        // A DECLARED constructor carries no return annotation — its construct
+        // "return" IS the class instance. Backfill the instance reference so
+        // `InstanceType<typeof C>` reads the instance type from the construct
+        // signature exactly as it does from the synthesized default. (The
+        // backfilled reference is transient inference, never an authored
+        // return position — `has_authored_return` stays false for
+        // constructors.)
+        if constructor_signature.return_type.is_none() {
+            constructor_signature.return_type = Some(TypeExpr::named(name.clone()));
+        }
+        // A declared constructor's authored function node is the construct
+        // signature at its shape ordinal of the produced `typeof C`
+        // constructor shape (a class with no declared constructor keeps the
+        // honest Synthetic origin instead).
+        if ctor_declared {
+            constructor_signature.origin = LoweredSignatureOrigin::ShapeMember {
+                ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+            };
+        }
     }
     // The constructor shape is the `typeof C` constructor-object model: the
-    // construct signature first, then the class's OWN static members (with
+    // construct signatures first, then the class's OWN static members (with
     // their declared visibility). Base statics are NOT folded here — static
     // heritage composes at query time through the shared class-surface
     // reducer, never eagerly at the producer.
-    let mut constructor_properties =
-        // An abstract class's construct signatures are abstract.
-        vec![ObjectMember::ConstructSignature(
-            FunctionExpr::with_spans(
-                constructor_signature.parameters.clone(),
-                constructor_signature.return_type.clone().map(Arc::new),
-                constructor_signature.type_parameters.clone(),
-                ctor_fn_spans,
+    let mut constructor_properties: Vec<ObjectMember> = constructors
+        .iter()
+        .map(|(constructor_signature, spans)| {
+            // An abstract class's construct signatures are abstract.
+            ObjectMember::ConstructSignature(
+                FunctionExpr::with_spans(
+                    constructor_signature.parameters.clone(),
+                    constructor_signature.return_type.clone().map(Arc::new),
+                    constructor_signature.type_parameters.clone(),
+                    *spans,
+                )
+                .with_abstract(decl.r#abstract),
             )
-            .with_abstract(decl.r#abstract),
-        )];
+        })
+        .collect();
     constructor_properties.extend(static_members);
     let constructor_shape = ObjectExpr {
         properties: constructor_properties,
@@ -3009,7 +3097,10 @@ fn collect_named_class(
         annotation_is_authored: false,
         inference_unavailable,
         expression_source_offset: None,
-        signatures: vec![constructor_signature],
+        signatures: constructors
+            .into_iter()
+            .map(|(signature, _)| signature)
+            .collect(),
         object_shape: Some(constructor_shape),
         enum_members: None,
         enum_member_names: None,
@@ -3184,6 +3275,7 @@ fn collect_enum(
         name,
         kind: TypeDeclKind::Alias,
         type_parameters: Vec::new(),
+        type_parameter_variances: Vec::new(),
         body: TypeExpr::Primitive(PrimitiveName::Never),
         unique_symbol_members: Vec::new(),
     });
@@ -4251,6 +4343,89 @@ fn lower_identifier_variable_parts(
 /// keep freshness (parentheses, `satisfies`, a non-null assertion); a
 /// conditional is fresh when both of its branches are; a read of another
 /// value follows that value; an assertion and every other form are regular.
+/// The declared type of a class property written with neither a type nor
+/// an initializer (the checker's `getWidenedTypeForVariableLikeDeclaration`).
+/// The implicit `any`, except where the checker reads the property's type
+/// off control flow under `noImplicitAny`: an instance property the
+/// constructor assigns (`getFlowTypeInConstructor`) and a static property
+/// of a class with a static block (`getFlowTypeInStaticBlocks`). That flow
+/// type is not modelled here, so the property is the unrepresented
+/// authored type there, never a guessed one. An ambient (`declare`)
+/// property is the implicit `any`.
+fn implicit_property_type(
+    class: &Class<'_>,
+    prop: &oxc_ast::ast::PropertyDefinition<'_>,
+    source: &str,
+) -> TypeExpr {
+    let flow_typed = !prop.declare
+        && if prop.r#static {
+            class
+                .body
+                .body
+                .iter()
+                .any(|element| matches!(element, ClassElement::StaticBlock(_)))
+        } else {
+            static_property_key_name(&prop.key).is_some_and(|name| {
+                class.body.body.iter().any(|element| match element {
+                    ClassElement::MethodDefinition(method)
+                        if method.kind == MethodDefinitionKind::Constructor =>
+                    {
+                        method
+                            .value
+                            .body
+                            .as_ref()
+                            .is_some_and(|body| constructor_assigns_this_member(body, &name))
+                    }
+                    _ => false,
+                })
+            })
+        };
+    if flow_typed {
+        TypeExpr::Unknown(verter_type_expr::UnknownValue::unsupported_syntax(
+            &source[prop.span.start as usize..prop.span.end as usize],
+        ))
+    } else {
+        TypeExpr::Primitive(PrimitiveName::Any)
+    }
+}
+
+/// Whether a constructor body assigns `this.<name>` in its own control
+/// flow: an assignment inside a nested function, arrow or class is not on
+/// the constructor's flow.
+fn constructor_assigns_this_member(body: &oxc_ast::ast::FunctionBody<'_>, name: &str) -> bool {
+    struct Assigns<'n> {
+        name: &'n str,
+        found: bool,
+    }
+    impl<'a> Visit<'a> for Assigns<'_> {
+        fn visit_assignment_expression(&mut self, it: &oxc_ast::ast::AssignmentExpression<'a>) {
+            if let oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) = &it.left {
+                if matches!(member.object, Expression::ThisExpression(_))
+                    && member.property.name.as_str() == self.name
+                {
+                    self.found = true;
+                }
+            }
+            oxc_ast_visit::walk::walk_assignment_expression(self, it);
+        }
+        fn visit_function(
+            &mut self,
+            _: &oxc_ast::ast::Function<'a>,
+            _: oxc_syntax::scope::ScopeFlags,
+        ) {
+        }
+        fn visit_arrow_function_expression(
+            &mut self,
+            _: &oxc_ast::ast::ArrowFunctionExpression<'a>,
+        ) {
+        }
+        fn visit_class(&mut self, _: &Class<'a>) {}
+    }
+    let mut assigns = Assigns { name, found: false };
+    assigns.visit_function_body(body);
+    assigns.found
+}
+
 fn initializer_literal_freshness(init: &Expression<'_>) -> DeclaredLiteralFreshness {
     match init {
         Expression::ParenthesizedExpression(paren) => {
@@ -5462,6 +5637,35 @@ fn infer_expression_type_ctx_with_read_root(
                 value.push_str(quasi.value.raw.as_str());
             }
             Ok(TypeExpr::string_literal(value))
+        }
+        // In a const context a template is the template literal type of its
+        // holes' literal types (`` `x${1}` as const `` is `"x1"`), when every
+        // hole is a literal or primitive type this inference reads; a hole
+        // naming a value keeps the template a `string`.
+        Expression::TemplateLiteral(tpl) if policy == MemberLiteralPolicy::ConstAssert => {
+            let expressions = tpl
+                .expressions
+                .iter()
+                .map(|expression| {
+                    infer_expression_type_ctx(expression, source, policy, budget, depth + 1)
+                })
+                .collect::<InferenceResult<Vec<_>>>()?;
+            let scalar =
+                |ty: &TypeExpr| matches!(ty, TypeExpr::Literal(_) | TypeExpr::Primitive(_));
+            if !expressions.iter().all(|ty| match ty {
+                TypeExpr::Union(members) => members.iter().all(scalar),
+                other => scalar(other),
+            }) {
+                return Ok(TypeExpr::Primitive(PrimitiveName::String));
+            }
+            Ok(TypeExpr::TemplateLiteral {
+                quasis: tpl
+                    .quasis
+                    .iter()
+                    .map(|quasi| quasi.value.raw.to_string())
+                    .collect(),
+                expressions: Arc::from(expressions.into_boxed_slice()),
+            })
         }
         Expression::TemplateLiteral(_) => Ok(TypeExpr::Primitive(PrimitiveName::String)),
         Expression::ArrowFunctionExpression(arrow) => {
@@ -6908,6 +7112,7 @@ pub fn parse_and_lower_parts(source: &str) -> LoweredFileParts {
             name: typedef.name,
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
+            type_parameter_variances: Vec::new(),
             body: typedef.body,
             unique_symbol_members: Vec::new(),
         });
@@ -6967,6 +7172,23 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
         IndexedValueDisposition::Asserted(input) => {
             // The assertion supplies the result; its operand's binding does not.
             return lower_value_expression_with_read_root(input, source, policy, read_root)
+                .map(IndexedValueExpression::Value)
+                .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
+                    PrimitiveName::Any,
+                )));
+        }
+        // `… as const` over a literal keeps the literal it spells, readonly:
+        // the operand is inferred in the const context the assertion opens.
+        IndexedValueDisposition::Inferred(
+            Expression::ArrayExpression(_)
+            | Expression::ObjectExpression(_)
+            | Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::TemplateLiteral(_),
+        ) if expr_is_const_asserted(expr, source) => {
+            return lower_value_expression_with_read_root(expr, source, policy, read_root)
                 .map(IndexedValueExpression::Value)
                 .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
                     PrimitiveName::Any,

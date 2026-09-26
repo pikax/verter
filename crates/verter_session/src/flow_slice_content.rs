@@ -244,7 +244,20 @@ pub struct SliceContent {
     /// channel (a budget edge, a decided-above call, a control-test gap);
     /// the executor then reads that call's arguments from the indexed
     /// program.
-    pub call_arguments: Arc<FxHashMap<verter_span::Span, Arc<[SliceExpr]>>>,
+    pub call_arguments: Arc<FxHashMap<verter_span::Span, Arc<[SliceCallArgument]>>>,
+}
+
+/// One argument of an authored call, lowered in the frame as a whole value
+/// ([`SliceContent::call_arguments`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceCallArgument {
+    /// The argument's value.
+    pub value: SliceExpr,
+    /// An object or array literal argument lowered in a const context, as
+    /// `as const` lowers it: the value the checker checks the literal as
+    /// when its contextual type is a `const` type parameter
+    /// (`isConstContext`). `None` for any other argument.
+    pub const_context: Option<SliceExpr>,
 }
 
 /// What a function body models as when it contributes no return arm and
@@ -420,27 +433,32 @@ pub enum SliceStatement {
     /// `asserts` signature narrows what follows while a `never` return
     /// ends the path. The evaluator reads the callee's call signatures
     /// (`SignaturesOfType`): none asserting and none returning `never`
-    /// leaves the path as it is; anything else takes the typed
-    /// guard-narrowing gap.
+    /// leaves the path as it is, and a `never` effects signature ends it;
+    /// an asserting one takes the typed guard-narrowing gap.
     CallEffect {
         /// The callee's type source.
         callee: SliceEffectCallee,
-        /// The call expression's absolute span — the call obligation a
-        /// settled callee discharges.
-        call: verter_span::Span,
+        /// The call expression — its absolute span is the call obligation
+        /// a settled callee discharges, and its arguments resolve an
+        /// overloaded or generic effects signature.
+        site: SliceCallSite,
     },
     /// A statement call whose bare callee names a value this file does not
     /// declare as ONE closed function (an import, a declared constant, an
     /// overload group): the checker reads the call's effect from the
     /// callee's declared signatures alone. None asserting ⇒ no effect; one
     /// non-generic `asserts x is T` / `asserts x` ⇒ its argument narrows
-    /// for the rest of the region; any other signature set — a declared
-    /// `never` return included — takes the typed guard-narrowing gap.
+    /// for the rest of the region; a set holding a `never`
+    /// return takes the effect of the signature the call resolves; any other
+    /// signature set takes the typed guard-narrowing gap.
     CalleeEffect {
         /// `typeof callee`, resolved in owner scope.
         callee: GatedType,
         /// Each argument's narrowable reference, positionally.
         arguments: Arc<[Option<SliceNarrowSubject>]>,
+        /// The call expression, whose arguments resolve an overloaded or
+        /// generic effects signature.
+        site: SliceCallSite,
     },
     /// A nested block, as its own region.
     Block(SliceRegion),
@@ -3101,9 +3119,10 @@ pub(crate) fn build_flow_slice_content(
     carrier_module: bool,
     snapshot: &crate::decl_lowering::SnapshotKey,
     context: Option<&NestedFlowContext>,
-    nullability: crate::semantic_query::NullabilityPolicy,
+    policy: crate::semantic_query::FlowReturnPolicy,
 ) -> Option<SliceContent> {
     let FlowSliceSource { program, resolved } = retained;
+    let nullability = policy.nullability;
     let module_scope = carrier_module || program_has_module_syntax(program);
     // Whether the served function is NAMESPACE-OWNED: its locator descends
     // through a `namespace` / `module` block. Every call site in its body
@@ -3269,9 +3288,22 @@ pub(crate) fn build_flow_slice_content(
             anchor,
         });
     // A direct class-declaration member reads its receiver; a nested
-    // function reads the `this` its creating frame handed it.
+    // function reads the `this` its creating frame handed it; a module-level
+    // function declaration with no `this` parameter has no receiver the
+    // checker can type, so its `this` is `any`.
+    let untyped_declaration_this = resolved.enclosing_this.is_none()
+        && matches!(
+            entry.locator.descent.as_ref(),
+            [FunctionDescentStep::FunctionDeclaration]
+        )
+        && matches!(
+            node,
+            FunctionNode::Function(function)
+                if function.is_declaration() && function.this_param.is_none()
+        );
     let this = match context {
         Some(context) => context.this.clone(),
+        None if untyped_declaration_this => Some(SliceThis::Untyped),
         None => resolved.enclosing_this.and_then(|this| {
             let class = Arc::clone(&entry.key.declaration.name);
             Some(match this {
@@ -3375,6 +3407,7 @@ pub(crate) fn build_flow_slice_content(
         break_target_followed_by_return: Vec::new(),
         current_statement_followed_by_return: SuffixReturn::NotGuaranteed,
         nullability,
+        no_implicit_this: policy.no_implicit_this,
         frame_is_async: match node {
             FunctionNode::Function(function) => function.r#async,
             FunctionNode::Arrow(arrow) => arrow.r#async,
@@ -5939,6 +5972,11 @@ pub enum SliceThis {
     /// an object literal: the instance (or object) the evaluator binds
     /// while it evaluates the class's members (or the literal's).
     Receiver,
+    /// A method or accessor of an object literal (or an arrow one creates)
+    /// in a project without `noImplicitThis`: the checker types the
+    /// literal's `this` only under that option
+    /// (`getContextualThisParameterType`), so `this` is `any`.
+    Untyped,
 }
 
 /// The exact lexical chain at a nested function's authored position.
@@ -6586,6 +6624,10 @@ struct Lowerer<'a> {
     /// member or an array element is the checker's widening nullable type,
     /// which the enclosing literal's widening turns into `any`.
     nullability: crate::semantic_query::NullabilityPolicy,
+    /// The function's own project's `noImplicitThis`: without it an object
+    /// literal's method or accessor has no contextual `this`, so `this` is
+    /// `any` there ([`SliceThis::Untyped`]).
+    no_implicit_this: bool,
     /// Whether the frame's function is `async`.
     frame_is_async: bool,
     frame_gate: Arc<DefiningFrameGate>,
@@ -6694,7 +6736,7 @@ struct Lowerer<'a> {
     decided_above_call_spans: Vec<verter_span::Span>,
     /// The frame-lowered argument values of each call — see
     /// [`SliceContent::call_arguments`].
-    call_arguments: FxHashMap<verter_span::Span, Arc<[SliceExpr]>>,
+    call_arguments: FxHashMap<verter_span::Span, Arc<[SliceCallArgument]>>,
     /// Nonzero while a call argument lowers as a WHOLE value: every
     /// position inside it is a value position, whatever the demand
     /// selected.
@@ -11149,7 +11191,11 @@ impl<'a> Lowerer<'a> {
         match self.lower_callee_signature_guard(call, callee) {
             SliceGuard::CalleePredicate {
                 callee, arguments, ..
-            } => Some(SliceStatement::CalleeEffect { callee, arguments }),
+            } => Some(SliceStatement::CalleeEffect {
+                callee,
+                arguments,
+                site: call_site(call),
+            }),
             _ => None,
         }
     }
@@ -11516,7 +11562,7 @@ impl<'a> Lowerer<'a> {
                         SliceStatement::ThrowPoint,
                         SliceStatement::CallEffect {
                             callee,
-                            call: call.span.into(),
+                            site: call_site(call),
                         },
                     ]
                     .into_boxed_slice(),
@@ -13605,7 +13651,7 @@ impl<'a> Lowerer<'a> {
         // A `this.m()` callee: the member of the frame's receiver —
         // an object literal's own method is a direct call of it.
         if let (Some(this), Expression::StaticMemberExpression(member)) =
-            (self.this.clone(), unwrap_parenthesized(&call.callee))
+            (self.keyword_this(), unwrap_parenthesized(&call.callee))
         {
             if let (SliceThis::Value { .. } | SliceThis::Static { .. }, Some([name])) =
                 (&this, this_member_path(member).as_deref())
@@ -13845,13 +13891,13 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Expression::ThisExpression(_) if self.this.is_some() => {
-                SliceExpr::This(self.this.clone().expect("guarded"))
+                SliceExpr::This(self.keyword_this().expect("guarded"))
             }
             // A member read off an object literal's `this` lowers from the
             // member the literal declares.
             Expression::StaticMemberExpression(member)
                 if matches!(
-                    self.this,
+                    self.keyword_this(),
                     Some(SliceThis::Value { .. } | SliceThis::Static { .. })
                 ) && this_member_path(member).is_some() =>
             {
@@ -13865,7 +13911,7 @@ impl<'a> Lowerer<'a> {
             {
                 let path = this_member_path(member).expect("guarded");
                 SliceExpr::OptionalMember {
-                    root: Box::new(SliceExpr::This(self.this.clone().expect("guarded"))),
+                    root: Box::new(SliceExpr::This(self.keyword_this().expect("guarded"))),
                     links: path.into_iter().map(|name| (name, false)).collect(),
                 }
             }
@@ -14987,7 +15033,11 @@ impl<'a> Lowerer<'a> {
                     Expression::FunctionExpression(func) => {
                         // A method or accessor of the literal runs against
                         // the object the literal builds.
-                        self.member_this = Some(Some(SliceThis::Receiver));
+                        self.member_this = Some(Some(if self.no_implicit_this {
+                            SliceThis::Receiver
+                        } else {
+                            SliceThis::Untyped
+                        }));
                         self.lower_nested_function(&FunctionNode::Function(func))
                     }
                     Expression::ArrowFunctionExpression(arrow) => {
@@ -15130,11 +15180,18 @@ impl<'a> Lowerer<'a> {
         let decided_above = self.decided_above_call_spans.len();
         let control_test_gap = self.control_test_gap;
         self.whole_value_nesting += 1;
-        let arguments: Vec<SliceExpr> = call
+        let arguments: Vec<SliceCallArgument> = call
             .arguments
             .iter()
             .filter_map(|argument| argument.as_expression())
-            .map(|argument| self.lower_expr(argument, ExprMode::Return))
+            .map(|argument| SliceCallArgument {
+                value: self.lower_expr(argument, ExprMode::Return),
+                const_context: matches!(
+                    value_descent(unwrap_parenthesized(argument)),
+                    ValueDescent::Object(_) | ValueDescent::Array(_)
+                )
+                .then(|| self.lower_in_const_context(argument, ExprMode::Return)),
+            })
             .collect();
         self.whole_value_nesting -= 1;
         let side_channel = self.budget_failure != budget_failure
@@ -15151,6 +15208,17 @@ impl<'a> Lowerer<'a> {
 
     fn lower_nested_function(&mut self, node: &FunctionNode<'_>) -> SliceExpr {
         self.lower_function_value(node, None)
+    }
+
+    /// What the `this` KEYWORD reads in this frame: the frame's `this`,
+    /// except that an object literal's method or accessor reads `this` as
+    /// the literal only under `noImplicitThis`. A name reading the variable
+    /// that holds the literal reads the frame's `this` itself.
+    fn keyword_this(&self) -> Option<SliceThis> {
+        match &self.this {
+            Some(SliceThis::Value { .. }) if !self.no_implicit_this => Some(SliceThis::Untyped),
+            this => this.clone(),
+        }
     }
 
     /// The member `name` of the object literal the frame's `this` is, as

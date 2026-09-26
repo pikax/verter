@@ -1411,6 +1411,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ty,
                         spread: argument.spread,
                         context_sensitive: argument.context_sensitive,
+                        const_view: None,
                         literal_mode: match argument.literal_mode {
                             verter_type_expr::IndexedValueLiteralMode::Widened => {
                                 crate::semantic_query::ArgumentLiteralMode::Widened
@@ -5196,7 +5197,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             entry,
             selection,
             &bound,
-            key.context.policy.nullability,
+            key.context.policy,
         ) else {
             return degraded(FlowReturnFailure::Missing, self_roots);
         };
@@ -5459,6 +5460,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             nullability: key.context.policy.nullability,
             no_implicit_any: key.context.policy.no_implicit_any,
             use_unknown_in_catch_variables: key.context.policy.use_unknown_in_catch_variables,
+            no_implicit_this: key.context.policy.no_implicit_this,
             params: &params,
             param_names: &ir.params,
             binder_env: &binder_env,
@@ -8024,8 +8026,11 @@ enum CalleeStatementEffect {
         parameter: usize,
         target: Option<SemanticNodeId>,
     },
-    /// Several asserting signatures, a generic or `this` assertion, a
-    /// declared `never` return, or a callee that does not settle.
+    /// A declared `never` return and no assertion: the call takes the
+    /// effect of the signature it resolves (`getEffectsSignature`).
+    Resolved(SemanticNodeId),
+    /// Several asserting signatures, a generic or `this` assertion, or a
+    /// callee that does not settle.
     Undecided,
 }
 
@@ -8264,8 +8269,12 @@ struct FlowEvaluator<'d, 'b> {
     dispatch: &'d ProjectSemanticDispatch<'d>,
     /// The frame-lowered argument values of each call, by the call's span
     /// ([`crate::flow_slice_content::SliceContent::call_arguments`]).
-    call_arguments:
-        Arc<rustc_hash::FxHashMap<verter_span::Span, Arc<[crate::flow_slice_content::SliceExpr]>>>,
+    call_arguments: Arc<
+        rustc_hash::FxHashMap<
+            verter_span::Span,
+            Arc<[crate::flow_slice_content::SliceCallArgument]>,
+        >,
+    >,
     /// The flow slot THIS frame evaluates — the identity a same-slot
     /// recursive call holds on.
     ///
@@ -8372,6 +8381,9 @@ struct FlowEvaluator<'d, 'b> {
     /// The function's project `useUnknownInCatchVariables`: an
     /// unannotated `catch` variable is `unknown`, else `any`.
     use_unknown_in_catch_variables: bool,
+    /// The function's project `noImplicitThis`: whether an object
+    /// literal's method or accessor reads `this` as the literal.
+    no_implicit_this: bool,
     /// The checker's AUTO-TYPED locals (`noImplicitAny` on, an unannotated
     /// `let` / `var` with no initializer or a bare `null` / free
     /// `undefined` one), by canonical subject — a fact of the declaration.
@@ -9274,6 +9286,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn union(&self, members: &[SemanticNodeId]) -> SemanticNodeId {
         self.dispatch
             .intern_normalized_union(members, self.nullability)
+    }
+
+    /// The flow policy of the function's own project, which a nested
+    /// function's content lowers under.
+    fn policy(&self) -> crate::semantic_query::FlowReturnPolicy {
+        crate::semantic_query::FlowReturnPolicy {
+            nullability: self.nullability,
+            no_implicit_any: self.no_implicit_any,
+            use_unknown_in_catch_variables: self.use_unknown_in_catch_variables,
+            no_implicit_this: self.no_implicit_this,
+        }
     }
 
     /// Promote the first statement-level gap only when evaluation found no
@@ -15051,6 +15074,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let mut out: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         let mut changed = false;
         let mut unclassified = false;
+        // With `strictNullChecks` off `undefined` and `null` are subtypes of
+        // every type, so the positive `"undefined"` / `"object"` edge reads
+        // them out of any arm of another kind (the checker's
+        // `narrowTypeByTypeFacts` substitutes the implied type):
+        // `typeof x === "undefined"` over `x: string` is `undefined`.
+        let implied_nullish = match kind {
+            _ if negated || self.nullability.is_strict() => None,
+            crate::flow_slice_content::SliceTypeofKind::Undefined => Some(PrimitiveKind::Undefined),
+            crate::flow_slice_content::SliceTypeofKind::Object => Some(PrimitiveKind::Null),
+            _ => None,
+        };
+        let mut implies_nullish = false;
         for arm in &arms {
             // The non-primitive `object` inhabits BOTH the `"object"` and
             // the `"function"` runtime kinds (functions are objects), so
@@ -15109,6 +15144,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         out.push(*arm);
                     } else {
                         changed = true;
+                        implies_nullish |= implied_nullish.is_some() && !self.is_never_node(*arm);
                     }
                 }
                 ArmGuardClass::Unclassified => {
@@ -15123,6 +15159,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             ));
         }
         if out.is_empty() {
+            if let (true, Some(nullish)) = (implies_nullish, implied_nullish) {
+                let node = self
+                    .dispatch
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(nullish));
+                return GuardNarrowing::Narrowed(subject.clone(), node);
+            }
             // Every arm is proved off the tested edge: the subject reads
             // `never` and the edge stays alive.
             return GuardNarrowing::Narrowed(subject.clone(), self.never_node());
@@ -15397,18 +15440,30 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let parent_fact = self.narrow_arms_by(&parent_subject, |this, arm| {
                 let member = this.project_segments_navigate(arm, &last)?;
                 let leaves = this.enumerated_union_arms_or_self(member);
-                Some(
-                    leaves
-                        .iter()
-                        .any(|leaf| match this.arm_truthiness_edge(*leaf, negated) {
-                            crate::semantic_query::TruthinessInhabitance::Yes => true,
-                            crate::semantic_query::TruthinessInhabitance::No => false,
-                            crate::semantic_query::TruthinessInhabitance::Undecided => {
-                                undecided = true;
-                                true
-                            }
-                        }),
-                )
+                Some(leaves.iter().any(|leaf| {
+                    // Without `strictNullChecks` a `null` or `undefined`
+                    // member is comparable to the narrowed member type, so
+                    // its arm stays on the truthy edge too.
+                    if !negated
+                        && !this.nullability.is_strict()
+                        && matches!(
+                            this.dispatch.graph().node_data(*leaf).as_deref(),
+                            Some(SemanticNodeData::Primitive(
+                                PrimitiveKind::Null | PrimitiveKind::Undefined
+                            ))
+                        )
+                    {
+                        return true;
+                    }
+                    match this.arm_truthiness_edge(*leaf, negated) {
+                        crate::semantic_query::TruthinessInhabitance::Yes => true,
+                        crate::semantic_query::TruthinessInhabitance::No => false,
+                        crate::semantic_query::TruthinessInhabitance::Undecided => {
+                            undecided = true;
+                            true
+                        }
+                    }
+                }))
             });
             match parent_fact {
                 // Every parent arm is proved off the tested edge. The
@@ -15498,6 +15553,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let mut survivors = Vec::with_capacity(arms.len() + 1);
         let mut dropped = false;
         for arm in arms {
+            // With `strictNullChecks` off `true` carries the `Falsy` fact
+            // too (`TrueFacts`), so the falsy edge keeps `boolean` whole.
+            if is_boolean(&arm) && negated && !self.nullability.is_strict() {
+                survivors.push(arm);
+                continue;
+            }
             if is_boolean(&arm) {
                 survivors.push(graph.intern_node(SemanticNodeData::Literal(
                     crate::semantic_query::LiteralValue::Boolean(!negated),
@@ -18602,6 +18663,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         let graph = self.dispatch.graph();
         let mut assertions = Vec::new();
+        let mut diverges = false;
         for signature in &signatures {
             match graph.node_data(*signature).as_deref() {
                 Some(SemanticNodeData::Signature {
@@ -18619,12 +18681,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             graph.node_data(*ret).as_deref(),
                             Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
                         ) {
-                            return CalleeStatementEffect::Undecided;
+                            diverges = true;
                         }
                     }
                 }
                 _ => return CalleeStatementEffect::Undecided,
             }
+        }
+        if diverges {
+            if !assertions.is_empty() {
+                return CalleeStatementEffect::Undecided;
+            }
+            return match self.callee_node(callee) {
+                Some(node) => CalleeStatementEffect::Resolved(node),
+                None => CalleeStatementEffect::Undecided,
+            };
         }
         match assertions.as_slice() {
             [] => CalleeStatementEffect::Inert,
@@ -18649,19 +18720,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         callee: &crate::flow_slice_content::GatedType,
     ) -> Option<Vec<SemanticNodeId>> {
-        if callee
-            .shadowed()
-            .iter()
-            .any(|name| self.owner_scope_answers_name(name))
-        {
-            return None;
-        }
-        let node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
-            self.canonical,
-            self.owner,
-            callee.ty(),
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        )?;
+        let node = self.callee_node(callee)?;
         match self
             .dispatch
             .shared_signature_nodes(node, crate::semantic_query::SignatureKind::Call)
@@ -18669,6 +18728,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             super::signature_discovery::SharedSignatureNodes::Nodes(signatures) => Some(signatures),
             super::signature_discovery::SharedSignatureNodes::Incomplete(_) => None,
         }
+    }
+
+    /// `typeof callee` a guard or effect statement names, lowered in owner
+    /// scope; `None` when a frame binding shadows it or it does not lower.
+    fn callee_node(
+        &mut self,
+        callee: &crate::flow_slice_content::GatedType,
+    ) -> Option<SemanticNodeId> {
+        if callee
+            .shadowed()
+            .iter()
+            .any(|name| self.owner_scope_answers_name(name))
+        {
+            return None;
+        }
+        self.dispatch.lower_type_expr_in_owner_scope_with_context(
+            self.canonical,
+            self.owner,
+            callee.ty(),
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )
     }
 
     /// [`Self::narrow_to_predicate_target_consuming`] over an already
@@ -21046,8 +21126,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     }
                 }
-                crate::flow_slice_content::SliceStatement::CallEffect { callee, call } => {
-                    self.settle_call_effect(callee, *call);
+                crate::flow_slice_content::SliceStatement::CallEffect { callee, site } => {
+                    if !self.settle_call_effect(callee, *site) {
+                        path_alive = false;
+                    }
                 }
                 crate::flow_slice_content::SliceStatement::Assertion { subject, target } => {
                     // A same-file assertion call: the narrowing fact lives
@@ -21061,11 +21143,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // definitely-falsy arms leave the subject's type.
                     self.apply_assertion(subject, target.as_ref());
                 }
-                crate::flow_slice_content::SliceStatement::CalleeEffect { callee, arguments } => {
+                crate::flow_slice_content::SliceStatement::CalleeEffect {
+                    callee,
+                    arguments,
+                    site,
+                } => {
                     // The call throws before any effect it asserts.
                     self.capture_throw_point();
                     match self.callee_statement_effect(callee) {
                         CalleeStatementEffect::Inert => {}
+                        CalleeStatementEffect::Resolved(node) => {
+                            if !self.settle_effects_signature(Some(node), *site) {
+                                path_alive = false;
+                            }
+                        }
                         CalleeStatementEffect::Assertion { parameter, target } => {
                             if let Some(Some(subject)) = arguments.get(parameter) {
                                 let fact = match target {
@@ -21285,7 +21376,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         .map(|(_, selection)| selection.clone()),
                     &bound,
                     Some(Arc::clone(context)),
-                    self.nullability,
+                    self.policy(),
                 )?;
             Some((
                 content,
@@ -21474,7 +21565,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         declared_predicate: Option<&crate::flow_slice_content::SlicePredicate>,
         body: &crate::flow_slice_content::SliceRegion,
         call_arguments: &Arc<
-            rustc_hash::FxHashMap<verter_span::Span, Arc<[crate::flow_slice_content::SliceExpr]>>,
+            rustc_hash::FxHashMap<
+                verter_span::Span,
+                Arc<[crate::flow_slice_content::SliceCallArgument]>,
+            >,
         >,
         can_fall_through: NormalCompletion,
         empty_completion: crate::flow_slice_content::EmptyCompletion,
@@ -22014,6 +22108,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 nullability: self.nullability,
                 no_implicit_any: self.no_implicit_any,
                 use_unknown_in_catch_variables: self.use_unknown_in_catch_variables,
+                no_implicit_this: self.no_implicit_this,
                 params: &params,
                 param_names: nested_params,
                 binder_env: &binder_env,
@@ -23286,6 +23381,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // computes (`c ? a : b`, `twin(c)`, `[twin(c)]`): its frame
             // lowering reads the frame's own bindings, which the indexed
             // program resolves in owner scope and cannot.
+            // A literal argument this frame computes is also evaluated in its
+            // const context: the value a `const` type parameter it is passed
+            // to infers from.
+            let mut const_view = None;
             let evaluated = match arguments.get(ordinal) {
                 Some(lowered) => match self.eval_expr(lowered) {
                     Positional::Value(node) => Some(node),
@@ -23297,9 +23396,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         (
                             FlowIndexedArgumentBinding::NonBindingExpression,
                             Some(frame_arguments),
-                        ) => frame_arguments
-                            .get(ordinal)
-                            .and_then(|expr| self.eval_frame_call_argument(expr)),
+                        ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
+                            let value = self.eval_frame_call_argument(&frame_argument.value)?;
+                            const_view = frame_argument
+                                .const_context
+                                .as_ref()
+                                .and_then(|expr| self.eval_frame_call_argument(expr));
+                            Some(value)
+                        }),
                         _ => None,
                     };
                     frame_value
@@ -23343,6 +23447,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ty,
                 spread: argument.spread,
                 context_sensitive: argument.context_sensitive,
+                const_view,
                 literal_mode: match argument.literal_mode {
                     verter_type_expr::IndexedValueLiteralMode::Widened => {
                         crate::semantic_query::ArgumentLiteralMode::Widened
@@ -23466,10 +23571,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // overload accepts the authored arguments — is the typed
             // `UnrepresentableCallee` degradation this rail already
             // defines; the executor never widens it to `any`, and
-            // neither does this rail.
+            // neither does this rail. So is a call whose type parameter
+            // the checker infers from a context-sensitive argument's
+            // return: this rail's own read would answer that parameter's
+            // fallback.
             super::call_resolve::ResolveCallStep::Degraded(
                 crate::semantic_query::ResolveCallFailure::NotCallable
-                | crate::semantic_query::ResolveCallFailure::NoApplicableOverload,
+                | crate::semantic_query::ResolveCallFailure::NoApplicableOverload
+                | crate::semantic_query::ResolveCallFailure::ContextSensitiveInference,
             ) => Some(self.degraded_unrepresentable_callee()),
             // An UNDECIDED executor (the machinery cannot decide this
             // shape, or a budget edge) is NOT a refusal: the caller
@@ -24108,8 +24217,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
+                let is_any = |node: SemanticNodeId| {
+                    matches!(
+                        self.dispatch.graph().node_data(node).as_deref(),
+                        Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                    )
+                };
                 let mut callee_node = receiver;
                 for name in member.iter() {
+                    // A member of an `any` receiver is `any`.
+                    if is_any(callee_node) {
+                        break;
+                    }
                     let this_source = self.this_member_source(callee_node, name);
                     let Some(read) = self.project_path_navigate(
                         this_source.unwrap_or(callee_node),
@@ -24121,6 +24240,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         Some(_) => self.dispatch.bind_this_receiver(read, callee_node),
                         None => read,
                     };
+                }
+                // A call of an `any` callee (a member of an `any` receiver)
+                // is the checker's untyped call: `any`.
+                if is_any(callee_node) {
+                    return Positional::Value(CallValue::modeled_any(self.dispatch));
                 }
                 if let Some(value) = self.eval_call_via_resolve_call(callee_node, site, arguments) {
                     return value;

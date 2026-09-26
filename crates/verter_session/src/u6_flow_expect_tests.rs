@@ -1307,6 +1307,13 @@ pub(crate) mod checker_syntax {
         },
         Union(Vec<CheckerType>),
         Array(Box<CheckerType>),
+        /// `[A, B]` / `readonly [A, B]` — a tuple print whose elements are
+        /// all required, unlabelled and not rest. Matches a live tuple of
+        /// the same readonly-ness whose elements are exactly those.
+        Tuple {
+            readonly: bool,
+            elements: Vec<CheckerType>,
+        },
         Intersection(Vec<CheckerType>),
         Object(Vec<CheckerMember>),
         Function {
@@ -1471,8 +1478,8 @@ pub(crate) mod checker_syntax {
         /// Postfix `[]` binds tighter than `&` / `|` in the checker's
         /// print (`string[]`, `(A | B)[]`). Generic arguments
         /// (`Promise<T>`) bind to the preceding bare reference.
-        /// `readonly T[]` is not modelled — it fails the identifier
-        /// lookup loudly.
+        /// `readonly T[]` is not modelled — only a `readonly` tuple print
+        /// parses, so it fails loudly.
         fn postfix(&mut self) -> Result<CheckerType, String> {
             let mut inner = self.atom()?;
             loop {
@@ -1548,6 +1555,7 @@ pub(crate) mod checker_syntax {
                         }
                     }
                 }
+                Some('[') => self.tuple(false),
                 Some('{') => self.object(),
                 Some('`') => self.template(),
                 Some('"') => {
@@ -1590,6 +1598,16 @@ pub(crate) mod checker_syntax {
                     }
                     if self.eat_keyword("keyof") {
                         return Ok(CheckerType::KeyOf(Box::new(self.postfix()?)));
+                    }
+                    if self.eat_keyword("readonly") {
+                        self.skip_ws();
+                        if !self.rest().starts_with('[') {
+                            return Err(format!(
+                                "only a `readonly` tuple print is modelled (byte {} of `{}`)",
+                                self.pos, self.text
+                            ));
+                        }
+                        return self.tuple(true);
                     }
                     if self.eat_keyword("new") {
                         self.skip_ws();
@@ -1826,6 +1844,24 @@ pub(crate) mod checker_syntax {
             self.pos += 3;
             self.expect(';')?;
             Ok(CheckerMember::ElidedMore(count))
+        }
+
+        /// `[A, B]` — a tuple print of required, unlabelled elements; the
+        /// `readonly` modifier, when printed, is already consumed.
+        fn tuple(&mut self, readonly: bool) -> Result<CheckerType, String> {
+            self.expect('[')?;
+            let mut elements = Vec::new();
+            self.skip_ws();
+            if !self.eat(']') {
+                loop {
+                    elements.push(self.union()?);
+                    if self.eat(']') {
+                        break;
+                    }
+                    self.expect(',')?;
+                }
+            }
+            Ok(CheckerType::Tuple { readonly, elements })
         }
 
         /// Consume `keyword` only when a member-name boundary follows —
@@ -2098,6 +2134,17 @@ pub(crate) mod checker_syntax {
             (CheckerType::Ref(name), SemanticNodeData::DeclRef { identity }) => {
                 &*identity.decl_name == name.as_str()
             }
+            // A declaration body's reference to the declaration itself
+            // lowers to the self-reference sentinel, which stands for that
+            // declaration (`R[]` inside `type R = R[] | 1`): it matches the
+            // declaration's name, a zero-argument reference only.
+            (
+                CheckerType::Ref(name),
+                SemanticNodeData::Opaque(crate::semantic_query::QueryError::RecursiveRef {
+                    name: sentinel,
+                    args,
+                }),
+            ) => args.is_empty() && &**sentinel == name.as_str(),
             // A class-expression instance matches the name the checker
             // prints for a reference to it (`Mixin.(Anonymous class)`,
             // `(Anonymous class)`, the variable a class expression
@@ -2219,6 +2266,25 @@ pub(crate) mod checker_syntax {
             }
             (CheckerType::Array(elem), SemanticNodeData::Array { element, readonly }) => {
                 !readonly && matches_node(dispatch, *element, elem, depth + 1)
+            }
+            (
+                CheckerType::Tuple {
+                    readonly: expected_readonly,
+                    elements: expected,
+                },
+                SemanticNodeData::Tuple { elements, readonly },
+            ) => {
+                readonly == expected_readonly
+                    && elements.len() == expected.len()
+                    && elements
+                        .iter()
+                        .zip(expected.iter())
+                        .all(|(element, expected)| {
+                            element.label.is_none()
+                                && !element.optional
+                                && !element.rest
+                                && matches_node(dispatch, element.value, expected, depth + 1)
+                        })
             }
             (CheckerType::Intersection(exp), SemanticNodeData::Intersection(members)) => {
                 members.len() == exp.len()
@@ -4148,6 +4214,32 @@ mod expectation_controls {
                         );
                     }
                 },
+            );
+        }
+    }
+
+    /// A tuple print parses strictly: `[A, B]`, `readonly [A, B]` and the
+    /// empty tuple parse; an unclosed tuple, a missing separator, a
+    /// trailing separator and `readonly T[]` (not modelled) are loud errors.
+    #[test]
+    fn tuple_prints_parse_strictly() {
+        for text in [
+            "[number, \"lit\"]",
+            "readonly [number, \"lit\"]",
+            "readonly []",
+            "[string] | number",
+        ] {
+            assert!(checker_syntax::parse(text).is_ok(), "`{text}` must parse");
+        }
+        for text in [
+            "[number",
+            "[number \"lit\"]",
+            "[number,]",
+            "readonly number[]",
+        ] {
+            assert!(
+                checker_syntax::parse(text).is_err(),
+                "`{text}` must be a LOUD parse error"
             );
         }
     }

@@ -48,6 +48,12 @@ export function tTernary(x: string | number) { return typeof x === "string" ? x 
 export function tTernaryElse(x: string | number) { return typeof x === "string" ? "" : x; }
 export function tMember(o: { v: string | number }) { if (typeof o.v === "string") return o.v; throw 0; }
 export function tEnumLike(x: 1 | "1" | null | undefined) { if (typeof x === "object") return x; throw 0; }
+export function tUndefOfString(x: string) { if (typeof x === "undefined") return x; throw 0; }
+export function tObjectOrString(x: { a: 1 } | string) { if (typeof x === "object") return x; throw 0; }
+export function tObjectOfNumber(x: number) { if (typeof x === "object") return x; throw 0; }
+export function tUndefOfUnion(x: string | number) { if (typeof x === "undefined") return x; throw 0; }
+export function tNotUndefElse(x: string) { if (typeof x !== "undefined") throw 0; return x; }
+export function tUndefOfNever(x: never) { if (typeof x === "undefined") return x; throw 0; }
 "##;
 
 /// A `typeof` guard keeps the union members of the tested kind in its true
@@ -111,21 +117,23 @@ fn a_switch_on_typeof_narrows_each_clause() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Without `strictNullChecks` the declared type still names `undefined` /
-/// `null` for a `typeof` guard: `typeof x === "undefined"` over `string |
-/// undefined` is `undefined`, and `typeof x === "object"` over `1 | "1" | null
-/// | undefined` is `null`. Wrong-but-clean: the lane narrows to `never`.
-///
-/// What the lane gives:
-/// - `tUndef`: the checker answers `undefined`; the lane measured `never`
-///   (strictNullChecks off, both off).
-/// - `tEnumLike`: the checker answers `null`; the lane measured `never`
-///   (strictNullChecks off, both off).
+/// Without `strictNullChecks` `undefined` and `null` are subtypes of every
+/// type, so the true branch of `typeof x === "undefined"` reads `undefined` and
+/// of `typeof x === "object"` reads `null` out of an arm of another kind (the
+/// checker's `narrowTypeByTypeFacts`), unless an arm of the tested kind
+/// survives; with it such an arm is `never`.
 #[test]
-#[ignore = "a typeof guard for undefined or object keeps the nullish type without strictNullChecks"]
-fn wrong_clean_a_typeof_guard_keeps_its_nullish_type_without_strict_null_checks() {
+fn a_typeof_guard_implies_a_nullish_type_as_the_checker_narrows_it() {
     let matrix = Matrix::new(TYPEOF);
-    let failures = matrix.returns(&[("tUndef", "undefined"), ("tEnumLike", "null")]);
+    let mut failures = matrix.returns(&[("tUndef", "undefined"), ("tEnumLike", "null")]);
+    failures.extend(matrix.nullness(&[
+        (Read::Return("tUndefOfString"), "never", "undefined"),
+        (Read::Return("tObjectOrString"), "{ a: 1; }", "{ a: 1; }"),
+        (Read::Return("tObjectOfNumber"), "never", "null"),
+        (Read::Return("tUndefOfUnion"), "never", "undefined"),
+        (Read::Return("tNotUndefElse"), "never", "undefined"),
+        (Read::Return("tUndefOfNever"), "never", "never"),
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -404,6 +412,11 @@ export function dExhaustNever(s: Shape) { switch (s.kind) { case "circle": case 
 export function dIn(s: Shape) { if ("r" in s) return s; throw 0; }
 export function dTypeofMember(x: { v: string } | { v: number }) { if (typeof x.v === "string") return x; throw 0; }
 export function dTruthyMember(x: { v: string; a: 1 } | { v?: undefined; b: 2 }) { if (x.v) return x; throw 0; }
+type NullK = { k: "a"; a: 1 } | { k: null; n: 0 };
+export function dOptionalNe(o: Opt) { if (o.k !== "a") return o; throw 0; }
+export function dNullK(o: NullK) { if (o.k === "a") return o; throw 0; }
+export function dLiteralTruthy(x: { v: ""; a: 1 } | { v: "x"; b: 2 }) { if (x.v) return x; throw 0; }
+export function dOptionalSwitch(o: Opt) { switch (o.k) { case "a": return o; default: throw 0; } }
 "##;
 
 /// A comparison of a discriminant property narrows the union it is read from:
@@ -498,26 +511,30 @@ fn an_exhaustive_switch_default_is_never() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Without `strictNullChecks` a union whose discriminant is `undefined` (or
-/// optional) in one member is not narrowed by comparing or testing that
-/// property: `o.k === "a"` and `if (x.v)` keep the whole union.
-/// Wrong-but-clean: the lane narrows.
-///
-/// What the lane gives:
-/// - `dOptionalElse`: the checker answers `{ k: "a"; a: 1; }` (strict), `Opt`
-///   (strictNullChecks off), `{ k: "a"; a: 1; }` (noImplicitAny off), `Opt`
-///   (both off); the lane measured `{ k: "a"; a: 1; }` (strictNullChecks off,
-///   both off).
-/// - `dTruthyMember`: the checker answers `{ v: string; a: 1; }` (strict), `{
-///   v: string; a: 1; } | { v?: undefined; b: 2; }` (strictNullChecks off), `{
-///   v: string; a: 1; }` (noImplicitAny off), `{ v: string; a: 1; } | { v?:
-///   undefined; b: 2; }` (both off); the lane measured `{ v: string; a: 1; }`
-///   (strictNullChecks off, both off).
+/// Without `strictNullChecks` `null` and `undefined` are comparable to every
+/// type, so a member whose discriminant is `undefined` or `null` survives a
+/// comparison with a literal and a truthiness test of that property: `o.k ===
+/// "a"` and `if (x.v)` keep the whole union, and `o.k !== "a"` keeps nothing.
 #[test]
-#[ignore = "a discriminant with an undefined member does not narrow without strictNullChecks"]
-fn wrong_clean_an_undefined_discriminant_does_not_narrow_without_strict_null_checks() {
+fn a_nullish_discriminant_narrows_as_the_checker_compares_it() {
     let matrix = Matrix::new(DISCRIMINANTS);
     let failures = matrix.nullness(&[
+        (
+            Read::Return("dOptionalNe"),
+            "{ k?: undefined; none: 0; }",
+            "never",
+        ),
+        (Read::Return("dNullK"), "{ k: \"a\"; a: 1; }", "NullK"),
+        (
+            Read::Return("dLiteralTruthy"),
+            "{ v: \"x\"; b: 2; }",
+            "{ v: \"x\"; b: 2; }",
+        ),
+        (
+            Read::Return("dOptionalSwitch"),
+            "{ k: \"a\"; a: 1; }",
+            "Opt",
+        ),
         (Read::Return("dOptionalElse"), "{ k: \"a\"; a: 1; }", "Opt"),
         (
             Read::Return("dTruthyMember"),
@@ -619,6 +636,9 @@ export function tr3(x: "" | "a" | 0 | 1 | null) { if (x) return x; throw 0; }
 export function tr3Else(x: "" | "a" | 0 | 1 | null) { if (x) throw 0; return x; }
 export function tr4(x: boolean) { if (x) return x; throw 0; }
 export function tr4Else(x: boolean) { if (x) throw 0; return x; }
+export function tr4Mixed(x: boolean | "a") { if (x) throw 0; return x; }
+export function tr4Not(x: boolean) { if (!x) return x; throw 0; }
+export function tr4Number(x: boolean | number) { if (x) throw 0; return x; }
 export function tr5(x: { a: 1 } | undefined) { if (x) return x; throw 0; }
 export function tr5Else(x: { a: 1 } | undefined) { if (x) throw 0; return x; }
 export function tr6(x: string | undefined) { if (!x) return x; throw 0; }
@@ -677,17 +697,21 @@ fn truthiness_narrows_as_the_checker_narrows() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Without `strictNullChecks` the false branch of `if (x)` over `x: boolean`
-/// keeps `boolean`. Wrong-but-clean: the lane narrows to `false`.
-///
-/// What the lane gives:
-/// - `tr4Else`: the checker answers `false` (strict), `boolean`
-///   (strictNullChecks off), `false` (noImplicitAny off), `boolean` (both off);
-///   the lane measured `false` (strictNullChecks off, both off).
+/// Without `strictNullChecks` `true` carries the checker's `Falsy` fact too,
+/// so the false branch of a truthiness test over `boolean` keeps `boolean`;
+/// with it the branch reads `false`.
 #[test]
-#[ignore = "the falsy branch of a boolean test keeps boolean without strictNullChecks"]
-fn wrong_clean_a_falsy_boolean_stays_boolean_without_strict_null_checks() {
+fn a_falsy_boolean_narrows_as_the_checker_narrows_it() {
     let matrix = Matrix::new(TRUTHINESS);
-    let failures = matrix.nullness(&[(Read::Return("tr4Else"), "false", "boolean")]);
+    let failures = matrix.nullness(&[
+        (Read::Return("tr4Else"), "false", "boolean"),
+        (Read::Return("tr4Mixed"), "false", "\"a\" | boolean"),
+        (Read::Return("tr4Not"), "false", "boolean"),
+        (
+            Read::Return("tr4Number"),
+            "number | false",
+            "number | boolean",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

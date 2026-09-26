@@ -104,6 +104,7 @@ mod tests {
                         nullability: NullabilityPolicy::Strict,
                         no_implicit_any: true,
                         use_unknown_in_catch_variables: true,
+                        no_implicit_this: true,
                     },
                 },
                 demand: ReturnProjectionDemand::whole_return(),

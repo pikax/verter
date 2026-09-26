@@ -1751,6 +1751,11 @@ pub struct FlowReturnPolicy {
     /// `useUnknownInCatchVariables` of the project owning the function:
     /// whether an unannotated `catch` variable is `unknown` or `any`.
     pub use_unknown_in_catch_variables: bool,
+    /// `noImplicitThis` of the project owning the function: whether an
+    /// object literal's method or accessor reads `this` as the literal
+    /// (`getContextualThisParameterType`) or, with the option off, as
+    /// `any`.
+    pub no_implicit_this: bool,
 }
 
 impl FlowReturnPolicy {
@@ -1763,6 +1768,7 @@ impl FlowReturnPolicy {
             nullability: NullabilityPolicy::from_strict_null_checks(options.strict_null_checks),
             no_implicit_any: options.no_implicit_any,
             use_unknown_in_catch_variables: options.use_unknown_in_catch_variables,
+            no_implicit_this: options.no_implicit_this,
         }
     }
 }
@@ -2124,6 +2130,11 @@ pub enum CallArgKey {
         /// Whether the argument is a function value at least one of whose
         /// parameters carries no authored type annotation.
         context_sensitive: bool,
+        /// The argument checked in its const context — an object or array
+        /// literal the calling frame computes, read as `as const` reads it —
+        /// which a `const` type parameter the argument is passed to infers
+        /// from (`isConstContext`). `None` for any other argument.
+        const_view: Option<SemanticNodeId>,
     },
     /// An argument identified by its program expression (the identity of
     /// the expression record the applicability executor evaluates).
@@ -2381,6 +2392,13 @@ pub enum ResolveCallFailure {
     Undecidable,
     /// The call-resolution work envelope tripped.
     Budget,
+    /// A type parameter no other argument infers occurs in the return of
+    /// the contextual signature a context-sensitive function argument is
+    /// checked under: the checker infers it from what that function
+    /// returns, which applicability does not model. Undecided like
+    /// [`Self::Undecidable`], but no rail may answer the call with the
+    /// parameter's fallback instead.
+    ContextSensitiveInference,
 }
 
 /// The env-free declaration-slot SEED — exactly the four env-free
@@ -7343,9 +7361,9 @@ impl Default for RelationKind {
 }
 
 /// The comparison policy that governs a relation and is part of relation
-/// IDENTITY — the three §2.7 / §4.0 policy axes: overload selection,
+/// IDENTITY — the §2.7 / §4.0 policy axes: overload selection,
 /// excess-property checking, and variance (including method-parameter
-/// bivariance). Two judgements over the same nodes that differ in any policy
+/// bivariance) — and whether the target is an intersection target's arm. Two judgements over the same nodes that differ in any policy
 /// axis can reach a different OUTCOME / bindings, so they are DISTINCT and must
 /// not share a memo slot. SHAPE only: the policy-driven comparison substrate is
 /// the relation-inference reducer (not yet implemented).
@@ -7366,6 +7384,11 @@ pub struct RelationPolicy {
     /// Context-owned semantic policy set. Changing it changes the identity
     /// of a resident `Relate` parent; a formatting-only change does not.
     pub policy_set: SemanticPolicySetId,
+    /// The target is one arm of an intersection target, related on its own
+    /// after the whole intersection passed the weak-type check (the
+    /// checker's `IntersectionState.Target`): the arm itself skips that
+    /// check, its members' relations do not.
+    pub intersection_target_arm: bool,
 }
 
 /// How an overloaded callee's signatures are selected during a relation

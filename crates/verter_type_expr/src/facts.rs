@@ -2126,6 +2126,37 @@ pub struct NarrowTypeParam {
     /// valid) — never a session-wide flag.
     #[serde(default)]
     pub is_const: bool,
+    /// The authored variance annotation (`in T`, `out T`, `in out T`).
+    #[serde(default)]
+    pub variance: TypeParamVariance,
+}
+
+/// A declaration type parameter's authored variance annotation, which the
+/// checker reads instead of measuring the parameter's variance
+/// (`getVariances`).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum TypeParamVariance {
+    /// No annotation: the checker measures the variance.
+    #[default]
+    Unannotated,
+    /// `in T`: contravariant.
+    In,
+    /// `out T`: covariant.
+    Out,
+    /// `in out T`: invariant.
+    InOut,
 }
 
 /// A whole type-parameter declaration list.
@@ -4434,6 +4465,7 @@ impl NarrowTypeParam {
             constraint: constraint.unwrap_or_else(|| self.constraint.clone()),
             default: default.unwrap_or_else(|| self.default.clone()),
             is_const: self.is_const,
+            variance: self.variance,
         })
     }
 }

@@ -592,7 +592,8 @@ fn a_readonly_instance_literal_widens_as_the_checker_declares() {
 ///
 /// Measured on TypeScript 7.0.2: `krCtor` (`readonly rCtor;` assigned `3`
 /// in the constructor) is `number` with `noImplicitAny`, `any` without it,
-/// under both `strictNullChecks` settings.
+/// under both `strictNullChecks` settings. The lane answers the typed
+/// missing-member marker ([`a_flow_typed_property_is_the_missing_member_marker`]).
 #[test]
 #[ignore = "a property without a type or initializer takes the type its constructor assigns"]
 fn a_constructor_assigned_property_takes_the_assigned_type() {
@@ -614,5 +615,113 @@ fn a_constructor_assigned_property_takes_the_assigned_type() {
             "{compiler_options:?}:\n{}",
             failures.join("\n")
         );
+    }
+}
+
+const IMPLICIT_PROPERTIES: &str = "\
+class N { p; readonly q; static s; }
+export function np(n: N) { return n.p; }
+export function nq(n: N) { return n.q; }
+export function ns() { return N.s; }
+declare class D { p; }
+export function dp(d: D) { return d.p; }
+class C { p; constructor() { } }
+export function cp(c: C) { return c.p; }
+class C3 { p; constructor() { const f = () => { this.p = 1; }; f(); } }
+export function c3(c: C3) { return c.p; }
+class B { p = 1 }
+class Dd extends B { q; }
+export function ddq(d: Dd) { return d.q; }
+";
+
+/// The four `strictNullChecks` × `noImplicitAny` settings.
+const FOUR_SETTINGS: [Option<&str>; 4] = [
+    None,
+    Some(r#"{ "strict": true, "noImplicitAny": false }"#),
+    Some(r#"{ "strict": true, "strictNullChecks": false }"#),
+    Some(r#"{ "strict": true, "strictNullChecks": false, "noImplicitAny": false }"#),
+];
+
+/// A property written with neither a type nor an initializer is the
+/// implicit `any` wherever the checker reads no control flow for it: a
+/// class without a constructor, a constructor that never assigns it (an
+/// assignment in an arrow it creates is not on its flow), a static of a
+/// class without a static block, and an ambient class's property.
+///
+/// Measured on TypeScript 7.0.2 (all four `strictNullChecks` ×
+/// `noImplicitAny` settings alike): `np`, `nq`, `ns`, `dp`, `cp`, `c3` and
+/// `ddq` are `any`.
+#[test]
+fn a_property_without_type_or_initializer_is_the_implicit_any() {
+    for compiler_options in FOUR_SETTINGS {
+        let failures = mismatches_in(
+            ProbeProject {
+                files: &[],
+                compiler_options,
+                ambient_lib: None,
+            },
+            IMPLICIT_PROPERTIES,
+            &[
+                ("ReturnType<typeof np>", "any"),
+                ("ReturnType<typeof nq>", "any"),
+                ("ReturnType<typeof ns>", "any"),
+                ("ReturnType<typeof dp>", "any"),
+                ("ReturnType<typeof cp>", "any"),
+                ("ReturnType<typeof c3>", "any"),
+                ("ReturnType<typeof ddq>", "any"),
+            ],
+        );
+        assert!(
+            failures.is_empty(),
+            "{compiler_options:?}:\n{}",
+            failures.join("\n")
+        );
+    }
+}
+
+/// A property the constructor assigns takes its type from the
+/// constructor's control flow under `noImplicitAny`, which the class
+/// lowering does not model: the property is the typed missing-member
+/// marker under every setting, never a guessed type
+/// ([`a_constructor_assigned_property_takes_the_assigned_type`] holds the
+/// measured answers). So is a static property of a class with a static
+/// block (TypeScript 7.0.2: `S1.s` with `static { this.s = 1; }` is
+/// `number` under `noImplicitAny`, `any` without it).
+#[test]
+fn a_flow_typed_property_is_the_missing_member_marker() {
+    let source = "\
+class K { readonly rCtor; constructor() { this.rCtor = 3; } }
+export function krCtor(k: K) { return k.rCtor; }
+class S1 { static s; static { this.s = 1; } }
+export function s1() { return S1.s; }
+";
+    for compiler_options in FOUR_SETTINGS {
+        for probe in [
+            "ReturnType<typeof krCtor>",
+            "K['rCtor']",
+            "ReturnType<typeof s1>",
+        ] {
+            super::checker_probe_lane_tests::with_probe_in(
+                ProbeProject {
+                    files: &[],
+                    compiler_options,
+                    ambient_lib: None,
+                },
+                source,
+                probe,
+                |dispatch, node| {
+                    assert!(
+                        matches!(
+                            dispatch.graph().node_data(node).as_deref(),
+                            Some(crate::semantic_query::SemanticNodeData::Opaque(_))
+                        ),
+                        "{compiler_options:?} `{probe}`: the lane measured `{}`",
+                        crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                            dispatch, node, 0
+                        )
+                    );
+                },
+            );
+        }
     }
 }

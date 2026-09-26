@@ -1086,29 +1086,42 @@ impl FlowEvaluator<'_, '_> {
         }
         // A chain nests its left operands: its left spine is walked, and the
         // operands are visited in the recursion's order — the innermost left
-        // operand, then each right operand from the innermost node out.
-        let mut operands: Vec<(&SliceExpr, bool)> = Vec::new();
+        // operand, then each right operand from the innermost node out. Each
+        // operand records whether it is the right operand of an `&&`.
+        let mut operands: Vec<(&SliceExpr, bool, bool)> = Vec::new();
         let mut node = expr;
         while let SliceExpr::Logical {
+            operator,
             left,
             right,
             fresh_operands,
             ..
         } = node
         {
-            operands.push((right, fresh_operands.1));
+            operands.push((right, fresh_operands.1, *operator == SliceLogical::And));
             if matches!(left.as_ref(), SliceExpr::Logical { .. }) {
                 node = left;
             } else {
-                operands.push((left, fresh_operands.0));
+                operands.push((left, fresh_operands.0, false));
                 break;
             }
         }
-        for (operand, fresh) in operands.into_iter().rev() {
+        for (operand, fresh, right_of_and) in operands.into_iter().rev() {
             match operand {
                 SliceExpr::Type(leaf) if fresh => {
                     if let verter_type_expr::TypeExpr::Literal(_) = leaf.ty() {
-                        out.push(self.lower_body_type(leaf.ty()));
+                        let literal = self.lower_body_type(leaf.ty());
+                        // With `strictNullChecks` off `a && b` holds the definitely
+                        // falsy part of `b`'s base type beside `b`: a falsy literal
+                        // `b` meets its own regular twin there, and the union keeps
+                        // the regular one (`removeRedundantLiteralTypes`), so
+                        // `v && 0` is a `0` that does not widen.
+                        let redundant = right_of_and
+                            && !self.nullability.is_strict()
+                            && self.arm_facts(literal).is_some_and(|facts| !facts.truthy);
+                        if !redundant {
+                            out.push(literal);
+                        }
                     }
                 }
                 nested @ (SliceExpr::Logical { .. } | SliceExpr::Assignment { .. }) => {

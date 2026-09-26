@@ -25,6 +25,9 @@ declare let lf: () => never;
 declare function fover(x: string): never;
 declare function fover(x: number): void;
 declare function gfail<T>(x: T): never;
+declare const O: { fover(x: string): never; fover(x: number): void; gfail<T>(x: T): never; };
+declare function mixb(x: string): never;
+declare function mixb(x: number): string;
 export function n1(x: string | number) { if (typeof x === \"string\") { return x; } fail(); }
 export function n2(x: string | number) { if (typeof x === \"string\") { return x; } cfail(); }
 export function n3(x: string | number) { if (typeof x === \"string\") { return x; } ufail(); }
@@ -41,6 +44,10 @@ export function n13(x: string | number) { fail(); return x; }
 export function n14(x: string | number) { if (typeof x === \"string\") { return x; } new K().m(); }
 export function n15(x: string | number) { if (typeof x === \"string\") { return x; } (fail)(); }
 export function n16(x: string | number) { if (typeof x === \"string\") { return x; } void fail(); }
+export function q1(x: string | number) { if (typeof x === \"string\") { return x; } O.fover(1); }
+export function q2(x: string | number) { if (typeof x === \"string\") { return x; } O.fover(\"a\"); }
+export function q3(x: string | number) { if (typeof x === \"string\") { return x; } O.gfail(1); }
+export function n21(x: string | number) { if (typeof x === \"string\") { return x; } mixb(2); }
 ";
 
 /// Assert each `(function, [strictNullChecks on, off])` return, complete.
@@ -107,7 +114,6 @@ fn a_statement_call_through_a_never_returning_callee_ends_the_path() {
 /// Measured on TypeScript 7.0.2: `ReturnType<typeof n6>`, `n7` and `n8` are
 /// `string` under every setting.
 #[test]
-#[ignore = "a statement call through a qualified never-returning callee ends the path"]
 fn a_statement_call_through_a_qualified_never_callee_ends_the_path() {
     assert_rows(&[
         ("n6", ["string", "string"]),
@@ -118,18 +124,36 @@ fn a_statement_call_through_a_qualified_never_callee_ends_the_path() {
 
 /// Overload resolution picks the signature whose effect a statement call
 /// takes (`fover(1)` resolves the `void` overload, `fover("a")` the `never`
-/// one), and a call through an unannotated `new` expression has no effect —
-/// each complete.
+/// one, `mixb(2)` the `string` one), and a call through an unannotated
+/// `new` expression has no effect — each complete.
 ///
 /// Measured on TypeScript 7.0.2 (`strictNullChecks` on / off):
-/// `ReturnType<typeof n10>` and `n14` are `string | undefined` / `string`,
-/// `n11` is `string`.
+/// `ReturnType<typeof n10>`, `n21` and `n14` are `string | undefined` /
+/// `string`, `n11` is `string`.
 #[test]
-#[ignore = "a statement call takes the effect of the overload it resolves, and a new-expression callee has none"]
 fn a_statement_call_takes_the_effect_of_its_resolved_overload() {
     assert_rows(&[
         ("n10", ["string | undefined", "string"]),
+        ("n21", ["string | undefined", "string"]),
         ("n11", ["string", "string"]),
         ("n14", ["string | undefined", "string"]),
+    ]);
+}
+
+/// A qualified callee's effects signature is the signature the call
+/// resolves when some signature returns `never` and the set is overloaded
+/// or generic (`getEffectsSignature` over `getResolvedSignature`).
+///
+/// Measured on TypeScript 7.0.2 (`strictNullChecks` on / off): over
+/// `declare const O: { fover(x: string): never; fover(x: number): void;
+/// gfail<T>(x: T): never }`, `ReturnType<typeof q1>` (`O.fover(1)`) is
+/// `string | undefined` / `string`, `q2` (`O.fover("a")`) and `q3`
+/// (`O.gfail(1)`) `string`.
+#[test]
+fn a_qualified_statement_call_takes_the_effect_of_its_resolved_signature() {
+    assert_rows(&[
+        ("q1", ["string | undefined", "string"]),
+        ("q2", ["string", "string"]),
+        ("q3", ["string", "string"]),
     ]);
 }

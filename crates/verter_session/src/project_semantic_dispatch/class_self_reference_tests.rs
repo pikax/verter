@@ -267,33 +267,56 @@ export const og = { n: 1, get self() { return this; } };
 }
 
 /// Without `noImplicitThis` an object literal's method or getter reads
-/// `this` as `any`.
+/// `this` as `any`: the `this` keyword, a member read or a call through
+/// it, and an arrow the method creates. A name reading the variable that
+/// holds the literal still reads the literal.
 ///
 /// Measured on TypeScript 7.0.2 with `--strict --noImplicitThis false`
-/// (all four `strictNullChecks` × `noImplicitAny` settings):
-/// `ReturnType<typeof own.me>` and `typeof og.self` are `any` (`0 extends 1
-/// & T` holds). The lane gives the literal under every `noImplicitThis`
-/// setting.
+/// (all four `strictNullChecks` × `noImplicitAny` settings alike):
+/// `ReturnType<typeof own.me>`, `…own.w>`, `…own.c>`,
+/// `ReturnType<ReturnType<typeof own.a>>` and `typeof og.self` are `any`
+/// (`0 extends 1 & T` holds of each), `ReturnType<typeof own.o>` is
+/// `number`, and over the literal a function returns,
+/// `ReturnType<ReturnType<typeof inner>['me']>` and `…['w']>` are `any`.
+/// With `noImplicitThis` on, the same members read the literal
+/// ([`a_literal_getter_returning_its_this_reads_the_literal`]).
 #[test]
-#[ignore = "without `noImplicitThis` an object literal's `this` is `any`"]
 fn a_literal_this_is_any_without_no_implicit_this() {
     let source = "\
-export const own = { v: 1, me() { return this; } };
+export const own = { v: 1, me() { return this; }, w() { return this.v; }, c() { return this.w(); }, a() { return () => this; }, o() { return own.v; } };
 export const og = { n: 1, get self() { return this; } };
+export function inner() { return { v: 1, me() { return this; }, w() { return this.v; } }; }
 ";
-    let failures = super::checker_probe_lane_tests::mismatches_in(
-        super::checker_probe_lane_tests::ProbeProject {
-            files: &[],
-            compiler_options: Some(r#"{ "strict": true, "noImplicitThis": false }"#),
-            ambient_lib: None,
-        },
-        source,
-        &[
-            ("ReturnType<typeof own.me>", "any"),
-            ("typeof og.self", "any"),
-        ],
-    );
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    for compiler_options in [
+        r#"{ "strict": true, "noImplicitThis": false }"#,
+        r#"{ "strict": true, "noImplicitThis": false, "noImplicitAny": false }"#,
+        r#"{ "strict": true, "noImplicitThis": false, "strictNullChecks": false }"#,
+        r#"{ "strict": true, "noImplicitThis": false, "strictNullChecks": false, "noImplicitAny": false }"#,
+    ] {
+        let failures = super::checker_probe_lane_tests::mismatches_in(
+            super::checker_probe_lane_tests::ProbeProject {
+                files: &[],
+                compiler_options: Some(compiler_options),
+                ambient_lib: None,
+            },
+            source,
+            &[
+                ("ReturnType<typeof own.me>", "any"),
+                ("ReturnType<typeof own.w>", "any"),
+                ("ReturnType<typeof own.c>", "any"),
+                ("ReturnType<ReturnType<typeof own.a>>", "any"),
+                ("ReturnType<typeof own.o>", "number"),
+                ("typeof og.self", "any"),
+                ("ReturnType<ReturnType<typeof inner>['me']>", "any"),
+                ("ReturnType<ReturnType<typeof inner>['w']>", "any"),
+            ],
+        );
+        assert!(
+            failures.is_empty(),
+            "{compiler_options}:\n{}",
+            failures.join("\n")
+        );
+    }
 }
 
 /// A class expression's members read through the value holding it: a
@@ -380,4 +403,42 @@ export function useOwn() { return own.me().v; }
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `this` in a module-level function declaration has no receiver the
+/// checker can type: it is `any` (with TS2683 under `noImplicitThis`),
+/// read directly, through a local copy or through a member.
+///
+/// Measured on TypeScript 7.0.2 (all four `strictNullChecks` ×
+/// `noImplicitAny` settings alike, `noImplicitThis` on and off):
+/// `ReturnType<typeof f>`, `ReturnType<typeof g>` and `ReturnType<typeof
+/// m>` are `any`, and `0 extends 1 & ReturnType<typeof f> ? 1 : 0` is `1`.
+#[test]
+fn this_in_a_module_function_is_any() {
+    let source = "\
+export function f() { return this; }
+export function g() { const t = this; return t; }
+export function m() { return this.x; }
+";
+    for compiler_options in [None, Some(r#"{ "strict": true, "noImplicitThis": false }"#)] {
+        let failures = super::checker_probe_lane_tests::mismatches_in(
+            super::checker_probe_lane_tests::ProbeProject {
+                files: &[],
+                compiler_options,
+                ambient_lib: None,
+            },
+            source,
+            &[
+                ("ReturnType<typeof f>", "any"),
+                ("ReturnType<typeof g>", "any"),
+                ("ReturnType<typeof m>", "any"),
+                ("0 extends 1 & ReturnType<typeof f> ? 1 : 0", "1"),
+            ],
+        );
+        assert!(
+            failures.is_empty(),
+            "{compiler_options:?}:\n{}",
+            failures.join("\n")
+        );
+    }
 }

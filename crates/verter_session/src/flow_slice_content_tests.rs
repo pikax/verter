@@ -102,7 +102,7 @@ fn content_for_path(source: &str, name: &str, path: &[Arc<str>]) -> Arc<SliceCon
         entry,
         selection,
         &skeleton,
-        crate::semantic_query::NullabilityPolicy::Strict,
+        crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
     )
     .expect("slice content must build for an indexed function")
 }
@@ -227,7 +227,7 @@ fn selected_capture_authority_rejects_a_different_outer_source_snapshot() {
                 None,
                 &changed_bound,
                 Some(Arc::clone(context)),
-                crate::semantic_query::NullabilityPolicy::Strict
+                crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default())
             )
             .is_none(),
         "signature-only lowering must reject an older linked lexical gate too"
@@ -305,7 +305,7 @@ fn runtime_occurrence_classification_does_not_rescan_hoisted_alias_groups() {
                 entry,
                 selection,
                 &bound,
-                crate::semantic_query::NullabilityPolicy::Strict,
+                crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
             )
             .unwrap();
         assert!(matches!(
@@ -343,7 +343,10 @@ fn and_chain_guard_classifications(operands: usize) -> usize {
         entry,
         selection,
         &skeleton,
-        crate::semantic_query::NullabilityPolicy::Strict,
+        crate::semantic_query::FlowReturnPolicy {
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
+            ..crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default())
+        },
     )
     .expect("slice content must build for an indexed function");
     memo.guard_classification_work.load(Ordering::Relaxed)
@@ -1495,7 +1498,7 @@ fn nested_content(memo: &DeclBodyMemo, nested: &SliceExpr) -> Arc<SliceContent> 
         Some(selection),
         &skeleton,
         Some(Arc::clone(context)),
-        crate::semantic_query::NullabilityPolicy::Strict,
+        crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
     )
     .expect("selected child content")
 }
@@ -3379,7 +3382,7 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
             entry,
             selection,
             &skeleton,
-            crate::semantic_query::NullabilityPolicy::Strict,
+            crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
         )
         .expect("the class member slice content must build");
     assert_eq!(
@@ -4302,7 +4305,7 @@ fn symbolic_and_unrepresentable_calls() {
             entry,
             selection,
             &skeleton,
-            crate::semantic_query::NullabilityPolicy::Strict,
+            crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
         )
         .expect("the class method slice content must build");
     assert_eq!(
@@ -4696,7 +4699,7 @@ fn locator_miss_is_typed_none() {
             &missing_contributor,
             selection.clone(),
             &skeleton,
-            crate::semantic_query::NullabilityPolicy::Strict
+            crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default())
         )
         .is_none(),
         "an out-of-range contributor is a typed miss"
@@ -4711,7 +4714,7 @@ fn locator_miss_is_typed_none() {
             &bad_descent,
             selection,
             &skeleton,
-            crate::semantic_query::NullabilityPolicy::Strict
+            crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default())
         )
         .is_none(),
         "a mismatched descent is a typed miss"
@@ -5813,7 +5816,7 @@ fn selected_assignment_definition_lookup_ignores_unrelated_write_inventory() {
                 entry,
                 selection,
                 &bound,
-                crate::semantic_query::NullabilityPolicy::Strict,
+                crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
             )
             .unwrap();
         let definitions: Vec<_> = content
@@ -5889,7 +5892,7 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
             entry,
             FlowSliceSelection::from_slice_ir(&ir),
             &bound,
-            crate::semantic_query::NullabilityPolicy::Strict,
+            crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
         )
         .unwrap();
     assert!(content.body.statements.iter().any(|statement| matches!(statement,SliceStatement::Assignment{definition,..} if *definition==original.site)),"repeated identical addresses preserve the same selected site");
@@ -5903,7 +5906,7 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
             entry,
             FlowSliceSelection::from_slice_ir(&ir),
             &bound,
-            crate::semantic_query::NullabilityPolicy::Strict,
+            crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
         )
         .unwrap();
     assert!(

@@ -438,7 +438,6 @@ fn an_enum_object_element_access_reads_the_reverse_mapping_and_members() {
 /// `Exclude<E, E.A>` `E.B`, `` `${S}` `` `"p" | "q"`, `E | number`
 /// `number`, `E & E.A` `E.A`, `F.A & G.A` `never`.
 #[test]
-#[ignore = "operators over a whole enum type: Exclude, a template over the enum, and union/intersection reduction with its members"]
 fn operators_over_an_enum_type_reduce_as_the_checker_reduces_them() {
     assert_rows(
         &[("enums.ts", ENUMS)],

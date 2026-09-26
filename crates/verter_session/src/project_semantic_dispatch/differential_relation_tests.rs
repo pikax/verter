@@ -140,44 +140,120 @@ fn object_types_relate_as_the_checker_relates_them() {
 /// A target member declared as a METHOD compares its parameters bivariantly
 /// under `strictFunctionTypes` (`strictVariance` excludes method signatures),
 /// so a function-typed property with a narrower parameter fits it.
-/// Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[Mv] extends [M] ? 1 : 2`: the checker answers `1`; the lane measured
-///   `2`.
 #[test]
-#[ignore = "a method member's parameters relate bivariantly under strictFunctionTypes"]
-fn wrong_clean_a_function_property_relates_to_a_method_member_bivariantly() {
+fn a_function_property_relates_to_a_method_as_the_checker_relates_it() {
     let matrix = Matrix::new(OBJECTS);
     let failures = matrix.types(&[("[Mv] extends [M] ? 1 : 2", "1")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Only an object LITERAL type gets an implicit index signature; an interface
-/// does not, so `P` is not below `{ [k: string]: number }`. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[P] extends [{ [k: string]: number }] ? 1 : 2`: the checker answers `2`;
-///   the lane measured `1`.
+/// Interfaces, aliases, classes and mapped types against index signatures.
+const INDEXES: &str = r##"
+interface P { x: number; y: number }
+interface E {}
+type TL = { x: number; y: number };
+type TP = P;
+class C { x = 1; y = 2 }
+interface PM { m(): void }
+type TM = { m(): void };
+declare const obj: { x: number };
+interface Q extends TL {}
+interface Q2 extends TL { z: number }
+interface Q3 extends P {}
+interface Q10 extends Pick<P, "x"> {}
+interface Q11 extends Q {}
+interface Q16 extends Q3 {}
+type TL2 = { z: number };
+interface Q14 extends TL, TL2 {}
+interface Dict { [k: string]: number }
+interface PD extends Dict { x: number }
+interface NI { [k: number]: number; x: number }
+"##;
+
+/// Only an object type with an inferable index — from a type literal, an
+/// object literal or a mapped type, with no call or construct signature —
+/// relates to an index signature it does not declare through its
+/// properties (the checker's `isObjectTypeWithInferableIndex`). A declared
+/// interface or class instance, `object`, and an intersection holding one
+/// need an applicable index signature of their own; an alias reads as the
+/// type it names, an interface that declares no member and extends one type
+/// as that type, and a string index signature of type `any` takes every
+/// object. TypeScript 7.0.2 answers each row alike under all four settings.
 #[test]
-#[ignore = "an interface has no implicit index signature"]
-fn wrong_clean_an_interface_is_not_below_an_implicit_string_index_signature() {
-    let matrix = Matrix::new(OBJECTS);
-    let failures = matrix.types(&[("[P] extends [{ [k: string]: number }] ? 1 : 2", "2")]);
+fn an_implicit_index_signature_relates_as_the_checker_infers_it() {
+    let matrix = Matrix::new(INDEXES);
+    let failures = matrix.types(&[
+        ("[P] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[E] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[TL] extends [{ [k: string]: number }] ? 1 : 2", "1"),
+        ("[C] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[P & TL] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        (
+            "[Partial<P>] extends [{ [k: string]: number | undefined }] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[typeof obj] extends [{ [k: string]: number }] ? 1 : 2",
+            "1",
+        ),
+        ("[{}] extends [{ [k: string]: number }] ? 1 : 2", "1"),
+        ("[P] extends [{ [k: string]: unknown }] ? 1 : 2", "2"),
+        ("[P] extends [{ [k: string]: any }] ? 1 : 2", "1"),
+        ("[TP] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[P] extends [{ [k: number]: number }] ? 1 : 2", "2"),
+        (
+            "[TL & { z: 1 }] extends [{ [k: string]: number }] ? 1 : 2",
+            "1",
+        ),
+        ("[P | TL] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        (
+            "[Pick<P, \"x\">] extends [{ [k: string]: number }] ? 1 : 2",
+            "1",
+        ),
+        ("[PM] extends [{ [k: string]: unknown }] ? 1 : 2", "2"),
+        ("[TM] extends [{ [k: string]: unknown }] ? 1 : 2", "1"),
+        ("[Q] extends [{ [k: string]: number }] ? 1 : 2", "1"),
+        ("[Q2] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[Q3] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[Q10] extends [{ [k: string]: number }] ? 1 : 2", "1"),
+        ("[Q11] extends [{ [k: string]: number }] ? 1 : 2", "1"),
+        ("[Q16] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[Q14] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[object] extends [{ a?: 1 }] ? 1 : 2", "1"),
+        ("[object] extends [{ a: 1 }] ? 1 : 2", "2"),
+        ("[object] extends [{ [k: string]: unknown }] ? 1 : 2", "2"),
+        ("[object] extends [{ (): void }] ? 1 : 2", "2"),
+        ("[object] extends [{ [k: string]: any }] ? 1 : 2", "1"),
+        (
+            "[{ (): void; x: number }] extends [{ [k: string]: unknown }] ? 1 : 2",
+            "2",
+        ),
+        ("[PD] extends [{ [k: string]: number }] ? 1 : 2", "1"),
+        ("[P] extends [Dict] ? 1 : 2", "2"),
+        ("[{ x: number }] extends [Dict] ? 1 : 2", "1"),
+        ("[NI] extends [{ [k: string]: number }] ? 1 : 2", "2"),
+        ("[NI] extends [{ [k: number]: number }] ? 1 : 2", "1"),
+        ("[Dict] extends [{ [k: number]: number }] ? 1 : 2", "1"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A fixed-length tuple type carries `length: 2`, so it relates to `{ length: 2
-/// }`. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[[1, 2]] extends [{ length: 2 }] ? 1 : 2`: the checker answers `1`; the
-///   lane measured `2`.
+/// A tuple type carries its own members: `length` as its possible lengths
+/// and each position as a numeric-key property, so `[1, 2]` relates to `{
+/// length: 2 }` and `{ 0: 1 }`, `[1, 2?]` to `{ length: 1 | 2 }`, and neither
+/// a wrong length, a wrong position nor a rest tuple's `number` length
+/// fits a literal one (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "a fixed tuple carries a literal length property"]
-fn wrong_clean_a_tuple_has_its_literal_length_property() {
+fn a_tuple_relates_as_the_checker_relates_its_own_members() {
     let matrix = Matrix::new(OBJECTS);
-    let failures = matrix.types(&[("[[1, 2]] extends [{ length: 2 }] ? 1 : 2", "1")]);
+    let failures = matrix.types(&[
+        ("[[1, 2]] extends [{ length: 2 }] ? 1 : 2", "1"),
+        ("[[1, 2?]] extends [{ length: 1 | 2 }] ? 1 : 2", "1"),
+        ("[[1, 2]] extends [{ 0: 1 }] ? 1 : 2", "1"),
+        ("[[1, 2]] extends [{ length: 3 }] ? 1 : 2", "2"),
+        ("[[1, 2]] extends [{ 1: 3 }] ? 1 : 2", "2"),
+        ("[[1, ...number[]]] extends [{ length: 1 }] ? 1 : 2", "2"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -252,25 +328,21 @@ fn union_types_relate_as_the_checker_relates_them() {
 
 /// An object source whose discriminant property is a union relates to a target
 /// union by splitting on the discriminant (`typeRelatedToDiscriminatedType`):
-/// each combination of discriminant values finds a target member.
-/// Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[{ kind: "cat" | "dog" }] extends [{ kind: "cat" } | { kind: "dog" }] ? 1
-///   : 2`: the checker answers `1`; the lane measured `2`.
-/// - `[{ kind: "circle" | "square"; r: number; s: number }] extends [Shape] ? 1
-///   : 2`: the checker answers `1`; the lane measured `2`.
-/// - `[{ a: 1 | 2 }] extends [{ a: 1 } | { a: 2 }] ? 1 : 2`: the checker
-///   answers `1`; the lane measured `2`.
-/// - `[{ a: 1 | 2; b: string }] extends [{ a: 1; b: string } | { a: 2; b:
-///   string }] ? 1 : 2`: the checker answers `1`; the lane measured `2`.
-/// - `[{ a: boolean }] extends [{ a: true } | { a: false }] ? 1 : 2`: the
-///   checker answers `1`; the lane measured `2`.
+/// each combination of discriminant values finds a target member, and a
+/// combination no member takes fails the whole (TypeScript 7.0.2, all four
+/// settings alike).
 #[test]
-#[ignore = "an object source with a union discriminant relates to a discriminated target union"]
-fn wrong_clean_a_discriminated_object_source_relates_to_a_target_union() {
+fn a_discriminated_object_source_relates_as_the_checker_splits_it() {
     let matrix = Matrix::new(UNIONS);
     let failures = matrix.types(&[
+        (
+            "[{ kind: \"cat\" | \"dog\" | \"fish\" }] extends [{ kind: \"cat\" } | { kind: \"dog\" }] ? 1 : 2",
+            "2",
+        ),
+        (
+            "[{ a: 1 | 2; b: string }] extends [{ a: 1; b: string } | { a: 2; b: number }] ? 1 : 2",
+            "2",
+        ),
         (
             "[{ kind: \"cat\" | \"dog\" }] extends [{ kind: \"cat\" } | { kind: \"dog\" }] ? 1 : 2",
             "1",
@@ -292,34 +364,43 @@ fn wrong_clean_a_discriminated_object_source_relates_to_a_target_union() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `boolean` IS `true | false`, so each is below the other. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[boolean] extends [true | false] ? 1 : 2`: the checker answers `1`; the
-///   lane measured `2`.
+/// `boolean` IS `true | false`, so each is below the other.
 #[test]
-#[ignore = "boolean is identical to true | false"]
-fn wrong_clean_boolean_is_the_union_of_its_literals() {
+fn boolean_relates_as_the_checker_relates_true_or_false() {
     let matrix = Matrix::new(UNIONS);
     let failures = matrix.types(&[("[boolean] extends [true | false] ? 1 : 2", "1")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `unknown` is below `{} | null | undefined` in every setting, and below `{}`
-/// alone when `strictNullChecks` is off. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[unknown] extends [{}] ? 1 : 2`: the checker answers `2` (strict), `1`
-///   (strictNullChecks off), `2` (noImplicitAny off), `1` (both off); the lane
-///   measured `2` (strictNullChecks off, both off).
-/// - `[unknown] extends [{} | null | undefined] ? 1 : 2`: the checker answers
-///   `1`; the lane measured `2`.
+/// `unknown` is below `{} | null | undefined` in every setting and below `{}`
+/// alone when `strictNullChecks` is off; with it, a union without the empty
+/// object type itself does not take it (without it every object type does),
+/// and `object` never does (TypeScript 7.0.2).
 #[test]
-#[ignore = "unknown relates to {} | null | undefined, and to {} without strictNullChecks"]
-fn wrong_clean_unknown_is_below_empty_object_and_nullish() {
+fn unknown_relates_as_the_checker_relates_its_unknown_union() {
     let matrix = Matrix::new(UNIONS);
-    let mut failures = matrix.types(&[("[unknown] extends [{} | null | undefined] ? 1 : 2", "1")]);
-    failures.extend(matrix.nullness(&[(Read::Type("[unknown] extends [{}] ? 1 : 2"), "2", "1")]));
+    let mut failures = matrix.types(&[
+        ("[unknown] extends [{} | null | undefined] ? 1 : 2", "1"),
+        (
+            "[unknown] extends [string | {} | null | undefined] ? 1 : 2",
+            "1",
+        ),
+        ("[unknown] extends [object | null | undefined] ? 1 : 2", "2"),
+        ("[unknown] extends [object] ? 1 : 2", "2"),
+    ]);
+    failures.extend(matrix.nullness(&[
+        (Read::Type("[unknown] extends [{}] ? 1 : 2"), "2", "1"),
+        (
+            Read::Type("[unknown] extends [{ a?: 1 } | null | undefined] ? 1 : 2"),
+            "2",
+            "1",
+        ),
+        (
+            Read::Type("[unknown] extends [{ a?: 1 }] ? 1 : 2"),
+            "2",
+            "1",
+        ),
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -366,35 +447,37 @@ fn intersection_types_relate_as_the_checker_relates_them() {
 }
 
 /// `(A | B) & { c: 1 }` is the union `(A & { c: 1 }) | (B & { c: 1 })`, so it
-/// relates to it. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[(A | B) & { c: 1 }] extends [(A & { c: 1 }) | (B & { c: 1 })] ? 1 : 2`:
-///   the checker answers `1`; the lane measured `2`.
+/// relates to it and to `{ c: 1 }`, but not to one arm alone (TypeScript
+/// 7.0.2, all four settings alike).
 #[test]
-#[ignore = "an intersection with a union member relates as its distributed union"]
-fn wrong_clean_an_intersection_over_a_union_relates_as_its_distribution() {
+fn an_intersection_over_a_union_relates_as_the_checker_distributes_it() {
     let matrix = Matrix::new(INTERSECTIONS);
-    let failures = matrix.types(&[(
-        "[(A | B) & { c: 1 }] extends [(A & { c: 1 }) | (B & { c: 1 })] ? 1 : 2",
-        "1",
-    )]);
+    let failures = matrix.types(&[
+        (
+            "[(A | B) & { c: 1 }] extends [(A & { c: 1 }) | (B & { c: 1 })] ? 1 : 2",
+            "1",
+        ),
+        ("[(A | B) & { c: 1 }] extends [A & { c: 1 }] ? 1 : 2", "2"),
+        ("[(A | B) & { c: 1 }] extends [{ c: 1 }] ? 1 : 2", "1"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// An intersection of object types whose same-named property has disjoint
-/// literal types reduces to `never`. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[{ a: 1 } & { a: 2 }] extends [never] ? 1 : 2`: the checker answers `1`;
-///   the lane measured `2`.
-/// - `[{ k: "x"; v: 1 } & { k: "y" }] extends [never] ? 1 : 2`: the checker
-///   answers `1`; the lane measured `2`.
+/// types, one of them a literal, reduces to `never`; a property whose types
+/// overlap, or that holds no literal, keeps the intersection (TypeScript
+/// 7.0.2, all four settings alike).
 #[test]
-#[ignore = "an intersection whose members disagree on a literal property reduces to never"]
-fn wrong_clean_an_intersection_of_disjoint_discriminants_is_never() {
+fn disjoint_discriminants_reduce_as_the_checker_reduces_them() {
     let matrix = Matrix::new(INTERSECTIONS);
     let failures = matrix.types(&[
+        ("[{ a: 1 } & { a: string }] extends [never] ? 1 : 2", "1"),
+        ("[{ a: 1 } & { a: number }] extends [never] ? 1 : 2", "2"),
+        (
+            "[{ a: string } & { a: number }] extends [never] ? 1 : 2",
+            "2",
+        ),
+        ("[{ a: 1; b: 2 } & { a: 1 }] extends [never] ? 1 : 2", "2"),
         ("[{ a: 1 } & { a: 2 }] extends [never] ? 1 : 2", "1"),
         (
             "[{ k: \"x\"; v: 1 } & { k: \"y\" }] extends [never] ? 1 : 2",
@@ -443,20 +526,44 @@ fn private_and_protected_members_relate_nominally() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// An ECMAScript private name `#h` is unique to its class, so two classes that
-/// each declare one are unrelated. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[E1] extends [E2] ? 1 : 2`: the checker answers `2`; the lane measured
-///   `1`.
+/// Classes with ECMAScript private names.
+const PRIVATE_NAMES: &str = r##"
+class E1 { #h = 1; q = 2 }
+class E2 { #h = 1; q = 2 }
+class E3 extends E1 { r = 3 }
+class F1 { #m() {} q = 2 }
+class F2 { #m() {} q = 2 }
+class G1 { get #g() { return 1 } q = 2 }
+class Pub { q = 2 }
+"##;
+
+/// An ECMAScript private name — a field, a method or an accessor — is a
+/// member of its class that relates only to its own declaration: two classes
+/// that each declare `#h` are unrelated, a subclass fits its base, a type
+/// without the member fits no class that has one, and `keyof` leaves it out.
+/// TypeScript 7.0.2 answers each row alike under all four settings.
 #[test]
-#[ignore = "a #private member relates only to its own declaration"]
-fn wrong_clean_an_ecmascript_private_name_relates_nominally() {
-    let matrix = Matrix::new(PRIVATE_MEMBERS);
-    let failures = matrix.types(&[("[E1] extends [E2] ? 1 : 2", "2")]);
+fn an_ecmascript_private_name_relates_as_the_checker_relates_it() {
+    let matrix = Matrix::new(PRIVATE_NAMES);
+    let failures = matrix.types(&[
+        ("[E1] extends [E2] ? 1 : 2", "2"),
+        ("[E1] extends [E1] ? 1 : 2", "1"),
+        ("[E3] extends [E1] ? 1 : 2", "1"),
+        ("[E1] extends [E3] ? 1 : 2", "2"),
+        ("[E1] extends [{ q: number }] ? 1 : 2", "1"),
+        ("[{ q: number }] extends [E1] ? 1 : 2", "2"),
+        ("[Pub] extends [E1] ? 1 : 2", "2"),
+        ("[E1] extends [Pub] ? 1 : 2", "1"),
+        ("[F1] extends [F2] ? 1 : 2", "2"),
+        ("[G1] extends [Pub] ? 1 : 2", "1"),
+        ("[Pub] extends [G1] ? 1 : 2", "2"),
+        ("[{ \"#h\": number; q: number }] extends [E1] ? 1 : 2", "2"),
+        ("[keyof E1] extends [\"q\"] ? 1 : 2", "1"),
+        ("[\"q\"] extends [keyof E1] ? 1 : 2", "1"),
+        ("[E1 | E2] extends [E1] ? 1 : 2", "2"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
-
 /// Generic interfaces with and without variance annotations, and a generic
 /// function.
 const GENERICS: &str = r##"
@@ -468,6 +575,55 @@ type Id<T> = T;
 type Pair<A, B> = [A, B];
 declare function idf<T>(x: T): T;
 "##;
+
+/// Generic interfaces with and without variance annotations whose members
+/// alone would relate otherwise.
+const VARIANCE: &str = r##"
+interface Sink<in T> { put(v: T): void }
+interface Sink2<T> { put(v: T): void }
+interface Src<out T> { get(): T; put(v: T): void }
+interface Inv<in out T> { v: T }
+"##;
+
+/// Two applications of one generic declaration whose type parameters carry
+/// variance annotations relate by their arguments under those annotations,
+/// before any structural comparison: `Sink<in T>` contravariantly, `Src<out
+/// T>` covariantly although its method takes `T`, `Inv<in out T>` invariantly
+/// although its property is covariant. An unannotated `Sink2<T>` relates
+/// structurally, its method's parameter bivariantly, and an object literal
+/// type relates to `Sink<…>` structurally.
+///
+/// Measured on TypeScript 7.0.2 (all four settings alike).
+#[test]
+fn variance_annotations_relate_as_the_checker_reads_them() {
+    let matrix = Matrix::new(VARIANCE);
+    let failures = matrix.types(&[
+        (
+            "[Sink<string>] extends [Sink<string | number>] ? 1 : 2",
+            "2",
+        ),
+        (
+            "[Sink<string | number>] extends [Sink<string>] ? 1 : 2",
+            "1",
+        ),
+        ("[Src<string>] extends [Src<string | number>] ? 1 : 2", "1"),
+        ("[Src<string | number>] extends [Src<string>] ? 1 : 2", "2"),
+        ("[Inv<string>] extends [Inv<string | number>] ? 1 : 2", "2"),
+        (
+            "[Sink2<string>] extends [Sink2<string | number>] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[Sink2<string | number>] extends [Sink2<string>] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[{ put(v: string): void }] extends [Sink<string | number>] ? 1 : 2",
+            "1",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
 
 /// Generic applications relate by their arguments' variance: covariant through
 /// a property, contravariant through a callback parameter, as annotated with
@@ -693,26 +849,9 @@ fn library_wrapper_types_relate_as_the_checker_relates_them() {
 /// A primitive source relates to an object target through its apparent type,
 /// the library's wrapper interface (`String`, `Number`, `Boolean`): `string`
 /// has `length`, `charAt` and a number index, `number` has `toFixed`, `true` is
-/// below `Boolean`. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[string] extends [HasLen] ? 1 : 2`: the checker answers `1`; the lane
-///   measured `2`.
-/// - `[string] extends [{ charAt(p: number): string }] ? 1 : 2`: the checker
-///   answers `1`; the lane measured `2`.
-/// - `[string] extends [{ [n: number]: string }] ? 1 : 2`: the checker answers
-///   `1`; the lane measured `2`.
-/// - `[number] extends [{ toFixed(): string }] ? 1 : 2`: the checker answers
-///   `1`; the lane measured `2`.
-/// - `[boolean] extends [{ valueOf(): boolean }] ? 1 : 2`: the checker answers
-///   `1`; the lane measured `2`.
-/// - `[true] extends [Boolean] ? 1 : 2`: the checker answers `1`; the lane
-///   measured `2`.
-/// - `["s"] extends [String] ? 1 : 2`: the checker answers `1`; the lane
-///   measured `2`.
+/// below `Boolean`.
 #[test]
-#[ignore = "a primitive source relates to an object target through its apparent wrapper type"]
-fn wrong_clean_a_primitive_relates_through_its_global_wrapper_interface() {
+fn a_primitive_relates_as_the_checker_relates_its_wrapper_interface() {
     let matrix = Matrix::new(LIB_RELATIONS).lib(RELATION_LIB);
     let failures = matrix.types(&[
         ("[string] extends [HasLen] ? 1 : 2", "1"),
@@ -731,20 +870,8 @@ fn wrong_clean_a_primitive_relates_through_its_global_wrapper_interface() {
 
 /// An array or tuple source relates to an object target through the library's
 /// `Array<T>` interface: its number index, `length` and `push`.
-/// Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[string[]] extends [{ [n: number]: string }] ? 1 : 2`: the checker
-///   answers `1`; the lane measured `2`.
-/// - `[string[]] extends [{ length: number }] ? 1 : 2`: the checker answers
-///   `1`; the lane measured `2`.
-/// - `[string[]] extends [{ push(...items: string[]): number }] ? 1 : 2`: the
-///   checker answers `1`; the lane measured `2`.
-/// - `[[1, 2]] extends [HasLen] ? 1 : 2`: the checker answers `1`; the lane
-///   measured `2`.
 #[test]
-#[ignore = "an array or tuple source relates to an object target through the Array interface"]
-fn wrong_clean_an_array_relates_through_the_array_interface() {
+fn an_array_relates_as_the_checker_relates_the_array_interface() {
     let matrix = Matrix::new(LIB_RELATIONS).lib(RELATION_LIB);
     let failures = matrix.types(&[
         ("[string[]] extends [{ [n: number]: string }] ? 1 : 2", "1"),
@@ -759,14 +886,9 @@ fn wrong_clean_an_array_relates_through_the_array_interface() {
 }
 
 /// `{}` is below the global `Object` interface: every object type's apparent
-/// type carries `Object`'s members. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[{}] extends [Object] ? 1 : 2`: the checker answers `1`; the lane
-///   measured `2`.
+/// type carries `Object`'s members.
 #[test]
-#[ignore = "{} relates to the Object interface through its apparent members"]
-fn wrong_clean_the_empty_object_type_is_below_object() {
+fn the_empty_object_type_relates_to_object_as_the_checker_relates_it() {
     let matrix = Matrix::new(LIB_RELATIONS).lib(RELATION_LIB);
     let failures = matrix.types(&[("[{}] extends [Object] ? 1 : 2", "1")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -774,19 +896,27 @@ fn wrong_clean_the_empty_object_type_is_below_object() {
 
 /// Under `strictBindCallApply` (part of `strict`) a function type's apparent
 /// type is `CallableFunction`, not `Function`; with a library whose
-/// `CallableFunction` declares no `apply`, a function type does not have one.
-/// Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[() => void] extends [{ apply(this: Function, thisArg: any, argArray?:
-///   any): any }] ? 1 : 2`: the checker answers `2`; the lane measured `1`.
+/// `CallableFunction` declares no `apply`, a function type does not have one,
+/// nor a constructor type through `NewableFunction`; without
+/// `strictBindCallApply` both read `Function`'s `apply` (TypeScript 7.0.2,
+/// over this library: `2` and `2` under `strict`, `1` and `1` with the option
+/// off).
 #[test]
-#[ignore = "a function type's apparent type is CallableFunction under strictBindCallApply"]
-fn wrong_clean_a_function_type_relates_through_callable_function() {
+fn a_function_type_relates_as_the_checker_reads_its_apparent_function() {
+    const APPLY: &str = "{ apply(this: Function, thisArg: any, argArray?: any): any }";
+    let call = format!("[() => void] extends [{APPLY}] ? 1 : 2");
+    let construct = format!("[new () => {{}}] extends [{APPLY}] ? 1 : 2");
     let matrix = Matrix::new(LIB_RELATIONS).lib(RELATION_LIB);
-    let failures = matrix.types(&[
-        ("[() => void] extends [{ apply(this: Function, thisArg: any, argArray?: any): any }] ? 1 : 2", "2"),
-    ]);
+    let mut failures = matrix.types(&[(call.as_str(), "2"), (construct.as_str(), "2")]);
+    failures.extend(super::checker_probe_lane_tests::mismatches_in(
+        super::checker_probe_lane_tests::ProbeProject {
+            files: &[],
+            compiler_options: Some(r#"{ "strict": true, "strictBindCallApply": false }"#),
+            ambient_lib: Some(RELATION_LIB),
+        },
+        LIB_RELATIONS,
+        &[(call.as_str(), "1"), (construct.as_str(), "1")],
+    ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -847,40 +977,65 @@ fn signatures_relate_by_parameters_and_return() {
 
 /// Under `strictNullChecks` an optional parameter's type includes `undefined`,
 /// so a source whose same parameter is a required `string` does not fit `(a?:
-/// string) => void`. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[(a: string) => void] extends [(a?: string) => void] ? 1 : 2`: the
-///   checker answers `2` (strict), `1` (strictNullChecks off), `2`
-///   (noImplicitAny off), `1` (both off); the lane measured `1` (strict,
-///   noImplicitAny off).
+/// string) => void` (`2`, and `1` with `strictNullChecks` off), while an
+/// optional source parameter fits a required one and `(a: string | undefined)
+/// => void` and `(a?: string) => void` fit each other (`1` under every
+/// setting, measured on TypeScript 7.0.2).
 #[test]
-#[ignore = "an optional target parameter's type includes undefined under strictNullChecks"]
-fn wrong_clean_an_optional_target_parameter_takes_undefined() {
+fn an_optional_parameter_relates_as_the_checker_relates_its_undefined() {
     let matrix = Matrix::new(SIGNATURES);
-    let failures = matrix.nullness(&[(
+    let mut failures = matrix.nullness(&[(
         Read::Type("[(a: string) => void] extends [(a?: string) => void] ? 1 : 2"),
         "2",
         "1",
     )]);
+    failures.extend(matrix.types(&[
+        (
+            "[(a?: string) => void] extends [(a: string) => void] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[(a: string | undefined) => void] extends [(a?: string) => void] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[(a?: string) => void] extends [(a: string | undefined) => void] ? 1 : 2",
+            "1",
+        ),
+        ("[(a?: string) => void] extends [() => void] ? 1 : 2", "1"),
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Two method members compare their parameters bivariantly even under
-/// `strictFunctionTypes`, so a method taking `Dog2` fits one taking `Animal`.
-/// Wrong-but-clean.
+/// A target METHOD compares its parameters bivariantly even under
+/// `strictFunctionTypes`, so a method or a function-typed property taking
+/// `Dog2` fits a method taking `Animal`; a function-typed target property
+/// stays strict, and unrelated parameters fit in neither direction.
 ///
-/// What the lane gives:
-/// - `[{ m(x: Dog2): void }] extends [{ m(x: Animal): void }] ? 1 : 2`: the
-///   checker answers `1`; the lane measured `2`.
+/// Measured on TypeScript 7.0.2 (all four settings alike): the method and
+/// property-to-method rows are `1`, the method-to-property and
+/// `number`-to-`string` rows `2`.
 #[test]
-#[ignore = "method members compare their parameters bivariantly"]
-fn wrong_clean_a_method_member_relates_its_parameters_bivariantly() {
+fn a_method_member_relates_as_the_checker_relates_its_parameters() {
     let matrix = Matrix::new(SIGNATURES);
-    let failures = matrix.types(&[(
-        "[{ m(x: Dog2): void }] extends [{ m(x: Animal): void }] ? 1 : 2",
-        "1",
-    )]);
+    let failures = matrix.types(&[
+        (
+            "[{ m(x: Dog2): void }] extends [{ m(x: Animal): void }] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[{ m: (x: Dog2) => void }] extends [{ m(x: Animal): void }] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[{ m(x: Dog2): void }] extends [{ m: (x: Animal) => void }] ? 1 : 2",
+            "2",
+        ),
+        (
+            "[{ m(x: number): void }] extends [{ m(x: string): void }] ? 1 : 2",
+            "2",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -952,43 +1107,127 @@ fn recursive_weak_and_keyed_types_relate_as_the_checker_relates_them() {
 
 /// `{ a: () => void }` is not below `Json` (`string | number | boolean | null |
 /// Json[] | { [k: string]: Json }`): the function fits no arm of the index
-/// signature's value. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[{ a: () => void }] extends [Json] ? 1 : 2`: the checker answers `2`; the
-///   lane measured `1`.
+/// signature's value: a function type has no implicit index signature, so
+/// only `{ [k: string]: any }` takes one (TypeScript 7.0.2, all four
+/// settings alike).
 #[test]
-#[ignore = "a function-valued property fits no arm of a recursive JSON alias"]
-fn wrong_clean_a_function_member_is_not_below_a_recursive_json_alias() {
+fn a_function_type_relates_to_an_index_signature_as_the_checker_relates_it() {
     let matrix = Matrix::new(RECURSIVE_AND_WEAK);
-    let failures = matrix.types(&[("[{ a: () => void }] extends [Json] ? 1 : 2", "2")]);
+    let failures = matrix.types(&[
+        ("[{ a: () => void }] extends [Json] ? 1 : 2", "2"),
+        ("[{ a: 1 }] extends [Json] ? 1 : 2", "1"),
+        ("[() => void] extends [{ [k: string]: any }] ? 1 : 2", "1"),
+        (
+            "[() => void] extends [{ [k: string]: unknown }] ? 1 : 2",
+            "2",
+        ),
+        (
+            "[() => void] extends [{ [k: number]: string }] ? 1 : 2",
+            "2",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A WEAK target (every property optional) takes a source only when they share
-/// a property, so `{ c: 1 }` is not below `{ a?: number; b?: string }`.
-/// Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[{ c: 1 }] extends [Weak] ? 1 : 2`: the checker answers `2`; the lane
-///   measured `1`.
+/// Weak targets — interfaces whose every property is optional — and the
+/// types around them.
+const WEAK: &str = r##"
+interface Weak { a?: number; b?: string }
+interface W2 { x?: 1 }
+interface Empty {}
+interface PW { p: Weak }
+declare enum En { A = 1 }
+"##;
+
+/// A WEAK target — at least one property, every property optional, no
+/// signature — takes a source with members only when they share a
+/// property, the checker's `isWeakType` check. A signature counts as a
+/// member, and a source with none (`{}`) is never checked. An intersection
+/// target is weak when every arm is, and is checked whole: its arms are
+/// then related without the check, so `{ a: 1 }` fits `{ a?: 1 } & { b?: 2
+/// }`, while a nested property is checked again. TypeScript 7.0.2 answers
+/// each row alike under all four settings.
 #[test]
-#[ignore = "a source sharing no property with a weak target is not assignable"]
-fn wrong_clean_a_weak_target_needs_a_shared_property() {
-    let matrix = Matrix::new(RECURSIVE_AND_WEAK);
-    let failures = matrix.types(&[("[{ c: 1 }] extends [Weak] ? 1 : 2", "2")]);
+fn a_weak_target_takes_a_source_as_the_checker_checks_it() {
+    let matrix = Matrix::new(WEAK);
+    let failures = matrix.types(&[
+        ("[{ c: 1 }] extends [Weak] ? 1 : 2", "2"),
+        ("[{ a: 1 }] extends [{ a?: 1 } & { b?: 2 }] ? 1 : 2", "1"),
+        ("[{ c: 1 }] extends [Weak & W2] ? 1 : 2", "2"),
+        ("[{ c: 1 }] extends [Weak & { c: 1 }] ? 1 : 2", "1"),
+        ("[{ c: 1 } | { a: 1 }] extends [Weak] ? 1 : 2", "2"),
+        ("[{}] extends [Weak] ? 1 : 2", "1"),
+        ("[() => void] extends [Weak] ? 1 : 2", "2"),
+        ("[{ p: { c: 1 } }] extends [{ p: Weak }] ? 1 : 2", "2"),
+        (
+            "[{ p: { c: 1 }; q: 1 }] extends [{ p: Weak } & { q?: 1 }] ? 1 : 2",
+            "2",
+        ),
+        ("[{ c: 1 }] extends [Weak | W2] ? 1 : 2", "2"),
+        (
+            "[{ c: 1 }] extends [{ [k: string]: unknown; a?: 1 }] ? 1 : 2",
+            "1",
+        ),
+        ("[{ c: 1 }] extends [Empty] ? 1 : 2", "1"),
+        ("[{ c: 1 } & { d: 2 }] extends [Weak] ? 1 : 2", "2"),
+        ("[{ c: 1 } & { a: 1 }] extends [Weak] ? 1 : 2", "1"),
+        ("[Weak] extends [W2] ? 1 : 2", "2"),
+        ("[{ c: 1 }[]] extends [Weak[]] ? 1 : 2", "2"),
+        ("[{ c: 1 }] extends [Partial<{ a: 1 }>] ? 1 : 2", "2"),
+        ("[{ c: 1 }] extends [{ a?: 1 } & {}] ? 1 : 2", "2"),
+        (
+            "[{ p: { c: 1 }; q: 1 }] extends [{ p: Weak; q?: 1 }] ? 1 : 2",
+            "2",
+        ),
+        ("[{ c: 1 } & (() => void)] extends [Weak] ? 1 : 2", "2"),
+        ("[{ get c(): 1 }] extends [Weak] ? 1 : 2", "2"),
+        ("[{ c: 1 }] extends [Weak & Empty] ? 1 : 2", "1"),
+        (
+            "[{ p: { c: 1 }; q: 1 }] extends [PW & { q?: 1 }] ? 1 : 2",
+            "2",
+        ),
+        (
+            "[{ p: { a: 1 }; q: 1 }] extends [PW & { q?: 1 }] ? 1 : 2",
+            "1",
+        ),
+        ("[{ p: { c: 1 } }] extends [PW & Weak] ? 1 : 2", "2"),
+        ("[{ p: { a: 1 } }] extends [PW & Weak] ? 1 : 2", "1"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A primitive, an array or a tuple offers the weak-type check its apparent
+/// type's properties (`1` shares none with `Weak`, `"s"` shares `length`
+/// with `{ length?: number }`, `[1]` its position `0`), an enum member its
+/// value's, and the global `Object` interface is never checked. Measured
+/// over the relation library with `--noLib`, alike under all four settings.
+#[test]
+fn a_weak_target_checks_an_apparent_type_as_the_checker_checks_it() {
+    let matrix = Matrix::new(WEAK).lib(RELATION_LIB);
+    let failures = matrix.types(&[
+        ("[1] extends [Weak] ? 1 : 2", "2"),
+        ("[true] extends [Weak] ? 1 : 2", "2"),
+        ("[\"s\"] extends [{ length?: number }] ? 1 : 2", "1"),
+        ("[string[]] extends [Weak] ? 1 : 2", "2"),
+        ("[[1]] extends [{ 0?: 1 }] ? 1 : 2", "1"),
+        ("[[1]] extends [{ length?: 1 }] ? 1 : 2", "1"),
+        ("[En.A] extends [Weak] ? 1 : 2", "2"),
+        ("[Object] extends [Weak] ? 1 : 2", "1"),
+        (
+            "[string] extends [{ length?: number } & { x?: 1 }] ? 1 : 2",
+            "1",
+        ),
+        ("[string] extends [Weak & W2] ? 1 : 2", "2"),
+        ("[1] extends [{ toFixed?: 1 }] ? 1 : 2", "2"),
+        ("[{ toString(): string }] extends [Weak] ? 1 : 2", "2"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Under `strictNullChecks` `{ a: string | undefined }` fits `{ a?: string }`:
-/// the optional target's read type includes `undefined`. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[{ a: string | undefined }] extends [{ a?: string }] ? 1 : 2`: the
-///   checker answers `1`; the lane measured `2` (strict, noImplicitAny off).
+/// the optional target's read type includes `undefined`.
 #[test]
-#[ignore = "a required property typed with undefined fits an optional property"]
-fn wrong_clean_a_required_property_including_undefined_fits_an_optional_one() {
+fn an_optional_property_relates_as_the_checker_relates_its_undefined() {
     let matrix = Matrix::new(RECURSIVE_AND_WEAK);
     let failures = matrix.types(&[(
         "[{ a: string | undefined }] extends [{ a?: string }] ? 1 : 2",

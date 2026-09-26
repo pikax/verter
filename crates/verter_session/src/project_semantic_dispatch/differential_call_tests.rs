@@ -131,6 +131,15 @@ export function gIdObj() { return id({ a: 1 }); }
 export function gPair() { return pair(1, "s"); }
 export function gFirst() { return first([1, 2]); }
 export function gFirstMixed() { return first([1, "s"]); }
+declare function firstRo<T>(xs: readonly T[]): T;
+declare const gTup: [1, "s"];
+declare const gTupRest: [1, ...string[]];
+export function gFirstThree() { return first([1, "s", true]); }
+export function gFirstTuple() { return first(gTup); }
+export function gFirstRest() { return first(gTupRest); }
+export function gFirstObjects() { return first([{ a: 1 }, { b: "x" }]); }
+export function gFirstReadonly() { return firstRo([1, 2]); }
+export function gFnExpr() { return fnArg(function () { return 42; }); }
 export function gWrap() { return wrap(true); }
 export function gMap(xs: number[]) { return map(xs, (x) => "" + x); }
 export function gMapObj(xs: number[]) { return map(xs, (x) => ({ x })); }
@@ -154,6 +163,10 @@ export function gPartial() { return partialInfer("s"); }
 export function gIdUnionArg(v: string | number) { return id(v); }
 export function gIdNull() { return id(null); }
 export function gIdUndefined() { return id(undefined); }
+declare function nbox<T>(x: T): { v: T };
+export function gBoxNull() { return nbox(null); }
+declare function ntwo<T>(x: T, y: T): T;
+export function gTwoNull() { return ntwo(null, 1); }
 "##;
 
 /// A generic call infers its type arguments from its arguments (widening
@@ -192,18 +205,24 @@ fn generic_calls_infer_as_the_checker_infers() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `first([1, "s"])` with `first<T>(xs: T[]): T` infers `T` from the array
-/// literal's element type `string | number`. Wrong-but-clean: the lane answers
-/// `number`.
-///
-/// What the lane gives:
-/// - `gFirstMixed`: the checker answers `string | number`; the lane measured
-///   `number`.
+/// An array literal or a tuple infers an array's element from ONE candidate,
+/// the union of its element types (`inferFromIndexTypes`): `first([1, "s"])`
+/// with `first<T>(xs: T[]): T` is `string | number`, and a declared tuple keeps
+/// its literal elements (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "an array literal of mixed elements infers the union of its element types"]
-fn wrong_clean_array_element_candidates_infer_their_union() {
+fn array_element_candidates_infer_as_the_checker_infers_them() {
     let matrix = Matrix::new(GENERIC_INFERENCE);
-    let failures = matrix.returns(&[("gFirstMixed", "string | number")]);
+    let failures = matrix.returns(&[
+        ("gFirstMixed", "string | number"),
+        ("gFirstThree", "string | number | boolean"),
+        ("gFirstTuple", "\"s\" | 1"),
+        ("gFirstRest", "string | 1"),
+        (
+            "gFirstObjects",
+            "{ a: number; b?: undefined; } | { a?: undefined; b: string; }",
+        ),
+        ("gFirstReadonly", "number"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -221,6 +240,28 @@ fn wrong_clean_a_callback_return_infers_its_type_parameter() {
     let matrix = Matrix::new(GENERIC_INFERENCE);
     let failures = matrix.returns(&[("gMap", "string[]"), ("gMapObj", "{ x: number; }[]")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `fnArg(function () { return 42; })` with `fnArg<R>(f: () => R): R` infers
+/// the widened `number` from the function expression's return (TypeScript
+/// 7.0.2, all four settings alike). Wrong-but-clean: the lane answers
+/// `unknown`.
+///
+/// What the lane gives:
+/// - `gFnExpr`: the checker answers `number`; the lane measured `unknown`.
+#[test]
+#[ignore = "a function expression argument infers its type parameter from its return"]
+fn wrong_clean_a_function_expression_return_infers_its_type_parameter() {
+    let matrix = Matrix::new(GENERIC_INFERENCE);
+    let failures = matrix.returns(&[("gFnExpr", "number")]);
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+"
+        )
+    );
 }
 
 /// `keys(o)` with `keys<T>(o: T): (keyof T)[]` and `o: { a: string; b: number
@@ -251,23 +292,17 @@ fn wrong_clean_a_callback_return_literal_widens_in_inference() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Without `strictNullChecks` `id(null)` and `id(undefined)` infer the widened
-/// `any`. Wrong-but-clean: the lane answers `unknown`.
-///
-/// What the lane gives:
-/// - `gIdNull`: the checker answers `null` (strict), `any` (strictNullChecks
-///   off), `null` (noImplicitAny off), `any` (both off); the lane measured
-///   `unknown` (strictNullChecks off, both off).
-/// - `gIdUndefined`: the checker answers `undefined` (strict), `any`
-///   (strictNullChecks off), `undefined` (noImplicitAny off), `any` (both off);
-///   the lane measured `unknown` (strictNullChecks off, both off).
+/// Without `strictNullChecks` an inference of `null` or `undefined` widens to
+/// `any` (`getWidenedType` over the covariant inference): `id(null)` and
+/// `id(undefined)` are `any`, and `nbox(null)` is `{ v: any; }`.
 #[test]
-#[ignore = "a null or undefined argument widens to any without strictNullChecks"]
-fn wrong_clean_a_nullish_argument_infers_any_without_strict_null_checks() {
+fn a_nullish_argument_infers_as_the_checker_widens_it() {
     let matrix = Matrix::new(GENERIC_INFERENCE);
     let failures = matrix.nullness(&[
         (Read::Return("gIdNull"), "null", "any"),
         (Read::Return("gIdUndefined"), "undefined", "any"),
+        (Read::Return("gBoxNull"), "{ v: null; }", "{ v: any; }"),
+        (Read::Return("gTwoNull"), "1 | null", "number"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -292,6 +327,11 @@ export function kConstConstrained() { return c3({ k: "v", n: 1 }); }
 export function kNonConstObj() { return nonConst({ a: 1 }); }
 export function kNonConstArr() { return nonConst([1, 2]); }
 export function kAsConst() { return nonConst([1, 2] as const); }
+declare function arrOf<T>(x: readonly T[]): T;
+export function kAsConstObj() { return nonConst({ a: 1 } as const); }
+export function kAsConstNested() { return nonConst(["a", ["b"]] as const); }
+export function kAsConstElement() { return arrOf([1, 2] as const); }
+export function kAsConstScalar() { return nonConst("s" as const); }
 export function kCtxParam() { let seen: unknown; cb((x, y) => { seen = x; }); return seen; }
 export function kCtxArrow() { const f: (a: string) => number = (a) => 1; return f; }
 export function kCtxReturnLiteral() { const f: () => "a" | "b" = () => "a"; return f(); }
@@ -338,17 +378,20 @@ fn const_type_parameters_and_contextual_types_apply_as_the_checker_applies_them(
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `nonConst([1, 2] as const)` infers `readonly [1, 2]`. Wrong-but-clean: the
-/// lane drops `readonly`.
-///
-/// What the lane gives:
-/// - `kAsConst`: the checker answers `readonly [1, 2]`; the lane measured `[1,
-///   2]`.
+/// An `as const` argument infers the type its const context spells:
+/// `nonConst([1, 2] as const)` is `readonly [1, 2]`, an object `{ readonly a:
+/// 1; }`, and an array parameter's element `1 | 2` (TypeScript 7.0.2, all
+/// four settings alike).
 #[test]
-#[ignore = "an as const argument infers its readonly tuple type"]
-fn wrong_clean_an_as_const_argument_keeps_its_readonly_tuple() {
+fn an_as_const_argument_infers_as_the_checker_reads_it() {
     let matrix = Matrix::new(CONST_AND_CONTEXT);
-    let failures = matrix.returns(&[("kAsConst", "readonly [1, 2]")]);
+    let failures = matrix.returns(&[
+        ("kAsConst", "readonly [1, 2]"),
+        ("kAsConstObj", "{ readonly a: 1; }"),
+        ("kAsConstNested", "readonly [\"a\", readonly [\"b\"]]"),
+        ("kAsConstElement", "1 | 2"),
+        ("kAsConstScalar", "\"s\""),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
