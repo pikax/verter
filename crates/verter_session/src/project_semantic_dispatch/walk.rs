@@ -4031,6 +4031,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                     ),
                                 )
                             };
+                        let value = self
+                            .dispatch
+                            .mapped_member_optionality(mapper, value, *source, key_arg);
                         // Emit the per-key edge mirroring
                         // `build_mapped_type`'s ProjectMember edge so
                         // downstream origin-graph consumers see the

@@ -25102,30 +25102,25 @@ fn identity_utility_mapped_carrier_projects_existing_members_not_miss() {
 
     // Single-key Identity rule: `Partial<{p: string}>` carrier walked at
     // `['p']` is `source['p']` — the source member's value node, never
-    // the key-absent sentinel for an existing member.
-    //
-    // What this pin asserts, exactly: `Partial`'s `?` is a MEMBER
-    // modifier, not a value rewrite — the optional-modifier surface
-    // lives on the synthesised member (`optional: true`, asserted on
-    // the empty-path Shallow surface below), while the single-key
-    // VALUE projection is value-EXACT (`string`, never an injected
-    // `string | undefined` union).
+    // the key-absent sentinel for an existing member — read under the `?`
+    // modifier as the checker reads a mapped property under
+    // `strictNullChecks`: `string | undefined`. The modifier itself also
+    // rides the synthesised member (`optional: true`, asserted on the
+    // empty-path Shallow surface below).
+    let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
     let single_p = project(carrier, string_key("p"));
-    assert_eq!(
-        single_p,
-        string_node,
-        "Identity-utility carrier ['p'] must project the source member value, \
-         got {:?}",
-        graph.node_data(single_p)
-    );
-    assert!(
-        !matches!(
-            graph.node_data(single_p).as_deref(),
-            Some(SemanticNodeData::Union(_))
+    let mut single_members = match graph.node_data(single_p).as_deref() {
+        Some(SemanticNodeData::Union(members)) => members.to_vec(),
+        other => panic!(
+            "Identity-utility carrier ['p'] must project the source member value \
+             under the `?` modifier, got {other:?}"
         ),
-        "the optional modifier must not widen the projected VALUE to a union"
-    );
-    // The modifier rail the value-exact pin rides on: the same carrier's
+    };
+    single_members.sort_unstable();
+    let mut single_expected = vec![string_node, undefined];
+    single_expected.sort_unstable();
+    assert_eq!(single_members, single_expected);
+    // The modifier rail: the same carrier's
     // empty-path Shallow surface publishes `p` with `optional: true`.
     let surface = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: carrier,
@@ -25159,11 +25154,11 @@ fn identity_utility_mapped_carrier_projects_existing_members_not_miss() {
         ),
     };
     members.sort_unstable();
-    let mut expected = vec![string_node, num];
+    let mut expected = vec![string_node, num, undefined];
     expected.sort_unstable();
     assert_eq!(
         members, expected,
-        "distributed union must contain both existing members' source values"
+        "distributed union must contain both existing members' source values, each read \n         under the `?` modifier"
     );
 
     // Negative: an absent key still aborts — the Identity rule must not

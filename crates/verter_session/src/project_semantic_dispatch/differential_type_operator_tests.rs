@@ -216,22 +216,38 @@ fn wrong_clean_unreduced_a_homomorphic_mapped_type_maps_arrays_and_tuples() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Under `strictNullChecks` `{ [K in keyof T]+?: T[K] }` read at a key is `1 |
-/// undefined`, and `Required<{ a?: 1 | undefined }>['a']` is `1` (`-?` removes
-/// the `undefined` the optional member added). Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `Opt<{ a: 1 }>['a']`: the checker answers `1 | undefined` (strict), `1`
-///   (strictNullChecks off), `1 | undefined` (noImplicitAny off), `1` (both
-///   off); the lane measured `1` (strict, noImplicitAny off).
-/// - `Required<{ a?: 1 | undefined }>['a']`: the checker answers `1`; the lane
-///   measured `undefined | 1` (strict, noImplicitAny off).
+/// Under `strictNullChecks` a mapped type read at a key takes its optionality
+/// modifier: `+?` adds `undefined` unless the value holds it (`void` does not
+/// stop it), and `-?` removes the `undefined` an optional source member added
+/// but not one the member's type spells (`Req<{ a: 1 | undefined }>['a']`
+/// stays `1 | undefined`). Without it the value is unchanged. Measured on
+/// TypeScript 7.0.2 under all four settings.
 #[test]
-#[ignore = "+? adds undefined and -? removes it from an indexed read under strictNullChecks"]
-fn wrong_clean_optionality_modifiers_change_the_read_type() {
+fn optionality_modifiers_change_the_read_type_as_the_checker_reads_it() {
     let matrix = Matrix::new(MAPPED);
-    let mut failures = matrix.types(&[("Required<{ a?: 1 | undefined }>['a']", "1")]);
-    failures.extend(matrix.nullness(&[(Read::Type("Opt<{ a: 1 }>['a']"), "1 | undefined", "1")]));
+    let mut failures = matrix.types(&[
+        ("Required<{ a?: 1 | undefined }>['a']", "1"),
+        ("Required<{ a?: 1 }>['a']", "1"),
+    ]);
+    failures.extend(matrix.nullness(&[
+        (Read::Type("Opt<{ a: 1 }>['a']"), "1 | undefined", "1"),
+        (Read::Type("Partial<{ a: 1 }>['a']"), "1 | undefined", "1"),
+        (
+            Read::Type("Req<{ a: 1 | undefined }>['a']"),
+            "1 | undefined",
+            "1",
+        ),
+        (
+            Read::Type("Opt<{ a: 1 | undefined }>['a']"),
+            "1 | undefined",
+            "1",
+        ),
+        (
+            Read::Type("Opt<{ a: void }>['a']"),
+            "void | undefined",
+            "void",
+        ),
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

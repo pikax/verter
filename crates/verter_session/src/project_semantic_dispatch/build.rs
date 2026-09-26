@@ -11308,6 +11308,107 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Whether the member of the mapped type's `source` at the literal
+    /// `key` is optional; `None` when the source's surface or the key does
+    /// not read.
+    fn mapped_source_member_optional(
+        &self,
+        source: SemanticNodeId,
+        key: SemanticNodeId,
+    ) -> Option<bool> {
+        let graph = self.graph();
+        let name: Arc<str> = match graph.node_data(key).as_deref()? {
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(text)) => {
+                Arc::from(text.as_str())
+            }
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(number)) => {
+                Arc::from(crate::semantic_query::index_key::js_number_to_string(*number).as_str())
+            }
+            _ => return None,
+        };
+        let super::relation::IdentityCarrierUnwrap::Concrete(resolved) =
+            self.unwrap_identity_carrier_for_relation(source)
+        else {
+            return None;
+        };
+        match graph.node_data(resolved).as_deref()? {
+            SemanticNodeData::Object(surface) => {
+                match surface.project_known_key(&crate::semantic_query::PropertyKey::String(name)) {
+                    crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                        Some(member.optional)
+                    }
+                    crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// A mapped member's value read at its key under its optionality
+    /// modifier, as the checker types a mapped symbol's property under
+    /// `strictNullChecks` (`resolveMappedTypeMembers`): `+?` adds `undefined`
+    /// unless the value holds it, and `-?` removes the `undefined` an
+    /// optional source member `key` added (`removeMissingOrUndefinedType`).
+    /// Without `strictNullChecks` the value is unchanged.
+    pub(super) fn mapped_member_optionality(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        value: SemanticNodeId,
+        source: SemanticNodeId,
+        key: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let (strict_null_checks, exact_optional) = self
+            .graph()
+            .node_scope(source)
+            .and_then(|scope| scope.canonical_file())
+            .map_or((true, false), |canonical| {
+                let options = self
+                    .ctx
+                    .host_for_fact_tracer_install()
+                    .semantic_compiler_options_for(&canonical);
+                (
+                    options.strict_null_checks,
+                    options.exact_optional_property_types,
+                )
+            });
+        if !strict_null_checks {
+            return value;
+        }
+        let graph = self.graph();
+        let arms: Vec<SemanticNodeId> = match graph.node_data(value).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
+            _ => vec![value],
+        };
+        let is_undefined = |arm: &SemanticNodeId| {
+            matches!(
+                graph.node_data(*arm).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+            )
+        };
+        match mapper.optionality {
+            crate::semantic_query::OptionalityMod::Add
+                if !exact_optional && !arms.iter().any(is_undefined) =>
+            {
+                let mut arms = arms;
+                arms.push(self.primitive_node(PrimitiveKind::Undefined));
+                self.intern_normalized_union_or_intersection(&arms, true)
+            }
+            crate::semantic_query::OptionalityMod::Remove
+                if arms.iter().any(is_undefined)
+                    && self.mapped_source_member_optional(source, key) == Some(true) =>
+            {
+                let kept: Vec<SemanticNodeId> =
+                    arms.into_iter().filter(|arm| !is_undefined(arm)).collect();
+                match kept.as_slice() {
+                    [] => self.primitive_node(PrimitiveKind::Never),
+                    [only] => *only,
+                    _ => self.intern_normalized_union_or_intersection(&kept, true),
+                }
+            }
+            _ => value,
+        }
+    }
+
     /// The mapping's template at the key `key` over the array or tuple
     /// `container` (TypeScript's `instantiateMappedTypeTemplate`): the
     /// container's element read at `key` for an identity mapping, else the
