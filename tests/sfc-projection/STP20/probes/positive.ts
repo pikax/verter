@@ -12,11 +12,6 @@ declare function __VerterUseConstructor<P, I>(
   component: abstract new (props: P) => I,
 ): new (props: P) => I;
 type __VerterUseComponentProps<C> = C extends abstract new (props: infer P) => unknown ? P : never;
-type __VerterUseResolvedKeys<S> = [keyof S] extends [infer K]
-  ? [K] extends [PropertyKey]
-    ? 1
-    : 0
-  : 0;
 type __VerterUseMemberOpen<S> = S extends unknown
   ? string extends keyof S
     ? true
@@ -26,24 +21,15 @@ type __VerterUseMemberOpen<S> = S extends unknown
         ? true
         : false
   : never;
-type __VerterUseBranch<S, P> = [S] extends [P] ? true : false;
-type __VerterUseChecked<S, P, O extends PropertyKey> = S extends unknown
-  ? [true] extends [P extends unknown ? __VerterUseBranch<Omit<S, O>, Omit<P, O>> : never]
-    ? true
-    : false
-  : never;
 type __VerterUseDrop<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
-type __VerterUseKnownSpread<S, P, O extends PropertyKey> = [__VerterUseResolvedKeys<S>] extends [
-  never,
-]
-  ? S
-  : __VerterUseResolvedKeys<S> extends 1
-    ? [__VerterUseMemberOpen<S>] extends [false]
-      ? [__VerterUseChecked<S, P, O>] extends [true]
-        ? S
-        : S & __VerterUseDrop<P, O>
-      : S
-    : S;
+type __VerterUseSupply<S, P, O extends PropertyKey> = S & { [K in O & keyof P]: P[K] };
+type __VerterUseOpen<S> = [true] extends [__VerterUseMemberOpen<S>] ? true : false;
+type __VerterUseKnownSpread<S, P, O extends PropertyKey> =
+  __VerterUseOpen<S> extends true
+    ? S
+    : [__VerterUseSupply<NoInfer<S>, P, O>] extends [P]
+      ? S
+      : S & __VerterUseDrop<P, O>;
 declare function __VerterUseSpread<C, S, O extends PropertyKey>(
   component: C,
   spread: S & __VerterUseKnownSpread<S, __VerterUseComponentProps<C>, O>,
@@ -54,6 +40,32 @@ type __VerterUseKeyOn<P, K extends PropertyKey> = P extends unknown
     ? true
     : false
   : never;
+type __VerterUseFallthrough<K extends PropertyKey> = K extends `${string}-${string}`
+  ? true
+  : K extends `on${Capitalize<string>}`
+    ? true
+    : K extends
+          | "id"
+          | "role"
+          | "tabindex"
+          | "slot"
+          | "lang"
+          | "dir"
+          | "hidden"
+          | "draggable"
+          | "autofocus"
+          | "inert"
+          | "popover"
+          | "part"
+          | "nonce"
+          | "is"
+          | "accesskey"
+          | "contenteditable"
+          | "spellcheck"
+          | "translate"
+          | "inputmode"
+      ? true
+      : false;
 type __VerterUseDirectOk<P, K extends PropertyKey> = 0 extends 1 & P
   ? true
   : string extends keyof P
@@ -63,7 +75,9 @@ type __VerterUseDirectOk<P, K extends PropertyKey> = 0 extends 1 & P
       : symbol extends keyof P
         ? true
         : [__VerterUseKeyOn<P, K>] extends [false]
-          ? false
+          ? __VerterUseFallthrough<K> extends true
+            ? true
+            : false
           : true;
 declare function __VerterUseDirect<C, I, K extends PropertyKey>(
   component: C,
@@ -170,6 +184,14 @@ export function constrainedExtraSpread<
   return __VerterUseSpread(Child, value, [] as const);
 }
 
+// A naked type parameter whose required prop is written directly afterwards
+// matches `{ ...value, title: "x" }`. It is not `never` and not `any`.
+type SimpleProps = { title: string; kind?: "a" | "b" };
+declare const Simple: { new (props: SimpleProps): { readonly $props: SimpleProps } };
+export function genericOverwritten<T>(value: T) {
+  return __VerterUseSpread(Simple, value, ["title"] as const);
+}
+
 const mutableTuple = {
   title: "ok",
   kind: "number" as const,
@@ -181,3 +203,7 @@ export const mutableTupleSpread = __VerterUseSpread(Child, mutableTuple, [] as c
 declare const childInstance: ChildInstance;
 export const directKnownKey = __VerterUseDirect(Child, childInstance, "title");
 export const directUnionKey = __VerterUseDirect(Child, childInstance, "value");
+// Fallthrough attributes and undeclared listeners are not excess-key errors.
+export const directId = __VerterUseDirect(Child, childInstance, "id");
+export const directData = __VerterUseDirect(Child, childInstance, "data-test");
+export const directClick = __VerterUseDirect(Child, childInstance, "onClick");

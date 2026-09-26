@@ -153,3 +153,32 @@ fn runtime_boolean_cast_validators_and_required_props_are_separate_facts() {
     assert_eq!(named.caller_optional_keys, ["flag"]);
     assert!(named.required_keys_are_static);
 }
+
+#[test]
+fn shorthand_runtime_constructors_stay_enumerable() {
+    let shorthand =
+        caller_contract("defineProps({ title: String, count: Number, disabled: Boolean });");
+    assert_eq!(shorthand.boolean_cast_keys, ["disabled"]);
+    assert!(shorthand.caller_required_keys.is_empty());
+    assert!(shorthand.required_keys_are_static);
+}
+
+#[test]
+fn options_api_props_are_not_a_static_empty_required_set() {
+    let options = caller_and_setup_from_blocks(
+        Some(ScriptBlockInput {
+            content: "export default defineComponent({ props: { title: { type: String, required: true } } });",
+            content_start: 0,
+            lang: Some(ScriptLanguage::TypeScript),
+        }),
+        None,
+        None,
+    )
+    .expect("projects");
+    assert!(options.caller_required_keys.is_empty());
+    assert!(!options.required_keys_are_static);
+
+    let setup_without_props = caller_contract("const title = 'x';");
+    assert!(setup_without_props.caller_required_keys.is_empty());
+    assert!(setup_without_props.required_keys_are_static);
+}

@@ -86,13 +86,16 @@ pub const USE_LISTENER: &str = "__VerterUseListener";
 pub const USE_SLOT_PROPS: &str = "__VerterUseSlotProps";
 /// Spread checker. A finite spread is checked the way TypeScript checks a
 /// spread argument: known-key types, missing required props, discriminated
-/// unions, exact optional properties and readonly tuples. Keys that arrive
-/// only through the spread are not excess-key errors. An index signature,
-/// `any`, or a union member that has one stays an open domain. A generic
-/// spread is checked through its constraint.
+/// unions, exact optional properties and readonly tuples. Overwritten keys
+/// are part of that check, so a generic spread matches `{...value, ...keys}`.
+/// Keys that arrive only through the spread are not excess-key errors. An
+/// index signature, `any`, or a union member that has one stays an open
+/// domain. A generic spread is checked through its constraint.
 pub const USE_SPREAD: &str = "__VerterUseSpread";
 /// Direct attribute key checker. A misspelled key written on the element is
-/// rejected; an open props domain is not.
+/// rejected. Hyphenated attributes, Vue `on*` listeners, and global
+/// fallthrough attributes are not excess-key errors. An open props domain
+/// is not.
 pub const USE_DIRECT: &str = "__VerterUseDirect";
 /// Specialized model write type read from its update listener.
 pub const USE_MODEL: &str = "__VerterUseModel";
@@ -107,15 +110,15 @@ const SPECIALIZATION_DOMAIN: &str =
 pub const USE_PRELUDE: &str = concat!(
     foreign_contract_declarations!(),
     "type __VerterUseComponentProps<C> = C extends abstract new (props: infer P) => unknown ? P : never;\n",
-    "type __VerterUseResolvedKeys<S> = [keyof S] extends [infer K] ? ([K] extends [PropertyKey] ? 1 : 0) : 0;\n",
     "type __VerterUseMemberOpen<S> = S extends unknown ? (string extends keyof S ? true : number extends keyof S ? true : symbol extends keyof S ? true : false) : never;\n",
-    "type __VerterUseBranch<S, P> = [S] extends [P] ? true : false;\n",
-    "type __VerterUseChecked<S, P, O extends PropertyKey> = S extends unknown ? ([true] extends [P extends unknown ? __VerterUseBranch<Omit<S, O>, Omit<P, O>> : never] ? true : false) : never;\n",
     "type __VerterUseDrop<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;\n",
-    "type __VerterUseKnownSpread<S, P, O extends PropertyKey> = [__VerterUseResolvedKeys<S>] extends [never] ? S : __VerterUseResolvedKeys<S> extends 1 ? ([__VerterUseMemberOpen<S>] extends [false] ? ([__VerterUseChecked<S, P, O>] extends [true] ? S : S & __VerterUseDrop<P, O>) : S) : S;\n",
+    "type __VerterUseSupply<S, P, O extends PropertyKey> = S & { [K in O & keyof P]: P[K] };\n",
+    "type __VerterUseOpen<S> = [true] extends [__VerterUseMemberOpen<S>] ? true : false;\n",
+    "type __VerterUseKnownSpread<S, P, O extends PropertyKey> = __VerterUseOpen<S> extends true ? S : [__VerterUseSupply<NoInfer<S>, P, O>] extends [P] ? S : S & __VerterUseDrop<P, O>;\n",
     "declare function __VerterUseSpread<C, S, O extends PropertyKey>(component: C, spread: S & __VerterUseKnownSpread<S, __VerterUseComponentProps<C>, O>, overwritten: readonly O[]): S;\n",
     "type __VerterUseKeyOn<P, K extends PropertyKey> = P extends unknown ? (K extends keyof P ? true : false) : never;\n",
-    "type __VerterUseDirectOk<P, K extends PropertyKey> = 0 extends 1 & P ? true : string extends keyof P ? true : number extends keyof P ? true : symbol extends keyof P ? true : ([__VerterUseKeyOn<P, K>] extends [false] ? false : true);\n",
+    "type __VerterUseFallthrough<K extends PropertyKey> = K extends `${string}-${string}` ? true : K extends `on${Capitalize<string>}` ? true : K extends \"id\" | \"role\" | \"tabindex\" | \"slot\" | \"lang\" | \"dir\" | \"hidden\" | \"draggable\" | \"autofocus\" | \"inert\" | \"popover\" | \"part\" | \"nonce\" | \"is\" | \"accesskey\" | \"contenteditable\" | \"spellcheck\" | \"translate\" | \"inputmode\" ? true : false;\n",
+    "type __VerterUseDirectOk<P, K extends PropertyKey> = 0 extends 1 & P ? true : string extends keyof P ? true : number extends keyof P ? true : symbol extends keyof P ? true : [__VerterUseKeyOn<P, K>] extends [false] ? __VerterUseFallthrough<K> extends true ? true : false : true;\n",
     "declare function __VerterUseDirect<C, I, K extends PropertyKey>(component: C, instance: I, key: 0 extends 1 & C ? K : (__VerterUseDirectOk<I extends { readonly $props: infer P } ? P : never, K> extends true ? K : never)): void;\n",
     "type __VerterUseProp<I, K extends PropertyKey> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : unknown) : unknown;\n",
     "type __VerterUseListener<I, K extends PropertyKey, F extends PropertyKey = K> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : F extends keyof P ? P[F] : (...args: any[]) => unknown) : (...args: any[]) => unknown;\n",

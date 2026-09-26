@@ -20,7 +20,8 @@ use crate::ide::vue_projection::attribute_operations::{
     AttributeOperationsProjection, AttributeSyntax,
 };
 use crate::ide::vue_projection::public_constructor::{
-    project_public_constructor_in, DeclaredSurface, PropsDefaults, VuePublicConstructorContract,
+    project_public_constructor_in, ConstructorSource, DeclaredSurface, PropsDefaults,
+    VuePublicConstructorContract,
 };
 use crate::ide::vue_projection::script_setup::{ScriptBlockInput, SetupProjectionRefusal};
 
@@ -228,7 +229,10 @@ fn assemble_caller_contract(
         _ => Vec::new(),
     };
     if !facts.saw_props {
-        facts.enumerated = true;
+        // Options API props live on the authored default export, which this
+        // walker does not read. An empty required list is static only when
+        // a setup block simply declares no props.
+        facts.enumerated = contract.source == ConstructorSource::ScriptSetup;
     }
     if parse_failed || (!saw_source && !matches!(contract.props, DeclaredSurface::None)) {
         facts.enumerated = false;
@@ -473,9 +477,7 @@ impl ScriptPropFacts {
 
     fn take_runtime_prop(&mut self, name: &str, value: &Expression<'_>) {
         match value {
-            Expression::Identifier(identifier) if identifier.name == "Boolean" => {
-                push_unique(&mut self.boolean_cast, name.to_string());
-            }
+            Expression::Identifier(_) => self.note_constructors(name, vec![ctor_of(value)]),
             Expression::ArrayExpression(array) => {
                 self.note_constructors(name, constructor_order(array));
             }
