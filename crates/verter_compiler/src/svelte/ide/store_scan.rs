@@ -225,7 +225,9 @@ pub(super) fn scan_store_subscriptions_and_host_with(
         subs: Vec::new(),
         uses_host_rune: false,
     };
-    collector.visit_program(&parsed.program);
+    verter_parser::oxc_parse::with_program_stack(&parsed.program, || {
+        collector.visit_program(&parsed.program)
+    });
     StoreScanOutcome {
         subs: collector.subs,
         uses_host_rune: collector.uses_host_rune,
@@ -254,7 +256,9 @@ pub(super) fn collect_declared_dollar_names(text: &str) -> Vec<String> {
     if parsed.panicked {
         return Vec::new();
     }
-    top_level_dollar_bindings(&parsed.program)
+    verter_parser::oxc_parse::with_program_stack(&parsed.program, || {
+        top_level_dollar_bindings(&parsed.program)
+    })
 }
 
 /// Collect the `$`-prefixed binding names introduced by a markup BLOCK BINDING
@@ -287,7 +291,9 @@ pub(super) fn collect_pattern_dollar_names(pattern_text: &str) -> Vec<String> {
         return Vec::new();
     }
     let mut names = LexicalDollarBindings::default();
-    names.scan_statements_direct(&parsed.program.body);
+    verter_parser::oxc_parse::with_program_stack(&parsed.program, || {
+        names.scan_statements_direct(&parsed.program.body)
+    });
     names.names
 }
 

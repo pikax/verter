@@ -1033,6 +1033,9 @@ impl FunctionProgramIndex {
 struct DiscoveryCtx<'source, 'ast> {
     canonical_id: Arc<str>,
     source: &'source str,
+    /// The containment every walk of oxc's over a node of the program runs
+    /// under, scanning the program at most once for all of them.
+    walks: verter_parser::oxc_parse::ProgramWalkStack<'ast>,
     owners: &'source TopLevelOwnerTable,
     nodes: Option<FunctionProgramNodes<'ast>>,
     enclosing_type_parameters: Option<&'ast oxc_ast::ast::TSTypeParameterDeclaration<'ast>>,
@@ -1134,6 +1137,7 @@ fn build_function_program_index_impl<'ast>(
     let mut ctx = DiscoveryCtx {
         canonical_id,
         source,
+        walks: verter_parser::oxc_parse::ProgramWalkStack::new(program),
         owners,
         nodes,
         enclosing_type_parameters: None,
@@ -1154,7 +1158,8 @@ fn build_function_program_index_impl<'ast>(
         );
     }
     let mut classes = ClassSyntaxCollector::default();
-    classes.visit_program(program);
+    ctx.walks
+        .with_node_stack(program.span, || classes.visit_program(program));
     resolve_captures(&mut ctx.entries);
     resolve_nested_capture_reads(&mut ctx.entries);
     resolve_call_site_targets(&mut ctx.entries);
@@ -2567,7 +2572,7 @@ fn discover_variable_declaration<'ast>(
                     contributor: anchor,
                     descent: Arc::from(base_descent.clone().into_boxed_slice()),
                 },
-                source: program_expression_source(init),
+                source: program_expression_source(&ctx.walks, init),
             });
             discover_top_level_call_arg_positions(init, &name, anchor, &base_descent, ctx);
         }
@@ -2737,7 +2742,10 @@ fn new_site_record(call: &oxc_ast::ast::NewExpression<'_>) -> FunctionCallSiteRe
     }
 }
 
-fn program_expression_source(expression: &Expression<'_>) -> ProgramExpressionSource {
+fn program_expression_source(
+    walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
+    expression: &Expression<'_>,
+) -> ProgramExpressionSource {
     match unwrap_program_expression(expression) {
         Expression::CallExpression(call) => ProgramExpressionSource::SemanticCall {
             kind: ProgramExpressionCallKind::Call,
@@ -2747,12 +2755,17 @@ fn program_expression_source(expression: &Expression<'_>) -> ProgramExpressionSo
             kind: ProgramExpressionCallKind::Construct,
             site: new_site_record(call),
         },
-        expression if expression_has_call(expression) => ProgramExpressionSource::UnsupportedCall,
+        expression if expression_has_call(walks, expression) => {
+            ProgramExpressionSource::UnsupportedCall
+        }
         _ => ProgramExpressionSource::Value,
     }
 }
 
-fn expression_has_call(expression: &Expression<'_>) -> bool {
+fn expression_has_call(
+    walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
+    expression: &Expression<'_>,
+) -> bool {
     #[derive(Default)]
     struct Probe(bool);
     impl<'a> Visit<'a> for Probe {
@@ -2769,7 +2782,7 @@ fn expression_has_call(expression: &Expression<'_>) -> bool {
         fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {}
     }
     let mut probe = Probe::default();
-    probe.visit_expression(expression);
+    walks.with_node_stack(expression.span(), || probe.visit_expression(expression));
     probe.0
 }
 
@@ -2885,7 +2898,7 @@ fn discover_variable_declaration_ns<'ast>(
                     contributor: anchor,
                     descent: Arc::from(base.clone().into_boxed_slice()),
                 },
-                source: program_expression_source(init),
+                source: program_expression_source(&ctx.walks, init),
             });
             discover_top_level_call_arg_positions(init, &name, anchor, &base, ctx);
         }
@@ -2965,7 +2978,7 @@ fn discover_class_heritage_expression<'ast>(
             contributor: anchor,
             descent: Arc::from(descent.into_boxed_slice()),
         },
-        source: program_expression_source(heritage),
+        source: program_expression_source(&ctx.walks, heritage),
     });
 }
 
@@ -3066,7 +3079,9 @@ fn discover_class_members<'ast>(
                 // A field whose initializer's type derives from a call is an
                 // indexed program expression its synthetic value reads.
                 if let (Some(_), Some(value), Some(anchor)) = (
-                    crate::analysis::type_eval_build::class_field_value_name(name, prop),
+                    crate::analysis::type_eval_build::class_field_value_name(
+                        name, prop, ctx.source,
+                    ),
                     prop.value.as_ref(),
                     ctx.anchor(contributor_index),
                 ) {
@@ -3080,7 +3095,7 @@ fn discover_class_members<'ast>(
                             contributor: anchor,
                             descent: Arc::from(descent.clone().into_boxed_slice()),
                         },
-                        source: program_expression_source(value),
+                        source: program_expression_source(&ctx.walks, value),
                     });
                 }
                 match prop.value.as_ref() {
@@ -3212,6 +3227,7 @@ pub fn take_nested_callable_walk_visits_for_tests() -> usize {
 /// Visit each directly nested callable once, without entering its frame,
 /// with whether it is a class expression's method or accessor.
 fn for_each_nested_callable<'a>(
+    walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
     statements: &'a [Statement<'a>],
     mut visit: impl FnMut(FunctionNode<'a>, bool),
 ) {
@@ -3255,7 +3271,7 @@ fn for_each_nested_callable<'a>(
     }
     let mut visitor = CallableVisitor(&mut visit);
     for statement in statements {
-        visitor.visit_statement(statement);
+        walks.with_node_stack(statement.span(), || visitor.visit_statement(statement));
     }
 }
 
@@ -3269,15 +3285,17 @@ fn discover_nested_positions<'ast>(
     let previous_type_parameters = ctx.enclosing_type_parameters.take();
     let previous_heritage = ctx.enclosing_heritage.take();
     let previous_this = ctx.enclosing_this.take();
-    let mut local_ordinal = 0;
-    for_each_nested_callable(statements, |node, class_member| {
+    let mut callables = Vec::new();
+    for_each_nested_callable(&ctx.walks, statements, |node, class_member| {
+        callables.push((node, class_member));
+    });
+    for (local_ordinal, (node, class_member)) in (0..).zip(callables) {
         let ordinal = ctx.next_nested_ordinal;
         ctx.next_nested_ordinal += 1;
         let mut descent = parent_locator.descent.to_vec();
         descent.push(FunctionDescentStep::NestedCallable {
             ordinal: local_ordinal,
         });
-        local_ordinal += 1;
         discover_nested_callable(
             node,
             parent_key,
@@ -3287,7 +3305,7 @@ fn discover_nested_positions<'ast>(
             class_member,
             ctx,
         );
-    });
+    }
     ctx.enclosing_type_parameters = previous_type_parameters;
     ctx.enclosing_heritage = previous_heritage;
     ctx.enclosing_this = previous_this;
@@ -3406,7 +3424,7 @@ struct TypeParamOccurrences {
 }
 
 impl TypeParamOccurrences {
-    fn of(node: &FunctionNode<'_>) -> Self {
+    fn of(walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>, node: &FunctionNode<'_>) -> Self {
         let params = match node {
             FunctionNode::Function(func) => &func.params,
             FunctionNode::Arrow(arrow) => &arrow.params,
@@ -3414,23 +3432,32 @@ impl TypeParamOccurrences {
         let mut out = Self::default();
         for (ordinal, param) in params.items.iter().enumerate() {
             if let Some(annotation) = param.type_annotation.as_ref() {
-                out.collect(&annotation.type_annotation, ordinal as u32);
+                out.collect(walks, &annotation.type_annotation, ordinal as u32);
             }
         }
         if let Some(rest) = params.rest.as_ref() {
             if let Some(annotation) = rest.type_annotation.as_ref() {
-                out.collect(&annotation.type_annotation, params.items.len() as u32);
+                out.collect(
+                    walks,
+                    &annotation.type_annotation,
+                    params.items.len() as u32,
+                );
             }
         }
         out
     }
 
-    fn collect(&mut self, ty: &oxc_ast::ast::TSType<'_>, ordinal: u32) {
+    fn collect(
+        &mut self,
+        walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
+        ty: &oxc_ast::ast::TSType<'_>,
+        ordinal: u32,
+    ) {
         let mut visitor = ReferencedTypeNames {
             found: Vec::new(),
             shadowed: Vec::new(),
         };
-        visitor.visit_ts_type(ty);
+        walks.with_node_stack(ty.span(), || visitor.visit_ts_type(ty));
         for name in visitor.found {
             self.first
                 .entry(name)
@@ -3565,30 +3592,35 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
         inventory.in_parameter_list = true;
         for param in &node.params().items {
             inventory.record_pattern(&param.pattern, FunctionBindingKind::Param, frame_span);
-            inventory.visit_binding_pattern(&param.pattern);
-            if let Some(annotation) = &param.type_annotation {
-                inventory.record_type_queries(
-                    &annotation.type_annotation,
-                    FunctionTypeQueryPosition::Parameter,
-                );
-            }
-            if let Some(initializer) = &param.initializer {
-                inventory.visit_expression(initializer);
-            }
+            self.walks.with_node_stack(param.span, || {
+                inventory.visit_binding_pattern(&param.pattern);
+                if let Some(annotation) = &param.type_annotation {
+                    inventory.visit_type_queries(
+                        &annotation.type_annotation,
+                        FunctionTypeQueryPosition::Parameter,
+                    );
+                }
+                if let Some(initializer) = &param.initializer {
+                    inventory.visit_expression(initializer);
+                }
+            });
         }
         if let Some(rest) = &node.params().rest {
             inventory.record_pattern(&rest.rest.argument, FunctionBindingKind::Param, frame_span);
-            inventory.visit_binding_pattern(&rest.rest.argument);
-            if let Some(annotation) = &rest.type_annotation {
-                inventory.record_type_queries(
-                    &annotation.type_annotation,
-                    FunctionTypeQueryPosition::Parameter,
-                );
-            }
+            self.walks.with_node_stack(rest.span, || {
+                inventory.visit_binding_pattern(&rest.rest.argument);
+                if let Some(annotation) = &rest.type_annotation {
+                    inventory.visit_type_queries(
+                        &annotation.type_annotation,
+                        FunctionTypeQueryPosition::Parameter,
+                    );
+                }
+            });
         }
         inventory.in_parameter_list = false;
         for stmt in statements {
-            inventory.visit_statement(stmt);
+            self.walks
+                .with_node_stack(stmt.span(), || inventory.visit_statement(stmt));
         }
         let InventoryVisitor {
             call_addresses: _,
@@ -3620,7 +3652,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             call_sites.push(call_site_record(call));
         });
 
-        let parameter_occurrences = TypeParamOccurrences::of(&node);
+        let parameter_occurrences = TypeParamOccurrences::of(&self.walks, &node);
         let type_parameters: Vec<FunctionProgramTypeParam> = node
             .type_parameters()
             .map(|declaration| {
@@ -3641,6 +3673,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
 
         let function_span = node.span();
         let hash = crate::analysis::function_program_hash::hash_function_body(
+            &self.walks,
             source,
             statements,
             &params,
@@ -3710,10 +3743,13 @@ pub struct StatementListInventory {
 }
 
 /// Inventory one statement list with the SAME single walk the index uses.
-pub fn inventory_statement_list(statements: &[Statement<'_>]) -> StatementListInventory {
+pub fn inventory_statement_list(
+    walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
+    statements: &[Statement<'_>],
+) -> StatementListInventory {
     let mut inventory = InventoryVisitor::default();
     for stmt in statements {
-        inventory.visit_statement(stmt);
+        walks.with_node_stack(stmt.span(), || inventory.visit_statement(stmt));
     }
     let mut nested_function_names = Vec::new();
     let mut var_names = Vec::new();
@@ -3831,7 +3867,7 @@ impl InventoryVisitor<'_, '_> {
     }
 
     /// Record every bare `typeof name` inside `ty` at `position`.
-    fn record_type_queries(
+    fn visit_type_queries(
         &mut self,
         ty: &oxc_ast::ast::TSType<'_>,
         position: FunctionTypeQueryPosition,
@@ -3904,11 +3940,11 @@ impl<'a> InventoryVisitor<'_, 'a> {
 
 impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
     fn visit_ts_type(&mut self, it: &oxc_ast::ast::TSType<'a>) {
-        self.record_type_queries(it, FunctionTypeQueryPosition::Expression);
+        self.visit_type_queries(it, FunctionTypeQueryPosition::Expression);
     }
 
     fn visit_ts_type_annotation(&mut self, it: &oxc_ast::ast::TSTypeAnnotation<'a>) {
-        self.record_type_queries(&it.type_annotation, FunctionTypeQueryPosition::Expression);
+        self.visit_type_queries(&it.type_annotation, FunctionTypeQueryPosition::Expression);
     }
 
     fn visit_variable_declarator(&mut self, it: &oxc_ast::ast::VariableDeclarator<'a>) {
@@ -3920,7 +3956,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
                 }
                 _ => FunctionTypeQueryPosition::Expression,
             };
-            self.record_type_queries(&annotation.type_annotation, position);
+            self.visit_type_queries(&annotation.type_annotation, position);
         }
         if let Some(init) = &it.init {
             self.visit_expression(init);
@@ -4637,6 +4673,7 @@ pub fn resolve_function_node<'a>(
     locator: &FunctionBodyLocator,
 ) -> Option<ResolvedFunctionNode<'a>> {
     use oxc_ast::ast::{ClassElement, TSModuleDeclarationBody};
+    let walks = verter_parser::oxc_parse::ProgramWalkStack::new(program);
     let mut statement = program
         .body
         .get(locator.contributor.contributor_index as usize)?;
@@ -4816,7 +4853,7 @@ pub fn resolve_function_node<'a>(
                 let body = current_body?;
                 let mut position = 0;
                 let mut selected = None;
-                for_each_nested_callable(&body.statements, |node, _| {
+                for_each_nested_callable(&walks, &body.statements, |node, _| {
                     if position == *ordinal {
                         selected = Some(node);
                     }

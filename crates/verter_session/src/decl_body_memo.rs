@@ -1457,7 +1457,11 @@ impl DeclBodyMemo {
                         }
                         FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
                     };
-                    Some(build_indexed_function_body_skeleton(&source, entry))
+                    Some(build_indexed_function_body_skeleton(
+                        &source,
+                        p.source_str(),
+                        entry,
+                    ))
                 })
                 .flatten()
             })

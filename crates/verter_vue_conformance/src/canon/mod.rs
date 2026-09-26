@@ -52,7 +52,7 @@ use std::collections::BTreeSet;
 use oxc_allocator::Allocator;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
-use verter_parser::oxc_parse::Parser;
+use verter_parser::oxc_parse::{with_program_stack, Parser};
 
 use canonize::Canonizer;
 use classify::Classifier;
@@ -157,7 +157,7 @@ pub fn canonicalize_module(code: &str, authored: &BTreeSet<String>) -> Result<Ca
         return Err(format!("module does not parse as ESM JS: {messages}"));
     }
     let program = parse.program;
-    let built = SemanticBuilder::new().build(&program);
+    let built = with_program_stack(&program, || SemanticBuilder::new().build(&program));
     if !built.errors.is_empty() {
         let messages = built
             .errors

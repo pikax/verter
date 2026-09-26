@@ -292,7 +292,7 @@ pub(super) fn collect_proxy_inits(program: &Program<'_>) -> FxHashMap<String, Pr
     // shared lexical ShadowStack so an inner shadowed write is never attributed to
     // the outer binding.
     let mut collector = ScriptUseCollector::tracking(&top_level_names);
-    collector.visit_program(program);
+    verter_parser::oxc_parse::with_program_stack(program, || collector.visit_program(program));
 
     let mut map = FxHashMap::default();
     for stmt in &program.body {

@@ -2640,7 +2640,9 @@ pub(crate) fn collect_expr_references_in<'a>(
         local_frames: Vec::new(),
         fn_depth: 0,
     };
-    collector.visit_program(&parsed.program);
+    verter_parser::oxc_parse::with_program_stack(&parsed.program, || {
+        collector.visit_program(&parsed.program)
+    });
     // The whole expression body (the `({text});` wrapper's lone expression statement) —
     // the SAME parsed program both downstream facts read (no second reparse).
     let body_expr = parsed.program.body.first().and_then(|stmt| match stmt {
@@ -2702,8 +2704,13 @@ pub(crate) fn collect_expr_references_in<'a>(
         classify_render_callee,
     );
     // The wrap-trigger + dynamic-callee lowering facts — from the SAME parse.
-    let has_sync_member_or_assignment = body_expr.is_some_and(sync_member_or_assignment);
-    let render_dynamic_callee = body_expr.and_then(collect_render_dynamic_callee_facts);
+    let (has_sync_member_or_assignment, render_dynamic_callee) =
+        verter_parser::oxc_parse::with_program_stack(&parsed.program, || {
+            (
+                body_expr.is_some_and(sync_member_or_assignment),
+                body_expr.and_then(collect_render_dynamic_callee_facts),
+            )
+        });
     let facts = ExprAnalysisFacts {
         references: collector.refs,
         direct_zero_arg_call_callee,

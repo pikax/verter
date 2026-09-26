@@ -43,6 +43,7 @@
 
 use oxc_ast::ast::*;
 use oxc_ast_visit::{walk, Visit};
+use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeFlags;
 use rustc_hash::FxHashSet;
 
@@ -69,7 +70,7 @@ pub fn collect_setup_binding_refs<'a>(
         // setup bindings under test and must not suppress their own references.
         scopes: vec![FxHashSet::default()],
     };
-    collector.visit_program(program);
+    crate::oxc_parse::with_program_stack(program, || collector.visit_program(program));
     match collector.sink {
         RefSink::Names { refs, .. } => refs,
         RefSink::Spans { .. } => unreachable!("Names sink installed above"),
@@ -90,7 +91,12 @@ pub fn collect_setup_binding_refs<'a>(
 /// roots is the SAFE direction for an unused-binding gate (it only suppresses a
 /// diagnostic), and the caller intersects this set against the real binding
 /// inventory.
-pub fn collect_expression_free_refs<'a>(expr: &'a Expression<'a>) -> FxHashSet<&'a str> {
+///
+/// `source` is the text `expr`'s spans index, which sizes the walk's stack.
+pub fn collect_expression_free_refs<'a>(
+    expr: &'a Expression<'a>,
+    source: &str,
+) -> FxHashSet<&'a str> {
     let mut collector = SetupRefCollector {
         sink: RefSink::Names {
             setup_names: None,
@@ -98,7 +104,7 @@ pub fn collect_expression_free_refs<'a>(expr: &'a Expression<'a>) -> FxHashSet<&
         },
         scopes: vec![FxHashSet::default()],
     };
-    collector.visit_expression(expr);
+    crate::oxc_parse::with_span_stack(source, expr.span(), || collector.visit_expression(expr));
     match collector.sink {
         RefSink::Names { refs, .. } => refs,
         RefSink::Spans { .. } => unreachable!("Names sink installed above"),
@@ -122,7 +128,12 @@ pub fn collect_expression_free_refs<'a>(expr: &'a Expression<'a>) -> FxHashSet<&
 /// many roots is the SAFE direction for an unused-binding gate (it only
 /// suppresses a diagnostic); the caller intersects this set against the real
 /// binding inventory.
-pub fn collect_type_free_ref_names<'a>(ts_type: &'a TSType<'a>) -> FxHashSet<&'a str> {
+///
+/// `source` is the text `ts_type`'s spans index, which sizes the walk's stack.
+pub fn collect_type_free_ref_names<'a>(
+    ts_type: &'a TSType<'a>,
+    source: &str,
+) -> FxHashSet<&'a str> {
     let mut collector = SetupRefCollector {
         sink: RefSink::Names {
             setup_names: None,
@@ -130,7 +141,7 @@ pub fn collect_type_free_ref_names<'a>(ts_type: &'a TSType<'a>) -> FxHashSet<&'a
         },
         scopes: vec![FxHashSet::default()],
     };
-    collector.visit_ts_type(ts_type);
+    crate::oxc_parse::with_span_stack(source, ts_type.span(), || collector.visit_ts_type(ts_type));
     match collector.sink {
         RefSink::Names { refs, .. } => refs,
         RefSink::Spans { .. } => unreachable!("Names sink installed above"),
@@ -156,8 +167,11 @@ pub fn collect_type_free_ref_names<'a>(ts_type: &'a TSType<'a>) -> FxHashSet<&'a
 /// (`Date`, `Map`) ARE retained: a `<script setup>` binding may shadow a JS
 /// global, so the `is_global` completion / `_ctx`-prefixing filter must NOT gate
 /// liveness.
+///
+/// `source` is the text `expr`'s spans index, which sizes the walk's stack.
 pub fn collect_expression_free_ref_spans<'a>(
     expr: &'a Expression<'a>,
+    source: &str,
     ignored: &FxHashSet<&[u8]>,
     out: &mut FxHashSet<Span>,
 ) {
@@ -168,7 +182,7 @@ pub fn collect_expression_free_ref_spans<'a>(
         },
         scopes: vec![FxHashSet::default()],
     };
-    collector.visit_expression(expr);
+    crate::oxc_parse::with_span_stack(source, expr.span(), || collector.visit_expression(expr));
     match collector.sink {
         RefSink::Spans { spans, .. } => *out = spans,
         RefSink::Names { .. } => unreachable!("Spans sink installed above"),
@@ -190,28 +204,30 @@ pub fn collect_expression_free_ref_spans<'a>(
 /// [`collect_type_free_ref_names`] `Visit`-over-`TSType` walker.
 pub fn collect_pattern_default_free_ref_names<'a>(
     pattern: &'a BindingPattern<'a>,
+    source: &str,
     out: &mut FxHashSet<&'a str>,
 ) {
-    match pattern {
-        BindingPattern::BindingIdentifier(_) => {}
-        BindingPattern::AssignmentPattern(assign) => {
-            out.extend(collect_expression_free_refs(&assign.right));
-            collect_pattern_default_free_ref_names(&assign.left, out);
-        }
-        BindingPattern::ObjectPattern(obj) => {
-            for prop in &obj.properties {
-                collect_pattern_default_free_ref_names(&prop.value, out);
+    // The patterns still to visit, last-first so they pop in source order: a
+    // pattern nested however deep costs no native level.
+    let mut pending = vec![pattern];
+    while let Some(pattern) = pending.pop() {
+        match pattern {
+            BindingPattern::BindingIdentifier(_) => {}
+            BindingPattern::AssignmentPattern(assign) => {
+                out.extend(collect_expression_free_refs(&assign.right, source));
+                pending.push(&assign.left);
             }
-            if let Some(rest) = &obj.rest {
-                collect_pattern_default_free_ref_names(&rest.argument, out);
+            BindingPattern::ObjectPattern(obj) => {
+                if let Some(rest) = &obj.rest {
+                    pending.push(&rest.argument);
+                }
+                pending.extend(obj.properties.iter().rev().map(|prop| &prop.value));
             }
-        }
-        BindingPattern::ArrayPattern(arr) => {
-            for elem in arr.elements.iter().flatten() {
-                collect_pattern_default_free_ref_names(elem, out);
-            }
-            if let Some(rest) = &arr.rest {
-                collect_pattern_default_free_ref_names(&rest.argument, out);
+            BindingPattern::ArrayPattern(arr) => {
+                if let Some(rest) = &arr.rest {
+                    pending.push(&rest.argument);
+                }
+                pending.extend(arr.elements.iter().rev().flatten());
             }
         }
     }

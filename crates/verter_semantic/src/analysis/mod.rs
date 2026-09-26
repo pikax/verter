@@ -38,6 +38,13 @@ pub mod file_usage;
 pub mod flow;
 pub mod framework_facts;
 pub mod function_program;
+/// The stack containment of oxc's walks over a retained program (the
+/// parser's, [`verter_parser::oxc_parse`]): a consumer of this crate's
+/// program facts walks the program it holds under it without depending on
+/// the parser itself.
+pub mod walk_stack {
+    pub use verter_parser::oxc_parse::{with_node_stack, with_program_stack, ProgramWalkStack};
+}
 mod function_program_hash;
 pub mod html_intrinsics;
 mod imports;

@@ -414,7 +414,7 @@ fn check_scope_references(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let mut spans = FxHashSet::default();
-    collect_expression_free_ref_spans(expr, &FxHashSet::default(), &mut spans);
+    collect_expression_free_ref_spans(expr, content_str, &FxHashSet::default(), &mut spans);
     for span in &spans {
         let name = &content_str[span.start as usize..span.end as usize];
         let is_setup_local = binding_types.get(name).is_some_and(|bt| {

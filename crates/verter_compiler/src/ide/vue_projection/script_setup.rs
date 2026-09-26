@@ -440,7 +440,10 @@ fn project_normal(
             _ => {}
         }
     }
-    let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+    let semantic = verter_parser::oxc_parse::with_program_stack(&parsed.program, || {
+        SemanticBuilder::new().build(&parsed.program)
+    })
+    .semantic;
     let scoping = semantic.scoping();
     module.normal_script_bindings = root_bindings(scoping);
     Ok(value_bindings(scoping))
@@ -477,7 +480,10 @@ fn project_setup(
     let program = &parsed.program;
     collect_imports(program, block.content_start, true, module);
 
-    let semantic = SemanticBuilder::new().build(program).semantic;
+    let semantic = verter_parser::oxc_parse::with_program_stack(program, || {
+        SemanticBuilder::new().build(program)
+    })
+    .semantic;
     let module_bound: FxHashSet<&str> = normal_value_bindings.iter().map(String::as_str).collect();
     let vue_macro_imports = vue_runtime_macro_imports(program);
     let mut collector = SetupCollector {
@@ -492,7 +498,7 @@ fn project_setup(
         top_level_await: None,
         macros: Vec::new(),
     };
-    collector.visit_program(program);
+    verter_parser::oxc_parse::with_program_stack(program, || collector.visit_program(program));
 
     let statements = program
         .body

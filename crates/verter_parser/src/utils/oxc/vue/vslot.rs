@@ -194,21 +194,27 @@ fn extract_slot_bindings_internal(
         // Default value (initializer) — already file-relative.
         if let Some(init) = &param.initializer {
             collect_expression_reference_spans(init, &ignored, &mut references_set);
-            liveness_names.extend(collect_expression_free_refs(init));
+            liveness_names.extend(collect_expression_free_refs(init, input));
         }
         // Type annotation on the parameter (on FormalParameter, not BindingPattern)
         if let Some(annotation) = &param.type_annotation {
             collect_type_reference_spans(&annotation.type_annotation, &mut type_refs);
-            liveness_names.extend(collect_type_free_ref_names(&annotation.type_annotation));
+            liveness_names.extend(collect_type_free_ref_names(
+                &annotation.type_annotation,
+                input,
+            ));
         }
         // References in default values within the pattern — already file-relative.
         collect_pattern_reference_spans(&param.pattern, &ignored, &mut references_set);
-        collect_pattern_default_free_ref_names(&param.pattern, &mut liveness_names);
+        collect_pattern_default_free_ref_names(&param.pattern, input, &mut liveness_names);
     }
     if let Some(rest) = &params.rest {
         if let Some(annotation) = &rest.type_annotation {
             collect_type_reference_spans(&annotation.type_annotation, &mut type_refs);
-            liveness_names.extend(collect_type_free_ref_names(&annotation.type_annotation));
+            liveness_names.extend(collect_type_free_ref_names(
+                &annotation.type_annotation,
+                input,
+            ));
         }
     }
 

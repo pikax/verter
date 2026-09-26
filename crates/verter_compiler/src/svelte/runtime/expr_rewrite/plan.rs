@@ -152,7 +152,9 @@ pub(super) fn plan_script_statement_edits(
         member_write_target_spans: rustc_hash::FxHashSet::default(),
         member_assign_rhs_verbatim_spans: rustc_hash::FxHashSet::default(),
     };
-    collector.visit_statement(statement);
+    verter_parser::oxc_parse::with_span_stack(source, statement.span(), || {
+        collector.visit_statement(statement)
+    });
     if let Some(surface) = collector.refusal {
         return Err(surface);
     }
@@ -206,7 +208,7 @@ pub(super) struct BindingOccurrenceCollector<'s> {
     stmt_effect_spans: rustc_hash::FxHashSet<(u32, u32)>,
     /// The parsed `({source})` text the AST spans index — the slice source for
     /// re-emitting comment trivia a head rewrite would otherwise overwrite.
-    wrapped: &'s str,
+    pub(super) wrapped: &'s str,
     /// The parse's comment table (spans index `wrapped`, delimiters included) —
     /// the trivia authority for the invocation-head rewrites.
     comments: &'s [Comment],

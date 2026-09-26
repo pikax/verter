@@ -25,7 +25,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::Visit;
 use oxc_span::SourceType;
-use verter_parser::oxc_parse::Parser;
+use verter_parser::oxc_parse::{with_program_stack, Parser};
 
 /// One module specifier: the byte range of its whole string literal, the
 /// DECODED specifier it denotes, and the quote character it was written with.
@@ -122,7 +122,7 @@ pub fn collect_module_specifier_spans(source: &str) -> Option<Vec<ModuleSpecifie
         source,
         spans: Vec::new(),
     };
-    collector.visit_program(&parsed.program);
+    with_program_stack(&parsed.program, || collector.visit_program(&parsed.program));
     collector.spans.sort_by_key(|span| span.start);
     collector.spans.dedup_by_key(|span| span.start);
     Some(collector.spans)

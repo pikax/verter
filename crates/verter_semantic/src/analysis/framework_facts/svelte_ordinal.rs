@@ -66,7 +66,7 @@ impl MacroOrdinalWalk {
 
     /// Visit one top-level statement: track its dispatcher imports and yield
     /// its ordinal-bearing macro calls to `visit`.
-    pub(super) fn visit_statement<'a, 'b>(
+    pub(super) fn yield_statement_macros<'a, 'b>(
         &mut self,
         stmt: &'b Statement<'a>,
         module_region: Option<(u32, u32)>,

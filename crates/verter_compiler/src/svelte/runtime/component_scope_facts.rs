@@ -292,8 +292,12 @@ fn analyze_script_scope(alloc: &Allocator, source: &str) -> Option<ScriptScopeFa
     // PLACE (same arena, the shared framework-neutral projection), then bind the
     // projected program.
     use oxc_ast_visit::VisitMut;
-    RuntimeSurvivalProjection::new(alloc, ErasureDelta::svelte()).visit_program(&mut program);
-    let built = SemanticBuilder::new().build(&program);
+    verter_parser::oxc_parse::with_ast_stack(program.source_text, program.source_type, || {
+        RuntimeSurvivalProjection::new(alloc, ErasureDelta::svelte()).visit_program(&mut program)
+    });
+    let built = verter_parser::oxc_parse::with_program_stack(&program, || {
+        SemanticBuilder::new().build(&program)
+    });
     // FAIL-CLOSED: a semantic-analysis error on an otherwise-parsed script refuses,
     // rather than feeding a partial scope tree into the name deconfliction.
     if !built.errors.is_empty() {
@@ -379,7 +383,9 @@ pub(super) fn project_source_for_test<'a>(
 ) -> Option<oxc_ast::ast::Program<'a>> {
     use oxc_ast_visit::VisitMut;
     let mut program = reparse_module(alloc, source)?;
-    RuntimeSurvivalProjection::new(alloc, ErasureDelta::svelte()).visit_program(&mut program);
+    verter_parser::oxc_parse::with_ast_stack(program.source_text, program.source_type, || {
+        RuntimeSurvivalProjection::new(alloc, ErasureDelta::svelte()).visit_program(&mut program)
+    });
     Some(program)
 }
 

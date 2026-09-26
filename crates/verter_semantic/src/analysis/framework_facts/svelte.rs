@@ -882,7 +882,7 @@ fn capture_svelte_candidates(
         // and tracked dispatcher calls) — yielded by the shared walk, built
         // into candidates here. Runs before the arms below; the touched
         // candidate fields are disjoint from the export/legacy inventory.
-        walk.visit_statement(stmt, module_region, &mut |macro_index, call| {
+        walk.yield_statement_macros(stmt, module_region, &mut |macro_index, call| {
             capture_ordinal_macro_call(
                 call,
                 owner,
@@ -1175,7 +1175,7 @@ fn collect_snippet_import_type_references(
     }
 
     let mut collector = SnippetImportTypeCollector { out };
-    collector.visit_program(program);
+    verter_parser::oxc_parse::with_program_stack(program, || collector.visit_program(program));
 }
 
 /// The names of every INSTANCE-region top-level `let`/`var` binding in the
@@ -1423,7 +1423,7 @@ pub fn lower_svelte_type_argument_at_with_owners(
     let mut found = SvelteTypeArgumentLowering::NoMacroCall;
     for (statement_index, stmt) in program.body.iter().enumerate() {
         let owner = owners.statement(statement_index).owner;
-        walk.visit_statement(stmt, module_region, &mut |ordinal, call| {
+        walk.yield_statement_macros(stmt, module_region, &mut |ordinal, call| {
             if ordinal != macro_index {
                 return;
             }
@@ -1492,7 +1492,7 @@ pub fn lower_props_annotation_at_with_owners(
     let mut found = PropsAnnotationLowering::NoPropsCall;
     for (statement_index, stmt) in program.body.iter().enumerate() {
         let owner = owners.statement(statement_index).owner;
-        walk.visit_statement(stmt, module_region, &mut |ordinal, call| {
+        walk.yield_statement_macros(stmt, module_region, &mut |ordinal, call| {
             if ordinal != macro_index {
                 return;
             }

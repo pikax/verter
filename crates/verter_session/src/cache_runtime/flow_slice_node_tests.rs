@@ -47,7 +47,7 @@ fn prepared_of(source: &str) -> PreparedFunctionBodySkeleton {
                     .next()
                     .unwrap()
                     .entry();
-                return build_indexed_function_body_skeleton(&body_source, entry).unwrap();
+                return build_indexed_function_body_skeleton(&body_source, source, entry).unwrap();
             }
         }
     }
@@ -131,6 +131,7 @@ impl FlowBodySkeletonSource for FixtureSkeletonSource {
             .expect("fixture function");
         let prepared = build_indexed_function_body_skeleton(
             &FunctionBodySource::from_function(function).unwrap(),
+            source,
             &entry,
         )?;
         Ok(Some(build_prepared_bundle(prepared)))

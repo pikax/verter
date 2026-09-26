@@ -105,7 +105,7 @@ pub(super) fn needs_context(
             unsafe_roots: &unsafe_roots,
             scopes: ShadowStack::default(),
         };
-        scan.visit_program(&program);
+        verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
         if scan.found {
             return true;
         }
@@ -139,7 +139,7 @@ fn expr_needs_context(
         unsafe_roots,
         scopes: ShadowStack::default(),
     };
-    scan.visit_program(&program);
+    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
     scan.found
 }
 
@@ -190,7 +190,7 @@ fn render_callee_needs_context(
         unsafe_roots,
         scopes: ShadowStack::default(),
     };
-    scan.visit_expression(scanned);
+    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_expression(scanned));
     scan.found
 }
 

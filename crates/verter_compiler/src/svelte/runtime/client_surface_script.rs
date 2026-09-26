@@ -156,23 +156,25 @@ fn instance_script_writes_a_prop(instance_source: &str, ir: &SvelteRuntimeIr) ->
     // itself: a LEGACY `$:` labeled statement is a SUPPORTED prop-read surface
     // and is skipped whole.
     use oxc_ast_visit::Visit;
-    let mut frame = rustc_hash::FxHashSet::default();
-    super::expr::collect_direct_decls(&program.body, &mut frame);
-    super::expr::collect_var_hoists(&program.body, &mut frame);
-    for name in &prop_locals {
-        frame.remove(name);
-    }
-    scan.scopes.push(frame);
-    for stmt in &program.body {
-        if legacy_mode {
-            if let oxc_ast::ast::Statement::LabeledStatement(labeled) = stmt {
-                if labeled.label.name == "$" {
-                    continue;
+    verter_parser::oxc_parse::with_program_stack(&program, || {
+        let mut frame = rustc_hash::FxHashSet::default();
+        super::expr::collect_direct_decls(&program.body, &mut frame);
+        super::expr::collect_var_hoists(&program.body, &mut frame);
+        for name in &prop_locals {
+            frame.remove(name);
+        }
+        scan.scopes.push(frame);
+        for stmt in &program.body {
+            if legacy_mode {
+                if let oxc_ast::ast::Statement::LabeledStatement(labeled) = stmt {
+                    if labeled.label.name == "$" {
+                        continue;
+                    }
                 }
             }
+            scan.visit_statement(stmt);
         }
-        scan.visit_statement(stmt);
-    }
+    });
     scan.found
 }
 
@@ -686,7 +688,7 @@ fn scan_unsupported_rune_forms(
         store_exempt.clone(),
     );
     use oxc_ast_visit::Visit;
-    scan.visit_program(&program);
+    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
     RuneScanOutcome {
         uses_host: scan.uses_host(),
         first_host_span: scan.first_host_span(),

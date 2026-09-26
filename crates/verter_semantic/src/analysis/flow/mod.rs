@@ -1086,8 +1086,13 @@ fn function_body_kind(is_async: bool, is_generator: bool) -> FunctionBodyKind {
 /// nested function / arrow / class bodies are never entered (they are their
 /// own frames).
 #[must_use]
-pub fn build_function_body_skeleton(source: &FunctionBodySource<'_, '_>) -> FunctionBodySkeleton {
-    build_body_skeleton(source, None)
+///
+/// `source_text` is the text the function's spans index.
+pub fn build_function_body_skeleton(
+    source: &FunctionBodySource<'_, '_>,
+    source_text: &str,
+) -> FunctionBodySkeleton {
+    build_body_skeleton(source, source_text, None)
 }
 
 /// A complete indexed structural artifact, built once before graph publication.
@@ -1112,11 +1117,14 @@ impl PreparedFunctionBodySkeleton {
 
 /// Build one current frame using the index's exact nested access facts. No child
 /// skeleton or graph is constructed to recover closure dependencies.
+///
+/// `source_text` is the text the function's spans index.
 pub fn build_indexed_function_body_skeleton(
     source: &FunctionBodySource<'_, '_>,
+    source_text: &str,
     entry: &FunctionProgramEntry,
 ) -> Result<PreparedFunctionBodySkeleton, FlowBindingMapError> {
-    let skeleton = build_body_skeleton(source, Some(entry));
+    let skeleton = build_body_skeleton(source, source_text, Some(entry));
     prepare_function_body_skeleton(skeleton, entry)
 }
 
@@ -1325,6 +1333,18 @@ fn arc_push<T: Clone>(slot: &mut Arc<[T]>, value: T) {
 }
 
 fn build_body_skeleton(
+    source: &FunctionBodySource<'_, '_>,
+    source_text: &str,
+    entry: Option<&FunctionProgramEntry>,
+) -> FunctionBodySkeleton {
+    // The build walks the function's parameters and body.
+    let function = oxc_span::Span::new(source.anchor, source.body_span.end);
+    verter_parser::oxc_parse::with_span_stack(source_text, function, || {
+        build_body_skeleton_contained(source, entry)
+    })
+}
+
+fn build_body_skeleton_contained(
     source: &FunctionBodySource<'_, '_>,
     entry: Option<&FunctionProgramEntry>,
 ) -> FunctionBodySkeleton {

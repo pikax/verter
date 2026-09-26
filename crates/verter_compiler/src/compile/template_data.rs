@@ -514,7 +514,7 @@ fn walk_node_for_extraction(
             flush_if_chain(current_if_chain, data);
 
             if let OxcNodeData::Interpolation(ref oxc_expr) = oxc_data {
-                note_expression_completeness(oxc_expr, data);
+                note_expression_completeness(oxc_expr, ctx.source, data);
                 if let Some(ref result) = oxc_expr.bindings {
                     for binding in &result.bindings {
                         if !binding.ignore {
@@ -1581,6 +1581,7 @@ pub struct RawMemberRead {
 /// Also harvests static member reads for the unused-declaration population.
 fn note_expression_completeness(
     exp: &crate::template::oxc::types::OxcParsedExpression<'_>,
+    source: &str,
     data: &mut RawTemplateData,
 ) {
     if exp.errors.is_some() || exp.bindings.as_ref().is_some_and(|b| b.has_errors) {
@@ -1592,7 +1593,12 @@ fn note_expression_completeness(
             out: &mut data.member_reads,
         };
         use oxc_ast_visit::Visit;
-        collector.visit_expression(expression);
+        // The expression's spans are relative to its slice at `exp.offset`.
+        let span = oxc_span::GetSpan::span(expression);
+        let in_source = oxc_span::Span::new(exp.offset + span.start, exp.offset + span.end);
+        verter_parser::oxc_parse::with_span_stack(source, in_source, || {
+            collector.visit_expression(expression)
+        });
     }
 }
 
@@ -1658,7 +1664,7 @@ fn extract_binding_occurrences(
             .into_iter()
             .flatten()
         {
-            note_expression_completeness(exp, data);
+            note_expression_completeness(exp, source, data);
             if let Some(ref result) = exp.bindings {
                 for b in &result.bindings {
                     if !b.ignore {
@@ -1676,7 +1682,7 @@ fn extract_binding_occurrences(
 
     // Extract from v-if condition
     if let Some(ref cond) = oxc_el.condition {
-        note_expression_completeness(cond, data);
+        note_expression_completeness(cond, source, data);
         if let Some(ref result) = cond.bindings {
             for b in &result.bindings {
                 if !b.ignore {
@@ -1705,7 +1711,11 @@ fn extract_binding_occurrences(
                 out: &mut data.member_reads,
             };
             use oxc_ast_visit::Visit;
-            collector.visit_expression(right);
+            verter_parser::oxc_parse::with_span_stack(
+                source,
+                oxc_span::GetSpan::span(right),
+                || collector.visit_expression(right),
+            );
         }
         for reference in &vfor.parsed.references {
             let name = reference.slice(source);
@@ -1724,7 +1734,7 @@ fn extract_binding_occurrences(
     // Extract from a dynamic v-slot name (`#[expr]` computes in the outer scope).
     if let Some(ref v_slot) = oxc_el.v_slot {
         if let Some(ref dynamic_name) = v_slot.dynamic_name {
-            note_expression_completeness(dynamic_name, data);
+            note_expression_completeness(dynamic_name, source, data);
             if let Some(ref result) = dynamic_name.bindings {
                 for b in &result.bindings {
                     if !b.ignore {

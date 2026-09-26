@@ -390,7 +390,7 @@ pub(super) fn collect_store_subscriptions(
         scoped_reject: None,
     };
     if let Some(program) = instance_program {
-        scan.visit_program(program);
+        verter_parser::oxc_parse::with_program_stack(program, || scan.visit_program(program));
     }
     if let Some((name, span)) = scan.scoped_reject {
         return Err(UnsupportedSvelteRuntimeSurface::StoreScopedSubscription { name, span });
@@ -585,7 +585,10 @@ struct ScriptSubscriptionScan<'a> {
 /// read → `$a()`, an inner `$a = v` write → `$.store_set(a, v)`), so a class
 /// carrying one fails closed. A `$`-named METHOD / PROPERTY KEY is an
 /// `IdentifierName`, NOT an `IdentifierReference`, so it is correctly not tripped.
-pub(super) fn class_body_has_inner_reactive_reference(class: &oxc_ast::ast::Class<'_>) -> bool {
+pub(super) fn class_body_has_inner_reactive_reference(
+    class: &oxc_ast::ast::Class<'_>,
+    source: &str,
+) -> bool {
     struct InnerReactiveScan {
         found: bool,
     }
@@ -598,7 +601,9 @@ pub(super) fn class_body_has_inner_reactive_reference(class: &oxc_ast::ast::Clas
         }
     }
     let mut scan = InnerReactiveScan { found: false };
-    walk::walk_class(&mut scan, class);
+    verter_parser::oxc_parse::with_span_stack(source, class.span, || {
+        walk::walk_class(&mut scan, class)
+    });
     scan.found
 }
 

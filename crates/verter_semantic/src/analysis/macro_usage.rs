@@ -90,7 +90,7 @@ pub fn collect_macro_usage(
         facts: MacroUsageFacts::default(),
         consumed: FxHashSet::default(),
     };
-    visitor.visit_program(program);
+    verter_parser::oxc_parse::with_program_stack(program, || visitor.visit_program(program));
     visitor.facts
 }
 

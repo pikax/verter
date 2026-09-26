@@ -24816,7 +24816,10 @@ mod narrowing_ledger_tests {
         };
         let source = verter_semantic::analysis::flow::FunctionBodySource::from_function(function)
             .expect("body");
-        let skeleton = verter_semantic::analysis::flow::build_function_body_skeleton(&source);
+        let skeleton = verter_semantic::analysis::flow::build_function_body_skeleton(
+            &source,
+            parsed.program.source_text,
+        );
         let name = skeleton
             .name_id(&format!("p{ordinal}"))
             .expect("parameter name");

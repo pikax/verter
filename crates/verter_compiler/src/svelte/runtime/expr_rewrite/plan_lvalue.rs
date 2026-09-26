@@ -126,13 +126,15 @@ impl BindingOccurrenceCollector<'_> {
         mut object: &Expression<'_>,
         computed_key: Option<&Expression<'_>>,
     ) -> bool {
-        let mut saw_ts = computed_key.is_some_and(expression_contains_ts_only_syntax);
+        let mut saw_ts =
+            computed_key.is_some_and(|key| expression_contains_ts_only_syntax(key, self.wrapped));
         loop {
             match object {
                 Expression::ParenthesizedExpression(p) => object = &p.expression,
                 Expression::StaticMemberExpression(m) => object = &m.object,
                 Expression::ComputedMemberExpression(m) => {
-                    saw_ts = saw_ts || expression_contains_ts_only_syntax(&m.expression);
+                    saw_ts =
+                        saw_ts || expression_contains_ts_only_syntax(&m.expression, self.wrapped);
                     object = &m.object;
                 }
                 Expression::PrivateFieldExpression(m) => object = &m.object,

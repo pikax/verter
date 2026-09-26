@@ -460,6 +460,20 @@ fn build_and_bind(
     module_owner: Option<TopLevelOwnerId>,
     instance_owner: Option<TopLevelOwnerId>,
 ) -> BuiltState {
+    // Cloning, projecting, binding and collecting walk the whole program.
+    verter_parser::oxc_parse::with_program_stack(program, || {
+        bind_clone(allocator, program, owners, module_owner, instance_owner)
+    })
+}
+
+/// [`build_and_bind`] on the stack its program's walks need.
+fn bind_clone(
+    allocator: &Allocator,
+    program: &Program<'_>,
+    owners: &TopLevelOwnerTable,
+    module_owner: Option<TopLevelOwnerId>,
+    instance_owner: Option<TopLevelOwnerId>,
+) -> BuiltState {
     let ast = AstBuilder::new(allocator);
 
     let mut root_body = ast.vec();

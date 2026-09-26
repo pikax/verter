@@ -455,7 +455,10 @@ pub fn project_options_block(
         return Err(SetupProjectionRefusal::SyntaxErrors { setup: false });
     }
     let program = &parsed.program;
-    let semantic = SemanticBuilder::new().build(program).semantic;
+    let semantic = verter_parser::oxc_parse::with_program_stack(program, || {
+        SemanticBuilder::new().build(program)
+    })
+    .semantic;
     let values = value_bindings(semantic.scoping());
     let vue_imports = vue_runtime_imports(program);
 

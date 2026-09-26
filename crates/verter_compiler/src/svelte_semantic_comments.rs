@@ -13,6 +13,7 @@ use oxc_ast::{
 };
 use oxc_ast_visit::Visit;
 use oxc_span::GetSpan;
+use verter_parser::oxc_parse::with_program_stack;
 
 /// A raw emitted module could not be parsed as JavaScript, so no semantic
 /// comment oracle can be produced safely.
@@ -202,13 +203,15 @@ impl CommentAnchorIndex {
             top_index: 0,
             top_segment_kind: TopSegmentKind::Statement,
         };
-        for (position, directive) in program.directives.iter().enumerate() {
-            index.top_index = position;
-            index.top_segment_kind = TopSegmentKind::Directive;
-            index.visit_directive(directive);
-        }
-        index.top_segment_kind = TopSegmentKind::Statement;
-        index.normalize_statement_list(&program.body);
+        with_program_stack(program, || {
+            for (position, directive) in program.directives.iter().enumerate() {
+                index.top_index = position;
+                index.top_segment_kind = TopSegmentKind::Directive;
+                index.visit_directive(directive);
+            }
+            index.top_segment_kind = TopSegmentKind::Statement;
+            index.normalize_statement_list(&program.body);
+        });
         index
     }
 

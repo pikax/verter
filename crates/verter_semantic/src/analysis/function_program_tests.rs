@@ -330,8 +330,10 @@ fn flow_binding_map_is_bijective_for_value_bindings() {
     let Statement::FunctionDeclaration(function) = &parsed.program.body[0] else {
         panic!("function fixture");
     };
-    let skeleton =
-        build_function_body_skeleton(&FunctionBodySource::from_function(function).unwrap());
+    let skeleton = build_function_body_skeleton(
+        &FunctionBodySource::from_function(function).unwrap(),
+        source,
+    );
     let map =
         FlowBindingMap::build(&skeleton, &entry.bindings, &entry.key, entry.span.start).unwrap();
     assert_eq!(map.value_count(), entry.bindings.len());

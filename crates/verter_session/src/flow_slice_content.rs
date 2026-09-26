@@ -3427,6 +3427,7 @@ pub(crate) fn build_flow_slice_content(
                 .into(),
             parameter_names: Arc::new(signature_parameter_bindings(skeleton, anchor)),
             modelled_patterns: Arc::new(modelled_pattern_bindings(
+                program,
                 &node.params().items,
                 &body.statements,
                 &bindings,
@@ -3509,6 +3510,7 @@ pub(crate) fn build_flow_slice_content(
         control: Arc::clone(&entry.control),
         direct_calls: &entry.direct_calls,
         program,
+        walks: verter_semantic::analysis::walk_stack::ProgramWalkStack::new(program),
         module_scope,
         namespace_owned,
         namespace_scopes: &namespace_scopes,
@@ -3639,7 +3641,7 @@ pub(crate) fn build_flow_slice_content(
         // `f(yield x)`, a delegating `yield*`) still yields, so a body
         // holding one has no complete yield type: the region carries the
         // typed gap ahead of its statements.
-        if body_has_unmodeled_yield(&body.statements) {
+        if body_has_unmodeled_yield(&lowerer.walks, &body.statements) {
             let mut statements = Vec::with_capacity(region.statements.len() + 1);
             statements.push(SliceStatement::Gap(
                 crate::semantic_query::FlowGap::UnmodeledExpression,
@@ -4122,6 +4124,7 @@ fn param_pattern_is_flat(pattern: &BindingPattern<'_>) -> bool {
 /// statement declarators' and its `for…of` / `for…in` elements', never a
 /// nested function's or class's.
 fn modelled_pattern_bindings(
+    program: &Program<'_>,
     params: &oxc_allocator::Vec<'_, oxc_ast::ast::FormalParameter<'_>>,
     statements: &[Statement<'_>],
     bindings: &verter_semantic::analysis::flow::FlowBindingMap,
@@ -4188,7 +4191,9 @@ fn modelled_pattern_bindings(
         }
     }
     for statement in statements {
-        collector.visit_statement(statement);
+        verter_semantic::analysis::walk_stack::with_node_stack(program, statement.span(), || {
+            collector.visit_statement(statement)
+        });
     }
     collector.out
 }
@@ -4672,54 +4677,62 @@ fn chain_element_root_identifier<'a>(
 /// deliberately absent because they can change the value being projected even
 /// when the underlying identifier was `any`.
 fn pure_optional_chain_root_identifier<'a>(
+    program: &Program<'_>,
     element: &'a oxc_ast::ast::ChainElement<'a>,
 ) -> Option<&'a oxc_ast::ast::IdentifierReference<'a>> {
     match element {
         oxc_ast::ast::ChainElement::CallExpression(call) => {
             if !call.arguments.iter().all(|argument| {
-                argument
-                    .as_expression()
-                    .is_some_and(optional_chain_discarded_expr_has_no_syntactic_effect)
+                argument.as_expression().is_some_and(|argument| {
+                    optional_chain_discarded_expr_has_no_syntactic_effect(program, argument)
+                })
             }) {
                 return None;
             }
-            pure_member_root_identifier(&call.callee)
-        }
-        oxc_ast::ast::ChainElement::StaticMemberExpression(member) => {
-            pure_member_root_identifier(&member.object)
-        }
-        oxc_ast::ast::ChainElement::ComputedMemberExpression(member) => {
-            if !optional_chain_discarded_expr_has_no_syntactic_effect(&member.expression) {
-                return None;
-            }
-            pure_member_root_identifier(&member.object)
-        }
-        oxc_ast::ast::ChainElement::PrivateFieldExpression(member) => {
-            pure_member_root_identifier(&member.object)
+            pure_member_root_identifier(program, &call.callee)
         }
         oxc_ast::ast::ChainElement::TSNonNullExpression(_) => None,
+        member => pure_optional_member_root_identifier(program, member),
     }
 }
 
+/// The identifier a pure member chain (`a.b[k].c`, parenthesized or
+/// optional links included) reads at its root, walked link by link down
+/// the chain's object spine: a chain however long costs no native level.
 fn pure_member_root_identifier<'a>(
+    program: &Program<'_>,
     expr: &'a Expression<'a>,
 ) -> Option<&'a oxc_ast::ast::IdentifierReference<'a>> {
-    match expr {
-        Expression::Identifier(identifier) => Some(identifier),
-        Expression::ParenthesizedExpression(paren) => {
-            pure_member_root_identifier(&paren.expression)
-        }
-        Expression::StaticMemberExpression(member) => pure_member_root_identifier(&member.object),
-        Expression::ComputedMemberExpression(member)
-            if optional_chain_discarded_expr_has_no_syntactic_effect(&member.expression) =>
-        {
-            pure_member_root_identifier(&member.object)
-        }
-        Expression::PrivateFieldExpression(member) => pure_member_root_identifier(&member.object),
-        Expression::ChainExpression(chain) => {
-            pure_optional_member_root_identifier(&chain.expression)
-        }
-        _ => None,
+    let mut expr = expr;
+    loop {
+        expr = match expr {
+            Expression::Identifier(identifier) => return Some(identifier),
+            Expression::ParenthesizedExpression(paren) => &paren.expression,
+            Expression::StaticMemberExpression(member) => &member.object,
+            Expression::ComputedMemberExpression(member)
+                if optional_chain_discarded_expr_has_no_syntactic_effect(
+                    program,
+                    &member.expression,
+                ) =>
+            {
+                &member.object
+            }
+            Expression::PrivateFieldExpression(member) => &member.object,
+            Expression::ChainExpression(chain) => match &chain.expression {
+                oxc_ast::ast::ChainElement::StaticMemberExpression(member) => &member.object,
+                oxc_ast::ast::ChainElement::ComputedMemberExpression(member)
+                    if optional_chain_discarded_expr_has_no_syntactic_effect(
+                        program,
+                        &member.expression,
+                    ) =>
+                {
+                    &member.object
+                }
+                oxc_ast::ast::ChainElement::PrivateFieldExpression(member) => &member.object,
+                _ => return None,
+            },
+            _ => return None,
+        };
     }
 }
 
@@ -4838,7 +4851,10 @@ fn super_callee_static_path(callee: &Expression<'_>) -> Option<Vec<Arc<str>>> {
     }
 }
 
-fn optional_chain_discarded_expr_has_no_syntactic_effect(expr: &Expression<'_>) -> bool {
+fn optional_chain_discarded_expr_has_no_syntactic_effect(
+    program: &Program<'_>,
+    expr: &Expression<'_>,
+) -> bool {
     struct EffectScanner {
         safe: bool,
     }
@@ -4907,26 +4923,29 @@ fn optional_chain_discarded_expr_has_no_syntactic_effect(expr: &Expression<'_>) 
     }
 
     let mut scanner = EffectScanner { safe: true };
-    scanner.visit_expression(expr);
+    verter_semantic::analysis::walk_stack::with_node_stack(program, expr.span(), || {
+        scanner.visit_expression(expr)
+    });
     scanner.safe
 }
 
 fn pure_optional_member_root_identifier<'a>(
+    program: &Program<'_>,
     element: &'a oxc_ast::ast::ChainElement<'a>,
 ) -> Option<&'a oxc_ast::ast::IdentifierReference<'a>> {
     match element {
         oxc_ast::ast::ChainElement::StaticMemberExpression(member) => {
-            pure_member_root_identifier(&member.object)
+            pure_member_root_identifier(program, &member.object)
         }
         oxc_ast::ast::ChainElement::ComputedMemberExpression(member) => {
-            if optional_chain_discarded_expr_has_no_syntactic_effect(&member.expression) {
-                pure_member_root_identifier(&member.object)
+            if optional_chain_discarded_expr_has_no_syntactic_effect(program, &member.expression) {
+                pure_member_root_identifier(program, &member.object)
             } else {
                 None
             }
         }
         oxc_ast::ast::ChainElement::PrivateFieldExpression(member) => {
-            pure_member_root_identifier(&member.object)
+            pure_member_root_identifier(program, &member.object)
         }
         oxc_ast::ast::ChainElement::CallExpression(_)
         | oxc_ast::ast::ChainElement::TSNonNullExpression(_) => None,
@@ -5152,8 +5171,11 @@ fn expression_freshness(expression: &Expression<'_>) -> SliceFreshness {
 /// from the SAME single inventory walk the index uses (nested function
 /// bodies are never entered, so a `var` inside a nested function value
 /// belongs to that frame, not this one).
-fn declares_var(statement: &Statement<'_>) -> bool {
-    !inventory_statement_list(std::slice::from_ref(statement))
+fn declares_var(
+    walks: &verter_semantic::analysis::walk_stack::ProgramWalkStack<'_>,
+    statement: &Statement<'_>,
+) -> bool {
+    !inventory_statement_list(walks, std::slice::from_ref(statement))
         .var_names
         .is_empty()
 }
@@ -6733,7 +6755,9 @@ pub(crate) fn build_flow_capture_authority(
         locator,
         found: None,
     };
-    finder.visit_program(program);
+    verter_semantic::analysis::walk_stack::with_program_stack(program, || {
+        finder.visit_program(program)
+    });
     Some(finder.found?.map(|declared| SliceCaptureAuthority {
         binding: locator.binding.clone(),
         name: locator.declaration.name.clone(),
@@ -6821,6 +6845,9 @@ struct Lowerer<'a> {
     /// site); a cross-file callee is beyond this channel and lowers to
     /// [`SliceGuard::None`].
     program: &'a Program<'a>,
+    /// The containment every walk of oxc's over a node of [`Self::program`]
+    /// runs under, scanning the program at most once for all of them.
+    walks: verter_semantic::analysis::walk_stack::ProgramWalkStack<'a>,
     /// Whether the frame's file is PROVABLY module-scoped: the carrier
     /// projects its script block as a module (a `.vue` / `.svelte` script
     /// block compiles to one), or the retained program carries top-level
@@ -7386,7 +7413,8 @@ impl<'a> Lowerer<'a> {
                 declaration,
                 found: None,
             };
-            extent.visit_program(self.program);
+            self.walks
+                .with_node_stack(self.program.span, || extent.visit_program(self.program));
             let position = extent.found.unwrap_or(write.span);
             position.contains(creation) || position > creation
         })
@@ -7912,7 +7940,9 @@ impl<'a> Lowerer<'a> {
         let mut may_break: Vec<SliceBreakTarget> = Vec::new();
         for (index, statement) in statements.iter().enumerate() {
             if !can_fall_through {
-                if !hit_unsupported && unreachable_statements_contribute(&statements[index..]) {
+                if !hit_unsupported
+                    && unreachable_statements_contribute(&self.walks, &statements[index..])
+                {
                     let unreachable = self.lower_region(&statements[index..]);
                     if unreachable.hit_unsupported {
                         out.insert(
@@ -8171,8 +8201,8 @@ impl<'a> Lowerer<'a> {
                     // the typed loop refusal.
                     let labels = std::mem::take(&mut self.pending_loop_labels);
                     if self.control_has_return(statement)
-                        || statement_yields_in_own_frame(statement)
-                        || declares_var(statement)
+                        || statement_yields_in_own_frame(&self.walks, statement)
+                        || declares_var(&self.walks, statement)
                         || loop_transfers_to_enclosing_label(statement, &self.loop_direct_labels)
                         || self.loop_has_selected_transfer(statement)
                     {
@@ -8663,7 +8693,8 @@ impl<'a> Lowerer<'a> {
                 // nested-frame blanket treatment.
                 Statement::ClassDeclaration(class) => {
                     let mut scanner = LeafCallScanner::default();
-                    scanner.visit_class(class);
+                    self.walks
+                        .with_node_stack(class.span(), || scanner.visit_class(class));
                     self.drain_leaf_call_scanner(scanner);
                 }
                 // Declaration / no-op statements: transparent (no return
@@ -11795,7 +11826,8 @@ impl<'a> Lowerer<'a> {
             names: annotated,
             effects: Vec::new(),
         };
-        finder.visit_program(self.program);
+        self.walks
+            .with_node_stack(self.program.span, || finder.visit_program(self.program));
         if finder.effects.len() != finder.names.len() {
             return None;
         }
@@ -11845,7 +11877,8 @@ impl<'a> Lowerer<'a> {
         }
         let mut finder = OwnFrameReturnFinder::default();
         for statement in &body.statements {
-            finder.visit_statement(statement);
+            self.walks
+                .with_node_stack(statement.span(), || finder.visit_statement(statement));
         }
         finder.found
     }
@@ -12541,10 +12574,13 @@ impl<'a> Lowerer<'a> {
     /// re-scanning the call itself.
     fn scan_call_operands(&mut self, call: &oxc_ast::ast::CallExpression<'_>) {
         let mut scanner = LeafCallScanner::default();
-        scanner.visit_expression(&call.callee);
+        self.walks.with_node_stack(call.callee.span(), || {
+            scanner.visit_expression(&call.callee)
+        });
         for argument in &call.arguments {
             if let Some(argument) = argument.as_expression() {
-                scanner.visit_expression(argument);
+                self.walks
+                    .with_node_stack(argument.span(), || scanner.visit_expression(argument));
             }
         }
         if self.drain_scanned_same_frame_effects(
@@ -13660,7 +13696,8 @@ impl<'a> Lowerer<'a> {
         if let Expression::CallExpression(call) = expression {
             scanner.statement_calls.insert(call.span);
         }
-        scanner.visit_expression(expression);
+        self.walks
+            .with_node_stack(expression.span(), || scanner.visit_expression(expression));
         // An entered `asserts` call (a comma operand anywhere in the
         // statement) narrows once the statement has run: its value is
         // discarded, so nothing the statement lowers reads past it.
@@ -14131,7 +14168,7 @@ impl<'a> Lowerer<'a> {
                         return member;
                     }
                 }
-                match pure_optional_chain_root_identifier(&chain.expression) {
+                match pure_optional_chain_root_identifier(self.walks.program(), &chain.expression) {
                     Some(root) if self.optional_chain_root_has_prior_flow_change(root) => {
                         SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression)
                     }
@@ -15806,7 +15843,8 @@ impl<'a> Lowerer<'a> {
                 name: fact.span.to_absolute(gate.anchor),
                 found: None,
             };
-            finder.visit_program(self.program);
+            self.walks
+                .with_node_stack(self.program.span, || finder.visit_program(self.program));
             if let Some(function) = finder.found {
                 return Some((function, gate, own_frame));
             }
@@ -16209,7 +16247,8 @@ impl<'a> Lowerer<'a> {
     /// called, and instance initializers, which run at construction).
     fn record_decided_above_calls(&mut self, expr: &Expression<'_>) {
         let mut scanner = LeafCallScanner::default();
-        scanner.visit_expression(expr);
+        self.walks
+            .with_node_stack(expr.span(), || scanner.visit_expression(expr));
         self.drain_leaf_call_scanner(scanner);
     }
 
@@ -16233,7 +16272,8 @@ impl<'a> Lowerer<'a> {
     /// silent.
     fn scan_unmodeled_position_effects(&mut self, expr: &Expression<'_>) {
         let mut scanner = LeafCallScanner::default();
-        scanner.visit_expression(expr);
+        self.walks
+            .with_node_stack(expr.span(), || scanner.visit_expression(expr));
         self.decided_above_call_spans.append(&mut scanner.decided);
         if self.drain_scanned_same_frame_effects(
             scanner,
@@ -16270,7 +16310,9 @@ impl<'a> Lowerer<'a> {
                 }
                 oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block) => {
                     for statement in &block.body {
-                        scanner.visit_statement(statement);
+                        self.walks.with_node_stack(statement.span(), || {
+                            scanner.visit_statement(statement)
+                        });
                     }
                     body = None;
                 }
@@ -16308,14 +16350,19 @@ impl<'a> Lowerer<'a> {
             // the callee route itself holds none (only computed keys,
             // which the scanner reaches as ordinary expressions).
             self.decided_above_call_spans.push(call.span.into());
-            scanner.visit_expression(&call.callee);
+            self.walks.with_node_stack(call.callee.span(), || {
+                scanner.visit_expression(&call.callee)
+            });
             for argument in &call.arguments {
                 if let Some(expression) = argument.as_expression() {
-                    scanner.visit_expression(expression);
+                    self.walks.with_node_stack(expression.span(), || {
+                        scanner.visit_expression(expression)
+                    });
                 }
             }
         } else {
-            scanner.visit_expression(whole);
+            self.walks
+                .with_node_stack(whole.span(), || scanner.visit_expression(whole));
         }
         self.drain_leaf_call_scanner(scanner);
     }
@@ -16539,7 +16586,8 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
-        scanner.visit_expression(expr);
+        self.walks
+            .with_node_stack(expr.span(), || scanner.visit_expression(expr));
         self.drain_scanned_same_frame_effects(
             scanner,
             CertificationMode::Strict,
@@ -17081,19 +17129,27 @@ impl<'a> Visit<'a> for OwnFrameReturnFinder {
 /// Whether unreachable `statements` hold a `return` or a `yield` of their
 /// own frame — contributions the checker aggregates whether or not a path
 /// reaches them.
-fn unreachable_statements_contribute(statements: &[Statement<'_>]) -> bool {
+fn unreachable_statements_contribute(
+    walks: &verter_semantic::analysis::walk_stack::ProgramWalkStack<'_>,
+    statements: &[Statement<'_>],
+) -> bool {
     let mut returns = OwnFrameReturnFinder::default();
     let mut yields = OwnFrameYieldFinder::default();
     for statement in statements {
-        returns.visit_statement(statement);
-        yields.visit_statement(statement);
+        walks.with_node_stack(statement.span(), || {
+            returns.visit_statement(statement);
+            yields.visit_statement(statement);
+        });
     }
     returns.found || yields.found
 }
 
-fn statement_yields_in_own_frame(statement: &Statement<'_>) -> bool {
+fn statement_yields_in_own_frame(
+    walks: &verter_semantic::analysis::walk_stack::ProgramWalkStack<'_>,
+    statement: &Statement<'_>,
+) -> bool {
     let mut finder = OwnFrameYieldFinder::default();
-    finder.visit_statement(statement);
+    walks.with_node_stack(statement.span(), || finder.visit_statement(statement));
     finder.found
 }
 
@@ -17101,13 +17157,16 @@ fn statement_yields_in_own_frame(statement: &Statement<'_>) -> bool {
 /// model: one nested inside another expression, a statement-position
 /// `yield*` delegation, or a yield inside a statement-position yield's
 /// own argument.
-fn body_has_unmodeled_yield(statements: &[Statement<'_>]) -> bool {
+fn body_has_unmodeled_yield(
+    walks: &verter_semantic::analysis::walk_stack::ProgramWalkStack<'_>,
+    statements: &[Statement<'_>],
+) -> bool {
     let mut finder = OwnFrameYieldFinder {
         statement_yields_modeled: true,
         ..OwnFrameYieldFinder::default()
     };
     for statement in statements {
-        finder.visit_statement(statement);
+        walks.with_node_stack(statement.span(), || finder.visit_statement(statement));
     }
     finder.found
 }

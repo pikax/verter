@@ -578,6 +578,29 @@ Recorded plainly so no reader mistakes absence for a pass:
   or the `!` classification overflows the worker, and restoring the
   derived drop overflows the test thread.
 
+* **oxc's own walks run on the stack their source needs.** oxc's
+  `clone_in`, semantic builder and `Visit` / `VisitMut` walkers recurse
+  once per level of the tree they walk, as its parser does: cloning a
+  10,000-deep `!` chain took 13.7 MB on the unoptimized IO worker
+  (`root_binding_index`'s binding clone), past its 8 MiB. Every walk entry
+  now runs under one of `verter_parser::oxc_parse`'s containments, sized
+  the way the parse is (8 KiB per level of the nesting scan's bound plus
+  512 KiB, in place when the thread has it, on a stack segment otherwise):
+  `with_program_stack` for a whole program, `ProgramWalkStack` for the
+  many node walks one program's consumer makes (its program scanned at
+  most once), `with_node_stack` / `with_span_stack` / `with_source_stack`
+  for one node given its program or its text (the larger of a TypeScript
+  and a TSX scan where the source type is not at hand), and
+  `with_nesting_stack` for a known bound. `verter_semantic` re-exports the
+  first three as `analysis::walk_stack` for the flow lane, which does not
+  depend on the parser. The guard `no_crate_walks_oxc_syntax_around_the_containment`
+  fails any walk entry (a `visit_…` call on a visitor, a `walk::` call on
+  one, `clone_in`, `SemanticBuilder::new`) outside a containment, a walk
+  step or a helper only those call. `every_form_nested_10000_deep_walks_on_a_small_stack`
+  clones and walks each of the ten nesting forms 10,000 deep on a 1 MiB
+  thread under each containment; running the walks in place instead
+  overflows it.
+
 * **A call's arguments lower once per enclosing call.** A call nested
   as an argument (`g(g(…g(1)…))`) lowers again from the enclosing call's
   frame-lowered arguments (`Lowerer::lower_call_arguments`), and each

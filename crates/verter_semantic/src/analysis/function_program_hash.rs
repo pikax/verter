@@ -23,6 +23,22 @@ const HASH_SALT: &[u8] = b"verter-flow-body-stable-hash:v1";
 const HASH_SEP: u8 = 0;
 
 pub(super) fn hash_function_body(
+    walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
+    source: &str,
+    statements: &[Statement<'_>],
+    params: &[FunctionParamRecord],
+    function_start: u32,
+    node: crate::analysis::function_program::FunctionNode<'_>,
+) -> Hash16 {
+    // Folding walks the whole function: its signature's types, its
+    // parameters' initializers and its body.
+    walks.with_node_stack(node.span(), || {
+        fold_function_body(source, statements, params, function_start, node)
+    })
+}
+
+/// [`hash_function_body`] on the stack the function's walks need.
+fn fold_function_body(
     source: &str,
     statements: &[Statement<'_>],
     params: &[FunctionParamRecord],

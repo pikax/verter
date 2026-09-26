@@ -766,7 +766,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
         FunctionNode::Function(func) => FunctionBodySource::from_function(func).expect("bodied declaration"),
         FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
     };
-    let prepared = build_indexed_function_body_skeleton(&body, entry).expect("indexed fixture structure");
+    let prepared = build_indexed_function_body_skeleton(&body, source, entry).expect("indexed fixture structure");
     let function = entry.key.clone();
     let key = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
         canonical_id, function, parse_env_hash: [0u8; 16],

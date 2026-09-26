@@ -1069,7 +1069,7 @@ fn collect_snippet_references(
     let Some(program) = parse_reference_snippet(allocator, snippet) else {
         return;
     };
-    scan.visit_program(&program);
+    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
 }
 
 /// Collect references from one expression-position snippet
@@ -1104,10 +1104,11 @@ fn script_reference_names(script: &str, declared: &[String]) -> FxHashSet<String
     let mut scan = ScriptReferenceScan {
         names: FxHashSet::default(),
     };
-    scan.visit_program(&program);
-    let semantic = oxc_semantic::SemanticBuilder::new()
-        .build(&program)
-        .semantic;
+    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
+    let semantic = verter_parser::oxc_parse::with_program_stack(&program, || {
+        oxc_semantic::SemanticBuilder::new().build(&program)
+    })
+    .semantic;
     let scoping = semantic.scoping();
     let root = scoping.root_scope_id();
     let mut names = FxHashSet::default();
@@ -1969,7 +1970,10 @@ pub fn project_binding_views(
             return Err(SetupProjectionRefusal::SyntaxErrors { setup: true });
         }
         let program = &parsed.program;
-        let semantic = oxc_semantic::SemanticBuilder::new().build(program).semantic;
+        let semantic = verter_parser::oxc_parse::with_program_stack(program, || {
+            oxc_semantic::SemanticBuilder::new().build(program)
+        })
+        .semantic;
         let values = value_bindings(semantic.scoping());
         let vue_imports = vue_runtime_imports(program);
         classify_setup_body(

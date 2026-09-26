@@ -4,7 +4,7 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, Statement};
 use oxc_span::SourceType;
-use verter_parser::oxc_parse::Parser;
+use verter_parser::oxc_parse::{with_ast_stack, Parser};
 
 /// The STRUCTURAL classification of a two-way `bind:` directive's bound target
 /// expression, derived from the parsed OXC node — NOT a text scan.
@@ -147,7 +147,7 @@ impl BindTargetFact {
             None
         };
         let kind = classify_target_expr(expr);
-        let lvalue_contains_ts = target_expr_lvalue_contains_ts(expr);
+        let lvalue_contains_ts = target_expr_lvalue_contains_ts(expr, source);
         let is_parenthesized_sequence = target_expr_is_parenthesized_sequence(expr);
         Self {
             kind,
@@ -155,7 +155,7 @@ impl BindTargetFact {
             lvalue_contains_ts,
             root_ident: target_expr_root_ident(expr),
             function_pair,
-            target_keypath: target_expr_keypath(expr),
+            target_keypath: target_expr_keypath(expr, source),
             is_parenthesized_sequence,
             // The `bind_invalid_expression` shape: a parsed non-lvalue / non-pair target that
             // is NOT a TS class (that is `lvalue_contains_ts`, the D-26/parse-error class) and
@@ -258,7 +258,7 @@ fn peel_runtime_lvalue_expression<'a>(mut expr: &'a Expression<'a>) -> &'a Expre
 /// divergent bind, whereas official svelte parses the source as plain JS. A plain valid-JS
 /// lvalue (`o.x`, `a[i]`, `arr[f(c)]`, an untyped IIFE index) carries no such node and stays
 /// accepted.
-fn target_expr_lvalue_contains_ts(expr: &Expression) -> bool {
+fn target_expr_lvalue_contains_ts(expr: &Expression, source: &str) -> bool {
     let mut core = expr;
     while let Expression::ParenthesizedExpression(p) = core {
         core = &p.expression;
@@ -266,7 +266,7 @@ fn target_expr_lvalue_contains_ts(expr: &Expression) -> bool {
     if matches!(core, Expression::SequenceExpression(_)) {
         return false;
     }
-    expression_contains_non_plain_svelte_js(core)
+    expression_contains_non_plain_svelte_js(core, source, SourceType::tsx())
 }
 
 /// Whether `expr`'s subtree carries ANY node that is NOT plain-Svelte-JS-faithful — a TS-only
@@ -280,10 +280,14 @@ fn target_expr_lvalue_contains_ts(expr: &Expression) -> bool {
 /// caught by the [`StrictOfficialDeltaScan`] `visit_ts_type` / type-parameter arms WITHOUT a new
 /// per-form override). Typed-IR / OXC-node only — NEVER a `source.contains` text scan. To be
 /// subsumed by the shared plain-MJS template-expression authority (D-26).
-fn expression_contains_non_plain_svelte_js(expr: &Expression) -> bool {
+fn expression_contains_non_plain_svelte_js(
+    expr: &Expression,
+    source_text: &str,
+    source_type: SourceType,
+) -> bool {
     use oxc_ast_visit::Visit;
     let mut scan = StrictOfficialDeltaScan { found: false };
-    scan.visit_expression(expr);
+    with_ast_stack(source_text, source_type, || scan.visit_expression(expr));
     scan.found
 }
 
@@ -322,12 +326,14 @@ pub(super) fn target_expr_root_ident(expr: &Expression) -> Option<String> {
 /// stays DISTINCT from `a["x"]` (`"a.[\"x\"]"`). Returns `None` only for a target that
 /// yields NO segment at all. Derived from the parsed OXC expression (the SAME node the rest
 /// of the fact reads), never a raw-source slice — so `o.x` and `o . x` canonicalize equal.
-fn target_expr_keypath(expr: &Expression) -> Option<String> {
+fn target_expr_keypath(expr: &Expression, source: &str) -> Option<String> {
     use oxc_ast_visit::Visit;
     let mut collector = KeypathSegments {
         segments: Vec::new(),
     };
-    collector.visit_expression(expr);
+    with_ast_stack(source, SourceType::tsx(), || {
+        collector.visit_expression(expr)
+    });
     if collector.segments.is_empty() {
         None
     } else {
@@ -482,8 +488,8 @@ fn parse_plain_svelte_function_pair(alloc: &Allocator, source: &str) -> Option<(
     // (3) The shared plain-Svelte-JS-faithfulness scan over BOTH elements — the SAME authority
     // the single-lvalue spine uses (`expression_contains_non_plain_svelte_js`, backed by
     // `StrictOfficialDeltaScan`), so both bind lanes share ONE TS / official-delta detector.
-    if expression_contains_non_plain_svelte_js(getter)
-        || expression_contains_non_plain_svelte_js(setter)
+    if expression_contains_non_plain_svelte_js(getter, source, SourceType::mjs())
+        || expression_contains_non_plain_svelte_js(setter, source, SourceType::mjs())
     {
         return None;
     }

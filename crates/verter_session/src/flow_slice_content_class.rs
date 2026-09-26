@@ -397,7 +397,8 @@ impl<'s> Lowerer<'s> {
         // `extends` value lowered above as a value of its own, which
         // answers for its own effects.
         let mut scanner = LeafCallScanner::default();
-        scanner.visit_class_after_heritage(class);
+        self.walks
+            .with_node_stack(class.span(), || scanner.visit_class_after_heritage(class));
         self.drain_leaf_call_scanner(scanner);
         let name: Arc<str> = match (&class.id, assigned_name) {
             (Some(id), _) => Arc::from(id.name.as_str()),
@@ -819,7 +820,9 @@ impl<'s> Lowerer<'s> {
                 .program
                 .body
                 .get(self.contributor as usize)
-                .and_then(|statement| ClauseContainerFinder::find(statement, gate.anchor))
+                .and_then(|statement| {
+                    ClauseContainerFinder::find(&self.walks, statement, gate.anchor)
+                })
                 .unwrap_or_else(|| (Arc::from(ANONYMOUS_FUNCTION), None));
             if !gate.enclosing_type_parameters.is_empty() {
                 clauses.push(crate::semantic_query::ClassExpressionClause {
@@ -914,6 +917,7 @@ impl ClauseContainerFinder {
     /// The container name of the function starting at `target` in
     /// `statement`, and its class's name when it is a class member.
     fn find(
+        walks: &verter_semantic::analysis::walk_stack::ProgramWalkStack<'_>,
         statement: &oxc_ast::ast::Statement<'_>,
         target: u32,
     ) -> Option<(Arc<str>, Option<Arc<str>>)> {
@@ -921,7 +925,7 @@ impl ClauseContainerFinder {
             target,
             ..Self::default()
         };
-        finder.visit_statement(statement);
+        walks.with_node_stack(statement.span(), || finder.visit_statement(statement));
         finder.found
     }
 

@@ -580,7 +580,8 @@ fn classify_instance_statement(
                     span,
                 });
             }
-            let facts = super::legacy_reactive::reactive_statement_facts(&labeled.body);
+            let facts =
+                super::legacy_reactive::reactive_statement_facts(&labeled.body, instance_source);
             let body = super::legacy_reactive::classify_reactive_statement_body(
                 &labeled.body,
                 instance_source,
@@ -899,7 +900,7 @@ fn classify_class_declaration(
     // rewrite the verbatim `StoreClassDecl` emit does not perform. Fail closed on
     // any such class (the SIMPLE `subscribe`-bearing store class with NO inner
     // reactive surface stays supported via verbatim lowering).
-    if super::store_subscriptions::class_body_has_inner_reactive_reference(class) {
+    if super::store_subscriptions::class_body_has_inner_reactive_reference(class, instance_source) {
         return Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
             construct: "class with an inner $-reactive reference",
             span: Span::new(class.span.start, class.span.end),
@@ -1303,7 +1304,7 @@ pub(super) fn scan_magic_identifiers(source: &str) -> Option<UnsupportedSvelteRu
         found: None,
     };
     use oxc_ast_visit::Visit;
-    scan.visit_program(&program);
+    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
     scan.found
 }
 

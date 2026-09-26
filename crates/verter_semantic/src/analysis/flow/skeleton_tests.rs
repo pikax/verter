@@ -19,7 +19,7 @@ fn parse_and_build<T>(
         ret.errors
     );
     let body_source = select(&ret.program);
-    check(build_function_body_skeleton(&body_source))
+    check(build_function_body_skeleton(&body_source, source))
 }
 
 fn first_function<'a, 'ast>(
@@ -83,6 +83,7 @@ fn indexed_structure_of(source: &str) -> PreparedFunctionBodySkeleton {
         .entry();
     build_indexed_function_body_skeleton(
         &FunctionBodySource::from_function(function).unwrap(),
+        source,
         entry,
     )
     .unwrap()
@@ -226,7 +227,8 @@ fn indexed_skeleton_retains_exact_nested_capture_paths_and_runtime_aliases() {
         build_function_program_index(&parsed.program, source, &owners, Arc::from("/capture.ts"));
     let entry = index.matches_named("f").next().unwrap().entry();
     let prepared =
-        build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+        build_indexed_function_body_skeleton(&first_function(&parsed.program), source, entry)
+            .unwrap();
     let skeleton = &prepared.skeleton;
     let xs: Vec<_> = skeleton
         .bindings_named(skeleton.name_id("x").unwrap())
@@ -318,7 +320,8 @@ fn prepared_graph_does_not_resolve_free_parameter_inputs_as_body_bindings() {
             "the default sees the outer environment"
         );
         let prepared =
-            build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+            build_indexed_function_body_skeleton(&first_function(&parsed.program), source, entry)
+                .unwrap();
         let skeleton = &prepared.skeleton;
         let seed = skeleton
             .bindings_named(skeleton.name_id("seed").unwrap())
@@ -367,7 +370,8 @@ fn indexed_skeleton_retains_write_only_capture_subjects_without_value_reads() {
         );
         let entry = index.matches_named("f").next().unwrap().entry();
         let prepared =
-            build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+            build_indexed_function_body_skeleton(&first_function(&parsed.program), source, entry)
+                .unwrap();
         let skeleton = &prepared.skeleton;
         let x = skeleton
             .bindings_named(skeleton.name_id("x").unwrap())
@@ -855,7 +859,7 @@ fn prepared_occurrences_distinguish_free_shadowed_and_captured_targets() {
             }
             FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
         };
-        let prepared = build_indexed_function_body_skeleton(&body, entry).unwrap();
+        let prepared = build_indexed_function_body_skeleton(&body, source, entry).unwrap();
         let bindings = prepared.bindings();
         let frame_span = |start: u32, len: u32| {
             FrameSpan::rebase(entry.span.start, verter_span::Span::new(start, start + len))
@@ -922,7 +926,8 @@ fn prepared_class_occurrences_distinguish_outer_free_and_static_local_bindings()
     );
     let entry = index.matches_named("f").next().unwrap().entry();
     let prepared =
-        build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+        build_indexed_function_body_skeleton(&first_function(&parsed.program), source, entry)
+            .unwrap();
     let occurrence = |needle: &str, name: &str| {
         let start = source.find(needle).unwrap() as u32;
         prepared.bindings().occurrence(FrameSpan::rebase(
@@ -994,7 +999,8 @@ fn runtime_shape_preserves_parameter_var_and_pattern_alias_boundaries() {
         build_function_program_index(&parsed.program, source, &owners, Arc::from("/runtime.ts"));
     let entry = index.matches_named("f").next().unwrap().entry();
     let prepared =
-        build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+        build_indexed_function_body_skeleton(&first_function(&parsed.program), source, entry)
+            .unwrap();
     for (ordinal, binding) in prepared.skeleton().bindings.iter().enumerate() {
         let local = SkeletonBindingId::from_index(ordinal as u32);
         let shape = prepared.bindings().runtime_shape(local);

@@ -20,7 +20,7 @@ use oxc_ast::ast::{ArrowFunctionExpression, AwaitExpression, Function, Program};
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::scope::ScopeFlags;
-use verter_parser::oxc_parse::Parser;
+use verter_parser::oxc_parse::{with_program_stack, Parser};
 
 use crate::code_transform::CodeTransform;
 
@@ -180,7 +180,7 @@ pub(super) fn scan_await_positions(text: &str) -> Vec<AwaitPosition> {
         async_depth: 0,
         positions: Vec::new(),
     };
-    collector.visit_program(&parsed.program);
+    with_program_stack(&parsed.program, || collector.visit_program(&parsed.program));
     collector.positions
 }
 

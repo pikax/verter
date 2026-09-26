@@ -153,7 +153,7 @@ fn collect_expr_identifier_roots(expr_text: &str, used: &mut FxHashSet<String>) 
     let alloc = Allocator::default();
     match Parser::new(&alloc, trimmed, SourceType::tsx()).parse_expression() {
         Ok(expr) => {
-            for reference in collect_expression_free_refs(&expr) {
+            for reference in collect_expression_free_refs(&expr, trimmed) {
                 used.insert(reference.to_string());
             }
             true

@@ -750,9 +750,20 @@ pub fn project_public_constructor(
     };
     contract.source = ConstructorSource::ScriptSetup;
 
-    let semantic = SemanticBuilder::new().build(program).semantic;
+    let semantic = verter_parser::oxc_parse::with_program_stack(program, || {
+        SemanticBuilder::new().build(program)
+    })
+    .semantic;
     let normal_bindings = normal_program
-        .map(|program| value_bindings(SemanticBuilder::new().build(program).semantic.scoping()))
+        .map(|program| {
+            value_bindings(
+                verter_parser::oxc_parse::with_program_stack(program, || {
+                    SemanticBuilder::new().build(program)
+                })
+                .semantic
+                .scoping(),
+            )
+        })
         .unwrap_or_default();
     let module_bound: FxHashSet<&str> = normal_bindings.iter().map(String::as_str).collect();
     let vue_macro_imports = vue_runtime_macro_imports(program);
@@ -790,7 +801,7 @@ pub fn project_public_constructor(
         literal_consts: &literal_consts,
         used_consts: FxHashSet::default(),
     };
-    collector.visit_program(program);
+    verter_parser::oxc_parse::with_program_stack(program, || collector.visit_program(program));
     let requirement = collector.requirement;
     let top_level_await = collector.top_level_await;
     let mut used_consts: Vec<&(u32, String)> = collector
@@ -1342,7 +1353,9 @@ impl PublicCollector<'_, '_> {
             names: self.binder_names,
             found: false,
         };
-        refs.visit_ts_type(ty);
+        verter_parser::oxc_parse::with_span_stack(self.content, ty.span(), || {
+            refs.visit_ts_type(ty)
+        });
         refs.found
     }
 
@@ -1365,8 +1378,11 @@ impl PublicCollector<'_, '_> {
         contextual: Option<&str>,
     ) {
         let text = self.text(expression.span());
+        let content = self.content;
         self.hoist_scanned(name, text, surface, contextual, |refs| {
-            refs.visit_expression(expression);
+            verter_parser::oxc_parse::with_span_stack(content, expression.span(), || {
+                refs.visit_expression(expression)
+            });
         });
     }
 
@@ -1564,6 +1580,7 @@ impl PublicCollector<'_, '_> {
                     .iter()
                     .map(|property| self.text(property.span()))
                     .collect();
+                let content = self.content;
                 self.hoist_scanned(
                     format!("{MODEL_OPTIONS}{ordinal}"),
                     format!("{{ {} }}", members.join(", ")),
@@ -1571,7 +1588,11 @@ impl PublicCollector<'_, '_> {
                     Some("{ readonly required?: boolean; readonly [key: string]: unknown }"),
                     |refs| {
                         for property in deciding {
-                            refs.visit_object_property_kind(property);
+                            verter_parser::oxc_parse::with_span_stack(
+                                content,
+                                property.span(),
+                                || refs.visit_object_property_kind(property),
+                            );
                         }
                     },
                 );

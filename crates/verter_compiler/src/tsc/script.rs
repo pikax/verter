@@ -47,7 +47,7 @@ use verter_macro_dto::{
     TscRetainedValueCarrier, TscScopeRequirements, TscScriptOwner,
     TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
 };
-use verter_parser::oxc_parse::Parser;
+use verter_parser::oxc_parse::{with_program_stack, Parser};
 use verter_type_expr::facts::TypeDependencyPathFact;
 
 use crate::code_transform::{CodeTransform, GeneratedSourceRange};
@@ -2390,7 +2390,9 @@ fn collect_local_type_inventory(
     source_offset: u32,
     owner: TscScriptOwner,
 ) -> Vec<LocalTypeDecl> {
-    let semantic = SemanticBuilder::new().with_enum_eval(true).build(program);
+    let semantic = with_program_stack(program, || {
+        SemanticBuilder::new().with_enum_eval(true).build(program)
+    });
     let scoping = semantic.semantic.scoping();
     let mut contributors = FxHashMap::<String, u32>::default();
     let mut locals = Vec::new();

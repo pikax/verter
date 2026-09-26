@@ -1371,7 +1371,9 @@ fn index_named_class(
                 // A field initialized by a call's synthetic value (see
                 // `class_field_value_name`), mirroring `collect_named_class`.
                 if let (Some(field_name), Some(value)) = (
-                    crate::analysis::type_eval_build::class_field_value_name(name, prop),
+                    crate::analysis::type_eval_build::class_field_value_name(
+                        name, prop, ctx.source,
+                    ),
                     prop.value.as_ref(),
                 ) {
                     let span: Span = value.span().into();

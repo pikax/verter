@@ -968,7 +968,7 @@ fn scan_dollar_refs_in_expression(
         found: None,
     };
     use oxc_ast_visit::Visit;
-    scan.visit_program(&program);
+    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
     scan.found
 }
 
@@ -1169,7 +1169,7 @@ fn first_misplaced_inspect_trace(src: &str) -> Option<u32> {
     })?;
     let mut scan = InspectTracePlacementScan::default();
     use oxc_ast_visit::Visit;
-    scan.visit_program(&program);
+    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
     scan.trace_spans
         .iter()
         .find(|span| !scan.legal_spans.contains(span))

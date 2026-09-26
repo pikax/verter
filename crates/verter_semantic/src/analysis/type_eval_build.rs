@@ -1759,6 +1759,7 @@ pub(crate) fn class_heritage_value_name(class_name: &str) -> String {
 pub(crate) fn class_field_value_name(
     class_name: &str,
     prop: &oxc_ast::ast::PropertyDefinition<'_>,
+    source: &str,
 ) -> Option<String> {
     if prop.type_annotation.is_some() || matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
         return None;
@@ -1767,7 +1768,7 @@ pub(crate) fn class_field_value_name(
     if matches!(
         value,
         Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-    ) || !value_type_derives_from_a_call(value)
+    ) || !value_type_derives_from_a_call(value, source)
         || has_authoritative_value_assertion(value)
     {
         return None;
@@ -2732,7 +2733,7 @@ fn collect_named_class(
                 // `let` does.
                 let field_value = function_value
                     .is_none()
-                    .then(|| class_field_value_name(&name, prop))
+                    .then(|| class_field_value_name(&name, prop, source))
                     .flatten()
                     .map(|field_name| {
                         out.value_decls.push(LoweredValueDeclParts {
@@ -3552,7 +3553,7 @@ fn apply_svelte_rune_initializer_inference(
                 parts.inference_unavailable = None;
                 continue;
             }
-            if svelte_rune_value_argument_contains_call(initializer) {
+            if svelte_rune_value_argument_contains_call(initializer, source) {
                 // Preserve the declaration initializer's indexed call source;
                 // rune inference never re-derives its nested call as a value
                 // type of its own.
@@ -3595,7 +3596,7 @@ fn apply_svelte_rune_initializer_inference(
     }
 }
 
-fn svelte_rune_value_argument_contains_call(expr: &Expression<'_>) -> bool {
+fn svelte_rune_value_argument_contains_call(expr: &Expression<'_>, source: &str) -> bool {
     let Expression::CallExpression(call) = unwrap_expression_wrappers(expr) else {
         return false;
     };
@@ -3609,7 +3610,7 @@ fn svelte_rune_value_argument_contains_call(expr: &Expression<'_>) -> bool {
     call.arguments
         .first()
         .and_then(|argument| argument.as_expression())
-        .is_some_and(value_type_derives_from_a_call)
+        .is_some_and(|argument| value_type_derives_from_a_call(argument, source))
 }
 
 fn inline_svelte_derived_by_callback_point(expr: &Expression<'_>) -> Option<u32> {
@@ -4295,7 +4296,7 @@ fn lower_identifier_variable_parts(
         }
 
         if type_annotation.is_none()
-            && value_type_derives_from_a_call(init)
+            && value_type_derives_from_a_call(init, source)
             && !has_authoritative_value_assertion(init)
         {
             expression_source_offset = Some(init.span().start);
@@ -4434,11 +4435,9 @@ fn implicit_property_type(
                     ClassElement::MethodDefinition(method)
                         if method.kind == MethodDefinitionKind::Constructor =>
                     {
-                        method
-                            .value
-                            .body
-                            .as_ref()
-                            .is_some_and(|body| constructor_assigns_this_member(body, &name))
+                        method.value.body.as_ref().is_some_and(|body| {
+                            constructor_assigns_this_member(body, &name, source)
+                        })
                     }
                     _ => false,
                 })
@@ -4456,7 +4455,11 @@ fn implicit_property_type(
 /// Whether a constructor body assigns `this.<name>` in its own control
 /// flow: an assignment inside a nested function, arrow or class is not on
 /// the constructor's flow.
-fn constructor_assigns_this_member(body: &oxc_ast::ast::FunctionBody<'_>, name: &str) -> bool {
+fn constructor_assigns_this_member(
+    body: &oxc_ast::ast::FunctionBody<'_>,
+    name: &str,
+    source: &str,
+) -> bool {
     struct Assigns<'n> {
         name: &'n str,
         found: bool,
@@ -4486,7 +4489,9 @@ fn constructor_assigns_this_member(body: &oxc_ast::ast::FunctionBody<'_>, name: 
         fn visit_class(&mut self, _: &Class<'a>) {}
     }
     let mut assigns = Assigns { name, found: false };
-    assigns.visit_function_body(body);
+    verter_parser::oxc_parse::with_span_stack(source, body.span, || {
+        assigns.visit_function_body(body)
+    });
     assigns.found
 }
 
@@ -7288,7 +7293,7 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
                 .with_predicate(signature.predicate),
             )))
         }
-        unwrapped if value_type_derives_from_a_call(unwrapped) => {
+        unwrapped if value_type_derives_from_a_call(unwrapped, source) => {
             IndexedValueExpression::UnsupportedCall {
                 point: unwrapped.span().start,
             }
@@ -7613,11 +7618,11 @@ fn lower_indexed_explicit_type_arguments(
 /// lowering fixes syntactically answers the same thing however its
 /// sub-expressions evaluate, so a call underneath one is not fabricated
 /// either.
-pub fn value_inference_fabricates_a_call(expr: &Expression<'_>, _source: &str) -> bool {
-    !has_authoritative_value_assertion(expr) && value_type_derives_from_a_call(expr)
+pub fn value_inference_fabricates_a_call(expr: &Expression<'_>, source: &str) -> bool {
+    !has_authoritative_value_assertion(expr) && value_type_derives_from_a_call(expr, source)
 }
 
-fn value_type_derives_from_a_call(expr: &Expression<'_>) -> bool {
+fn value_type_derives_from_a_call(expr: &Expression<'_>, source: &str) -> bool {
     #[derive(Default)]
     struct CallProbe(bool);
 
@@ -7668,6 +7673,6 @@ fn value_type_derives_from_a_call(expr: &Expression<'_>) -> bool {
     }
 
     let mut probe = CallProbe::default();
-    probe.visit_expression(expr);
+    verter_parser::oxc_parse::with_span_stack(source, expr.span(), || probe.visit_expression(expr));
     probe.0
 }
