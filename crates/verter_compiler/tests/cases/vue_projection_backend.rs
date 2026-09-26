@@ -1392,3 +1392,80 @@ fn component_uses_reads_admitted_carrier_blocks() {
         SetupProjectionRefusal::MissingParse
     );
 }
+
+/// The production advanced generic use path runs on real Vue SFC carrier
+/// bytes: every use sits in one scope over the authored binder and is
+/// constructed through the foreign contract adapter (exact contract first,
+/// tolerant signature second); an unnameable use is recorded unavailable
+/// rather than fabricated; a binder that does not parse and a parse of
+/// other bytes are refused.
+#[test]
+fn advanced_generic_uses_reads_admitted_carrier_blocks() {
+    use verter_compiler::framework_common::vue_projection_backend::{
+        ForeignComponentContractAdapter, UseContractAvailability, USE_COMPONENT, USE_CONSTRUCTOR,
+        USE_PRELUDE, USE_SCOPE,
+    };
+    use verter_compiler::framework_common::SetupProjectionRefusal;
+
+    const SFC: &str = concat!(
+        "<script setup lang=\"ts\" generic=\"const T extends { id: number }, K extends keyof T = keyof T\">\n",
+        "import Picker from './Picker.vue';\n",
+        "import { Badge } from './foreign';\n",
+        "const props = defineProps<{ items: T[] }>();\n",
+        "</script>\n",
+        "<template>\n",
+        "<Picker :items=\"props.items\" field=\"id\" />\n",
+        "<Badge :level=\"2\" />\n",
+        "<component :is=\"\" />\n",
+        "</template>\n",
+    );
+    let artifact = registered_artifact("file:///Parent.vue", SFC);
+    let projection = VueProjectionBackend
+        .advanced_generic_uses(SFC, &artifact, "file:///Parent.vue")
+        .expect("projects");
+    assert!(!projection.complete);
+    assert_eq!(
+        projection.scope_binder(),
+        "<const T extends { id: number }, K extends keyof T = keyof T>"
+    );
+    assert_eq!(projection.uses.len(), 3);
+    assert_eq!(projection.witnesses.witnesses.len(), 2);
+    assert_eq!(
+        projection.uses[2].availability,
+        UseContractAvailability::Unavailable
+    );
+    let rendered = projection.render("const props = defineProps<{ items: T[] }>();\n");
+    assert!(rendered.starts_with(USE_PRELUDE));
+    assert!(rendered.contains(&format!(
+        "function {USE_SCOPE}<const T extends {{ id: number }}, K extends keyof T = keyof T>() {{\nconst props = defineProps<{{ items: T[] }}>();\n"
+    )));
+    for (record, component) in projection.uses.iter().zip(["Picker", "Badge"]) {
+        let UseContractAvailability::Witnessed { binding } = &record.availability else {
+            panic!("use {component} has no witness");
+        };
+        assert!(rendered.contains(&format!(
+            "const {binding} = new ({}",
+            ForeignComponentContractAdapter.construction_callee(component)
+        )));
+        assert!(rendered.contains(&format!(
+            "new ({USE_COMPONENT}({component}, {USE_CONSTRUCTOR}({component})))"
+        )));
+    }
+    assert!(rendered.ends_with("}\n"));
+
+    const BAD_GENERIC: &str =
+        "<script setup lang=\"ts\" generic=\"T extends\">\n</script>\n<template><Picker /></template>\n";
+    let bad = registered_artifact("file:///Bad.vue", BAD_GENERIC);
+    assert_eq!(
+        VueProjectionBackend
+            .advanced_generic_uses(BAD_GENERIC, &bad, "file:///Bad.vue")
+            .unwrap_err(),
+        SetupProjectionRefusal::InvalidGeneric
+    );
+    assert_eq!(
+        VueProjectionBackend
+            .advanced_generic_uses("<template></template>", &artifact, "file:///Parent.vue")
+            .unwrap_err(),
+        SetupProjectionRefusal::MissingParse
+    );
+}

@@ -79,6 +79,10 @@
       "manifest": "tests/sfc-projection/STP18/manifest.json"
     },
     {
+      "id": "STP19",
+      "manifest": "tests/sfc-projection/STP19/manifest.json"
+    },
+    {
       "id": "STS0",
       "manifest": "tests/sfc-projection/STS0/manifest.json"
     }

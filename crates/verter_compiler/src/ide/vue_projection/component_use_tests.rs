@@ -1,5 +1,6 @@
 use super::attribute_operations::project_attribute_operations;
 use super::component_use::*;
+use super::generic_interop::USE_COMPONENT;
 use super::public_constructor::project_public_constructor;
 use super::script_setup::ScriptBlockInput;
 use crate::cursor::ScriptLanguage;
@@ -80,9 +81,7 @@ fn member<'w>(witness: &'w ComponentUseWitness, key: &str) -> &'w MemberValue {
 }
 
 fn constructions(rendered: &str) -> usize {
-    rendered
-        .matches(&format!("new ({USE_CONSTRUCTOR}("))
-        .count()
+    rendered.matches(&format!("new ({USE_COMPONENT}(")).count()
 }
 
 /// Every authored channel of one use — data, callback, discriminant, model
@@ -108,7 +107,7 @@ fn component_use_single_witness_carries_every_channel_once() {
     let rendered = witness.render();
     assert_eq!(constructions(&rendered), 1);
     assert!(rendered.starts_with(&format!(
-        "const {} = new ({USE_CONSTRUCTOR}(Table))({{ \"rows\": (rows), ",
+        "const {} = new ({USE_COMPONENT}(Table, {USE_CONSTRUCTOR}(Table)))({{ \"rows\": (rows), ",
         witness.binding
     )));
     assert!(!rendered.contains("instantiateComponent"));

@@ -627,41 +627,47 @@ impl VuePublicConstructorContract {
     }
 
     fn binder_list(&self, site: BinderSite) -> String {
-        if self.binder.is_empty() {
-            return String::new();
-        }
-        // Aliases cannot carry `const`; every function site keeps it.
-        let with_const = site != BinderSite::Alias;
-        let params: Vec<String> = self
-            .binder
-            .iter()
-            .map(|param| {
-                let mut text = String::new();
-                if with_const && param.is_const {
-                    text.push_str("const ");
-                }
-                text.push_str(&param.name);
-                if let Some(constraint) = &param.constraint {
-                    text.push_str(" extends ");
-                    text.push_str(constraint);
-                }
-                if let Some(default) = &param.default {
-                    text.push_str(" = ");
-                    text.push_str(default);
-                }
-                text
-            })
-            .collect();
-        // An arrow's trailing comma keeps `<T,>() =>` a type parameter list
-        // under the TSX grammar too.
-        let trailing = if site == BinderSite::Arrow { "," } else { "" };
-        format!("<{}{trailing}>", params.join(", "))
+        render_binder_list(&self.binder, site)
     }
+}
+
+/// The authored binder as a type parameter list for `site`: constraints and
+/// defaults verbatim, `const` kept at every function site, empty for an
+/// absent binder.
+pub(super) fn render_binder_list(binder: &[PublicBinderParam], site: BinderSite) -> String {
+    if binder.is_empty() {
+        return String::new();
+    }
+    // Aliases cannot carry `const`; every function site keeps it.
+    let with_const = site != BinderSite::Alias;
+    let params: Vec<String> = binder
+        .iter()
+        .map(|param| {
+            let mut text = String::new();
+            if with_const && param.is_const {
+                text.push_str("const ");
+            }
+            text.push_str(&param.name);
+            if let Some(constraint) = &param.constraint {
+                text.push_str(" extends ");
+                text.push_str(constraint);
+            }
+            if let Some(default) = &param.default {
+                text.push_str(" = ");
+                text.push_str(default);
+            }
+            text
+        })
+        .collect();
+    // An arrow's trailing comma keeps `<T,>() =>` a type parameter list
+    // under the TSX grammar too.
+    let trailing = if site == BinderSite::Arrow { "," } else { "" };
+    format!("<{}{trailing}>", params.join(", "))
 }
 
 /// Where a binder parameter list is rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BinderSite {
+pub(super) enum BinderSite {
     /// A type alias: no `const` modifiers.
     Alias,
     /// The construct signature or the expose provider.
@@ -830,6 +836,18 @@ fn parse_block<'a>(
         return Err(SetupProjectionRefusal::SyntaxErrors { setup });
     }
     Ok(allocator.alloc(parsed.program))
+}
+
+/// The authored binder of a `generic` attribute value, parsed once under
+/// the same rules the public constructor renders from.
+///
+/// # Errors
+///
+/// Refuses a `generic` attribute that does not parse.
+pub(crate) fn public_binder(
+    generic: Option<&str>,
+) -> Result<Vec<PublicBinderParam>, SetupProjectionRefusal> {
+    project_binder(&Allocator::default(), generic)
 }
 
 fn project_binder(
