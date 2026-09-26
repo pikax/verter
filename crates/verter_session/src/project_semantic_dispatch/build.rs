@@ -10764,15 +10764,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => None,
         };
-        // A mapped type — written, or a builtin mapped utility's
-        // application — is read before it materializes, so a homomorphic
+        // A mapped type — written, or a declaration or application whose
+        // body is one — is read before it materializes, so a homomorphic
         // one answers `keyof` its source. A declaration materializes once,
         // under the demand every other reader of it shares.
         let transit_settled = match self.graph().node_data(base).as_deref() {
             Some(SemanticNodeData::Mapped { .. }) => Some(base),
-            Some(SemanticNodeData::InstantiationRef { base: identity, .. })
-                if identity.canonical_id.as_ref() == "__builtin__" =>
-            {
+            Some(SemanticNodeData::InstantiationRef { .. } | SemanticNodeData::DeclRef { .. }) => {
                 Some(self.resolve_signature_source_carrier(
                     base,
                     crate::semantic_query::ProjectionReductionContext::structural_transit(),
@@ -10780,39 +10778,63 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => None,
         };
+        // The checker reads a mapped type's keys off its constraint
+        // (`getIndexTypeForMappedType`), never as a declaration's key list:
+        // they carry no `keyof` origin of their own.
+        let mut mapped = false;
         if let Some(SemanticNodeData::Mapped { source, mapper }) = transit_settled
             .and_then(|settled| self.graph().node_data(settled))
             .as_deref()
         {
-            if mapper.name_remap.is_some()
-                || crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
-                    self, *source, mapper,
-                )
-            {
+            if crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
+                self, *source, mapper,
+            ) {
                 return None;
             }
-            return match self.graph().node_data(mapper.key_space).as_deref() {
-                Some(SemanticNodeData::KeyOf { base: keyed }) if *keyed == *source => {
-                    read(*source).and_then(|keys| {
-                        // `keyof` over the source keeps its own printed form
-                        // (`keyof Partial<Face>` prints `keyof Face`).
-                        match self.graph().node_data(keys).as_deref() {
-                            Some(SemanticNodeData::Opaque(_)) => None,
-                            _ => Some(keys),
-                        }
-                    })
-                }
-                _ => settled_keys(
-                    self.evaluate_deferred_semantic_node_with_context(mapper.key_space, context)
+            mapped = true;
+            // A key remapping's keys are the remapped names the
+            // materialized type holds (`keyof Getters<{ a: 1 }>` is
+            // `"getA"`).
+            if mapper.name_remap.is_none() {
+                return match self.graph().node_data(mapper.key_space).as_deref() {
+                    Some(SemanticNodeData::KeyOf { base: keyed }) if *keyed == *source => {
+                        read(*source).and_then(|keys| {
+                            // `keyof` over the source keeps its own printed
+                            // form (`keyof Partial<Face>` prints `keyof Face`).
+                            match self.graph().node_data(keys).as_deref() {
+                                Some(SemanticNodeData::Opaque(_)) => None,
+                                _ => Some(keys),
+                            }
+                        })
+                    }
+                    _ => settled_keys(
+                        self.evaluate_deferred_semantic_node_with_context(
+                            mapper.key_space,
+                            context,
+                        )
                         .into_active_query_build_node(self),
-                ),
-            };
+                    ),
+                };
+            }
         }
         let settled = self.resolve_signature_source_carrier(base, context);
         if settled == base {
             return None;
         }
         let keys = settled_keys(read(settled)?)?;
+        // A union's keys are those every member shares and an
+        // intersection's those of any member (`getIndexType` over a union or
+        // intersection), read off the members, so an alias naming one leaves
+        // no `keyof` origin (`keyof U` over `type U = { k: 1 } | { k: 2 }`
+        // prints `"k"`); a class or interface keeps its own even where its
+        // heritage resolves to an intersection.
+        let composite = named.as_ref().is_some_and(|identity| {
+            self.prepared_decl_kind(identity)
+                == Some(verter_semantic::analysis::type_eval::TypeDeclKind::Alias)
+        }) && matches!(
+            self.graph().node_data(settled).as_deref(),
+            Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
+        );
         match self.graph().node_data(keys).as_deref() {
             // The checker's key list is one type per property and per index
             // signature — a `string` index contributing its prebuilt
@@ -10823,7 +10845,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::Union(_)) if self.keys_are_one_string_index(settled) => {
                 Some(keys)
             }
-            Some(SemanticNodeData::Union(members)) if named.is_some() && members.len() > 1 => None,
+            Some(SemanticNodeData::Union(members))
+                if named.is_some() && !mapped && !composite && members.len() > 1 =>
+            {
+                None
+            }
             _ => Some(keys),
         }
     }

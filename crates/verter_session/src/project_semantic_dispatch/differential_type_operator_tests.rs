@@ -28,6 +28,8 @@ type Tup = [string, number, boolean];
 type Arr = Array<{ x: 1 }>;
 type Nested = { a: { b: { c: "deep" } } };
 type U2 = { k: "a"; v: 1 } | { k: "b"; v: 2 };
+type Obj = { a: 1; b: 2 };
+type Both = { a: 1 } & { b: 2 };
 "##;
 
 /// An indexed access reads a property, a union of keys, every key, a tuple
@@ -80,21 +82,19 @@ fn indexed_access_and_keyof_read_as_the_checker_reads_them() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `keyof U2` (a union alias) is `"k" | "v"` and `keyof { a: 1 } | keyof { b: 2
-/// }` is `"a" | "b"`: the checker resolves `keyof` over anything but an
-/// interface or class reference. Wrong-but-clean (unreduced): the lane keeps
-/// the `keyof` operator.
-///
-/// What the lane gives:
-/// - `keyof U2`: the checker answers `"k" | "v"`; the lane measured `keyof U2`.
-/// - `keyof { a: 1 } | keyof { b: 2 }`: the checker answers `"a" | "b"`; the
-///   lane measured `keyof { a: 1; } | keyof { b: 2; }`.
+/// `keyof` keeps its origin in print only over a declaration's own key list:
+/// `keyof Obj` over `type Obj = { a: 1; b: 2 }` prints `keyof Obj`, while
+/// `keyof U2` over a union alias is `"k" | "v"` and `keyof Both` over an
+/// intersection alias is `"a" | "b"` (the keys are read off the members), and
+/// a union of `keyof` object literal types holds their keys (`keyof { a: 1 } |
+/// keyof { b: 2 }` is `"a" | "b"`).
 #[test]
-#[ignore = "keyof a union alias or an object literal type resolves to its key union"]
-fn wrong_clean_unreduced_keyof_an_alias_or_literal_type_is_its_key_union() {
+fn keyof_an_alias_or_literal_type_prints_as_the_checker_prints_it() {
     let matrix = Matrix::new(INDEXED);
     let failures = matrix.types(&[
         ("keyof U2", "\"k\" | \"v\""),
+        ("keyof Obj", "keyof Obj"),
+        ("keyof Both", "\"a\" | \"b\""),
         ("keyof { a: 1 } | keyof { b: 2 }", "\"a\" | \"b\""),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -170,19 +170,11 @@ fn a_key_remapped_mapped_type_reads_its_remapped_members() {
 
 /// `keyof Flags<User>` prints `keyof User` (a homomorphic mapped type's keys
 /// are its source's), `keyof Getters<{ a: 1; b: 2 }>` is `"getA" | "getB"` and
-/// `keyof FromUnion<'x' | 'y'>` is `"x" | "y"`. Wrong-but-clean (unreduced):
-/// the lane keeps `keyof` over the application.
-///
-/// What the lane gives:
-/// - `keyof Flags<User>`: the checker answers `keyof User`; the lane measured
-///   `keyof Flags<User>`.
-/// - `keyof Getters<{ a: 1; b: 2 }>`: the checker answers `"getA" | "getB"`;
-///   the lane measured `keyof Getters<{ a: 1; b: 2; }>`.
-/// - `keyof FromUnion<'x' | 'y'>`: the checker answers `"x" | "y"`; the lane
-///   measured `keyof FromUnion<"x" | "y">`.
+/// `keyof FromUnion<'x' | 'y'>` is `"x" | "y"`: a mapped type's keys are read
+/// off its constraint, never as a declaration's key list with a `keyof`
+/// origin of its own.
 #[test]
-#[ignore = "keyof a mapped type application resolves to its keys"]
-fn wrong_clean_unreduced_keyof_a_mapped_application_is_its_key_union() {
+fn keyof_a_mapped_application_is_its_key_union() {
     let matrix = Matrix::new(MAPPED);
     let failures = matrix.types(&[
         ("keyof Flags<User>", "keyof User"),
@@ -193,25 +185,31 @@ fn wrong_clean_unreduced_keyof_a_mapped_application_is_its_key_union() {
 }
 
 /// A homomorphic mapped type instantiated with a tuple or array type is a tuple
-/// or array: `Boxed<[1, 2]>` is `[{ v: 1; }, { v: 2; }]`, `Boxed<string[]>` is
-/// `{ v: string; }[]`, `Flags<[1, 2]>` is `[boolean, boolean]`. Wrong-but-clean
-/// (unreduced): the lane keeps the application.
+/// or array, which the alias does not name: `Flags<[1, 2]>` is `[boolean,
+/// boolean]`.
+#[test]
+fn a_homomorphic_mapped_type_maps_arrays_and_tuples() {
+    let matrix = Matrix::new(MAPPED);
+    let failures = matrix.types(&[("Flags<[1, 2]>", "[boolean, boolean]")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `Boxed<[1, 2]>` is `[{ v: 1; }, { v: 2; }]` and `Boxed<string[]>` is `{ v:
+/// string; }[]`: each element's member value is the source element's type.
 ///
 /// What the lane gives:
 /// - `Boxed<[1, 2]>`: the checker answers `[{ v: 1; }, { v: 2; }]`; the lane
-///   measured `Boxed<[1, 2]>`.
+///   measured `[{ v: <unreduced indexed access>; }, { v: <unreduced indexed
+///   access>; }]`.
 /// - `Boxed<string[]>`: the checker answers `{ v: string; }[]`; the lane
-///   measured `Boxed<string[]>`.
-/// - `Flags<[1, 2]>`: the checker answers `[boolean, boolean]`; the lane
-///   measured `Flags<[1, 2]>`.
+///   measured `{ v: <unreduced indexed access>; }[]`.
 #[test]
-#[ignore = "a homomorphic mapped type over an array or tuple is an array or tuple"]
-fn wrong_clean_unreduced_a_homomorphic_mapped_type_maps_arrays_and_tuples() {
+#[ignore = "a homomorphic mapped type over an array or tuple reads each element's member value"]
+fn a_homomorphic_mapped_type_over_a_tuple_reads_its_element_values() {
     let matrix = Matrix::new(MAPPED);
     let failures = matrix.types(&[
         ("Boxed<[1, 2]>", "[{ v: 1; }, { v: 2; }]"),
         ("Boxed<string[]>", "{ v: string; }[]"),
-        ("Flags<[1, 2]>", "[boolean, boolean]"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
