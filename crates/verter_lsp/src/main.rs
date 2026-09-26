@@ -22,8 +22,12 @@ use verter_session::{HostConfig, VerterHost};
 /// the measured requirement this replaces that default with.
 fn main() {
     verter_lsp::run_on_serve_thread(|| {
+        // Every worker and blocking thread gets the serve thread's stack:
+        // the sync coordinator, background drain, diagnostics and scanner
+        // run compile and analysis on them, and tokio's default is 2 MiB.
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            .thread_stack_size(verter_lsp::SERVE_THREAD_STACK_BYTES)
             .build()
             .expect("multi-thread tokio runtime must build")
             .block_on(serve());

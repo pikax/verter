@@ -46,8 +46,8 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Statement, TSType};
-use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
+use verter_parser::oxc_parse::Parser;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HoverExtractError {

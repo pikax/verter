@@ -18,8 +18,8 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, VariableDeclarator};
 use oxc_ast::{Comment, CommentContent};
 use oxc_ast_visit::{walk, Visit};
-use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
+use verter_parser::oxc_parse::Parser;
 
 impl TemplateProjector<'_, '_> {
     /// Project a `<svelte:*>` special element.

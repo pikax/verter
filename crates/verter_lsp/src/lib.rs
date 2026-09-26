@@ -43,12 +43,14 @@ pub const LSP_MAX_CONCURRENCY: usize = 64;
 /// nest inline and their poll frames are not compacted, so a debug server on
 /// Windows died on its first request regardless of what that request did.
 ///
-/// 8 MiB is chosen as defence in depth, not as a correctness condition: ~70x
-/// headroom over the release peak and ~4.4x over the debug peak, while staying
-/// small enough to be an ordinary thread rather than a licence for unbounded
-/// recursion. A runaway recursion must still be fixed at its source — no stack
-/// size survives one.
-pub const SERVE_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+/// The thread is sized like every analysis thread
+/// ([`verter_scheduler::WORKER_STACK_BYTES`]: 8 MiB optimized, 32 MiB
+/// unoptimized), because a handler also runs compile and analysis inline,
+/// and those recurse once per nesting level of the source in places. That is
+/// ~70x headroom over the release peak above and ~17x over the debug one. A
+/// runaway recursion must still be fixed at its source — no stack size
+/// survives one.
+pub const SERVE_THREAD_STACK_BYTES: usize = verter_scheduler::WORKER_STACK_BYTES;
 
 /// Run `body` on a thread with [`SERVE_THREAD_STACK_BYTES`] of stack and return
 /// its value, propagating a panic to the caller.

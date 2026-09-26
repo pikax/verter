@@ -1,7 +1,8 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
-use oxc_parser::{ParseOptions, Parser};
+use oxc_parser::ParseOptions;
 use oxc_span::SourceType;
+use verter_parser::oxc_parse::Parser;
 
 use crate::analysis::classify::classify_vue_api;
 use crate::analysis::types::{

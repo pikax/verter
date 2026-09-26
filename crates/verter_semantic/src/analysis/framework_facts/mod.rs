@@ -509,8 +509,8 @@ pub fn capture_script_candidates_with_context(
 mod tests {
     use super::*;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
 
     struct FixtureProvider {
         gate: ScriptFactSyntaxGate,

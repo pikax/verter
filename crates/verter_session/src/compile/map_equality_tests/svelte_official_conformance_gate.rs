@@ -671,7 +671,9 @@ fn each_flags_argument(code: &str) -> u32 {
     use oxc_ast_visit::Visit;
 
     let allocator = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&allocator, code, oxc_span::SourceType::mjs()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, code, oxc_span::SourceType::mjs())
+            .parse();
     assert!(
         !parsed.panicked && parsed.errors.is_empty(),
         "the emitted module does not parse, so no structural reading is possible: {:?}",
@@ -756,7 +758,9 @@ fn imports_client_runtime(code: &str) -> bool {
     use oxc_ast::ast::Statement;
 
     let allocator = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&allocator, code, oxc_span::SourceType::mjs()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, code, oxc_span::SourceType::mjs())
+            .parse();
     parsed.program.body.iter().any(|statement| {
         matches!(statement, Statement::ImportDeclaration(import)
             if import.source.value.as_str() == SVELTE_CLIENT_RUNTIME_SPECIFIER)

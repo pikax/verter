@@ -35,6 +35,7 @@ oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_ast_visit = { workspace = true }
 oxc_parser = { workspace = true }
+stacker = "0.1.25"
 oxc_span = { workspace = true }
 oxc_syntax = { workspace = true }
 oxc_diagnostics = "0.126.0"

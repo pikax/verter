@@ -89,6 +89,8 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<A::Out> {
+    #[cfg(test)]
+    FOLDED_NODES.with(|folded| folded.set(folded.get() + 1));
     let ctx = dispatch.ctx;
     let data = node_data_for(ctx, node)?;
     Some(match data.as_ref() {
@@ -787,6 +789,42 @@ fn fold_open_object_spread_program<A: RaisedShapeAlgebra>(
     alg.absorb_dropped(result, dropped)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many nodes this thread's raises folded ([`fold_node`]);
+    /// test-only.
+    static FOLDED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many nodes this thread's raises folded so far (test-only).
+#[cfg(test)]
+pub(crate) fn folded_nodes_for_tests() -> usize {
+    FOLDED_NODES.with(std::cell::Cell::get)
+}
+
+/// Whether `member` is the `prototype` property the checker declares on a
+/// class expression's constructor type
+/// ([`crate::project_semantic_dispatch::build::class_prototype_member`]):
+/// synthetic, with no authored site, whose value is the class's instance.
+/// The checker's printer skips a prototype property (its declaration emit
+/// of a class expression's type is the construct signatures and statics
+/// alone), and printing it spells the instance a second time beside the
+/// construct signature's return: a class expression nested in a method's
+/// return doubled the raised shape per level.
+fn is_class_expression_prototype(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    surface: &SurfaceView,
+    member: &crate::semantic_query::SurfaceMember,
+) -> bool {
+    !surface.construct_signatures.is_empty()
+        && member.key.as_string() == Some("prototype")
+        && member.spans == verter_type_expr::MemberSpans::default()
+        && matches!(
+            node_data_for(dispatch.ctx, member.value).as_deref(),
+            Some(SemanticNodeData::ClassExpressionInstance { .. })
+        )
+}
+
 /// Reconstruct an Object from a [`SurfaceView`] — the non-empty `Object` arm.
 /// Each member / signature value folds through the core with a FRESH cycle set
 /// (matching the materializer's fresh-per-member `active`). A member whose
@@ -823,6 +861,9 @@ fn fold_surface_view<A: RaisedShapeAlgebra>(
 
     let mut members: Vec<A::Member> = Vec::new();
     for member in surface.positive_members().iter() {
+        if is_class_expression_prototype(dispatch, surface, member) {
+            continue;
+        }
         push_surface_member(alg, dispatch, &mut members, member);
     }
 

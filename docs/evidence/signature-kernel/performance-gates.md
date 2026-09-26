@@ -74,6 +74,101 @@ idle-machine policy. Raw logs and run reports stay out of the tree; a
 distribution is published here only from a session that reports **lock
 evidence**.
 
+Commands, from the repository root:
+
+```text
+# full session (lock evidence on the locked runner class)
+node scripts/benchmark/signature-kernel-perf.mjs
+# quick session (pipeline smoke test: small corpus, 2 invocations, no control)
+node scripts/benchmark/signature-kernel-perf.mjs --quick
+
+# the harness alone, full and quick
+cargo run --release -p verter_session --example signature_kernel_bench
+cargo run --release -p verter_session --example signature_kernel_bench -- \
+    --modules 4 --depth 4 --samples 6 --cold-samples 3 --soak 20
+# the cancellation probe alone, full and quick
+cargo run --release -p verter_session --example signature_kernel_cancel_probe
+cargo run --release -p verter_session --example signature_kernel_cancel_probe -- \
+    --modules 4 --depth 4 --cold-samples 3 --rounds 3
+```
+
+The harness prints one JSON document (`harness_version` 3). What each number
+means:
+
+* **`workloads`** — per workload (`cold_load`, `warm_query`, `local_edit`,
+  `declaration_edit`, `augmentation_edit`, `restart`), latency samples in
+  nanoseconds and the allocation count and bytes of one untimed accounting
+  pass. `warm_query` samples are per query, each timed in a batch of full
+  sweeps. The runner reports p50 / p95 / p99 per arm and, over matched
+  work, the candidate / baseline ratio with its 95% hierarchical bootstrap
+  interval and verdict.
+* **Scalability.** Three sections, each point its own distribution. Caller
+  threads are created once per point, outside timing; each sample is
+  released by a start barrier and timed from the first caller's start to
+  the last caller's finish, each read by the caller itself, so neither
+  thread spawn and join nor a wake-up is inside a sample. One untimed
+  warm-up sample precedes each point. The worker count of a point is the
+  host's scheduler CPU workers (`SchedulerConfig::cpu_threads`); the host
+  CPU pool and the declaration-lowering workers keep their default sizes.
+  * **`concurrent_queries`** (concurrent query scalability) — one warm
+    host with a fixed worker count (`--host-workers`, default 4), queried
+    by 1, 2, 4 and 8 callers at once. Every caller runs the same work per
+    sample, ten full sweeps over every witness from its own offset, so
+    perfect scaling keeps the sample's wall time flat. Per point:
+    `samples_ns` (wall), `qps` (all callers' queries over the wall) and
+    `query_latency_ns` (each query's own latency, p50 / p95 / p99 / max
+    over every caller and sample).
+  * **`scheduler_scaling`** (internal scheduler scalability) — one caller;
+    hosts with 1, 2, 4 and 8 workers. Each sample gets a fresh host loaded
+    with the check corpus untimed; the sample is the cold first query of
+    every witness, independent roots across every module. Per point:
+    `samples_ns`, `median_ns`, `speedup_vs_1` (the one-worker median over
+    this point's), and the CPU fields below. A speedup is work the host
+    spreads over its scheduler by itself.
+  * **`full_check`** (full-check throughput) — hosts with 1, 2, 4 and 8
+    workers and as many callers, on a fresh host per sample: the two shared
+    inputs are loaded untimed, then the check corpus's files are dealt out
+    round-robin and each caller upserts its files and answers their
+    witnesses, as a project checker drives one host with a checking thread
+    per worker. Per point: `samples_ns`, `files_per_second` and the CPU
+    fields.
+  * CPU fields (`scheduler_scaling`, `full_check`): `cpu_ns`, the process
+    CPU time (every thread, user plus system) across each sample;
+    `cpu_utilisation`, `cpu / (wall × workers)` per sample; and
+    `cpu_utilisation_total`, `Σ cpu / (Σ wall × workers)` over the point,
+    which the runner reports. The callers' own CPU counts, so utilisation
+    can exceed 1. `cpu_time_source` names the clock:
+    `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` on macOS and Linux,
+    `GetProcessTimes` on Windows (which advances in scheduler ticks of
+    about 15.6 ms, so read the point's total there, not one sample), and
+    null elsewhere.
+  * The **check corpus** is the corpus's module shape at `--check-modules`
+    modules (default four times `--modules`); its outcomes are the
+    `check` state, and the scheduler and full-check points are matched
+    only when both arms agree on every witness in it.
+
+  The runner compares each point's wall time like a workload (ratio,
+  interval, gate, verdict) and reports queries per second and query
+  latency, speedup, files per second and CPU utilisation as the medians
+  across invocations. The per-query latency percentiles are the median of
+  each invocation's percentile.
+* **`soak_live_bytes`** — live heap after each edit/revert round.
+* **`census`**, **`census_by_witness`** and **`outcomes`** — what every
+  witness answers, untimed (see *Matched work* below).
+
+The cancellation probe prints its own document (`harness_version` 2):
+`cold_request`, `cancel_stop` and `restart` samples in aggregate, and
+`by_fraction`, one entry per injection point (10, 30, 50, 70 and 90% of
+the invocation's median cold request, `cold_request_median_ns`), each with
+its `delay_ns`, `landed_ns` (from the request's start to `cancel()`),
+`cancel_stop` and `restart` samples and `completed_before_cancel`; a
+request that completed before its cancellation landed gives neither a stop
+nor a restart sample (its retry is a warm read). The
+canceller thread is parked before the request starts and counts from the
+request's own start instant, so where a cancellation lands does not depend
+on thread creation. The runner reports p50 / p95 / p99 per point beside the
+aggregate.
+
 Lock evidence requires, beyond an idle machine and a control drift inside the
 gate:
 
@@ -109,7 +204,8 @@ Recorded plainly so no reader mistakes absence for a pass:
   exists; the candidate-only probe
   (`crates/verter_session/examples/signature_kernel_cancel_probe.rs`), which
   the runner runs inside the same session, records the stop and restart
-  distributions. No locked session has run it yet.
+  distributions, in aggregate and per injection point. No locked session
+  has run it yet.
 * Completion and diagnostic agreement rates against the pinned official
   compiler on a full project check.
 * A LOCKED cell: `performance-gates.toml` has no signature-kernel cell.
@@ -415,6 +511,91 @@ Recorded plainly so no reader mistakes absence for a pass:
   `a_return_in_2000_parentheses_lowers_on_the_worker_stack`; it overflows
   with the recursion restored). The declaration-lowering worker's deepest
   stack there is its re-parse of the file (4.0 MiB at 2,000).
+
+* **Every production thread that analyzes reserves the workers' stack.**
+  Several host APIs compute on the caller's own thread (`compile_entry`,
+  public-API extraction, the scheduler-missed analysis lane), so the
+  caller's stack matters as much as the workers'. Before, the LSP's tokio
+  workers and blocking pool (sync coordinator, background drain,
+  diagnostics, scanner compile, document analysis), every MCP tool call,
+  `verter-tsc`'s main thread and rayon pool, and the WebAssembly module ran
+  on 2 MiB, 1 MiB (Windows main threads) or 1 MiB (wasm32's linker
+  default). Measured on the calling thread with a 256-deep nest, the flow
+  evaluation of nested functions, blocks and object literals takes up to
+  2.6 MB optimized and 11.4 MB unoptimized (arrow functions; `if` 1.2 /
+  6.1 MB, object literals 0.5 / 2.6 MB, class expressions 1.6 / 6.8 MB), and
+  the declaration-lowering worker up to 1.3 / 7.2 MB. Every analysis
+  thread now reserves `verter_scheduler::WORKER_STACK_BYTES` (8 MiB
+  optimized, 32 MiB unoptimized): the scheduler's and host's workers, the
+  declaration-lowering workers, the LSP serve thread and its runtime's
+  workers and blocking threads (`thread_stack_size`), MCP's server thread
+  and runtime (`verter_mcp::run::run_blocking`), `verter-tsc`'s checker
+  thread and global rayon pool, and the WebAssembly module
+  (`crates/verter_wasm/build.rs`: `-zstack-size=8388608`; the built
+  module's stack pointer starts at 8 MiB). Node's own main thread, which
+  `verter_napi` computes on synchronously, is 8 MiB on Windows
+  (`SizeOfStackReserve` of node.exe) and the `ulimit` on Linux. On the
+  8 MiB wasm module every measured form at 250 levels answers through
+  `evaluateTypeExpressionWithAudit`.
+
+* **oxc's parse runs on a stack its source cannot exhaust.** oxc_parser
+  0.126's recursive descent has no depth limit and aborts the process when
+  a thread's stack runs out, before returning an AST: on an 8 MiB stack at
+  4,512 nested type arguments or object literals and 5,664 parentheses
+  (optimized), 2,272 and 3,424 unoptimized
+  (`docs/evidence/signature-kernel/oxc-deep-parse.md`, reproduced by
+  `crates/verter_parser/examples/oxc_deep_parse.rs` with nothing of
+  Verter's). Every production parse goes through
+  `verter_parser::oxc_parse::Parser`, a drop-in that parses exactly what
+  oxc parses: a linear scan bounds the syntax tree's depth from above and
+  the parse gets 8 KiB per level of it (twice oxc's costliest measured
+  level), in place when the thread has it and on a `stacker` segment
+  otherwise. No source is refused and no depth is imposed.
+  `oxc_parse/tests.rs` parses ten forms 10,000 deep and an unclosed
+  200,000-deep nest on a 1 MiB thread (with the parse in place, or with a
+  per-level stack below what oxc spends, it overflows), and
+  `no_crate_parses_around_the_guard` fails on a direct
+  `oxc_parser::Parser`. The scan costs about a third of the parse (8.1 ms
+  against 6.1 ms for `lib.dom.d.ts`, optimized); a source short enough
+  that every byte could be a level skips it. `stacker` cannot grow the
+  stack on wasm32, where the module's 8 MiB bounds the parse. What runs
+  after the parse (the syntax-tree clone, the semantic builder and
+  Verter's own passes) still recurses per level in places.
+
+* **A class expression raises one instance per level.** The lane's graph
+  of `class { m() { return class { … } } }` nested `n` deep is linear
+  (evaluation 3–10 ms from 4 to 24 levels, optimized), but its raised type
+  printed the `prototype` property the checker declares on every class
+  constructor beside the construct signature, each spelling the anonymous
+  instance structurally, so the raised shape doubled per level: 8,451,
+  143,091, 2,297,331 and 36,765,171 JSON bytes at 4, 8, 12 and 16 levels,
+  62 s to serialize 16 levels natively, 72 s for
+  `evaluateTypeExpressionWithAudit` on the WebAssembly host at 16 and no
+  answer at 20. No query or memo recomputed work (the audit's hops and
+  expansions are 3 and 2 at every depth); the output did. The raise now
+  omits that synthetic prototype property, as the checker's declaration
+  emit does (`{ new (): { m(): … } }`, 9,806 bytes at 24 levels), while
+  the graph keeps it for member reads and `keyof`: 1,088 to 6,348 bytes
+  from 4 to 24 levels, 3.5 ms to serialize 24, and 77–86 ms per call on
+  the WebAssembly host at every depth.
+  `flow_return_class_tests.rs` →
+  `a_nested_class_expression_raises_one_instance_per_level` asserts the
+  folded nodes (a test counter in the raise's `fold_node`) and the raised
+  size grow by the same amount per level over 4, 8 and 12; with the
+  prototype printed they grow 136, 2,296, 36,856.
+
+* **A call's arguments lower once per enclosing call.** A call nested
+  as an argument (`g(g(…g(1)…))`) lowers again from the enclosing call's
+  frame-lowered arguments (`Lowerer::lower_call_arguments`), and each
+  such lowering recorded its own arguments again
+  (`Lowerer::record_call_arguments`), so the work doubled per level:
+  383, 6,143 and 98,303 expression lowerings at 8, 12 and 16 levels, and
+  256 levels never finished. A call whose arguments are already recorded
+  keeps them; the lowerings grow with the square of the depth
+  (`flow_slice_content_tests.rs` →
+  `nested_calls_lower_their_arguments_once_per_enclosing_call`, the second
+  difference over 8/12/16 equal to that over 12/16/20; it fails with the
+  re-recording restored), and 256 nested calls lower in 0.5 s optimized.
 
 * **A pair of literal types relates without a query.** Two literal types
   relate, under every relation kind, exactly when they are one value, so

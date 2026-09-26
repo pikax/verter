@@ -1165,3 +1165,72 @@ fn a_class_prototype_erases_every_type_parameter() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// `pf`, returning a class expression whose method returns a class
+/// expression, `depth` deep, raised whole: the nodes the raise folded and
+/// the raised shape's JSON size.
+fn nested_class_expression_raise(depth: usize) -> (usize, usize) {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let body = format!(
+        "{}0{}",
+        "class { m() { return ".repeat(depth),
+        " } }".repeat(depth)
+    );
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/nested-class.ts".to_string()),
+        input_id: "/ws/nested-class.ts".to_string(),
+        source: Arc::from(format!("export function pf() {{ return {body}; }}\n")),
+        file_language: crate::FileLanguage::script(verter_language::ScriptSourceType::Ts),
+        aliases: Vec::new(),
+    });
+    let (resolved, _) = host
+        .evaluate_type_expression_with_audit(
+            crate::typeinfo::types::EvaluateTypeExpressionRequest {
+                scope: "/ws/nested-class.ts".to_string(),
+                expression: "ReturnType<typeof pf>".to_string(),
+                extra_imports: Vec::new(),
+                mode: crate::semantic_query::ProjectionMode::Expanded,
+                cacheable: false,
+            },
+        )
+        .into_parts();
+    let node = resolved
+        .ok()
+        .flatten()
+        .expect("the nested class expression resolves");
+    let before = super::raise::folded_nodes_for_tests();
+    let raised = host
+        .project_node_to_type_expr_for_test(node)
+        .expect("the nested class expression raises");
+    let folded = super::raise::folded_nodes_for_tests() - before;
+    let bytes = serde_json::to_vec(&raised).expect("serializes").len();
+    (folded, bytes)
+}
+
+/// A class expression's raised type prints its construct signatures and
+/// statics, never the `prototype` property the checker declares on its
+/// constructor: the checker's printer skips a prototype property, and
+/// printing it spelled the instance a second time beside the construct
+/// signature's return, so a class expression nested in a method's return
+/// doubled the raised shape per level (8,451, 143,091 and 2,297,331 bytes
+/// at 4, 8 and 12 levels; 62 s to serialize 16 levels, and 20 never
+/// finished on the WebAssembly host). The folded nodes and the raised size
+/// now grow by the same amount per level.
+///
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`):
+/// `pf` is declared `{ new (): { m(): { new (): … m(): number … } } }`,
+/// with no `prototype`, 9,806 bytes at 24 levels.
+#[test]
+fn a_nested_class_expression_raises_one_instance_per_level() {
+    let raises = [4, 8, 12].map(nested_class_expression_raise);
+    assert_eq!(
+        raises[1].0 - raises[0].0,
+        raises[2].0 - raises[1].0,
+        "the folded nodes grow by the same count per level: {raises:?}"
+    );
+    assert_eq!(
+        raises[1].1 - raises[0].1,
+        raises[2].1 - raises[1].1,
+        "the raised shape grows by the same size per level: {raises:?}"
+    );
+}

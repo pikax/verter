@@ -196,8 +196,9 @@ pub(in crate::server) fn template_lexical_scope_names(
 fn parse_template_binding_pattern_names(pattern: &str) -> std::collections::HashSet<String> {
     let allocator = oxc_allocator::Allocator::new();
     let wrapped = format!("({pattern}) => {{}}");
-    let Ok(expression) = oxc_parser::Parser::new(&allocator, &wrapped, oxc_span::SourceType::tsx())
-        .parse_expression()
+    let Ok(expression) =
+        verter_parser::oxc_parse::Parser::new(&allocator, &wrapped, oxc_span::SourceType::tsx())
+            .parse_expression()
     else {
         return std::collections::HashSet::new();
     };

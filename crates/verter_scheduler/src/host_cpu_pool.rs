@@ -205,7 +205,7 @@ impl HostCpuPool {
             let pool_id = self.pool_id;
             rayon::ThreadPoolBuilder::new()
                 .num_threads(self.threads)
-                .stack_size(8 * 1024 * 1024)
+                .stack_size(crate::pool::WORKER_STACK_BYTES)
                 .thread_name(|i| format!("verter-host-cpu-{i}"))
                 .start_handler(move |_| {
                     // Workers register as `External` so `wait_or_drive`

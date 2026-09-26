@@ -43,8 +43,8 @@ fn candidate_key(canonical: &str, content: [u8; 16]) -> CandidateSlotKey {
 
 fn fixture_candidates() -> ExactFrameworkScriptCandidates {
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_semantic::analysis::framework_facts::{
         capture_script_candidates, ScriptFactProvider,
     };

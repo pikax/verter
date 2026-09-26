@@ -271,15 +271,24 @@ impl SchedulerCpuPool {
     }
 }
 
-/// The native stack of every scheduler worker, CPU and I/O alike: 8 MiB,
-/// the stack the host CPU pool and the declaration-lowering workers run
-/// on. A source job parses and analyzes the file it loads (an I/O worker
-/// runs it inline), and the parser and the syntax-tree clone recurse once
-/// per level of nesting: on the platform default (2 MiB on Windows and
-/// Linux) a file holding 700 nested type arguments or a 2,000-operand
-/// `&&` chain overflowed a worker and aborted the process. Stacks are
-/// reserved, not committed, so the reservation costs address space only.
-const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+/// The native stack of every thread Verter runs analysis on: the
+/// scheduler's CPU and I/O workers, the host CPU pool, the
+/// declaration-lowering workers and the entry threads and runtimes of the
+/// LSP, MCP and `verter-tsc` binaries. A source job parses and analyzes the
+/// file it loads (an I/O worker runs it inline), and the parser, the
+/// syntax-tree clone, the slice lowering and the flow evaluation still
+/// recurse once per level of nesting in places. The platform defaults
+/// (1 MiB for a Windows main thread, 2 MiB for std, tokio and rayon threads)
+/// held about a quarter of what the analysis of a 256-deep nest of arrow
+/// functions takes unoptimized on the calling thread (11.4 MB; 2.6 MB
+/// optimized). Unoptimized frames are four to five times larger, so an
+/// unoptimized build reserves 32 MiB. Stacks are reserved, not committed,
+/// so the reservation costs address space only.
+pub const WORKER_STACK_BYTES: usize = if cfg!(debug_assertions) {
+    32 * 1024 * 1024
+} else {
+    8 * 1024 * 1024
+};
 
 /// Scheduler-owned I/O pool for source/load work.
 ///

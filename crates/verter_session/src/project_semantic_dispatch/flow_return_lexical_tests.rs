@@ -6822,3 +6822,28 @@ fn a_member_call_on_a_shadowing_binding_reads_the_binding() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A nested generic function's own `T` shadows the enclosing one, in a
+/// function value as in a function type: calling the inner signature reads
+/// its own constraint.
+///
+/// Measured on TypeScript 7.0.2 (strict): each row below is `number`, the
+/// inner `T`'s constraint (the outer one is `string`).
+#[test]
+fn a_nested_same_name_type_parameter_names_the_innermost_declaration() {
+    let failures = super::checker_probe_lane_tests::mismatches(
+        concat!(
+            "export function pf<T extends string>(x: T) { return <T extends number>(y: T) => y; }\n",
+            "export const af = <T extends string>(x: T) => <T extends number>(y: T) => y;\n",
+            "type F = <T extends string>(x: T) => <T extends number>(y: T) => T;\n",
+        ),
+        &[
+            ("ReturnType<ReturnType<typeof pf>>", "number"),
+            ("ReturnType<ReturnType<typeof af>>", "number"),
+            ("Parameters<ReturnType<typeof pf>>[0]", "number"),
+            ("ReturnType<ReturnType<F>>", "number"),
+            ("Parameters<ReturnType<F>>[0]", "number"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -346,10 +346,10 @@ struct LoweredStatementBatch {
 pub struct DeclBodyMemo {
     #[cfg(test)]
     pub(crate) capture_lookup_work: Arc<std::sync::atomic::AtomicUsize>,
-    /// How many tests this memo's slice lowerings classified as guards
-    /// ([`crate::flow_slice_content::guard_classification_probe`]).
+    /// This memo's slice lowerings' work
+    /// ([`crate::flow_slice_content::lowering_probe`]).
     #[cfg(test)]
-    pub(crate) guard_classification_work: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) lowering_work: Arc<crate::flow_slice_content::lowering_probe::LoweringWork>,
     key: SnapshotKey,
     eval_source: Arc<str>,
     framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
@@ -439,7 +439,7 @@ impl DeclBodyMemo {
             #[cfg(test)]
             capture_lookup_work: Arc::default(),
             #[cfg(test)]
-            guard_classification_work: Arc::default(),
+            lowering_work: Arc::default(),
             key,
             eval_source,
             framework_parse,
@@ -477,7 +477,7 @@ impl DeclBodyMemo {
             #[cfg(test)]
             capture_lookup_work: Arc::default(),
             #[cfg(test)]
-            guard_classification_work: Arc::default(),
+            lowering_work: Arc::default(),
             key,
             eval_source: Arc::from(""),
             framework_parse: None,
@@ -1275,13 +1275,12 @@ impl DeclBodyMemo {
         #[cfg(test)]
         let work = Arc::clone(&self.capture_lookup_work);
         #[cfg(test)]
-        let classifications = Arc::clone(&self.guard_classification_work);
+        let lowering_work = Arc::clone(&self.lowering_work);
         let Some(node) = service.run_leased(&self.key, move |program| {
             #[cfg(test)]
             let _probe = crate::flow_slice_content::capture_lookup_probe::enter(work);
             #[cfg(test)]
-            let _classifications =
-                crate::flow_slice_content::guard_classification_probe::enter(classifications);
+            let _lowering = crate::flow_slice_content::lowering_probe::enter(lowering_work);
             program.and_then(|p| {
                 p.with_indexed_function(&entry, |resolved, entry| {
                     crate::flow_slice_content::build_flow_slice_content(

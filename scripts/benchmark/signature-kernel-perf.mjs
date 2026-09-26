@@ -20,7 +20,15 @@
 // Inside the same control bracket it also runs the candidate's cancellation probe
 // (crates/verter_session/examples/signature_kernel_cancel_probe.rs) once per candidate
 // invocation. The baseline has no caller-cancellable entry, so the probe's
-// cancellation/restart distributions are recorded absolute, never gated.
+// cancellation/restart distributions are recorded absolute, never gated — in
+// aggregate and per injection point.
+//
+// The harness's three scalability sections (concurrent queries against a fixed host
+// worker count, one caller against 1/2/4/8 host workers, and the full check at 1/2/4/8
+// host workers) each get their own table.
+//
+//   node scripts/benchmark/signature-kernel-perf.mjs            # full run (lock evidence)
+//   node scripts/benchmark/signature-kernel-perf.mjs --quick    # pipeline smoke test
 //
 //   node scripts/benchmark/signature-kernel-perf.mjs [options]
 //
@@ -29,6 +37,9 @@
 //   --candidate <rev>      candidate revision (default: HEAD)
 //   --invocations <n>      invocations per arm, ABBA-interleaved (default: 4, the policy minimum)
 //   --modules/--depth/--samples/--cold-samples/--soak <n>   forwarded to the harness
+//   --host-workers <n>     the concurrent-query benchmark's fixed host worker count (forwarded)
+//   --check-modules <n>    the scaling benchmarks' corpus size (forwarded)
+//   --rounds <n>           cancellation rounds per injection point (forwarded to the probe only)
 //   --exclude <Kind,Kind>  witness kinds NOT queried (forwarded); a workload whose witnesses the
 //                          arms answer differently gets no ratio, so exclude the kinds the
 //                          matched-work section names to compare the rest
@@ -58,7 +69,9 @@ import { readGatesToml } from "../validate-performance-gates.mjs";
 const HARNESS_REL = "crates/verter_session/examples/signature_kernel_bench.rs";
 const CANCEL_PROBE_REL = "crates/verter_session/examples/signature_kernel_cancel_probe.rs";
 // The harness arguments the cancellation probe shares.
-const CANCEL_PROBE_ARGS = ["--modules", "--depth", "--cold-samples"];
+const CANCEL_PROBE_ARGS = ["--modules", "--depth", "--cold-samples", "--rounds"];
+// The arguments only the cancellation probe takes.
+const CANCEL_PROBE_ONLY_ARGS = ["--rounds"];
 const BASELINE_TITLE = "resolve effective tsconfig semantic options into the type environment";
 
 // The locked runner class and statistics are READ from the gate file, never restated
@@ -167,6 +180,9 @@ function parseArgs(argv) {
       case "--samples":
       case "--cold-samples":
       case "--soak":
+      case "--host-workers":
+      case "--check-modules":
+      case "--rounds":
       case "--exclude":
         opts.forwarded[flag] = value();
         break;
@@ -210,6 +226,7 @@ function parseArgs(argv) {
       "--samples": "6",
       "--cold-samples": "3",
       "--soak": "20",
+      "--rounds": "3",
       ...opts.forwarded,
     };
   }
@@ -643,6 +660,115 @@ function workloadIsMatched(outcomes, name) {
   return !original.mismatches.some((m) => queried.has(m.witness));
 }
 
+/** p50 / p95 / p99 and the count of a sample set. */
+function stats(xs) {
+  return { p50: quantile(xs, 0.5), p95: quantile(xs, 0.95), p99: quantile(xs, 0.99), n: xs.length };
+}
+
+/**
+ * One timed distribution compared across the arms: the pooled percentiles and, over
+ * matched work, the median ratio, its hierarchical bootstrap interval, the gate
+ * (max(5%, 2 × the baseline's between-invocation noise)) and the verdict. A ratio
+ * across different answers is not a speedup or a regression: unmatched work reports
+ * its distributions and no ratio, interval, gate or verdict.
+ */
+function timeComparison(baseline, candidate, matched, seed) {
+  const base = baseline.flat();
+  const cand = candidate.flat();
+  const baseMedians = baseline.map(median);
+  // Between-invocation noise of the baseline arm, relative to its median.
+  const noisePercent =
+    ((Math.max(...baseMedians) - Math.min(...baseMedians)) / median(baseMedians)) * 100;
+  const threshold = matched
+    ? Math.max(POLICY.investigationFloorPercent, POLICY.noiseMultiplier * noisePercent)
+    : null;
+  const ci = matched
+    ? bootstrapRatio(baseline, candidate, POLICY.bootstrapResamples, POLICY.confidence, seed)
+    : null;
+  return {
+    baseline_ns: stats(base),
+    candidate_ns: stats(cand),
+    matched,
+    median_ratio: matched ? median(cand) / median(base) : null,
+    ratio_ci: ci,
+    baseline_noise_percent: noisePercent,
+    gate_threshold_percent: threshold,
+    verdict: matched ? verdictFor(ci, threshold) : "not comparable — the arms answer differently",
+  };
+}
+
+/**
+ * The harness's scalability sections: where each keeps its points, and the outcome
+ * states its witnesses are fingerprinted in (the scaling benchmarks run the check
+ * corpus, whose modules include the original ones).
+ */
+const SCALING_SECTIONS = {
+  concurrent_queries: { points: "by_callers", states: ["original"] },
+  scheduler_scaling: { points: "by_workers", states: ["check"] },
+  full_check: { points: "by_workers", states: ["check"] },
+};
+
+/**
+ * Every scalability section present in the harness output, per point and arm: the
+ * wall-time distribution with its comparison, and the section's own figures —
+ * queries per second and the per-query latency percentiles (the median across
+ * invocations of each invocation's percentile), the speedup against the one-worker
+ * point (from the pooled medians), files per second, and the CPU utilisation over
+ * every sample (`Σ cpu / (Σ wall × workers)`, median across invocations; null where
+ * the harness had no process CPU clock).
+ */
+function summarizeScaling(runs, outcomes) {
+  const sections = {};
+  let seed = 0x5ca1e;
+  for (const [section, spec] of Object.entries(SCALING_SECTIONS)) {
+    const first = runs.baseline[0].document[section];
+    if (!first) continue;
+    const matched =
+      outcomes.nondeterministic.length === 0 &&
+      spec.states.every((state) => outcomes.states[state]?.mismatches.length === 0);
+    const pointsOf = (arm, key) => runs[arm].map((r) => r.document[section][spec.points][key]);
+    const medianOrNull = (xs) =>
+      xs.some((x) => x === null || x === undefined) ? null : median(xs);
+    const points = {};
+    for (const key of Object.keys(first[spec.points])) {
+      const figures = (arm) => {
+        const docs = pointsOf(arm, key);
+        const out = {};
+        if (docs[0].qps !== undefined) out.qps = median(docs.flatMap((d) => d.qps));
+        if (docs[0].query_latency_ns !== undefined) {
+          out.query_latency_ns = Object.fromEntries(
+            ["p50", "p95", "p99"].map((q) => [q, median(docs.map((d) => d.query_latency_ns[q]))]),
+          );
+        }
+        if (docs[0].files_per_second !== undefined)
+          out.files_per_second = median(docs.flatMap((d) => d.files_per_second));
+        if (docs[0].cpu_utilisation_total !== undefined)
+          out.cpu_utilisation = medianOrNull(docs.map((d) => d.cpu_utilisation_total));
+        return out;
+      };
+      points[key] = {
+        ...timeComparison(
+          pointsOf("baseline", key).map((d) => d.samples_ns),
+          pointsOf("candidate", key).map((d) => d.samples_ns),
+          matched,
+          seed++,
+        ),
+        baseline: figures("baseline"),
+        candidate: figures("candidate"),
+      };
+    }
+    if (spec.points === "by_workers" && points["1"]) {
+      for (const point of Object.values(points)) {
+        point.baseline.speedup_vs_1 = points["1"].baseline_ns.p50 / point.baseline_ns.p50;
+        point.candidate.speedup_vs_1 = points["1"].candidate_ns.p50 / point.candidate_ns.p50;
+      }
+    }
+    const { by_callers: _callers, by_workers: _workers, ...facts } = first;
+    sections[section] = { ...facts, matched, points };
+  }
+  return sections;
+}
+
 // ── main ─────────────────────────────────────────────────────────────────
 
 function main() {
@@ -712,7 +838,9 @@ function main() {
       );
     }
 
-    const harnessArgs = Object.entries(opts.forwarded).flat();
+    const harnessArgs = Object.entries(opts.forwarded)
+      .filter(([flag]) => !CANCEL_PROBE_ONLY_ARGS.includes(flag))
+      .flat();
     const control = () => {
       const text = run(controlBinary, ["--files", "40", "--runs", "30"], {
         cwd: trees.baseline,
@@ -878,10 +1006,7 @@ function summarize({
   const first = runs.baseline[0].document;
   const outcomes = compareOutcomes(runs);
   const workloadNames = Object.keys(first.workloads);
-  const pooled = (arm, name) => runs[arm].flatMap((r) => r.document.workloads[name].samples_ns);
   const clustered = (arm, name) => runs[arm].map((r) => r.document.workloads[name].samples_ns);
-  const perInvocationMedians = (arm, name) =>
-    runs[arm].map((r) => median(r.document.workloads[name].samples_ns));
 
   const censusOf = (arm) => runs[arm][0].document.census;
   const censusMatches =
@@ -897,61 +1022,22 @@ function summarize({
 
   const workloads = {};
   workloadNames.forEach((name, index) => {
-    const base = pooled("baseline", name);
-    const cand = pooled("candidate", name);
-    const baseMedians = perInvocationMedians("baseline", name);
-    // Between-invocation noise of the baseline arm, relative to its median.
-    const noisePercent =
-      ((Math.max(...baseMedians) - Math.min(...baseMedians)) / median(baseMedians)) * 100;
-    // A ratio across different answers is not a speedup or a regression: an unmatched
-    // workload reports its distributions and no ratio, interval, gate or verdict.
-    const matched = workloadIsMatched(outcomes, name);
-    const threshold = matched
-      ? Math.max(POLICY.investigationFloorPercent, POLICY.noiseMultiplier * noisePercent)
-      : null;
-    const ratio = matched ? median(cand) / median(base) : null;
-    const ci = matched
-      ? bootstrapRatio(
-          clustered("baseline", name),
-          clustered("candidate", name),
-          POLICY.bootstrapResamples,
-          POLICY.confidence,
-          0x5eed + index,
-        )
-      : null;
-    const verdict = matched
-      ? verdictFor(ci, threshold)
-      : "not comparable — the arms answer differently";
-    const stats = (xs) => ({
-      p50: quantile(xs, 0.5),
-      p95: quantile(xs, 0.95),
-      p99: quantile(xs, 0.99),
-      n: xs.length,
-    });
     const allocOf = (arm) => median(runs[arm].map((r) => r.document.workloads[name].alloc_bytes));
     const allocCountOf = (arm) =>
       median(runs[arm].map((r) => r.document.workloads[name].alloc_count));
     workloads[name] = {
-      baseline_ns: stats(base),
-      candidate_ns: stats(cand),
-      matched,
-      median_ratio: ratio,
-      ratio_ci: ci,
-      baseline_noise_percent: noisePercent,
-      gate_threshold_percent: threshold,
-      verdict,
+      ...timeComparison(
+        clustered("baseline", name),
+        clustered("candidate", name),
+        workloadIsMatched(outcomes, name),
+        0x5eed + index,
+      ),
       alloc_bytes: { baseline: allocOf("baseline"), candidate: allocOf("candidate") },
       alloc_count: { baseline: allocCountOf("baseline"), candidate: allocCountOf("candidate") },
     };
   });
 
-  const throughput = {};
-  for (const key of Object.keys(first.throughput_qps)) {
-    throughput[key] = {
-      baseline_qps: median(runs.baseline.map((r) => r.document.throughput_qps[key])),
-      candidate_qps: median(runs.candidate.map((r) => r.document.throughput_qps[key])),
-    };
-  }
+  const scaling = summarizeScaling(runs, outcomes);
 
   const soak = {};
   for (const arm of ["baseline", "candidate"]) {
@@ -990,7 +1076,12 @@ function summarize({
       `outcomes differ between invocations of the ${outcomes.nondeterministic.join(" and ")} arm`,
     );
   }
-  const unmatched = workloadNames.filter((name) => !workloads[name].matched);
+  const unmatched = [
+    ...workloadNames.filter((name) => !workloads[name].matched),
+    ...Object.entries(scaling)
+      .filter(([, section]) => !section.matched)
+      .map(([name]) => name),
+  ];
   if (unmatched.length > 0) lockRefusals.push(`unmatched work in ${unmatched.join(", ")}`);
 
   return {
@@ -1023,7 +1114,7 @@ function summarize({
     },
     outcomes,
     workloads,
-    throughput,
+    scaling,
     soak,
     cancellation: summarizeCancellation(cancelProbe, cancelRuns),
     raw_logs: rawDigests,
@@ -1052,6 +1143,23 @@ function summarizeCancellation(probe, runs) {
             spread_percent: ((Math.max(...medians) - Math.min(...medians)) / median(medians)) * 100,
           };
   }
+  // Per injection point, pooled across invocations; where each cancellation landed is
+  // read against its own invocation's median cold request.
+  const byFraction = (runs[0].by_fraction ?? []).map((point, index) => {
+    const points = runs.map((r) => r.by_fraction[index]);
+    const pooledOf = (name) => points.flatMap((p) => p[name].samples_ns);
+    const landedFractions = runs.flatMap((r) =>
+      r.by_fraction[index].landed_ns.samples_ns.map((ns) => ns / r.cold_request_median_ns),
+    );
+    const distribution = (xs) => (xs.length === 0 ? { n: 0 } : stats(xs));
+    return {
+      fraction: point.fraction,
+      landed_fraction: distribution(landedFractions),
+      completed_before_cancel: points.reduce((sum, p) => sum + p.completed_before_cancel, 0),
+      cancel_stop: distribution(pooledOf("cancel_stop")),
+      restart: distribution(pooledOf("restart")),
+    };
+  });
   return {
     probe: { path: CANCEL_PROBE_REL, sha256: probe.sha256 },
     invocations: runs.length,
@@ -1059,7 +1167,74 @@ function summarizeCancellation(probe, runs) {
     fractions: runs[0].fractions,
     completed_before_cancel: runs.reduce((sum, r) => sum + r.completed_before_cancel, 0),
     distributions,
+    by_fraction: byFraction,
   };
+}
+
+/** The three scalability tables, each section only when the harness recorded it. */
+function renderScaling(scaling, ms) {
+  const lines = [];
+  const util = (x) => (x === null || x === undefined ? "n/a" : x.toFixed(2));
+  const concurrent = scaling.concurrent_queries;
+  if (concurrent) {
+    const us = (ns) => String(Number((ns / 1e3).toPrecision(4)));
+    const lat = (l) => `${us(l.p50)} / ${us(l.p95)} / ${us(l.p99)}`;
+    lines.push(
+      "",
+      `## Concurrent query scalability (one warm host, ${concurrent.host_workers} host workers, N callers)`,
+      "",
+      `Each caller runs ${concurrent.sweeps_per_sample} full sweeps of ${concurrent.witnesses} witnesses per sample; the callers are created once, released by a barrier, and timed from the first start to the last finish.`,
+      "",
+      "| Callers | baseline q/s | candidate q/s | baseline query p50 / p95 / p99 (µs) | candidate query p50 / p95 / p99 (µs) | time ratio (95% CI) | verdict |",
+      "|---|---|---|---|---|---|---|",
+    );
+    for (const [key, p] of Object.entries(concurrent.points)) {
+      lines.push(
+        `| ${key} | ${Math.round(p.baseline.qps)} | ${Math.round(p.candidate.qps)} | ${lat(p.baseline.query_latency_ns)} | ${lat(p.candidate.query_latency_ns)} | ${ratioCell(p)} | ${p.verdict} |`,
+      );
+    }
+  }
+  const scheduler = scaling.scheduler_scaling;
+  if (scheduler) {
+    lines.push(
+      "",
+      "## Internal scheduler scalability (one caller, N host workers)",
+      "",
+      `A fresh host per sample, loaded untimed; the sample is the cold first query of all ${scheduler.witnesses} witnesses of the ${scheduler.modules}-module check corpus. Speedup is against one worker.`,
+      "",
+      "| Workers | baseline p50 (ms) | candidate p50 (ms) | baseline speedup | candidate speedup | baseline CPU utilisation | candidate CPU utilisation | time ratio (95% CI) | verdict |",
+      "|---|---|---|---|---|---|---|---|---|",
+    );
+    for (const [key, p] of Object.entries(scheduler.points)) {
+      lines.push(
+        `| ${key} | ${ms(p.baseline_ns.p50)} | ${ms(p.candidate_ns.p50)} | ${p.baseline.speedup_vs_1.toFixed(2)} | ${p.candidate.speedup_vs_1.toFixed(2)} | ${util(p.baseline.cpu_utilisation)} | ${util(p.candidate.cpu_utilisation)} | ${ratioCell(p)} | ${p.verdict} |`,
+      );
+    }
+  }
+  const check = scaling.full_check;
+  if (check) {
+    lines.push(
+      "",
+      "## Full-check throughput (N host workers, N callers)",
+      "",
+      `A fresh host per sample; the ${check.files} files of the check corpus dealt out to one caller per worker, each loading its files and answering their ${check.witnesses} witnesses in all.`,
+      "",
+      "| Workers | baseline files/s | candidate files/s | baseline p50 (ms) | candidate p50 (ms) | baseline CPU utilisation | candidate CPU utilisation | time ratio (95% CI) | verdict |",
+      "|---|---|---|---|---|---|---|---|---|",
+    );
+    for (const [key, p] of Object.entries(check.points)) {
+      lines.push(
+        `| ${key} | ${p.baseline.files_per_second.toFixed(1)} | ${p.candidate.files_per_second.toFixed(1)} | ${ms(p.baseline_ns.p50)} | ${ms(p.candidate_ns.p50)} | ${util(p.baseline.cpu_utilisation)} | ${util(p.candidate.cpu_utilisation)} | ${ratioCell(p)} | ${p.verdict} |`,
+      );
+    }
+  }
+  if (scheduler || check) {
+    lines.push(
+      "",
+      "CPU utilisation is process CPU time (every thread, user and system) over wall time × host workers, across every sample of the point; the callers' own CPU counts, so it can exceed 1.",
+    );
+  }
+  return lines;
 }
 
 /** A workload's ratio and interval, or `n/a` when its work is not matched. */
@@ -1179,7 +1354,6 @@ function renderMarkdown(s) {
     "|---|---|---|---|---|---|",
   );
   for (const [name, w] of Object.entries(s.workloads)) {
-    if (name.startsWith("throughput_")) continue;
     lines.push(
       `| ${name} | ${ms(w.baseline_ns.p50)} / ${ms(w.baseline_ns.p95)} / ${ms(w.baseline_ns.p99)} | ${ms(w.candidate_ns.p50)} / ${ms(w.candidate_ns.p95)} / ${ms(w.candidate_ns.p99)} | ${ratioCell(w)} | ${w.matched ? `±${w.gate_threshold_percent.toFixed(1)}%` : "n/a"} | ${w.verdict} |`,
     );
@@ -1199,28 +1373,11 @@ function renderMarkdown(s) {
     "|---|---|---|---|---|",
   );
   for (const [name, w] of Object.entries(s.workloads)) {
-    if (name.startsWith("throughput_")) continue;
     lines.push(
       `| ${name} | ${w.alloc_bytes.baseline} | ${w.alloc_bytes.candidate} | ${w.alloc_count.baseline} | ${w.alloc_count.candidate} |`,
     );
   }
-  lines.push(
-    "",
-    "## Throughput (queries/s, one warm host, N threads over N scheduler workers)",
-    "",
-  );
-  lines.push(
-    "| Workers | baseline | candidate | time ratio (95% CI) | verdict |",
-    "|---|---|---|---|---|",
-  );
-  for (const [key, t] of Object.entries(s.throughput)) {
-    // The throughput workload's own time samples carry the interval and verdict.
-    const w = s.workloads[key];
-    const timed = w ? `${ratioCell(w)} | ${w.verdict}` : "n/a | n/a";
-    lines.push(
-      `| ${key.replace("throughput_w", "")} | ${t.baseline_qps} | ${t.candidate_qps} | ${timed} |`,
-    );
-  }
+  lines.push(...renderScaling(s.scaling ?? {}, ms));
   lines.push("", "## Edit/revert soak (live heap)", "");
   lines.push(
     "| Arm | second-quarter median | last-quarter median | growth | verdict |",
@@ -1251,11 +1408,31 @@ function renderMarkdown(s) {
           : `| ${name} | ${ms(d.p50)} / ${ms(d.p95)} / ${ms(d.p99)} | ${d.n} | ${d.spread_percent.toFixed(1)}% |`,
       );
     }
+    if ((c.by_fraction ?? []).length > 0) {
+      const cell = (d) => (d.n === 0 ? "n/a" : `${ms(d.p50)} / ${ms(d.p95)} / ${ms(d.p99)}`);
+      lines.push(
+        "",
+        "Per injection point:",
+        "",
+        "| Injection point | landed (median, of cold) | cancel_stop p50 / p95 / p99 | stopped | completed first | restart p50 / p95 / p99 |",
+        "|---|---|---|---|---|---|",
+      );
+      for (const p of c.by_fraction) {
+        const landed =
+          p.landed_fraction.n === 0 ? "n/a" : `${(p.landed_fraction.p50 * 100).toFixed(1)}%`;
+        lines.push(
+          `| ${Math.round(p.fraction * 100)}% | ${landed} | ${cell(p.cancel_stop)} | ${p.cancel_stop.n} | ${p.completed_before_cancel} | ${cell(p.restart)} |`,
+        );
+      }
+    }
     lines.push(
       "",
       "`cold_request` is the uncancelled request on a fresh host; `cancel_stop` runs from",
       "`cancel()` to the request returning `Cancelled`; `restart` is the retry on the same",
-      "host. The baseline has no caller-cancellable entry, so these are recorded, not gated.",
+      "host after a cancelled attempt. An injection point is its fraction of the invocation's",
+      "median cold request, counted from the request's own start; `landed` is where its",
+      "cancellations actually fell. The baseline has no caller-cancellable entry, so these",
+      "are recorded, not gated.",
     );
   }
   lines.push(

@@ -34,10 +34,10 @@ use oxc_ast::ast::{
     Argument, BindingPattern, Declaration, Expression, ImportDeclarationSpecifier, ImportSpecifier,
     ModuleExportName, ObjectExpression, ObjectPropertyKind, Program, PropertyKey, Statement,
 };
-use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType};
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_parser::oxc_parse::Parser;
 
 use crate::cursor::ScriptLanguage;
 

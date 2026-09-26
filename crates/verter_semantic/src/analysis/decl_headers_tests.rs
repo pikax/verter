@@ -10,8 +10,8 @@ use crate::analysis::type_eval_build::{build_eval_env, parse_and_build_env};
 
 fn index_for(source: &str) -> DeclHeaderIndex {
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
 
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
@@ -23,8 +23,8 @@ fn index_for(source: &str) -> DeclHeaderIndex {
 fn owner_scoped_headers_do_not_merge_same_name_declarations() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
@@ -85,8 +85,8 @@ fn ordinary_header_entry_point_uses_module_zero_owner() {
 fn default_export_aliases_are_scoped_by_lexical_owner() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
@@ -122,8 +122,8 @@ export default interface InstanceDefault { instance: number }
 fn jsdoc_typedef_headers_use_attachment_or_explicit_region_owner() {
     use crate::analysis::top_level_owners::{TopLevelOwnerRegion, TopLevelOwnerTable};
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_span::Span;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
@@ -200,8 +200,8 @@ fn augmentation_contributors_retain_lexical_owner() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use crate::analysis::type_eval::AugmentationScopeKind;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
@@ -247,7 +247,7 @@ fn assert_name_parity(source: &str) {
 /// over one parse.
 fn assert_name_parity_as(source: &str, source_type: oxc_span::SourceType) -> DeclHeaderIndex {
     let allocator = oxc_allocator::Allocator::default();
-    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+    let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
     assert!(!ret.panicked, "fixture must parse");
     let env = build_eval_env(
         &ret.program,
@@ -441,8 +441,8 @@ interface Trailing extends WrongTrailing /* @vue-ignore */ {}
 fn vue_ignore_facts_are_scoped_to_exact_merged_contributor_and_lexical_owner() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::facts::VueIgnoredHeritageFact;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
@@ -1024,8 +1024,8 @@ fn selective_statement_lowering_matches_whole_env_group() {
     // the whole-env walk's group — the core selective-lowering parity.
     use crate::analysis::type_eval::EvalEnv;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
 
     let source = r#"
 interface Merged { a: string }
