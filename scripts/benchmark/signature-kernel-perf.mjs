@@ -1429,9 +1429,10 @@ function renderMarkdown(s) {
       "",
       "`cold_request` is the uncancelled request on a fresh host; `cancel_stop` runs from",
       "`cancel()` to the request returning `Cancelled`; `restart` is the retry on the same",
-      "host. An injection point is its fraction of the invocation's median cold request,",
-      "counted from the request's own start; `landed` is where its cancellations actually",
-      "fell. The baseline has no caller-cancellable entry, so these are recorded, not gated.",
+      "host after a cancelled attempt. An injection point is its fraction of the invocation's",
+      "median cold request, counted from the request's own start; `landed` is where its",
+      "cancellations actually fell. The baseline has no caller-cancellable entry, so these",
+      "are recorded, not gated.",
     );
   }
   lines.push(

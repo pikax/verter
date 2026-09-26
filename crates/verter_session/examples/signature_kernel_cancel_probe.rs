@@ -27,7 +27,8 @@
 //!   `Cancelled`, with the cancellation landing at fixed fractions of the
 //!   median cold request.
 //! * `restart`      — the retry under a fresh token on the host the
-//!   cancelled attempt ran on, until its complete answer.
+//!   cancelled attempt ran on, until its complete answer; a request that
+//!   completed before its cancellation landed gives no restart sample.
 //!
 //! Each distribution is recorded in aggregate (`workloads`) and per
 //! injection point (`by_fraction`): the point is `fraction × the median
@@ -303,9 +304,14 @@ fn run() {
                 ),
                 Outcome::Complete => point.completed_before_cancel += 1,
             }
+            // A retry after a request that completed is a warm read, not a
+            // restart: it still runs, but only a cancelled attempt's retry
+            // is a restart sample.
             let retried = Instant::now();
             let retry = request(&host, CancellationToken::new());
-            point.restart_ns.push(retried.elapsed().as_nanos() as u64);
+            if landing.outcome == Outcome::Cancelled {
+                point.restart_ns.push(retried.elapsed().as_nanos() as u64);
+            }
             assert_eq!(retry, Outcome::Complete, "the retry completes");
         }
     }

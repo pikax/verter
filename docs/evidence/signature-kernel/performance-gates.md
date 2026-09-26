@@ -161,7 +161,9 @@ The cancellation probe prints its own document (`harness_version` 2):
 `by_fraction`, one entry per injection point (10, 30, 50, 70 and 90% of
 the invocation's median cold request, `cold_request_median_ns`), each with
 its `delay_ns`, `landed_ns` (from the request's start to `cancel()`),
-`cancel_stop` and `restart` samples and `completed_before_cancel`. The
+`cancel_stop` and `restart` samples and `completed_before_cancel`; a
+request that completed before its cancellation landed gives neither a stop
+nor a restart sample (its retry is a warm read). The
 canceller thread is parked before the request starts and counts from the
 request's own start instant, so where a cancellation lands does not depend
 on thread creation. The runner reports p50 / p95 / p99 per point beside the
