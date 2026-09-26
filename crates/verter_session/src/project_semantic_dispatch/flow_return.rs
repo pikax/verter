@@ -24481,7 +24481,7 @@ mod narrowing_ledger_tests {
 
     fn param(ordinal: u32) -> FlowProductSubject {
         let allocator = oxc_allocator::Allocator::default();
-        let parsed = crate::parse::Parser::new(
+        let parsed = oxc_parser::Parser::new(
             &allocator,
             "function f(p0: unknown, p1: unknown) {}",
             oxc_span::SourceType::ts(),

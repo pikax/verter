@@ -384,8 +384,7 @@ pub fn extract_programmatic_routes(
     } else {
         oxc_span::SourceType::mjs()
     };
-    let parser_ret =
-        verter_parser::oxc_parse::Parser::new(&allocator, content, source_type).parse();
+    let parser_ret = oxc_parser::Parser::new(&allocator, content, source_type).parse();
     let program = &parser_ret.program;
 
     // Collect import map: local_name -> source (for resolving eager component imports)
@@ -1020,8 +1019,7 @@ pub fn extract_route_guards(content: &str, file_path: &str) -> Vec<RouteGuard> {
     } else {
         oxc_span::SourceType::mjs()
     };
-    let parser_ret =
-        verter_parser::oxc_parse::Parser::new(&allocator, content, source_type).parse();
+    let parser_ret = oxc_parser::Parser::new(&allocator, content, source_type).parse();
     let program = &parser_ret.program;
 
     let mut guards = Vec::new();

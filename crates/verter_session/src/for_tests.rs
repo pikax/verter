@@ -741,7 +741,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     let (_, parse_key) = verter_language::default_parse_identity_for(source, &file_language)
         .expect("the hermetic fixture's script language derives a parse identity");
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_source_type).parse();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_source_type).parse();
     assert!(parsed.errors.is_empty(), "fixture must parse");
     let function = parsed.program.body.iter().find_map(|s| match s { oxc_ast::ast::Statement::FunctionDeclaration(f) => Some(f), _ => None }).expect("fixture must contain a function declaration");
     let name = function.id.as_ref().expect("named function").name.as_str();

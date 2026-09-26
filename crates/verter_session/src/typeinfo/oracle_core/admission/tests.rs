@@ -26,8 +26,8 @@ const SHALLOW: ProjectionModeKind = ProjectionModeKind::Shallow;
 fn lower(rhs: &str) -> TypeExpr {
     use oxc_allocator::Allocator;
     use oxc_ast::ast::Statement;
+    use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use verter_parser::oxc_parse::Parser;
     let allocator = Allocator::default();
     let src = format!("type __T = {rhs};");
     let ret = Parser::new(&allocator, &src, SourceType::ts()).parse();
@@ -297,8 +297,8 @@ fn pre_lowering_loss_rejected() {
 fn strict_lowering_drop_counter() {
     use oxc_allocator::Allocator;
     use oxc_ast::ast::Statement;
+    use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use verter_parser::oxc_parse::Parser;
 
     fn drops(rhs: &str) -> usize {
         let allocator = Allocator::default();

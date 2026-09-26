@@ -7348,23 +7348,10 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
     // `use oxc_parser::Parser as OxcParser;` → "OxcParser", glob
     // `use oxc_parser::*;` → "Parser", module alias
     // `use oxc_parser as op;` → "op::Parser".
-    //
-    // Every parse goes through the guarded `verter_parser::oxc_parse::Parser`
-    // (`verter_parser`'s `no_crate_parses_around_the_guard`), so its imports
-    // bind the parser exactly as `oxc_parser`'s did.
     fn oxc_parser_import_bindings(body: &str) -> Vec<String> {
-        let mut bindings = oxc_parser_import_bindings_from(body, "use oxc_parser");
-        bindings.extend(oxc_parser_import_bindings_from(
-            body,
-            "use verter_parser::oxc_parse",
-        ));
-        bindings
-    }
-
-    fn oxc_parser_import_bindings_from(body: &str, prefix: &str) -> Vec<String> {
         let mut bindings = Vec::new();
         let mut rest = body;
-        while let Some(pos) = rest.find(prefix) {
+        while let Some(pos) = rest.find("use oxc_parser") {
             let stmt_start = &rest[pos..];
             let end = stmt_start.find(';').unwrap_or(stmt_start.len());
             let stmt = &stmt_start[..end];
@@ -7372,7 +7359,7 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
             // `use oxc_parser as <alias>` — calls then appear as
             // `<alias>::Parser::new`.
             if let Some((before, alias)) = stmt.split_once(" as ") {
-                if before.trim() == prefix {
+                if before.trim() == "use oxc_parser" {
                     bindings.push(format!("{}::Parser", alias.trim()));
                 }
             }
@@ -7456,7 +7443,6 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
                 continue;
             }
             if line.contains("oxc_parser::Parser::new")
-                || line.contains("oxc_parse::Parser::new")
                 || bindings.iter().any(|b| contains_bare_call(line, b))
             {
                 site_lines.push(lineno + 1);

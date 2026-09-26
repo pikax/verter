@@ -3,8 +3,8 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, Statement};
+use oxc_parser::Parser;
 use oxc_span::SourceType;
-use verter_parser::oxc_parse::Parser;
 
 /// The STRUCTURAL classification of a two-way `bind:` directive's bound target
 /// expression, derived from the parsed OXC node — NOT a text scan.

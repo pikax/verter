@@ -69,8 +69,8 @@ fn parse_jsdoc_tag_type_payload_with_dependencies(
     payload_file_offset: Option<u32>,
 ) -> (TypeExpr, DeclDependencyNames) {
     use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use verter_parser::oxc_parse::Parser;
 
     if input.trim().is_empty() {
         return (

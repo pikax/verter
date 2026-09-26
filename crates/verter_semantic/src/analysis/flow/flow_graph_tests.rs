@@ -204,9 +204,7 @@ fn indexed_returned_arrow(source: &str) -> FunctionBodySkeleton {
     };
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     let allocator = oxc_allocator::Allocator::default();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-            .parse();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index =
         build_function_program_index(&parsed.program, source, &owners, Arc::from("/capture.ts"));

@@ -1,8 +1,7 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
-use oxc_parser::ParseOptions;
+use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SourceType};
-use verter_parser::oxc_parse::Parser;
 
 use verter_span::Span;
 

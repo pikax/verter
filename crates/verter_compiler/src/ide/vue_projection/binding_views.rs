@@ -49,9 +49,9 @@ use oxc_ast::ast::{
     PropertyKey, Statement, TSSignature, TSType,
 };
 use oxc_ast_visit::{walk, Visit};
+use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_parser::oxc_parse::Parser;
 
 use crate::cursor::ScriptLanguage;
 

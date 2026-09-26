@@ -7,7 +7,6 @@ pub mod ast;
 pub mod common;
 pub mod cursor;
 pub mod diagnostics;
-pub mod oxc_parse;
 pub mod parser;
 pub mod svelte_reactivity;
 pub mod tokenizer;

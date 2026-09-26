@@ -842,9 +842,7 @@ mod tests {
         source: &str,
     ) -> Arc<verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory> {
         let alloc = oxc_allocator::Allocator::new();
-        let parsed =
-            verter_parser::oxc_parse::Parser::new(&alloc, source, oxc_span::SourceType::ts())
-                .parse();
+        let parsed = oxc_parser::Parser::new(&alloc, source, oxc_span::SourceType::ts()).parse();
         assert!(!parsed.panicked, "route fixture must parse");
         Arc::new(
             verter_parser::utils::oxc::script::route_inventory::build_script_route_inventory(

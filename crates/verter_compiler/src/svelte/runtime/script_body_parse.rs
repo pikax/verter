@@ -35,8 +35,7 @@ pub(super) fn script_body_fails_to_parse(body: &str, grammar: ScriptBodyGrammar)
         ScriptBodyGrammar::Js => oxc_span::SourceType::mjs(),
         ScriptBodyGrammar::Ts => oxc_span::SourceType::ts(),
     };
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&alloc, alloc.alloc_str(body), source_type).parse();
+    let parsed = oxc_parser::Parser::new(&alloc, alloc.alloc_str(body), source_type).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         return true;
     }

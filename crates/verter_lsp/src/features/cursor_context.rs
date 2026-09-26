@@ -1264,8 +1264,7 @@ pub fn classify_expression_context(tsx_content: &str, tsx_offset: usize) -> Expr
     // Wrap in an expression statement for parsing
     let wrapped = format!("({})", tsx_content);
     let wrapped_offset = tsx_offset + 1; // account for the wrapping `(`
-    let parse_result =
-        verter_parser::oxc_parse::Parser::new(&allocator, &wrapped, source_type).parse();
+    let parse_result = oxc_parser::Parser::new(&allocator, &wrapped, source_type).parse();
 
     if parse_result.panicked {
         return ExpressionContext::Unknown;

@@ -549,8 +549,8 @@ fn collect_pattern_names(pattern: &BindingPattern<'_>, out: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::oxc_parse::Parser;
     use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
     use oxc_span::SourceType;
 
     use super::*;

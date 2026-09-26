@@ -11,10 +11,8 @@ use std::sync::{LazyLock, Mutex};
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Program;
-use oxc_parser::ParseOptions;
+use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SourceType};
-/// The guarded parser, for the modules that may not name `verter_parser`.
-pub(crate) use verter_parser::oxc_parse::Parser;
 
 use verter_compiler::framework_common::registered_carrier_projection::{
     InstalledSemanticAuthority, TemplateFactsBasis,

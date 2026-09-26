@@ -70,7 +70,7 @@ pub fn expr_has_call(
 ) -> Result<bool, ()> {
     let alloc = Allocator::default();
     let wrapped = format!("({source})");
-    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
+    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         return Err(());
     }
@@ -321,7 +321,7 @@ pub(super) fn expr_has_binding_impurity(
 ) -> Result<bool, ()> {
     let alloc = Allocator::default();
     let wrapped = format!("({source})");
-    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
+    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         return Err(());
     }

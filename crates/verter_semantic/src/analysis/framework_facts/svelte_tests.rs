@@ -4,8 +4,8 @@
 use super::*;
 use crate::analysis::framework_facts::ExactFrameworkScriptCandidates;
 use oxc_allocator::Allocator;
+use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
-use verter_parser::oxc_parse::Parser;
 use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 fn capture(src: &str) -> SvelteScriptCandidates {

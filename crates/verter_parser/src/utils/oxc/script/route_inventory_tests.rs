@@ -4,8 +4,8 @@ use super::route_inventory::{
     ScriptLocalExportRoute, ScriptReexportRoute, ScriptRouteCounts, ScriptSideEffectImport,
     ScriptWildcardRoute,
 };
-use crate::oxc_parse::Parser;
 use oxc_allocator::Allocator;
+use oxc_parser::Parser;
 use oxc_span::SourceType;
 use verter_type_expr::TopLevelOwnerId;
 

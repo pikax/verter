@@ -18,9 +18,9 @@ use std::sync::Arc;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Declaration, Statement};
+use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use serde_json::{json, Value};
-use verter_parser::oxc_parse::Parser;
 use verter_parser::utils::oxc::script::raw_surface::{
     RawDeclKind, RawKey, RawMemberKind, RawSourceSurface, SymbolSpace as RawSymbolSpace,
     TupleElementShape,

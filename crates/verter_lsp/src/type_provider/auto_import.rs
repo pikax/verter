@@ -21,9 +21,9 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Statement;
+use oxc_parser::Parser;
 use oxc_span::SourceType;
 use tower_lsp_server::ls_types::{Position, Range, TextEdit};
-use verter_parser::oxc_parse::Parser;
 use verter_semantic::analysis::AnalyzedImport;
 use verter_span::TsPosition;
 

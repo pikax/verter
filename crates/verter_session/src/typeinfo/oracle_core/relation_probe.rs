@@ -24,9 +24,9 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{TSType, TSTypeOperatorOperator};
+use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use serde_json::Value;
-use verter_parser::oxc_parse::Parser;
 use verter_type_expr::TypeExpr;
 
 use super::admission;

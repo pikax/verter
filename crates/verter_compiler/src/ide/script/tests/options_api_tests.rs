@@ -69,9 +69,7 @@ export default { props: ['msg'], emits: ['click'] }
     // OXC validation
     let full = format!("{}\n{}", code, type_constructs);
     let val_alloc = oxc_allocator::Allocator::new();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&val_alloc, &full, oxc_span::SourceType::tsx())
-            .parse();
+    let parsed = oxc_parser::Parser::new(&val_alloc, &full, oxc_span::SourceType::tsx()).parse();
     assert!(
         parsed.errors.is_empty(),
         "Full TSX must be valid: {:?}\n---\n{}",
@@ -384,8 +382,7 @@ export default {
 
     // Should parse as valid JSX
     let alloc = oxc_allocator::Allocator::new();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
     for err in &parsed.errors {
         eprintln!("OXC JSX ERROR: {err}");
     }
@@ -438,8 +435,7 @@ const count = ref(0)
 
     // Should parse as valid JSX
     let alloc = oxc_allocator::Allocator::new();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
     assert!(
         parsed.errors.is_empty(),
         "generated JSX should have no parse errors, got {}:\n{code}",
@@ -475,8 +471,7 @@ const count = ref(0)
 
     // Should parse as valid JSX
     let alloc = oxc_allocator::Allocator::new();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
     assert!(
         parsed.errors.is_empty(),
         "generated JSX should have no parse errors, got {}:\n{code}",
@@ -505,8 +500,7 @@ const count = ref(SHARED)
 
     // Should parse as valid JSX
     let alloc = oxc_allocator::Allocator::new();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
     assert!(
         parsed.errors.is_empty(),
         "generated JSX should have no parse errors, got {}:\n{code}",
@@ -545,8 +539,7 @@ export default {
 
     // Should parse as valid JSX
     let alloc = oxc_allocator::Allocator::new();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
     assert!(
         parsed.errors.is_empty(),
         "generated JSX should have no parse errors, got {}:\n{code}",
@@ -610,8 +603,7 @@ inheritAttrs: false,
 
     // Should parse as valid JSX
     let alloc = oxc_allocator::Allocator::new();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
     for err in &parsed.errors {
         eprintln!("OXC JSX ERROR: {err}");
     }

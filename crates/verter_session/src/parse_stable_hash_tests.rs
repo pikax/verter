@@ -30,8 +30,7 @@ use crate::types::MetaProvenance;
 fn indexed_for(source: &str) -> Arc<IndexedReady> {
     let eval_source: Arc<str> = Arc::from(source);
     let allocator = oxc_allocator::Allocator::default();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&allocator, source, SourceType::ts()).parse();
+    let parsed = oxc_parser::Parser::new(&allocator, source, SourceType::ts()).parse();
     assert!(!parsed.panicked, "fixture must parse: {source}");
     let shallow_index = verter_semantic::analysis::script_shallow_index::build_script_shallow_index(
         &parsed.program,

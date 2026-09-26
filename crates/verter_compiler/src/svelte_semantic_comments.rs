@@ -29,9 +29,7 @@ pub fn semantic_comment_signature(
     code: &str,
 ) -> Result<Vec<String>, SemanticCommentSignatureError> {
     let allocator = oxc_allocator::Allocator::default();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&allocator, code, oxc_span::SourceType::mjs())
-            .parse();
+    let parsed = oxc_parser::Parser::new(&allocator, code, oxc_span::SourceType::mjs()).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         return Err(SemanticCommentSignatureError {
             diagnostic_count: parsed.errors.len().max(usize::from(parsed.panicked)),

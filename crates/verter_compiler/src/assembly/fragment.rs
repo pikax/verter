@@ -29,8 +29,8 @@ use std::sync::Arc;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Statement;
+use oxc_parser::Parser;
 use oxc_span::SourceType;
-use verter_parser::oxc_parse::Parser;
 
 use crate::compile_request::ProductKind;
 

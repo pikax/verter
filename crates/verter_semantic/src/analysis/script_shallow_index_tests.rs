@@ -1,6 +1,6 @@
 use oxc_allocator::Allocator;
+use oxc_parser::Parser;
 use oxc_span::SourceType;
-use verter_parser::oxc_parse::Parser;
 use verter_parser::utils::oxc::script::route_inventory::{
     RouteCapability, RouteImportForm, RouteImportedName, ScriptImportRoute, ScriptLocalExportRoute,
 };

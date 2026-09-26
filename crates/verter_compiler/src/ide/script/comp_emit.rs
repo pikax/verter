@@ -763,7 +763,7 @@ pub(super) fn resolve_all_prop_refs_in_expr(
     }
 
     let alloc = oxc_allocator::Allocator::new();
-    let parser = verter_parser::oxc_parse::Parser::new(&alloc, expr, oxc_span::SourceType::tsx());
+    let parser = oxc_parser::Parser::new(&alloc, expr, oxc_span::SourceType::tsx());
     let parsed = match parser.parse_expression() {
         Ok(parsed) => parsed,
         Err(_) => return expr.to_string(), // fallback: return unchanged on parse error

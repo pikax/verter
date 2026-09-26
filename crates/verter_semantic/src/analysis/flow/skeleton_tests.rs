@@ -12,7 +12,7 @@ fn parse_and_build<T>(
 ) -> T {
     let allocator = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::ts();
-    let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
+    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     assert!(
         ret.errors.is_empty(),
         "fixture must parse: {:?}",
@@ -60,9 +60,7 @@ fn indexed_structure_of(source: &str) -> PreparedFunctionBodySkeleton {
     use crate::analysis::function_program::build_function_program_index;
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     let allocator = oxc_allocator::Allocator::default();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-            .parse();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
     assert!(parsed.errors.is_empty());
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index =
@@ -217,9 +215,7 @@ fn indexed_skeleton_retains_exact_nested_capture_paths_and_runtime_aliases() {
     let source =
         "function f(x) { {var x;} let unused = 0; { let x = {a: 1}; return () => () => x.a; } }";
     let allocator = oxc_allocator::Allocator::default();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-            .parse();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
     assert!(parsed.errors.is_empty());
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index =
@@ -297,8 +293,7 @@ fn prepared_graph_does_not_resolve_free_parameter_inputs_as_body_bindings() {
     ] {
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
-            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-                .parse();
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
         assert!(parsed.errors.is_empty());
         let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
         let index = build_function_program_index(
@@ -355,8 +350,7 @@ fn indexed_skeleton_retains_write_only_capture_subjects_without_value_reads() {
     ] {
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
-            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-                .parse();
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
         assert!(parsed.errors.is_empty());
         let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
         let index = build_function_program_index(
@@ -833,9 +827,7 @@ fn prepared_occurrences_distinguish_free_shadowed_and_captured_targets() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     let source = "const seed='global'; function root(arg=seed) { const seed=1; let value=0; { let twin=1; consume(twin); } { let twin=2; consume(twin); } return () => { value=2; return value; }; }";
     let allocator = oxc_allocator::Allocator::default();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-            .parse();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index = build_function_program_index(
         &parsed.program,
@@ -909,9 +901,7 @@ fn prepared_class_occurrences_distinguish_outer_free_and_static_local_bindings()
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     let source = "function f(x) { class C { static { touch(); var touch; { let x; x = 1; } x = 2; try {} catch (caught) { caught = 3; } for (let item of []) { item = 4; } } static { touch(); x = 5; } method() { deferred(); } p = deferredInit(); static p = immediate(); } const named = class own { static { own(); } }; return x; }";
     let allocator = oxc_allocator::Allocator::default();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-            .parse();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
     assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let (index, nodes) = build_function_program_index_with_nodes(
@@ -985,9 +975,7 @@ fn runtime_shape_preserves_parameter_var_and_pattern_alias_boundaries() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     let source = "function f(p,q,r) { var p; var [q] = []; { let q = 0; q; } return r; }";
     let allocator = oxc_allocator::Allocator::default();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-            .parse();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
     assert!(parsed.errors.is_empty());
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index =

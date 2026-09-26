@@ -5,11 +5,11 @@
 //! The parser splits on ` of ` or ` in ` and parses left and right sides separately,
 //! which properly handles Vue's multi-variable syntax.
 
-use crate::oxc_parse::Parser;
 use memchr::memmem::find;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{ArrayExpressionElement, Expression, ObjectPropertyKind, PropertyKey};
 use oxc_diagnostics::OxcDiagnostic;
+use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 

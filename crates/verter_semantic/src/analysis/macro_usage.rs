@@ -259,8 +259,7 @@ mod tests {
     fn facts(source: &str, props: Option<&str>, emit: Option<&str>) -> MacroUsageFacts {
         let allocator = oxc_allocator::Allocator::new();
         let parsed =
-            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-                .parse();
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
         assert!(
             parsed.errors.is_empty(),
             "fixture must parse: {:?}",
@@ -376,8 +375,7 @@ mod tests {
         let allocator = oxc_allocator::Allocator::new();
         let source = "const props = defineProps();\nconst a = toRef(props, 'a');";
         let parsed =
-            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-                .parse();
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
         let f = collect_macro_usage(&parsed.program, Some("props"), None, &FxHashSet::default());
         assert!(f.props_escapes);
         assert!(f.props_member_reads.is_empty());

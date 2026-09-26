@@ -686,7 +686,7 @@ fn the_recorded_runes_axis_matches_what_the_shipped_route_infers() {
         let eval_source = crate::parse::catalog_eval_source(&artifact, &cell.source)
             .expect("the semantic catalog serves the Svelte carrier");
         let allocator = oxc_allocator::Allocator::new();
-        let parsed_program = verter_parser::oxc_parse::Parser::new(
+        let parsed_program = oxc_parser::Parser::new(
             &allocator,
             eval_source.as_ref(),
             oxc_span::SourceType::mjs(),

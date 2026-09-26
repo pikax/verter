@@ -24,8 +24,8 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::Visit;
+use oxc_parser::Parser;
 use oxc_span::SourceType;
-use verter_parser::oxc_parse::Parser;
 
 /// One module specifier: the byte range of its whole string literal, the
 /// DECODED specifier it denotes, and the quote character it was written with.

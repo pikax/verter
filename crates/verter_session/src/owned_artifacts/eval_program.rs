@@ -4,7 +4,7 @@
 //! ## Lowering-boundary contract
 //!
 //! `OwnedEvalProgram` is a post-parse, post-lowering owned representation
-//! of a script body. The borrowed `verter_parser::oxc_parse::Parser` arena is dropped
+//! of a script body. The borrowed `oxc_parser::Parser` arena is dropped
 //! at the lowering boundary; after construction, no field of
 //! `OwnedEvalProgram` retains any pointer into the OXC allocator. The
 //! struct is `Clone + Send + Sync + 'static` so it can sit in host-owned

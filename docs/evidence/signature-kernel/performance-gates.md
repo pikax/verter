@@ -375,23 +375,18 @@ Recorded plainly so no reader mistakes absence for a pass:
   fresh-literal collection and effect walk over a chain walk its spine too,
   and the evaluation stops at the first operand after the connected
   demand's work budget trips, instead of evaluating the rest of the chain
-  under a result already refused: at 2,000 operands, 6.0 million guard
-  applications and 90 s without the early stop against 1.5 million and 8 s
-  with it. The parse now admits at most 500 operands (the syntax nesting
-  limit below): a 500-operand chain lowers and evaluates on a 1 MiB thread
+  under a result already refused. A 2,000-operand chain lowers and
+  evaluates on a 1 MiB thread in 8 s unoptimized
   (`flow_return_null_policy_tests.rs` →
-  `a_500_operand_and_chain_lowers_and_evaluates_on_a_small_stack`: the
+  `a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack`: the
   typed `Budget(WorkBudgetExceeded)` refusal, with the guard applications of
-  a 460-operand chain), and recursive slice lowering still overflows the
-  worker there; at 500 operands a recursive fresh-literal collection or
-  effect walk no longer overflows the 1 MiB thread (it did at 2,000), so
-  those two rewrites are defence in depth. A 10,000-operand chain is
-  refused before it is parsed
-  (`a_10000_operand_and_chain_is_refused_before_it_is_parsed`). The
+  a 1,000-operand chain; without the early stop, 6.0 million against 1.5
+  million and 90 s). Recursive slice lowering overflows the worker, and a
+  recursive fresh-literal collection or effect walk the 1 MiB thread. The
   checker answers the chain in about a second
   (`"" | 0 | 1 | false | null | undefined`); the lane's connected work
   outgrows the budget from about 420 operands
-  (`a_500_operand_and_chain_answers_the_checkers_type`, skipped).
+  (`a_2000_operand_and_chain_answers_the_checkers_type`, skipped).
 
 * **The scheduler's workers parse on 8 MiB stacks.** The oxc parser, the
   syntax-tree clone the semantic builder reads (`clone_in`) and the
@@ -404,63 +399,22 @@ Recorded plainly so no reader mistakes absence for a pass:
   (`WORKER_STACK_BYTES`, `verter_scheduler/src/pool.rs`), the stack of the
   LSP serve thread, the host CPU pool and the declaration-lowering workers;
   a reservation costs address space, not memory. `type_syntax_depth_tests.rs`
-  → `a_500_deep_nested_generic_application_parses_on_a_scheduler_worker`
+  → `a_700_deep_nested_generic_application_parses_on_a_scheduler_worker`
   answers the checker's `"v"` for `keyof D` and `1` for `D extends
-  Box<unknown> ? 1 : 2` (at 700 levels, which the parse no longer admits,
-  2 MiB overflowed `verter-io-0`). The slice lowering of a returned value
-  (`Lowerer::lower_expr`, on the declaration-lowering workers) re-entered
-  itself once per parenthesis, about 15 KiB per level unoptimized, and
-  overflowed the 8 MiB worker from about 550; each level is now re-entered
-  from its loop, and a return in 500 parentheses answers the checker's
-  `number` (`flow_return_null_policy_tests.rs` →
-  `a_return_in_500_parentheses_lowers_on_the_worker_stack`; at 500 the
-  recursion no longer overflows the worker, so the loop is defence in
-  depth).
-
-* **The parse refuses a source nested past 512 levels.** oxc's parser has
-  no depth guard, and neither have the passes over its tree (the
-  syntax-tree clone, the semantic builder, codegen) nor Verter's lowering
-  and evaluation: on the 8 MiB I/O worker a 10,000-deep `Box<…>`,
-  parenthesis, `!`, conditional, `+`, `|`, `||`, array, object, call,
-  arrow, assignment, template, `keyof`, conditional-type, tuple, object
-  type, function type, block, `if` or immediately invoked function nest
-  overflowed and aborted the process (only a flat comma sequence and a
-  flat type union survived). TypeScript 7.0.2 answers eighteen of the
-  forms at 10,000 levels (reporting its own TS2563 for a conditional
-  chain's body), the `Box` nesting, parentheses and `!` also at 50,000 and
-  200,000, and was still running on the 10,000-deep object literal after 15
-  minutes. Every production parse now goes through
-  `verter_parser::oxc_parse::Parser`, a drop-in for `oxc_parser::Parser`
-  (`new`, `with_options`, `with_config`, `parse`, `parse_expression`):
-  a linear scan (`oxc_parse/nesting.rs`) bounds the depth of the syntax
-  tree from the tokens — every open bracket, JSX tag or template `${` is
-  one level, and within the innermost one every operator, member access,
-  prefix keyword, arrow and chained call or index since the last `,`,
-  `;` or statement-ending line break one more, with a union's `|` and
-  `&` not counted where the source can only be a type (a type alias, an
-  interface body, an annotation, a declaration file) — and a source past
-  `SYNTAX_NESTING_LIMIT` (512) is refused as oxc refuses a source it cannot
-  parse: an empty program, one syntax error at the offending token, and
-  `panicked`, so every caller's parse-failure path handles it. A source
-  no longer than the limit is never scanned (each counted level takes a
-  byte). The limit sits well above real code: over the 121,390
-  TypeScript sources of this checkout's `node_modules` (1.2 GB), the
-  deepest nests 168 (p99.99 146, p99 23); bundled JavaScript reaches
-  thousands and is refused. The scan costs about a third of oxc's parse
-  (1.9 ms against 6.0 ms for `lib.dom.d.ts`'s 2.3 MB, optimized).
-  `verter_parser`'s `no_crate_parses_around_the_guard` fails on any
-  `oxc_parser::Parser` in a crate's sources (`verter_type_expr_oxc`, below
-  `verter_parser`, parses only in its tests), and the session's
-  scheduler-path guard counts the guarded parser's sites as it counted
-  oxc's. `flow_return_null_policy_tests.rs` →
-  `every_form_nested_10000_deep_is_refused_on_a_small_stack` refuses
-  nineteen forms 10,000 deep on a 1 MiB thread, each answering the typed
-  `Failure(Missing)` for the function the empty program lacks (with the
-  guard disabled it overflows `verter-io-0`), and `oxc_parse/tests.rs`
-  pins the scan: chains, siblings and statements, else-if chains, unions
-  in each type position against the same tokens in expressions, strings,
-  comments, regular expressions, templates and JSX, and the refusal at
-  exactly the limit.
+  Box<unknown> ? 1 : 2` (at 2 MiB it overflows `verter-io-0`). The parser
+  itself still refuses nothing: on the 8 MiB I/O worker it overflows at
+  about 2,200 nested type arguments and 5,000 nested parentheses
+  (unoptimized), where TypeScript 7.0.2 answers at 10,000 of either
+  (`"v"` and `1` for the `Box` nesting, `1` for `(((…1…)))`, each in under
+  2 s). The slice lowering of a returned value (`Lowerer::lower_expr`,
+  on the declaration-lowering workers) re-entered itself once per
+  parenthesis, about 15 KiB per level unoptimized, and overflowed the 8 MiB
+  worker from about 550; each level is now re-entered from its loop, and a
+  return in 2,000 parentheses answers the checker's `number`
+  (`flow_return_null_policy_tests.rs` →
+  `a_return_in_2000_parentheses_lowers_on_the_worker_stack`; it overflows
+  with the recursion restored). The declaration-lowering worker's deepest
+  stack there is its re-parse of the file (4.0 MiB at 2,000).
 
 * **A pair of literal types relates without a query.** Two literal types
   relate, under every relation kind, exactly when they are one value, so

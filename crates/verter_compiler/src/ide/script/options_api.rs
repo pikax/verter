@@ -11,9 +11,9 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, ObjectPropertyKind, Program, PropertyKey, Statement};
+use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashMap;
-use verter_parser::oxc_parse::Parser;
 
 use crate::ast::types::TemplateAst;
 use crate::code_transform::CodeTransform;

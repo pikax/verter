@@ -339,7 +339,7 @@ pub(super) fn validate_generated_client_module(
     code: &str,
     alloc: &Allocator,
 ) -> Result<(), ClientCompileError> {
-    let parsed = verter_parser::oxc_parse::Parser::new(alloc, code, SourceType::mjs()).parse();
+    let parsed = oxc_parser::Parser::new(alloc, code, SourceType::mjs()).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         return Err(ClientCompileError::GeneratedModuleInvalid {
             diagnostic_count: parsed.errors.len().max(usize::from(parsed.panicked)),

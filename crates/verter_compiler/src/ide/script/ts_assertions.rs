@@ -7,8 +7,8 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Expression;
 use oxc_ast_visit::{walk, Visit};
+use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
-use verter_parser::oxc_parse::Parser;
 
 use crate::code_transform::CodeTransform;
 

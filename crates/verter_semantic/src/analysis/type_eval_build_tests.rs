@@ -33,9 +33,7 @@ fn lowered(source: &str) -> LoweredFileParts {
 
 fn svelte_runes_statement(source: &str) -> crate::analysis::type_eval_build::LoweredStatementParts {
     let allocator = oxc_allocator::Allocator::default();
-    let parsed =
-        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-            .parse();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
     assert!(!parsed.panicked, "fixture must parse: {source}");
     let statement = parsed.program.body.first().expect("one statement fixture");
     crate::analysis::type_eval_build::lower_svelte_runes_statement_parts(statement, source)
@@ -45,8 +43,8 @@ fn svelte_runes_statement(source: &str) -> crate::analysis::type_eval_build::Low
 fn owner_aware_eval_env_keeps_setup_and_module_locators_distinct() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
@@ -105,8 +103,8 @@ fn jsdoc_typedef_bodies_lower_by_exact_owner_qualified_comment() {
     use crate::analysis::decl_headers::build_decl_header_index_with_owners;
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
@@ -1183,8 +1181,8 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
 /// into a sibling test module.
 fn header_index_for(source: &str) -> crate::analysis::decl_headers::DeclHeaderIndex {
     use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use verter_parser::oxc_parse::Parser;
 
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
@@ -2792,10 +2790,9 @@ fn call_bearing_initializer_uses_an_indexed_semantic_expression_source() {
 fn indexed_call_ir_preserves_nested_calls_and_rebases_program_points() {
     let source = "make(id())";
     let allocator = oxc_allocator::Allocator::default();
-    let expression =
-        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-            .parse_expression()
-            .expect("fixture expression");
+    let expression = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+        .parse_expression()
+        .expect("fixture expression");
     let mut indexed =
         crate::analysis::type_eval_build::lower_indexed_value_expression(&expression, source);
     crate::analysis::type_eval_build::offset_indexed_value_expression(&mut indexed, 40);
@@ -2824,10 +2821,9 @@ fn indexed_call_with_observed_roots(
         lower_indexed_call_expression, lower_indexed_call_expression_with_read_roots,
     };
     let allocator = oxc_allocator::Allocator::default();
-    let expression =
-        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-            .parse_expression()
-            .expect("fixture expression");
+    let expression = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+        .parse_expression()
+        .expect("fixture expression");
     let oxc_ast::ast::Expression::CallExpression(call) = expression else {
         panic!("fixture must be a direct call");
     };
@@ -3081,10 +3077,9 @@ fn indexed_call_read_roots_observe_the_actual_member_receiver_once() {
 fn value_expression_inference_carries_calls_as_the_honest_carrier() {
     fn inferred(source: &str) -> TypeExpr {
         let allocator = oxc_allocator::Allocator::default();
-        let expression =
-            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-                .parse_expression()
-                .expect("fixture expression");
+        let expression = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse_expression()
+            .expect("fixture expression");
         crate::analysis::type_eval_build::infer_declaration_expression_type(
             &expression,
             source,
@@ -3146,13 +3141,9 @@ fn value_expression_inference_carries_calls_as_the_honest_carrier() {
     // record, and a call-bearing compound is a TYPED unsupported carrier —
     // never a fabricated value.
     let allocator = oxc_allocator::Allocator::default();
-    let compound = verter_parser::oxc_parse::Parser::new(
-        &allocator,
-        "{ a: fn() }",
-        oxc_span::SourceType::ts(),
-    )
-    .parse_expression()
-    .expect("fixture expression");
+    let compound = oxc_parser::Parser::new(&allocator, "{ a: fn() }", oxc_span::SourceType::ts())
+        .parse_expression()
+        .expect("fixture expression");
     assert!(matches!(
         crate::analysis::type_eval_build::lower_indexed_value_expression(&compound, "{ a: fn() }"),
         crate::analysis::type_eval_build::IndexedValueExpression::UnsupportedCall { .. }

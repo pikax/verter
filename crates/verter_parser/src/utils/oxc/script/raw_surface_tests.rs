@@ -2,8 +2,8 @@
 //! item G). Each test asserts a SPECIFIC erased fact is captured AND a clean
 //! peer is captured WITHOUT the fact — an empty/broken capture would fail.
 
-use crate::oxc_parse::Parser;
 use oxc_allocator::Allocator;
+use oxc_parser::Parser;
 use oxc_span::SourceType;
 
 use super::*;

@@ -50,9 +50,9 @@ mod comments;
 use std::collections::BTreeSet;
 
 use oxc_allocator::Allocator;
+use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
-use verter_parser::oxc_parse::Parser;
 
 use canonize::Canonizer;
 use classify::Classifier;

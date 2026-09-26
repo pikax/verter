@@ -173,8 +173,8 @@ fn analyze_source(
     ctx: &mut AnalysisContext,
 ) -> Result<Vec<(String, String)>, String> {
     use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use verter_parser::oxc_parse::Parser;
 
     let allocator = Allocator::default();
     let source_type =
