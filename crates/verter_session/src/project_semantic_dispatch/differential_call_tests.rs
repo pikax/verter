@@ -304,6 +304,11 @@ export function kConstConstrained() { return c3({ k: "v", n: 1 }); }
 export function kNonConstObj() { return nonConst({ a: 1 }); }
 export function kNonConstArr() { return nonConst([1, 2]); }
 export function kAsConst() { return nonConst([1, 2] as const); }
+declare function arrOf<T>(x: readonly T[]): T;
+export function kAsConstObj() { return nonConst({ a: 1 } as const); }
+export function kAsConstNested() { return nonConst(["a", ["b"]] as const); }
+export function kAsConstElement() { return arrOf([1, 2] as const); }
+export function kAsConstScalar() { return nonConst("s" as const); }
 export function kCtxParam() { let seen: unknown; cb((x, y) => { seen = x; }); return seen; }
 export function kCtxArrow() { const f: (a: string) => number = (a) => 1; return f; }
 export function kCtxReturnLiteral() { const f: () => "a" | "b" = () => "a"; return f(); }
@@ -350,17 +355,20 @@ fn const_type_parameters_and_contextual_types_apply_as_the_checker_applies_them(
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `nonConst([1, 2] as const)` infers `readonly [1, 2]`. Wrong-but-clean: the
-/// lane drops `readonly`.
-///
-/// What the lane gives:
-/// - `kAsConst`: the checker answers `readonly [1, 2]`; the lane measured `[1,
-///   2]`.
+/// An `as const` argument infers the type its const context spells:
+/// `nonConst([1, 2] as const)` is `readonly [1, 2]`, an object `{ readonly a:
+/// 1; }`, and an array parameter's element `1 | 2` (TypeScript 7.0.2, all
+/// four settings alike).
 #[test]
-#[ignore = "an as const argument infers its readonly tuple type"]
-fn wrong_clean_an_as_const_argument_keeps_its_readonly_tuple() {
+fn an_as_const_argument_infers_as_the_checker_reads_it() {
     let matrix = Matrix::new(CONST_AND_CONTEXT);
-    let failures = matrix.returns(&[("kAsConst", "readonly [1, 2]")]);
+    let failures = matrix.returns(&[
+        ("kAsConst", "readonly [1, 2]"),
+        ("kAsConstObj", "{ readonly a: 1; }"),
+        ("kAsConstNested", "readonly [\"a\", readonly [\"b\"]]"),
+        ("kAsConstElement", "1 | 2"),
+        ("kAsConstScalar", "\"s\""),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

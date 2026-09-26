@@ -7118,6 +7118,23 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
                     PrimitiveName::Any,
                 )));
         }
+        // `… as const` over a literal keeps the literal it spells, readonly:
+        // the operand is inferred in the const context the assertion opens.
+        IndexedValueDisposition::Inferred(
+            Expression::ArrayExpression(_)
+            | Expression::ObjectExpression(_)
+            | Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::TemplateLiteral(_),
+        ) if expr_is_const_asserted(expr, source) => {
+            return lower_value_expression_with_read_root(expr, source, policy, read_root)
+                .map(IndexedValueExpression::Value)
+                .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
+                    PrimitiveName::Any,
+                )));
+        }
         IndexedValueDisposition::Inferred(input) => input,
     };
     match input {
