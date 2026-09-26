@@ -2030,21 +2030,22 @@ impl SemanticGraphStore {
         // validity oracle: project-shape invalidation rides
         // `FactVersionRef::ProjectGeneration` on the carrier.
         let validated = snapshot.and_then(|list| {
-            list.into_iter()
-                .find(|entry| self.warm_candidate_serves(entry, requested, ctx))
+            let back = list.len().checked_sub(1); // the freshest in LRU order
+            let mut candidates = list.into_iter().enumerate();
+            let (index, hit) =
+                candidates.find(|(_, entry)| self.warm_candidate_serves(entry, requested, ctx))?;
+            Some((Some(index) != back, hit))
         });
-        if let Some(entry) = &validated {
-            // Brief LRU bookkeeping — reacquire ONLY to update the
-            // slot's LRU order so subsequent lookups treat this
-            // candidate as freshest. The match is by discriminant
-            // identity; if a concurrent invalidation drained it between
-            // snapshot and here, the update is a no-op.
+        if let Some((true, entry)) = &validated {
+            // Brief LRU bookkeeping for a hit that is not the snapshot's
+            // freshest: reacquire to move it to the LRU back. Matched by
+            // discriminant identity; a candidate drained meanwhile is a no-op.
             let mut entries = self.entries_lock_diagnosed();
             if let Some(slots) = entries.get_mut(family) {
                 slots.mark_validated_freshest(slot, entry);
             }
         }
-        let result = validated.map(|entry| {
+        let result = validated.map(|(_, entry)| {
             if let Some(capture) = operand_evidence {
                 *capture = semantic_operand_evidence(
                     &entry.read_set_signature,
