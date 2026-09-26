@@ -1,0 +1,41 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP20",
+  "kind": "implementation",
+  "products": ["PropCheckObligation", "CallerAndSetupPropsContract", "SpreadCertaintyPolicy"],
+  "mandatoryCases": ["STP20-default", "STP20-required", "STP20-spread-extra", "STP20-union", "STP20-optional", "STP20-overwritten"],
+  "probes": {
+    "positive": "tests/sfc-projection/STP20/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP20/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP20/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP20/probes/tsconfig.json",
+    "hoverNeedle": "stp20HoverTarget",
+    "definitionNeedle": "stp20DefinitionTarget",
+    "expectedNegativeCode": 2345,
+    "allowedNegativeCodes": [2379],
+    "negativeAnchors": [
+      {"id": "STP20-spread-extra", "code": 2345, "messageIncludes": "\"titel\""},
+      {"id": "STP20-required", "code": 2345, "messageIncludes": "'{}'"},
+      {"id": "STP20-optional", "code": 2379, "messageIncludes": "exactOptionalPropertyTypes"},
+      {"id": "STP20-union", "code": 2345, "messageIncludes": "label: \"no\""},
+      {"id": "STP20-overwritten", "code": 2345, "messageIncludes": "readonly title: 1"},
+      {"id": "STP20-readonly-tuple", "code": 2345, "messageIncludes": "tuple: readonly"},
+      {"id": "STP20-generic", "code": 2345, "messageIncludes": "Argument of type 'T'"}
+    ],
+    "expectedHoverType": "number",
+    "expectedInstanceType": "ChildInstance"
+  },
+  "cases": [
+    {"id": "STP20-default", "disposition": "accept", "twins": ["defaulted-caller-optional-setup-defined"]},
+    {"id": "STP20-required", "disposition": "reject", "twins": ["missing-required-title"]},
+    {"id": "STP20-spread-extra", "disposition": "reject", "twins": ["direct-misspelled-attribute"]},
+    {"id": "STP20-union", "disposition": "accept", "twins": ["matching-discriminated-pair"]},
+    {"id": "STP20-optional", "disposition": "accept", "twins": ["exact-optional-omitted"]},
+    {"id": "STP20-overwritten", "disposition": "reject", "twins": ["overwritten-spread-value-does-not-satisfy-final-prop"]}
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP20 --engine all --require-all --json",
+  "test": "cargo test -p verter_compiler --lib ide::vue_projection::props",
+  "runtimeCorrectness": true,
+  "notes": "Caller default optionality stays separate from setup-defined values. VueProjectionBackend::props reads caller facts from the public constructor's already-parsed scripts. A v-bind object spread is checked the way TypeScript checks a spread: known-key types, required props, discriminated unions, exact optional properties and readonly tuples. Excess keys that arrive only through the spread are not rejected; a misspelled key written directly as an attribute is. A generic spread is checked through its constraint. An index signature, any, or a union member that has one stays an open domain. Certainly overwritten keys stay out of that spread's check."
+}

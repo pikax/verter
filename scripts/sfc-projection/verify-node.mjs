@@ -49,6 +49,7 @@ import {
   STP17_MANDATORY_CASES,
   STP18_MANDATORY_CASES,
   STP19_MANDATORY_CASES,
+  STP20_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
 } from "./node-mandatory-cases.mjs";
 
@@ -72,6 +73,7 @@ export {
   STP17_MANDATORY_CASES,
   STP18_MANDATORY_CASES,
   STP19_MANDATORY_CASES,
+  STP20_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
 };
 
@@ -1763,6 +1765,11 @@ function evaluateHarnessRun(
     );
   }
   const expectedCode = probes.expectedNegativeCode;
+  const allowedCodes = new Set(
+    [expectedCode].concat(
+      Array.isArray(probes.allowedNegativeCodes) ? probes.allowedNegativeCodes : [],
+    ),
+  );
   const anchored = (run.negative.diags || []).filter((diag) => diag.code === expectedCode);
   if (anchored.length === 0) {
     errors.push(
@@ -1774,7 +1781,7 @@ function evaluateHarnessRun(
     );
   }
   const unrelated = (run.negative.diags || []).filter(
-    (diag) => diag.code && diag.code !== expectedCode,
+    (diag) => diag.code && !allowedCodes.has(diag.code),
   );
   if (unrelated.length > 0) {
     errors.push(
@@ -1784,6 +1791,22 @@ function evaluateHarnessRun(
         `${engineId} negative probe had unrelated diagnostic ${unrelated[0].code}: ${unrelated[0].message}`,
       ),
     );
+  }
+  for (const anchor of probes.negativeAnchors || []) {
+    const hit = (run.negative.diags || []).some(
+      (diag) =>
+        diag.code === anchor.code &&
+        String(diag.message || "").includes(String(anchor.messageIncludes || "")),
+    );
+    if (!hit) {
+      errors.push(
+        err(
+          anchor.id || "STP1-harness",
+          "missing-negative",
+          `${engineId} negative probe lacked ${anchor.messageIncludes} (TS${anchor.code}); got ${JSON.stringify(run.negative.diags)}`,
+        ),
+      );
+    }
   }
   errors.push(
     ...assertCheckCounts(run.checkCounts, engineId, harnessProbeFiles(probes), maxChecksPerFile),
