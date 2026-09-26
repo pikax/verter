@@ -143,6 +143,15 @@ export function gFnExpr() { return fnArg(function () { return 42; }); }
 export function gWrap() { return wrap(true); }
 export function gMap(xs: number[]) { return map(xs, (x) => "" + x); }
 export function gMapObj(xs: number[]) { return map(xs, (x) => ({ x })); }
+export function gMapLit(xs: number[]) { return map(xs, (x) => 1); }
+export function gMapId(xs: number[]) { return map(xs, (x) => x); }
+declare function pipe2<A, B, C>(a: A, f: (a: A) => B, g: (b: B) => C): C;
+export function gPipe() { return pipe2(1, (a) => a + "", (b) => b > ""); }
+declare function apply<T>(cb: (v: string) => T): T;
+declare function applyN<T extends number>(cb: (v: string) => T): T;
+export function gApplyLit() { return apply((v) => 1); }
+export function gApplyLitN() { return applyN((v) => 1); }
+export function gApplyBranch(b: boolean) { return apply((v) => b ? 1 : 2); }
 export function gPick(o: { a: string; b: number }) { return pick(o, "b"); }
 export function gKeys(o: { a: string; b: number }) { return keys(o); }
 export function gDefault() { return def(); }
@@ -227,18 +236,23 @@ fn array_element_candidates_infer_as_the_checker_infers_them() {
 }
 
 /// `map(xs, (x) => "" + x)` with `map<T, U>(xs: T[], f: (x: T) => U): U[]`
-/// fixes `T` from `xs`, then types the callback and infers `U` from its return.
-/// Wrong-but-clean: the lane answers `unknown[]`.
-///
-/// What the lane gives:
-/// - `gMap`: the checker answers `string[]`; the lane measured `unknown[]`.
-/// - `gMapObj`: the checker answers `{ x: number; }[]`; the lane measured
-///   `unknown[]`.
+/// fixes `T` from `xs`, then types the callback under `(x: number) => U`
+/// and infers `U` from its return, a single literal return widening unless
+/// the contextual return is a literal context for it, through an uninferred
+/// parameter's constraint (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "a context-sensitive callback's return infers a later type parameter"]
-fn wrong_clean_a_callback_return_infers_its_type_parameter() {
+fn a_callback_return_infers_as_the_checker_infers_it() {
     let matrix = Matrix::new(GENERIC_INFERENCE);
-    let failures = matrix.returns(&[("gMap", "string[]"), ("gMapObj", "{ x: number; }[]")]);
+    let failures = matrix.returns(&[
+        ("gMap", "string[]"),
+        ("gMapObj", "{ x: number; }[]"),
+        ("gMapLit", "number[]"),
+        ("gMapId", "number[]"),
+        ("gPipe", "boolean"),
+        ("gApplyLit", "number"),
+        ("gApplyLitN", "1"),
+        ("gApplyBranch", "1 | 2"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -339,6 +353,7 @@ export function kCtxObjMethod() { const o: { m(x: number): void } = { m(x) {} };
 export function kCtxHandler() { let got: unknown; reg((ev) => { got = ev.kind; }); return got; }
 export function kCtxTuple() { const t: [number, string] = [1, "a"]; return t; }
 export function kCtxWithInfer() { return withCtx((x) => x, 3); }
+export function kCtxStr() { return withCtx((x) => x, "s"); }
 export function kSatisfies() { const v = { a: 1 } satisfies { a: number }; return v; }
 export function kSatisfiesLiteral() { const v = "x" satisfies string; return v; }
 export function kAnnotatedArr() { const a: readonly ("x" | "y")[] = ["x"]; return a; }
@@ -396,17 +411,13 @@ fn an_as_const_argument_infers_as_the_checker_reads_it() {
 }
 
 /// `withCtx((x) => x, 3)` with `withCtx<T>(f: (x: T) => T, v: T): T` defers the
-/// context-sensitive arrow, infers `T = number` from `3`, and returns `number`.
-/// Wrong-but-clean: the lane answers `unknown`.
-///
-/// What the lane gives:
-/// - `kCtxWithInfer`: the checker answers `number`; the lane measured
-///   `unknown`.
+/// context-sensitive arrow, infers `T` from `3`, fixes it widened to `number`
+/// where the arrow reads it, and returns `number` (TypeScript 7.0.2, all four
+/// settings alike).
 #[test]
-#[ignore = "a context-sensitive argument is typed after the other arguments fix the inference"]
-fn wrong_clean_a_context_sensitive_argument_is_typed_after_inference() {
+fn a_context_sensitive_argument_is_typed_as_the_checker_types_it() {
     let matrix = Matrix::new(CONST_AND_CONTEXT);
-    let failures = matrix.returns(&[("kCtxWithInfer", "number")]);
+    let failures = matrix.returns(&[("kCtxWithInfer", "number"), ("kCtxStr", "string")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

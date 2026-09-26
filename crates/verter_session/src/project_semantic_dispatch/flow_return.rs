@@ -8256,6 +8256,9 @@ mod operators;
 
 #[path = "flow_return_call_effects.rs"]
 mod call_effects;
+#[path = "flow_return_contextual.rs"]
+mod contextual;
+use contextual::ContextualSignature;
 #[path = "flow_return_correlation.rs"]
 mod correlation;
 #[path = "flow_return_destructure.rs"]
@@ -9935,12 +9938,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 let Some(constraint) = constraint else {
                     return false;
                 };
+                // Read by data: a constraint lowered in its declaration's scope
+                // is another node than the scope-free primitive.
+                let is_kind = |node: SemanticNodeId, kind: PrimitiveKind| {
+                    matches!(
+                        graph.node_data(node).as_deref(),
+                        Some(SemanticNodeData::Primitive(primitive)) if *primitive == kind
+                    )
+                };
                 let of_kind = |kind: PrimitiveKind| {
-                    let primitive = graph.intern_node(SemanticNodeData::Primitive(kind));
-                    constraint == primitive
+                    is_kind(constraint, kind)
                         || matches!(
                             graph.node_data(constraint).as_deref(),
-                            Some(SemanticNodeData::Union(members)) if members.contains(&primitive)
+                            Some(SemanticNodeData::Union(members))
+                                if members.iter().any(|member| is_kind(*member, kind))
                         )
                 };
                 (of_kind(PrimitiveKind::String) && has_literal_of(Kind::String))
@@ -21317,6 +21328,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         outer_env: &FlowBinderEnv,
         extended_captures: &[verter_semantic::analysis::flow::SkeletonBindingId],
         declared_evolving_captures: &[verter_semantic::analysis::function_program::FlowBindingIdentity],
+        contextual: Option<&ContextualSignature>,
     ) -> SemanticNodeId {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
@@ -21438,6 +21450,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             outer_env,
             extended_captures,
             circular,
+            contextual,
         );
         let found_circular = !circular
             && self
@@ -21581,6 +21594,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         outer_env: &FlowBinderEnv,
         extended_captures: &[verter_semantic::analysis::flow::SkeletonBindingId],
         circular: bool,
+        contextual: Option<&ContextualSignature>,
     ) -> SemanticNodeId {
         let graph = self.dispatch.graph();
         // The nested function's OWN type parameters are binders in scope
@@ -21659,6 +21673,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             );
             let node = self.dispatch.erase_nullable_members(node, self.nullability);
+            // A parameter with neither an annotation nor a default takes the
+            // contextual signature's type at its position.
+            let node = match contextual {
+                Some(contextual) if param.contextually_typed => {
+                    contextual.parameter_at(params.len()).unwrap_or(node)
+                }
+                _ => node,
+            };
             params.push(node);
             signature_params.push(crate::semantic_query::FunctionParam {
                 name: param.name.clone(),
@@ -22296,6 +22318,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // the OUTER frame's component, so no fixed point closes here and
         // the freshness bit has no later consumer.
         let mut predicate = None;
+        // The one fresh literal every contributor of the body return is.
+        let lone_fresh_literal = contributors.as_ref().ok().and_then(|contributors| {
+            let (first, rest) = contributors.split_first()?;
+            (contributors
+                .iter()
+                .all(|contribution| contribution.fresh_literal)
+                && rest
+                    .iter()
+                    .all(|contribution| contribution.node == first.node))
+            .then_some(first.node)
+        });
         let return_type = match contributors.and_then(|contributors| {
             self.dispatch.join_flow_return_contributors(
                 contributors,
@@ -22334,6 +22367,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 wrapped.return_type()
             }
             Err(_) => self.unmodeled_position(),
+        };
+        // A body return that is one fresh literal widens, unless the
+        // contextual return is a literal context for it
+        // (`getWidenedLiteralLikeTypeForContextualReturnTypeIfNeeded`):
+        // `(v) => 1` passed for `(v: string) => T` with `T extends number`
+        // returns `1`.
+        let return_type = match (contextual, lone_fresh_literal) {
+            (Some(contextual), Some(literal))
+                if self.literal_of_contextual_type(literal, contextual.return_type) =>
+            {
+                literal
+            }
+            _ => return_type,
         };
         graph.intern_node(SemanticNodeData::Signature {
             kind: crate::semantic_query::SignatureKind::Call,
@@ -22909,6 +22955,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     outer_env,
                     extended_captures,
                     declared_evolving_captures,
+                    None,
                 ))
             }
             crate::flow_slice_content::SliceExpr::Class(class) => self.eval_class_value(class),
@@ -23371,6 +23418,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let call = &indexed.call;
         let frame_arguments = self.call_arguments.get(&site.span()).cloned();
         let mut args = Vec::with_capacity(call.args.len());
+        // Each function-value argument's frame lowering, typed again under
+        // its contextual signature when the executor asks for it.
+        let mut function_arguments: Vec<Option<crate::flow_slice_content::SliceExpr>> =
+            Vec::with_capacity(call.args.len());
         for (ordinal, argument) in call.args.iter().enumerate() {
             let root = indexed.argument_roots.get(ordinal)?;
             let binding = self.indexed_argument_binding(*root);
@@ -23384,6 +23435,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // A literal argument this frame computes is also evaluated in its
             // const context: the value a `const` type parameter it is passed
             // to infers from.
+            function_arguments.push(
+                arguments
+                    .get(ordinal)
+                    .or_else(|| {
+                        frame_arguments
+                            .as_deref()
+                            .and_then(|frame| frame.get(ordinal))
+                            .map(|frame| &frame.value)
+                    })
+                    .filter(|expr| {
+                        matches!(
+                            expr,
+                            crate::flow_slice_content::SliceExpr::NestedFunctionValue { .. }
+                        )
+                    })
+                    .cloned(),
+            );
             let mut const_view = None;
             let evaluated = match arguments.get(ordinal) {
                 Some(lowered) => match self.eval_expr(lowered) {
@@ -23483,7 +23551,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             None => None,
         };
-        let key = crate::semantic_query::ResolveCallKey {
+        let mut key = crate::semantic_query::ResolveCallKey {
             point: crate::semantic_query::ProgramPointId {
                 canonical_id: Arc::from(self.canonical),
                 offset: call.point,
@@ -23498,12 +23566,62 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             },
             receiver,
-            args: Arc::from(args.into_boxed_slice()),
+            args: Arc::from(args.clone().into_boxed_slice()),
             explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
             flow: crate::semantic_query::FlowNarrowingKey::empty(),
             context: self.dispatch.resolve_call_context_for(self.canonical),
         };
-        Some(Positional::Value(self.dispatch.execute_resolve_call(key)))
+        let mut step = Positional::Value(self.dispatch.execute_resolve_call(key.clone()));
+        // The checker's second inference pass: a context-sensitive argument
+        // the executor names is typed under the contextual type it hands
+        // back, and the call is asked again with that argument's type. Each
+        // round types one argument that no round types again.
+        let mut retyped = false;
+        // bounded-loop: at most one round per argument — each round retypes one context-sensitive argument, which is no longer context-sensitive after it.
+        for _ in 0..args.len() {
+            let Some((position, contextual)) = Self::contextual_argument_request(&step) else {
+                break;
+            };
+            let Some(Some(expr)) = function_arguments.get(position).cloned() else {
+                break;
+            };
+            let Some(ty) = self.eval_function_argument_in_context(&expr, contextual) else {
+                break;
+            };
+            let Some(crate::semantic_query::CallArgKey::Eager { spread, .. }) = args.get(position)
+            else {
+                break;
+            };
+            retyped = true;
+            args[position] = crate::semantic_query::CallArgKey::Eager {
+                ty,
+                spread: *spread,
+                context_sensitive: false,
+                const_view: None,
+                literal_mode: crate::semantic_query::ArgumentLiteralMode::Literal,
+            };
+            function_arguments[position] = None;
+            key.args = Arc::from(args.clone().into_boxed_slice());
+            step = Positional::Value(self.dispatch.execute_resolve_call(key.clone()));
+        }
+        // A call asked again after a retyped argument that still does not
+        // decide answers no uninferred parameter's fallback either.
+        if retyped
+            && matches!(
+                step,
+                Positional::Value(super::call_resolve::ResolveCallStep::Degraded(
+                    crate::semantic_query::ResolveCallFailure::Undecidable
+                        | crate::semantic_query::ResolveCallFailure::Budget
+                ))
+            )
+        {
+            step = Positional::Value(super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::ContextSensitiveInference {
+                    contextual: None,
+                },
+            ));
+        }
+        Some(step)
     }
 
     /// The call-executor route of one authored call or `new` expression:
@@ -23578,7 +23696,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             super::call_resolve::ResolveCallStep::Degraded(
                 crate::semantic_query::ResolveCallFailure::NotCallable
                 | crate::semantic_query::ResolveCallFailure::NoApplicableOverload
-                | crate::semantic_query::ResolveCallFailure::ContextSensitiveInference,
+                | crate::semantic_query::ResolveCallFailure::ContextSensitiveInference { .. },
             ) => Some(self.degraded_unrepresentable_callee()),
             // An UNDECIDED executor (the machinery cannot decide this
             // shape, or a budget edge) is NOT a refusal: the caller

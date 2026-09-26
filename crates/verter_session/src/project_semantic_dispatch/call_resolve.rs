@@ -1282,6 +1282,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &arguments,
                     &mut budget,
                     false,
+                    visible.len() == 1,
                 );
                 self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
                 match verdict {
@@ -1293,6 +1294,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         if failure == ResolveCallFailure::Budget {
                             self.abandon_call_sessions_since(session_watermark);
                         }
+                        // Each of several candidates would type a context-sensitive
+                        // argument under its own contextual type.
+                        let failure = match failure {
+                            ResolveCallFailure::ContextSensitiveInference { .. }
+                                if visible.len() > 1 =>
+                            {
+                                ResolveCallFailure::ContextSensitiveInference { contextual: None }
+                            }
+                            failure => failure,
+                        };
                         return CandidateVerdict::Degraded(failure);
                     }
                 }
@@ -1320,6 +1331,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 raw_candidate,
                 &arguments,
                 &mut budget,
+                true,
                 true,
             );
             self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
@@ -1366,6 +1378,54 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// signature a context-sensitive function argument is checked under —
     /// mentions one of `params`. A signature list that does not settle
     /// answers `true`: nothing proves the return free of them.
+    /// The contextual type a context-sensitive argument is typed under: the
+    /// parameter type `target` with every type parameter `fixed`, its one
+    /// call signature's return read under the `inferred` bindings alone,
+    /// so an uninferred parameter stays itself there (a literal context
+    /// through its constraint).
+    fn contextual_argument_type(
+        &self,
+        target: SemanticNodeId,
+        fixed: &CanonicalTypeSubstitution,
+        inferred: &CanonicalTypeSubstitution,
+    ) -> SemanticNodeId {
+        let fixed_target = self.substitute_canonical(target, fixed);
+        let partial_target = self.substitute_canonical(target, inferred);
+        let single = |node: SemanticNodeId| match self
+            .shared_signature_nodes(node, SignatureKind::Call)
+        {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) if nodes.len() == 1 => {
+                Some(nodes[0])
+            }
+            _ => None,
+        };
+        let (Some(fixed_signature), Some(partial_signature)) =
+            (single(fixed_target), single(partial_target))
+        else {
+            return fixed_target;
+        };
+        let graph = self.graph();
+        let Some(SemanticNodeData::Signature { return_type, .. }) =
+            graph.node_data(partial_signature).as_deref().cloned()
+        else {
+            return fixed_target;
+        };
+        let Some(mut data) = graph.node_data(fixed_signature).as_deref().cloned() else {
+            return fixed_target;
+        };
+        let SemanticNodeData::Signature {
+            return_type: ref mut fixed_return,
+            ref mut return_carrier,
+            ..
+        } = data
+        else {
+            return fixed_target;
+        };
+        *fixed_return = return_type;
+        *return_carrier = crate::semantic_query::SignatureReturnCarrier::Declared(return_type);
+        graph.intern_node(data)
+    }
+
     fn contextual_return_mentions(
         &self,
         target: SemanticNodeId,
@@ -1650,6 +1710,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         arguments: &[CallArgument],
         budget: &mut CallResolutionBudget,
         recovery: bool,
+        sole_candidate: bool,
     ) -> CandidateVerdict {
         let graph = self.graph();
         let consumer = crate::semantic_query::ResolveCallConsumer::witness();
@@ -2275,7 +2336,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
-        let mut context_sensitive_targets: Vec<SemanticNodeId> = Vec::new();
+        let mut context_sensitive_targets: Vec<(usize, SemanticNodeId)> = Vec::new();
         for (index, argument) in arguments.iter().enumerate() {
             if deferred_generic_rest.is_some_and(|(_, rest_start)| index >= rest_start) {
                 continue;
@@ -2296,8 +2357,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
-            if argument.context_sensitive {
-                context_sensitive_targets.push(target);
+            // A context-sensitive argument whose contextual type reads one of
+            // the callee's type parameters is typed under that type and
+            // checked on the next request, never as the untyped function it
+            // is here.
+            if argument.context_sensitive && key.explicit_type_args.is_empty() {
+                let reads_inference = (!uninferred_params.is_empty()
+                    && self.contextual_return_mentions(target, &uninferred_params))
+                    || (sole_candidate
+                        && raw_type_params
+                            .iter()
+                            .any(|decl| self.mentions_node(target, decl.param)));
+                if reads_inference {
+                    context_sensitive_targets.push((index, target));
+                    continue;
+                }
             }
             let (source, freshness_origin, _) = argument_source(argument, target);
             let target = self.substitute_canonical(target, &substitution);
@@ -2330,17 +2404,71 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // from a context-sensitive function argument's RETURN: its second
         // inference pass checks the function under the contextual signature
         // and infers from what the body returns (`map<U>` over `x => x`).
-        // This executor types no function body under a contextual
-        // signature: the call is undecided, and no rail may answer it with
-        // the parameter's fallback.
-        if key.explicit_type_args.is_empty()
-            && !uninferred_params.is_empty()
-            && context_sensitive_targets
-                .iter()
-                .any(|target| self.contextual_return_mentions(*target, &uninferred_params))
-        {
+        // This executor types no function body: it names the argument and
+        // its contextual type, the caller types the argument under it and
+        // asks again, and no rail may answer the call with the parameter's
+        // fallback meanwhile.
+        // A context-sensitive argument whose contextual type reads one of the
+        // callee's type parameters is typed the same way: it fixes the
+        // parameters it reads (`withCtx((x) => x, 3)` types `x` as `number`).
+        if !context_sensitive_targets.is_empty() {
+            // The first context-sensitive argument is typed next, under its
+            // contextual type: its parameters instantiated with every
+            // parameter fixed, its return with the inferences alone (the
+            // checker's fixing and non-fixing mappers).
+            // An uninferred parameter reads as itself, its constraint on it,
+            // the way the checker reads a literal context through a type
+            // parameter's constraint.
+            let inferred = CanonicalTypeSubstitution::new(
+                substitution
+                    .bindings()
+                    .iter()
+                    .map(|(param, bound)| {
+                        if !uninferred_params.contains(param) {
+                            return (*param, *bound);
+                        }
+                        let constrained =
+                            constraints
+                                .get(param)
+                                .copied()
+                                .flatten()
+                                .and_then(|constraint| {
+                                    let data = graph.node_data(*param)?;
+                                    let SemanticNodeData::TypeParam {
+                                        decl,
+                                        param_index,
+                                        default,
+                                        display_name,
+                                        constraint: None,
+                                    } = &*data
+                                    else {
+                                        return None;
+                                    };
+                                    Some(graph.intern_node(SemanticNodeData::TypeParam {
+                                        decl: decl.clone(),
+                                        param_index: *param_index,
+                                        constraint: Some(constraint),
+                                        default: *default,
+                                        display_name: Arc::clone(display_name),
+                                    }))
+                                });
+                        (*param, constrained.unwrap_or(*param))
+                    })
+                    .collect(),
+            );
+            let contextual = context_sensitive_targets
+                .first()
+                .and_then(|(index, target)| {
+                    let index = u32::try_from(*index).ok()?;
+                    Some((
+                        index,
+                        self.contextual_argument_type(*target, &substitution, &inferred),
+                    ))
+                });
             self.abandon_session(session_id);
-            return CandidateVerdict::Degraded(ResolveCallFailure::ContextSensitiveInference);
+            return CandidateVerdict::Degraded(ResolveCallFailure::ContextSensitiveInference {
+                contextual,
+            });
         }
         let ordered_args = raw_type_params
             .iter()

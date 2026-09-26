@@ -291,6 +291,11 @@ pub struct SliceParam {
     /// the default initializer's inferred type, else `any` — always
     /// through the frame gate for the signature's scope.
     pub ty: GatedType,
+    /// Whether the parameter is a plain identifier with neither an
+    /// annotation nor a default: the parameter a contextual signature
+    /// types (`getTypeAtPosition` of the contextual signature), `any`
+    /// without one.
+    pub contextually_typed: bool,
     /// The modelled elements of a destructured OBJECT-pattern parameter
     /// (`{ label = "x", n }`, aliases included): identifier bindings
     /// whose value is the annotation member `key` with the default rule
@@ -5711,6 +5716,9 @@ fn lower_params(
             optional: param.optional || param.initializer.is_some(),
             rest: false,
             ty,
+            contextually_typed: param.type_annotation.is_none()
+                && param.initializer.is_none()
+                && matches!(param.pattern, BindingPattern::BindingIdentifier(_)),
             destructured,
         });
     }
@@ -5738,6 +5746,7 @@ fn lower_params(
             optional: false,
             rest: true,
             ty,
+            contextually_typed: false,
             destructured: Arc::from(Vec::new().into_boxed_slice()),
         });
     }

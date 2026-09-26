@@ -419,7 +419,8 @@ fn failure_tag(failure: FlowReturnFailure) -> FlowFailureTag {
         FlowReturnFailure::CallResolution(call) => match call {
             ResolveCallFailure::NotCallable => FlowFailureTag::CallNotCallable,
             ResolveCallFailure::NoApplicableOverload => FlowFailureTag::CallNoApplicableOverload,
-            ResolveCallFailure::Undecidable | ResolveCallFailure::ContextSensitiveInference => {
+            ResolveCallFailure::Undecidable
+            | ResolveCallFailure::ContextSensitiveInference { .. } => {
                 FlowFailureTag::CallUndecidable
             }
             ResolveCallFailure::Budget => FlowFailureTag::CallBudget,

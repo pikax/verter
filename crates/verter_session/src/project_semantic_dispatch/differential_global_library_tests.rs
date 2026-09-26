@@ -214,20 +214,10 @@ fn array_methods_resolve_as_the_checker_resolves_them() {
 }
 
 /// `xs.map((x) => x > 0)` is `boolean[]`: `map<U>` infers `U` from the
-/// callback's return, over an array, a tuple and a readonly array alike.
-/// Wrong-but-clean: the lane answers `unknown[]`.
-///
-/// What the lane gives:
-/// - `aMap`: the checker answers `boolean[]`; the lane measured `unknown[]`.
-/// - `aMapIndex`: the checker answers `number[]`; the lane measured
-///   `unknown[]`.
-/// - `aTupleMap`: the checker answers `(1 | 2)[]`; the lane measured
-///   `unknown[]`.
-/// - `aReadonlyMap`: the checker answers `number[][]`; the lane measured
-///   `unknown[]`.
+/// callback's return, typed under the element type, over an array, a tuple
+/// and a readonly array alike (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "Array map infers its type argument from the callback's return"]
-fn wrong_clean_an_array_method_callback_return_infers_its_type_argument() {
+fn an_array_method_callback_return_infers_as_the_checker_infers_it() {
     let matrix = Matrix::new(ARRAYS).lib(GLOBALS_LIB);
     let failures = matrix.returns(&[
         ("aMap", "boolean[]"),

@@ -12163,45 +12163,10 @@ const ARRAY_MAP_TABLE: &[(&str, &str, &str, &str, &str)] = &[
 /// `map<U>` infers `U` from its callback's return, the callback's parameter
 /// contextually typed by the array's element: `a.map(x => x)` over
 /// `number[]` is `number[]` and `a.map(x => String(x))` `string[]`
-/// (measured on TypeScript 7.0.2). The lane leaves the call undecided
-/// ([`array_map_over_a_context_sensitive_callback_publishes_no_fallback`]).
+/// (measured on TypeScript 7.0.2).
 #[test]
-#[ignore = "call inference from a contextually typed callback return: `a.map(x => x)` over `number[]` is `number[]`"]
 fn array_map_infers_its_callback_return() {
     assert_measured_matrix_with_lib("array-map.ts", ARRAY_MAP_SOURCE, ARRAY_LIB, ARRAY_MAP_TABLE);
-}
-
-/// The checker infers `map`'s `U` from the callback's return, typed under
-/// the contextual signature; the call executor types no callback body
-/// that way, so the call is undecided and the lane publishes no answer
-/// clean — never the uninferred `U`'s fallback `unknown[]` (the measured
-/// answers are [`array_map_infers_its_callback_return`]'s).
-#[test]
-fn array_map_over_a_context_sensitive_callback_publishes_no_fallback() {
-    let host = four_policy_host_with_lib(ARRAY_LIB);
-    let roots = [
-        STRICT_ROOT,
-        LOOSE_ROOT,
-        STRICT_IMPLICIT_ROOT,
-        LOOSE_IMPLICIT_ROOT,
-    ];
-    for root in roots {
-        upsert(&host, &format!("{root}/array-map.ts"), ARRAY_MAP_SOURCE);
-    }
-    let clean: Vec<String> = roots
-        .into_iter()
-        .flat_map(|root| {
-            ["evMap", "evMapString", "decMap", "decMapString"]
-                .into_iter()
-                .map(move |symbol| (root, symbol))
-        })
-        .filter_map(|(root, symbol)| {
-            let observed = observe(&host, &format!("{root}/array-map.ts"), symbol);
-            (!observed.contains("[degraded") && !observed.starts_with("<no value"))
-                .then(|| format!("{root} `{symbol}`: published clean `{observed}`"))
-        })
-        .collect();
-    assert!(clean.is_empty(), "{}", clean.join("\n"));
 }
 
 const ARRAY_CONCAT_SOURCE: &str = r#"
