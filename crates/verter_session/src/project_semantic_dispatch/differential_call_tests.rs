@@ -564,3 +564,37 @@ fn wrong_clean_a_module_declaration_of_a_fresh_call_result_widens() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Generic methods of a generic interface, instantiated by the receiver.
+const METHOD_BINDERS: &str = r##"
+interface Bx<T> {
+  pick<S extends T>(x: S): S;
+  pickU<S>(x: S): S;
+  guard<S extends T>(p: (v: T) => v is S): S;
+}
+declare const bx: Bx<string | number>;
+interface Plain { pick<S extends string>(x: S): S; }
+declare const pl: Plain;
+export function mPick() { return bx.pick("a"); }
+export function mPickUnconstrained() { return bx.pickU("a"); }
+export function mGuard() { return bx.guard((v: string | number): v is string => true); }
+export function mPlain() { return pl.pick("a"); }
+"##;
+
+/// A method's type parameter constrained by the interface's own parameter
+/// infers from its arguments once the receiver instantiates the interface:
+/// `bx.pick("a")` over `pick<S extends T>(x: S): S` on `Bx<string | number>`
+/// is `"a"` (the constraint makes the literal context), and an annotated
+/// guard callback infers `S` from its predicate (`string`). Measured on
+/// TypeScript 7.0.2 under all four settings.
+#[test]
+fn a_constrained_method_type_parameter_infers_on_an_instantiated_interface() {
+    let matrix = Matrix::new(METHOD_BINDERS);
+    let failures = matrix.returns(&[
+        ("mPick", "\"a\""),
+        ("mPickUnconstrained", "string"),
+        ("mGuard", "string"),
+        ("mPlain", "\"a\""),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
