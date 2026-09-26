@@ -130,6 +130,34 @@ impl VerterHost {
         demand: ReturnProjectionDemand,
         cancellation: Option<verter_scheduler::cancellation::CancellationToken>,
     ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
+        self.flow_return_request(function, cancellation, |dispatch| {
+            let key = dispatch.flow_return_key_with_demand(function, demand);
+            match dispatch.execute_flow_return(key) {
+                crate::semantic_query::FlowReturnStep::Complete(result) => Ok(Arc::new(result)),
+                crate::semantic_query::FlowReturnStep::NoValue(failure) => {
+                    Err(FlowReturnError::Failure(failure))
+                }
+                // A hold cannot surface at a fresh top-level
+                // transaction (no in-flight frame exists to
+                // re-enter); treat a torn surfacing as
+                // undecided, never a fabricated value.
+                crate::semantic_query::FlowReturnStep::Hold(_) => {
+                    Err(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
+                }
+            }
+        })
+    }
+
+    /// One audited flow-return request for `function` around `run`: the
+    /// request id, context, audit registration, proven-current store view
+    /// and dispatch every flow-return request builds, `run` over that
+    /// dispatch, then the cancellation mapping and the audit record.
+    pub(crate) fn flow_return_request(
+        &self,
+        function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+        cancellation: Option<verter_scheduler::cancellation::CancellationToken>,
+        run: impl FnOnce(&ProjectSemanticDispatch<'_>) -> Result<Arc<FlowReturnResult>, FlowReturnError>,
+    ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
         let canonical_id: &str = function.anchor.canonical_id.as_ref();
         let function_symbol: &str = function.anchor.symbol.as_ref();
 
@@ -194,24 +222,6 @@ impl VerterHost {
                     );
                     let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext =
                         &host_ctx;
-                    let run = |dispatch: &ProjectSemanticDispatch<'_>| {
-                        let key = dispatch.flow_return_key_with_demand(function, demand.clone());
-                        match dispatch.execute_flow_return(key) {
-                            crate::semantic_query::FlowReturnStep::Complete(result) => {
-                                Ok(Arc::new(result))
-                            }
-                            crate::semantic_query::FlowReturnStep::NoValue(failure) => {
-                                Err(FlowReturnError::Failure(failure))
-                            }
-                            // A hold cannot surface at a fresh top-level
-                            // transaction (no in-flight frame exists to
-                            // re-enter); treat a torn surfacing as
-                            // undecided, never a fabricated value.
-                            crate::semantic_query::FlowReturnStep::Hold(_) => {
-                                Err(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
-                            }
-                        }
-                    };
                     match registration.as_ref() {
                         AuditRequestRegistration::Active(_) => {
                             let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));

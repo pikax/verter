@@ -2003,7 +2003,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         // (2) Warm read (carrier-validated).
-        if let Some(result) = self.graph().get_flow_return_result(self.ctx, &key) {
+        if let Some(result) = self.warm_flow_return_read(&key) {
             return FlowReturnStep::Complete(result);
         }
         // (3) Transaction reuse.
@@ -2023,6 +2023,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             self.execute_flow_return_inline(key)
         }
+    }
+
+    /// The warm, carrier-validated memo read of `key` under this
+    /// dispatch's view: step (2) of [`Self::execute_flow_return`].
+    pub(crate) fn warm_flow_return_read(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
+        self.graph().get_flow_return_result(self.ctx, key)
     }
 
     /// The proven value of `key` when it already closed on this transaction
