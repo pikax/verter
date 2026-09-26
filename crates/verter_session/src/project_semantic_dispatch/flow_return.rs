@@ -5472,6 +5472,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &bound,
             &execution_selection,
         );
+        // The authored return annotation: the contextual type of every
+        // returned expression.
+        let declared_return = ir
+            .declared_return
+            .as_ref()
+            .filter(|declared| !signature_answer_is_frame_shadowed(self, &binder_env, declared))
+            .map(|declared| {
+                let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+                self.shallow_lower_type_expr_with_context(
+                    declared.ty(),
+                    &binder_env.env,
+                    &binder_env.scope,
+                    &binder_env.name_resolution,
+                    binder_env.scope_payload.as_ref(),
+                    &binder_env.shadowing,
+                    &mut substitutions,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                )
+            });
         let mut evaluator = FlowEvaluator {
             dispatch: self,
             call_arguments: Arc::clone(&ir.call_arguments),
@@ -5518,6 +5537,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             circular_inferred: rustc_hash::FxHashSet::default(),
             unwidened_views: rustc_hash::FxHashMap::default(),
             regular_right_operands: rustc_hash::FxHashSet::default(),
+            declared_return,
             call_fresh_literal_returns: Vec::new(),
             break_exits: Vec::new(),
             return_edges: Vec::new(),
@@ -8518,6 +8538,12 @@ struct FlowEvaluator<'d, 'b> {
     /// with it; each logical step rewrites its own entry, so it holds at
     /// most one entry per logical node of the slice.
     regular_right_operands: rustc_hash::FxHashSet<usize>,
+    /// The root function's authored return type, the contextual type of
+    /// its returned expressions: a returned function value is typed under
+    /// it (`(): () => "q" { return () => "q" }` returns `() => "q"`). Owned
+    /// by the evaluator for its one frame; `None` for a nested function's
+    /// evaluator, whose signature is its annotation.
+    declared_return: Option<SemanticNodeId>,
     /// The first statement-level gap observed in source order. A statement
     /// gap is a fallback diagnosis; a concrete degradation found during the
     /// evaluation takes precedence. Expression gaps remain immediate because
@@ -19728,7 +19754,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     Some((node, fresh_values))
                                 }
                                 _ => {
-                                    let outcome = self.eval_expr(expr);
+                                    // A returned function value is typed
+                                    // under the declared return.
+                                    let contextual = self.declared_return.and_then(|declared| {
+                                        self.eval_function_argument_in_context(expr, declared)
+                                    });
+                                    let outcome = match contextual {
+                                        Some(node) => Positional::Value(node),
+                                        None => self.eval_expr(expr),
+                                    };
                                     self.settle(outcome).map(|node| {
                                         let fresh_values =
                                             self.position_fresh_values(expr, node, bare_literal);
@@ -22255,6 +22289,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 circular_inferred: rustc_hash::FxHashSet::default(),
                 unwidened_views: rustc_hash::FxHashMap::default(),
                 regular_right_operands: rustc_hash::FxHashSet::default(),
+                declared_return: None,
                 call_fresh_literal_returns: Vec::new(),
                 break_exits: Vec::new(),
                 return_edges: Vec::new(),

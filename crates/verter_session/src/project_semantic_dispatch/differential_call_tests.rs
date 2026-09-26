@@ -336,6 +336,8 @@ export function kSatisfies() { const v = { a: 1 } satisfies { a: number }; retur
 export function kSatisfiesLiteral() { const v = "x" satisfies string; return v; }
 export function kAnnotatedArr() { const a: readonly ("x" | "y")[] = ["x"]; return a; }
 export function kReturnCtx(): () => "q" { return () => "q"; }
+export function kReturnWide(): () => number { return () => 1; }
+export function kReturnParam(): (x: number) => number { return (x) => x; }
 export function kIIFECtx() { return ((x: number) => x * 2)(3); }
 "##;
 
@@ -399,19 +401,19 @@ fn a_context_sensitive_argument_is_typed_as_the_checker_types_it() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `function kReturnCtx(): () => "q" { return () => "q"; }` returns `() =>
-/// "q"`: the declared return type is the arrow's contextual type, so its
-/// literal return does not widen. Wrong-but-clean: the lane answers `() =>
-/// string`.
-///
-/// What the lane gives:
-/// - `kReturnCtx`: the checker answers `() => "q"`; the lane measured `() =>
-///   string`.
+/// A returned arrow is typed under the declared return type: `function
+/// kReturnCtx(): () => "q" { return () => "q"; }` returns `() => "q"`, its
+/// literal return kept by the literal context, while `(): () => number`
+/// widens `() => 1` to `() => number` and `(): (x: number) => number` types
+/// `(x) => x`'s parameter (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "a returned arrow is contextually typed by the declared return type"]
-fn wrong_clean_a_returned_arrow_takes_the_declared_return_as_context() {
+fn a_returned_arrow_takes_the_declared_return_as_context() {
     let matrix = Matrix::new(CONST_AND_CONTEXT);
-    let failures = matrix.returns(&[("kReturnCtx", "() => \"q\"")]);
+    let failures = matrix.returns(&[
+        ("kReturnCtx", "() => \"q\""),
+        ("kReturnWide", "() => number"),
+        ("kReturnParam", "(x: number) => number"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
