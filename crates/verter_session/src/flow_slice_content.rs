@@ -3288,9 +3288,22 @@ pub(crate) fn build_flow_slice_content(
             anchor,
         });
     // A direct class-declaration member reads its receiver; a nested
-    // function reads the `this` its creating frame handed it.
+    // function reads the `this` its creating frame handed it; a module-level
+    // function declaration with no `this` parameter has no receiver the
+    // checker can type, so its `this` is `any`.
+    let untyped_declaration_this = resolved.enclosing_this.is_none()
+        && matches!(
+            entry.locator.descent.as_ref(),
+            [FunctionDescentStep::FunctionDeclaration]
+        )
+        && matches!(
+            node,
+            FunctionNode::Function(function)
+                if function.is_declaration() && function.this_param.is_none()
+        );
     let this = match context {
         Some(context) => context.this.clone(),
+        None if untyped_declaration_this => Some(SliceThis::Untyped),
         None => resolved.enclosing_this.and_then(|this| {
             let class = Arc::clone(&entry.key.declaration.name);
             Some(match this {

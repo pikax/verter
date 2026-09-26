@@ -407,20 +407,18 @@ export function useOwn() { return own.me().v; }
 
 /// `this` in a module-level function declaration has no receiver the
 /// checker can type: it is `any` (with TS2683 under `noImplicitThis`),
-/// read directly or through a local copy.
+/// read directly, through a local copy or through a member.
 ///
 /// Measured on TypeScript 7.0.2 (all four `strictNullChecks` ×
 /// `noImplicitAny` settings alike, `noImplicitThis` on and off):
-/// `ReturnType<typeof f>` and `ReturnType<typeof g>` are `any`, and `0
-/// extends 1 & ReturnType<typeof f> ? 1 : 0` is `1`. The lane answers the
-/// unmodelled-position marker, and the conditional over it stays
-/// undecided.
+/// `ReturnType<typeof f>`, `ReturnType<typeof g>` and `ReturnType<typeof
+/// m>` are `any`, and `0 extends 1 & ReturnType<typeof f> ? 1 : 0` is `1`.
 #[test]
-#[ignore = "`this` in a module-level function declaration is `any`"]
 fn this_in_a_module_function_is_any() {
     let source = "\
 export function f() { return this; }
 export function g() { const t = this; return t; }
+export function m() { return this.x; }
 ";
     for compiler_options in [None, Some(r#"{ "strict": true, "noImplicitThis": false }"#)] {
         let failures = super::checker_probe_lane_tests::mismatches_in(
@@ -433,6 +431,7 @@ export function g() { const t = this; return t; }
             &[
                 ("ReturnType<typeof f>", "any"),
                 ("ReturnType<typeof g>", "any"),
+                ("ReturnType<typeof m>", "any"),
                 ("0 extends 1 & ReturnType<typeof f> ? 1 : 0", "1"),
             ],
         );
