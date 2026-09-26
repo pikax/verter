@@ -98,21 +98,3 @@ Each `reject` row, and each accept row's forbidden twin, is exercised in `protoc
 - Anchored negatives (`assertAnchoredNegatives`): every construction violation is exactly one TS2769 at an authored member (for the six-overload use, TypeScript reports its last candidate's failure exactly as for `new Shape(...)` written directly); every violated explicit argument is exactly one TS2344 at the authored argument token.
 
 The tsc probes carry the product's own rendering: `probe_fixtures_are_the_rendered_products` pins the rendered projections inside `positive.ts`, `negative.ts` and `negative-construction.ts`, and `picker_probe_fixture_is_the_rendered_declaration` pins the child component to the public-constructor product. Through both pinned engines the positive probe is diagnostic-free: the forwarded `Picker` slot item is the parent's `T` and its value `T["label"]`; the slot's `map` and the `format` prop keep their own binders per call (hover `number[]`); the explicit alias `Picker<Row, "id">` reached through a renamed re-export and a namespace fixes every channel; Options API, generic setup-function, functional and generic functional dependencies keep their published props, payloads and slots; both the first and fifth of six construct overloads resolve; both precise overloads ahead of `Gauge`'s open catch-all and both non-last `Toggle` call overloads resolve; `Menu`'s later overload is selected by its extra `flag`; `Select`'s generic overload and `Mix`'s generic overload ahead of a non-generic one resolve; the erased item stays exactly `unknown` and the untyped component stays `any`. The negative probe raises only customer TS2322 diagnostics.
-
-## Review findings
-
-Settled in earlier review rounds:
-
-- A trailing `any[]` construct signature replaced every earlier overload — fixed by the signature-by-signature constructor rebuild; discriminated by `open-catch-all-replaces-earlier-overloads`.
-- Callable component overloads collapsed to the last call signature — fixed by the signature-by-signature callable rebuild; discriminated by `call-overloads-collapse-to-the-last`.
-- Source-map preservation of generic argument tokens was covered only structurally — covered by `generic_use_witness_values_keep_their_authored_origin`.
-
-This round:
-
-- F1, an attribute index on every rebuilt call overload hid a later overload — rebuilt call overloads take exactly their declared props; discriminated by `call-overloads-tolerate-attributes`.
-- F4, a generic construct signature reopened the `any[]` catch-all — the walk keeps what it read instead of returning the declared constructor; anchored negative `Select :label="1"` plus `generic-construct-overload-reopens-catch-all`.
-- F5, one generic call signature dropped non-generic siblings — overloads read up to the generic signature are now kept (`generic-call-overload-drops-read-overloads`); the overloads declared ahead of a generic signature and per-use binder inference of a rebuilt generic overload remain out of this adapter's reach (see the known TypeScript limit above) and were relocated to STP19A by the architect ruling of 2026-09-25.
-- F6, this evidence file did not describe the shipped rebuild — updated here.
-- An open catch-all whose instance publishes no `$props` was rebuilt as the declared `any[]` signature, and its tolerant fallback took `any` props — the rebuilt signature now takes no props (`Record<string, never>`) and the fallback an `unknown` attribute index over no props; every attribute of such a component is a fallthrough attribute, so use-level diagnostics are unchanged.
-
-Raw outcomes: see the CI artifact owner for the candidate run; local qualification is the charter §14 command above.
