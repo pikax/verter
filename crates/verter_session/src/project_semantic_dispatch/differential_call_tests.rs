@@ -131,6 +131,14 @@ export function gIdObj() { return id({ a: 1 }); }
 export function gPair() { return pair(1, "s"); }
 export function gFirst() { return first([1, 2]); }
 export function gFirstMixed() { return first([1, "s"]); }
+declare function firstRo<T>(xs: readonly T[]): T;
+declare const gTup: [1, "s"];
+declare const gTupRest: [1, ...string[]];
+export function gFirstThree() { return first([1, "s", true]); }
+export function gFirstTuple() { return first(gTup); }
+export function gFirstRest() { return first(gTupRest); }
+export function gFirstObjects() { return first([{ a: 1 }, { b: "x" }]); }
+export function gFirstReadonly() { return firstRo([1, 2]); }
 export function gWrap() { return wrap(true); }
 export function gMap(xs: number[]) { return map(xs, (x) => "" + x); }
 export function gMapObj(xs: number[]) { return map(xs, (x) => ({ x })); }
@@ -196,18 +204,24 @@ fn generic_calls_infer_as_the_checker_infers() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `first([1, "s"])` with `first<T>(xs: T[]): T` infers `T` from the array
-/// literal's element type `string | number`. Wrong-but-clean: the lane answers
-/// `number`.
-///
-/// What the lane gives:
-/// - `gFirstMixed`: the checker answers `string | number`; the lane measured
-///   `number`.
+/// An array literal or a tuple infers an array's element from ONE candidate,
+/// the union of its element types (`inferFromIndexTypes`): `first([1, "s"])`
+/// with `first<T>(xs: T[]): T` is `string | number`, and a declared tuple keeps
+/// its literal elements (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "an array literal of mixed elements infers the union of its element types"]
-fn wrong_clean_array_element_candidates_infer_their_union() {
+fn array_element_candidates_infer_as_the_checker_infers_them() {
     let matrix = Matrix::new(GENERIC_INFERENCE);
-    let failures = matrix.returns(&[("gFirstMixed", "string | number")]);
+    let failures = matrix.returns(&[
+        ("gFirstMixed", "string | number"),
+        ("gFirstThree", "string | number | boolean"),
+        ("gFirstTuple", "\"s\" | 1"),
+        ("gFirstRest", "string | 1"),
+        (
+            "gFirstObjects",
+            "{ a: number; b?: undefined; } | { a?: undefined; b: string; }",
+        ),
+        ("gFirstReadonly", "number"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

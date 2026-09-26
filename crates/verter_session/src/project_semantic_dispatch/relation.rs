@@ -7393,17 +7393,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     results.push(assignable(bindings));
                     return true;
                 }
+                // The positions relate as ONE union to the element, so an
+                // inference takes it as one candidate (`inferFromIndexTypes`):
+                // `first([1, "s"])` infers `string | number`. A variadic
+                // element's number index is its whole array-like value against
+                // the target array.
                 let mut forward: Vec<RelateWork> = Vec::with_capacity(s_els.len() + 1);
+                let mut positions: Vec<SemanticNodeId> = Vec::with_capacity(s_els.len());
                 for slot in self.tuple_slots(&s_els) {
-                    // A variadic element's number index is its whole
-                    // array-like value against the target array.
-                    forward.push(match slot.kind {
-                        TupleSlotKind::Variadic => RelateWork::Eval(slot.value, target),
-                        _ => RelateWork::Eval(slot.type_argument, t_el),
-                    });
+                    match slot.kind {
+                        TupleSlotKind::Variadic => {
+                            forward.push(RelateWork::Eval(slot.value, target))
+                        }
+                        _ => positions.push(slot.type_argument),
+                    }
                 }
-                if s_els.len() > 1 {
-                    forward.push(RelateWork::ReduceAnd(s_els.len() as u32));
+                if !positions.is_empty() {
+                    let index = self.intern_normalized_union_or_intersection(&positions, true);
+                    forward.push(RelateWork::Eval(index, t_el));
+                }
+                if forward.len() > 1 {
+                    forward.push(RelateWork::ReduceAnd(forward.len() as u32));
                 }
                 push_forward_work(work, forward);
                 return true;
