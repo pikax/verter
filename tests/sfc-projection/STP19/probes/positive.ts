@@ -66,6 +66,8 @@ type __VerterUseContract<C> = C extends abstract new (...args: infer A) => unkno
 type __VerterUseTolerant<P, I> = (0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : (0 extends 1 & I ? P : {})) : P) & Record<string, unknown>;
 type __VerterUseFunctional<P, X> = { readonly $props: P; readonly $slots: X extends { slots: infer S } ? S : {}; $emit: X extends { emit: infer E } ? E : never };
 declare function __VerterUseComponent<C, A>(component: C, tolerant: A): __VerterUseContract<C> & A;
+declare function __VerterUseConstructor<C extends new <T extends any[]>(...args: T) => { readonly args: T }>(component: C): C;
+declare function __VerterUseConstructor<C extends new <T extends readonly any[]>(...args: T) => { readonly args: T }>(component: C): C;
 declare function __VerterUseConstructor<P, I>(component: abstract new (props: P) => I): new (props: __VerterUseTolerant<P, I>) => I;
 declare function __VerterUseConstructor<P, X, R>(component: (props: P, ctx: X) => R): new (props: P & Record<string, unknown>) => __VerterUseFunctional<P, X>;
 type __VerterUseProp<I, K extends PropertyKey> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : unknown) : unknown;
@@ -160,3 +162,21 @@ const adaptedRestNotOpen: "v" = new (__VerterUseComponent(RestNotOpen, __VerterU
 new RestNotOpen({ kind: "rest" });
 // @ts-expect-error the adapter must not turn a required-prefix rest into props.
 new (__VerterUseComponent(RestNotOpen, __VerterUseConstructor(RestNotOpen)))({ kind: "rest" });
+
+// A generic rest is not Vue's non-generic open catch-all. Its binder and
+// every preceding overload stay on the original constructor path.
+declare const GenericRest: {
+  new <T extends any[]>(...args: T): { readonly $props: { count: number }; readonly args: T };
+};
+declare const GenericRestOverloads: {
+  new (props: { kind: "precise"; n: number }): { readonly $props: { kind: "precise"; n: number }; readonly tag: "precise" };
+  new <T extends any[]>(...args: T): { readonly $props: { kind: "generic" }; readonly args: T; readonly tag: "generic" };
+};
+declare const ReadonlyGenericRest: {
+  new <T extends readonly any[]>(...args: T): { readonly $props: { count: number }; readonly args: T };
+};
+const directGenericRest: [string, number] = new GenericRest("a", 1).args;
+const adaptedGenericRest: [string, number] = new (__VerterUseComponent(GenericRest, __VerterUseConstructor(GenericRest)))("a", 1).args;
+const adaptedReadonlyGenericRest: readonly [string] = new (__VerterUseComponent(ReadonlyGenericRest, __VerterUseConstructor(ReadonlyGenericRest)))("a").args;
+const directGenericRestOverload: "precise" = new GenericRestOverloads({ kind: "precise", n: 1 }).tag;
+const adaptedGenericRestOverload: "precise" = new (__VerterUseComponent(GenericRestOverloads, __VerterUseConstructor(GenericRestOverloads)))({ kind: "precise", n: 1 }).tag;

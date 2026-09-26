@@ -14,6 +14,9 @@
 //!     through unchanged, so every construct overload and every binder —
 //!     constraints, defaults, `const`, variadic and dependent parameters —
 //!     stays TypeScript's to resolve, with no fixed overload count;
+//!     a generic rest constructor whose instance carries its inferred tuple
+//!     takes this pass-through path before open-catch-all reflection, so that
+//!     tuple is not mistaken for Vue's non-generic `any[]` catch-all;
 //!   - a constructor whose last construct signature is Vue's open
 //!     `...args: any[]` (the Options API `defineComponent`) is rebuilt
 //!     signature by signature, in declaration order: every open signature is
@@ -116,6 +119,8 @@ macro_rules! foreign_contract_declarations {
             "type __VerterUseTolerant<P, I> = (0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : (0 extends 1 & I ? P : {})) : P) & Record<string, unknown>;\n",
             "type __VerterUseFunctional<P, X> = { readonly $props: P; readonly $slots: X extends { slots: infer S } ? S : {}; $emit: X extends { emit: infer E } ? E : never };\n",
             "declare function __VerterUseComponent<C, A>(component: C, tolerant: A): __VerterUseContract<C> & A;\n",
+            "declare function __VerterUseConstructor<C extends new <T extends any[]>(...args: T) => { readonly args: T }>(component: C): C;\n",
+            "declare function __VerterUseConstructor<C extends new <T extends readonly any[]>(...args: T) => { readonly args: T }>(component: C): C;\n",
             "declare function __VerterUseConstructor<P, I>(component: abstract new (props: P) => I): new (props: __VerterUseTolerant<P, I>) => I;\n",
             "declare function __VerterUseConstructor<P, X, R>(component: (props: P, ctx: X) => R): new (props: P & Record<string, unknown>) => __VerterUseFunctional<P, X>;\n",
         )

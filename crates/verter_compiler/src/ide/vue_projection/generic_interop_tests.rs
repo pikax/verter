@@ -283,6 +283,12 @@ fn foreign_contract_declarations_keep_published_shapes() {
         "declare function {USE_CONSTRUCTOR}<P, X, R>(component: (props: P, ctx: X) => R): new (props: P & Record<string, unknown>) => {USE_FUNCTIONAL}<P, X>;"
     )));
     assert!(declarations.contains(&format!(
+        "declare function {USE_CONSTRUCTOR}<C extends new <T extends any[]>(...args: T) => {{ readonly args: T }}>(component: C): C;"
+    )));
+    assert!(declarations.contains(&format!(
+        "declare function {USE_CONSTRUCTOR}<P, I>(component: abstract new (props: P) => I): new (props: {USE_TOLERANT}<P, I>) => I;"
+    )));
+    assert!(declarations.contains(&format!(
         "declare function {USE_COMPONENT}<C, A>(component: C, tolerant: A): {USE_CONTRACT}<C> & A;"
     )));
     let results = declared_results();
