@@ -568,6 +568,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             env,
             extended_captures,
             declared_evolving_captures,
+            None,
         ))
     }
 

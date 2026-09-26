@@ -1023,8 +1023,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         if let Some(reasons) = exit_reasons {
             completeness = completeness.merge(ResultCompleteness::partial(reasons));
-        } else if let Some(reduced) = self.composite_over_resolved_arms(n) {
-            n = reduced;
+        } else {
+            if let Some(reduced) = self.composite_over_resolved_arms(n) {
+                n = reduced;
+            }
+            if let Some(reduced) = self.union_over_evaluated_key_arms(n, context) {
+                n = reduced;
+            }
         }
         // The alias names the type its application settled on only while
         // that type is one the alias itself constructs; a union that
@@ -1037,11 +1042,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
                 ) && !arguments.contains(&n)
             } else {
-                self.alias_names_settled_type(n)
+                self.alias_names_settled_type(n) && !self.mapped_alias_over_array(named, n)
             };
             if named_by_alias {
                 n = named;
             }
+        }
+        // The declaration-keeping mode prints an application's arguments as
+        // the checker prints them.
+        if !resolve_declaration_refs && !completeness.is_partial() {
+            n = self.application_over_printed_arguments(n, context);
         }
         match completeness {
             ResultCompleteness::Complete => StructuralFactDemandOutcome::Complete(n),
@@ -1339,6 +1349,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Whether the alias application `named` declares a mapped type and
+    /// settled on an array or tuple: the checker maps a homomorphic mapped
+    /// type over an array or tuple to an array or tuple type
+    /// (`instantiateMappedType`), which no alias names (`type Boxed<T> = {
+    /// [K in keyof T]: { v: T[K] } }` prints `Boxed<[1, 2]>` as `[{ v: 1; },
+    /// { v: 2; }]`).
+    fn mapped_alias_over_array(&self, named: SemanticNodeId, settled: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        if !matches!(
+            graph.node_data(settled).as_deref(),
+            Some(SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. })
+        ) {
+            return false;
+        }
+        let identity = match graph.node_data(named).as_deref() {
+            Some(
+                SemanticNodeData::InstantiationRef { base: identity, .. }
+                | SemanticNodeData::DeclRef { identity },
+            ) => identity.clone(),
+            _ => return false,
+        };
+        matches!(
+            self.declared_alias_body(&identity),
+            Some(Some(body)) if matches!(
+                graph.node_data(body).as_deref(),
+                Some(SemanticNodeData::Mapped { .. })
+            )
+        )
+    }
+
     /// Whether a named alias application still names the type it settled
     /// on: one of the constructed types the checker attaches an alias to,
     /// a lib interface application (`Promise<number>`) included.
@@ -1358,6 +1398,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => false,
         }
+    }
+
+    /// The application `application` with each argument read as the checker
+    /// prints it ([`Self::resolve_structural_fact_demand`] keeping
+    /// declaration names): the checker instantiates an application's
+    /// arguments as types, resolving the operators they write
+    /// (`Promise<Awaited<T>>` at `T = string` prints `Promise<string>`). An
+    /// argument that does not settle stays as written.
+    fn application_over_printed_arguments(
+        &self,
+        application: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let (base, args) = match self.graph().node_data(application).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                (base.clone(), Arc::clone(args))
+            }
+            _ => return application,
+        };
+        let printed: Vec<SemanticNodeId> = args
+            .iter()
+            .map(
+                |&arg| match self.resolve_structural_fact_demand(arg, context, true, false) {
+                    StructuralFactDemandOutcome::Complete(node) => node,
+                    _ => arg,
+                },
+            )
+            .collect();
+        if printed.as_slice() == args.as_ref() {
+            return application;
+        }
+        self.graph().intern_preserving_scope(
+            application,
+            SemanticNodeData::InstantiationRef {
+                base,
+                args: Arc::from(printed.into_boxed_slice()),
+            },
+        )
     }
 
     /// The application of `identity` the checker prints for `carrier`: its
@@ -1844,6 +1922,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let reduced = self.reduce_over_resolved_arms(node, &arms, is_union, &is_name);
         self.carrier_normalizing.borrow_mut().pop();
         reduced
+    }
+
+    /// The union `node` with each `keyof` arm read as the keys it settles
+    /// to under `context`: the checker resolves `keyof` over a type that is
+    /// not generic when it builds the type, so the union holds those keys
+    /// (`keyof { a: 1 } | keyof { b: 2 }` is `"a" | "b"`). An arm whose keys
+    /// keep their `keyof` origin (`keyof Face` over an interface) or do not
+    /// settle stays as written. `None` when no arm changes.
+    fn union_over_evaluated_key_arms(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let arms = match graph.node_data(node)?.as_ref() {
+            SemanticNodeData::Union(members) => members.members_arc(),
+            _ => return None,
+        };
+        let mut changed = false;
+        let views: Vec<SemanticNodeId> = arms
+            .iter()
+            .map(|&arm| {
+                if !matches!(
+                    graph.node_data(arm).as_deref(),
+                    Some(SemanticNodeData::KeyOf { .. })
+                ) {
+                    return arm;
+                }
+                let keys = self.evaluate_deferred_outcome(arm, context);
+                let settled = matches!(keys.completeness, ResultCompleteness::Complete)
+                    && !matches!(
+                        graph.node_data(keys.node).as_deref(),
+                        Some(SemanticNodeData::KeyOf { .. } | SemanticNodeData::Opaque(_))
+                    );
+                if settled {
+                    changed = true;
+                    keys.node
+                } else {
+                    arm
+                }
+            })
+            .collect();
+        changed.then(|| self.intern_normalized_union_or_intersection(&views, true))
     }
 
     fn reduce_over_resolved_arms(

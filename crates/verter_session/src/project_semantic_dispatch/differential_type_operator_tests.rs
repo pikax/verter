@@ -28,6 +28,8 @@ type Tup = [string, number, boolean];
 type Arr = Array<{ x: 1 }>;
 type Nested = { a: { b: { c: "deep" } } };
 type U2 = { k: "a"; v: 1 } | { k: "b"; v: 2 };
+type Obj = { a: 1; b: 2 };
+type Both = { a: 1 } & { b: 2 };
 "##;
 
 /// An indexed access reads a property, a union of keys, every key, a tuple
@@ -80,21 +82,19 @@ fn indexed_access_and_keyof_read_as_the_checker_reads_them() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `keyof U2` (a union alias) is `"k" | "v"` and `keyof { a: 1 } | keyof { b: 2
-/// }` is `"a" | "b"`: the checker resolves `keyof` over anything but an
-/// interface or class reference. Wrong-but-clean (unreduced): the lane keeps
-/// the `keyof` operator.
-///
-/// What the lane gives:
-/// - `keyof U2`: the checker answers `"k" | "v"`; the lane measured `keyof U2`.
-/// - `keyof { a: 1 } | keyof { b: 2 }`: the checker answers `"a" | "b"`; the
-///   lane measured `keyof { a: 1; } | keyof { b: 2; }`.
+/// `keyof` keeps its origin in print only over a declaration's own key list:
+/// `keyof Obj` over `type Obj = { a: 1; b: 2 }` prints `keyof Obj`, while
+/// `keyof U2` over a union alias is `"k" | "v"` and `keyof Both` over an
+/// intersection alias is `"a" | "b"` (the keys are read off the members), and
+/// a union of `keyof` object literal types holds their keys (`keyof { a: 1 } |
+/// keyof { b: 2 }` is `"a" | "b"`).
 #[test]
-#[ignore = "keyof a union alias or an object literal type resolves to its key union"]
-fn wrong_clean_unreduced_keyof_an_alias_or_literal_type_is_its_key_union() {
+fn keyof_an_alias_or_literal_type_prints_as_the_checker_prints_it() {
     let matrix = Matrix::new(INDEXED);
     let failures = matrix.types(&[
         ("keyof U2", "\"k\" | \"v\""),
+        ("keyof Obj", "keyof Obj"),
+        ("keyof Both", "\"a\" | \"b\""),
         ("keyof { a: 1 } | keyof { b: 2 }", "\"a\" | \"b\""),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -170,19 +170,11 @@ fn a_key_remapped_mapped_type_reads_its_remapped_members() {
 
 /// `keyof Flags<User>` prints `keyof User` (a homomorphic mapped type's keys
 /// are its source's), `keyof Getters<{ a: 1; b: 2 }>` is `"getA" | "getB"` and
-/// `keyof FromUnion<'x' | 'y'>` is `"x" | "y"`. Wrong-but-clean (unreduced):
-/// the lane keeps `keyof` over the application.
-///
-/// What the lane gives:
-/// - `keyof Flags<User>`: the checker answers `keyof User`; the lane measured
-///   `keyof Flags<User>`.
-/// - `keyof Getters<{ a: 1; b: 2 }>`: the checker answers `"getA" | "getB"`;
-///   the lane measured `keyof Getters<{ a: 1; b: 2; }>`.
-/// - `keyof FromUnion<'x' | 'y'>`: the checker answers `"x" | "y"`; the lane
-///   measured `keyof FromUnion<"x" | "y">`.
+/// `keyof FromUnion<'x' | 'y'>` is `"x" | "y"`: a mapped type's keys are read
+/// off its constraint, never as a declaration's key list with a `keyof`
+/// origin of its own.
 #[test]
-#[ignore = "keyof a mapped type application resolves to its keys"]
-fn wrong_clean_unreduced_keyof_a_mapped_application_is_its_key_union() {
+fn keyof_a_mapped_application_is_its_key_union() {
     let matrix = Matrix::new(MAPPED);
     let failures = matrix.types(&[
         ("keyof Flags<User>", "keyof User"),
@@ -193,45 +185,67 @@ fn wrong_clean_unreduced_keyof_a_mapped_application_is_its_key_union() {
 }
 
 /// A homomorphic mapped type instantiated with a tuple or array type is a tuple
-/// or array: `Boxed<[1, 2]>` is `[{ v: 1; }, { v: 2; }]`, `Boxed<string[]>` is
-/// `{ v: string; }[]`, `Flags<[1, 2]>` is `[boolean, boolean]`. Wrong-but-clean
-/// (unreduced): the lane keeps the application.
+/// or array, which the alias does not name: `Flags<[1, 2]>` is `[boolean,
+/// boolean]`.
+#[test]
+fn a_homomorphic_mapped_type_maps_arrays_and_tuples() {
+    let matrix = Matrix::new(MAPPED);
+    let failures = matrix.types(&[("Flags<[1, 2]>", "[boolean, boolean]")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `Boxed<[1, 2]>` is `[{ v: 1; }, { v: 2; }]` and `Boxed<string[]>` is `{ v:
+/// string; }[]`: each element's member value is the source element's type.
 ///
 /// What the lane gives:
 /// - `Boxed<[1, 2]>`: the checker answers `[{ v: 1; }, { v: 2; }]`; the lane
-///   measured `Boxed<[1, 2]>`.
+///   measured `[{ v: <unreduced indexed access>; }, { v: <unreduced indexed
+///   access>; }]`.
 /// - `Boxed<string[]>`: the checker answers `{ v: string; }[]`; the lane
-///   measured `Boxed<string[]>`.
-/// - `Flags<[1, 2]>`: the checker answers `[boolean, boolean]`; the lane
-///   measured `Flags<[1, 2]>`.
+///   measured `{ v: <unreduced indexed access>; }[]`.
 #[test]
-#[ignore = "a homomorphic mapped type over an array or tuple is an array or tuple"]
-fn wrong_clean_unreduced_a_homomorphic_mapped_type_maps_arrays_and_tuples() {
+#[ignore = "a homomorphic mapped type over an array or tuple reads each element's member value"]
+fn a_homomorphic_mapped_type_over_a_tuple_reads_its_element_values() {
     let matrix = Matrix::new(MAPPED);
     let failures = matrix.types(&[
         ("Boxed<[1, 2]>", "[{ v: 1; }, { v: 2; }]"),
         ("Boxed<string[]>", "{ v: string; }[]"),
-        ("Flags<[1, 2]>", "[boolean, boolean]"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Under `strictNullChecks` `{ [K in keyof T]+?: T[K] }` read at a key is `1 |
-/// undefined`, and `Required<{ a?: 1 | undefined }>['a']` is `1` (`-?` removes
-/// the `undefined` the optional member added). Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `Opt<{ a: 1 }>['a']`: the checker answers `1 | undefined` (strict), `1`
-///   (strictNullChecks off), `1 | undefined` (noImplicitAny off), `1` (both
-///   off); the lane measured `1` (strict, noImplicitAny off).
-/// - `Required<{ a?: 1 | undefined }>['a']`: the checker answers `1`; the lane
-///   measured `undefined | 1` (strict, noImplicitAny off).
+/// Under `strictNullChecks` a mapped type read at a key takes its optionality
+/// modifier: `+?` adds `undefined` unless the value holds it (`void` does not
+/// stop it), and `-?` removes the `undefined` an optional source member added
+/// but not one the member's type spells (`Req<{ a: 1 | undefined }>['a']`
+/// stays `1 | undefined`). Without it the value is unchanged. Measured on
+/// TypeScript 7.0.2 under all four settings.
 #[test]
-#[ignore = "+? adds undefined and -? removes it from an indexed read under strictNullChecks"]
-fn wrong_clean_optionality_modifiers_change_the_read_type() {
+fn optionality_modifiers_change_the_read_type_as_the_checker_reads_it() {
     let matrix = Matrix::new(MAPPED);
-    let mut failures = matrix.types(&[("Required<{ a?: 1 | undefined }>['a']", "1")]);
-    failures.extend(matrix.nullness(&[(Read::Type("Opt<{ a: 1 }>['a']"), "1 | undefined", "1")]));
+    let mut failures = matrix.types(&[
+        ("Required<{ a?: 1 | undefined }>['a']", "1"),
+        ("Required<{ a?: 1 }>['a']", "1"),
+    ]);
+    failures.extend(matrix.nullness(&[
+        (Read::Type("Opt<{ a: 1 }>['a']"), "1 | undefined", "1"),
+        (Read::Type("Partial<{ a: 1 }>['a']"), "1 | undefined", "1"),
+        (
+            Read::Type("Req<{ a: 1 | undefined }>['a']"),
+            "1 | undefined",
+            "1",
+        ),
+        (
+            Read::Type("Opt<{ a: 1 | undefined }>['a']"),
+            "1 | undefined",
+            "1",
+        ),
+        (
+            Read::Type("Opt<{ a: void }>['a']"),
+            "void | undefined",
+            "void",
+        ),
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -252,6 +266,7 @@ type NotAny<T> = 0 extends 1 & T ? "any" : "not";
 type Eq<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 type Rev<T extends unknown[]> = T extends [infer H, ...infer R] ? [...Rev<R>, H] : [];
 type InferExt<T> = T extends [infer X extends string] ? X : "nope";
+type Thenish<T> = T extends object & { then(onfulfilled: infer F, ...args: infer _): any } ? F : "none";
 "##;
 
 /// A conditional distributes over a naked union argument (and `never` to
@@ -280,6 +295,23 @@ fn conditional_types_resolve_as_the_checker_resolves_them() {
         ("NotAny<any>", "\"any\""),
         ("NotAny<string>", "\"not\""),
         ("InferExt<['s']>", "\"s\""),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A check that does not relate to an `infer` pattern even with every
+/// `infer` read as `any` takes the false branch, whatever the pattern binds
+/// and however deep: `Unpromise<string>` is `string`, `Thenish<{ a: 1 }>`
+/// (a `then` method over `object & …`) is `"none"`.
+#[test]
+fn a_check_no_inference_relates_takes_the_false_branch() {
+    let matrix = Matrix::new(CONDITIONALS);
+    let failures = matrix.types(&[
+        ("Unpromise<string>", "string"),
+        ("Unpromise<{ a: 1 }>", "{ a: 1; }"),
+        ("Unpromise<number[]>", "number[]"),
+        ("Thenish<string>", "\"none\""),
+        ("Thenish<{ a: 1 }>", "\"none\""),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

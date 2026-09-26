@@ -1319,12 +1319,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         declared_literal: param.declared_literal,
                     });
                 }
-                let (sub_return, return_changed) =
+                let (mut sub_return, return_changed) =
                     self.substitute_with_change_tracking(*return_type, parameter_node, arg);
                 any_changed |= return_changed;
                 // A generic predicate instantiates with the signature:
                 // `x is T` at `T := string` narrows to `string`.
-                let sub_predicate = predicate.map(|predicate| {
+                let mut sub_predicate = predicate.map(|predicate| {
                     predicate.map_type(|target| {
                         let (sub, changed) =
                             self.substitute_with_change_tracking(target, parameter_node, arg);
@@ -1382,6 +1382,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         constraint: new_constraint,
                         default: new_default,
                         is_const: tp.is_const,
+                    });
+                }
+                // A binder re-interned with its moved bounds is still the
+                // parameter its signature's positions name: every occurrence
+                // of the old binder node follows it, so inference and
+                // substitution, which bind the exact binder node, reach them
+                // (`pick<S extends T>(x: S): S` over `Bx<string | number>`
+                // infers `S` from `x`).
+                for (old, new) in type_parameters
+                    .iter()
+                    .zip(new_type_parameters.iter())
+                    .filter(|(old, new)| old.param != new.param)
+                    .map(|(old, new)| (old.param, new.param))
+                {
+                    for param in new_params.iter_mut() {
+                        param.ty = self.substitute_with_change_tracking(param.ty, old, new).0;
+                    }
+                    sub_return = self.substitute_with_change_tracking(sub_return, old, new).0;
+                    sub_predicate = sub_predicate.map(|predicate| {
+                        predicate.map_type(|target| {
+                            self.substitute_with_change_tracking(target, old, new).0
+                        })
                     });
                 }
                 if !any_changed {

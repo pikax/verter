@@ -2397,8 +2397,15 @@ pub enum ResolveCallFailure {
     /// checked under: the checker infers it from what that function
     /// returns, which applicability does not model. Undecided like
     /// [`Self::Undecidable`], but no rail may answer the call with the
-    /// parameter's fallback instead.
-    ContextSensitiveInference,
+    /// parameter's fallback instead. `contextual` names the first
+    /// context-sensitive argument (its position) and the contextual type it
+    /// is checked under, instantiated with the inferences of the arguments
+    /// before it: the caller types that argument under it and asks again —
+    /// the checker's second inference pass. `None` when the callee has
+    /// several candidates, each of which would type it differently.
+    ContextSensitiveInference {
+        contextual: Option<(u32, SemanticNodeId)>,
+    },
 }
 
 /// The env-free declaration-slot SEED — exactly the four env-free

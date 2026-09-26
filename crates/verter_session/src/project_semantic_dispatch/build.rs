@@ -443,6 +443,15 @@ pub(super) enum ConditionalInferRoute {
     OutOfScope,
 }
 
+/// What [`ProjectSemanticDispatch::infer_scan`] finds under a node: its
+/// `infer` declarations, and whether a nested conditional or mapped type
+/// scopes binders of its own there.
+#[derive(Debug, Default)]
+struct InferScan {
+    infers: Vec<SemanticNodeId>,
+    binder_scope: bool,
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Collect the observed self-roots of a set of input `SemanticNodeId`s.
     ///
@@ -1404,6 +1413,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ) {
             if let Some(source) = prepared.type_annotation.expression_source.as_ref() {
                 match self.execute_semantic_expression_source(source, effective_owner) {
+                    // A mutable declaration widens the fresh literal its
+                    // initializer call returns (`let m = f(1)` over `f<T>(x:
+                    // T): T` is `number`).
+                    Some(node)
+                        if matches!(
+                            prepared.kind,
+                            verter_semantic::analysis::type_eval::ValueDeclKind::Let
+                                | verter_semantic::analysis::type_eval::ValueDeclKind::Var
+                        ) && self
+                            .semantic_expression_source_is_fresh(source, effective_owner) =>
+                    {
+                        let members = match self.graph().node_data(node).as_deref() {
+                            Some(SemanticNodeData::Union(members)) => {
+                                Some(members.iter().copied().collect::<Vec<_>>())
+                            }
+                            _ => None,
+                        };
+                        match members {
+                            Some(arms) => {
+                                let widened: Vec<SemanticNodeId> =
+                                    arms.iter().map(|arm| self.widened_literal(*arm)).collect();
+                                self.intern_normalized_union_or_intersection(&widened, true)
+                            }
+                            None => self.widened_literal(node),
+                        }
+                    }
                     Some(node) => node,
                     None => {
                         composed_partial = true;
@@ -1902,6 +1937,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
         }
         match &prepared.type_annotation.literal_freshness {
+            // A `const` initialized by a call reads as fresh as the call's
+            // result is (`const m = f(1)` over `f<T>(x: T): T`).
+            DeclaredLiteralFreshness::Regular
+                if prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Const =>
+            {
+                prepared
+                    .type_annotation
+                    .expression_source
+                    .as_ref()
+                    .is_some_and(|source| {
+                        self.semantic_expression_source_is_fresh(source, declaring_owner)
+                    })
+            }
             DeclaredLiteralFreshness::Regular
             | DeclaredLiteralFreshness::WideningStaticMembers(_)
             | DeclaredLiteralFreshness::WideningNullish => false,
@@ -10610,10 +10658,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // An index signature contributes its key type — a `string`
                 // one `string | number`, since a numeric key reads it too
                 // (`getLiteralTypeFromProperties`) — beside the members'
-                // literal keys, which a `string` key type absorbs.
+                // literal keys, which a `string` key type absorbs. An enum's
+                // reverse mapping is no key of its object.
+                let enum_object = self.is_enum_object(base);
                 let index_keys: Vec<SemanticNodeId> = surface
                     .index_signatures
                     .iter()
+                    .filter(|_| !enum_object)
                     .flat_map(|signature| {
                         let string_key = matches!(
                             self.graph().node_data(signature.key_type).as_deref(),
@@ -10764,15 +10815,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => None,
         };
-        // A mapped type — written, or a builtin mapped utility's
-        // application — is read before it materializes, so a homomorphic
+        // A mapped type — written, or a declaration or application whose
+        // body is one — is read before it materializes, so a homomorphic
         // one answers `keyof` its source. A declaration materializes once,
         // under the demand every other reader of it shares.
         let transit_settled = match self.graph().node_data(base).as_deref() {
             Some(SemanticNodeData::Mapped { .. }) => Some(base),
-            Some(SemanticNodeData::InstantiationRef { base: identity, .. })
-                if identity.canonical_id.as_ref() == "__builtin__" =>
-            {
+            Some(SemanticNodeData::InstantiationRef { .. } | SemanticNodeData::DeclRef { .. }) => {
                 Some(self.resolve_signature_source_carrier(
                     base,
                     crate::semantic_query::ProjectionReductionContext::structural_transit(),
@@ -10780,39 +10829,63 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => None,
         };
+        // The checker reads a mapped type's keys off its constraint
+        // (`getIndexTypeForMappedType`), never as a declaration's key list:
+        // they carry no `keyof` origin of their own.
+        let mut mapped = false;
         if let Some(SemanticNodeData::Mapped { source, mapper }) = transit_settled
             .and_then(|settled| self.graph().node_data(settled))
             .as_deref()
         {
-            if mapper.name_remap.is_some()
-                || crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
-                    self, *source, mapper,
-                )
-            {
+            if crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
+                self, *source, mapper,
+            ) {
                 return None;
             }
-            return match self.graph().node_data(mapper.key_space).as_deref() {
-                Some(SemanticNodeData::KeyOf { base: keyed }) if *keyed == *source => {
-                    read(*source).and_then(|keys| {
-                        // `keyof` over the source keeps its own printed form
-                        // (`keyof Partial<Face>` prints `keyof Face`).
-                        match self.graph().node_data(keys).as_deref() {
-                            Some(SemanticNodeData::Opaque(_)) => None,
-                            _ => Some(keys),
-                        }
-                    })
-                }
-                _ => settled_keys(
-                    self.evaluate_deferred_semantic_node_with_context(mapper.key_space, context)
+            mapped = true;
+            // A key remapping's keys are the remapped names the
+            // materialized type holds (`keyof Getters<{ a: 1 }>` is
+            // `"getA"`).
+            if mapper.name_remap.is_none() {
+                return match self.graph().node_data(mapper.key_space).as_deref() {
+                    Some(SemanticNodeData::KeyOf { base: keyed }) if *keyed == *source => {
+                        read(*source).and_then(|keys| {
+                            // `keyof` over the source keeps its own printed
+                            // form (`keyof Partial<Face>` prints `keyof Face`).
+                            match self.graph().node_data(keys).as_deref() {
+                                Some(SemanticNodeData::Opaque(_)) => None,
+                                _ => Some(keys),
+                            }
+                        })
+                    }
+                    _ => settled_keys(
+                        self.evaluate_deferred_semantic_node_with_context(
+                            mapper.key_space,
+                            context,
+                        )
                         .into_active_query_build_node(self),
-                ),
-            };
+                    ),
+                };
+            }
         }
         let settled = self.resolve_signature_source_carrier(base, context);
         if settled == base {
             return None;
         }
         let keys = settled_keys(read(settled)?)?;
+        // A union's keys are those every member shares and an
+        // intersection's those of any member (`getIndexType` over a union or
+        // intersection), read off the members, so an alias naming one leaves
+        // no `keyof` origin (`keyof U` over `type U = { k: 1 } | { k: 2 }`
+        // prints `"k"`); a class or interface keeps its own even where its
+        // heritage resolves to an intersection.
+        let composite = named.as_ref().is_some_and(|identity| {
+            self.prepared_decl_kind(identity)
+                == Some(verter_semantic::analysis::type_eval::TypeDeclKind::Alias)
+        }) && matches!(
+            self.graph().node_data(settled).as_deref(),
+            Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
+        );
         match self.graph().node_data(keys).as_deref() {
             // The checker's key list is one type per property and per index
             // signature — a `string` index contributing its prebuilt
@@ -10823,7 +10896,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::Union(_)) if self.keys_are_one_string_index(settled) => {
                 Some(keys)
             }
-            Some(SemanticNodeData::Union(members)) if named.is_some() && members.len() > 1 => None,
+            Some(SemanticNodeData::Union(members))
+                if named.is_some() && !mapped && !composite && members.len() > 1 =>
+            {
+                None
+            }
             _ => Some(keys),
         }
     }
@@ -11305,6 +11382,107 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .name_remap
                 .map(|remap| self.substitute_semantic_type_param(remap, source, arm)),
             ..mapper.clone()
+        }
+    }
+
+    /// Whether the member of the mapped type's `source` at the literal
+    /// `key` is optional; `None` when the source's surface or the key does
+    /// not read.
+    fn mapped_source_member_optional(
+        &self,
+        source: SemanticNodeId,
+        key: SemanticNodeId,
+    ) -> Option<bool> {
+        let graph = self.graph();
+        let name: Arc<str> = match graph.node_data(key).as_deref()? {
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(text)) => {
+                Arc::from(text.as_str())
+            }
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(number)) => {
+                Arc::from(crate::semantic_query::index_key::js_number_to_string(*number).as_str())
+            }
+            _ => return None,
+        };
+        let super::relation::IdentityCarrierUnwrap::Concrete(resolved) =
+            self.unwrap_identity_carrier_for_relation(source)
+        else {
+            return None;
+        };
+        match graph.node_data(resolved).as_deref()? {
+            SemanticNodeData::Object(surface) => {
+                match surface.project_known_key(&crate::semantic_query::PropertyKey::String(name)) {
+                    crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                        Some(member.optional)
+                    }
+                    crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// A mapped member's value read at its key under its optionality
+    /// modifier, as the checker types a mapped symbol's property under
+    /// `strictNullChecks` (`resolveMappedTypeMembers`): `+?` adds `undefined`
+    /// unless the value holds it, and `-?` removes the `undefined` an
+    /// optional source member `key` added (`removeMissingOrUndefinedType`).
+    /// Without `strictNullChecks` the value is unchanged.
+    pub(super) fn mapped_member_optionality(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        value: SemanticNodeId,
+        source: SemanticNodeId,
+        key: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let (strict_null_checks, exact_optional) = self
+            .graph()
+            .node_scope(source)
+            .and_then(|scope| scope.canonical_file())
+            .map_or((true, false), |canonical| {
+                let options = self
+                    .ctx
+                    .host_for_fact_tracer_install()
+                    .semantic_compiler_options_for(&canonical);
+                (
+                    options.strict_null_checks,
+                    options.exact_optional_property_types,
+                )
+            });
+        if !strict_null_checks {
+            return value;
+        }
+        let graph = self.graph();
+        let arms: Vec<SemanticNodeId> = match graph.node_data(value).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
+            _ => vec![value],
+        };
+        let is_undefined = |arm: &SemanticNodeId| {
+            matches!(
+                graph.node_data(*arm).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+            )
+        };
+        match mapper.optionality {
+            crate::semantic_query::OptionalityMod::Add
+                if !exact_optional && !arms.iter().any(is_undefined) =>
+            {
+                let mut arms = arms;
+                arms.push(self.primitive_node(PrimitiveKind::Undefined));
+                self.intern_normalized_union_or_intersection(&arms, true)
+            }
+            crate::semantic_query::OptionalityMod::Remove
+                if arms.iter().any(is_undefined)
+                    && self.mapped_source_member_optional(source, key) == Some(true) =>
+            {
+                let kept: Vec<SemanticNodeId> =
+                    arms.into_iter().filter(|arm| !is_undefined(arm)).collect();
+                match kept.as_slice() {
+                    [] => self.primitive_node(PrimitiveKind::Never),
+                    [only] => *only,
+                    _ => self.intern_normalized_union_or_intersection(&kept, true),
+                }
+            }
+            _ => value,
         }
     }
 
@@ -13328,7 +13506,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let route = self.conditional_infer_route(extends);
         if matches!(route, ConditionalInferRoute::OutOfScope) {
-            return (ConditionalBranchSelection::Deferred, None);
+            return (self.permissive_conditional_selection(check, extends), None);
         }
         if matches!(route, ConditionalInferRoute::Bare) {
             // `check extends infer X` binds `X := check` through the
@@ -13371,6 +13549,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (ConditionalBranchSelection::False, None)
             }
             _ => (ConditionalBranchSelection::Deferred, None),
+        }
+    }
+
+    /// The selection over an `extends` pattern whose `infer` declarations
+    /// sit deeper than the relation binds: the false branch when the check
+    /// does not relate to the pattern even with every `infer` read as `any`
+    /// — the checker's definitely-false test over the permissive
+    /// instantiation (`getConditionalType`), which no inference can turn
+    /// true (`string extends { then(cb: (v: infer V) => void): void }` is
+    /// false) — and deferred otherwise. A pattern holding a nested
+    /// conditional or mapped type, whose binders scope their own `infer`
+    /// declarations, stays deferred.
+    fn permissive_conditional_selection(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+    ) -> ConditionalBranchSelection {
+        let scan = self.infer_scan(extends, true);
+        if scan.binder_scope || scan.infers.is_empty() {
+            return ConditionalBranchSelection::Deferred;
+        }
+        let any = self
+            .graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        let permissive = scan.infers.iter().fold(extends, |pattern, infer| {
+            self.substitute_semantic_type_param(pattern, *infer, any)
+        });
+        if self.subtree_contains_infer(permissive) {
+            return ConditionalBranchSelection::Deferred;
+        }
+        match self.execute_relate_pair(check, permissive) {
+            super::dispatch_txn::RelationStep::NotAssignable => ConditionalBranchSelection::False,
+            _ => ConditionalBranchSelection::Deferred,
         }
     }
 
@@ -13543,6 +13754,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// direct positions keeps the conditional deferred rather than
     /// leaking an unbound placeholder into the selected branch.
     pub(super) fn subtree_contains_infer(&self, root: SemanticNodeId) -> bool {
+        !self.infer_scan(root, false).infers.is_empty()
+    }
+
+    /// The `infer` declarations in `root`'s structural subtree (the first
+    /// one alone unless `collect_all`), and whether the subtree holds a
+    /// nested conditional or mapped type, whose own binders scope what lies
+    /// under them ([`Self::subtree_contains_infer`]'s walk).
+    fn infer_scan(&self, root: SemanticNodeId, collect_all: bool) -> InferScan {
+        let mut scan = InferScan::default();
         let graph = self.graph();
         let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
         let mut stack: Vec<SemanticNodeId> = vec![root];
@@ -13554,7 +13774,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 continue;
             };
             match data.as_ref() {
-                SemanticNodeData::Infer { .. } => return true,
+                SemanticNodeData::Infer { .. } => {
+                    scan.infers.push(node);
+                    if !collect_all {
+                        return scan;
+                    }
+                }
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");
@@ -13615,6 +13840,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     pending,
                     ..
                 } => {
+                    scan.binder_scope = true;
                     if let Some(pending) = pending {
                         stack.extend(pending.argument_nodes());
                     }
@@ -13646,6 +13872,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Mapped { source, mapper } => {
+                    scan.binder_scope = true;
                     stack.push(*source);
                     stack.push(mapper.key_space);
                     stack.push(mapper.value_expr);
@@ -13656,7 +13883,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => {}
             }
         }
-        false
+        scan
     }
 
     /// Ordered union reduction — the `ReduceUnion` query builder. Routes

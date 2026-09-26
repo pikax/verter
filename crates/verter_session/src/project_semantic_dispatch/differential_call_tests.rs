@@ -143,6 +143,15 @@ export function gFnExpr() { return fnArg(function () { return 42; }); }
 export function gWrap() { return wrap(true); }
 export function gMap(xs: number[]) { return map(xs, (x) => "" + x); }
 export function gMapObj(xs: number[]) { return map(xs, (x) => ({ x })); }
+export function gMapLit(xs: number[]) { return map(xs, (x) => 1); }
+export function gMapId(xs: number[]) { return map(xs, (x) => x); }
+declare function pipe2<A, B, C>(a: A, f: (a: A) => B, g: (b: B) => C): C;
+export function gPipe() { return pipe2(1, (a) => a + "", (b) => b > ""); }
+declare function apply<T>(cb: (v: string) => T): T;
+declare function applyN<T extends number>(cb: (v: string) => T): T;
+export function gApplyLit() { return apply((v) => 1); }
+export function gApplyLitN() { return applyN((v) => 1); }
+export function gApplyBranch(b: boolean) { return apply((v) => b ? 1 : 2); }
 export function gPick(o: { a: string; b: number }) { return pick(o, "b"); }
 export function gKeys(o: { a: string; b: number }) { return keys(o); }
 export function gDefault() { return def(); }
@@ -227,41 +236,37 @@ fn array_element_candidates_infer_as_the_checker_infers_them() {
 }
 
 /// `map(xs, (x) => "" + x)` with `map<T, U>(xs: T[], f: (x: T) => U): U[]`
-/// fixes `T` from `xs`, then types the callback and infers `U` from its return.
-/// Wrong-but-clean: the lane answers `unknown[]`.
-///
-/// What the lane gives:
-/// - `gMap`: the checker answers `string[]`; the lane measured `unknown[]`.
-/// - `gMapObj`: the checker answers `{ x: number; }[]`; the lane measured
-///   `unknown[]`.
+/// fixes `T` from `xs`, then types the callback under `(x: number) => U`
+/// and infers `U` from its return, a single literal return widening unless
+/// the contextual return is a literal context for it, through an uninferred
+/// parameter's constraint (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "a context-sensitive callback's return infers a later type parameter"]
-fn wrong_clean_a_callback_return_infers_its_type_parameter() {
+fn a_callback_return_infers_as_the_checker_infers_it() {
     let matrix = Matrix::new(GENERIC_INFERENCE);
-    let failures = matrix.returns(&[("gMap", "string[]"), ("gMapObj", "{ x: number; }[]")]);
+    let failures = matrix.returns(&[
+        ("gMap", "string[]"),
+        ("gMapObj", "{ x: number; }[]"),
+        ("gMapLit", "number[]"),
+        ("gMapId", "number[]"),
+        ("gPipe", "boolean"),
+        ("gApplyLit", "number"),
+        ("gApplyLitN", "1"),
+        ("gApplyBranch", "1 | 2"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `fnArg(function () { return 42; })` with `fnArg<R>(f: () => R): R` infers
-/// the widened `number` from the function expression's return (TypeScript
-/// 7.0.2, all four settings alike). Wrong-but-clean: the lane answers
-/// `unknown`.
-///
-/// What the lane gives:
-/// - `gFnExpr`: the checker answers `number`; the lane measured `unknown`.
+/// `fnArg(function () { return 42; })` and `fnArg(() => 42)` with `fnArg<R>(f:
+/// () => R): R` infer the widened `number` from the function's return: a
+/// function value whose parameters are all annotated is typed in the call's
+/// first pass, and its lone fresh literal return widens under a contextual
+/// return type that is no literal context for it (TypeScript 7.0.2, all four
+/// settings alike).
 #[test]
-#[ignore = "a function expression argument infers its type parameter from its return"]
-fn wrong_clean_a_function_expression_return_infers_its_type_parameter() {
+fn a_function_value_return_infers_its_type_parameter_widened() {
     let matrix = Matrix::new(GENERIC_INFERENCE);
-    let failures = matrix.returns(&[("gFnExpr", "number")]);
-    assert!(
-        failures.is_empty(),
-        "{}",
-        failures.join(
-            "
-"
-        )
-    );
+    let failures = matrix.returns(&[("gFnExpr", "number"), ("gFnArg", "number")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// `keys(o)` with `keys<T>(o: T): (keyof T)[]` and `o: { a: string; b: number
@@ -276,19 +281,6 @@ fn wrong_clean_a_function_expression_return_infers_its_type_parameter() {
 fn wrong_clean_a_keyof_of_an_inferred_object_prints_its_keys() {
     let matrix = Matrix::new(GENERIC_INFERENCE);
     let failures = matrix.returns(&[("gKeys", "(\"a\" | \"b\")[]")]);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-/// `fnArg(() => 42)` with `fnArg<R>(f: () => R): R` infers the widened
-/// `number`. Wrong-but-clean: the lane answers `42`.
-///
-/// What the lane gives:
-/// - `gFnArg`: the checker answers `number`; the lane measured `42`.
-#[test]
-#[ignore = "a literal returned by a callback widens when inferred for an unconstrained type parameter"]
-fn wrong_clean_a_callback_return_literal_widens_in_inference() {
-    let matrix = Matrix::new(GENERIC_INFERENCE);
-    let failures = matrix.returns(&[("gFnArg", "number")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -339,10 +331,13 @@ export function kCtxObjMethod() { const o: { m(x: number): void } = { m(x) {} };
 export function kCtxHandler() { let got: unknown; reg((ev) => { got = ev.kind; }); return got; }
 export function kCtxTuple() { const t: [number, string] = [1, "a"]; return t; }
 export function kCtxWithInfer() { return withCtx((x) => x, 3); }
+export function kCtxStr() { return withCtx((x) => x, "s"); }
 export function kSatisfies() { const v = { a: 1 } satisfies { a: number }; return v; }
 export function kSatisfiesLiteral() { const v = "x" satisfies string; return v; }
 export function kAnnotatedArr() { const a: readonly ("x" | "y")[] = ["x"]; return a; }
 export function kReturnCtx(): () => "q" { return () => "q"; }
+export function kReturnWide(): () => number { return () => 1; }
+export function kReturnParam(): (x: number) => number { return (x) => x; }
 export function kIIFECtx() { return ((x: number) => x * 2)(3); }
 "##;
 
@@ -396,32 +391,253 @@ fn an_as_const_argument_infers_as_the_checker_reads_it() {
 }
 
 /// `withCtx((x) => x, 3)` with `withCtx<T>(f: (x: T) => T, v: T): T` defers the
-/// context-sensitive arrow, infers `T = number` from `3`, and returns `number`.
-/// Wrong-but-clean: the lane answers `unknown`.
-///
-/// What the lane gives:
-/// - `kCtxWithInfer`: the checker answers `number`; the lane measured
-///   `unknown`.
+/// context-sensitive arrow, infers `T` from `3`, fixes it widened to `number`
+/// where the arrow reads it, and returns `number` (TypeScript 7.0.2, all four
+/// settings alike).
 #[test]
-#[ignore = "a context-sensitive argument is typed after the other arguments fix the inference"]
-fn wrong_clean_a_context_sensitive_argument_is_typed_after_inference() {
+fn a_context_sensitive_argument_is_typed_as_the_checker_types_it() {
     let matrix = Matrix::new(CONST_AND_CONTEXT);
-    let failures = matrix.returns(&[("kCtxWithInfer", "number")]);
+    let failures = matrix.returns(&[("kCtxWithInfer", "number"), ("kCtxStr", "string")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `function kReturnCtx(): () => "q" { return () => "q"; }` returns `() =>
-/// "q"`: the declared return type is the arrow's contextual type, so its
-/// literal return does not widen. Wrong-but-clean: the lane answers `() =>
-/// string`.
-///
-/// What the lane gives:
-/// - `kReturnCtx`: the checker answers `() => "q"`; the lane measured `() =>
-///   string`.
+/// A returned arrow is typed under the declared return type: `function
+/// kReturnCtx(): () => "q" { return () => "q"; }` returns `() => "q"`, its
+/// literal return kept by the literal context, while `(): () => number`
+/// widens `() => 1` to `() => number` and `(): (x: number) => number` types
+/// `(x) => x`'s parameter (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "a returned arrow is contextually typed by the declared return type"]
-fn wrong_clean_a_returned_arrow_takes_the_declared_return_as_context() {
+fn a_returned_arrow_takes_the_declared_return_as_context() {
     let matrix = Matrix::new(CONST_AND_CONTEXT);
-    let failures = matrix.returns(&[("kReturnCtx", "() => \"q\"")]);
+    let failures = matrix.returns(&[
+        ("kReturnCtx", "() => \"q\""),
+        ("kReturnWide", "() => number"),
+        ("kReturnParam", "(x: number) => number"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Generic calls over literal arguments, directly and nested, under an
+/// unconstrained, a primitive-constrained and a literal-constrained type
+/// parameter, a `const` one, an `as const` argument, a contextual type (a
+/// callback's return inferring a type parameter, a contextually typed arrow)
+/// and a `const` or `let` binding of the result.
+const LITERAL_INFERENCE: &str = r##"
+declare function f<T>(x: T): T;
+declare function g<T>(x: T): T[];
+declare function k<T>(x: T): { v: T };
+declare function h<T>(x: T): T | undefined;
+declare function n<T extends number>(x: T): T;
+declare function sn<T extends string | number>(x: T): T;
+declare function lit<T extends 1 | 2>(x: T): T;
+declare function c<const T>(x: T): T;
+declare const one: 1;
+export function wDirect() { return f(1); }
+export function wNested() { return f(f(1)); }
+export function wNestedThree() { return f(f(f("s"))); }
+export function wIntoArray() { return g(f(1)); }
+export function wArrayInto() { return f(g(1)); }
+export function wIntoObject() { return k(f(1)); }
+export function wIntoUnion() { return f(h(1)); }
+export function wBoolean() { return f(f(true)); }
+export function wConstBinding() { const x = f(f(1)); return x; }
+export function wLetBinding() { let x = f(f(1)); return x; }
+export function wObjectMember() { const o = { a: f(f(1)) }; return o; }
+export function wArrayElement() { return [f(f(1))]; }
+export function wConditional(b: boolean) { return b ? f(f(1)) : f(2); }
+export function wNumber() { return n(n(1)); }
+export function wStringOrNumber() { return sn(sn("a")); }
+export function wLiteral() { return lit(lit(1)); }
+export function wNumberInto() { return f(n(1)); }
+export function wIntoNumber() { return n(f(1)); }
+export function wConst() { return c(c(1)); }
+export function wConstInto() { return f(c(1)); }
+export function wIntoConst() { return c(f(1)); }
+export function wAsConst() { return f(f(1 as const)); }
+export function wAsConstLet() { let x = f(f(1 as const)); return x; }
+export function wRegular() { return f(f(one)); }
+export function wContextual() { const x: 1 = f(f(1)); return x; }
+declare function run<R>(cb: () => R): R;
+declare function runN<R extends number>(cb: () => R): R;
+export function wCallbackReturn() { return run(() => f(f(1))); }
+export function wCallbackLiteralReturn() { return runN(() => f(f(1))); }
+export function wContextualReturn() { const r: () => 1 = () => f(f(1)); return r; }
+export function wImmediate() { return (() => f(f(1)))(); }
+export function wUnionLet() { let x = f(h(1)); return x; }
+declare function hn<T extends number>(x: T): T | undefined;
+export function wUnionArray() { return g(h(1)); }
+export function wUnionMember() { return { a: f(h(1)) }; }
+export function wUnionConstrained() { let x = f(hn(1)); return x; }
+export function wUnionNested() { let x = f(f(h(1))); return x; }
+let mUL = f(h(1));
+const mUC = f(h(1));
+export function wModuleUnionLet() { return mUL; }
+export function wModuleUnionConst() { return mUC; }
+export function wModuleUnionConstLet() { let x = mUC; return x; }
+const mTop = f(f(1));
+let mLet = f(f(1));
+const mArr = g(f(1));
+const mDirect = f(1);
+const mN = n(1);
+const mReg = f(one);
+export const mExp = f(1);
+export function wModule() { return mTop; }
+export function wModuleLet() { return mLet; }
+export function wModuleArray() { return mArr; }
+export function wModuleDirect() { return mDirect; }
+export function wModuleArgument() { return f(mTop); }
+export function wModuleConstrained() { return mN; }
+export function wModuleRegular() { return mReg; }
+export function wModuleExported() { return mExp; }
+export function wModuleTypeof() { const x: typeof mExp = mExp; return x; }
+"##;
+
+/// An unconstrained type parameter inferred from a fresh literal argument is
+/// that FRESH literal (it sits at the top level of the return, so the
+/// candidate is not widened), and so is the call's result: a nested call
+/// hands the fresh literal on as its own argument, and the return, a mutable
+/// binding or member widens it (`f(f(1))` is `number`). A primitive or
+/// literal constraint, a `const` type parameter, an `as const` argument and a
+/// regular literal argument infer the REGULAR literal, which no position
+/// widens; a union of fresh literals is not a unit type, so the return keeps
+/// it (`b ? f(f(1)) : f(2)` is `1 | 2`). A function value's lone fresh literal
+/// return widens unless its parameter's contextual return type is a literal
+/// context (`run(() => f(f(1)))` over `run<R>(cb: () => R): R` is `number`,
+/// `runN(() => f(f(1)))` over `R extends number` is `1`). Measured on TypeScript 7.0.2 under
+/// all four settings.
+#[test]
+fn a_generic_call_keeps_or_widens_a_literal_as_the_checker_infers_it() {
+    let matrix = Matrix::new(LITERAL_INFERENCE);
+    let mut failures = matrix.returns(&[
+        ("wDirect", "number"),
+        ("wNested", "number"),
+        ("wNestedThree", "string"),
+        ("wIntoArray", "number[]"),
+        ("wArrayInto", "number[]"),
+        ("wIntoObject", "{ v: number; }"),
+        ("wBoolean", "boolean"),
+        ("wConstBinding", "number"),
+        ("wLetBinding", "number"),
+        ("wObjectMember", "{ a: number; }"),
+        ("wArrayElement", "number[]"),
+        ("wConditional", "1 | 2"),
+        ("wNumber", "1"),
+        ("wStringOrNumber", "\"a\""),
+        ("wLiteral", "1"),
+        ("wNumberInto", "1"),
+        ("wIntoNumber", "1"),
+        ("wConst", "1"),
+        ("wConstInto", "1"),
+        ("wIntoConst", "1"),
+        ("wAsConst", "1"),
+        ("wAsConstLet", "1"),
+        ("wRegular", "1"),
+        ("wContextual", "1"),
+        ("wContextualReturn", "() => 1"),
+        ("wImmediate", "number"),
+        ("wCallbackReturn", "number"),
+        ("wCallbackLiteralReturn", "1"),
+        ("wModuleArray", "number[]"),
+    ]);
+    failures.extend(matrix.nullness(&[(Read::Return("wIntoUnion"), "1 | undefined", "number")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A union a call returns keeps its fresh literal members through an
+/// enclosing call, for a mutable binding, a member or an array element to
+/// widen: `let x = f(h(1))` over `h<T>(x: T): T | undefined` is `number |
+/// undefined`, `g(h(1))` over `g<T>(x: T): T[]` is `(number | undefined)[]`;
+/// a constrained parameter's literal stays regular (`1 | undefined`). A
+/// module `let` of such a call widens it, and a module `const` of one reads
+/// as that fresh union, which the return keeps (not a unit type) and a
+/// mutable binding widens.
+/// Measured on TypeScript 7.0.2 under all four settings.
+#[test]
+fn a_fresh_union_constituent_of_a_nested_call_widens() {
+    let matrix = Matrix::new(LITERAL_INFERENCE);
+    let failures = matrix.nullness(&[
+        (Read::Return("wUnionLet"), "number | undefined", "number"),
+        (
+            Read::Return("wUnionArray"),
+            "(number | undefined)[]",
+            "number[]",
+        ),
+        (
+            Read::Return("wUnionMember"),
+            "{ a: number | undefined; }",
+            "{ a: number; }",
+        ),
+        (Read::Return("wUnionConstrained"), "1 | undefined", "1"),
+        (Read::Return("wUnionNested"), "number | undefined", "number"),
+        (
+            Read::Return("wModuleUnionLet"),
+            "number | undefined",
+            "number",
+        ),
+        (Read::Return("wModuleUnionConst"), "1 | undefined", "number"),
+        (
+            Read::Return("wModuleUnionConstLet"),
+            "number | undefined",
+            "number",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A module-level declaration initialized by a call that returns a fresh
+/// literal declares that fresh literal: a `let` widens it (`let mLet =
+/// f(f(1))` is `number`), and a read of a `const` is a fresh literal source
+/// that the return widens (`return mDirect` over `const mDirect = f(1)` is
+/// `number`, as `f(mTop)` over `const mTop = f(f(1))` is), while its type
+/// stays the literal (`typeof mExp` is `1`). A constrained parameter or a
+/// regular argument infers a regular literal no read widens. Measured on
+/// TypeScript 7.0.2 under all four settings.
+#[test]
+fn a_module_declaration_of_a_fresh_call_result_widens() {
+    let matrix = Matrix::new(LITERAL_INFERENCE);
+    let failures = matrix.returns(&[
+        ("wModule", "number"),
+        ("wModuleLet", "number"),
+        ("wModuleDirect", "number"),
+        ("wModuleArgument", "number"),
+        ("wModuleConstrained", "1"),
+        ("wModuleRegular", "1"),
+        ("wModuleExported", "number"),
+        ("wModuleTypeof", "1"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Generic methods of a generic interface, instantiated by the receiver.
+const METHOD_BINDERS: &str = r##"
+interface Bx<T> {
+  pick<S extends T>(x: S): S;
+  pickU<S>(x: S): S;
+  guard<S extends T>(p: (v: T) => v is S): S;
+}
+declare const bx: Bx<string | number>;
+interface Plain { pick<S extends string>(x: S): S; }
+declare const pl: Plain;
+export function mPick() { return bx.pick("a"); }
+export function mPickUnconstrained() { return bx.pickU("a"); }
+export function mGuard() { return bx.guard((v: string | number): v is string => true); }
+export function mPlain() { return pl.pick("a"); }
+"##;
+
+/// A method's type parameter constrained by the interface's own parameter
+/// infers from its arguments once the receiver instantiates the interface:
+/// `bx.pick("a")` over `pick<S extends T>(x: S): S` on `Bx<string | number>`
+/// is `"a"` (the constraint makes the literal context), and an annotated
+/// guard callback infers `S` from its predicate (`string`). Measured on
+/// TypeScript 7.0.2 under all four settings.
+#[test]
+fn a_constrained_method_type_parameter_infers_on_an_instantiated_interface() {
+    let matrix = Matrix::new(METHOD_BINDERS);
+    let failures = matrix.returns(&[
+        ("mPick", "\"a\""),
+        ("mPickUnconstrained", "string"),
+        ("mGuard", "string"),
+        ("mPlain", "\"a\""),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

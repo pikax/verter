@@ -214,20 +214,10 @@ fn array_methods_resolve_as_the_checker_resolves_them() {
 }
 
 /// `xs.map((x) => x > 0)` is `boolean[]`: `map<U>` infers `U` from the
-/// callback's return, over an array, a tuple and a readonly array alike.
-/// Wrong-but-clean: the lane answers `unknown[]`.
-///
-/// What the lane gives:
-/// - `aMap`: the checker answers `boolean[]`; the lane measured `unknown[]`.
-/// - `aMapIndex`: the checker answers `number[]`; the lane measured
-///   `unknown[]`.
-/// - `aTupleMap`: the checker answers `(1 | 2)[]`; the lane measured
-///   `unknown[]`.
-/// - `aReadonlyMap`: the checker answers `number[][]`; the lane measured
-///   `unknown[]`.
+/// callback's return, typed under the element type, over an array, a tuple
+/// and a readonly array alike (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "Array map infers its type argument from the callback's return"]
-fn wrong_clean_an_array_method_callback_return_infers_its_type_argument() {
+fn an_array_method_callback_return_infers_as_the_checker_infers_it() {
     let matrix = Matrix::new(ARRAYS).lib(GLOBALS_LIB);
     let failures = matrix.returns(&[
         ("aMap", "boolean[]"),
@@ -238,41 +228,31 @@ fn wrong_clean_an_array_method_callback_return_infers_its_type_argument() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `xs.filter((x) => typeof x === "string")` is `string[]`: the arrow's
-/// inferred type predicate `x is string` selects the `filter<S extends T>`
-/// overload. Wrong-but-clean: the lane answers `(string | number)[]`.
-///
-/// What the lane gives:
-/// - `aFilter`: the checker answers `string[]`; the lane measured `(string |
-///   number)[]`.
+/// `xs.filter((x) => typeof x === "string")` is `string[]`: the arrow is
+/// typed under the first overload's contextual signature, its inferred type
+/// predicate `x is string` infers `S` of `filter<S extends T>`, and that
+/// overload applies; a guard callback with an authored predicate selects it
+/// too.
 #[test]
-#[ignore = "filter resolves its guard overload with a callback whose type predicate is inferred"]
-fn wrong_clean_filter_takes_the_callbacks_inferred_type_predicate() {
+fn filter_takes_the_callbacks_type_predicate() {
     let matrix = Matrix::new(ARRAYS).lib(GLOBALS_LIB);
-    let failures = matrix.returns(&[("aFilter", "string[]")]);
+    let failures = matrix.returns(&[("aFilter", "string[]"), ("aFilterGuard", "string[]")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// An explicitly annotated guard callback selects `filter<S extends T>`
-/// (`string[]`) and makes `every` a `this is S[]` predicate that narrows the
+/// A guard callback makes `every` a `this is S[]` predicate that narrows the
 /// receiver (`number[]`); a `filter`/`map`/`join` chain is `string`.
 ///
 /// What the lane gives:
-/// - `aFilterGuard`: the checker answers `string[]`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnrepresentableCallee.
 /// - `aEvery`: the checker answers `number[]`; the lane measured `(string |
 ///   number)[]` degraded by FlowGap(GuardNarrowing).
 /// - `aChain`: the checker answers `string`; the lane measured `<opaque
 ///   UnmodeledPosition>` degraded by UnmodeledPosition.
 #[test]
-#[ignore = "a type-guard callback resolves filter / every to their generic overloads"]
-fn a_guard_callback_resolves_the_generic_overload() {
+#[ignore = "a type-guard callback narrows every's receiver, and a filter chain reads through"]
+fn a_guard_callback_narrows_every_and_a_filter_chain_reads_through() {
     let matrix = Matrix::new(ARRAYS).lib(GLOBALS_LIB);
-    let failures = matrix.returns(&[
-        ("aFilterGuard", "string[]"),
-        ("aEvery", "number[]"),
-        ("aChain", "string"),
-    ]);
+    let failures = matrix.returns(&[("aEvery", "number[]"), ("aChain", "string")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -471,17 +451,21 @@ fn a_member_of_a_library_generic_instance_reads_in_type_position() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `Promise.resolve("x")` is `Promise<string>`: `Awaited<string>` is `string`.
-/// Wrong-but-clean (unreduced): the lane keeps `Promise<Awaited<string>>`.
-///
-/// What the lane gives:
-/// - `pResolve`: the checker answers `Promise<string>`; the lane measured
-///   `Promise<Awaited<string>>`.
+/// `Promise.resolve("x")` is `Promise<string>`: an application's arguments
+/// print as the types they resolve to, and `Awaited<string>` is `string`
+/// (`Promise<Awaited<string>>` prints `Promise<string>`, `Map<Awaited<Promise<1>>,
+/// keyof { a: 1; b: 2 }>` prints `Map<1, "a" | "b">`).
 #[test]
-#[ignore = "Promise.resolve(value) resolves Awaited<T> for a non-thenable argument"]
-fn wrong_clean_unreduced_promise_resolve_awaits_its_argument() {
+fn promise_resolve_awaits_its_argument() {
     let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
-    let failures = matrix.returns(&[("pResolve", "Promise<string>")]);
+    let mut failures = matrix.returns(&[("pResolve", "Promise<string>")]);
+    failures.extend(matrix.types(&[
+        ("Promise<Awaited<string>>", "Promise<string>"),
+        (
+            "Map<Awaited<Promise<1>>, keyof { a: 1; b: 2 }>",
+            "Map<1, \"a\" | \"b\">",
+        ),
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

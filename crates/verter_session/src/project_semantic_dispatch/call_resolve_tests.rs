@@ -1464,8 +1464,9 @@ fn incomplete_independent_nested_call_taints_enclosing_build() {
 
 /// A context-sensitive argument (a function value with an un-annotated
 /// parameter) is withheld from the FIRST inference pass: the eager argument
-/// alone fixes `T`, and the withheld argument is then checked for
-/// applicability under that fixed substitution. Mutation: drop the
+/// alone fixes `T`, and the executor hands the withheld argument back with
+/// its contextual type instantiated under that fixed substitution; typed
+/// under it, the argument selects the candidate. Mutation: drop the
 /// context-sensitivity withholding — the lambda's `any` parameter deposits
 /// and beats the literal, and `T` binds `any`. The second half is the
 /// negative control: the SAME nodes with the argument marked
@@ -1538,20 +1539,51 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         const_view: None,
     };
 
-    let withheld = selected(dispatch.execute_resolve_call(call_key(
+    let withheld = dispatch.execute_resolve_call(call_key(
         &dispatch,
         callee,
         CallKind::Call,
         None,
         vec![lambda_arg(true), eager(literal)],
-    )));
-    let ResolvedCallResult::Selected { return_type, .. } = withheld else {
-        panic!("the generic candidate must select")
+    ));
+    let super::call_resolve::ResolveCallStep::Degraded(
+        crate::semantic_query::ResolveCallFailure::ContextSensitiveInference {
+            contextual: Some((0, contextual)),
+        },
+    ) = withheld
+    else {
+        panic!("the withheld lambda must be handed back for typing, got {withheld:?}")
+    };
+    let parameter = match graph.node_data(contextual).as_deref() {
+        Some(SemanticNodeData::Signature { params, .. }) => params.first().map(|param| param.ty),
+        other => panic!("the contextual type must be the callback signature, got {other:?}"),
     };
     assert_eq!(
-        return_type, literal,
+        parameter,
+        Some(literal),
         "the eager argument alone fixes T; the withheld lambda contributes no candidate"
     );
+    // The caller types the lambda under that signature and asks again.
+    let typed_lambda = signature(
+        &dispatch,
+        "typedLambda",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, literal, false, false)],
+        Vec::new(),
+        literal,
+    );
+    let typed = selected(dispatch.execute_resolve_call(call_key(
+        &dispatch,
+        callee,
+        CallKind::Call,
+        None,
+        vec![eager(typed_lambda), eager(literal)],
+    )));
+    let ResolvedCallResult::Selected { return_type, .. } = typed else {
+        panic!("the generic candidate must select")
+    };
+    assert_eq!(return_type, literal);
     assert_ne!(return_type, any);
 
     // Negative control: the same nodes, marked context-FREE, DO deposit.

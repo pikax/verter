@@ -1192,6 +1192,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "aec83bc5654ab8d03e5f552cf3cfed3abc9dd886b94387da9e303faf644def53",
     ),
     (
+        "CC06_contextual_arrow_param",
+        "6e42678728761ad256ffa9e6e610b2188a1d6191e8cf087d3b41d5275ca1c0b0",
+    ),
+    (
         "CC07_annotated_spread_source",
         "c93c1afc2a56465c8bdde1ace16813094845a6e6bc8c9dffad1c8e4dfaa14283",
     ),
@@ -3891,6 +3895,10 @@ mod corpus_suite {
                 "checker prints `{ readonly label: \"x\"; readonly n: 1; }`; the renderer spells the same surface `{ label: \"x\", n: 1 }` — the `readonly` modifiers and member terminators differ; semantic equality holds and is compared",
             ),
             (
+                "CC06_contextual_arrow_param",
+                "checker prints `{ mode: \"a\" | \"b\"; }`; the renderer spells the same surface `{ mode: Union(\"b\" | \"a\") }` — union spelling, member order and terminators differ; semantic equality holds and is compared",
+            ),
+            (
                 "N88_in_unknown_key_keeps_subject_as_typed_superset",
                 "checker prints `{ v: number | (({ a: number; } | { b: string; }) & Record<\"c\", unknown>); }`; the renderer spells the same node `{ v: Union(number | Intersection(Union({ a: number } | { b: string }) & InstantiationRef(Record))) }` — union/intersection spelling, member terminators, and the Record carrier spelling differ",
             ),
@@ -5415,13 +5423,6 @@ const OPEN_DEBTS: &[&str] = &[
     "B10_as_const_ident",
     // ── NARROWING ────────────────────────────────────────────────────
     "N55_in_operator_nonliteral_key",
-    // ── CALL RESOLUTION — context-sensitive callback inference ──────────
-    // A callback argument's un-annotated parameter is never contextually
-    // typed: withheld from the first inference pass and never re-typed
-    // under the fixed substitution, so a type parameter inferable ONLY
-    // from the callback's return binds `unknown` where the checker
-    // computes the contextual union.
-    "CC06_contextual_arrow_param",
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
     // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
     "X14_accessor_pair",
@@ -5517,7 +5518,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // constructed member and C22's tag-returned one match the checker, and
     // C29 keeps the degraded member over an undeclared call.
     (Owner::U2MappedTemplate, 6, 4, 1),
-    (Owner::U6CallResolve, 33, 32, 1),
+    (Owner::U6CallResolve, 33, 33, 0),
     // Nine switch-, try/catch- and reunion-family rows are parked as the
     // SUBTYPE-REUNION class: TypeScript's return-position reunion applies
     // subtype reduction and absorbs a subtype arm into its supertype; the

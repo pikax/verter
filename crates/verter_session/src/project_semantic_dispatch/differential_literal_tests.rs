@@ -119,6 +119,10 @@ export function cTemplateBranches(b: boolean) { return `x${b ? 1 : 2}` as const;
 export function cTemplateNumber(n: number) { return `a${n}` as const; }
 export function cTemplateLocal() { const s = "q"; return `a${s}` as const; }
 export function cTemplateMember() { return { k: `v${2}` } as const; }
+export function cTemplateBool(b: boolean) { return `x${b}` as const; }
+export function cTemplateUnion(v: "a" | "b") { return `x-${v}` as const; }
+export function cTemplateLocalMember() { const n = 1; return { k: `v${n}` } as const; }
+export function cTemplateElement(s: string) { return [`p${s}`] as const; }
 export function cSpread() { const base = { a: 1 } as const; return { ...base, b: 2 }; }
 export function cSpreadConst() { const base = { a: 1 } as const; return { ...base, b: 2 } as const; }
 export function cArrSpread() { const t = [1, 2] as const; return [...t, 3]; }
@@ -178,35 +182,24 @@ fn a_const_template_infers_as_the_checker_infers_it() {
 }
 
 /// A const template whose hole reads a value is the template literal type of
-/// that value's type, and a template member of an `as const` object is its
-/// literal: ``a${n}` as const` over `n: number` is ``a${number}``, over
-/// `const s = "q"` it is `"aq"`, and `{ k: `v${2}` } as const` is `{
-/// readonly k: "v2"; }` (TypeScript 7.0.2, all four settings alike).
-/// Wrong-but-clean: the lane answers `string` for each template.
-///
-/// What the lane gives:
-/// - `cTemplateNumber`: the checker answers ``a${number}``; the lane measured
-///   `string`.
-/// - `cTemplateLocal`: the checker answers `"aq"`; the lane measured `string`.
-/// - `cTemplateMember`: the checker answers `{ readonly k: "v2"; }`; the lane
-///   measured `{ readonly k: string; }`.
+/// that value's type, and a template member or element of an `as const`
+/// literal is its literal: ``a${n}` as const` over `n: number` is
+/// ``a${number}``, over `const s = "q"` it is `"aq"`, a `boolean` or union
+/// hole distributes, and `{ k: `v${2}` } as const` is `{ readonly k: "v2";
+/// }` (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "a const template reads its value holes and keeps its literal as an as const member"]
-fn wrong_clean_a_const_template_reads_its_value_holes() {
+fn a_const_template_reads_its_value_holes_as_the_checker_reads_them() {
     let matrix = Matrix::new(AS_CONST);
     let failures = matrix.returns(&[
         ("cTemplateNumber", "`a${number}`"),
         ("cTemplateLocal", "\"aq\""),
         ("cTemplateMember", "{ readonly k: \"v2\"; }"),
+        ("cTemplateBool", "\"xfalse\" | \"xtrue\""),
+        ("cTemplateUnion", "\"x-a\" | \"x-b\""),
+        ("cTemplateLocalMember", "{ readonly k: \"v1\"; }"),
+        ("cTemplateElement", "readonly [`p${string}`]"),
     ]);
-    assert!(
-        failures.is_empty(),
-        "{}",
-        failures.join(
-            "
-"
-        )
-    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// `{ ...base, b: 2 }` over `const base = { a: 1 } as const` is `{ a: 1; b:
@@ -248,6 +241,7 @@ export function eFlag() { return Flag.AB; }
 export function eSingle() { return Single.Only; }
 export function eSingleLet() { let s = Single.Only; return s; }
 export function eAmbient() { return Amb.Q; }
+export function eReverse() { return eObj()[5]; }
 export function eCompare(c: Color) { if (c === Color.Red) return c; throw 0; }
 export function eCompareElse(c: Color) { if (c === Color.Red) throw 0; return c; }
 export function eSwitch(d: Dir) { switch (d) { case Dir.Up: return d; default: return d; } }
@@ -305,19 +299,29 @@ fn enum_values_and_types_read_as_the_checker_reads_them() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `return Color;` is `typeof Color`, whose numeric enum object also carries
-/// the reverse mapping `[x: number]: string`. Wrong-but-clean: the lane answers
-/// the members-only object `{ readonly Red: Color.Red; readonly Green:
-/// Color.Green; readonly Blue: Color.Blue; }`.
-///
-/// What the lane gives:
-/// - `eObj`: the checker answers `typeof Color`; the lane measured `{ readonly
-///   Red: Color.Red; readonly Green: Color.Green; readonly Blue: Color.Blue;
-///   }`.
+/// `return Color;` is `typeof Color`, whose numeric enum object carries the
+/// reverse mapping `readonly [x: number]: string` beside its members, which
+/// is no key of it. The checker prints the value by its name, `typeof
+/// Color`; the lane prints the object it is, `{ readonly [x: number]:
+/// string; readonly Red: Color.Red; readonly Green: Color.Green; readonly
+/// Blue: Color.Blue; }` — a difference in print only: every read of the
+/// value agrees, as each row here checks.
 #[test]
-#[ignore = "an enum object value is typeof the enum, with its reverse mapping"]
-fn wrong_clean_a_returned_enum_object_is_typeof_the_enum() {
+fn a_returned_enum_object_reads_as_typeof_the_enum() {
     let matrix = Matrix::new(ENUMS);
-    let failures = matrix.returns(&[("eObj", "typeof Color")]);
+    let mut failures = matrix.types(&[
+        ("ReturnType<typeof eObj>[number]", "string"),
+        (
+            "keyof ReturnType<typeof eObj>",
+            "\"Blue\" | \"Green\" | \"Red\"",
+        ),
+        ("keyof typeof Color", "\"Blue\" | \"Green\" | \"Red\""),
+        ("ReturnType<typeof eObj>['Green']", "Color.Green"),
+        (
+            "[ReturnType<typeof eObj>] extends [typeof Color] ? ([typeof Color] extends [ReturnType<typeof eObj>] ? 1 : 2) : 3",
+            "1",
+        ),
+    ]);
+    failures.extend(matrix.returns(&[("eReverse", "string")]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

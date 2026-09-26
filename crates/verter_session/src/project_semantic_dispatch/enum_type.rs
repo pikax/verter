@@ -360,9 +360,34 @@ impl ProjectSemanticDispatch<'_> {
     }
 
     /// The enum's object (`typeof E`): one readonly property per member,
-    /// typed by the member's literal type.
+    /// typed by the member's literal type, and — when a member's value is
+    /// numeric or computed — the reverse mapping `readonly [x: number]:
+    /// string` the checker gives it (`resolveAnonymousTypeMembers`'s
+    /// `enumNumberIndexInfo`), so `E[0]` reads a member's name.
     pub(super) fn enum_object(&self, enumeration: &EnumDeclaration) -> SemanticNodeId {
-        let members: Vec<crate::semantic_query::SurfaceMember> = enumeration
+        let reverse_mapping = enumeration.members.iter().any(|entry| {
+            matches!(
+                entry.value,
+                EnumScalar::Number(_)
+                    | EnumScalar::Primitive(
+                        EnumPrimitiveDomain::Number | EnumPrimitiveDomain::NumberOrString
+                    )
+            )
+        });
+        let index_signature = reverse_mapping.then(|| {
+            let graph = self.graph();
+            crate::semantic_query::SurfaceEntry::IndexSignature(
+                crate::semantic_query::IndexSignature {
+                    key_type: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number)),
+                    value_type: graph
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+                    readonly: true,
+                    spans: verter_type_expr::IndexSignatureSpans::default(),
+                    declaration_origin: Some(Arc::clone(&enumeration.decl.canonical_id)),
+                },
+            )
+        });
+        let members = enumeration
             .members
             .iter()
             .map(|entry| crate::semantic_query::SurfaceMember {
@@ -382,10 +407,14 @@ impl ProjectSemanticDispatch<'_> {
                 declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                 merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             })
+            .map(crate::semantic_query::SurfaceEntry::Member)
+            .chain(index_signature)
             .collect();
         self.graph().intern_node_with_scope(
-            SemanticNodeData::Object(crate::semantic_query::SurfaceView::from_members(
-                members, None,
+            SemanticNodeData::Object(crate::semantic_query::SurfaceView::from_entries(
+                members,
+                None,
+                reverse_mapping,
             )),
             self.enum_scope(enumeration),
         )
@@ -419,6 +448,34 @@ impl ProjectSemanticDispatch<'_> {
             )
             .into_active_query_build_node(self)
             == object
+    }
+
+    /// Whether `node` is an enum's object itself (`typeof E`): its reverse
+    /// mapping is no key of it, as the checker leaves `enumNumberIndexInfo`
+    /// out of `keyof` (`keyof typeof E` is its member names).
+    pub(super) fn is_enum_object(&self, node: SemanticNodeId) -> bool {
+        let literal = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Object(surface)) => {
+                match surface
+                    .positive_members()
+                    .first()
+                    .map(|member| member.value)
+                {
+                    Some(value) => match self.graph().node_data(value).as_deref() {
+                        Some(SemanticNodeData::EnumLiteral(literal)) => literal.clone(),
+                        _ => return false,
+                    },
+                    None => return false,
+                }
+            }
+            _ => return false,
+        };
+        self.enum_declaration(
+            literal.enum_decl.canonical_id.as_ref(),
+            literal.enum_decl.owner,
+            literal.enum_decl.decl_name.as_ref(),
+        )
+        .is_some_and(|enumeration| self.enum_object(&enumeration) == node)
     }
 
     fn enum_scope(&self, enumeration: &EnumDeclaration) -> NodeScopeId {
