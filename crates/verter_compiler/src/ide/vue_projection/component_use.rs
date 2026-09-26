@@ -21,10 +21,12 @@
 //!
 //! Rendering rules, and why:
 //!
-//! - The construction is `new (USE_CONSTRUCTOR(Comp))({ ... })`: the helper
-//!   hands the component's own construct signature back unchanged except for
-//!   an `unknown` attribute index on the props parameter, so TypeScript
-//!   still infers the component's binder at the construction, checks and
+//! - The construction is `new (USE_COMPONENT(Comp, USE_CONSTRUCTOR(Comp)))({
+//!   ... })`: the [`ForeignComponentContractAdapter`] hands TypeScript the
+//!   component's adapted contract (subject to the adapter's documented
+//!   generic-overload reflection limits) and then an attribute-tolerant
+//!   signature, so TypeScript still
+//!   infers the component's binder at the construction, checks and
 //!   contextually types every declared key, and keeps literal types, while
 //!   a fallthrough attribute is not an excess-key error (excess-key policy
 //!   is a separate obligation, not a side effect of inference).
@@ -62,13 +64,17 @@ use crate::ide::vue_projection::attribute_operations::{
     is_reserved, AttributeOperationsProjection, AttributeSyntax, EffectiveProperty, MergeRule,
     RuntimeKey, RuntimePropertyKeyPlan, VueAttributeSequence, WriteValue,
 };
+use crate::ide::vue_projection::generic_interop::{
+    foreign_contract_declarations, ForeignComponentContractAdapter,
+};
 use crate::ide::vue_projection::props::{project_props, PropsProjection};
 use crate::template::code_gen::shared::helpers::{
     is_member_expression, to_pascal_case, trim_handler_body,
 };
 
-/// Construction helper: the component's construct signature with an
-/// `unknown` attribute index on its props parameter.
+/// Attribute-tolerant construction signature: the component's (last)
+/// construct or call signature with an `unknown` attribute index on its
+/// props parameter; the adapter's fallback after the exact contract.
 pub const USE_CONSTRUCTOR: &str = "__VerterUseConstructor";
 /// Specialized `$props` member, `unknown` when the key is not declared.
 pub const USE_PROP: &str = "__VerterUseProp";
@@ -89,9 +95,10 @@ pub const WITNESS_PREFIX: &str = "__VerterUse_";
 const SPECIALIZATION_DOMAIN: &str =
     "verter.compiler.vue_projection.component_use_specialization.v1";
 
-/// Module-scope declarations every rendered witness reads, rendered once.
+/// Module-scope declarations every rendered witness reads, rendered once:
+/// the foreign component contract adapter, then the observation types.
 pub const USE_PRELUDE: &str = concat!(
-    "declare function __VerterUseConstructor<P, I>(component: abstract new (props: P) => I): new (props: P) => I;\n",
+    foreign_contract_declarations!(),
     "type __VerterUseComponentProps<C> = C extends abstract new (props: infer P) => unknown ? P : never;\n",
     "type __VerterUseKnownSpread<S, P, O extends PropertyKey> = string extends keyof S ? S : Exclude<keyof S, keyof P | O> extends never ? Omit<S, O> extends Partial<Omit<P, O>> ? S : never : never;\n",
     "declare function __VerterUseSpread<C, S, O extends PropertyKey>(component: C, spread: S & __VerterUseKnownSpread<S, __VerterUseComponentProps<C>, O>, overwritten: readonly O[]): S;\n",
@@ -362,9 +369,9 @@ impl ComponentUseWitness {
             .map(|member| member.render(&self.component))
             .collect();
         let mut out = format!(
-            "const {} = new ({USE_CONSTRUCTOR}({}))({{ {} }});\n",
+            "const {} = new ({})({{ {} }});\n",
             self.binding,
-            self.component,
+            ForeignComponentContractAdapter.construction_callee(&self.component),
             members.join(", ")
         );
         for (ordinal, check) in self.transaction.validations.iter().enumerate() {
@@ -409,10 +416,18 @@ impl ComponentUseProjection {
     #[must_use]
     pub fn render(&self) -> String {
         let mut out = String::from(USE_PRELUDE);
-        for witness in &self.witnesses {
-            out.push_str(&witness.render());
-        }
+        out.push_str(&self.render_witnesses());
         out
+    }
+
+    /// Every witness without the prelude, in plan use order, for a scope
+    /// whose module already declares the prelude.
+    #[must_use]
+    pub fn render_witnesses(&self) -> String {
+        self.witnesses
+            .iter()
+            .map(ComponentUseWitness::render)
+            .collect()
     }
 }
 
