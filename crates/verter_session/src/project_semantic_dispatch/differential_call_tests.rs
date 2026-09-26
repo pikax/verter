@@ -436,3 +436,162 @@ fn wrong_clean_a_returned_arrow_takes_the_declared_return_as_context() {
     let failures = matrix.returns(&[("kReturnCtx", "() => \"q\"")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Generic calls over literal arguments, directly and nested, under an
+/// unconstrained, a primitive-constrained and a literal-constrained type
+/// parameter, a `const` one, an `as const` argument, a contextual type (a
+/// callback's return inferring a type parameter, a contextually typed arrow)
+/// and a `const` or `let` binding of the result.
+const LITERAL_INFERENCE: &str = r##"
+declare function f<T>(x: T): T;
+declare function g<T>(x: T): T[];
+declare function k<T>(x: T): { v: T };
+declare function h<T>(x: T): T | undefined;
+declare function n<T extends number>(x: T): T;
+declare function sn<T extends string | number>(x: T): T;
+declare function lit<T extends 1 | 2>(x: T): T;
+declare function c<const T>(x: T): T;
+declare const one: 1;
+export function wDirect() { return f(1); }
+export function wNested() { return f(f(1)); }
+export function wNestedThree() { return f(f(f("s"))); }
+export function wIntoArray() { return g(f(1)); }
+export function wArrayInto() { return f(g(1)); }
+export function wIntoObject() { return k(f(1)); }
+export function wIntoUnion() { return f(h(1)); }
+export function wBoolean() { return f(f(true)); }
+export function wConstBinding() { const x = f(f(1)); return x; }
+export function wLetBinding() { let x = f(f(1)); return x; }
+export function wObjectMember() { const o = { a: f(f(1)) }; return o; }
+export function wArrayElement() { return [f(f(1))]; }
+export function wConditional(b: boolean) { return b ? f(f(1)) : f(2); }
+export function wNumber() { return n(n(1)); }
+export function wStringOrNumber() { return sn(sn("a")); }
+export function wLiteral() { return lit(lit(1)); }
+export function wNumberInto() { return f(n(1)); }
+export function wIntoNumber() { return n(f(1)); }
+export function wConst() { return c(c(1)); }
+export function wConstInto() { return f(c(1)); }
+export function wIntoConst() { return c(f(1)); }
+export function wAsConst() { return f(f(1 as const)); }
+export function wAsConstLet() { let x = f(f(1 as const)); return x; }
+export function wRegular() { return f(f(one)); }
+export function wContextual() { const x: 1 = f(f(1)); return x; }
+declare function run<R>(cb: () => R): R;
+declare function runN<R extends number>(cb: () => R): R;
+export function wCallbackReturn() { return run(() => f(f(1))); }
+export function wCallbackLiteralReturn() { return runN(() => f(f(1))); }
+export function wContextualReturn() { const r: () => 1 = () => f(f(1)); return r; }
+export function wImmediate() { return (() => f(f(1)))(); }
+export function wUnionLet() { let x = f(h(1)); return x; }
+const mTop = f(f(1));
+let mLet = f(f(1));
+const mArr = g(f(1));
+const mDirect = f(1);
+export function wModule() { return mTop; }
+export function wModuleLet() { return mLet; }
+export function wModuleArray() { return mArr; }
+export function wModuleDirect() { return mDirect; }
+export function wModuleArgument() { return f(mTop); }
+"##;
+
+/// An unconstrained type parameter inferred from a fresh literal argument is
+/// that FRESH literal (it sits at the top level of the return, so the
+/// candidate is not widened), and so is the call's result: a nested call
+/// hands the fresh literal on as its own argument, and the return, a mutable
+/// binding or member widens it (`f(f(1))` is `number`). A primitive or
+/// literal constraint, a `const` type parameter, an `as const` argument and a
+/// regular literal argument infer the REGULAR literal, which no position
+/// widens; a union of fresh literals is not a unit type, so the return keeps
+/// it (`b ? f(f(1)) : f(2)` is `1 | 2`). Measured on TypeScript 7.0.2 under
+/// all four settings.
+#[test]
+fn a_generic_call_keeps_or_widens_a_literal_as_the_checker_infers_it() {
+    let matrix = Matrix::new(LITERAL_INFERENCE);
+    let mut failures = matrix.returns(&[
+        ("wDirect", "number"),
+        ("wNested", "number"),
+        ("wNestedThree", "string"),
+        ("wIntoArray", "number[]"),
+        ("wArrayInto", "number[]"),
+        ("wIntoObject", "{ v: number; }"),
+        ("wBoolean", "boolean"),
+        ("wConstBinding", "number"),
+        ("wLetBinding", "number"),
+        ("wObjectMember", "{ a: number; }"),
+        ("wArrayElement", "number[]"),
+        ("wConditional", "1 | 2"),
+        ("wNumber", "1"),
+        ("wStringOrNumber", "\"a\""),
+        ("wLiteral", "1"),
+        ("wNumberInto", "1"),
+        ("wIntoNumber", "1"),
+        ("wConst", "1"),
+        ("wConstInto", "1"),
+        ("wIntoConst", "1"),
+        ("wAsConst", "1"),
+        ("wAsConstLet", "1"),
+        ("wRegular", "1"),
+        ("wContextual", "1"),
+        ("wContextualReturn", "() => 1"),
+        ("wImmediate", "number"),
+        ("wModuleArray", "number[]"),
+    ]);
+    failures.extend(matrix.nullness(&[(Read::Return("wIntoUnion"), "1 | undefined", "number")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A callback's fresh literal return infers the type parameter it returns
+/// through, widened unless the parameter's constraint is a literal context
+/// (`run(() => f(f(1)))` over `run<R>(cb: () => R): R` is `number`,
+/// `runN(() => f(f(1)))` over `R extends number` is `1`), and a union a call
+/// returns keeps its fresh literal for a mutable binding to widen (`let x =
+/// f(h(1))` over `h<T>(x: T): T | undefined` is `number | undefined`).
+/// Measured on TypeScript 7.0.2 under all four settings.
+///
+/// What the lane gives:
+/// - `wCallbackReturn`: the checker answers `number`; the lane measured
+///   `unknown`.
+/// - `wCallbackLiteralReturn`: the checker answers `1`; the lane measured
+///   `number`.
+/// - `wUnionLet`: the checker answers `number | undefined` (`number` without
+///   `strictNullChecks`); the lane measured `undefined | 1` with
+///   `strictNullChecks`.
+#[test]
+#[ignore = "a callback's fresh literal return and a call's fresh union constituent widen as the checker widens them"]
+fn wrong_clean_a_fresh_literal_through_a_callback_return_or_a_union_widens() {
+    let matrix = Matrix::new(LITERAL_INFERENCE);
+    let mut failures = matrix.returns(&[
+        ("wCallbackReturn", "number"),
+        ("wCallbackLiteralReturn", "1"),
+    ]);
+    failures.extend(matrix.nullness(&[(
+        Read::Return("wUnionLet"),
+        "number | undefined",
+        "number",
+    )]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A module-level declaration initialized by a call that returns a fresh
+/// literal declares that fresh literal: a `let` widens it (`let mLet =
+/// f(f(1))` is `number`), and a read of a `const` is a fresh literal source
+/// that the return widens (`return mDirect` over `const mDirect = f(1)` is
+/// `number`, as `f(mTop)` over `const mTop = f(f(1))` is). Measured on
+/// TypeScript 7.0.2 under all four settings.
+///
+/// What the lane gives:
+/// - `wModule`, `wModuleLet`, `wModuleDirect`, `wModuleArgument`: the checker
+///   answers `number`; the lane measured `1`.
+#[test]
+#[ignore = "a module declaration initialized by a fresh-literal call declares the fresh literal"]
+fn wrong_clean_a_module_declaration_of_a_fresh_call_result_widens() {
+    let matrix = Matrix::new(LITERAL_INFERENCE);
+    let failures = matrix.returns(&[
+        ("wModule", "number"),
+        ("wModuleLet", "number"),
+        ("wModuleDirect", "number"),
+        ("wModuleArgument", "number"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

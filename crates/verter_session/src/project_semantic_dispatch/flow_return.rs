@@ -1278,6 +1278,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> Option<crate::semantic_query::SemanticNodeId> {
         self.execute_indexed_resolve_call_with_flow_hold(key, false)
             .0
+            .map(|value| value.node)
     }
 
     /// The flow-aware half of [`Self::execute_indexed_resolve_call`]: when
@@ -1290,10 +1291,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: crate::semantic_query::ResolveCallKey,
         hold_flow_result: bool,
-    ) -> (Option<crate::semantic_query::SemanticNodeId>, bool) {
+    ) -> (Option<IndexedValue>, bool) {
         match self.execute_resolve_call(key.clone()) {
             super::call_resolve::ResolveCallStep::Complete(result) => {
                 let return_type = super::return_equation::resolved_call_return_type(&result);
+                let fresh = self.call_result_is_fresh_literal(&result, return_type);
                 let held_by_flow = hold_flow_result
                     && self
                         .dispatch_txn
@@ -1305,7 +1307,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if held_by_flow {
                     (None, true)
                 } else {
-                    (Some(return_type), false)
+                    (
+                        Some(IndexedValue {
+                            node: return_type,
+                            fresh,
+                        }),
+                        false,
+                    )
                 }
             }
             super::call_resolve::ResolveCallStep::Hold(target) => {
@@ -1372,20 +1380,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expression: &verter_type_expr::IndexedValueExpression,
         hold_flow_result: bool,
     ) -> Option<crate::semantic_query::SemanticNodeId> {
+        self.evaluate_indexed_value(canonical, owner, expression, hold_flow_result)
+            .map(|value| value.node)
+    }
+
+    /// [`Self::evaluate_indexed_value_expression_node_inner`] with the
+    /// value's freshness: a call whose result is wholly the FRESH literal
+    /// its inference kept ([`Self::call_result_is_fresh_literal`]) hands
+    /// that literal on as fresh, as the checker's call expression type is
+    /// (`f(f(1))` over `f<T>(x: T): T` infers the outer `T` from a fresh
+    /// `1`, and the return widens it to `number`).
+    fn evaluate_indexed_value(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &verter_type_expr::IndexedValueExpression,
+        hold_flow_result: bool,
+    ) -> Option<IndexedValue> {
         use verter_type_expr::{IndexedValueCallKind, IndexedValueExpression};
+        let regular = |node: Option<crate::semantic_query::SemanticNodeId>| {
+            node.map(|node| IndexedValue { node, fresh: false })
+        };
         match expression {
-            IndexedValueExpression::Value(value) => self.lower_type_expr_in_owner_scope_with_mode(
-                canonical,
-                owner,
-                value,
-                crate::semantic_query::ProjectionMode::Navigate,
-            ),
+            IndexedValueExpression::Value(value) => {
+                regular(self.lower_type_expr_in_owner_scope_with_mode(
+                    canonical,
+                    owner,
+                    value,
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ))
+            }
             IndexedValueExpression::UnsupportedCall { .. } => {
                 crate::request_context::mark_request_result_partial();
                 None
             }
             IndexedValueExpression::TemplateStrings { .. } => {
-                self.global_template_strings_array(canonical, owner)
+                regular(self.global_template_strings_array(canonical, owner))
             }
             IndexedValueExpression::Call(call) => {
                 let callee = self.evaluate_indexed_value_expression_node_inner(
@@ -1401,25 +1431,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 });
                 let mut args = Vec::with_capacity(call.args.len());
                 for argument in call.args.iter() {
-                    let ty = self.evaluate_indexed_value_expression_node_inner(
-                        canonical,
-                        owner,
-                        &argument.expression,
-                        false,
-                    )?;
+                    let value =
+                        self.evaluate_indexed_value(canonical, owner, &argument.expression, false)?;
                     args.push(crate::semantic_query::CallArgKey::Eager {
-                        ty,
+                        ty: value.node,
                         spread: argument.spread,
                         context_sensitive: argument.context_sensitive,
                         const_view: None,
-                        literal_mode: match argument.literal_mode {
-                            verter_type_expr::IndexedValueLiteralMode::Widened => {
-                                crate::semantic_query::ArgumentLiteralMode::Widened
-                            }
-                            verter_type_expr::IndexedValueLiteralMode::Literal => {
-                                crate::semantic_query::ArgumentLiteralMode::Literal
-                            }
-                        },
+                        literal_mode: indexed_argument_literal_mode(
+                            argument.literal_mode,
+                            value.fresh,
+                        ),
                     });
                 }
                 let explicit_type_args = call
@@ -7573,6 +7595,63 @@ fn is_never_node(
         graph.node_data(node).as_deref(),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
     )
+}
+
+/// An indexed value and whether it is a FRESH literal
+/// ([`ProjectSemanticDispatch::evaluate_indexed_value`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct IndexedValue {
+    node: SemanticNodeId,
+    fresh: bool,
+}
+
+/// The inference deposit mode of an indexed call argument: a bare literal,
+/// or a value that is a fresh literal (a call's fresh result), deposits
+/// as the fresh literal source it is; any other authored form pins its
+/// type.
+fn indexed_argument_literal_mode(
+    authored: verter_type_expr::IndexedValueLiteralMode,
+    fresh: bool,
+) -> crate::semantic_query::ArgumentLiteralMode {
+    match authored {
+        verter_type_expr::IndexedValueLiteralMode::Widened => {
+            crate::semantic_query::ArgumentLiteralMode::Widened
+        }
+        verter_type_expr::IndexedValueLiteralMode::Literal if fresh => {
+            crate::semantic_query::ArgumentLiteralMode::Widened
+        }
+        verter_type_expr::IndexedValueLiteralMode::Literal => {
+            crate::semantic_query::ArgumentLiteralMode::Literal
+        }
+    }
+}
+
+impl ProjectSemanticDispatch<'_> {
+    /// Whether a call's result `return_type` is wholly the fresh literal
+    /// its inference kept: every top-level literal of it is one of the
+    /// call's fresh literal returns, and it has one.
+    fn call_result_is_fresh_literal(
+        &self,
+        result: &crate::semantic_query::ResolvedCallResult,
+        return_type: SemanticNodeId,
+    ) -> bool {
+        let crate::semantic_query::ResolvedCallResult::Selected {
+            fresh_literal_returns,
+            ..
+        } = result
+        else {
+            return false;
+        };
+        let graph = self.graph();
+        let literals = top_level_literal_nodes_in(graph, return_type);
+        literals.as_slice() == [return_type]
+            && literals.iter().all(|literal| {
+                let data = graph.node_data(*literal);
+                fresh_literal_returns
+                    .iter()
+                    .any(|fresh| graph.node_data(*fresh) == data)
+            })
+    }
 }
 
 /// The top-level LITERAL constituents of one value node — the shared
@@ -23289,11 +23368,42 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Evaluate one argument in this frame. Ordinary value reads and authored
     /// whole-root type queries consume the current type of their own exact
     /// subjects. Free roots and other indexed values use owner-scope lowering.
+    /// Whether `expr`, evaluated to `node`, is a call this frame completed
+    /// on a result that is wholly the fresh literal its inference kept
+    /// ([`FreshCallReturn`]).
+    fn is_fresh_call_value(
+        &self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        node: SemanticNodeId,
+    ) -> bool {
+        let crate::flow_slice_content::SliceExpr::Call(_, site, _) = expr else {
+            return false;
+        };
+        let graph = self.dispatch.graph();
+        let literals = self.top_level_literal_nodes(node);
+        literals.as_slice() == [node]
+            && self
+                .call_fresh_literal_returns
+                .iter()
+                .rev()
+                .find(|fresh| fresh.span == site.span())
+                .is_some_and(|fresh| {
+                    fresh.node == node
+                        && literals.iter().all(|literal| {
+                            let data = graph.node_data(*literal);
+                            fresh
+                                .values
+                                .iter()
+                                .any(|value| graph.node_data(*value) == data)
+                        })
+                })
+    }
+
     fn eval_indexed_call_argument(
         &mut self,
         expression: &verter_type_expr::IndexedValueExpression,
         binding: &FlowIndexedArgumentBinding,
-    ) -> Option<SemanticNodeId> {
+    ) -> Option<IndexedValue> {
         if matches!(
             binding,
             FlowIndexedArgumentBinding::Missing | FlowIndexedArgumentBinding::UnmodeledLocal
@@ -23313,14 +23423,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             };
             return self
                 .narrowed_read(&subject)
-                .or_else(|| self.read_local(binding));
+                .or_else(|| self.read_local(binding))
+                .map(|node| IndexedValue { node, fresh: false });
         }
-        self.dispatch.evaluate_indexed_value_expression_node_inner(
-            self.canonical,
-            self.owner,
-            expression,
-            false,
-        )
+        self.dispatch
+            .evaluate_indexed_value(self.canonical, self.owner, expression, false)
     }
 
     /// The direct-call target's callee VALUE TYPE through the same
@@ -23471,9 +23578,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     .cloned(),
             );
             let mut const_view = None;
+            // Whether the argument is a call whose result is wholly the
+            // fresh literal its inference kept: a fresh literal source, as
+            // a bare literal is.
+            let mut fresh_call = false;
             let evaluated = match arguments.get(ordinal) {
                 Some(lowered) => match self.eval_expr(lowered) {
-                    Positional::Value(node) => Some(node),
+                    Positional::Value(node) => {
+                        fresh_call = self.is_fresh_call_value(lowered, node);
+                        Some(node)
+                    }
                     Positional::Hold => return Some(Positional::Hold),
                     Positional::Unmodeled => None,
                 },
@@ -23492,8 +23606,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }),
                         _ => None,
                     };
-                    frame_value
-                        .or_else(|| self.eval_indexed_call_argument(&argument.expression, &binding))
+                    frame_value.or_else(|| {
+                        let value =
+                            self.eval_indexed_call_argument(&argument.expression, &binding)?;
+                        fresh_call = value.fresh;
+                        Some(value.node)
+                    })
                 }
             };
             let Some(ty) = evaluated else {
@@ -23534,18 +23652,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 spread: argument.spread,
                 context_sensitive: argument.context_sensitive,
                 const_view,
-                literal_mode: match argument.literal_mode {
-                    verter_type_expr::IndexedValueLiteralMode::Widened => {
-                        crate::semantic_query::ArgumentLiteralMode::Widened
-                    }
-                    verter_type_expr::IndexedValueLiteralMode::Literal => {
-                        if reads_widening_local {
-                            crate::semantic_query::ArgumentLiteralMode::Widened
-                        } else {
-                            crate::semantic_query::ArgumentLiteralMode::Literal
-                        }
-                    }
-                },
+                literal_mode: indexed_argument_literal_mode(
+                    argument.literal_mode,
+                    reads_widening_local || fresh_call,
+                ),
             });
         }
         let mut explicit_type_args = Vec::with_capacity(call.explicit_type_args.len());
@@ -23565,7 +23675,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             Some(receiver) => {
                 let root = indexed.receiver_root?;
                 let receiver_binding = self.indexed_argument_binding(root);
-                Some(self.eval_indexed_call_argument(receiver, &receiver_binding)?)
+                Some(
+                    self.eval_indexed_call_argument(receiver, &receiver_binding)?
+                        .node,
+                )
             }
             None => None,
         };
