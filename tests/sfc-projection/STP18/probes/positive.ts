@@ -42,7 +42,11 @@ declare function __VerterUseConstructor<C extends new <T extends readonly any[]>
 declare function __VerterUseConstructor<P, I>(component: abstract new (props: P) => I): new (props: __VerterUseTolerant<P, I>) => I;
 declare function __VerterUseConstructor<P, X, R>(component: (props: P, ctx: X) => R): new (props: P & Record<string, unknown>) => __VerterUseFunctional<P, X>;
 type __VerterUseComponentProps<C> = C extends abstract new (props: infer P) => unknown ? P : never;
-type __VerterUseKnownSpread<S, P, O extends PropertyKey> = string extends keyof S ? S : Exclude<keyof S, keyof P | O> extends never ? Omit<S, O> extends Partial<Omit<P, O>> ? S : never : never;
+type __VerterUseResolvedKeys<S> = [keyof S] extends [infer K] ? ([K] extends [PropertyKey] ? 1 : 0) : 0;
+type __VerterUseMemberOpen<S> = S extends unknown ? (string extends keyof S ? true : number extends keyof S ? true : symbol extends keyof S ? true : false) : never;
+type __VerterUseBranch<S, P> = Exclude<keyof S, keyof P> extends never ? ([S] extends [Partial<P>] ? true : false) : false;
+type __VerterUseChecked<S, P, O extends PropertyKey> = S extends unknown ? ([true] extends [P extends unknown ? __VerterUseBranch<Omit<S, O>, Omit<P, O>> : never] ? true : false) : never;
+type __VerterUseKnownSpread<S, P, O extends PropertyKey> = [__VerterUseResolvedKeys<S>] extends [never] ? S : __VerterUseResolvedKeys<S> extends 1 ? ([__VerterUseMemberOpen<S>] extends [false] ? ([__VerterUseChecked<S, P, O>] extends [true] ? S : never) : S) : S;
 declare function __VerterUseSpread<C, S, O extends PropertyKey>(component: C, spread: S & __VerterUseKnownSpread<S, __VerterUseComponentProps<C>, O>, overwritten: readonly O[]): S;
 type __VerterUseProp<I, K extends PropertyKey> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : unknown) : unknown;
 type __VerterUseListener<I, K extends PropertyKey, F extends PropertyKey = K> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : F extends keyof P ? P[F] : (...args: any[]) => unknown) : (...args: any[]) => unknown;

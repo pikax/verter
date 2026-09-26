@@ -337,7 +337,14 @@ impl VueProjectionBackend {
         let attributes = project_attribute_operations(&plan, parsed, source);
         let (normal, setup, generic) = self.script_blocks(source, artifact)?;
         let public = project_public_constructor(normal, setup, generic)?;
-        Ok((project_props(&attributes), caller_and_setup_props(&public)))
+        let sources = [
+            normal.as_ref().map(|block| block.content),
+            setup.as_ref().map(|block| block.content),
+        ];
+        Ok((
+            project_props(&attributes),
+            caller_and_setup_props(&public, sources.into_iter().flatten()),
+        ))
     }
 
     /// Live template read/write views for the admitted parse: unwrapped

@@ -27,5 +27,5 @@
   "verify": "node scripts/sfc-projection/verify-node.mjs --node STP20 --engine all --require-all --json",
   "test": "cargo test -p verter_compiler --lib ide::vue_projection::props",
   "runtimeCorrectness": true,
-  "notes": "Caller default optionality stays separate from setup-defined values. Finite object spreads validate keys and values against the component props; index-signature domains remain open. Keys definitely overwritten by a later property are excluded from that spread's check even when a later v-bind may still write the key."
+  "notes": "Caller default optionality stays separate from setup-defined values: withDefaults, reactive destructuring defaults, runtime defaults, Boolean absence casting, validators and required props are facts on CallerAndSetupPropsContract. VueProjectionBackend::props is the dormant consumer (STP58 owns live activation); the positive probe pins the contract witness it renders. Finite spreads check each prop-union branch, including keys unique to one arm. An index signature, any, or a union member that has an index signature stays an open domain. Keys definitely overwritten by a later property are excluded from that spread's check even when a later v-bind may still write the key. A naked generic spread type is not separated from a finite excess-key type by the helper; see the STP20 evidence index."
 }
