@@ -1486,6 +1486,142 @@ impl GatedLeaf {
     }
 }
 
+/// A slice expression nests without bound (an operand of an operand, a
+/// member value of a member value), and the derived drop glue would drop it
+/// a native level per level. Dropping moves each expression's owned
+/// sub-expressions onto an explicit stack first, so a nest however deep
+/// drops from this loop. A sub-expression behind a shared `Arc` another
+/// owner still holds is left to that owner.
+impl Drop for SliceExpr {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        self.take_sub_expressions(&mut pending);
+        while let Some(mut expr) = pending.pop() {
+            expr.take_sub_expressions(&mut pending);
+        }
+    }
+}
+
+impl SliceExpr {
+    /// Move the sub-expressions this expression solely owns onto `out`,
+    /// leaving [`SliceExpr::Elided`] in their place.
+    fn take_sub_expressions(&mut self, out: &mut Vec<SliceExpr>) {
+        fn take(expr: &mut SliceExpr, out: &mut Vec<SliceExpr>) {
+            if !matches!(expr, SliceExpr::Elided) {
+                out.push(std::mem::replace(expr, SliceExpr::Elided));
+            }
+        }
+        fn take_all(exprs: &mut Arc<[SliceExpr]>, out: &mut Vec<SliceExpr>) {
+            if let Some(exprs) = Arc::get_mut(exprs) {
+                for expr in exprs.iter_mut() {
+                    take(expr, out);
+                }
+            }
+        }
+        match self {
+            SliceExpr::FrameShadowed { inner, .. } => take(inner, out),
+            SliceExpr::OptionalAnyChain { root } | SliceExpr::OptionalMember { root, .. } => {
+                take(root, out)
+            }
+            SliceExpr::Object { entries, .. } => {
+                if let Some(entries) = Arc::get_mut(entries) {
+                    for entry in entries.iter_mut() {
+                        match entry {
+                            SliceObjectEntry::Member(member) => {
+                                take(&mut member.value, out);
+                                if let Some(value) = member.assignment_value.as_mut() {
+                                    take(value, out);
+                                }
+                                if let Some(value) = member.unwidened.as_mut() {
+                                    take(value, out);
+                                }
+                            }
+                            SliceObjectEntry::Spread { source } => take(source, out),
+                        }
+                    }
+                }
+            }
+            SliceExpr::Array { elements, .. } => {
+                if let Some(elements) = Arc::get_mut(elements) {
+                    for element in elements.iter_mut() {
+                        match element {
+                            SliceArrayElement::Value {
+                                value,
+                                pre_widening,
+                                ..
+                            } => {
+                                take(value, out);
+                                if let Some(value) = pre_widening.as_mut() {
+                                    take(value, out);
+                                }
+                            }
+                            SliceArrayElement::Spread { source } => take(source, out),
+                            SliceArrayElement::Elision => {}
+                        }
+                    }
+                }
+            }
+            SliceExpr::Sequence { value, .. }
+            | SliceExpr::Awaited { operand: value }
+            | SliceExpr::Satisfies { operand: value, .. }
+            | SliceExpr::Not { operand: value, .. }
+            | SliceExpr::NonNull { operand: value }
+            | SliceExpr::MemberOf { object: value, .. }
+            | SliceExpr::Assignment { value, .. } => take(value, out),
+            SliceExpr::Void { operand, value } => {
+                take(operand, out);
+                take(value, out);
+            }
+            SliceExpr::ElementAccess { object, index, .. } => {
+                take(object, out);
+                take(index, out);
+            }
+            SliceExpr::Logical { left, right, .. } => {
+                take(left, out);
+                take(right, out);
+            }
+            SliceExpr::Arithmetic { operands, .. } => take_all(operands, out),
+            SliceExpr::Union { arms, .. } => take_all(arms, out),
+            _ => {}
+        }
+    }
+}
+
+/// An operator form [`Lowerer::lower_expr`] builds from its operands'
+/// lowerings ([`Lowerer::operator_operands`]).
+#[derive(Debug, Clone, Copy)]
+enum OperatorShape {
+    Not,
+    Arithmetic(SliceArithmetic),
+    NonNull,
+}
+
+impl OperatorShape {
+    /// The form over its operands, the last of `values` in order.
+    fn build(self, values: &mut Vec<SliceExpr>) -> SliceExpr {
+        match self {
+            Self::Not => SliceExpr::Not {
+                operand: Box::new(values.pop().expect("the operand")),
+                widen: false,
+            },
+            Self::NonNull => SliceExpr::NonNull {
+                operand: Box::new(values.pop().expect("the operand")),
+            },
+            Self::Arithmetic(operator) => {
+                let arity = match operator {
+                    SliceArithmetic::Plus | SliceArithmetic::Negate => 1,
+                    SliceArithmetic::Add | SliceArithmetic::Numeric => 2,
+                };
+                let operands = values.split_off(values.len() - arity);
+                SliceExpr::Arithmetic {
+                    operator,
+                    operands: Arc::from(operands.into_boxed_slice()),
+                }
+            }
+        }
+    }
+}
+
 /// One expression of the slice content.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SliceExpr {
@@ -4198,11 +4334,12 @@ fn call_rooted_member_path<'a>(
     }
 }
 
-fn unwrap_parenthesized<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
-    match expression {
-        Expression::ParenthesizedExpression(paren) => unwrap_parenthesized(&paren.expression),
-        inner => inner,
+fn unwrap_parenthesized<'e, 'a>(expression: &'e Expression<'a>) -> &'e Expression<'a> {
+    let mut expression = expression;
+    while let Expression::ParenthesizedExpression(paren) = expression {
+        expression = &paren.expression;
     }
+    expression
 }
 
 /// The reference an expression NAMES, through the wrappers the checker
@@ -4789,44 +4926,24 @@ fn pure_optional_member_root_identifier<'a>(
 /// is NOT fresh (the checker's own early-return-guard shapes keep their
 /// literal unions), so only leaf arms widen. A fresh `!x` literal is a
 /// leaf too.
-fn widen_mutable_slot_literals(value: SliceExpr) -> SliceExpr {
-    match value {
-        SliceExpr::Type(leaf) => SliceExpr::Type(
-            leaf.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal),
-        ),
-        SliceExpr::Not { operand, widen: _ } => SliceExpr::Not {
-            operand,
-            widen: true,
-        },
-        SliceExpr::Sequence {
-            before,
-            value,
-            after,
-        } => SliceExpr::Sequence {
-            before,
-            value: Box::new(widen_mutable_slot_literals(*value)),
-            after,
-        },
-        SliceExpr::Logical {
-            operator,
-            left,
-            right,
-            guard,
-            right_reachable,
-            fresh_operands,
-            widen: _,
-        } => SliceExpr::Logical {
-            operator,
-            left,
-            right,
-            guard,
-            right_reachable,
-            fresh_operands,
-            widen: true,
-        },
-        assignment @ SliceExpr::Assignment { .. } => widen_assignment_value(assignment),
-        SliceExpr::Union { arms, guard } => SliceExpr::Union {
-            arms: Arc::from(
+fn widen_mutable_slot_literals(mut value: SliceExpr) -> SliceExpr {
+    match &mut value {
+        SliceExpr::Type(leaf) => {
+            let taken = std::mem::replace(
+                leaf,
+                GatedLeaf(TypeExpr::Primitive(PrimitiveName::Any), None),
+            );
+            *leaf = taken.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal);
+        }
+        SliceExpr::Not { widen, .. }
+        | SliceExpr::Logical { widen, .. }
+        | SliceExpr::Assignment { widen, .. } => *widen = true,
+        SliceExpr::Sequence { value: inner, .. } => {
+            let taken = std::mem::replace(&mut **inner, SliceExpr::Elided);
+            **inner = widen_mutable_slot_literals(taken);
+        }
+        SliceExpr::Union { arms, .. } => {
+            *arms = Arc::from(
                 arms.iter()
                     .map(|arm| match arm {
                         SliceExpr::Type(leaf) => SliceExpr::Type(leaf.clone().map_ty(
@@ -4842,35 +4959,21 @@ fn widen_mutable_slot_literals(value: SliceExpr) -> SliceExpr {
                     })
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
-            ),
-            guard,
-        },
-        value => value,
+            );
+        }
+        _ => {}
     }
+    value
 }
 
 /// A value-position `=` write whose value lands in a mutable slot: the
 /// right-hand side's fresh literals widen there (`[(x = "s")]` is
 /// `string[]`), while the write itself keeps the literal.
-fn widen_assignment_value(assignment: SliceExpr) -> SliceExpr {
-    match assignment {
-        SliceExpr::Assignment {
-            target,
-            definition,
-            span,
-            value,
-            freshness,
-            widen: _,
-        } => SliceExpr::Assignment {
-            target,
-            definition,
-            span,
-            value,
-            freshness,
-            widen: true,
-        },
-        other => other,
+fn widen_assignment_value(mut assignment: SliceExpr) -> SliceExpr {
+    if let SliceExpr::Assignment { widen, .. } = &mut assignment {
+        *widen = true;
     }
+    assignment
 }
 
 /// The type of a bare `null` / `undefined` / `void` value
@@ -9637,8 +9740,24 @@ impl<'a> Lowerer<'a> {
         // type, which drops a real contributor. See
         // [`unwrap_reference_transparent`].
         match unwrap_reference_transparent(test) {
+            // A chain of `!`s negates its innermost test once per `!`,
+            // peeled here rather than a native level per `!`.
             Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
-                self.classify_guard(&unary.argument).negated()
+                let mut negations = 1usize;
+                let mut operand = &unary.argument;
+                while let Expression::UnaryExpression(inner) = unwrap_reference_transparent(operand)
+                {
+                    if inner.operator != UnaryOperator::LogicalNot {
+                        break;
+                    }
+                    negations += 1;
+                    operand = &inner.argument;
+                }
+                let mut disposition = self.classify_guard(operand);
+                for _ in 0..negations {
+                    disposition = disposition.negated();
+                }
+                disposition
             }
             // A chain nests its left operands; its left spine is classified
             // from the innermost operand outward, each node composing its
@@ -13758,20 +13877,21 @@ impl<'a> Lowerer<'a> {
     /// to anything but a call carrier has no call sink to read them.
     fn with_call_arguments(
         &mut self,
-        lowered: SliceExpr,
+        mut lowered: SliceExpr,
         arguments: &[oxc_ast::ast::Argument<'_>],
         mode: ExprMode,
     ) -> SliceExpr {
-        match lowered {
-            SliceExpr::Call(call, site, _) => {
-                SliceExpr::Call(call, site, self.lower_call_arguments(arguments, mode))
+        match &mut lowered {
+            SliceExpr::Call(_, _, lowered_arguments) => {
+                *lowered_arguments = self.lower_call_arguments(arguments, mode);
             }
-            SliceExpr::FrameShadowed { inner, shadowed } => SliceExpr::FrameShadowed {
-                inner: Box::new(self.with_call_arguments(*inner, arguments, mode)),
-                shadowed,
-            },
-            lowered => lowered,
+            SliceExpr::FrameShadowed { inner, .. } => {
+                let taken = std::mem::replace(&mut **inner, SliceExpr::Elided);
+                **inner = self.with_call_arguments(taken, arguments, mode);
+            }
+            _ => {}
         }
+        lowered
     }
 
     /// The [`SliceCallArguments`] of one call's `arguments`: each argument
@@ -13832,19 +13952,127 @@ impl<'a> Lowerer<'a> {
     /// take the shared shallow-pass per-expression lowering for the
     /// position.
     fn lower_expr(&mut self, expr: &Expression<'_>, mode: ExprMode) -> SliceExpr {
-        // A value-transparent wrapper (a parenthesis) lowers as its operand:
-        // each level is re-entered from this loop, not a native level each.
-        let mut expr = expr;
-        loop {
-            #[cfg(test)]
-            lowering_probe::expression();
-            let mut transparent = None;
-            let value = self.lower_expr_level(expr, mode, &mut transparent);
-            match transparent {
-                Some(inner) => expr = inner,
-                None => return value,
+        // The operator forms whose value is built from their operands' (a
+        // `!`, a unary or binary arithmetic operator, a non-null assertion
+        // — [`Self::operator_operands`]) lower from an explicit stack: an
+        // operand nested in an operand costs no native level. So does a
+        // value-transparent wrapper (a parenthesis), which lowers as its
+        // operand.
+        enum Task<'e, 'a> {
+            Lower(&'e Expression<'a>, ExprMode),
+            Build(OperatorShape),
+        }
+        let mut tasks = vec![Task::Lower(expr, mode)];
+        let mut values: Vec<SliceExpr> = Vec::new();
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Lower(expr, mode) => {
+                    #[cfg(test)]
+                    lowering_probe::expression();
+                    // A parenthesised operator form lowers as the form
+                    // (the fall-through of [`Self::lower_expr_level`] peels
+                    // the parentheses before it tries one).
+                    if let Some((shape, operands)) =
+                        self.operator_operands(unwrap_parenthesized(expr), mode)
+                    {
+                        tasks.push(Task::Build(shape));
+                        for (operand, operand_mode) in operands.into_iter().rev() {
+                            tasks.push(Task::Lower(operand, operand_mode));
+                        }
+                        continue;
+                    }
+                    let mut transparent = None;
+                    let value = self.lower_expr_level(expr, mode, &mut transparent);
+                    match transparent {
+                        Some(inner) => tasks.push(Task::Lower(inner, mode)),
+                        None => values.push(value),
+                    }
+                }
+                Task::Build(shape) => {
+                    let value = shape.build(&mut values);
+                    values.push(value);
+                }
             }
         }
+        values
+            .pop()
+            .expect("the expression's value is the one value left")
+    }
+
+    /// The operands of an operator form [`Self::lower_operator_form`] builds
+    /// from its operands' lowerings — a `!`, a unary or binary arithmetic
+    /// operator or a non-null assertion — with the mode each lowers under;
+    /// `None` for every other expression, and for an arithmetic operator
+    /// whose leaf answers a type (the leaf lowering takes it). The same
+    /// decisions [`Self::lower_expr_level`] reaches such an expression
+    /// through: no arm before its fall-through takes these forms, and none
+    /// is a `void` write.
+    fn operator_operands<'e, 'x>(
+        &mut self,
+        expr: &'e Expression<'x>,
+        mode: ExprMode,
+    ) -> Option<(OperatorShape, Vec<(&'e Expression<'x>, ExprMode)>)> {
+        use oxc_ast::ast::{BinaryOperator, UnaryOperator};
+        let operand_mode = ExprMode::BindingInit {
+            preserve_literal: true,
+        };
+        let (shape, operands) = match expr {
+            Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
+                return Some((OperatorShape::Not, vec![(&unary.argument, operand_mode)]));
+            }
+            Expression::UnaryExpression(unary)
+                if matches!(
+                    unary.operator,
+                    UnaryOperator::UnaryNegation
+                        | UnaryOperator::UnaryPlus
+                        | UnaryOperator::BitwiseNot
+                ) =>
+            {
+                let operator = if unary.operator == UnaryOperator::UnaryPlus {
+                    SliceArithmetic::Plus
+                } else {
+                    SliceArithmetic::Negate
+                };
+                (
+                    OperatorShape::Arithmetic(operator),
+                    vec![(&unary.argument, operand_mode)],
+                )
+            }
+            Expression::BinaryExpression(binary)
+                if matches!(
+                    binary.operator,
+                    BinaryOperator::Addition
+                        | BinaryOperator::Subtraction
+                        | BinaryOperator::Multiplication
+                        | BinaryOperator::Division
+                        | BinaryOperator::Remainder
+                        | BinaryOperator::Exponential
+                        | BinaryOperator::ShiftLeft
+                        | BinaryOperator::ShiftRight
+                        | BinaryOperator::ShiftRightZeroFill
+                        | BinaryOperator::BitwiseOR
+                        | BinaryOperator::BitwiseXOR
+                        | BinaryOperator::BitwiseAnd
+                ) =>
+            {
+                let operator = if binary.operator == BinaryOperator::Addition {
+                    SliceArithmetic::Add
+                } else {
+                    SliceArithmetic::Numeric
+                };
+                (
+                    OperatorShape::Arithmetic(operator),
+                    vec![(&binary.left, operand_mode), (&binary.right, operand_mode)],
+                )
+            }
+            Expression::TSNonNullExpression(non_null)
+                if !verter_semantic::analysis::flow::value_is_unmodeled_call(expr) =>
+            {
+                (OperatorShape::NonNull, vec![(&non_null.expression, mode)])
+            }
+            _ => return None,
+        };
+        matches!(self.leaf_type(expr, mode), LeafLowering::Unmodeled).then_some((shape, operands))
     }
 
     /// One level of [`Self::lower_expr`]: the lowering of `expr`, or, for a
@@ -14578,36 +14806,16 @@ impl<'a> Lowerer<'a> {
             return None;
         }
         Some(match expr {
-            Expression::BinaryExpression(binary) => SliceExpr::Arithmetic {
-                operator: if binary.operator == BinaryOperator::Addition {
-                    SliceArithmetic::Add
-                } else {
-                    SliceArithmetic::Numeric
-                },
-                operands: Arc::from(
-                    vec![
-                        self.lower_expr(&binary.left, operand_mode),
-                        self.lower_expr(&binary.right, operand_mode),
-                    ]
-                    .into_boxed_slice(),
-                ),
-            },
-            Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
-                SliceExpr::Not {
-                    operand: Box::new(self.lower_expr(&unary.argument, operand_mode)),
-                    widen: false,
-                }
+            // [`Self::lower_expr`] builds these from its explicit stack
+            // ([`Self::operator_operands`]) before this arm is reached.
+            Expression::BinaryExpression(_) | Expression::UnaryExpression(_) => {
+                let (shape, operands) = self.operator_operands(expr, mode)?;
+                let mut values: Vec<SliceExpr> = operands
+                    .into_iter()
+                    .map(|(operand, operand_mode)| self.lower_expr(operand, operand_mode))
+                    .collect();
+                shape.build(&mut values)
             }
-            Expression::UnaryExpression(unary) => SliceExpr::Arithmetic {
-                operator: if unary.operator == UnaryOperator::UnaryPlus {
-                    SliceArithmetic::Plus
-                } else {
-                    SliceArithmetic::Negate
-                },
-                operands: Arc::from(
-                    vec![self.lower_expr(&unary.argument, operand_mode)].into_boxed_slice(),
-                ),
-            },
             Expression::ComputedMemberExpression(member) => {
                 // A key read from a frame binding makes the access the
                 // reference its identity spells ([`SliceElementKey`]).

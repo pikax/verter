@@ -559,6 +559,25 @@ Recorded plainly so no reader mistakes absence for a pass:
   size grow by the same amount per level over 4, 8 and 12; with the
   prototype printed they grow 136, 2,296, 36,856.
 
+* **Operator chains lower and drop from explicit stacks.** The slice
+  lowering built a `!`, a unary or binary arithmetic operator or a non-null
+  assertion by lowering its operands recursively, 4.4 KiB per level
+  optimized (43 MB for a 10,000-deep `!` or `+` chain on the
+  declaration-lowering worker); a `!` chain's guard classification
+  (`classify_guard`) recursed per `!` too, and the lowered `SliceExpr`'s
+  derived drop glue dropped a nest a native level per level. `lower_expr`
+  now lowers those forms' operands from an explicit task stack
+  (`operator_operands`, the same decisions its fall-through makes, so every
+  other form lowers as before), `classify_guard` peels a `!` chain and
+  negates the innermost test once per `!`, and `SliceExpr`'s `Drop` moves
+  the sub-expressions it solely owns onto a stack before it drops.
+  `flow_slice_content_tests.rs` →
+  `operator_chains_10000_deep_lower_on_the_worker_stack` lowers 10,000-deep
+  `!`, unary `-` and `+` chains on the 8 MiB worker and drops them on a
+  2 MiB test thread, unoptimized; restoring the recursive operand lowering
+  or the `!` classification overflows the worker, and restoring the
+  derived drop overflows the test thread.
+
 * **A call's arguments lower once per enclosing call.** A call nested
   as an argument (`g(g(…g(1)…))`) lowers again from the enclosing call's
   frame-lowered arguments (`Lowerer::lower_call_arguments`), and each

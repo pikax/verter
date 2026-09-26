@@ -5969,3 +5969,57 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
         "conflicting addresses must not attach either site's execution evidence"
     );
 }
+
+/// How deeply `expr` nests through the operand of a `!`, a unary operator
+/// or the left operand of a binary one, walked iteratively.
+fn operator_chain_depth(expr: &SliceExpr) -> usize {
+    let mut depth = 0;
+    let mut current = expr;
+    loop {
+        current = match current {
+            SliceExpr::Not { operand, .. } | SliceExpr::NonNull { operand } => operand,
+            SliceExpr::Arithmetic { operands, .. } => &operands[0],
+            _ => return depth,
+        };
+        depth += 1;
+    }
+}
+
+/// The returned expression of `pf` in `source`.
+fn returned_expression(content: &SliceContent) -> &SliceExpr {
+    content
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Return {
+                argument: Some(argument),
+                ..
+            } => Some(argument),
+            _ => None,
+        })
+        .expect("a return statement")
+}
+
+/// A `!` chain, a unary negation chain and a binary `+` chain, each 10,000
+/// operators deep, lower on the declaration-lowering worker: each
+/// operator's operands lower from the lowering's explicit stack, not a
+/// native level each (about 4.4 KiB per level optimized; 43 MB at 10,000).
+#[test]
+fn operator_chains_10000_deep_lower_on_the_worker_stack() {
+    let depth = 10_000;
+    let chains = [
+        ("not", format!("{}x", "!".repeat(depth))),
+        ("negation", format!("{}x", "- ".repeat(depth))),
+        ("addition", vec!["x"; depth + 1].join(" + ")),
+    ];
+    for (form, chain) in chains {
+        let source = format!("function pf(x: number) {{ return {chain}; }}");
+        let content = content_for(&source, "pf");
+        assert_eq!(
+            operator_chain_depth(returned_expression(&content)),
+            depth,
+            "{form}"
+        );
+    }
+}
