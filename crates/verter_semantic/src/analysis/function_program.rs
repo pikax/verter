@@ -3063,6 +3063,26 @@ fn discover_class_members<'ast>(
                             static_side: prop.r#static,
                         });
                 ctx.enclosing_this = Some(EnclosingThis::of_member(prop.r#static));
+                // A field whose initializer's type derives from a call is an
+                // indexed program expression its synthetic value reads.
+                if let (Some(_), Some(value), Some(anchor)) = (
+                    crate::analysis::type_eval_build::class_field_value_name(name, prop),
+                    prop.value.as_ref(),
+                    ctx.anchor(contributor_index),
+                ) {
+                    ctx.expressions.push(ProgramExpressionRecord {
+                        point: ProgramExpressionIdentity {
+                            canonical_id: Arc::clone(&ctx.canonical_id),
+                            offset: value.span().start,
+                        },
+                        span: value.span().into(),
+                        locator: FunctionBodyLocator {
+                            contributor: anchor,
+                            descent: Arc::from(descent.clone().into_boxed_slice()),
+                        },
+                        source: program_expression_source(value),
+                    });
+                }
                 match prop.value.as_ref() {
                     Some(Expression::ArrowFunctionExpression(arrow)) => {
                         discover_arrow_inner(
@@ -4997,6 +5017,17 @@ pub fn build_indexed_program_expression_ir(
         }
         FunctionDescentStep::ClassHeritage if steps.len() == 0 => {
             class_declaration_of(statement)?.super_class.as_ref()?
+        }
+        // A class field's initializer.
+        FunctionDescentStep::ClassMember { member_ordinal } if steps.len() == 0 => {
+            match class_declaration_of(statement)?
+                .body
+                .body
+                .get(*member_ordinal as usize)?
+            {
+                oxc_ast::ast::ClassElement::PropertyDefinition(prop) => prop.value.as_ref()?,
+                _ => return None,
+            }
         }
         _ => return None,
     };

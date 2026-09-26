@@ -1368,6 +1368,29 @@ fn index_named_class(
                 if matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
                     continue;
                 }
+                // A field initialized by a call's synthetic value (see
+                // `class_field_value_name`), mirroring `collect_named_class`.
+                if let (Some(field_name), Some(value)) = (
+                    crate::analysis::type_eval_build::class_field_value_name(name, prop),
+                    prop.value.as_ref(),
+                ) {
+                    let span: Span = value.span().into();
+                    let entry = index
+                        .value_headers
+                        .entry(ctx.key(&field_name))
+                        .or_insert_with(|| ValueDeclHeader {
+                            kind: if prop.readonly {
+                                ValueDeclKind::Const
+                            } else {
+                                ValueDeclKind::Let
+                            },
+                            span,
+                            name_span: span,
+                            object_member_headers: Vec::new(),
+                            contributors: Vec::new(),
+                        });
+                    push_contributor(&mut entry.contributors, ctx, span, span);
+                }
                 let header = MemberHeader {
                     key: lower_property_key(&prop.key, ctx.source),
                     method_kind: None,

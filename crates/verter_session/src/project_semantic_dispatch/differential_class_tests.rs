@@ -90,15 +90,16 @@ fn a_method_declared_to_return_its_class_reads_the_class() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `static origin = new Pt("o", 0)` is `Pt`. Wrong-but-clean: the lane answers
-/// `any`.
+/// `static origin = new Pt("o", 0)` is `Pt`: a static constructing its own
+/// class, whose static `make` constructs it too.
 ///
 /// What the lane gives:
 /// - `(typeof Pt)['origin']`: the checker answers `Pt`; the lane measured
-///   `any`.
+///   `Pt` degraded by UnresolvedValue (the construction re-enters the class's
+///   static side).
 #[test]
-#[ignore = "a static property initialized with new C() is C"]
-fn wrong_clean_a_static_initialized_with_new_is_its_instance_type() {
+#[ignore = "a static property constructing its own class reads its instance type"]
+fn a_static_constructing_its_own_class_is_its_instance_type() {
     let matrix = Matrix::new(MEMBERS);
     let failures = matrix.types(&[("(typeof Pt)['origin']", "Pt")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -347,5 +348,54 @@ fn a_returned_class_value_reads_as_typeof_the_class() {
         ),
     ]);
     failures.extend(matrix.returns(&[("ctorCall", "number")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Class fields initialized by calls and constructions.
+const FIELD_CALLS: &str = r##"
+class Pt { x = 0; constructor(public tag: string, private hidden: number) {} }
+declare function mk(): number;
+declare function lit<T>(x: T): T;
+class R { v = mk(); static s = mk(); readonly r = mk(); w = lit(1); readonly wr = lit(1); static ws = lit("s"); }
+class Simple { n = 1; }
+class Q2 { inst = new Simple(); static p = new Pt("q", 1); }
+class S4 { static make() { return new S4(); } }
+class Q6 { inst = new S4(); }
+"##;
+
+/// A field whose initializer's type derives from a call takes the call's
+/// result, instance and static alike: `v = mk()` is `number`, `inst = new
+/// Simple()` is `Simple`, `static p = new Pt("q", 1)` is `Pt`; a mutable
+/// field widens a fresh literal result (`w = lit(1)` is `number`) and a
+/// `readonly` one keeps it (`1`). Measured on TypeScript 7.0.2 under all four
+/// settings.
+#[test]
+fn a_field_initialized_by_a_call_takes_the_calls_result() {
+    let matrix = Matrix::new(FIELD_CALLS);
+    let failures = matrix.types(&[
+        ("R['v']", "number"),
+        ("(typeof R)['s']", "number"),
+        ("R['r']", "number"),
+        ("R['w']", "number"),
+        ("R['wr']", "1"),
+        ("(typeof R)['ws']", "string"),
+        ("Q2['inst']", "Simple"),
+        ("(typeof Q2)['p']", "Pt"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `inst = new S4()` is `S4` where `S4` declares `static make() { return new
+/// S4(); }`: constructing a class whose static method constructs it reads
+/// its instance type.
+///
+/// What the lane gives:
+/// - `Q6['inst']`: the checker answers `S4`; the lane reduced to a partial
+///   demand (the static method's flow return re-enters the construction).
+#[test]
+#[ignore = "a field constructing a class whose static method constructs it reads its instance type"]
+fn a_field_constructing_a_self_constructing_class_reads_its_instance_type() {
+    let matrix = Matrix::new(FIELD_CALLS);
+    let failures = matrix.types(&[("Q6['inst']", "S4")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

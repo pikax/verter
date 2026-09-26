@@ -2621,12 +2621,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // and a recursive component's callees are
                             // never re-demanded for a question that does
                             // not arise.
+                            // A bound is one candidate or a union of several
+                            // (a fresh union argument, a rest parameter's
+                            // arguments): any fresh literal member counts.
                             let has_fresh_literal_deposit =
                                 substitution.bindings().iter().any(|(param, bound)| {
-                                    super::enum_type::is_literal_type(self.graph(), *bound)
-                                        && self.binding_is_fresh_literal_deposit(
-                                            session_id, *param, *bound,
-                                        )
+                                    let graph = self.graph();
+                                    let candidates: Vec<SemanticNodeId> =
+                                        match graph.node_data(*bound).as_deref() {
+                                            Some(SemanticNodeData::Union(members)) => {
+                                                members.iter().copied().collect()
+                                            }
+                                            _ => vec![*bound],
+                                        };
+                                    candidates.into_iter().any(|candidate| {
+                                        super::enum_type::is_literal_type(graph, candidate)
+                                            && self.binding_is_fresh_literal_deposit(
+                                                session_id, *param, candidate,
+                                            )
+                                    })
                                 });
                             let binder_structure = if !has_fresh_literal_deposit {
                                 None

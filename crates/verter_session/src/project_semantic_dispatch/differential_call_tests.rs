@@ -464,15 +464,32 @@ export function wCallbackLiteralReturn() { return runN(() => f(f(1))); }
 export function wContextualReturn() { const r: () => 1 = () => f(f(1)); return r; }
 export function wImmediate() { return (() => f(f(1)))(); }
 export function wUnionLet() { let x = f(h(1)); return x; }
+declare function hn<T extends number>(x: T): T | undefined;
+export function wUnionArray() { return g(h(1)); }
+export function wUnionMember() { return { a: f(h(1)) }; }
+export function wUnionConstrained() { let x = f(hn(1)); return x; }
+export function wUnionNested() { let x = f(f(h(1))); return x; }
+let mUL = f(h(1));
+const mUC = f(h(1));
+export function wModuleUnionLet() { return mUL; }
+export function wModuleUnionConst() { return mUC; }
+export function wModuleUnionConstLet() { let x = mUC; return x; }
 const mTop = f(f(1));
 let mLet = f(f(1));
 const mArr = g(f(1));
 const mDirect = f(1);
+const mN = n(1);
+const mReg = f(one);
+export const mExp = f(1);
 export function wModule() { return mTop; }
 export function wModuleLet() { return mLet; }
 export function wModuleArray() { return mArr; }
 export function wModuleDirect() { return mDirect; }
 export function wModuleArgument() { return f(mTop); }
+export function wModuleConstrained() { return mN; }
+export function wModuleRegular() { return mReg; }
+export function wModuleExported() { return mExp; }
+export function wModuleTypeof() { const x: typeof mExp = mExp; return x; }
 "##;
 
 /// An unconstrained type parameter inferred from a fresh literal argument is
@@ -526,19 +543,44 @@ fn a_generic_call_keeps_or_widens_a_literal_as_the_checker_infers_it() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A union a call returns keeps its fresh literal for a mutable binding to
+/// A union a call returns keeps its fresh literal members through an
+/// enclosing call, for a mutable binding, a member or an array element to
 /// widen: `let x = f(h(1))` over `h<T>(x: T): T | undefined` is `number |
-/// undefined`. Measured on TypeScript 7.0.2 under all four settings.
-///
-/// What the lane gives:
-/// - `wUnionLet`: the checker answers `number | undefined` (`number` without
-///   `strictNullChecks`); the lane measured `undefined | 1` with
-///   `strictNullChecks`.
+/// undefined`, `g(h(1))` over `g<T>(x: T): T[]` is `(number | undefined)[]`;
+/// a constrained parameter's literal stays regular (`1 | undefined`). A
+/// module `let` of such a call widens it, and a module `const` of one reads
+/// as that fresh union, which the return keeps (not a unit type) and a
+/// mutable binding widens.
+/// Measured on TypeScript 7.0.2 under all four settings.
 #[test]
-#[ignore = "a call's fresh union constituent widens in a mutable binding"]
-fn wrong_clean_a_fresh_union_constituent_of_a_nested_call_widens() {
+fn a_fresh_union_constituent_of_a_nested_call_widens() {
     let matrix = Matrix::new(LITERAL_INFERENCE);
-    let failures = matrix.nullness(&[(Read::Return("wUnionLet"), "number | undefined", "number")]);
+    let failures = matrix.nullness(&[
+        (Read::Return("wUnionLet"), "number | undefined", "number"),
+        (
+            Read::Return("wUnionArray"),
+            "(number | undefined)[]",
+            "number[]",
+        ),
+        (
+            Read::Return("wUnionMember"),
+            "{ a: number | undefined; }",
+            "{ a: number; }",
+        ),
+        (Read::Return("wUnionConstrained"), "1 | undefined", "1"),
+        (Read::Return("wUnionNested"), "number | undefined", "number"),
+        (
+            Read::Return("wModuleUnionLet"),
+            "number | undefined",
+            "number",
+        ),
+        (Read::Return("wModuleUnionConst"), "1 | undefined", "number"),
+        (
+            Read::Return("wModuleUnionConstLet"),
+            "number | undefined",
+            "number",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -546,21 +588,22 @@ fn wrong_clean_a_fresh_union_constituent_of_a_nested_call_widens() {
 /// literal declares that fresh literal: a `let` widens it (`let mLet =
 /// f(f(1))` is `number`), and a read of a `const` is a fresh literal source
 /// that the return widens (`return mDirect` over `const mDirect = f(1)` is
-/// `number`, as `f(mTop)` over `const mTop = f(f(1))` is). Measured on
+/// `number`, as `f(mTop)` over `const mTop = f(f(1))` is), while its type
+/// stays the literal (`typeof mExp` is `1`). A constrained parameter or a
+/// regular argument infers a regular literal no read widens. Measured on
 /// TypeScript 7.0.2 under all four settings.
-///
-/// What the lane gives:
-/// - `wModule`, `wModuleLet`, `wModuleDirect`, `wModuleArgument`: the checker
-///   answers `number`; the lane measured `1`.
 #[test]
-#[ignore = "a module declaration initialized by a fresh-literal call declares the fresh literal"]
-fn wrong_clean_a_module_declaration_of_a_fresh_call_result_widens() {
+fn a_module_declaration_of_a_fresh_call_result_widens() {
     let matrix = Matrix::new(LITERAL_INFERENCE);
     let failures = matrix.returns(&[
         ("wModule", "number"),
         ("wModuleLet", "number"),
         ("wModuleDirect", "number"),
         ("wModuleArgument", "number"),
+        ("wModuleConstrained", "1"),
+        ("wModuleRegular", "1"),
+        ("wModuleExported", "number"),
+        ("wModuleTypeof", "1"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
