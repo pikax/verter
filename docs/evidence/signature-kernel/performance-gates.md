@@ -406,8 +406,15 @@ Recorded plainly so no reader mistakes absence for a pass:
   about 2,200 nested type arguments and 5,000 nested parentheses
   (unoptimized), where TypeScript 7.0.2 answers at 10,000 of either
   (`"v"` and `1` for the `Box` nesting, `1` for `(((…1…)))`, each in under
-  2 s). A function returning 2,000 nested parentheses still overflows a
-  declaration-lowering worker before the parser's limit.
+  2 s). The slice lowering of a returned value (`Lowerer::lower_expr`,
+  on the declaration-lowering workers) re-entered itself once per
+  parenthesis, about 15 KiB per level unoptimized, and overflowed the 8 MiB
+  worker from about 550; each level is now re-entered from its loop, and a
+  return in 2,000 parentheses answers the checker's `number`
+  (`flow_return_null_policy_tests.rs` →
+  `a_return_in_2000_parentheses_lowers_on_the_worker_stack`; it overflows
+  with the recursion restored). The declaration-lowering worker's deepest
+  stack there is its re-parse of the file (4.0 MiB at 2,000).
 
 * **A pair of literal types relates without a query.** Two literal types
   relate, under every relation kind, exactly when they are one value, so

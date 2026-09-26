@@ -11620,6 +11620,26 @@ fn a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack() {
     );
 }
 
+/// A return nested in 2,000 parentheses lowers on the declaration-lowering
+/// worker: each parenthesis is re-entered from the lowering's loop, not a
+/// native level each (about 15 KiB per level unoptimized, which overflowed
+/// the 8 MiB worker from about 550).
+///
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`):
+/// `number` with and without `strictNullChecks`.
+#[test]
+fn a_return_in_2000_parentheses_lowers_on_the_worker_stack() {
+    let host = four_policy_host();
+    let path = format!("{STRICT_ROOT}/parens-2000.ts");
+    let source = format!(
+        "export function pf() {{ return {}1{}; }}\n",
+        "(".repeat(2000),
+        ")".repeat(2000)
+    );
+    upsert(&host, &path, &source);
+    assert_eq!(observe(&host, &path, "pf"), "number");
+}
+
 /// The checker's answer for the 2,000-operand chain above.
 #[test]
 #[ignore = "the evaluation's connected work outgrows the demand's work budget past about 420 operands"]
