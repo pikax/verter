@@ -1611,6 +1611,15 @@ pub enum SliceExpr {
         /// Whether an enclosing `as const` pins the literal.
         const_asserted: bool,
     },
+    /// A template literal expression in a const context (``a${n}` as
+    /// const`): the template literal type of its holes' types, each hole a
+    /// value this frame evaluates in the const context.
+    ConstTemplate {
+        /// The raw text around the holes, one more than the holes.
+        quasis: Arc<[Arc<str>]>,
+        /// The holes in source order.
+        holes: Arc<[SliceExpr]>,
+    },
     /// A nested function VALUE (a function / arrow expression or an
     /// object-literal method in any expression position): its parameters
     /// and OWNED body region, lowered inline — the evaluator answers its
@@ -14240,6 +14249,16 @@ impl<'a> Lowerer<'a> {
                     }
                     ValueDescent::TypeCarrier(inner) => {
                         match member_literal_policy(other, self.source) {
+                            Some(ObjectMemberPolicy::ConstAssert)
+                                if matches!(
+                                    unwrap_parenthesized(inner),
+                                    Expression::TemplateLiteral(template)
+                                        if !template.expressions.is_empty()
+                                ) =>
+                            {
+                                self.lower_const_template(inner)
+                                    .expect("a template with holes")
+                            }
                             Some(policy) => match value_descent(inner) {
                                 ValueDescent::Object(object) => self
                                     .lower_object_literal_with_policy(object, other, mode, policy),
@@ -14788,7 +14807,40 @@ impl<'a> Lowerer<'a> {
     /// nested object or array literal inherits the const assertion
     /// (TypeScript's `isConstContext`), and every other form lowers as it
     /// would anywhere else.
+    /// A template literal with holes in a const context: its holes lowered
+    /// as values of this frame, the text around them kept raw. `None` for
+    /// any other expression.
+    fn lower_const_template(&mut self, expression: &Expression<'_>) -> Option<SliceExpr> {
+        let Expression::TemplateLiteral(template) = unwrap_parenthesized(expression) else {
+            return None;
+        };
+        if template.expressions.is_empty() {
+            return None;
+        }
+        let quasis: Arc<[Arc<str>]> = template
+            .quasis
+            .iter()
+            .map(|quasi| Arc::from(quasi.value.raw.as_str()))
+            .collect();
+        let holes: Arc<[SliceExpr]> = template
+            .expressions
+            .iter()
+            .map(|hole| {
+                self.lower_in_const_context(
+                    hole,
+                    ExprMode::BindingInit {
+                        preserve_literal: true,
+                    },
+                )
+            })
+            .collect();
+        Some(SliceExpr::ConstTemplate { quasis, holes })
+    }
+
     fn lower_in_const_context(&mut self, expression: &Expression<'_>, mode: ExprMode) -> SliceExpr {
+        if let Some(template) = self.lower_const_template(expression) {
+            return template;
+        }
         match value_descent(unwrap_parenthesized(expression)) {
             ValueDescent::Object(object) => self.lower_object_literal_with_policy(
                 object,

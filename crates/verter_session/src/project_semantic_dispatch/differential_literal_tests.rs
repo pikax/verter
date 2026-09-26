@@ -119,6 +119,10 @@ export function cTemplateBranches(b: boolean) { return `x${b ? 1 : 2}` as const;
 export function cTemplateNumber(n: number) { return `a${n}` as const; }
 export function cTemplateLocal() { const s = "q"; return `a${s}` as const; }
 export function cTemplateMember() { return { k: `v${2}` } as const; }
+export function cTemplateBool(b: boolean) { return `x${b}` as const; }
+export function cTemplateUnion(v: "a" | "b") { return `x-${v}` as const; }
+export function cTemplateLocalMember() { const n = 1; return { k: `v${n}` } as const; }
+export function cTemplateElement(s: string) { return [`p${s}`] as const; }
 export function cSpread() { const base = { a: 1 } as const; return { ...base, b: 2 }; }
 export function cSpreadConst() { const base = { a: 1 } as const; return { ...base, b: 2 } as const; }
 export function cArrSpread() { const t = [1, 2] as const; return [...t, 3]; }
@@ -178,35 +182,24 @@ fn a_const_template_infers_as_the_checker_infers_it() {
 }
 
 /// A const template whose hole reads a value is the template literal type of
-/// that value's type, and a template member of an `as const` object is its
-/// literal: ``a${n}` as const` over `n: number` is ``a${number}``, over
-/// `const s = "q"` it is `"aq"`, and `{ k: `v${2}` } as const` is `{
-/// readonly k: "v2"; }` (TypeScript 7.0.2, all four settings alike).
-/// Wrong-but-clean: the lane answers `string` for each template.
-///
-/// What the lane gives:
-/// - `cTemplateNumber`: the checker answers ``a${number}``; the lane measured
-///   `string`.
-/// - `cTemplateLocal`: the checker answers `"aq"`; the lane measured `string`.
-/// - `cTemplateMember`: the checker answers `{ readonly k: "v2"; }`; the lane
-///   measured `{ readonly k: string; }`.
+/// that value's type, and a template member or element of an `as const`
+/// literal is its literal: ``a${n}` as const` over `n: number` is
+/// ``a${number}``, over `const s = "q"` it is `"aq"`, a `boolean` or union
+/// hole distributes, and `{ k: `v${2}` } as const` is `{ readonly k: "v2";
+/// }` (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "a const template reads its value holes and keeps its literal as an as const member"]
-fn wrong_clean_a_const_template_reads_its_value_holes() {
+fn a_const_template_reads_its_value_holes_as_the_checker_reads_them() {
     let matrix = Matrix::new(AS_CONST);
     let failures = matrix.returns(&[
         ("cTemplateNumber", "`a${number}`"),
         ("cTemplateLocal", "\"aq\""),
         ("cTemplateMember", "{ readonly k: \"v2\"; }"),
+        ("cTemplateBool", "\"xfalse\" | \"xtrue\""),
+        ("cTemplateUnion", "\"x-a\" | \"x-b\""),
+        ("cTemplateLocalMember", "{ readonly k: \"v1\"; }"),
+        ("cTemplateElement", "readonly [`p${string}`]"),
     ]);
-    assert!(
-        failures.is_empty(),
-        "{}",
-        failures.join(
-            "
-"
-        )
-    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// `{ ...base, b: 2 }` over `const base = { a: 1 } as const` is `{ a: 1; b:

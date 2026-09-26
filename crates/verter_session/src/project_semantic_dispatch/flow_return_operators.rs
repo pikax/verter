@@ -1162,3 +1162,66 @@ impl FlowEvaluator<'_, '_> {
         }
     }
 }
+
+impl FlowEvaluator<'_, '_> {
+    /// [`SliceExpr::ConstTemplate`]: the template literal type of the holes'
+    /// types (`getTemplateLiteralType`), each hole evaluated in order —
+    /// `` `a${n}` as const `` over `n: number` is `` `a${number}` `` and over
+    /// `const s = "q"` it is `"aq"`. A hole whose type a template literal
+    /// type cannot hold takes the typed gap.
+    pub(super) fn eval_const_template(
+        &mut self,
+        quasis: &[Arc<str>],
+        holes: &[SliceExpr],
+    ) -> Positional<SemanticNodeId> {
+        let mut nodes = Vec::with_capacity(holes.len());
+        for hole in holes {
+            match self.eval_expr(hole) {
+                Positional::Value(node) => nodes.push(node),
+                other => return other,
+            }
+        }
+        let graph = self.dispatch.graph();
+        let spellable = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(
+                    SemanticNodeData::Literal(_)
+                        | SemanticNodeData::TemplateLiteral { .. }
+                        | SemanticNodeData::Primitive(
+                            PrimitiveKind::String
+                                | PrimitiveKind::Number
+                                | PrimitiveKind::BigInt
+                                | PrimitiveKind::Boolean
+                                | PrimitiveKind::Null
+                                | PrimitiveKind::Undefined
+                        )
+                )
+            )
+        };
+        let holds_spellable = nodes
+            .iter()
+            .all(|node| match graph.node_data(*node).as_deref() {
+                Some(SemanticNodeData::Union(members)) => {
+                    members.iter().all(|member| spellable(*member))
+                }
+                _ => spellable(*node),
+            });
+        if !holds_spellable {
+            self.record_degradation(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression));
+            return Positional::Unmodeled;
+        }
+        let reduced = self.dispatch.reduce_template_literal_nodes(
+            quasis,
+            &nodes,
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            ),
+        );
+        if reduced.keyspace_budget_exceeded {
+            self.record_degradation(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression));
+            return Positional::Unmodeled;
+        }
+        Positional::Value(reduced.node)
+    }
+}

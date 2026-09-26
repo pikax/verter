@@ -7000,6 +7000,7 @@ fn slice_expr_reads_frame(expr: &crate::flow_slice_content::SliceExpr) -> bool {
             SliceArrayElement::Elision => false,
         }),
         SliceExpr::Union { arms, .. } => arms.iter().any(slice_expr_reads_frame),
+        SliceExpr::ConstTemplate { holes, .. } => holes.iter().any(slice_expr_reads_frame),
         SliceExpr::Satisfies { operand, .. }
         | SliceExpr::Void { operand, .. }
         | SliceExpr::Awaited { operand } => slice_expr_reads_frame(operand),
@@ -7106,6 +7107,11 @@ fn expression_effect_tree(
             SliceExpr::Arithmetic { operands, .. } => {
                 for operand in operands.iter() {
                     walk(operand, out);
+                }
+            }
+            SliceExpr::ConstTemplate { holes, .. } => {
+                for hole in holes.iter() {
+                    walk(hole, out);
                 }
             }
             SliceExpr::ElementAccess { object, index, .. } => {
@@ -23002,6 +23008,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Value(_) | Positional::Unmodeled => self.eval_expr(value),
                     Positional::Hold => Positional::Hold,
                 }
+            }
+            crate::flow_slice_content::SliceExpr::ConstTemplate { quasis, holes } => {
+                self.eval_const_template(quasis, holes)
             }
             crate::flow_slice_content::SliceExpr::Arithmetic { operator, operands } => {
                 self.eval_arithmetic(*operator, operands)
