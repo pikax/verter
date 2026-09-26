@@ -119,8 +119,8 @@ mod tests {
     use super::*;
     use crate::svelte::runtime::client_imports::UserImportSpecifier;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_span::Span;
 
     #[test]

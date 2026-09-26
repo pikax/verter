@@ -109,7 +109,8 @@ fn rune_ambient_inventory() -> &'static RuneAmbientInventory {
         let source = verter_compiler::svelte::ide::prelude::module_rune_ambient_source();
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
-            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse();
         // The prelude has NO canonical id — the empty anchor canonical makes
         // every minted body locator fail the deref's canonical-coherence gate
         // closed (ambient bodies are served from THIS inventory, never a

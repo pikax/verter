@@ -72,7 +72,7 @@ pub(super) fn mixed_chunk_fold(
     // identifier references — e.g. `String(5)` — folds without it).
     let alloc = Allocator::default();
     let wrapped = format!("({expr_source})");
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         // A torn parse cannot prove anything — stay a plain live interpolation (the caller
         // already routes a torn chunk through the live rewriter).
@@ -221,7 +221,7 @@ pub(super) fn mixed_chunk_nullish_wrap(
 
     let alloc = Allocator::default();
     let wrapped = format!("({expr_source})");
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         // A torn parse cannot prove definedness — default to the safe `?? ''` (official's
         // behavior for any non-statically-defined value).

@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Declaration, Statement};
-use oxc_parser::Parser;
 use oxc_span::SourceType;
+use verter_parser::oxc_parse::Parser;
 
 /// Parse a lib's source and return its top-level declared / exported names
 /// in source order. Names are deduplicated case-sensitively while preserving

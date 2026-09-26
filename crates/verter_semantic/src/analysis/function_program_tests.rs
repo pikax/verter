@@ -9,7 +9,7 @@ use verter_type_expr::facts::FunctionPartIdentity;
 fn index_of(source: &str) -> FunctionProgramIndex {
     let allocator = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::ts();
-    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+    let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
     assert!(
         ret.errors.is_empty(),
         "fixture must parse: {:?}",
@@ -142,7 +142,9 @@ fn nested_value_frames_have_exact_indexed_locators() {
     let index = index_of(source);
     assert_eq!(index.entries.len(), 4, "every nested callable owns a frame");
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     for entry in index.entries.iter() {
         let resolved = resolve_function_node(&parsed.program, &entry.locator)
             .expect("indexed locator resolves");
@@ -322,7 +324,9 @@ fn flow_binding_map_is_bijective_for_value_bindings() {
     let index = index_of(source);
     let entry = entry_of(&index, "inventory");
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     let Statement::FunctionDeclaration(function) = &parsed.program.body[0] else {
         panic!("function fixture");
     };
@@ -1340,7 +1344,8 @@ namespace N {
 }
 "#;
     let allocator = oxc_allocator::Allocator::default();
-    let ret = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+        .parse();
     assert!(
         ret.errors.is_empty(),
         "fixture must parse: {:?}",
@@ -1466,7 +1471,9 @@ fn exact_value_function_lookup_does_not_scan_sibling_functions() {
 fn retained_function_addresses_preserve_exact_locator_metadata() {
     let source = "namespace N { export const arrow = () => 0; export class Box<T> { method<U>(x:T) { return () => x; } field = () => 1; } } const named = function internal(){ return named(); }; const obj = { method() { return () => 2; } }; function root() { return () => ({ method(){ return () => 3; } }); }";
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let (index, nodes) = build_function_program_index_with_nodes(

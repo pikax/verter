@@ -33,7 +33,7 @@
 use base64::prelude::*;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
-use oxc_parser::{config::TokensParserConfig, Kind, Parser, Token};
+use oxc_parser::{config::TokensParserConfig, Kind, Token};
 use oxc_semantic::SemanticBuilder;
 use oxc_sourcemap::SourceMapBuilder;
 use oxc_span::{GetSpan, SourceType};
@@ -47,6 +47,7 @@ use verter_macro_dto::{
     TscRetainedValueCarrier, TscScopeRequirements, TscScriptOwner,
     TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
 };
+use verter_parser::oxc_parse::Parser;
 use verter_type_expr::facts::TypeDependencyPathFact;
 
 use crate::code_transform::{CodeTransform, GeneratedSourceRange};

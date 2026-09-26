@@ -2496,8 +2496,8 @@ fn define_model_default_modelvalue() {
 fn owner_aware_analysis_stamps_imports_macros_and_declarations_at_production() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::TopLevelOwnerId;
 
     let source = r#"
@@ -2544,8 +2544,8 @@ const props = defineProps<SetupProps>();
 fn declaration_content_hash_discriminates_owner_only_role_changes() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::TopLevelOwnerId;
 
     let source = "interface Shared { value: string }";
@@ -2589,8 +2589,8 @@ fn declaration_content_hash_discriminates_owner_only_role_changes() {
 fn macro_local_type_resolution_is_scoped_by_owner() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::TopLevelOwnerId;
 
     let source = r#"
@@ -2629,8 +2629,8 @@ const instanceProps = defineProps<Props>();
 fn macro_local_type_resolution_uses_only_the_validated_one_way_parent() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::TopLevelOwnerId;
 
     let analyze = |source: &str, statement_owners: &[TopLevelOwnerId]| {

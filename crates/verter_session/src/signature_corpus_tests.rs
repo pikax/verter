@@ -320,8 +320,8 @@ fn signature_corpus_observations_parse_and_families_are_covered() {
 /// parse is an unverified claim.
 fn parse_declarations(text: &str) -> Result<(), String> {
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     let allocator = Allocator::default();
     // A `.d.ts` module; `from_path` only fails on unknown extensions.
     let source_type = SourceType::from_path("module.d.ts").unwrap_or_default();

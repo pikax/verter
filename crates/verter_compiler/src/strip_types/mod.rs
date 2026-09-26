@@ -6,8 +6,8 @@
 //! files without a separate `oxc-transform` WASM dependency.
 
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
+use verter_parser::oxc_parse::Parser;
 
 pub(crate) mod typescript;
 

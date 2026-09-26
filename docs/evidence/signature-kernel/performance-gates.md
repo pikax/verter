@@ -442,6 +442,30 @@ Recorded plainly so no reader mistakes absence for a pass:
   8 MiB wasm module every measured form at 250 levels answers through
   `evaluateTypeExpressionWithAudit`.
 
+* **oxc's parse runs on a stack its source cannot exhaust.** oxc_parser
+  0.126's recursive descent has no depth limit and aborts the process when
+  a thread's stack runs out, before returning an AST: on an 8 MiB stack at
+  4,512 nested type arguments or object literals and 5,664 parentheses
+  (optimized), 2,272 and 3,424 unoptimized
+  (`docs/evidence/signature-kernel/oxc-deep-parse.md`, reproduced by
+  `crates/verter_parser/examples/oxc_deep_parse.rs` with nothing of
+  Verter's). Every production parse goes through
+  `verter_parser::oxc_parse::Parser`, a drop-in that parses exactly what
+  oxc parses: a linear scan bounds the syntax tree's depth from above and
+  the parse gets 8 KiB per level of it (twice oxc's costliest measured
+  level), in place when the thread has it and on a `stacker` segment
+  otherwise. No source is refused and no depth is imposed.
+  `oxc_parse/tests.rs` parses ten forms 10,000 deep and an unclosed
+  200,000-deep nest on a 1 MiB thread (with the parse in place, or with a
+  per-level stack below what oxc spends, it overflows), and
+  `no_crate_parses_around_the_guard` fails on a direct
+  `oxc_parser::Parser`. The scan costs about a third of the parse (8.1 ms
+  against 6.1 ms for `lib.dom.d.ts`, optimized); a source short enough
+  that every byte could be a level skips it. `stacker` cannot grow the
+  stack on wasm32, where the module's 8 MiB bounds the parse. What runs
+  after the parse (the syntax-tree clone, the semantic builder and
+  Verter's own passes) still recurses per level in places.
+
 * **A class expression raises one instance per level.** The lane's graph
   of `class { m() { return class { … } } }` nested `n` deep is linear
   (evaluation 3–10 ms from 4 to 24 levels, optimized), but its raised type

@@ -68,7 +68,7 @@ impl ParsedEvalProgram {
                 source_type,
             },
             |owner| {
-                let result = oxc_parser::Parser::new(
+                let result = verter_parser::oxc_parse::Parser::new(
                     &owner.allocator,
                     owner.source.as_ref(),
                     owner.source_type,

@@ -34,9 +34,10 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use oxc_allocator::Allocator;
-use oxc_parser::{ParseOptions, Parser};
+use oxc_parser::ParseOptions;
 use oxc_span::SourceType;
 use verter_language::FrameworkAdapterId;
+use verter_parser::oxc_parse::Parser;
 use verter_semantic::analysis::framework_facts::{
     ExactFrameworkScriptCandidates, FrameworkScriptCandidates, FrameworkScriptFactPayload,
     ResolvedImportTarget, ResolvedPackage, ResolvedValidationCx, ScriptCandidateCx,

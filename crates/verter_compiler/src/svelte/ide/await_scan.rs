@@ -18,9 +18,9 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{ArrowFunctionExpression, AwaitExpression, Function, Program};
 use oxc_ast_visit::{walk, Visit};
-use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::scope::ScopeFlags;
+use verter_parser::oxc_parse::Parser;
 
 use crate::code_transform::CodeTransform;
 

@@ -1628,7 +1628,8 @@ const props = defineProps<{ zIndex: number }>()
 
     // The generated TSX should parse without errors
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::tsx()).parse();
     for err in &parsed.errors {
         eprintln!("OXC ERROR: {err}");
     }

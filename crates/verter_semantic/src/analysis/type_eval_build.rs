@@ -6467,8 +6467,8 @@ fn lower_type_param_decls(
 pub fn parse_type_parameter_clause(clause: &str) -> Vec<TypeParam> {
     use oxc_allocator::Allocator;
     use oxc_ast::ast::Statement;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
 
     let wrapped = format!("type __VerterGeneric__<{clause}> = void");
     let allocator = Allocator::default();
@@ -6977,8 +6977,8 @@ pub fn has_named_shape_surface(shape: &crate::analysis::type_expand::ExpandedObj
 /// deterministic inline-fixture canonical.
 pub fn parse_and_build_env(source: &str) -> EvalEnv {
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
 
     let allocator = Allocator::default();
     let source_type = SourceType::ts();
@@ -7079,8 +7079,8 @@ impl LoweredFileParts {
 /// returned parts are the pre-fact-minting view and are never stored.
 pub fn parse_and_lower_parts(source: &str) -> LoweredFileParts {
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
 
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
