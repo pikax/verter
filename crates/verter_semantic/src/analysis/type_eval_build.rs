@@ -2600,8 +2600,9 @@ fn collect_named_class(
     // `unique symbol` — the member-level nominal fact for `typeof C.A`.
     let mut static_unique_symbol_members = Vec::new();
     let mut static_widening_members: Vec<String> = Vec::new();
-    let mut ctor_sig = None;
-    let mut ctor_fn_spans = FunctionSpans::default();
+    // Every public constructor declaration with its spans and whether it
+    // has a body: the overloads, then the implementation.
+    let mut ctor_sigs: Vec<(LoweredSignatureParts, FunctionSpans, bool)> = Vec::new();
     let mut inference_unavailable = None;
     // The served function position of a body-derived member return is keyed
     // by the RAW `ClassBody.body` index (the produced shape interleaves
@@ -2868,15 +2869,18 @@ fn collect_named_class(
                     // non-public constructor still does not contribute a
                     // call signature to the consuming surface.
                     if matches!(method.accessibility, None | Some(TSAccessibility::Public)) {
-                        ctor_sig = Some(extract_function_signature(&method.value, source));
-                        ctor_fn_spans = FunctionSpans {
-                            signature: Some(method.span.into()),
-                            return_type: method
-                                .value
-                                .return_type
-                                .as_ref()
-                                .map(|rt| rt.type_annotation.span().into()),
-                        };
+                        ctor_sigs.push((
+                            extract_function_signature(&method.value, source),
+                            FunctionSpans {
+                                signature: Some(method.span.into()),
+                                return_type: method
+                                    .value
+                                    .return_type
+                                    .as_ref()
+                                    .map(|rt| rt.type_annotation.span().into()),
+                            },
+                            method.value.body.is_some(),
+                        ));
                     }
                 } else {
                     // Record every NON-static instance method with its
@@ -3011,51 +3015,74 @@ fn collect_named_class(
         unique_symbol_members: Vec::new(),
     });
 
-    // Also register as a value (for typeof ClassName / InstanceType)
-    let ctor_declared = ctor_sig.is_some();
-    let mut constructor_signature = ctor_sig.unwrap_or_else(|| LoweredSignatureParts {
-        parameters: Vec::new(),
-        return_type: Some(TypeExpr::named(name.clone())),
-        predicate: None,
-        type_parameters: Vec::new(),
-        has_implementation_body: true,
-        has_authored_return: false,
-        jsdoc_return: false,
-        origin: LoweredSignatureOrigin::Synthetic,
-    });
-    // A DECLARED constructor carries no return annotation — its construct
-    // "return" IS the class instance. Backfill the instance reference so
-    // `InstanceType<typeof C>` reads the instance type from the construct
-    // signature exactly as it does from the synthesized default. (The
-    // backfilled reference is transient inference, never an authored return
-    // position — `has_authored_return` stays false for constructors.)
-    if constructor_signature.return_type.is_none() {
-        constructor_signature.return_type = Some(TypeExpr::named(name.clone()));
+    // Also register as a value (for typeof ClassName / InstanceType). An
+    // overloaded constructor's construct signatures are its overloads; the
+    // implementation signature is not part of the type.
+    if ctor_sigs.iter().any(|(_, _, has_body)| !has_body) {
+        ctor_sigs.retain(|(_, _, has_body)| !has_body);
     }
-
-    // The declared constructor's authored function node is the construct
-    // signature at shape ordinal 0 of the produced `typeof C` constructor
-    // shape (a class with no declared constructor keeps the honest Synthetic
-    // origin instead).
-    if ctor_declared {
-        constructor_signature.origin = LoweredSignatureOrigin::ShapeMember { ordinal: 0 };
+    let ctor_declared = !ctor_sigs.is_empty();
+    let mut constructors: Vec<(LoweredSignatureParts, FunctionSpans)> = if ctor_declared {
+        ctor_sigs
+            .into_iter()
+            .map(|(signature, spans, _)| (signature, spans))
+            .collect()
+    } else {
+        vec![(
+            LoweredSignatureParts {
+                parameters: Vec::new(),
+                return_type: Some(TypeExpr::named(name.clone())),
+                predicate: None,
+                type_parameters: Vec::new(),
+                has_implementation_body: true,
+                has_authored_return: false,
+                jsdoc_return: false,
+                origin: LoweredSignatureOrigin::Synthetic,
+            },
+            FunctionSpans::default(),
+        )]
+    };
+    for (ordinal, (constructor_signature, _)) in constructors.iter_mut().enumerate() {
+        // A DECLARED constructor carries no return annotation — its construct
+        // "return" IS the class instance. Backfill the instance reference so
+        // `InstanceType<typeof C>` reads the instance type from the construct
+        // signature exactly as it does from the synthesized default. (The
+        // backfilled reference is transient inference, never an authored
+        // return position — `has_authored_return` stays false for
+        // constructors.)
+        if constructor_signature.return_type.is_none() {
+            constructor_signature.return_type = Some(TypeExpr::named(name.clone()));
+        }
+        // A declared constructor's authored function node is the construct
+        // signature at its shape ordinal of the produced `typeof C`
+        // constructor shape (a class with no declared constructor keeps the
+        // honest Synthetic origin instead).
+        if ctor_declared {
+            constructor_signature.origin = LoweredSignatureOrigin::ShapeMember {
+                ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+            };
+        }
     }
     // The constructor shape is the `typeof C` constructor-object model: the
-    // construct signature first, then the class's OWN static members (with
+    // construct signatures first, then the class's OWN static members (with
     // their declared visibility). Base statics are NOT folded here — static
     // heritage composes at query time through the shared class-surface
     // reducer, never eagerly at the producer.
-    let mut constructor_properties =
-        // An abstract class's construct signatures are abstract.
-        vec![ObjectMember::ConstructSignature(
-            FunctionExpr::with_spans(
-                constructor_signature.parameters.clone(),
-                constructor_signature.return_type.clone().map(Arc::new),
-                constructor_signature.type_parameters.clone(),
-                ctor_fn_spans,
+    let mut constructor_properties: Vec<ObjectMember> = constructors
+        .iter()
+        .map(|(constructor_signature, spans)| {
+            // An abstract class's construct signatures are abstract.
+            ObjectMember::ConstructSignature(
+                FunctionExpr::with_spans(
+                    constructor_signature.parameters.clone(),
+                    constructor_signature.return_type.clone().map(Arc::new),
+                    constructor_signature.type_parameters.clone(),
+                    *spans,
+                )
+                .with_abstract(decl.r#abstract),
             )
-            .with_abstract(decl.r#abstract),
-        )];
+        })
+        .collect();
     constructor_properties.extend(static_members);
     let constructor_shape = ObjectExpr {
         properties: constructor_properties,
@@ -3070,7 +3097,10 @@ fn collect_named_class(
         annotation_is_authored: false,
         inference_unavailable,
         expression_source_offset: None,
-        signatures: vec![constructor_signature],
+        signatures: constructors
+            .into_iter()
+            .map(|(signature, _)| signature)
+            .collect(),
         object_shape: Some(constructor_shape),
         enum_members: None,
         enum_member_names: None,

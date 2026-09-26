@@ -150,6 +150,7 @@ class ChainSub extends Chain { sub = 1; }
 interface Merged { extra: string }
 class Merged { own = 1; }
 class WithCtor { constructor(a: string); constructor(a: number); constructor(a: any) {} }
+class OneCtor { constructor(a: string) {} }
 class StaticInherit extends Base { static own = 2; }
 "##;
 
@@ -204,18 +205,26 @@ fn a_polymorphic_this_return_reads_the_receiver_subclass() {
 }
 
 /// With `constructor(a: string); constructor(a: number); constructor(a: any)
-/// {}`, `ConstructorParameters<typeof WithCtor>` infers from the LAST overload,
-/// `[a: number]`; the implementation signature is not part of the type.
-/// Wrong-but-clean: the lane answers `[a: any]`.
-///
-/// What the lane gives:
-/// - `ConstructorParameters<typeof WithCtor>`: the checker answers `[a:
-///   number]`; the lane measured `[a: any]`.
+/// {}`, the class's construct signatures are its overloads, never the
+/// implementation: `ConstructorParameters<typeof WithCtor>` infers from the
+/// LAST overload, `[a: number]`, and `typeof WithCtor` does not take a
+/// `boolean` (TypeScript 7.0.2, all four settings alike).
 #[test]
-#[ignore = "an overloaded constructor exposes its overloads, never its implementation signature"]
-fn wrong_clean_constructor_parameters_read_the_last_overload() {
+fn constructor_overloads_are_read_as_the_checker_reads_them() {
     let matrix = Matrix::new(HERITAGE);
-    let failures = matrix.types(&[("ConstructorParameters<typeof WithCtor>", "[a: number]")]);
+    let failures = matrix.types(&[
+        ("ConstructorParameters<typeof WithCtor>", "[a: number]"),
+        ("InstanceType<typeof WithCtor>", "WithCtor"),
+        (
+            "[typeof WithCtor] extends [new (a: string) => WithCtor] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[typeof WithCtor] extends [new (a: boolean) => WithCtor] ? 1 : 2",
+            "2",
+        ),
+        ("ConstructorParameters<typeof OneCtor>", "[a: string]"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
