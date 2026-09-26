@@ -269,10 +269,37 @@ Recorded plainly so no reader mistakes absence for a pass:
   160-link chain overflowed the default test stack. A 320-link chain
   resolves now (`type_syntax_depth_tests.rs` →
   `a_320_deep_conditional_chain_resolves_on_the_default_stack`, the
-  checker's `"c319"`, `"none"` and, over 160 links, `"c159"`); the
-  deepest remaining recursion over such a chain is the oxc-AST-to-`TypeExpr`
-  conversion (`verter_type_expr_oxc::lower_ts_type`, on the declaration
-  lowering workers), about 4.6 KiB per link. The relation engine
+  checker's `"c319"`, `"none"` and, over 160 links, `"c159"`). The
+  oxc-AST-to-`TypeExpr` conversion (`verter_type_expr_oxc::lower_ts_type`,
+  on the declaration-lowering workers) recursed once per level of every
+  form, about 4.1 KiB per level unoptimized: on the 8 MiB workers a
+  `Box<…>` nesting overflowed it from about 1,950 levels, before the
+  parser's own limit (about 2,200 on the I/O worker), and a generic
+  function type's rewrite of its type-parameter references
+  (`normalize_type_parameter_refs`) recursed the same way, about 3.5 KiB
+  per level. Both lower from an explicit stack now: each node's builder
+  runs once with a placeholder per non-leaf child to enumerate its children
+  and once over their results, and a nested function's type parameters
+  resolve through a chain of scopes rather than a copy of the enclosing
+  ones. `lower_depth_tests.rs` →
+  `a_type_nested_5000_levels_lowers_on_a_small_stack` (a reference's
+  argument, a parenthesised type, an array element, a `keyof` operand, a
+  function's return, an object property, a tuple element, a conditional's
+  false branch, an indexed access's object and a mapped type's value, each
+  5,000 deep, on a 256 KiB thread) and
+  `a_generic_function_type_nested_5000_levels_lowers_on_a_small_stack`
+  (a generic function's 5,000-deep return, and 1,000 nested generic
+  function types) each overflow the small thread with the recursion they
+  cover restored. A 2,100-deep
+  `Box` nesting now answers in the lane, and the deepest stack on the
+  declaration-lowering worker is the parser's re-parse (5.8 MiB); the I/O
+  worker's parser and syntax-tree clone overflow first, from about 2,300.
+  The conversion costs about 30 ns more per annotation (20.4 ms against
+  16.5 ms for twenty conversions of the 6,816 property and alias
+  annotations of `lib.dom.d.ts`, optimized). Nested generic function
+  types still rewrite the functions inside them again, a cost that grows
+  with the square of their nesting (0.9 s for 1,000 unoptimized). The
+  relation engine
   recurses once per structural level, and is bounded as the checker bounds
   it (`CHECKER_RELATION_DEPTH_LIMIT`, `project_semantic_dispatch/relation.rs`).
   The relation frames stacked directly on one another are one checker
