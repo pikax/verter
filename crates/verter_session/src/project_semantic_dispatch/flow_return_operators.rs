@@ -705,6 +705,8 @@ impl FlowEvaluator<'_, '_> {
         guard: &SliceGuard,
         right_reachable: Option<bool>,
     ) -> Positional<SemanticNodeId> {
+        let right_key = right as *const SliceExpr as usize;
+        self.regular_right_operands.remove(&right_key);
         let right_type = match right_reachable {
             // No edge reaches the right operand: the value is the left's.
             Some(false) => return Positional::Value(left_type),
@@ -745,7 +747,10 @@ impl FlowEvaluator<'_, '_> {
             }
         };
         let result = self.logical_result(operator, left_type, right_type);
-        self.decided(result)
+        if let Some((_, true)) = result {
+            self.regular_right_operands.insert(right_key);
+        }
+        self.decided(result.map(|(value, _)| value))
     }
 
     /// A logical operand's value: an assignment operand is read as
@@ -800,46 +805,58 @@ impl FlowEvaluator<'_, '_> {
     /// part beside the right when the left may be falsy; `??` the left's
     /// non-nullable part beside the right when the left may be nullish —
     /// and the left alone otherwise. `None` when an operand's facts are
-    /// not decidable here.
+    /// not decidable here. The flag is set when the result does not hold
+    /// the right operand fresh: it is the left alone, or the left's part
+    /// already holds the right operand's literal and the union keeps that
+    /// regular twin (`removeRedundantLiteralTypes`): `v && 0` over `v:
+    /// number` is a `0` that does not widen, while over `v: string` it is
+    /// `"" | 0` whose `0` widens.
     fn logical_result(
         &mut self,
         operator: SliceLogical,
         left: SemanticNodeId,
         right: SemanticNodeId,
-    ) -> Option<SemanticNodeId> {
+    ) -> Option<(SemanticNodeId, bool)> {
         let facts = self.logical_facts(left)?;
-        Some(match operator {
+        let kept = match operator {
             SliceLogical::And if facts.truthy => {
                 let source = if self.nullability.is_strict() {
                     left
                 } else {
                     self.base_type_of_literal(right)
                 };
-                let falsy = self.definitely_falsy_part(source)?;
-                self.union(&[falsy, right])
+                self.definitely_falsy_part(source)?
             }
-            SliceLogical::Or if facts.falsy => {
-                let truthy = self.remove_definitely_falsy(left)?;
-                self.reduced_union(vec![
-                    super::ReductionArm::plain(truthy),
-                    super::ReductionArm::plain(right),
-                ])
-                .0
-            }
+            SliceLogical::Or if facts.falsy => self.remove_definitely_falsy(left)?,
             SliceLogical::Coalesce if facts.nullish => {
-                let non_nullable = if self.nullability.is_strict() {
+                if self.nullability.is_strict() {
                     self.non_nullable_operand(left)
                 } else {
                     left
-                };
-                self.reduced_union(vec![
-                    super::ReductionArm::plain(non_nullable),
-                    super::ReductionArm::plain(right),
-                ])
-                .0
+                }
             }
-            SliceLogical::And | SliceLogical::Or | SliceLogical::Coalesce => left,
-        })
+            SliceLogical::And | SliceLogical::Or | SliceLogical::Coalesce => {
+                return Some((left, true));
+            }
+        };
+        let graph = self.dispatch.graph();
+        let redundant = matches!(
+            graph.node_data(right).as_deref(),
+            Some(SemanticNodeData::Literal(_))
+        ) && self
+            .operand_arms(kept)
+            .iter()
+            .any(|arm| graph.node_data(*arm) == graph.node_data(right));
+        let value = if operator == SliceLogical::And {
+            self.union(&[kept, right])
+        } else {
+            self.reduced_union(vec![
+                super::ReductionArm::plain(kept),
+                super::ReductionArm::plain(right),
+            ])
+            .0
+        };
+        Some((value, redundant))
     }
 
     /// The members of an operand with `boolean` read as `true | false`.
@@ -1086,42 +1103,36 @@ impl FlowEvaluator<'_, '_> {
         }
         // A chain nests its left operands: its left spine is walked, and the
         // operands are visited in the recursion's order — the innermost left
-        // operand, then each right operand from the innermost node out. Each
-        // operand records whether it is the right operand of an `&&`.
-        let mut operands: Vec<(&SliceExpr, bool, bool)> = Vec::new();
+        // operand, then each right operand from the innermost node out. A
+        // right operand the result does not hold fresh
+        // ([`Self::logical_result`]) contributes nothing.
+        let mut operands: Vec<(&SliceExpr, bool)> = Vec::new();
         let mut node = expr;
         while let SliceExpr::Logical {
-            operator,
             left,
             right,
             fresh_operands,
             ..
         } = node
         {
-            operands.push((right, fresh_operands.1, *operator == SliceLogical::And));
+            let regular = self
+                .regular_right_operands
+                .contains(&(&**right as *const SliceExpr as usize));
+            if !regular {
+                operands.push((right, fresh_operands.1));
+            }
             if matches!(left.as_ref(), SliceExpr::Logical { .. }) {
                 node = left;
             } else {
-                operands.push((left, fresh_operands.0, false));
+                operands.push((left, fresh_operands.0));
                 break;
             }
         }
-        for (operand, fresh, right_of_and) in operands.into_iter().rev() {
+        for (operand, fresh) in operands.into_iter().rev() {
             match operand {
                 SliceExpr::Type(leaf) if fresh => {
                     if let verter_type_expr::TypeExpr::Literal(_) = leaf.ty() {
-                        let literal = self.lower_body_type(leaf.ty());
-                        // With `strictNullChecks` off `a && b` holds the definitely
-                        // falsy part of `b`'s base type beside `b`: a falsy literal
-                        // `b` meets its own regular twin there, and the union keeps
-                        // the regular one (`removeRedundantLiteralTypes`), so
-                        // `v && 0` is a `0` that does not widen.
-                        let redundant = right_of_and
-                            && !self.nullability.is_strict()
-                            && self.arm_facts(literal).is_some_and(|facts| !facts.truthy);
-                        if !redundant {
-                            out.push(literal);
-                        }
+                        out.push(self.lower_body_type(leaf.ty()));
                     }
                 }
                 nested @ (SliceExpr::Logical { .. } | SliceExpr::Assignment { .. }) => {

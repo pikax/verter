@@ -5495,6 +5495,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             evolving_locals: rustc_hash::FxHashSet::default(),
             circular_inferred: rustc_hash::FxHashSet::default(),
             unwidened_views: rustc_hash::FxHashMap::default(),
+            regular_right_operands: rustc_hash::FxHashSet::default(),
             call_fresh_literal_returns: Vec::new(),
             break_exits: Vec::new(),
             return_edges: Vec::new(),
@@ -8431,6 +8432,13 @@ struct FlowEvaluator<'d, 'b> {
     /// A join compares those unwidened views, as the checker's subtype
     /// reduction runs before its widening ([`Self::literal_view`]).
     unwidened_views: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    /// The right operands, by address in the slice this evaluation reads,
+    /// of the logical nodes whose last evaluation did not hold them fresh
+    /// ([`Self::logical_result`]): such an operand contributes no fresh
+    /// literal. Owned by the evaluator for one frame evaluation and dropped
+    /// with it; each logical step rewrites its own entry, so it holds at
+    /// most one entry per logical node of the slice.
+    regular_right_operands: rustc_hash::FxHashSet<usize>,
     /// The first statement-level gap observed in source order. A statement
     /// gap is a fallback diagnosis; a concrete degradation found during the
     /// evaluation takes precedence. Expression gaps remain immediate because
@@ -22167,6 +22175,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 evolving_locals: rustc_hash::FxHashSet::default(),
                 circular_inferred: rustc_hash::FxHashSet::default(),
                 unwidened_views: rustc_hash::FxHashMap::default(),
+                regular_right_operands: rustc_hash::FxHashSet::default(),
                 call_fresh_literal_returns: Vec::new(),
                 break_exits: Vec::new(),
                 return_edges: Vec::new(),
