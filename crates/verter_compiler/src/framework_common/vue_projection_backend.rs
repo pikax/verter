@@ -39,7 +39,7 @@ use crate::ide::vue_projection::binding_views::{project_binding_views, BindingVi
 use crate::ide::vue_projection::component_use::project_component_uses;
 use crate::ide::vue_projection::generic_interop::project_advanced_generic_uses;
 use crate::ide::vue_projection::options_api::project_options_pair;
-use crate::ide::vue_projection::props::{caller_and_setup_props, project_props};
+use crate::ide::vue_projection::props::{caller_and_setup_from_blocks, project_props};
 
 /// STP13 named products: the acceptance surface of
 /// [`VueProjectionBackend::options_projection`]. Re-exported here (rather
@@ -336,15 +336,8 @@ impl VueProjectionBackend {
         let plan = self.projection_plan(source, artifact, canonical_id);
         let attributes = project_attribute_operations(&plan, parsed, source);
         let (normal, setup, generic) = self.script_blocks(source, artifact)?;
-        let public = project_public_constructor(normal, setup, generic)?;
-        let sources = [
-            normal.as_ref().map(|block| block.content),
-            setup.as_ref().map(|block| block.content),
-        ];
-        Ok((
-            project_props(&attributes),
-            caller_and_setup_props(&public, sources.into_iter().flatten()),
-        ))
+        let caller = caller_and_setup_from_blocks(normal, setup, generic)?;
+        Ok((project_props(&attributes), caller))
     }
 
     /// Live template read/write views for the admitted parse: unwrapped

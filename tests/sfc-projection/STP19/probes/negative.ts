@@ -49,10 +49,14 @@ declare function __VerterUseConstructor<P, X, R>(component: (props: P, ctx: X) =
 type __VerterUseComponentProps<C> = C extends abstract new (props: infer P) => unknown ? P : never;
 type __VerterUseResolvedKeys<S> = [keyof S] extends [infer K] ? ([K] extends [PropertyKey] ? 1 : 0) : 0;
 type __VerterUseMemberOpen<S> = S extends unknown ? (string extends keyof S ? true : number extends keyof S ? true : symbol extends keyof S ? true : false) : never;
-type __VerterUseBranch<S, P> = Exclude<keyof S, keyof P> extends never ? ([S] extends [Partial<P>] ? true : false) : false;
+type __VerterUseBranch<S, P> = [S] extends [P] ? true : false;
 type __VerterUseChecked<S, P, O extends PropertyKey> = S extends unknown ? ([true] extends [P extends unknown ? __VerterUseBranch<Omit<S, O>, Omit<P, O>> : never] ? true : false) : never;
-type __VerterUseKnownSpread<S, P, O extends PropertyKey> = [__VerterUseResolvedKeys<S>] extends [never] ? S : __VerterUseResolvedKeys<S> extends 1 ? ([__VerterUseMemberOpen<S>] extends [false] ? ([__VerterUseChecked<S, P, O>] extends [true] ? S : never) : S) : S;
+type __VerterUseDrop<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+type __VerterUseKnownSpread<S, P, O extends PropertyKey> = [__VerterUseResolvedKeys<S>] extends [never] ? S : __VerterUseResolvedKeys<S> extends 1 ? ([__VerterUseMemberOpen<S>] extends [false] ? ([__VerterUseChecked<S, P, O>] extends [true] ? S : S & __VerterUseDrop<P, O>) : S) : S;
 declare function __VerterUseSpread<C, S, O extends PropertyKey>(component: C, spread: S & __VerterUseKnownSpread<S, __VerterUseComponentProps<C>, O>, overwritten: readonly O[]): S;
+type __VerterUseKeyOn<P, K extends PropertyKey> = P extends unknown ? (K extends keyof P ? true : false) : never;
+type __VerterUseDirectOk<P, K extends PropertyKey> = 0 extends 1 & P ? true : string extends keyof P ? true : number extends keyof P ? true : symbol extends keyof P ? true : ([__VerterUseKeyOn<P, K>] extends [false] ? false : true);
+declare function __VerterUseDirect<C, I, K extends PropertyKey>(component: C, instance: I, key: 0 extends 1 & C ? K : (__VerterUseDirectOk<I extends { readonly $props: infer P } ? P : never, K> extends true ? K : never)): void;
 type __VerterUseProp<I, K extends PropertyKey> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : unknown) : unknown;
 type __VerterUseListener<I, K extends PropertyKey, F extends PropertyKey = K> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : F extends keyof P ? P[F] : (...args: any[]) => unknown) : (...args: any[]) => unknown;
 type __VerterUseSlotProps<I, K extends PropertyKey> = I extends { readonly $slots: infer S } ? (K extends keyof S ? (NonNullable<S[K]> extends (props: infer A, ...rest: any[]) => any ? A : unknown) : unknown) : unknown;
@@ -75,10 +79,21 @@ function observe() {
   return [labels, erasedItem];
 }
 const __VerterUse_59bb64ff2cef7792 = new (__VerterUseComponent(Badge, __VerterUseConstructor(Badge)))({ "level": (4) });
+__VerterUseDirect(Badge, __VerterUse_59bb64ff2cef7792, "level");
 const __VerterUse_2133c520847fbc1a = new (__VerterUseComponent(Badge, __VerterUseConstructor(Badge)))({ "level": (1), "onDismiss": (dismiss) });
+__VerterUseDirect(Badge, __VerterUse_2133c520847fbc1a, "level");
+__VerterUseDirect(Badge, __VerterUse_2133c520847fbc1a, "onDismiss");
 const __VerterUse_2133c520847fbc1a_check0: __VerterUseListener<typeof __VerterUse_2133c520847fbc1a, "onDismiss"> = ((level: string) => level);
 const __VerterUse_b2332edd161df4f1 = new (__VerterUseComponent(BarrelPicker, __VerterUseConstructor(BarrelPicker)))({ "items": (rows), "field": "id", "format": (describe), "onPick": ((row) => row.id) });
+__VerterUseDirect(BarrelPicker, __VerterUse_b2332edd161df4f1, "items");
+__VerterUseDirect(BarrelPicker, __VerterUse_b2332edd161df4f1, "field");
+__VerterUseDirect(BarrelPicker, __VerterUse_b2332edd161df4f1, "format");
+__VerterUseDirect(BarrelPicker, __VerterUse_b2332edd161df4f1, "onPick");
 const __VerterUse_b2332edd161df4f1_check0: __VerterUseListener<typeof __VerterUse_b2332edd161df4f1, "onPick"> = (count);
 const __VerterUse_8c747e13a84a8163 = new (__VerterUseComponent(Picker, __VerterUseConstructor(Picker)))({ "items": (props.items), "field": "id", "format": (String) });
+__VerterUseDirect(Picker, __VerterUse_8c747e13a84a8163, "items");
+__VerterUseDirect(Picker, __VerterUse_8c747e13a84a8163, "field");
+__VerterUseDirect(Picker, __VerterUse_8c747e13a84a8163, "format");
 const __VerterUse_fe63724fd35964d9 = new (__VerterUseComponent(ErasedList, __VerterUseConstructor(ErasedList)))({ "items": (rows) });
+__VerterUseDirect(ErasedList, __VerterUse_fe63724fd35964d9, "items");
 }

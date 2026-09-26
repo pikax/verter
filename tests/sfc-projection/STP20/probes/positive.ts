@@ -1,6 +1,6 @@
 type ChildProps =
-  | { title: string; kind: "number"; value: number; optional?: string }
-  | { title: string; kind: "text"; value: string; optional?: string };
+  | { title: string; kind: "number"; value: number; optional?: string; tuple?: [string, number] }
+  | { title: string; kind: "text"; value: string; optional?: string; tuple?: [string, number] };
 
 interface ChildInstance {
   readonly $props: ChildProps;
@@ -26,13 +26,13 @@ type __VerterUseMemberOpen<S> = S extends unknown
         ? true
         : false
   : never;
-type __VerterUseBranch<S, P> =
-  Exclude<keyof S, keyof P> extends never ? ([S] extends [Partial<P>] ? true : false) : false;
+type __VerterUseBranch<S, P> = [S] extends [P] ? true : false;
 type __VerterUseChecked<S, P, O extends PropertyKey> = S extends unknown
   ? [true] extends [P extends unknown ? __VerterUseBranch<Omit<S, O>, Omit<P, O>> : never]
     ? true
     : false
   : never;
+type __VerterUseDrop<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 type __VerterUseKnownSpread<S, P, O extends PropertyKey> = [__VerterUseResolvedKeys<S>] extends [
   never,
 ]
@@ -41,7 +41,7 @@ type __VerterUseKnownSpread<S, P, O extends PropertyKey> = [__VerterUseResolvedK
     ? [__VerterUseMemberOpen<S>] extends [false]
       ? [__VerterUseChecked<S, P, O>] extends [true]
         ? S
-        : never
+        : S & __VerterUseDrop<P, O>
       : S
     : S;
 declare function __VerterUseSpread<C, S, O extends PropertyKey>(
@@ -49,6 +49,31 @@ declare function __VerterUseSpread<C, S, O extends PropertyKey>(
   spread: S & __VerterUseKnownSpread<S, __VerterUseComponentProps<C>, O>,
   overwritten: readonly O[],
 ): S;
+type __VerterUseKeyOn<P, K extends PropertyKey> = P extends unknown
+  ? K extends keyof P
+    ? true
+    : false
+  : never;
+type __VerterUseDirectOk<P, K extends PropertyKey> = 0 extends 1 & P
+  ? true
+  : string extends keyof P
+    ? true
+    : number extends keyof P
+      ? true
+      : symbol extends keyof P
+        ? true
+        : [__VerterUseKeyOn<P, K>] extends [false]
+          ? false
+          : true;
+declare function __VerterUseDirect<C, I, K extends PropertyKey>(
+  component: C,
+  instance: I,
+  key: 0 extends 1 & C
+    ? K
+    : __VerterUseDirectOk<I extends { readonly $props: infer P } ? P : never, K> extends true
+      ? K
+      : never,
+): void;
 
 export type Instance = InstanceType<typeof Child>;
 export const stp20DefinitionTarget: typeof Child = Child;
@@ -121,3 +146,38 @@ const numberBranch = { kind: "number", value: 1 } as const;
 export const branchNumber = __VerterUseSpread(Branch, numberBranch, [] as const);
 const textBranch = { kind: "text", label: "ok" } as const;
 export const branchText = __VerterUseSpread(Branch, textBranch, [] as const);
+
+// Excess keys that arrive through a v-bind object, named or inline, are not
+// rejected. Known-key types on that object still are.
+const extraNamed = { title: "ok", kind: "number" as const, value: 1, titel: "extra" };
+export const extraNamedSpread = __VerterUseSpread(Child, extraNamed, [] as const);
+export const extraInlineSpread = __VerterUseSpread(
+  Child,
+  { title: "ok", kind: "number" as const, value: 1, titel: "inline" },
+  [] as const,
+);
+
+// A generic spread is checked through its constraint, including extra keys
+// the constraint adds. It is not collapsed to `never` and not widened to `any`.
+export function constrainedSpread<T extends { title: string; kind: "number"; value: number }>(
+  value: T,
+) {
+  return __VerterUseSpread(Child, value, [] as const);
+}
+export function constrainedExtraSpread<
+  T extends { title: string; kind: "number"; value: number; extra: boolean },
+>(value: T) {
+  return __VerterUseSpread(Child, value, [] as const);
+}
+
+const mutableTuple = {
+  title: "ok",
+  kind: "number" as const,
+  value: 1,
+  tuple: ["a", 1] as [string, number],
+};
+export const mutableTupleSpread = __VerterUseSpread(Child, mutableTuple, [] as const);
+
+declare const childInstance: ChildInstance;
+export const directKnownKey = __VerterUseDirect(Child, childInstance, "title");
+export const directUnionKey = __VerterUseDirect(Child, childInstance, "value");

@@ -84,10 +84,16 @@ pub const USE_PROP: &str = "__VerterUseProp";
 pub const USE_LISTENER: &str = "__VerterUseListener";
 /// Specialized slot props, `unknown` when the slot is not declared.
 pub const USE_SLOT_PROPS: &str = "__VerterUseSlotProps";
-/// Spread checker that rejects a finite excess key or a mismatched union
-/// branch, and preserves a framework-legal open domain (an index signature,
-/// `any`, or a union member that has one).
+/// Spread checker. A finite spread is checked the way TypeScript checks a
+/// spread argument: known-key types, missing required props, discriminated
+/// unions, exact optional properties and readonly tuples. Keys that arrive
+/// only through the spread are not excess-key errors. An index signature,
+/// `any`, or a union member that has one stays an open domain. A generic
+/// spread is checked through its constraint.
 pub const USE_SPREAD: &str = "__VerterUseSpread";
+/// Direct attribute key checker. A misspelled key written on the element is
+/// rejected; an open props domain is not.
+pub const USE_DIRECT: &str = "__VerterUseDirect";
 /// Specialized model write type read from its update listener.
 pub const USE_MODEL: &str = "__VerterUseModel";
 /// Prefix of a witness binding; the use-id digest follows.
@@ -103,10 +109,14 @@ pub const USE_PRELUDE: &str = concat!(
     "type __VerterUseComponentProps<C> = C extends abstract new (props: infer P) => unknown ? P : never;\n",
     "type __VerterUseResolvedKeys<S> = [keyof S] extends [infer K] ? ([K] extends [PropertyKey] ? 1 : 0) : 0;\n",
     "type __VerterUseMemberOpen<S> = S extends unknown ? (string extends keyof S ? true : number extends keyof S ? true : symbol extends keyof S ? true : false) : never;\n",
-    "type __VerterUseBranch<S, P> = Exclude<keyof S, keyof P> extends never ? ([S] extends [Partial<P>] ? true : false) : false;\n",
+    "type __VerterUseBranch<S, P> = [S] extends [P] ? true : false;\n",
     "type __VerterUseChecked<S, P, O extends PropertyKey> = S extends unknown ? ([true] extends [P extends unknown ? __VerterUseBranch<Omit<S, O>, Omit<P, O>> : never] ? true : false) : never;\n",
-    "type __VerterUseKnownSpread<S, P, O extends PropertyKey> = [__VerterUseResolvedKeys<S>] extends [never] ? S : __VerterUseResolvedKeys<S> extends 1 ? ([__VerterUseMemberOpen<S>] extends [false] ? ([__VerterUseChecked<S, P, O>] extends [true] ? S : never) : S) : S;\n",
+    "type __VerterUseDrop<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;\n",
+    "type __VerterUseKnownSpread<S, P, O extends PropertyKey> = [__VerterUseResolvedKeys<S>] extends [never] ? S : __VerterUseResolvedKeys<S> extends 1 ? ([__VerterUseMemberOpen<S>] extends [false] ? ([__VerterUseChecked<S, P, O>] extends [true] ? S : S & __VerterUseDrop<P, O>) : S) : S;\n",
     "declare function __VerterUseSpread<C, S, O extends PropertyKey>(component: C, spread: S & __VerterUseKnownSpread<S, __VerterUseComponentProps<C>, O>, overwritten: readonly O[]): S;\n",
+    "type __VerterUseKeyOn<P, K extends PropertyKey> = P extends unknown ? (K extends keyof P ? true : false) : never;\n",
+    "type __VerterUseDirectOk<P, K extends PropertyKey> = 0 extends 1 & P ? true : string extends keyof P ? true : number extends keyof P ? true : symbol extends keyof P ? true : ([__VerterUseKeyOn<P, K>] extends [false] ? false : true);\n",
+    "declare function __VerterUseDirect<C, I, K extends PropertyKey>(component: C, instance: I, key: 0 extends 1 & C ? K : (__VerterUseDirectOk<I extends { readonly $props: infer P } ? P : never, K> extends true ? K : never)): void;\n",
     "type __VerterUseProp<I, K extends PropertyKey> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : unknown) : unknown;\n",
     "type __VerterUseListener<I, K extends PropertyKey, F extends PropertyKey = K> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : F extends keyof P ? P[F] : (...args: any[]) => unknown) : (...args: any[]) => unknown;\n",
     "type __VerterUseSlotProps<I, K extends PropertyKey> = I extends { readonly $slots: infer S } ? (K extends keyof S ? (NonNullable<S[K]> extends (props: infer A, ...rest: any[]) => any ? A : unknown) : unknown) : unknown;\n",
@@ -227,7 +237,7 @@ impl TransactionMember {
                 overwritten_keys,
                 ..
             } => format!(
-                "...{USE_SPREAD}({component}, {}, [{}])",
+                "...{USE_SPREAD}({component}, {}, [{}] as const)",
                 value.render(),
                 overwritten_keys
                     .iter()
@@ -379,6 +389,16 @@ impl ComponentUseWitness {
             ForeignComponentContractAdapter.construction_callee(&self.component),
             members.join(", ")
         );
+        for member in &self.transaction.members {
+            if let TransactionMember::Property { key, .. } = member {
+                out.push_str(&format!(
+                    "{USE_DIRECT}({}, {}, {});\n",
+                    self.component,
+                    self.binding,
+                    quote(key)
+                ));
+            }
+        }
         for (ordinal, check) in self.transaction.validations.iter().enumerate() {
             let contract = match check.contract {
                 CheckContract::Listener => USE_LISTENER,

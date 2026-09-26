@@ -518,8 +518,8 @@ fn overwritten_spread_key_stays_excluded_when_a_later_spread_follows() {
     assert_eq!(spreads[0], ["title".to_string()]);
     assert!(spreads[1].is_empty());
     let rendered = witness.render();
-    assert!(rendered.contains(r#"__VerterUseSpread(Child, ({ title: 1 }), ["title"])"#));
-    assert!(rendered.contains(r#"__VerterUseSpread(Child, (rest), [])"#));
+    assert!(rendered.contains(r#"__VerterUseSpread(Child, ({ title: 1 }), ["title"] as const)"#));
+    assert!(rendered.contains(r#"__VerterUseSpread(Child, (rest), [] as const)"#));
     assert!(rendered.contains(r#""title": (ok)"#));
 }
 

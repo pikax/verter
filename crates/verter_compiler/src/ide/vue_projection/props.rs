@@ -10,7 +10,9 @@ use oxc_ast::ast::{
     ObjectPropertyKind, Program, PropertyKey, Statement, TSLiteral, TSSignature, TSType,
     TSTypeName,
 };
+#[cfg(test)]
 use oxc_parser::Parser;
+#[cfg(test)]
 use oxc_span::SourceType;
 
 use crate::framework_common::projection_plan::ComponentUseId;
@@ -18,15 +20,17 @@ use crate::ide::vue_projection::attribute_operations::{
     AttributeOperationsProjection, AttributeSyntax,
 };
 use crate::ide::vue_projection::public_constructor::{
-    DeclaredSurface, PropsDefaults, VuePublicConstructorContract,
+    project_public_constructor_in, DeclaredSurface, PropsDefaults, VuePublicConstructorContract,
 };
+use crate::ide::vue_projection::script_setup::{ScriptBlockInput, SetupProjectionRefusal};
 
 /// Policy used for an object `v-bind` contribution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpreadCertaintyPolicy {
-    /// A finite key set is checked against the component's declared props.
-    /// Keys proven overwritten by a later definite write are excluded from
-    /// that check.
+    /// Known-key types, required props, unions, exact optional properties
+    /// and readonly tuples are checked. Keys that arrive only through the
+    /// spread are not excess-key errors. Keys proven overwritten by a later
+    /// definite write are excluded from the check.
     CheckKnownKeys,
     /// An index-signature spread is framework-legal and cannot be made exact
     /// without inventing a type answer.
@@ -161,21 +165,43 @@ pub fn project_props(attributes: &AttributeOperationsProjection) -> PropsProject
     }
 }
 
-/// Derive the caller/setup split from the public constructor's macro facts
-/// and the authored script. `sources` are the normal and setup block texts;
-/// a block that fails to parse leaves required keys unenumerated.
-#[must_use]
-pub fn caller_and_setup_props<'a>(
+/// Derive the caller/setup split from one script pair. The public
+/// constructor parse is the only script parse; caller facts walk those
+/// programs.
+///
+/// # Errors
+///
+/// Refuses the same inputs as [`project_public_constructor_in`].
+pub fn caller_and_setup_from_blocks(
+    normal: Option<ScriptBlockInput<'_>>,
+    setup: Option<ScriptBlockInput<'_>>,
+    generic: Option<&str>,
+) -> Result<CallerAndSetupPropsContract, SetupProjectionRefusal> {
+    let allocator = Allocator::default();
+    let parsed = project_public_constructor_in(&allocator, normal, setup, generic)?;
+    let mut facts = ScriptPropFacts::default();
+    let saw_source = parsed.normal_program.is_some() || parsed.setup_program.is_some();
+    if let Some(program) = parsed.normal_program {
+        facts.absorb_program(program);
+    }
+    if let Some(program) = parsed.setup_program {
+        facts.absorb_program(program);
+    }
+    Ok(assemble_caller_contract(
+        &parsed.contract,
+        facts,
+        false,
+        saw_source,
+    ))
+}
+
+/// Source-text entry kept for the reparse control. Production callers use
+/// [`caller_and_setup_from_blocks`], which walks the constructor's programs.
+#[cfg(test)]
+pub(crate) fn caller_and_setup_props<'a>(
     contract: &VuePublicConstructorContract,
     sources: impl IntoIterator<Item = &'a str>,
 ) -> CallerAndSetupPropsContract {
-    let static_defaults = matches!(contract.props, DeclaredSurface::TypeArgument { .. });
-    let with_default_keys = match &contract.props_defaults {
-        Some(PropsDefaults {
-            keys: Some(keys), ..
-        }) if static_defaults => keys.clone(),
-        _ => Vec::new(),
-    };
     let mut facts = ScriptPropFacts::default();
     let mut saw_source = false;
     let mut parse_failed = false;
@@ -185,6 +211,22 @@ pub fn caller_and_setup_props<'a>(
             parse_failed = true;
         }
     }
+    assemble_caller_contract(contract, facts, parse_failed, saw_source)
+}
+
+fn assemble_caller_contract(
+    contract: &VuePublicConstructorContract,
+    mut facts: ScriptPropFacts,
+    parse_failed: bool,
+    saw_source: bool,
+) -> CallerAndSetupPropsContract {
+    let static_defaults = matches!(contract.props, DeclaredSurface::TypeArgument { .. });
+    let with_default_keys = match &contract.props_defaults {
+        Some(PropsDefaults {
+            keys: Some(keys), ..
+        }) if static_defaults => keys.clone(),
+        _ => Vec::new(),
+    };
     if !facts.saw_props {
         facts.enumerated = true;
     }
@@ -289,11 +331,15 @@ struct ScriptPropFacts {
 }
 
 impl ScriptPropFacts {
-    /// Merge one script. `false` when the script does not parse.
+    /// Merge one script text. `false` when the script does not parse.
+    /// Production walks the constructor's programs via [`Self::absorb_program`].
+    #[cfg(test)]
     fn absorb(&mut self, source: &str) -> bool {
         if source.trim().is_empty() {
             return true;
         }
+        crate::ide::vue_projection::public_constructor::SCRIPT_ABSORB_PARSES
+            .with(|count| count.set(count.get() + 1));
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::ts().with_module(true)).parse();
         if parsed.panicked || !parsed.errors.is_empty() {
