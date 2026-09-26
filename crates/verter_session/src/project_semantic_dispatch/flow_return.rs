@@ -8026,8 +8026,11 @@ enum CalleeStatementEffect {
         parameter: usize,
         target: Option<SemanticNodeId>,
     },
-    /// Several asserting signatures, a generic or `this` assertion, a
-    /// declared `never` return, or a callee that does not settle.
+    /// A declared `never` return and no assertion: the call takes the
+    /// effect of the signature it resolves (`getEffectsSignature`).
+    Resolved(SemanticNodeId),
+    /// Several asserting signatures, a generic or `this` assertion, or a
+    /// callee that does not settle.
     Undecided,
 }
 
@@ -18660,6 +18663,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         let graph = self.dispatch.graph();
         let mut assertions = Vec::new();
+        let mut diverges = false;
         for signature in &signatures {
             match graph.node_data(*signature).as_deref() {
                 Some(SemanticNodeData::Signature {
@@ -18677,12 +18681,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             graph.node_data(*ret).as_deref(),
                             Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
                         ) {
-                            return CalleeStatementEffect::Undecided;
+                            diverges = true;
                         }
                     }
                 }
                 _ => return CalleeStatementEffect::Undecided,
             }
+        }
+        if diverges {
+            if !assertions.is_empty() {
+                return CalleeStatementEffect::Undecided;
+            }
+            return match self.callee_node(callee) {
+                Some(node) => CalleeStatementEffect::Resolved(node),
+                None => CalleeStatementEffect::Undecided,
+            };
         }
         match assertions.as_slice() {
             [] => CalleeStatementEffect::Inert,
@@ -18707,19 +18720,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         callee: &crate::flow_slice_content::GatedType,
     ) -> Option<Vec<SemanticNodeId>> {
-        if callee
-            .shadowed()
-            .iter()
-            .any(|name| self.owner_scope_answers_name(name))
-        {
-            return None;
-        }
-        let node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
-            self.canonical,
-            self.owner,
-            callee.ty(),
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        )?;
+        let node = self.callee_node(callee)?;
         match self
             .dispatch
             .shared_signature_nodes(node, crate::semantic_query::SignatureKind::Call)
@@ -18727,6 +18728,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             super::signature_discovery::SharedSignatureNodes::Nodes(signatures) => Some(signatures),
             super::signature_discovery::SharedSignatureNodes::Incomplete(_) => None,
         }
+    }
+
+    /// `typeof callee` a guard or effect statement names, lowered in owner
+    /// scope; `None` when a frame binding shadows it or it does not lower.
+    fn callee_node(
+        &mut self,
+        callee: &crate::flow_slice_content::GatedType,
+    ) -> Option<SemanticNodeId> {
+        if callee
+            .shadowed()
+            .iter()
+            .any(|name| self.owner_scope_answers_name(name))
+        {
+            return None;
+        }
+        self.dispatch.lower_type_expr_in_owner_scope_with_context(
+            self.canonical,
+            self.owner,
+            callee.ty(),
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )
     }
 
     /// [`Self::narrow_to_predicate_target_consuming`] over an already
@@ -21121,11 +21143,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // definitely-falsy arms leave the subject's type.
                     self.apply_assertion(subject, target.as_ref());
                 }
-                crate::flow_slice_content::SliceStatement::CalleeEffect { callee, arguments } => {
+                crate::flow_slice_content::SliceStatement::CalleeEffect {
+                    callee,
+                    arguments,
+                    site,
+                } => {
                     // The call throws before any effect it asserts.
                     self.capture_throw_point();
                     match self.callee_statement_effect(callee) {
                         CalleeStatementEffect::Inert => {}
+                        CalleeStatementEffect::Resolved(node) => {
+                            if !self.settle_effects_signature(Some(node), *site) {
+                                path_alive = false;
+                            }
+                        }
                         CalleeStatementEffect::Assertion { parameter, target } => {
                             if let Some(Some(subject)) = arguments.get(parameter) {
                                 let fact = match target {

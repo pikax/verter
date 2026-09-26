@@ -43,6 +43,17 @@ impl FlowEvaluator<'_, '_> {
                 Positional::Hold | Positional::Unmodeled => None,
             },
         };
+        self.settle_effects_signature(node, site)
+    }
+
+    /// [`Self::settle_call_effect`] over the callee's settled type: whether
+    /// the path goes on past the call, the call discharged when its effects
+    /// signature is read, the typed guard-narrowing gap otherwise.
+    pub(super) fn settle_effects_signature(
+        &mut self,
+        node: Option<SemanticNodeId>,
+        site: SliceCallSite,
+    ) -> bool {
         match node.and_then(|node| self.effects_signature_diverges(node, site)) {
             Some(diverges) => {
                 self.call_evidence.push(FlowCallEvidence {

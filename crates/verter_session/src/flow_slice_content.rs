@@ -448,13 +448,17 @@ pub enum SliceStatement {
     /// overload group): the checker reads the call's effect from the
     /// callee's declared signatures alone. None asserting ⇒ no effect; one
     /// non-generic `asserts x is T` / `asserts x` ⇒ its argument narrows
-    /// for the rest of the region; any other signature set — a declared
-    /// `never` return included — takes the typed guard-narrowing gap.
+    /// for the rest of the region; a set holding a `never`
+    /// return takes the effect of the signature the call resolves; any other
+    /// signature set takes the typed guard-narrowing gap.
     CalleeEffect {
         /// `typeof callee`, resolved in owner scope.
         callee: GatedType,
         /// Each argument's narrowable reference, positionally.
         arguments: Arc<[Option<SliceNarrowSubject>]>,
+        /// The call expression, whose arguments resolve an overloaded or
+        /// generic effects signature.
+        site: SliceCallSite,
     },
     /// A nested block, as its own region.
     Block(SliceRegion),
@@ -11174,7 +11178,11 @@ impl<'a> Lowerer<'a> {
         match self.lower_callee_signature_guard(call, callee) {
             SliceGuard::CalleePredicate {
                 callee, arguments, ..
-            } => Some(SliceStatement::CalleeEffect { callee, arguments }),
+            } => Some(SliceStatement::CalleeEffect {
+                callee,
+                arguments,
+                site: call_site(call),
+            }),
             _ => None,
         }
     }
