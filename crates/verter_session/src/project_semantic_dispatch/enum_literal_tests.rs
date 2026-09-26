@@ -410,12 +410,25 @@ export function eRev() { return E[E.A]; }
 export function sRev() { return S[\"P\"]; }
 ";
 
-/// Element access on an enum object: a numeric enum's reverse mapping reads
-/// the member's name as `string`, and a string key reads the member.
+/// A numeric enum's object reads its reverse mapping: `(typeof E)[0]` and
+/// `(typeof E)[number]` are `string`, measured on TypeScript 7.0.2.
+#[test]
+fn an_enum_object_type_reads_its_reverse_mapping() {
+    assert_rows(
+        &[("enums.ts", ENUMS)],
+        REVERSE,
+        &[
+            ("(typeof E)[0]", "string"),
+            ("(typeof E)[number]", "string"),
+        ],
+    );
+}
+
+/// Element access on an enum object value: a numeric enum's reverse mapping
+/// reads the member's name as `string`, and a string key reads the member.
 ///
 /// Measured on TypeScript 7.0.2: `eRev` (`E[E.A]`) is `string`, `sRev`
-/// (`S["P"]`) is `S`; `(typeof E)[0]` and `(typeof E)[number]` are
-/// `string`.
+/// (`S["P"]`) is `S`.
 #[test]
 #[ignore = "element access on an enum object: the numeric reverse mapping and a string-keyed member read"]
 fn an_enum_object_element_access_reads_the_reverse_mapping_and_members() {
@@ -425,7 +438,6 @@ fn an_enum_object_element_access_reads_the_reverse_mapping_and_members() {
         &[
             ("ReturnType<typeof eRev>", "string"),
             ("ReturnType<typeof sRev>", "S"),
-            ("(typeof E)[0]", "string"),
         ],
     );
 }

@@ -241,6 +241,7 @@ export function eFlag() { return Flag.AB; }
 export function eSingle() { return Single.Only; }
 export function eSingleLet() { let s = Single.Only; return s; }
 export function eAmbient() { return Amb.Q; }
+export function eReverse() { return eObj()[5]; }
 export function eCompare(c: Color) { if (c === Color.Red) return c; throw 0; }
 export function eCompareElse(c: Color) { if (c === Color.Red) throw 0; return c; }
 export function eSwitch(d: Dir) { switch (d) { case Dir.Up: return d; default: return d; } }
@@ -298,19 +299,29 @@ fn enum_values_and_types_read_as_the_checker_reads_them() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `return Color;` is `typeof Color`, whose numeric enum object also carries
-/// the reverse mapping `[x: number]: string`. Wrong-but-clean: the lane answers
-/// the members-only object `{ readonly Red: Color.Red; readonly Green:
-/// Color.Green; readonly Blue: Color.Blue; }`.
-///
-/// What the lane gives:
-/// - `eObj`: the checker answers `typeof Color`; the lane measured `{ readonly
-///   Red: Color.Red; readonly Green: Color.Green; readonly Blue: Color.Blue;
-///   }`.
+/// `return Color;` is `typeof Color`, whose numeric enum object carries the
+/// reverse mapping `readonly [x: number]: string` beside its members, which
+/// is no key of it. The checker prints the value by its name, `typeof
+/// Color`; the lane prints the object it is, `{ readonly [x: number]:
+/// string; readonly Red: Color.Red; readonly Green: Color.Green; readonly
+/// Blue: Color.Blue; }` — a difference in print only: every read of the
+/// value agrees, as each row here checks.
 #[test]
-#[ignore = "an enum object value is typeof the enum, with its reverse mapping"]
-fn wrong_clean_a_returned_enum_object_is_typeof_the_enum() {
+fn a_returned_enum_object_reads_as_typeof_the_enum() {
     let matrix = Matrix::new(ENUMS);
-    let failures = matrix.returns(&[("eObj", "typeof Color")]);
+    let mut failures = matrix.types(&[
+        ("ReturnType<typeof eObj>[number]", "string"),
+        (
+            "keyof ReturnType<typeof eObj>",
+            "\"Blue\" | \"Green\" | \"Red\"",
+        ),
+        ("keyof typeof Color", "\"Blue\" | \"Green\" | \"Red\""),
+        ("ReturnType<typeof eObj>['Green']", "Color.Green"),
+        (
+            "[ReturnType<typeof eObj>] extends [typeof Color] ? ([typeof Color] extends [ReturnType<typeof eObj>] ? 1 : 2) : 3",
+            "1",
+        ),
+    ]);
+    failures.extend(matrix.returns(&[("eReverse", "string")]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

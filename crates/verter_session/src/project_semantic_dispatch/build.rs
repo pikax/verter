@@ -10619,10 +10619,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // An index signature contributes its key type — a `string`
                 // one `string | number`, since a numeric key reads it too
                 // (`getLiteralTypeFromProperties`) — beside the members'
-                // literal keys, which a `string` key type absorbs.
+                // literal keys, which a `string` key type absorbs. An enum's
+                // reverse mapping is no key of its object.
+                let enum_object = self.is_enum_object(base);
                 let index_keys: Vec<SemanticNodeId> = surface
                     .index_signatures
                     .iter()
+                    .filter(|_| !enum_object)
                     .flat_map(|signature| {
                         let string_key = matches!(
                             self.graph().node_data(signature.key_type).as_deref(),
