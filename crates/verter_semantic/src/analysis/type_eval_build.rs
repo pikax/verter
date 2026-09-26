@@ -1749,6 +1749,34 @@ pub(crate) fn class_heritage_value_name(class_name: &str) -> String {
     format!("{class_name}:extends")
 }
 
+/// The synthetic value declaration a class field reads its type through,
+/// when the field's initializer is an expression whose type derives from
+/// a call (`static origin = new Pt()`): its value reads through the indexed
+/// program expression at the initializer, as a declarator initializer's
+/// does. `None` for a field with an annotation, without an initializer, with
+/// a function value (served at its own member position), with an
+/// authoritative assertion, or without a static name.
+pub(crate) fn class_field_value_name(
+    class_name: &str,
+    prop: &oxc_ast::ast::PropertyDefinition<'_>,
+) -> Option<String> {
+    if prop.type_annotation.is_some() || matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
+        return None;
+    }
+    let value = prop.value.as_ref()?;
+    if matches!(
+        value,
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+    ) || !value_type_derives_from_a_call(value)
+        || has_authoritative_value_assertion(value)
+    {
+        return None;
+    }
+    let key = crate::analysis::function_program::static_property_key_name(&prop.key)?;
+    let side = if prop.r#static { "static" } else { "field" };
+    Some(format!("{class_name}:{side}:{key}"))
+}
+
 pub(crate) fn heritage_expression_name(expression: &Expression<'_>) -> Option<String> {
     match expression {
         Expression::Identifier(identifier) => Some(identifier.name.to_string()),
@@ -2698,7 +2726,43 @@ fn collect_named_class(
                     }
                     _ => None,
                 };
-                let ty = function_value.unwrap_or_else(|| {
+                // A field whose initializer's type derives from a call reads
+                // it through a synthetic value declaration indexed at the
+                // initializer; a mutable field widens a fresh result as a
+                // `let` does.
+                let field_value = function_value
+                    .is_none()
+                    .then(|| class_field_value_name(&name, prop))
+                    .flatten()
+                    .map(|field_name| {
+                        out.value_decls.push(LoweredValueDeclParts {
+                            name: field_name.clone(),
+                            kind: if prop.readonly {
+                                ValueDeclKind::Const
+                            } else {
+                                ValueDeclKind::Let
+                            },
+                            is_unique_symbol: false,
+                            unique_symbol_members: Vec::new(),
+                            type_annotation: None,
+                            annotation_is_authored: false,
+                            inference_unavailable: None,
+                            expression_source_offset: prop
+                                .value
+                                .as_ref()
+                                .map(|value| value.span().start),
+                            signatures: Vec::new(),
+                            object_shape: None,
+                            enum_members: None,
+                            enum_member_names: None,
+                            literal_freshness: DeclaredLiteralFreshness::Regular,
+                        });
+                        TypeExpr::TypeOf(ValueRef {
+                            path: vec![field_name],
+                            type_args: Vec::new(),
+                        })
+                    });
+                let ty = field_value.or(function_value).unwrap_or_else(|| {
                     prop.type_annotation
                         .as_ref()
                         .map(|ta| lower_ts_type(&ta.type_annotation, source))
