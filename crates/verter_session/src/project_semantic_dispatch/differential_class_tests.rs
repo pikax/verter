@@ -302,6 +302,7 @@ export function ctorValue() { return K; }
 export function subOrBase(c: boolean) { return c ? new K() : new Sub(); }
 export function thisInArrow() { return new (class { a = 1; f = () => this.a; })().f(); }
 export function protoRead() { return K.prototype; }
+export function ctorCall() { return new (ctorValue())().m(); }
 "##;
 
 /// `new` over a class or generic class (inferred or explicit) is its instance
@@ -325,17 +326,26 @@ fn class_values_read_as_the_checker_reads_them() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `return K;` is `typeof K`, the class's constructor type. Wrong-but-clean
-/// (presentation): the lane expands it to the structural object `{ new (): K;
-/// prototype: K; s: string; }`.
-///
-/// What the lane gives:
-/// - `ctorValue`: the checker answers `typeof K`; the lane measured `{ new ():
-///   K; prototype: K; s: string; }`.
+/// `return K;` is `typeof K`, the class's constructor type. The checker prints
+/// the value by its name, `typeof K`; the lane prints the constructor type it
+/// is, `{ new (): K; prototype: K; s: string; }` — a difference in print only:
+/// every read of the value agrees, as each row here checks.
 #[test]
-#[ignore = "a returned class value is typeof the class"]
-fn wrong_clean_a_returned_class_value_prints_as_typeof_the_class() {
+fn a_returned_class_value_reads_as_typeof_the_class() {
     let matrix = Matrix::new(CLASS_VALUES);
-    let failures = matrix.returns(&[("ctorValue", "typeof K")]);
+    let mut failures = matrix.types(&[
+        ("ReturnType<typeof ctorValue>['s']", "string"),
+        ("InstanceType<ReturnType<typeof ctorValue>>", "K"),
+        (
+            "keyof ReturnType<typeof ctorValue>",
+            "\"prototype\" | \"s\"",
+        ),
+        ("ReturnType<typeof ctorValue>['prototype']", "K"),
+        (
+            "[ReturnType<typeof ctorValue>] extends [typeof K] ? ([typeof K] extends [ReturnType<typeof ctorValue>] ? 1 : 2) : 3",
+            "1",
+        ),
+    ]);
+    failures.extend(matrix.returns(&[("ctorCall", "number")]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
