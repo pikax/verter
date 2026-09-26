@@ -48,6 +48,8 @@ pub use dependency_facts::{
 mod dependency_facts_tests;
 #[cfg(test)]
 mod lower_depth_tests;
+#[cfg(test)]
+mod type_parameter_scope_tests;
 
 /// Lower an OXC `TSType` node into a `TypeExpr`.
 ///
