@@ -37,7 +37,54 @@ function document(outcomes, scale = 1) {
       cold_load: { samples_ns: samples(1000), alloc_bytes: 10, alloc_count: 1 },
       local_edit: { samples_ns: samples(500), alloc_bytes: 5, alloc_count: 1 },
     },
-    throughput_qps: {},
+    concurrent_queries: {
+      host_workers: 4,
+      sweeps_per_sample: 10,
+      witnesses: 2,
+      by_callers: {
+        1: {
+          callers: 1,
+          samples_ns: samples(2000),
+          qps: [100, 110, 120],
+          query_latency_ns: { p50: 1000, p95: 2000, p99: 3000, max: 4000, n: 60 },
+        },
+        2: {
+          callers: 2,
+          samples_ns: samples(3000),
+          qps: [150, 160, 170],
+          query_latency_ns: { p50: 1500, p95: 2500, p99: 3500, max: 4500, n: 120 },
+        },
+      },
+    },
+    scheduler_scaling: {
+      callers: 1,
+      modules: 2,
+      witnesses: 2,
+      by_workers: {
+        1: { workers: 1, samples_ns: samples(4000), cpu_utilisation_total: 0.9 },
+        2: { workers: 2, samples_ns: samples(2000), cpu_utilisation_total: null },
+      },
+    },
+    full_check: {
+      files: 2,
+      witnesses: 2,
+      by_workers: {
+        1: {
+          workers: 1,
+          callers: 1,
+          samples_ns: samples(4000),
+          files_per_second: [500, 510],
+          cpu_utilisation_total: 1,
+        },
+        2: {
+          workers: 2,
+          callers: 2,
+          samples_ns: samples(2000),
+          files_per_second: [990, 1000],
+          cpu_utilisation_total: 0.8,
+        },
+      },
+    },
     soak_live_bytes: [100, 100, 100, 100, 100, 100, 100, 100],
   };
 }
@@ -51,9 +98,13 @@ function runs(baselineOutcomes, candidateOutcomes) {
   };
 }
 
-const same = () => ({ original: { ...ORIGINAL }, local_edit: { ...LOCAL_EDIT } });
+const same = () => ({
+  original: { ...ORIGINAL },
+  local_edit: { ...LOCAL_EDIT },
+  check: { ...ORIGINAL },
+});
 
-function summary(allRuns, mismatches = []) {
+function summary(allRuns, mismatches = [], cancelRuns = []) {
   return summarize({
     opts: {
       quick: false,
@@ -77,8 +128,8 @@ function summary(allRuns, mismatches = []) {
       thermal: {},
     },
     sessionVoid: false,
-    cancelProbe: null,
-    cancelRuns: [],
+    cancelProbe: cancelRuns.length > 0 ? { sha256: "e".repeat(64) } : null,
+    cancelRuns,
     runnerCheck: { class: "test-class", expected: {}, observed: {}, mismatches },
   });
 }
@@ -164,6 +215,118 @@ test("the markdown renders an unmatched workload without a ratio", () => {
   assert.match(markdown, /\| cold_load \|[^\n]*\| n\/a \| n\/a \| not comparable/);
   assert.match(markdown, /## Matched work/);
   assert.match(markdown, /`original` `\/sk\/m1\.ts#witnessChain1`/);
+});
+
+const MACHINE = {
+  cpu_model: "x",
+  logical_cpus: 1,
+  memory_bytes: 2 ** 30,
+  platform: "p",
+  os_release: "r",
+  node: "n",
+};
+
+test("every scaling point is compared on matched work and rendered in its own table", () => {
+  const s = summary(runs(same, same));
+  const concurrent = s.scaling.concurrent_queries;
+  assert.equal(concurrent.host_workers, 4);
+  assert.equal(concurrent.matched, true);
+  assert.deepEqual(Object.keys(concurrent.points), ["1", "2"]);
+  assert.equal(concurrent.points["2"].baseline.qps, 160);
+  assert.deepEqual(concurrent.points["1"].candidate.query_latency_ns, {
+    p50: 1000,
+    p95: 2000,
+    p99: 3000,
+  });
+  assert.equal(typeof concurrent.points["1"].median_ratio, "number");
+  const scheduler = s.scaling.scheduler_scaling.points;
+  assert.equal(scheduler["1"].baseline.speedup_vs_1, 1);
+  assert.ok(scheduler["2"].baseline.speedup_vs_1 > 1.5);
+  assert.equal(scheduler["1"].baseline.cpu_utilisation, 0.9);
+  // One invocation without a CPU clock leaves the utilisation unknown, not zero.
+  assert.equal(scheduler["2"].baseline.cpu_utilisation, null);
+  assert.equal(s.scaling.full_check.points["2"].candidate.files_per_second, 995);
+  assert.equal(s.lock_evidence, true);
+
+  s.machine = MACHINE;
+  const markdown = renderMarkdown(s);
+  const has = (text) => assert.ok(markdown.includes(text), text);
+  has("## Concurrent query scalability (one warm host, 4 host workers, N callers)");
+  has("| 2 | 160 | 160 | 1.5 / 2.5 / 3.5 | 1.5 / 2.5 / 3.5 |");
+  has("## Internal scheduler scalability (one caller, N host workers)");
+  has("| 1.00 | 1.00 | 0.90 | 0.90 |");
+  has("| n/a | n/a |");
+  has("## Full-check throughput (N host workers, N callers)");
+  has("| 2 | 995.0 | 995.0 |");
+  assert.ok(!markdown.includes("## Throughput"));
+});
+
+test("a differing check-corpus witness unmatches only the scaling benchmarks that run it", () => {
+  const candidate = () => ({
+    ...same(),
+    check: { ...ORIGINAL, "/sk/m1.ts#witnessChain1": "complete { v: string }" },
+  });
+  const s = summary(runs(same, candidate));
+  assert.equal(s.scaling.concurrent_queries.matched, true);
+  assert.equal(s.scaling.scheduler_scaling.matched, false);
+  assert.equal(s.scaling.full_check.matched, false);
+  assert.equal(s.scaling.full_check.points["1"].median_ratio, null);
+  assert.equal(s.workloads.cold_load.matched, true);
+  assert.ok(
+    s.lock_evidence_refusals.includes("unmatched work in scheduler_scaling, full_check"),
+    s.lock_evidence_refusals.join("; "),
+  );
+});
+
+test("the cancellation summary reports every injection point beside the aggregate", () => {
+  const probe = (offset) => ({
+    corpus: { modules: 2, depth: 2 },
+    fractions: [0.1, 0.9],
+    rounds: 2,
+    cold_request_median_ns: 1000,
+    completed_before_cancel: 1,
+    workloads: {
+      cold_request: { samples_ns: [1000, 1000] },
+      cancel_stop: { samples_ns: [10, 20, 90] },
+      restart: { samples_ns: [900, 950, 100, 150] },
+    },
+    by_fraction: [
+      {
+        fraction: 0.1,
+        delay_ns: 100,
+        completed_before_cancel: 0,
+        landed_ns: { samples_ns: [100 + offset, 100 + offset] },
+        cancel_stop: { samples_ns: [10, 20] },
+        restart: { samples_ns: [900, 950] },
+      },
+      {
+        fraction: 0.9,
+        delay_ns: 900,
+        completed_before_cancel: 1,
+        landed_ns: { samples_ns: [900, 900] },
+        cancel_stop: { samples_ns: [90] },
+        restart: { samples_ns: [100, 150] },
+      },
+    ],
+  });
+  const s = summary(runs(same, same), [], [probe(0), probe(0)]);
+  const [early, late] = s.cancellation.by_fraction;
+  assert.equal(early.fraction, 0.1);
+  assert.equal(early.cancel_stop.n, 4);
+  assert.equal(early.cancel_stop.p50, 15);
+  assert.equal(early.landed_fraction.p50, 0.1);
+  assert.equal(early.completed_before_cancel, 0);
+  assert.equal(late.cancel_stop.n, 2);
+  assert.equal(late.completed_before_cancel, 2);
+  assert.equal(late.restart.p50, 125);
+  assert.equal(s.cancellation.distributions.cancel_stop.n, 6);
+
+  s.machine = MACHINE;
+  const markdown = renderMarkdown(s);
+  const has = (text) => assert.ok(markdown.includes(text), text);
+  has("Per injection point:");
+  has("| 10% | 10.0% | 0.000015 / 0.00002 / 0.00002 | 4 | 0 | 0.000925 / 0.00095 / 0.00095 |");
+  has("| 90% | 90.0% | 0.00009 / 0.00009 / 0.00009 | 2 | 2 |");
 });
 
 const LOCKED = canonicalLockedRunner(LOCKED_RUNNER);
