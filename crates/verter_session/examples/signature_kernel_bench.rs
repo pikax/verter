@@ -9,20 +9,27 @@
 //! in nothing but the implementation under test.
 //!
 //! It records SAMPLES, never verdicts. One JSON document goes to stdout:
-//! per-workload latency samples, per-workload allocation totals,
-//! worker-count throughput, the edit/revert soak's live-heap series, the
-//! completion census of every witness, and — untimed — every witness's
+//! per-workload latency samples, per-workload allocation totals, the three
+//! scalability benchmarks below, the edit/revert soak's live-heap series,
+//! the completion census of every witness, and — untimed — every witness's
 //! OUTCOME (completion, typed degradation or refusal, and the answered type
-//! rendered structurally) in the original corpus and in each edited state
-//! an edit workload reaches. The runner reports a ratio for a workload only
-//! when both arms' outcomes agree on every witness it queries. Statistics, the ABBA
+//! rendered structurally) in the original corpus, in each edited state an
+//! edit workload reaches, and in the check corpus the scaling benchmarks
+//! run. The runner reports a ratio for a workload only when both arms'
+//! outcomes agree on every witness it queries. Statistics, the ABBA
 //! interleaving, the control benchmark and the regression gate live in the
 //! runner, `scripts/benchmark/signature-kernel-perf.mjs`.
 //!
 //! ```text
+//! # full run (the runner's defaults)
+//! cargo run --release -p verter_session --example signature_kernel_bench
+//! # quick run (the runner's --quick corpus)
+//! cargo run --release -p verter_session --example signature_kernel_bench -- \
+//!     --modules 4 --depth 4 --samples 6 --cold-samples 3 --soak 20
+//!
 //! cargo run --release -p verter_session --example signature_kernel_bench -- \
 //!     [--modules N] [--depth N] [--samples N] [--cold-samples N] [--soak N]
-//!     [--exclude Kind,Kind]
+//!     [--exclude Kind,Kind] [--host-workers N] [--check-modules N]
 //! ```
 //!
 //! Workloads, each a distribution:
@@ -33,8 +40,28 @@
 //! * `declaration_edit`  — edit the shared declarations every module imports, re-query all.
 //! * `augmentation_edit` — edit a `declare global` augmentation, re-query its readers.
 //! * `restart`           — tear a warm host down and rebuild it on the same content.
-//! * `throughput_wN`     — N threads querying one warm host whose scheduler has N workers.
 //! * `soak`              — edit/revert one module repeatedly; live heap after each round.
+//!
+//! Scalability, each its own section, each point a distribution. Caller
+//! threads are created once per point, outside timing, and every sample
+//! is released by a start barrier and timed from the first caller's start
+//! to the last caller's finish, each read by the caller itself:
+//!
+//! * `concurrent_queries` — ONE warm host with a fixed `--host-workers`
+//!   scheduler CPU workers (default 4), queried by 1/2/4/8 callers at once,
+//!   each running the same full sweeps; queries per second and per-query
+//!   latency percentiles.
+//! * `scheduler_scaling`  — ONE caller, hosts with 1/2/4/8 scheduler CPU
+//!   workers; a fresh host loaded untimed per sample, the cold first query
+//!   of every witness of the check corpus timed; wall time and speedup
+//!   against one worker.
+//! * `full_check`         — hosts with 1/2/4/8 scheduler CPU workers and as
+//!   many callers, each loading and querying its share of the check
+//!   corpus's files on a fresh host; files per second, wall time and CPU
+//!   utilisation, `process CPU time / (wall time × workers)`.
+//!
+//! The check corpus is the same module shape, `--check-modules` modules
+//! (default four times `--modules`).
 //!
 //! Cancellation is NOT a workload here: the baseline tree has no
 //! caller-cancellable entry, so no matched workload exists. The candidate-only
@@ -47,8 +74,10 @@
 //! bytes are tracked only for the soak, from zero before its host exists.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::any::Any;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::Instant;
 
 use verter_scheduler::scheduler::SchedulerConfig;
@@ -666,53 +695,462 @@ fn restart(corpus: &Corpus, samples: usize) -> Workload {
     }
 }
 
-/// `workers` threads each query the whole corpus against ONE warm host
-/// whose scheduler has `workers` CPU workers. Each thread walks the witness
-/// list from a different offset, so the threads contend for different keys
-/// first. A sample is the queries completed per second across all threads.
-fn throughput(corpus: &Corpus, workers: usize, samples: usize) -> (Workload, u64) {
-    let witnesses = Arc::new(corpus.all_witnesses());
-    let host = host_with_workers(Some(workers));
-    load(&host, corpus);
-    query_all(&host, &witnesses);
-    let per_thread = witnesses.len();
-    let mut samples_ns = Vec::with_capacity(samples);
-    let mut qps = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        let started = Instant::now();
-        std::thread::scope(|scope| {
-            for thread in 0..workers {
-                let host = Arc::clone(&host);
-                let witnesses = Arc::clone(&witnesses);
-                scope.spawn(move || {
-                    let offset = thread * witnesses.len() / workers;
-                    for k in 0..witnesses.len() {
-                        let (canonical, symbol) = &witnesses[(offset + k) % witnesses.len()];
-                        query(&host, canonical, symbol);
-                    }
+// ─────────────────────────────────────────────────────────────────────────
+// Scalability
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The caller counts of the concurrent-query benchmark and the host worker
+/// counts of the scheduler-scaling and full-check benchmarks.
+const SCALING_COUNTS: [usize; 4] = [1, 2, 4, 8];
+
+/// One timed sample run by persistent caller threads.
+struct CallerSample {
+    /// From the earliest caller's start to the latest caller's finish, each
+    /// read by the caller itself, so no wake-up latency is inside it.
+    wall_ns: u64,
+    /// Process CPU time (every thread, user and system) across the sample,
+    /// read by the driving thread around the barriers; `None` where the
+    /// platform has no reader.
+    cpu_ns: Option<u64>,
+}
+
+/// What the callers ran: every sample's timing and, when latencies were
+/// asked for, each query's latency pooled over every caller and sample.
+struct CallerRun {
+    samples: Vec<CallerSample>,
+    query_latencies_ns: Vec<u64>,
+}
+
+/// Run `samples` timed samples (after one untimed warm-up) on `callers`
+/// persistent threads, created once before the first sample and joined
+/// after the last, so no thread is spawned or joined inside a timing.
+///
+/// Per sample, `prepare` runs untimed on the driving thread and hands every
+/// caller the same state; each caller waits at a start barrier, reads its
+/// own start instant, runs `work(caller, &state, latencies)`, reads its own
+/// finish instant, drops its state and waits at an end barrier. The
+/// driving thread drops the state after the end barrier, also untimed.
+/// `work` pushes one latency per query into `latencies` only when
+/// `record_latencies` is set; the vector is preallocated outside timing.
+///
+/// A panic in `prepare` or in any caller still reaches both barriers, so
+/// every thread leaves together and the panic resumes on the driving
+/// thread: a failing arm fails its invocation instead of hanging it.
+fn run_callers<S: Send + Sync>(
+    callers: usize,
+    samples: usize,
+    record_latencies: Option<usize>,
+    mut prepare: impl FnMut() -> Arc<S>,
+    work: impl Fn(usize, &S, &mut Vec<u64>) + Sync,
+) -> CallerRun {
+    let start = Barrier::new(callers + 1);
+    let end = Barrier::new(callers + 1);
+    let state: Mutex<Option<Arc<S>>> = Mutex::new(None);
+    let spans: Vec<Mutex<Option<(Instant, Instant)>>> =
+        (0..callers).map(|_| Mutex::new(None)).collect();
+    // The first panic of any thread; read by every thread only after a
+    // barrier, which orders it after the write.
+    let failure: Mutex<Option<Box<dyn Any + Send>>> = Mutex::new(None);
+    let failed = || failure.lock().expect("failure slot").is_some();
+    let fail = |panic: Box<dyn Any + Send>| {
+        failure.lock().expect("failure slot").get_or_insert(panic);
+    };
+    let rounds = samples + 1;
+    let mut run = CallerRun {
+        samples: Vec::with_capacity(samples),
+        query_latencies_ns: Vec::new(),
+    };
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..callers)
+            .map(|caller| {
+                let (start, end, state, spans, work, failed, fail) =
+                    (&start, &end, &state, &spans, &work, &failed, &fail);
+                std::thread::Builder::new()
+                    .name(format!("signature-kernel-caller-{caller}"))
+                    .stack_size(WORK_STACK_BYTES)
+                    .spawn_scoped(scope, move || {
+                        let capacity = record_latencies.map_or(0, |per_round| per_round * rounds);
+                        let mut latencies = Vec::with_capacity(capacity);
+                        for round in 0..rounds {
+                            start.wait();
+                            if failed() {
+                                break;
+                            }
+                            let shared = state
+                                .lock()
+                                .expect("caller state")
+                                .clone()
+                                .expect("a prepared state");
+                            let recorded = latencies.len();
+                            let began = Instant::now();
+                            let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                                work(caller, &shared, &mut latencies)
+                            }));
+                            let finished = Instant::now();
+                            drop(shared);
+                            // The warm-up round's latencies are not samples.
+                            if round == 0 {
+                                latencies.truncate(recorded);
+                            }
+                            match outcome {
+                                Ok(()) => {
+                                    *spans[caller].lock().expect("caller span") =
+                                        Some((began, finished));
+                                }
+                                Err(panic) => fail(panic),
+                            }
+                            end.wait();
+                            if failed() {
+                                break;
+                            }
+                        }
+                        latencies
+                    })
+                    .expect("spawn a caller thread")
+            })
+            .collect();
+        for round in 0..rounds {
+            match std::panic::catch_unwind(AssertUnwindSafe(&mut prepare)) {
+                Ok(prepared) => *state.lock().expect("caller state") = Some(prepared),
+                Err(panic) => fail(panic),
+            }
+            let cpu_before = process_cpu_ns();
+            start.wait();
+            if failed() {
+                break;
+            }
+            end.wait();
+            let cpu_after = process_cpu_ns();
+            drop(state.lock().expect("caller state").take());
+            if failed() {
+                break;
+            }
+            let spans: Vec<(Instant, Instant)> = spans
+                .iter()
+                .map(|span| {
+                    span.lock()
+                        .expect("caller span")
+                        .take()
+                        .expect("every caller ran")
+                })
+                .collect();
+            let began = spans.iter().map(|span| span.0).min().expect("a caller");
+            let finished = spans.iter().map(|span| span.1).max().expect("a caller");
+            if round > 0 {
+                let wall = finished.saturating_duration_since(began);
+                run.samples.push(CallerSample {
+                    wall_ns: wall.as_nanos() as u64,
+                    cpu_ns: cpu_before
+                        .zip(cpu_after)
+                        .map(|(before, after)| after.saturating_sub(before)),
                 });
             }
-        });
-        let elapsed = started.elapsed();
-        samples_ns.push(elapsed.as_nanos() as u64);
-        qps.push(((workers * per_thread) as f64 / elapsed.as_secs_f64()) as u64);
+        }
+        for handle in handles {
+            let latencies = handle.join().expect("a caller thread finishes");
+            run.query_latencies_ns.extend(latencies);
+        }
+    });
+    drop(state.into_inner().expect("caller state"));
+    if let Some(panic) = failure.into_inner().expect("failure slot") {
+        std::panic::resume_unwind(panic);
     }
-    qps.sort_unstable();
-    let median_qps = qps[qps.len() / 2];
-    (
-        Workload {
-            name: match workers {
-                1 => "throughput_w1",
-                2 => "throughput_w2",
-                4 => "throughput_w4",
-                _ => "throughput_w8",
-            },
-            samples_ns,
-            alloc_count: 0,
-            alloc_bytes: 0,
+    run
+}
+
+/// Nearest-rank quantile of `sorted`, which must be ascending and non-empty.
+fn quantile(sorted: &[u64], q: f64) -> u64 {
+    let rank = ((sorted.len() - 1) as f64 * q).round() as usize;
+    sorted[rank.min(sorted.len() - 1)]
+}
+
+fn median_of(samples: &[u64]) -> u64 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    quantile(&sorted, 0.5)
+}
+
+fn latency_json(latencies: &[u64]) -> serde_json::Value {
+    if latencies.is_empty() {
+        return serde_json::json!({ "n": 0 });
+    }
+    let mut sorted = latencies.to_vec();
+    sorted.sort_unstable();
+    serde_json::json!({
+        "p50": quantile(&sorted, 0.5),
+        "p95": quantile(&sorted, 0.95),
+        "p99": quantile(&sorted, 0.99),
+        "max": sorted[sorted.len() - 1],
+        "n": sorted.len(),
+    })
+}
+
+/// Concurrent query scalability: ONE warm host with a fixed
+/// `host_workers` scheduler CPU workers, queried by `callers` persistent
+/// threads at once. Every caller runs the same work per sample —
+/// [`WARM_SWEEPS_PER_SAMPLE`] full sweeps over every witness, from its own
+/// offset so the callers contend for different keys first — so with
+/// perfect scaling the sample's wall time stays flat and queries per second
+/// grow with the caller count.
+fn concurrent_queries(
+    corpus: &Corpus,
+    host_workers: usize,
+    callers: usize,
+    samples: usize,
+) -> serde_json::Value {
+    let witnesses = corpus.all_witnesses();
+    let host = host_with_workers(Some(host_workers));
+    load(&host, corpus);
+    query_all(&host, &witnesses);
+    let per_caller = WARM_SWEEPS_PER_SAMPLE * witnesses.len();
+    let run = run_callers(
+        callers,
+        samples,
+        Some(per_caller),
+        || Arc::clone(&host),
+        |caller, host: &VerterHost, latencies| {
+            let offset = caller * witnesses.len() / callers;
+            for k in 0..per_caller {
+                let (canonical, symbol) = &witnesses[(offset + k) % witnesses.len()];
+                let started = Instant::now();
+                query(host, canonical, symbol);
+                latencies.push(started.elapsed().as_nanos() as u64);
+            }
         },
-        median_qps,
-    )
+    );
+    let queries = (callers * per_caller) as f64;
+    let samples_ns: Vec<u64> = run.samples.iter().map(|s| s.wall_ns).collect();
+    let qps: Vec<u64> = samples_ns
+        .iter()
+        .map(|&ns| (queries / (ns.max(1) as f64 / 1e9)) as u64)
+        .collect();
+    serde_json::json!({
+        "callers": callers,
+        "queries_per_sample": callers * per_caller,
+        "samples_ns": samples_ns,
+        "qps": qps,
+        "median_qps": median_of(&qps),
+        "query_latency_ns": latency_json(&run.query_latencies_ns),
+    })
+}
+
+/// The fields every scaling point records: wall and CPU samples and, where
+/// the platform reads process CPU time, the utilisation of `workers`
+/// workers, `cpu / (wall × workers)` — per sample, and over every sample
+/// at once (`Σ cpu / (Σ wall × workers)`), which stays meaningful where the
+/// process CPU clock ticks coarsely (Windows' advances in scheduler ticks,
+/// about 15.6 ms).
+fn scaling_samples_json(
+    run: &CallerRun,
+    workers: usize,
+) -> serde_json::Map<String, serde_json::Value> {
+    let samples_ns: Vec<u64> = run.samples.iter().map(|s| s.wall_ns).collect();
+    let cpu_ns: Option<Vec<u64>> = run.samples.iter().map(|s| s.cpu_ns).collect();
+    let utilisation: Option<Vec<f64>> = cpu_ns.as_ref().map(|cpu| {
+        cpu.iter()
+            .zip(&samples_ns)
+            .map(|(&cpu, &wall)| cpu as f64 / (wall.max(1) as f64 * workers as f64))
+            .collect()
+    });
+    let utilisation_total = cpu_ns.as_ref().map(|cpu| {
+        let wall: u64 = samples_ns.iter().sum();
+        cpu.iter().sum::<u64>() as f64 / (wall.max(1) as f64 * workers as f64)
+    });
+    let mut fields = serde_json::Map::new();
+    fields.insert("workers".into(), serde_json::json!(workers));
+    fields.insert(
+        "median_ns".into(),
+        serde_json::json!(median_of(&samples_ns)),
+    );
+    fields.insert("samples_ns".into(), serde_json::json!(samples_ns));
+    fields.insert("cpu_ns".into(), serde_json::json!(cpu_ns));
+    fields.insert("cpu_utilisation".into(), serde_json::json!(utilisation));
+    fields.insert(
+        "cpu_utilisation_total".into(),
+        serde_json::json!(utilisation_total),
+    );
+    fields
+}
+
+/// Internal scheduler scalability: ONE caller, a host with `workers`
+/// scheduler CPU workers. Each sample gets a fresh host, built and loaded
+/// with the check corpus untimed; the sample is the cold first query of
+/// every witness — independent roots across every module, each demanding
+/// its module's declarations, chain and imports cold. Any speedup over one
+/// worker is work the host spreads over its scheduler by itself.
+fn scheduler_scaling(corpus: &Corpus, workers: usize, samples: usize) -> serde_json::Value {
+    let witnesses = corpus.all_witnesses();
+    let run = run_callers(
+        1,
+        samples,
+        None,
+        || {
+            let host = host_with_workers(Some(workers));
+            load(&host, corpus);
+            host
+        },
+        |_, host: &VerterHost, _| {
+            query_all(host, &witnesses);
+        },
+    );
+    serde_json::Value::Object(scaling_samples_json(&run, workers))
+}
+
+/// Full-check throughput: every file of the check corpus loaded and every
+/// witness in it answered, on a fresh host with `workers` scheduler CPU
+/// workers, by as many caller threads as workers — the files dealt out
+/// round-robin, each caller upserting its file and then querying it, as a
+/// project checker drives one host with one checking thread per worker.
+/// The two shared inputs every module imports are loaded untimed with the
+/// fresh host; the sample is the rest of the check.
+fn full_check(corpus: &Corpus, workers: usize, samples: usize) -> serde_json::Value {
+    let run = run_callers(
+        workers,
+        samples,
+        None,
+        || {
+            let host = host_with_workers(Some(workers));
+            upsert(&host, SHARED, &Corpus::shared(false));
+            upsert(&host, AUGMENTATION, &Corpus::augmentation(false));
+            host
+        },
+        |caller, host: &VerterHost, _| {
+            for i in (caller..corpus.modules).step_by(workers) {
+                upsert(host, &Corpus::module_path(i), &corpus.module(i, false));
+                query_all(host, &corpus.witnesses_of(i));
+            }
+        },
+    );
+    let mut fields = scaling_samples_json(&run, workers);
+    let files_per_second: Vec<f64> = run
+        .samples
+        .iter()
+        .map(|s| corpus.modules as f64 / (s.wall_ns.max(1) as f64 / 1e9))
+        .collect();
+    fields.insert("callers".into(), serde_json::json!(workers));
+    fields.insert(
+        "files_per_second".into(),
+        serde_json::json!(files_per_second),
+    );
+    serde_json::Value::Object(fields)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Process CPU time
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Where [`process_cpu_ns`] reads from on this platform, or `None`.
+const CPU_TIME_SOURCE: Option<&str> = cpu_clock::SOURCE;
+
+/// The process's CPU time so far (every thread, user plus system), in
+/// nanoseconds; `None` on a platform this harness has no reader for.
+fn process_cpu_ns() -> Option<u64> {
+    cpu_clock::read()
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+))]
+mod cpu_clock {
+    use std::os::raw::{c_int, c_long};
+
+    /// `struct timespec`: `time_t` and the nanoseconds are both `long` on
+    /// these platforms.
+    #[repr(C)]
+    struct Timespec {
+        tv_sec: c_long,
+        tv_nsec: c_long,
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const CLOCK_PROCESS_CPUTIME_ID: c_int = 2;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    const CLOCK_PROCESS_CPUTIME_ID: c_int = 12;
+
+    extern "C" {
+        fn clock_gettime(clock: c_int, time: *mut Timespec) -> c_int;
+    }
+
+    pub(super) const SOURCE: Option<&str> = Some("clock_gettime(CLOCK_PROCESS_CPUTIME_ID)");
+
+    pub(super) fn read() -> Option<u64> {
+        let mut time = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `time` is a valid, writable `struct timespec`; the call
+        // writes it and reads nothing else.
+        let status = unsafe { clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &mut time) };
+        (status == 0).then(|| time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64)
+    }
+}
+
+#[cfg(windows)]
+mod cpu_clock {
+    use std::ffi::c_void;
+
+    /// `FILETIME`: a count of 100-nanosecond intervals, split in halves.
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+
+    impl FileTime {
+        fn nanos(&self) -> u64 {
+            ((u64::from(self.high) << 32) | u64::from(self.low)) * 100
+        }
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn GetProcessTimes(
+            process: *mut c_void,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
+    }
+
+    pub(super) const SOURCE: Option<&str> = Some("GetProcessTimes");
+
+    pub(super) fn read() -> Option<u64> {
+        let (mut creation, mut exit) = (FileTime::default(), FileTime::default());
+        let (mut kernel, mut user) = (FileTime::default(), FileTime::default());
+        // SAFETY: the pseudo-handle of the current process needs no
+        // closing, and the call writes the four `FILETIME`s it is given.
+        let ok = unsafe {
+            GetProcessTimes(
+                GetCurrentProcess(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            )
+        };
+        (ok != 0).then(|| kernel.nanos() + user.nanos())
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios",
+    windows
+)))]
+mod cpu_clock {
+    pub(super) const SOURCE: Option<&str> = None;
+
+    pub(super) fn read() -> Option<u64> {
+        None
+    }
 }
 
 /// Edit/revert one module `rounds` times on one host and record the live
@@ -828,6 +1266,16 @@ fn run() {
     // 400 rounds: a short soak only sees the warm-up climb; retention is
     // bounded and reclaimed in bursts, so the plateau shows after it.
     let soak_rounds = arg(&args, "--soak", 400);
+    // The concurrent-query benchmark's fixed scheduler worker count.
+    let host_workers = arg(&args, "--host-workers", 4).max(1);
+    // The scheduler-scaling and full-check corpus: the same modules, four
+    // times as many by default, so eight workers each have many
+    // independent roots and files.
+    let check = Corpus {
+        modules: arg(&args, "--check-modules", corpus.modules * 4).max(1),
+        depth: corpus.depth,
+        kinds: corpus.kinds.clone(),
+    };
 
     // Completion census on a fresh host: what the implementation ANSWERS,
     // so the runner can separate "faster" from "answering differently" —
@@ -887,6 +1335,11 @@ fn run() {
             }
             by_state.insert(state.to_owned(), outcomes(&host, &witnesses));
         }
+        // The check corpus the scheduler-scaling and full-check
+        // benchmarks answer.
+        let host = host_with_workers(None);
+        load(&host, &check);
+        by_state.insert("check".to_owned(), outcomes(&host, &check.all_witnesses()));
         by_state
     };
 
@@ -930,11 +1383,32 @@ fn run() {
     drop(host);
     workloads.push(restart(&corpus, cold_samples));
 
-    let mut throughput_qps = serde_json::Map::new();
-    for workers in [1, 2, 4, 8] {
-        let (workload, median_qps) = throughput(&corpus, workers, cold_samples);
-        throughput_qps.insert(workload.name.to_string(), serde_json::json!(median_qps));
-        workloads.push(workload);
+    let mut by_callers = serde_json::Map::new();
+    for callers in SCALING_COUNTS {
+        by_callers.insert(
+            callers.to_string(),
+            concurrent_queries(&corpus, host_workers, callers, samples),
+        );
+    }
+    let mut scheduler_by_workers = serde_json::Map::new();
+    let mut full_check_by_workers = serde_json::Map::new();
+    for workers in SCALING_COUNTS {
+        scheduler_by_workers.insert(
+            workers.to_string(),
+            scheduler_scaling(&check, workers, cold_samples),
+        );
+    }
+    for workers in SCALING_COUNTS {
+        full_check_by_workers.insert(
+            workers.to_string(),
+            full_check(&check, workers, cold_samples),
+        );
+    }
+    // Speedup against one worker, from the medians.
+    let one_worker = scheduler_by_workers["1"]["median_ns"].as_u64().unwrap_or(0) as f64;
+    for point in scheduler_by_workers.values_mut() {
+        let median = point["median_ns"].as_u64().unwrap_or(0).max(1) as f64;
+        point["speedup_vs_1"] = serde_json::json!(one_worker / median);
     }
 
     let live = soak(&corpus, soak_rounds);
@@ -945,7 +1419,7 @@ fn run() {
     }
     let document = serde_json::json!({
         "harness": "signature_kernel_bench",
-        "harness_version": 2,
+        "harness_version": 3,
         "rev": std::env::var("SK_BENCH_REV").unwrap_or_default(),
         "machine": {
             "os": std::env::consts::OS,
@@ -963,7 +1437,24 @@ fn run() {
         "census_by_witness": census_by_witness,
         "outcomes": outcomes_by_state,
         "workloads": by_name,
-        "throughput_qps": throughput_qps,
+        "concurrent_queries": {
+            "host_workers": host_workers,
+            "sweeps_per_sample": WARM_SWEEPS_PER_SAMPLE,
+            "witnesses": corpus.all_witnesses().len(),
+            "by_callers": by_callers,
+        },
+        "scheduler_scaling": {
+            "callers": 1,
+            "modules": check.modules,
+            "witnesses": check.all_witnesses().len(),
+            "by_workers": scheduler_by_workers,
+        },
+        "full_check": {
+            "files": check.modules,
+            "witnesses": check.all_witnesses().len(),
+            "by_workers": full_check_by_workers,
+        },
+        "cpu_time_source": CPU_TIME_SOURCE,
         "soak_live_bytes": live,
         "warm_query_sweeps_per_sample": WARM_SWEEPS_PER_SAMPLE,
     });
