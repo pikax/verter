@@ -578,6 +578,22 @@ Recorded plainly so no reader mistakes absence for a pass:
   or the `!` classification overflows the worker, and restoring the
   derived drop overflows the test thread.
 
+* **Operator chains evaluate from explicit stacks.** The flow evaluator
+  evaluated a `!`, a non-null assertion and an arithmetic operator by
+  evaluating its operands recursively, 8.7 MB for a 10,000-deep `!` chain
+  optimized, on the thread that asks for the return type; the effect
+  pre-scan (`expression_effect_tree`, which collects the writes an
+  expression carries) recursed per level of any nest too. `eval_expr` now
+  evaluates those forms' operands from an explicit stack of the forms
+  waiting on them (each operand's value erased as its own evaluation would
+  erase it, an arithmetic operator stopping at the operand that holds or is
+  unmodeled), and `expression_effect_tree` walks from a stack in the same
+  tree order. `flow_return_null_policy_tests.rs` →
+  `operator_chains_10000_deep_evaluate_on_a_small_stack` answers
+  `boolean`, `number` and `number` (TypeScript 7.0.2's answers) for
+  10,000-deep `!`, unary `-` and `+` chains on a 1 MiB caller thread,
+  unoptimized; restoring either recursion overflows it.
+
 * **oxc's own walks run on the stack their source needs.** oxc's
   `clone_in`, semantic builder and `Visit` / `VisitMut` walkers recurse
   once per level of the tree they walk, as its parser does: cloning a

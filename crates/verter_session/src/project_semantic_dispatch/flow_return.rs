@@ -7109,34 +7109,33 @@ fn expression_effect_tree(
     keep: fn(&crate::flow_slice_content::SliceEvolvingOperation) -> bool,
 ) -> Vec<&crate::flow_slice_content::SliceExpr> {
     use crate::flow_slice_content::{
-        SliceArrayElement, SliceCall, SliceEvolvingOperation, SliceExpr, SliceObjectEntry,
-        SliceObjectKey,
+        SliceArrayElement, SliceCall, SliceExpr, SliceObjectEntry, SliceObjectKey,
     };
+    // The tree is walked from an explicit stack of the expressions still to
+    // visit, each node's children pushed last-first so they pop in tree
+    // order: a nest however deep costs no native level.
     let mut out = Vec::new();
-    fn walk<'e>(
-        expr: &'e SliceExpr,
-        keep: fn(&SliceEvolvingOperation) -> bool,
-        out: &mut Vec<&'e SliceExpr>,
-    ) {
-        let walk = |expr: &'e SliceExpr, out: &mut Vec<&'e SliceExpr>| walk(expr, keep, out);
+    let mut pending: Vec<&SliceExpr> = vec![expr];
+    let mut children: Vec<&SliceExpr> = Vec::new();
+    while let Some(expr) = pending.pop() {
         match expr {
             SliceExpr::Assignment { value, .. } => {
                 out.push(expr);
-                walk(value, out);
+                children.push(value);
             }
-            SliceExpr::FrameShadowed { inner, .. } => walk(inner, out),
-            SliceExpr::OptionalAnyChain { root } => walk(root, out),
+            SliceExpr::FrameShadowed { inner, .. } => children.push(inner),
+            SliceExpr::OptionalAnyChain { root } => children.push(root),
             SliceExpr::Object { entries, .. } => {
                 for entry in entries.iter() {
                     match entry {
-                        SliceObjectEntry::Spread { source } => walk(source, out),
+                        SliceObjectEntry::Spread { source } => children.push(source),
                         SliceObjectEntry::Member(member) => {
                             if let SliceObjectKey::Computed { value, .. } = &member.key {
-                                walk(value, out);
+                                children.push(value);
                             }
-                            walk(&member.value, out);
+                            children.push(&member.value);
                             if let Some(assignment_value) = member.assignment_value.as_ref() {
-                                walk(assignment_value, out);
+                                children.push(assignment_value);
                             }
                         }
                     }
@@ -7145,79 +7144,52 @@ fn expression_effect_tree(
             SliceExpr::Array { elements, .. } => {
                 for element in elements.iter() {
                     match element {
-                        SliceArrayElement::Value { value, .. } => walk(value, out),
-                        SliceArrayElement::Spread { source } => walk(source, out),
+                        SliceArrayElement::Value { value, .. } => children.push(value),
+                        SliceArrayElement::Spread { source } => children.push(source),
                         SliceArrayElement::Elision => {}
                     }
                 }
             }
-            SliceExpr::Union { arms, .. } => {
-                for arm in arms.iter() {
-                    walk(arm, out);
-                }
-            }
-            // A chain nests its left operands: its left spine is walked, in
-            // tree order — the innermost left operand, then each right
-            // operand from the innermost node out.
+            SliceExpr::Union { arms, .. } => children.extend(arms.iter()),
             SliceExpr::Logical { left, right, .. } => {
-                let mut rights = vec![&**right];
-                let mut innermost = &**left;
-                while let SliceExpr::Logical { left, right, .. } = innermost {
-                    rights.push(right);
-                    innermost = left;
-                }
-                walk(innermost, out);
-                for right in rights.into_iter().rev() {
-                    walk(right, out);
-                }
+                children.push(left);
+                children.push(right);
             }
-            SliceExpr::Sequence { value, .. } => walk(value, out),
+            SliceExpr::Sequence { value, .. } => children.push(value),
             SliceExpr::Satisfies { operand, .. } | SliceExpr::Void { operand, .. } => {
-                walk(operand, out)
+                children.push(operand)
             }
-            SliceExpr::Arithmetic { operands, .. } => {
-                for operand in operands.iter() {
-                    walk(operand, out);
-                }
-            }
-            SliceExpr::ConstTemplate { holes, .. } => {
-                for hole in holes.iter() {
-                    walk(hole, out);
-                }
-            }
+            SliceExpr::Arithmetic { operands, .. } => children.extend(operands.iter()),
+            SliceExpr::ConstTemplate { holes, .. } => children.extend(holes.iter()),
             SliceExpr::ElementAccess { object, index, .. } => {
-                walk(object, out);
-                walk(index, out);
+                children.push(object);
+                children.push(index);
             }
             SliceExpr::Update { .. } => out.push(expr),
-            SliceExpr::NonNull { operand } => walk(operand, out),
-            SliceExpr::Not { operand, .. } => walk(operand, out),
-            SliceExpr::MemberOf { object, .. } => walk(object, out),
+            SliceExpr::NonNull { operand } => children.push(operand),
+            SliceExpr::Not { operand, .. } => children.push(operand),
+            SliceExpr::MemberOf { object, .. } => children.push(object),
             SliceExpr::Call(call, _, arguments) => {
                 match call {
-                    SliceCall::Nested(function_value) => walk(function_value, out),
+                    SliceCall::Nested(function_value) => children.push(function_value),
                     SliceCall::Construct(callee) | SliceCall::TaggedTemplate(callee) => {
-                        walk(callee, out)
+                        children.push(callee)
                     }
-                    SliceCall::OnValue { object, .. } => walk(object, out),
+                    SliceCall::OnValue { object, .. } => children.push(object),
                     _ => {}
                 }
-                for argument in arguments.iter() {
-                    walk(argument, out);
-                }
+                children.extend(arguments.iter());
             }
             SliceExpr::EvolvingArray(operation) => {
                 if keep(operation) {
                     out.push(expr);
                 }
-                for operand in operation.operands() {
-                    walk(operand, out);
-                }
+                children.extend(operation.operands());
             }
             _ => {}
         }
+        pending.extend(children.drain(..).rev());
     }
-    walk(expr, keep, &mut out);
     out
 }
 
@@ -22717,11 +22689,98 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         expr: &crate::flow_slice_content::SliceExpr,
     ) -> Positional<SemanticNodeId> {
-        match self.eval_expr_unerased(expr) {
-            Positional::Value(node) => {
-                Positional::Value(self.dispatch.erase_nullable_members(node, self.nullability))
+        use crate::flow_slice_content::{SliceArithmetic, SliceExpr};
+        // An operator form's operands (a `!`, a non-null assertion, an
+        // arithmetic operator's operands) evaluate from an explicit stack of
+        // the forms waiting on them, each operand's value erased as its own
+        // [`Self::eval_expr`] would erase it: an operand nested in an
+        // operand costs no native level. Every other form evaluates through
+        // [`Self::eval_expr_unerased`].
+        enum Waiting<'e> {
+            Erase,
+            Not {
+                widen: bool,
+            },
+            NonNull,
+            Arithmetic {
+                operator: SliceArithmetic,
+                operands: &'e [SliceExpr],
+                types: Vec<SemanticNodeId>,
+            },
+        }
+        let mut waiting = vec![Waiting::Erase];
+        let mut current = expr;
+        loop {
+            let mut value = match current {
+                SliceExpr::Not { operand, widen } => {
+                    waiting.push(Waiting::Not { widen: *widen });
+                    waiting.push(Waiting::Erase);
+                    current = operand;
+                    continue;
+                }
+                SliceExpr::NonNull { operand } => {
+                    waiting.push(Waiting::NonNull);
+                    waiting.push(Waiting::Erase);
+                    current = operand;
+                    continue;
+                }
+                SliceExpr::Arithmetic { operator, operands } if !operands.is_empty() => {
+                    waiting.push(Waiting::Arithmetic {
+                        operator: *operator,
+                        operands,
+                        types: Vec::with_capacity(operands.len()),
+                    });
+                    waiting.push(Waiting::Erase);
+                    current = &operands[0];
+                    continue;
+                }
+                other => self.eval_expr_unerased(other),
+            };
+            loop {
+                match waiting.pop() {
+                    None => return value,
+                    Some(Waiting::Erase) => {
+                        if let Positional::Value(node) = value {
+                            value = Positional::Value(
+                                self.dispatch.erase_nullable_members(node, self.nullability),
+                            );
+                        }
+                    }
+                    Some(Waiting::Not { widen }) => {
+                        value = match self.finish_not(value) {
+                            Positional::Value(node) if widen => {
+                                Positional::Value(widen_literal_node(self.dispatch, node))
+                            }
+                            other => other,
+                        };
+                    }
+                    Some(Waiting::NonNull) => value = self.finish_non_null(value),
+                    Some(Waiting::Arithmetic {
+                        operator,
+                        operands,
+                        mut types,
+                    }) => {
+                        // An operand that holds or is unmodeled ends the
+                        // operator there, as the operands after it never
+                        // evaluate.
+                        let Positional::Value(node) = value else {
+                            continue;
+                        };
+                        types.push(node);
+                        if let Some(next) = operands.get(types.len()) {
+                            waiting.push(Waiting::Arithmetic {
+                                operator,
+                                operands,
+                                types,
+                            });
+                            waiting.push(Waiting::Erase);
+                            current = next;
+                            break;
+                        }
+                        value = self.finish_arithmetic(operator, &types);
+                    }
+                }
             }
-            other => other,
         }
     }
 

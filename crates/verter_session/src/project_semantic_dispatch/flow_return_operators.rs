@@ -68,7 +68,16 @@ impl FlowEvaluator<'_, '_> {
                 Positional::Unmodeled => return Positional::Unmodeled,
             }
         }
-        let result = match (operator, types.as_slice()) {
+        self.finish_arithmetic(operator, &types)
+    }
+
+    /// [`Self::eval_arithmetic`] over its operands' evaluated types.
+    pub(super) fn finish_arithmetic(
+        &mut self,
+        operator: SliceArithmetic,
+        types: &[SemanticNodeId],
+    ) -> Positional<SemanticNodeId> {
+        let result = match (operator, types) {
             (SliceArithmetic::Plus, [_]) => Some(self.primitive(PrimitiveKind::Number)),
             (SliceArithmetic::Negate, [operand]) => self.unary_numeric_result(*operand),
             (SliceArithmetic::Numeric, [left, right]) => self.numeric_result(*left, *right),
@@ -569,7 +578,16 @@ impl FlowEvaluator<'_, '_> {
     /// nullability this frame cannot prove (a type parameter, whose
     /// non-nullable type is `T & {}`) leaves the typed gap.
     pub(super) fn eval_non_null(&mut self, operand: &SliceExpr) -> Positional<SemanticNodeId> {
-        let node = match self.eval_expr(operand) {
+        let value = self.eval_expr(operand);
+        self.finish_non_null(value)
+    }
+
+    /// [`Self::eval_non_null`] over its operand's evaluated value.
+    pub(super) fn finish_non_null(
+        &mut self,
+        value: Positional<SemanticNodeId>,
+    ) -> Positional<SemanticNodeId> {
+        let node = match value {
             Positional::Value(node) => node,
             other => return other,
         };
@@ -1028,7 +1046,16 @@ impl FlowEvaluator<'_, '_> {
     /// `boolean` otherwise (`checkPrefixUnaryExpression` over the
     /// operand's `Truthy` / `Falsy` facts).
     pub(super) fn eval_not(&mut self, operand: &SliceExpr) -> Positional<SemanticNodeId> {
-        let node = match self.eval_expr(operand) {
+        let value = self.eval_expr(operand);
+        self.finish_not(value)
+    }
+
+    /// [`Self::eval_not`] over its operand's evaluated value.
+    pub(super) fn finish_not(
+        &mut self,
+        value: Positional<SemanticNodeId>,
+    ) -> Positional<SemanticNodeId> {
+        let node = match value {
             Positional::Value(node) => node,
             other => return other,
         };
