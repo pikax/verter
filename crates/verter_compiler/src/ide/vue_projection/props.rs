@@ -6,7 +6,7 @@
 
 use crate::framework_common::projection_plan::ComponentUseId;
 use crate::ide::vue_projection::attribute_operations::{
-    AttributeOperationsProjection, AttributeSyntax, Certainty,
+    AttributeOperationsProjection, AttributeSyntax,
 };
 use crate::ide::vue_projection::public_constructor::{
     DeclaredSurface, PropsDefaults, VuePublicConstructorContract,
@@ -78,16 +78,13 @@ pub fn project_props(attributes: &AttributeOperationsProjection) -> PropsProject
             if operation.syntax != AttributeSyntax::BindObject {
                 continue;
             }
+            // `overridden` already proves this spread's value is dead. A later
+            // possible writer can replace the definite write; it cannot restore
+            // the earlier value, so the key stays out of this spread's check.
             let overwritten_keys = key_plan
                 .effective
                 .iter()
                 .filter(|property| property.overridden.contains(&operation.index))
-                .filter(|property| {
-                    property
-                        .contributors
-                        .iter()
-                        .all(|contribution| contribution.certainty != Certainty::Possible)
-                })
                 .map(|property| property.key.clone())
                 .collect();
             obligations.push(PropCheckObligation {

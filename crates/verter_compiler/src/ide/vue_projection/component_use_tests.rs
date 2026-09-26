@@ -497,6 +497,32 @@ fn component_use_products_are_deterministic_and_incomplete_plans_stay_incomplete
     assert!(unnamed.witnesses.is_empty());
 }
 
+/// A spread value proved dead by a later definite write stays out of the
+/// spread check when another v-bind can still write the key afterwards.
+#[test]
+fn overwritten_spread_key_stays_excluded_when_a_later_spread_follows() {
+    let projection = project(r#"  <Child v-bind="{ title: 1 }" :title="ok" v-bind="rest" />"#);
+    let witness = only(&projection);
+    let spreads: Vec<&[String]> = witness
+        .transaction
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            TransactionMember::Spread {
+                overwritten_keys, ..
+            } => Some(overwritten_keys.as_slice()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(spreads.len(), 2);
+    assert_eq!(spreads[0], ["title".to_string()]);
+    assert!(spreads[1].is_empty());
+    let rendered = witness.render();
+    assert!(rendered.contains(r#"__VerterUseSpread(Child, ({ title: 1 }), ["title"])"#));
+    assert!(rendered.contains(r#"__VerterUseSpread(Child, (rest), [])"#));
+    assert!(rendered.contains(r#""title": (ok)"#));
+}
+
 #[test]
 fn table_probe_fixture_is_the_rendered_declaration() {
     const FIXTURE: &str = include_str!(concat!(

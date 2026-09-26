@@ -46,6 +46,16 @@ fn known_spreads_are_checked_but_open_spreads_remain_framework_legal() {
 }
 
 #[test]
+fn a_later_possible_spread_does_not_revive_a_definitely_overwritten_key() {
+    let projection = project(r#"<Child v-bind="{ title: 1 }" :title="ok" v-bind="rest" />"#);
+    assert!(projection.complete);
+    assert_eq!(projection.obligations.len(), 2);
+    assert_eq!(projection.obligations[0].overwritten_keys, vec!["title"]);
+    assert!(projection.obligations[0].checks_known_keys());
+    assert!(projection.obligations[1].overwritten_keys.is_empty());
+}
+
+#[test]
 fn defaults_make_callers_optional_but_setup_values_defined_only_when_named() {
     let named = caller_contract(
         "const props = withDefaults(defineProps<{ title: string; count?: number }>(), { title: 'fallback' });",

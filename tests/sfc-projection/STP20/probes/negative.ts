@@ -21,3 +21,7 @@ declare function __VerterUseSpread<C, S, O extends PropertyKey>(
 const misspelled = { titel: "typo" };
 // A finite v-bind object cannot bypass the component's declared keys.
 __VerterUseSpread(Child, misspelled, [] as const);
+
+const staleTitle = { title: 1, kind: "number", value: 1 } as const;
+// The same number is rejected when the key is not certainly overwritten.
+__VerterUseSpread(Child, staleTitle, [] as const);

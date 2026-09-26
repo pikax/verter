@@ -27,5 +27,5 @@
   "verify": "node scripts/sfc-projection/verify-node.mjs --node STP20 --engine all --require-all --json",
   "test": "cargo test -p verter_compiler --lib ide::vue_projection::props",
   "runtimeCorrectness": true,
-  "notes": "Caller default optionality stays separate from setup-defined values. Finite object spreads validate keys and values against the component props; index-signature domains remain open. Keys definitely overwritten by a later property are excluded from the spread check."
+  "notes": "Caller default optionality stays separate from setup-defined values. Finite object spreads validate keys and values against the component props; index-signature domains remain open. Keys definitely overwritten by a later property are excluded from that spread's check even when a later v-bind may still write the key."
 }

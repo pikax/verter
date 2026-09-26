@@ -49,9 +49,10 @@ export const omittedOptional = new (__VerterUseConstructor(Child))({
 });
 export const stp20HoverTarget: number = matched.$props.kind === "number" ? matched.$props.value : 0;
 
-const spread = { title: "old", kind: "number", value: 1 } as const;
-// The stale title is ignored because the later definite value is the one the
-// child receives. Other finite keys still participate in the check.
+const spread = { title: 1, kind: "number", value: 1 } as const;
+// `title: 1` cannot satisfy `title: string`. It is still accepted because a
+// later definite write replaces it, including when another v-bind follows
+// that write. Other finite keys still participate in the check.
 export const overwritten = new (__VerterUseConstructor(Child))({
   ...__VerterUseSpread(Child, spread, ["title"] as const),
   title: "new",
