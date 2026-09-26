@@ -138,6 +138,18 @@ fn register_locator_function_children_alias(
     ) {
         infer_binders.register_equivalent_subtree(alias, original);
     }
+    if let (Some(alias), Some(original)) = (
+        alias_function
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref()),
+        original
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref()),
+    ) {
+        infer_binders.register_equivalent_subtree(alias, original);
+    }
 }
 
 fn register_locator_object_member_alias(
@@ -409,6 +421,163 @@ impl<'a> ShapeLowerCtx<'a> {
 #[path = "locator_shape_binder.rs"]
 mod binder;
 
+/// The binder stack one node of the explicit-stack locator lowering is
+/// lowered under: the stack the lowering entered with, or one a
+/// conditional extended for its `extends` clause or its true branch.
+#[derive(Clone)]
+enum LocatorBinders<'r> {
+    Entry(&'r [LocatorBinderFrame]),
+    Extended(std::rc::Rc<[LocatorBinderFrame]>),
+}
+
+impl LocatorBinders<'_> {
+    fn frames(&self) -> &[LocatorBinderFrame] {
+        match self {
+            LocatorBinders::Entry(frames) => frames,
+            LocatorBinders::Extended(frames) => frames,
+        }
+    }
+
+    /// This stack with `frame` innermost.
+    fn extended(&self, frame: LocatorBinderFrame) -> Self {
+        let mut frames = self.frames().to_vec();
+        frames.push(frame);
+        LocatorBinders::Extended(std::rc::Rc::from(frames.into_boxed_slice()))
+    }
+}
+
+/// One step of the explicit-stack locator lowering: a finished node's
+/// value, or the child to lower next under its binder stack (the node
+/// itself waits on the stack).
+enum LocatorStep<'e, 'r> {
+    Value(SemanticNodeId),
+    Descend(&'e TypeExpr, LocatorBinders<'r>),
+}
+
+/// A node of the explicit-stack locator lowering waiting for a child's
+/// value: what remains of its own lowering.
+enum LocatorFrame<'e, 'r> {
+    /// A union (`union`) or intersection's arms.
+    Composite {
+        arms: &'e [TypeExpr],
+        union: bool,
+        binders: LocatorBinders<'r>,
+        lowered: Vec<SemanticNodeId>,
+    },
+    Array {
+        readonly: bool,
+    },
+    Tuple {
+        elements: &'e [verter_type_expr::TupleElement],
+        readonly: bool,
+        binders: LocatorBinders<'r>,
+        lowered: Vec<TupleElement>,
+    },
+    Template {
+        quasis: &'e [String],
+        expressions: &'e [TypeExpr],
+        binders: LocatorBinders<'r>,
+        lowered: Vec<SemanticNodeId>,
+    },
+    KeyOf,
+    /// An indexed access whose object is being lowered.
+    IndexedObject {
+        index: &'e TypeExpr,
+        binders: LocatorBinders<'r>,
+    },
+    /// An indexed access whose computed index is being lowered.
+    IndexedIndex {
+        object: SemanticNodeId,
+    },
+    Intrinsic {
+        application: &'e TypeExpr,
+        arguments: &'e [TypeExpr],
+        binders: LocatorBinders<'r>,
+        lowered: Vec<SemanticNodeId>,
+    },
+    /// A named reference whose head resolved to a carrier over its
+    /// arguments.
+    RefArguments {
+        head: crate::project_semantic_dispatch::carrier::RefHeadResolution,
+        name: &'e Arc<str>,
+        arguments: &'e [TypeExpr],
+        binders: LocatorBinders<'r>,
+        lowered: Vec<SemanticNodeId>,
+    },
+    /// A conditional at `stage`, under its own binder stack.
+    Conditional {
+        conditional: &'e TypeExpr,
+        binders: LocatorBinders<'r>,
+        stage: LocatorConditionalStage,
+    },
+    /// An object in its member loop at member `next`.
+    Object {
+        object: &'e verter_type_expr::ObjectExpr,
+        next: usize,
+        state: LocatorObjectState,
+        binders: LocatorBinders<'r>,
+        awaiting: LocatorObjectAwait<'e>,
+    },
+}
+
+/// An object's surface as its member loop builds it.
+struct LocatorObjectState {
+    entries: Vec<SurfaceEntry>,
+    call_signatures: u32,
+    construct_signatures: u32,
+    has_index_signature: bool,
+}
+
+impl LocatorObjectState {
+    fn with_capacity(members: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(members),
+            call_signatures: 0,
+            construct_signatures: 0,
+            has_index_signature: false,
+        }
+    }
+}
+
+/// The object member whose child is being lowered.
+enum LocatorObjectAwait<'e> {
+    /// A property's value, beside its lowered key.
+    PropertyValue(
+        &'e verter_type_expr::ObjectProperty,
+        crate::semantic_query::AuthoredPropertyKey,
+    ),
+    IndexKey(&'e verter_type_expr::IndexSignature),
+    /// An index signature's value type, beside its lowered key type.
+    IndexValue(&'e verter_type_expr::IndexSignature, SemanticNodeId),
+}
+
+/// Which child of a conditional is being lowered, with what the earlier
+/// ones produced.
+enum LocatorConditionalStage {
+    Check,
+    Extends {
+        check_id: SemanticNodeId,
+        declarations: Vec<(Arc<str>, crate::semantic_query::InferBinderId)>,
+    },
+    True {
+        check_id: SemanticNodeId,
+        extends_id: SemanticNodeId,
+    },
+    False {
+        check_id: SemanticNodeId,
+        extends_id: SemanticNodeId,
+        true_id: SemanticNodeId,
+    },
+}
+
+/// The head half of a named reference's locator lowering.
+enum LocatorRefPlan {
+    /// The node the reference is, with no carrier to intern.
+    Ready(SemanticNodeId),
+    /// The carrier's head resolution, interned over the lowered arguments.
+    Carrier(crate::project_semantic_dispatch::carrier::RefHeadResolution),
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     /// The carrier-only locator-shape lowering entry: intern the FIXED
     /// authored shape of `expr` under the sealed [`LocatorShapeCtx`].
@@ -439,139 +608,611 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.lower_locator_shape_node(expr, &work)
     }
 
-    /// Lower one node of the fixed authored shape. Recursive over the
-    /// typed IR; every arm either interns a structural shell, a deferred
-    /// operator carrier, or an identity carrier — never a reduction.
+    /// Lower one node of the fixed authored shape; every node either
+    /// interns a structural shell, a deferred operator carrier, or an
+    /// identity carrier — never a reduction.
+    ///
+    /// A type's syntax nests without bound (a conditional chained through
+    /// its false branch, `Box<Box<…>>`, `T['a']['b']…`), so the positions
+    /// that lower a child under this lowering's own scope and resolution
+    /// inputs — union and intersection arms, an array's element, tuple
+    /// elements, a template's holes, a parenthesised or rest type, a
+    /// `keyof` operand, an indexed access's object and index, an
+    /// intrinsic's operands, a named reference's arguments, and a
+    /// conditional's check, `extends` clause and branches (the clause and
+    /// the true branch under the binder frames the conditional declares) —
+    /// are lowered from an explicit stack of [`LocatorFrame`]s, each
+    /// resuming when its child's value is delivered, in the order and under
+    /// the binder frames the node's own lowering demands them. Every other
+    /// form is lowered by [`Self::lower_locator_shape_leaf`] and costs one
+    /// native level.
     fn lower_locator_shape_node(&self, expr: &TypeExpr, ctx: &ShapeLowerCtx<'_>) -> SemanticNodeId {
-        let graph = self.graph();
-        let scope = ctx.scope;
-        match expr {
-            // -- Structural terminals --
-            TypeExpr::Primitive(name) => graph.intern_node_with_scope(
-                SemanticNodeData::Primitive(map_primitive_name(*name)),
-                scope.clone(),
-            ),
-            TypeExpr::Literal(value) => graph
-                .intern_node_with_scope(SemanticNodeData::Literal(value.clone()), scope.clone()),
+        let mut frames: Vec<LocatorFrame<'_, '_>> = Vec::new();
+        let (mut next, mut next_binders) = (expr, LocatorBinders::Entry(ctx.binders));
+        loop {
+            let mut value = match self.locator_shape_step(ctx, next, next_binders, &mut frames) {
+                LocatorStep::Value(value) => value,
+                LocatorStep::Descend(child, binders) => {
+                    (next, next_binders) = (child, binders);
+                    continue;
+                }
+            };
+            // Deliver the value to the node waiting for it, until one
+            // needs another child or the outermost node completes.
+            loop {
+                let Some(frame) = frames.pop() else {
+                    return value;
+                };
+                match self.resume_locator_frame(ctx, frame, value, &mut frames) {
+                    LocatorStep::Value(done) => value = done,
+                    LocatorStep::Descend(child, binders) => {
+                        (next, next_binders) = (child, binders);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
-            // -- Composite structural shells --
-            TypeExpr::Union(arms) => {
-                let ids = self.lower_locator_shape_args(arms, ctx);
-                if ids.is_empty() {
-                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-                } else if ids.len() == 1 {
-                    ids[0]
-                } else {
-                    // Locator-shape shell lowering: authored order and
-                    // scope, never a reduction.
-                    graph.intern_node_with_scope(
-                        SemanticNodeData::Union(
-                            crate::semantic_query::composite::CompositeList::authored_shell(ids),
-                        ),
-                        scope.clone(),
-                    )
+    /// Begin lowering one node under `binders`: a structural position
+    /// pushes its frame and descends into its first child (see
+    /// [`Self::lower_locator_shape_node`]); every other form is lowered in
+    /// place.
+    fn locator_shape_step<'e, 'r>(
+        &self,
+        entry: &ShapeLowerCtx<'r>,
+        expr: &'e TypeExpr,
+        binders: LocatorBinders<'r>,
+        frames: &mut Vec<LocatorFrame<'e, 'r>>,
+    ) -> LocatorStep<'e, 'r> {
+        let graph = self.graph();
+        let ctx = entry.with_binders(binders.frames());
+        match expr {
+            TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => match arms.first() {
+                None => LocatorStep::Value(
+                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+                ),
+                Some(first) => {
+                    frames.push(LocatorFrame::Composite {
+                        arms,
+                        union: matches!(expr, TypeExpr::Union(_)),
+                        binders: binders.clone(),
+                        lowered: Vec::with_capacity(arms.len()),
+                    });
+                    LocatorStep::Descend(first, binders)
                 }
-            }
-            TypeExpr::Intersection(arms) => {
-                let ids = self.lower_locator_shape_args(arms, ctx);
-                if ids.is_empty() {
-                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-                } else if ids.len() == 1 {
-                    ids[0]
-                } else {
-                    // Locator-shape shell lowering: see the Union arm above.
-                    graph.intern_node_with_scope(
-                        SemanticNodeData::Intersection(
-                            crate::semantic_query::composite::CompositeList::authored_shell(ids),
-                        ),
-                        scope.clone(),
-                    )
-                }
-            }
+            },
             TypeExpr::Array { element, readonly } => {
-                let element = self.lower_locator_shape_node(element, ctx);
-                graph.intern_node_with_scope(
-                    SemanticNodeData::Array {
-                        element,
-                        readonly: *readonly,
-                    },
-                    scope.clone(),
-                )
+                frames.push(LocatorFrame::Array {
+                    readonly: *readonly,
+                });
+                LocatorStep::Descend(element, binders)
             }
             // The plain tuple shell, per-element label / optional / rest
             // preserved verbatim. No variadic-spread normalization — that is
             // a reduction; open rest elements survive as authored.
-            TypeExpr::Tuple { elements, readonly } => {
-                let lowered: Vec<TupleElement> = elements
-                    .iter()
-                    .map(|el| TupleElement {
-                        label: el.label.as_deref().map(Arc::<str>::from),
-                        value: self.lower_locator_shape_node(&el.ty, ctx),
-                        optional: el.optional,
-                        rest: el.rest,
-                    })
-                    .collect();
-                graph.intern_node_with_scope(
-                    SemanticNodeData::Tuple {
-                        elements: Arc::from(lowered.into_boxed_slice()),
+            TypeExpr::Tuple { elements, readonly } => match elements.first() {
+                None => {
+                    LocatorStep::Value(self.locator_tuple_shell(Vec::new(), *readonly, ctx.scope))
+                }
+                Some(first) => {
+                    frames.push(LocatorFrame::Tuple {
+                        elements,
                         readonly: *readonly,
-                    },
-                    scope.clone(),
-                )
-            }
+                        binders: binders.clone(),
+                        lowered: Vec::with_capacity(elements.len()),
+                    });
+                    LocatorStep::Descend(&first.ty, binders)
+                }
+            },
             TypeExpr::TemplateLiteral {
                 quasis,
                 expressions,
-            } => {
-                let quasis: Arc<[Arc<str>]> =
-                    quasis.iter().map(|q| Arc::from(q.as_str())).collect();
-                let expressions = self.lower_locator_shape_args(expressions, ctx);
-                graph.intern_node_with_scope(
-                    SemanticNodeData::TemplateLiteral {
+            } => match expressions.first() {
+                None => {
+                    LocatorStep::Value(self.locator_template_shell(quasis, Vec::new(), ctx.scope))
+                }
+                Some(first) => {
+                    frames.push(LocatorFrame::Template {
                         quasis,
                         expressions,
-                    },
-                    scope.clone(),
-                )
-            }
+                        binders: binders.clone(),
+                        lowered: Vec::with_capacity(expressions.len()),
+                    });
+                    LocatorStep::Descend(first, binders)
+                }
+            },
             // Parenthesized types are structurally transparent.
-            TypeExpr::Parenthesized(inner) => self.lower_locator_shape_node(inner, ctx),
+            TypeExpr::Parenthesized(inner) => LocatorStep::Descend(inner, binders),
             // A standalone rest outside tuple context is structurally
             // transparent (tuple-rest fidelity rides `TupleElement.rest`).
-            TypeExpr::Rest(inner) => self.lower_locator_shape_node(inner, ctx),
+            TypeExpr::Rest(inner) => LocatorStep::Descend(inner, binders),
 
             // -- Deferred operator shells (NEVER reduced) --
             TypeExpr::KeyOf(operand) => {
-                let base = self.lower_locator_shape_node(operand, ctx);
-                graph.intern_node_with_scope(SemanticNodeData::KeyOf { base }, scope.clone())
+                frames.push(LocatorFrame::KeyOf);
+                LocatorStep::Descend(operand, binders)
             }
             TypeExpr::IndexedAccess { object, index } => {
-                let object = self.lower_locator_shape_node(object, ctx);
-                let index = match index.as_ref() {
-                    TypeExpr::Literal(LiteralValue::String(s)) => {
-                        IndexKey::String(Arc::from(s.as_str()))
+                frames.push(LocatorFrame::IndexedObject {
+                    index,
+                    binders: binders.clone(),
+                });
+                LocatorStep::Descend(object, binders)
+            }
+            TypeExpr::Conditional { check, .. } => {
+                frames.push(LocatorFrame::Conditional {
+                    conditional: expr,
+                    binders: binders.clone(),
+                    stage: LocatorConditionalStage::Check,
+                });
+                LocatorStep::Descend(check, binders)
+            }
+            // Interned DIRECTLY: an intrinsic names no declaration, so it
+            // must never go through `resolve_locator_ref_head` (name
+            // resolution). Operands lower as ordinary children; no
+            // reduction happens here. A wrong operand count is a malformed
+            // input, never a compiler-native node.
+            TypeExpr::IntrinsicApplication { arguments, .. } => match arguments.first() {
+                None => {
+                    LocatorStep::Value(self.locator_intrinsic_shell(expr, Vec::new(), ctx.scope))
+                }
+                Some(first) => {
+                    frames.push(LocatorFrame::Intrinsic {
+                        application: expr,
+                        arguments,
+                        binders: binders.clone(),
+                        lowered: Vec::with_capacity(arguments.len()),
+                    });
+                    LocatorStep::Descend(first, binders)
+                }
+            },
+            // -- Named reference: identity resolution ONLY --
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => match self.plan_locator_ref_head(name, type_arguments, &ctx) {
+                LocatorRefPlan::Ready(value) => LocatorStep::Value(value),
+                LocatorRefPlan::Carrier(head) => match type_arguments.first() {
+                    None => LocatorStep::Value(self.intern_ref_head_carrier(
+                        head,
+                        name,
+                        ctx.scope,
+                        Arc::from(Vec::new()),
+                    )),
+                    Some(first) => {
+                        frames.push(LocatorFrame::RefArguments {
+                            head,
+                            name,
+                            arguments: type_arguments,
+                            binders: binders.clone(),
+                            lowered: Vec::with_capacity(type_arguments.len()),
+                        });
+                        LocatorStep::Descend(first, binders)
                     }
-                    TypeExpr::Literal(LiteralValue::Number(n)) => {
-                        match crate::semantic_query::index_key::integer_convention_index_key(*n) {
-                            Some(i) => IndexKey::Number(i),
-                            None => IndexKey::Computed(self.lower_locator_shape_node(index, ctx)),
-                        }
-                    }
-                    _ => IndexKey::Computed(self.lower_locator_shape_node(index, ctx)),
-                };
-                graph.intern_node_with_scope(
-                    SemanticNodeData::IndexedAccess { object, index },
-                    scope.clone(),
+                },
+            },
+            // -- Object surface: ROLE-FREE member stamps --
+            // A spread-bearing object lowers as a leaf, through its ordered
+            // spread program.
+            TypeExpr::Object(object)
+                if !object
+                    .properties
+                    .iter()
+                    .any(|member| matches!(member, ObjectMember::Spread(_))) =>
+            {
+                self.advance_locator_object(
+                    entry,
+                    object,
+                    0,
+                    LocatorObjectState::with_capacity(object.properties.len()),
+                    binders,
+                    frames,
                 )
             }
-            TypeExpr::Conditional {
-                check,
-                extends,
-                true_type,
-                false_type,
+            _ => LocatorStep::Value(self.lower_locator_shape_leaf(expr, &ctx)),
+        }
+    }
+
+    /// Continue an object's member loop at member `next`, in authored order
+    /// (the stored surface's `entries` stream is the source order, never
+    /// the grouped bucket order): a property's value and an index
+    /// signature's key and value types lower from the explicit stack, a
+    /// computed key, a method and a call or construct signature in place.
+    /// With no member left, the object interns.
+    fn advance_locator_object<'e, 'r>(
+        &self,
+        entry: &ShapeLowerCtx<'r>,
+        object: &'e verter_type_expr::ObjectExpr,
+        mut next: usize,
+        mut state: LocatorObjectState,
+        binders: LocatorBinders<'r>,
+        frames: &mut Vec<LocatorFrame<'e, 'r>>,
+    ) -> LocatorStep<'e, 'r> {
+        let ctx = entry.with_binders(binders.frames());
+        let scope = ctx.scope;
+        while let Some(member) = object.properties.get(next) {
+            let member_ordinal = u32::try_from(next).unwrap_or(u32::MAX);
+            match member {
+                ObjectMember::Property(prop) => {
+                    let key = prop.key.clone().map(
+                        |computed| self.lower_locator_shape_node(&computed, &ctx),
+                        |identity| identity,
+                    );
+                    frames.push(LocatorFrame::Object {
+                        object,
+                        next,
+                        state,
+                        binders: binders.clone(),
+                        awaiting: LocatorObjectAwait::PropertyValue(prop, key),
+                    });
+                    return LocatorStep::Descend(&prop.ty, binders);
+                }
+                ObjectMember::Method(method) => {
+                    let function_expr = TypeExpr::Function(Arc::new(method.function.clone()));
+                    register_locator_function_alias(
+                        ctx.infer_binders,
+                        &function_expr,
+                        &method.function,
+                    );
+                    let value = self.lower_locator_shape_node(&function_expr, &ctx);
+                    let value =
+                        self.patch_member_signature_occurrence(value, &ctx, member_ordinal, 0);
+                    state.entries.push(SurfaceEntry::Member(SurfaceMember {
+                        key: method.key.clone().map(
+                            |computed| self.lower_locator_shape_node(&computed, &ctx),
+                            |identity| identity,
+                        ),
+                        value,
+                        optional: method.optional,
+                        readonly: false,
+                        method_kind: Some(method.method_kind),
+                        has_implementation_body: method.has_implementation_body,
+                        visibility: method.visibility,
+                        // Declaration materialization is never a
+                        // literal origin (see the property's resume).
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                        spans: method.spans,
+                        declaration_origin: scope.canonical_file(),
+                        declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                        merge_role: MergeRoleStamp::NEUTRAL,
+                    }));
+                }
+                ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                    let construct = matches!(member, ObjectMember::ConstructSignature(_));
+                    let function_expr = if construct {
+                        TypeExpr::ConstructorType(Arc::new(func.clone()))
+                    } else {
+                        TypeExpr::Function(Arc::new(func.clone()))
+                    };
+                    register_locator_function_alias(ctx.infer_binders, &function_expr, func);
+                    let node = self.lower_locator_shape_node(&function_expr, &ctx);
+                    let bucket = if construct {
+                        &mut state.construct_signatures
+                    } else {
+                        &mut state.call_signatures
+                    };
+                    let node =
+                        self.patch_member_signature_occurrence(node, &ctx, member_ordinal, *bucket);
+                    *bucket = bucket.saturating_add(1);
+                    state.entries.push(if construct {
+                        SurfaceEntry::ConstructSignature(node)
+                    } else {
+                        SurfaceEntry::CallSignature(node)
+                    });
+                }
+                ObjectMember::IndexSignature(sig) => {
+                    frames.push(LocatorFrame::Object {
+                        object,
+                        next,
+                        state,
+                        binders: binders.clone(),
+                        awaiting: LocatorObjectAwait::IndexKey(sig),
+                    });
+                    return LocatorStep::Descend(&sig.key_type, binders);
+                }
+                // Unreachable by construction: a spread-bearing object
+                // lowers as a leaf, through its spread program.
+                ObjectMember::Spread(_) => {}
+            }
+            next += 1;
+        }
+        let view = SurfaceView::from_entries(state.entries, None, state.has_index_signature);
+        LocatorStep::Value(
+            self.graph()
+                .intern_node_with_scope(SemanticNodeData::Object(view), scope.clone()),
+        )
+    }
+
+    /// Deliver `value`, the child `frame` descended into, and continue that
+    /// node's lowering.
+    fn resume_locator_frame<'e, 'r>(
+        &self,
+        entry: &ShapeLowerCtx<'r>,
+        frame: LocatorFrame<'e, 'r>,
+        value: SemanticNodeId,
+        frames: &mut Vec<LocatorFrame<'e, 'r>>,
+    ) -> LocatorStep<'e, 'r> {
+        let graph = self.graph();
+        let scope = entry.scope;
+        match frame {
+            LocatorFrame::Composite {
+                arms,
+                union,
+                binders,
+                mut lowered,
             } => {
-                let check_id = self.lower_locator_shape_node(check, ctx);
-                let extends_path = ctx.infer_binders.path_for_expr(expr).child(
+                lowered.push(value);
+                if let Some(next) = arms.get(lowered.len()) {
+                    frames.push(LocatorFrame::Composite {
+                        arms,
+                        union,
+                        binders: binders.clone(),
+                        lowered,
+                    });
+                    return LocatorStep::Descend(next, binders);
+                }
+                if lowered.len() == 1 {
+                    return LocatorStep::Value(value);
+                }
+                // Locator-shape shell lowering: authored order and
+                // scope, never a reduction.
+                let ids: Arc<[SemanticNodeId]> = Arc::from(lowered.into_boxed_slice());
+                LocatorStep::Value(graph.intern_node_with_scope(
+                    if union {
+                        SemanticNodeData::Union(
+                            crate::semantic_query::composite::CompositeList::authored_shell(ids),
+                        )
+                    } else {
+                        SemanticNodeData::Intersection(
+                            crate::semantic_query::composite::CompositeList::authored_shell(ids),
+                        )
+                    },
+                    scope.clone(),
+                ))
+            }
+            LocatorFrame::Array { readonly } => LocatorStep::Value(graph.intern_node_with_scope(
+                SemanticNodeData::Array {
+                    element: value,
+                    readonly,
+                },
+                scope.clone(),
+            )),
+            LocatorFrame::Tuple {
+                elements,
+                readonly,
+                binders,
+                mut lowered,
+            } => {
+                let element = &elements[lowered.len()];
+                lowered.push(TupleElement {
+                    label: element.label.as_deref().map(Arc::<str>::from),
+                    value,
+                    optional: element.optional,
+                    rest: element.rest,
+                });
+                match elements.get(lowered.len()) {
+                    Some(next) => {
+                        frames.push(LocatorFrame::Tuple {
+                            elements,
+                            readonly,
+                            binders: binders.clone(),
+                            lowered,
+                        });
+                        LocatorStep::Descend(&next.ty, binders)
+                    }
+                    None => LocatorStep::Value(self.locator_tuple_shell(lowered, readonly, scope)),
+                }
+            }
+            LocatorFrame::Template {
+                quasis,
+                expressions,
+                binders,
+                mut lowered,
+            } => {
+                lowered.push(value);
+                match expressions.get(lowered.len()) {
+                    Some(next) => {
+                        frames.push(LocatorFrame::Template {
+                            quasis,
+                            expressions,
+                            binders: binders.clone(),
+                            lowered,
+                        });
+                        LocatorStep::Descend(next, binders)
+                    }
+                    None => LocatorStep::Value(self.locator_template_shell(quasis, lowered, scope)),
+                }
+            }
+            LocatorFrame::KeyOf => LocatorStep::Value(
+                graph
+                    .intern_node_with_scope(SemanticNodeData::KeyOf { base: value }, scope.clone()),
+            ),
+            LocatorFrame::IndexedObject { index, binders } => {
+                let key = match index {
+                    TypeExpr::Literal(LiteralValue::String(s)) => {
+                        Some(IndexKey::String(Arc::from(s.as_str())))
+                    }
+                    TypeExpr::Literal(LiteralValue::Number(n)) => {
+                        crate::semantic_query::index_key::integer_convention_index_key(*n)
+                            .map(IndexKey::Number)
+                    }
+                    _ => None,
+                };
+                match key {
+                    Some(index) => LocatorStep::Value(graph.intern_node_with_scope(
+                        SemanticNodeData::IndexedAccess {
+                            object: value,
+                            index,
+                        },
+                        scope.clone(),
+                    )),
+                    None => {
+                        frames.push(LocatorFrame::IndexedIndex { object: value });
+                        LocatorStep::Descend(index, binders)
+                    }
+                }
+            }
+            LocatorFrame::IndexedIndex { object } => {
+                LocatorStep::Value(graph.intern_node_with_scope(
+                    SemanticNodeData::IndexedAccess {
+                        object,
+                        index: IndexKey::Computed(value),
+                    },
+                    scope.clone(),
+                ))
+            }
+            LocatorFrame::Intrinsic {
+                application,
+                arguments,
+                binders,
+                mut lowered,
+            } => {
+                lowered.push(value);
+                match arguments.get(lowered.len()) {
+                    Some(next) => {
+                        frames.push(LocatorFrame::Intrinsic {
+                            application,
+                            arguments,
+                            binders: binders.clone(),
+                            lowered,
+                        });
+                        LocatorStep::Descend(next, binders)
+                    }
+                    None => LocatorStep::Value(self.locator_intrinsic_shell(
+                        application,
+                        lowered,
+                        scope,
+                    )),
+                }
+            }
+            LocatorFrame::RefArguments {
+                head,
+                name,
+                arguments,
+                binders,
+                mut lowered,
+            } => {
+                lowered.push(value);
+                match arguments.get(lowered.len()) {
+                    Some(next) => {
+                        frames.push(LocatorFrame::RefArguments {
+                            head,
+                            name,
+                            arguments,
+                            binders: binders.clone(),
+                            lowered,
+                        });
+                        LocatorStep::Descend(next, binders)
+                    }
+                    None => LocatorStep::Value(self.intern_ref_head_carrier(
+                        head,
+                        name,
+                        scope,
+                        Arc::from(lowered.into_boxed_slice()),
+                    )),
+                }
+            }
+            LocatorFrame::Conditional {
+                conditional,
+                binders,
+                stage,
+            } => self.resume_locator_conditional(entry, conditional, binders, stage, value, frames),
+            LocatorFrame::Object {
+                object,
+                next,
+                mut state,
+                binders,
+                awaiting,
+            } => {
+                match awaiting {
+                    LocatorObjectAwait::PropertyValue(prop, key) => {
+                        state.entries.push(SurfaceEntry::Member(SurfaceMember {
+                            key,
+                            value,
+                            optional: prop.optional,
+                            readonly: prop.readonly,
+                            method_kind: None,
+                            has_implementation_body: false,
+                            visibility: prop.visibility,
+                            // The locator path materializes DECLARATION
+                            // bodies: a member reached through a
+                            // variable/declaration deref is `NonLiteral`
+                            // regardless of the origin the producer recorded
+                            // on the authored literal — freshness never
+                            // survives declaration materialization.
+                            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                            spans: prop.spans,
+                            declaration_origin: scope.canonical_file(),
+                            // ROLE-FREE shape identity: the locator shape
+                            // never carries a caller-relative provenance or
+                            // merge role — those are projection-time stamps
+                            // applied to the fetched shape, never node
+                            // identity. NEUTRAL is the ONLY stamp this path
+                            // can construct: the non-neutral producers
+                            // require a `ProjectionReductionContext`
+                            // witness, and the sealed `LocatorShapeCtx`
+                            // neither contains nor converts to one.
+                            declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                            merge_role: MergeRoleStamp::NEUTRAL,
+                        }));
+                    }
+                    LocatorObjectAwait::IndexKey(sig) => {
+                        frames.push(LocatorFrame::Object {
+                            object,
+                            next,
+                            state,
+                            binders: binders.clone(),
+                            awaiting: LocatorObjectAwait::IndexValue(sig, value),
+                        });
+                        return LocatorStep::Descend(&sig.value_type, binders);
+                    }
+                    LocatorObjectAwait::IndexValue(sig, key_type) => {
+                        state.has_index_signature = true;
+                        state
+                            .entries
+                            .push(SurfaceEntry::IndexSignature(IndexSignature {
+                                key_type,
+                                value_type: value,
+                                readonly: sig.readonly,
+                                spans: sig.spans,
+                                declaration_origin: scope.canonical_file(),
+                            }));
+                    }
+                }
+                self.advance_locator_object(entry, object, next + 1, state, binders, frames)
+            }
+        }
+    }
+
+    /// Continue a conditional's lowering with the value of the child its
+    /// `stage` descended into: the check, then the `extends` clause under a
+    /// frame declaring its `infer` binders, then the true branch under a
+    /// frame referencing them, then the false branch, then the carrier.
+    fn resume_locator_conditional<'e, 'r>(
+        &self,
+        entry: &ShapeLowerCtx<'r>,
+        conditional: &'e TypeExpr,
+        binders: LocatorBinders<'r>,
+        stage: LocatorConditionalStage,
+        value: SemanticNodeId,
+        frames: &mut Vec<LocatorFrame<'e, 'r>>,
+    ) -> LocatorStep<'e, 'r> {
+        let TypeExpr::Conditional {
+            extends,
+            true_type,
+            false_type,
+            ..
+        } = conditional
+        else {
+            return LocatorStep::Value(self.opaque(QueryError::Miss));
+        };
+        let graph = self.graph();
+        let scope = entry.scope;
+        match stage {
+            LocatorConditionalStage::Check => {
+                let check_id = value;
+                let extends_path = entry.infer_binders.path_for_expr(conditional).child(
                     crate::semantic_query::infer_binder_names::
                         InferSyntaxPathStep::ConditionalExtends,
                 );
@@ -583,7 +1224,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let mut declaration_frame = LocatorBinderFrame::default();
                 let mut declarations = Vec::with_capacity(infer_sites.len());
                 for site in infer_sites {
-                    let binder = ctx.infer_binders.binder_at(&site.path);
+                    let binder = entry.infer_binders.binder_at(&site.path);
                     let declaration = graph.intern_node_with_scope(
                         SemanticNodeData::Infer {
                             name: Arc::clone(&site.name),
@@ -594,12 +1235,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     declaration_frame.bind_infer_declaration(Arc::clone(&site.name), declaration);
                     declarations.push((site.name, binder));
                 }
-                let mut extends_frames: Vec<LocatorBinderFrame> = ctx.binders.to_vec();
-                extends_frames.push(declaration_frame);
-                let extends_ctx = ctx.with_binders(&extends_frames);
-                let extends_id = self.lower_locator_shape_node(extends, &extends_ctx);
-                let true_id = if declarations.is_empty() {
-                    self.lower_locator_shape_node(true_type, ctx)
+                let extends_binders = binders.extended(declaration_frame);
+                frames.push(LocatorFrame::Conditional {
+                    conditional,
+                    binders,
+                    stage: LocatorConditionalStage::Extends {
+                        check_id,
+                        declarations,
+                    },
+                });
+                LocatorStep::Descend(extends, extends_binders)
+            }
+            LocatorConditionalStage::Extends {
+                check_id,
+                declarations,
+            } => {
+                let extends_id = value;
+                let true_binders = if declarations.is_empty() {
+                    binders.clone()
                 } else {
                     let mut infer_frame = LocatorBinderFrame::default();
                     for (name, binder) in declarations {
@@ -612,28 +1265,123 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         );
                         infer_frame.bind(name, reference);
                     }
-                    let mut frames: Vec<LocatorBinderFrame> = ctx.binders.to_vec();
-                    frames.push(infer_frame);
-                    let true_ctx = ctx.with_binders(&frames);
-                    self.lower_locator_shape_node(true_type, &true_ctx)
+                    binders.extended(infer_frame)
                 };
-                let false_id = self.lower_locator_shape_node(false_type, ctx);
+                frames.push(LocatorFrame::Conditional {
+                    conditional,
+                    binders,
+                    stage: LocatorConditionalStage::True {
+                        check_id,
+                        extends_id,
+                    },
+                });
+                LocatorStep::Descend(true_type, true_binders)
+            }
+            LocatorConditionalStage::True {
+                check_id,
+                extends_id,
+            } => {
+                frames.push(LocatorFrame::Conditional {
+                    conditional,
+                    binders: binders.clone(),
+                    stage: LocatorConditionalStage::False {
+                        check_id,
+                        extends_id,
+                        true_id: value,
+                    },
+                });
+                LocatorStep::Descend(false_type, binders)
+            }
+            LocatorConditionalStage::False {
+                check_id,
+                extends_id,
+                true_id,
+            } => {
                 let distributive = matches!(
                     graph.node_data(check_id).as_deref(),
                     Some(SemanticNodeData::TypeParam { .. })
                 );
-                graph.intern_node_with_scope(
+                LocatorStep::Value(graph.intern_node_with_scope(
                     SemanticNodeData::Conditional {
                         check: check_id,
                         extends: extends_id,
                         true_branch_ref: true_id,
-                        false_branch_ref: false_id,
+                        false_branch_ref: value,
                         distributive,
                         pending: None,
                     },
                     scope.clone(),
-                )
+                ))
             }
+        }
+    }
+
+    /// The plain tuple shell of lowered elements.
+    fn locator_tuple_shell(
+        &self,
+        lowered: Vec<TupleElement>,
+        readonly: bool,
+        scope: &NodeScopeId,
+    ) -> SemanticNodeId {
+        self.graph().intern_node_with_scope(
+            SemanticNodeData::Tuple {
+                elements: Arc::from(lowered.into_boxed_slice()),
+                readonly,
+            },
+            scope.clone(),
+        )
+    }
+
+    /// The template-literal shell of lowered holes.
+    fn locator_template_shell(
+        &self,
+        quasis: &[String],
+        expressions: Vec<SemanticNodeId>,
+        scope: &NodeScopeId,
+    ) -> SemanticNodeId {
+        let quasis: Arc<[Arc<str>]> = quasis.iter().map(|q| Arc::from(q.as_str())).collect();
+        self.graph().intern_node_with_scope(
+            SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions: Arc::from(expressions.into_boxed_slice()),
+            },
+            scope.clone(),
+        )
+    }
+
+    /// The intrinsic application `application` over its lowered operands.
+    fn locator_intrinsic_shell(
+        &self,
+        application: &TypeExpr,
+        arguments: Vec<SemanticNodeId>,
+        scope: &NodeScopeId,
+    ) -> SemanticNodeId {
+        let TypeExpr::IntrinsicApplication { op, .. } = application else {
+            return self.opaque(QueryError::Miss);
+        };
+        match SemanticNodeData::intrinsic_application(*op, arguments.into()) {
+            Some(application) => self
+                .graph()
+                .intern_node_with_scope(application, scope.clone()),
+            None => self.opaque(QueryError::Miss),
+        }
+    }
+
+    /// Lower one node that is not a structural position of
+    /// [`Self::lower_locator_shape_node`]'s explicit stack: its children
+    /// lower through that entry, one native level beneath this one.
+    fn lower_locator_shape_leaf(&self, expr: &TypeExpr, ctx: &ShapeLowerCtx<'_>) -> SemanticNodeId {
+        let graph = self.graph();
+        let scope = ctx.scope;
+        match expr {
+            // -- Structural terminals --
+            TypeExpr::Primitive(name) => graph.intern_node_with_scope(
+                SemanticNodeData::Primitive(map_primitive_name(*name)),
+                scope.clone(),
+            ),
+            TypeExpr::Literal(value) => graph
+                .intern_node_with_scope(SemanticNodeData::Literal(value.clone()), scope.clone()),
+
             // Deferred mapped-type shell — the per-key value surface is
             // NEVER enumerated here.
             TypeExpr::Mapped {
@@ -674,9 +1422,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                     scope.clone(),
                 );
+                let mut over_type_variable = false;
                 let (source_node, key_space, base_infer_name) = match source.as_ref() {
                     TypeExpr::KeyOf(inner) => {
                         let inner_id = self.lower_locator_shape_node(inner, ctx);
+                        over_type_variable =
+                            crate::semantic_query::keyof_operand_is_type_variable(graph, inner_id);
                         let key_space = graph.intern_node_with_scope(
                             SemanticNodeData::KeyOf { base: inner_id },
                             scope.clone(),
@@ -744,6 +1495,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             readonly,
                             name_remap,
                             kind,
+                            over_type_variable,
                         },
                     },
                     scope.clone(),
@@ -812,28 +1564,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                 );
                 built[0].binder
-            }
-
-            // -- Named reference: identity resolution ONLY --
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } => self.resolve_locator_ref_head(name, type_arguments, ctx),
-
-            // Interned DIRECTLY: an intrinsic names no declaration, so it
-            // must never go through `resolve_locator_ref_head` (name
-            // resolution). Operands lower as ordinary children; no
-            // reduction happens here. A wrong operand count is a malformed
-            // input, never a compiler-native node.
-            TypeExpr::IntrinsicApplication { op, arguments } => {
-                let args: Vec<SemanticNodeId> = arguments
-                    .iter()
-                    .map(|argument| self.lower_locator_shape_node(argument, ctx))
-                    .collect();
-                match SemanticNodeData::intrinsic_application(*op, args.into()) {
-                    Some(application) => graph.intern_node_with_scope(application, scope.clone()),
-                    None => self.opaque(QueryError::Miss),
-                }
             }
 
             TypeExpr::Infer { name } => match ctx.lookup_infer_declaration(name) {
@@ -981,155 +1711,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope.clone(),
                     );
                 }
-                let declaration_origin = scope.canonical_file();
-                let mut members: Vec<SurfaceMember> = Vec::new();
-                let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
-                let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
-                let mut index_signatures: Vec<IndexSignature> = Vec::new();
-                // Authored interleave, kept so the stored surface's
-                // `entries` stream is the source order, never the
-                // grouped bucket order.
-                let mut ordered_entries: Vec<SurfaceEntry> =
-                    Vec::with_capacity(obj.properties.len());
-                for (member_ordinal, member) in obj.properties.iter().enumerate() {
-                    let member_ordinal = u32::try_from(member_ordinal).unwrap_or(u32::MAX);
-                    match member {
-                        ObjectMember::Property(prop) => {
-                            let member_index = members.len();
-                            members.push(SurfaceMember {
-                                key: prop.key.clone().map(
-                                    |computed| self.lower_locator_shape_node(&computed, ctx),
-                                    |identity| identity,
-                                ),
-                                value: self.lower_locator_shape_node(&prop.ty, ctx),
-                                optional: prop.optional,
-                                readonly: prop.readonly,
-                                method_kind: None,
-                                has_implementation_body: false,
-                                visibility: prop.visibility,
-                                // The locator path materializes DECLARATION
-                                // bodies: a member reached through a
-                                // variable/declaration deref is `NonLiteral`
-                                // regardless of the origin the producer recorded
-                                // on the authored literal — freshness never
-                                // survives declaration materialization.
-                                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                                spans: prop.spans,
-                                declaration_origin: declaration_origin.clone(),
-                                // ROLE-FREE shape identity: the locator shape
-                                // never carries a caller-relative provenance or
-                                // merge role — those are projection-time stamps
-                                // applied to the fetched shape, never node
-                                // identity. NEUTRAL is the ONLY stamp this path
-                                // can construct: the non-neutral producers
-                                // require a `ProjectionReductionContext`
-                                // witness, and the sealed `LocatorShapeCtx`
-                                // neither contains nor converts to one.
-                                declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
-                                merge_role: MergeRoleStamp::NEUTRAL,
-                            });
-                            ordered_entries
-                                .push(SurfaceEntry::Member(members[member_index].clone()));
-                        }
-                        ObjectMember::Method(method) => {
-                            let function_expr =
-                                TypeExpr::Function(Arc::new(method.function.clone()));
-                            register_locator_function_alias(
-                                ctx.infer_binders,
-                                &function_expr,
-                                &method.function,
-                            );
-                            let value = self.lower_locator_shape_node(&function_expr, ctx);
-                            let value = self.patch_member_signature_occurrence(
-                                value,
-                                ctx,
-                                member_ordinal,
-                                0,
-                            );
-                            let member_index = members.len();
-                            members.push(SurfaceMember {
-                                key: method.key.clone().map(
-                                    |computed| self.lower_locator_shape_node(&computed, ctx),
-                                    |identity| identity,
-                                ),
-                                value,
-                                optional: method.optional,
-                                readonly: false,
-                                method_kind: Some(method.method_kind),
-                                has_implementation_body: method.has_implementation_body,
-                                visibility: method.visibility,
-                                // Declaration materialization is never a
-                                // literal origin (see the Property arm).
-                                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                                spans: method.spans,
-                                declaration_origin: declaration_origin.clone(),
-                                declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
-                                merge_role: MergeRoleStamp::NEUTRAL,
-                            });
-                            ordered_entries
-                                .push(SurfaceEntry::Member(members[member_index].clone()));
-                        }
-                        ObjectMember::CallSignature(func) => {
-                            let function_expr = TypeExpr::Function(Arc::new(func.clone()));
-                            register_locator_function_alias(
-                                ctx.infer_binders,
-                                &function_expr,
-                                func,
-                            );
-                            let node = self.lower_locator_shape_node(&function_expr, ctx);
-                            let bucket_ordinal =
-                                u32::try_from(call_signatures.len()).unwrap_or(u32::MAX);
-                            let node = self.patch_member_signature_occurrence(
-                                node,
-                                ctx,
-                                member_ordinal,
-                                bucket_ordinal,
-                            );
-                            call_signatures.push(node);
-                            ordered_entries.push(SurfaceEntry::CallSignature(node));
-                        }
-                        ObjectMember::ConstructSignature(func) => {
-                            let function_expr = TypeExpr::ConstructorType(Arc::new(func.clone()));
-                            register_locator_function_alias(
-                                ctx.infer_binders,
-                                &function_expr,
-                                func,
-                            );
-                            let node = self.lower_locator_shape_node(&function_expr, ctx);
-                            let bucket_ordinal =
-                                u32::try_from(construct_signatures.len()).unwrap_or(u32::MAX);
-                            let node = self.patch_member_signature_occurrence(
-                                node,
-                                ctx,
-                                member_ordinal,
-                                bucket_ordinal,
-                            );
-                            construct_signatures.push(node);
-                            ordered_entries.push(SurfaceEntry::ConstructSignature(node));
-                        }
-                        ObjectMember::IndexSignature(sig) => {
-                            let index_index = index_signatures.len();
-                            index_signatures.push(IndexSignature {
-                                key_type: self.lower_locator_shape_node(&sig.key_type, ctx),
-                                value_type: self.lower_locator_shape_node(&sig.value_type, ctx),
-                                readonly: sig.readonly,
-                                spans: sig.spans,
-                                declaration_origin: declaration_origin.clone(),
-                            });
-                            ordered_entries.push(SurfaceEntry::IndexSignature(
-                                index_signatures[index_index].clone(),
-                            ));
-                        }
-                        // Unreachable by construction: the spread-bearing
-                        // check above fails the whole object closed before
-                        // this member loop runs.
-                        ObjectMember::Spread(_) => {}
-                    }
-                }
-                let has_index_signature = !index_signatures.is_empty();
-                let view = SurfaceView::from_entries(ordered_entries, None, has_index_signature);
-                graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
+                // Every other object lowers from the explicit stack.
+                self.lower_locator_shape_node(expr, ctx)
             }
+            // The structural positions lower from the explicit stack.
+            TypeExpr::Union(_)
+            | TypeExpr::Intersection(_)
+            | TypeExpr::Array { .. }
+            | TypeExpr::Tuple { .. }
+            | TypeExpr::TemplateLiteral { .. }
+            | TypeExpr::Parenthesized(_)
+            | TypeExpr::Rest(_)
+            | TypeExpr::KeyOf(_)
+            | TypeExpr::IndexedAccess { .. }
+            | TypeExpr::Conditional { .. }
+            | TypeExpr::IntrinsicApplication { .. }
+            | TypeExpr::Ref { .. } => self.lower_locator_shape_node(expr, ctx),
         }
     }
 
@@ -1282,8 +1879,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 optional: p.optional,
                 rest: p.rest,
                 span: p.span,
+                declared_literal: crate::semantic_query::declares_literal_type(&p.ty),
             })
             .collect();
+        // A body-derived return carries the predicate the checker infers
+        // from the body beside it.
+        let mut inferred_predicate = None;
         let (return_type, return_carrier) = match &func.flow_return {
             // A body-derived return is demanded from the whole-function
             // producer through the sealed helper: the extractor marked the
@@ -1314,11 +1915,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope_canonical.as_ref(),
                         ) {
                             super::flow_return::FunctionReturnNode::Flow(result) => {
+                                inferred_predicate = result.inferred_predicate();
                                 result.return_type()
                             }
                             _ => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
                         };
-                        (return_type, carrier)
+                        // An enclosing parameter the body reads rebinds to
+                        // this lowering's binder for it, so the receiver's
+                        // instantiation reaches the return (see
+                        // `rebind_flow_return_binders`).
+                        // The signature's own parameters stay the flow
+                        // lane's: the call resolver instantiates them
+                        // through the body-derived carrier.
+                        let own =
+                            |name: &str| func.type_parameters.iter().any(|tp| tp.name == name);
+                        let bind = |name: &str| match inner_ctx.lookup_binder(name) {
+                            Some(BinderSlot::Usable(binder)) if !own(name) => Some(binder),
+                            _ => None,
+                        };
+                        let rebound = self.rebind_flow_return_binders(
+                            return_type,
+                            scope_canonical.as_ref(),
+                            bind,
+                        );
+                        if rebound == return_type {
+                            (return_type, carrier)
+                        } else {
+                            inferred_predicate = inferred_predicate.map(|predicate| {
+                                predicate.map_type(|target| {
+                                    self.rebind_flow_return_binders(
+                                        target,
+                                        scope_canonical.as_ref(),
+                                        bind,
+                                    )
+                                })
+                            });
+                            (
+                                rebound,
+                                crate::semantic_query::SignatureReturnCarrier::Declared(rebound),
+                            )
+                        }
                     }
                     None => (
                         graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
@@ -1344,6 +1980,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ),
             },
         };
+        // The predicate target is a fixed authored shape under the
+        // signature's own binders, exactly like the return.
+        let predicate = func
+            .predicate
+            .as_deref()
+            .and_then(|predicate| {
+                let target = predicate
+                    .ty
+                    .as_deref()
+                    .map(|target| self.lower_locator_shape_node(target, &inner_ctx));
+                crate::semantic_query::SignaturePredicate::resolve(predicate, &params, target)
+            })
+            .or(inferred_predicate);
         graph.intern_node_with_scope(
             SemanticNodeData::Signature {
                 kind,
@@ -1357,6 +2006,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_carrier,
                 signature_span: func.spans.signature,
                 return_type_span: func.spans.return_type,
+                predicate,
+                is_abstract: func.is_abstract,
             },
             scope.clone(),
         )
@@ -1374,29 +2025,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    interns the `__builtin__` `InstantiationRef` carrier;
     /// 4. an unresolvable name stays a `BareRef` carrier for the demand
     ///    points.
-    fn resolve_locator_ref_head(
+    ///
+    /// This is the head half: the node a binder reference or a refused
+    /// reference IS, or the head resolution a carrier then interns over the
+    /// reference's lowered arguments ([`LocatorFrame::RefArguments`]).
+    fn plan_locator_ref_head(
         &self,
         name: &Arc<str>,
         type_arguments: &[TypeExpr],
         ctx: &ShapeLowerCtx<'_>,
-    ) -> SemanticNodeId {
+    ) -> LocatorRefPlan {
         let scope = ctx.scope;
 
         match ctx.lookup_binder(name) {
             Some(BinderSlot::Usable(binder)) => {
                 if type_arguments.is_empty() {
-                    return binder;
+                    return LocatorRefPlan::Ready(binder);
                 }
                 // An applied binder (`T<X>` where `T` is a bound type
                 // parameter) has no faithful authored shape — fail closed
                 // rather than leak the shadowed name as an unbound reference.
-                return self.opaque(QueryError::Miss);
+                return LocatorRefPlan::Ready(self.opaque(QueryError::Miss));
             }
             // A shadow-forbidden name (a default bound's self / forward
             // sibling): the name is declared in the frame, so it shadows
             // any outer same-named declaration, but the reference itself is
             // illegal — unbound-within-frame, never the outer symbol.
-            Some(BinderSlot::ShadowOnly) => return self.opaque(QueryError::Miss),
+            Some(BinderSlot::ShadowOnly) => {
+                return LocatorRefPlan::Ready(self.opaque(QueryError::Miss))
+            }
             None => {}
         }
 
@@ -1410,11 +2067,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .scope_payload
             .is_some_and(|payload| payload.scope_type_bindings().contains_key(name.as_ref()))
         {
-            return self.intern_ref_head_carrier(
+            return LocatorRefPlan::Carrier(
                 crate::project_semantic_dispatch::carrier::RefHeadResolution::Unresolved,
-                name,
-                scope,
-                self.lower_locator_shape_args(type_arguments, ctx),
             );
         }
 
@@ -1501,12 +2155,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 whole_hash,
                 decl_name: Arc::clone(&ri.symbol_name),
             };
-            return self.intern_ref_head_carrier(
-                RefHeadResolution::Resolved(identity),
-                name,
-                scope,
-                self.lower_locator_shape_args(type_arguments, ctx),
-            );
+            return LocatorRefPlan::Carrier(RefHeadResolution::Resolved(identity));
         }
 
         // Unshadowed global lib heads: `Promise` and the builtin utilities
@@ -1518,27 +2167,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
             .is_some()
         {
-            return self.intern_ref_head_carrier(
-                RefHeadResolution::Builtin(DeclIdentity {
-                    canonical_id: Arc::from("__builtin__"),
-                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    whole_hash: HashValue::default(),
-                    decl_name: Arc::clone(name),
-                }),
-                name,
-                scope,
-                self.lower_locator_shape_args(type_arguments, ctx),
-            );
+            return LocatorRefPlan::Carrier(RefHeadResolution::Builtin(DeclIdentity {
+                canonical_id: Arc::from("__builtin__"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::clone(name),
+            }));
         }
 
         // Unresolved: keep the deferred BareRef carrier — demand-time
         // carrier-subject normalization owns its resolution.
-        self.intern_ref_head_carrier(
-            RefHeadResolution::Unresolved,
-            name,
-            scope,
-            self.lower_locator_shape_args(type_arguments, ctx),
-        )
+        LocatorRefPlan::Carrier(RefHeadResolution::Unresolved)
     }
 
     /// The session-private locator-shape provider: lower the fixed authored

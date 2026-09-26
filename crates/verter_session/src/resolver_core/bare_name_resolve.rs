@@ -53,6 +53,7 @@ use crate::resolver_core::ResolverContext;
 /// the dispatch gates, and [`ScopeShadowing`](crate::resolver_core::scope_shadowing::ScopeShadowing)
 /// all check both sources), so the materialized union the payload used
 /// to carry is redundant.
+#[derive(Clone)]
 pub(crate) struct DeclarationScopePayload {
     bundle: Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
     owner: verter_type_expr::TopLevelOwnerId,
@@ -85,6 +86,14 @@ impl DeclarationScopePayload {
     #[must_use]
     pub(crate) fn owner(&self) -> verter_type_expr::TopLevelOwnerId {
         self.owner
+    }
+
+    /// The prepared bundle this payload views.
+    #[cfg(test)]
+    pub(crate) fn bundle_for_tests(
+        &self,
+    ) -> &Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle> {
+        &self.bundle
     }
 
     fn owner_scope(&self) -> Option<&crate::resolver_core::prepared_decl::PreparedOwnerScope> {
@@ -203,7 +212,13 @@ pub(crate) fn resolve_bare_name_in_scope(
         // merged global declaration. The prepared-decl builder + `ResolveDecl`
         // both fall back to the global augmentation inventory under the same
         // `(canonical, name)` identity.
-        if entry.shallow_state.has_global_augmentation(name) {
+        // Likewise a type of one of the file's `declare module "…"` blocks:
+        // the block's own references to the name read it.
+        if entry
+            .shallow_state
+            .type_fallback_augmentation_scope(scope_owner, name)
+            .is_some()
+        {
             return Some(mint_in_owner(scope_owner));
         }
     }
@@ -355,20 +370,67 @@ fn resolve_namespace_member_from_facts(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
-    _scope_payload: Option<&DeclarationScopePayload>,
+    scope_payload: Option<&DeclarationScopePayload>,
     symbol_name: &str,
 ) -> Option<ResolvedRootIdentity> {
     let dot_pos = symbol_name.find('.')?;
     let prefix = &symbol_name[..dot_pos];
     let member = &symbol_name[dot_pos + 1..];
-    let target_canonical =
-        resolve_namespace_import_canonical_from_facts(ctx, canonical_id, owner, prefix)?;
+    let Some(target_canonical) =
+        resolve_namespace_import_canonical_from_facts(ctx, canonical_id, owner, prefix)
+    else {
+        // `Ns.Member` over a NAMED import of a namespace declaration
+        // (`import { Ns } from './m'`): the member is the declaring file's
+        // own qualified declaration.
+        let named_import = ctx
+            .ensure_indexed_ready_serve(canonical_id)
+            .and_then(|serve| {
+                match serve
+                    .indexed
+                    .shallow_state
+                    .visible_value_binding(owner, prefix)?
+                {
+                    crate::resolver_core::shallow_file_state::LexicalValueBinding::Import(
+                        target,
+                    ) => Some(!target.is_namespace),
+                    crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(_) => None,
+                }
+            })
+            .unwrap_or(false);
+        if !named_import {
+            return None;
+        }
+        let declaring =
+            resolve_import_binding_from_facts(ctx, canonical_id, owner, scope_payload, prefix)?;
+        return qualified_member_declaration(ctx, &declaring, member);
+    };
 
     let (resolved, route_facts) =
         ctx.resolve_imported_type_root_with_facts(&target_canonical, member);
     ctx.observe_borrowed_signature(&route_facts);
+    // A module that assigns `export = X` gives a namespace import a
+    // `default` only when X can be called or constructed.
+    if (member == "default" || member.starts_with("default."))
+        && ctx
+            .ensure_indexed_ready_serve(&target_canonical)
+            .and_then(|serve| serve.indexed.shallow_state.export_assignment_is_callable())
+            == Some(false)
+    {
+        return None;
+    }
     if let Some(resolved) = resolved {
         return Some(resolved);
+    }
+    // `Ns.Export.Member`: a member of a namespace the module exports.
+    if let Some((export, rest)) = member.split_once('.') {
+        let (declaring, route_facts) =
+            ctx.resolve_imported_type_root_with_facts(&target_canonical, export);
+        ctx.observe_borrowed_signature(&route_facts);
+        if let Some(found) =
+            declaring.and_then(|declaring| qualified_member_declaration(ctx, &declaring, rest))
+        {
+            return Some(found);
+        }
     }
 
     let interner = ctx.project_type_store().identity_interner();
@@ -380,6 +442,36 @@ fn resolve_namespace_member_from_facts(
                 interner.intern(&target.name),
             )
         })
+}
+
+/// The declaration `member` names inside the namespace `declaring`
+/// declares, read from outside the namespace: a namespace member is its
+/// own declaration under its qualified name (`Ns.Inner.T`) in the
+/// namespace's file, and only an exported one is visible here.
+fn qualified_member_declaration(
+    ctx: &dyn ResolverContext,
+    declaring: &ResolvedRootIdentity,
+    member: &str,
+) -> Option<ResolvedRootIdentity> {
+    let qualified = format!("{}.{member}", declaring.symbol_name);
+    let entry = ctx
+        .ensure_indexed_ready_serve(declaring.canonical_id.as_ref())
+        .map(|serve| serve.indexed)?;
+    if !symbol_exists_in_facts(entry.as_ref(), declaring.owner, &qualified)
+        || !entry
+            .shallow_state
+            .decl_bodies()
+            .header_index()
+            .namespace_member_is_exported(declaring.owner, &qualified)
+    {
+        return None;
+    }
+    let interner = ctx.project_type_store().identity_interner();
+    Some(ResolvedRootIdentity::new_in_owner(
+        interner.intern(declaring.canonical_id.as_ref()),
+        declaring.owner,
+        interner.intern(&qualified),
+    ))
 }
 
 /// Resolve the dependency canonical owned by an exact namespace-import
@@ -514,7 +606,7 @@ pub(crate) fn resolve_prepared_type_decl_via_host(
 ///   `NS.Sub.X` is not reachable as a bare name from `NS`).
 /// - [`Global`](crate::semantic_query::LocalScopeOrigin::Global): a
 ///   `declare global { namespace NS { ... } }` binds a global TYPE sibling
-///   ONLY (a global value sibling has no prepared-value slot).
+///   ONLY, as the eager producer does.
 /// - [`Module`](crate::semantic_query::LocalScopeOrigin::Module): binds
 ///   nothing (no consumable module-scope sibling is addressable today).
 ///

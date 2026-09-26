@@ -30,7 +30,7 @@ use crate::VerterHost;
 fn prepared_of(source: &str) -> PreparedFunctionBodySkeleton {
     let allocator = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::ts();
-    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+    let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
     assert!(
         ret.errors.is_empty(),
         "fixture must parse: {:?}",
@@ -98,7 +98,8 @@ impl FlowBodySkeletonSource for FixtureSkeletonSource {
         self.builds.fetch_add(1, Ordering::SeqCst);
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
-            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse();
         assert!(parsed.errors.is_empty(), "fixture must parse");
         let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
         let index = build_function_program_index(
@@ -225,7 +226,8 @@ fn enclosing_binding_changes_split_unchanged_child_body_bundles() {
     ) {
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
-            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse();
         assert!(parsed.errors.is_empty());
         let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
         let index = build_function_program_index(

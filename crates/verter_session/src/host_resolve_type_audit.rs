@@ -141,7 +141,10 @@ impl TypeResolutionRequestError {
             // flow rail already folded its own partial/ReturnOnly rails
             // at the consumer boundary, so it is not a request FAULT.
             | QueryError::UnmodeledPosition
-            | QueryError::UnrepresentableSurfaceMember => None,
+            | QueryError::UnrepresentableSurfaceMember
+            // The checker's recovered error type is its own answer after a
+            // diagnostic, never a request fault.
+            | QueryError::CheckerRecovery(_) => None,
             QueryError::UnsupportedIntrinsic { name } => Some(Self::UnsupportedIntrinsic {
                 name: Arc::clone(name),
             }),
@@ -505,7 +508,7 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         | SemanticQueryKey::MappedType { .. }
         | SemanticQueryKey::Conditional { .. }
         | SemanticQueryKey::TypeOf { .. }
-        | SemanticQueryKey::NormalizeUnion { .. }
+        | SemanticQueryKey::ReduceUnion { .. }
         | SemanticQueryKey::ReduceIntersection { .. }
         | SemanticQueryKey::Relate { .. }
         | SemanticQueryKey::ResolveEnum { .. }
@@ -572,6 +575,7 @@ mod request_error_classification_tests {
     fn recursive_ref_is_not_a_request_fault() {
         let err = QueryError::RecursiveRef {
             name: Arc::from("Tree"),
+            args: std::sync::Arc::from([]),
         };
         assert!(TypeResolutionRequestError::from_query_error(&err).is_none());
     }

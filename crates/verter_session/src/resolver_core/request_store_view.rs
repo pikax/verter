@@ -173,6 +173,9 @@ pub(crate) struct CanonicalCompletionOverlay {
     bundle_memo: RequestBundleMemo,
     #[cfg(test)]
     verify_write_protocol: AtomicBool,
+    /// How many completions promoted a content version (test-only).
+    #[cfg(test)]
+    completion_promotions: std::sync::atomic::AtomicUsize,
 }
 
 /// Which world a memoised prepared-decl bundle was materialised for.
@@ -364,6 +367,8 @@ impl CanonicalCompletionOverlay {
             bundle_memo: RequestBundleMemo::default(),
             #[cfg(test)]
             verify_write_protocol: AtomicBool::new(false),
+            #[cfg(test)]
+            completion_promotions: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -400,6 +405,12 @@ impl CanonicalCompletionOverlay {
     #[cfg(test)]
     pub(crate) fn completion_state_for_tests(&self) -> CompletionOverlayState {
         self.completion_state()
+    }
+
+    /// How many completions promoted a content version into this overlay.
+    #[cfg(test)]
+    pub(crate) fn completion_promotions_for_tests(&self) -> usize {
+        self.completion_promotions.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -703,6 +714,23 @@ impl CanonicalCompletionOverlay {
                     &key.file_language_id,
                 )
         });
+        // Completion is idempotent per content version: an overlay that
+        // already holds this `whole_hash` with these very facts holds the
+        // route hash derived from the same artifacts too (one revision
+        // wrote all three). Writing them again changes nothing, and would
+        // compare the stored facts with these structurally — a walk over
+        // every fact the file registers, on every serve of the file.
+        if self.lookup_whole_hash(canonical) == Some(whole_hash)
+            && file_artifacts.as_ref().is_some_and(|file_artifacts| {
+                self.lookup_file_facts(canonical).is_some_and(|facts| {
+                    Arc::ptr_eq(&facts, &file_artifacts.facts) || facts == file_artifacts.facts
+                })
+            })
+        {
+            return;
+        }
+        #[cfg(test)]
+        self.completion_promotions.fetch_add(1, Ordering::Relaxed);
         let route_hash = file_artifacts.as_ref().and_then(|file_artifacts| {
             let indexed = &file_artifacts.indexed;
             // Parse-environment reuse gate. The route surface is authored

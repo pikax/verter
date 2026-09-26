@@ -3,7 +3,8 @@
 //!
 //! The subject walk settles a type to its signature-bearing shape (carriers
 //! and aliases through the shared settlement rail, unions through the
-//! `VerterStableV1` arm order, intersections in authored order, constrained
+//! `VerterStableV1` arm order, intersections in authored order, a
+//! declaration's heritage body own signatures first, constrained
 //! type parameters through their constraint, apparent primitives and
 //! collections through the resolved global population) and publishes the
 //! candidates through the record-level discovery in
@@ -16,6 +17,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashSet, FxHasher};
 
+use crate::semantic_query::composite::CompositeOriginCategory;
 use crate::semantic_query::{
     CanonicalTypeSubstitution, IncompleteReason, LiteralValue, ProjectionReductionContext,
     QueryOutcome, Ready, ResolveOverloadSetConsumer, ResultEvaluationContextId, SemanticContext,
@@ -23,12 +25,12 @@ use crate::semantic_query::{
     CONTEXT_FREE_EVALUATION, CONTEXT_FREE_EVIDENCE,
 };
 use crate::signature_kernel::{
-    intersection_signatures, publish_signature, set_from_candidates, union_signatures,
-    AppliedResult, AppliedResultId, BinderInput, DeclarationGroupId, DeclarationParentId,
-    DiscoveryError, DiscoveryTypes, ParamInput, RestInput, ResultDemand, ResultInput,
-    SemanticReadView, SignatureCandidate, SignatureDescriptorId, SignatureInput, SignatureKind,
-    SignatureProvenance, SignatureResultRecipe, SignatureSemanticFlags, SignatureStore,
-    SlotTypeFacts, SourceLocatorId, TypeToken,
+    heritage_signatures, intersection_signatures, merged_declaration_signatures, publish_signature,
+    set_from_candidates, union_signatures, AppliedResult, AppliedResultId, BinderInput,
+    DeclarationGroupId, DeclarationParentId, DiscoveryError, DiscoveryTypes, ParamInput, RestInput,
+    ResultDemand, ResultInput, SemanticReadView, SignatureCandidate, SignatureDescriptorId,
+    SignatureInput, SignatureKind, SignatureProvenance, SignatureResultRecipe,
+    SignatureSemanticFlags, SignatureStore, SlotTypeFacts, SourceLocatorId, TypeToken,
 };
 use verter_semantic::analysis::type_solver::arena::PrimitiveKind;
 
@@ -183,7 +185,10 @@ impl DiscoveryTypes for GraphTypes<'_, '_> {
         })
     }
 
-    fn forced_return(&self, candidate: &SignatureCandidate) -> Result<TypeToken, IncompleteReason> {
+    fn forced_result(
+        &self,
+        candidate: &SignatureCandidate,
+    ) -> Result<crate::signature_kernel::ForcedResult, IncompleteReason> {
         let empty = self
             .store
             .intern_substitution(
@@ -198,17 +203,23 @@ impl DiscoveryTypes for GraphTypes<'_, '_> {
             self.store,
             candidate.signature,
             empty,
-            ResultDemand::Return,
+            ResultDemand::Both,
             CONTEXT_FREE_EVALUATION,
             SemanticContextId::production(),
         );
         match result {
-            QueryOutcome::Ready(Ready { value, .. }) => self
-                .store
-                .applied_result(value)
-                .ok()
-                .and_then(|r| r.return_type)
-                .ok_or(IncompleteReason::UnsettledInput),
+            QueryOutcome::Ready(Ready { value, .. }) => {
+                let applied = self
+                    .store
+                    .applied_result(value)
+                    .map_err(|_| IncompleteReason::UnsettledInput)?;
+                Ok(crate::signature_kernel::ForcedResult {
+                    return_type: applied
+                        .return_type
+                        .ok_or(IncompleteReason::UnsettledInput)?,
+                    effects: applied.effects,
+                })
+            }
             QueryOutcome::Incomplete(reason) => Err(reason),
         }
     }
@@ -287,16 +298,21 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 drop(data);
                 self.discover(target)
             }
-            SemanticNodeData::MergedDecl { .. } => {
+            // A class expression's INSTANCE carries the signatures of its
+            // instance surface.
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                let surface = *surface;
                 drop(data);
-                match self.dispatch().unwrap_identity_carrier_for_relation(node) {
-                    super::relation::IdentityCarrierUnwrap::Concrete(settled)
-                        if settled != node =>
-                    {
-                        self.discover(settled)
-                    }
-                    _ => unsettled(),
-                }
+                let surface = self
+                    .dispatch()
+                    .class_expression_read_surface(node)
+                    .unwrap_or(surface);
+                self.discover(surface)
+            }
+            SemanticNodeData::MergedDecl { contributors } => {
+                let contributors = Arc::clone(contributors);
+                drop(data);
+                self.discover_merged_declaration(&contributors)
             }
             SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
                 drop(data);
@@ -308,18 +324,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                     GraphSignatureKind::Construct => Arc::clone(&surface.construct_signatures),
                 };
                 drop(data);
-                let mut out = Vec::with_capacity(list.len());
-                for (ordinal, sig) in list.iter().enumerate() {
-                    let sig = self.dispatch().resolve_signature_source_carrier(
-                        *sig,
-                        ProjectionReductionContext::structural_transit(),
-                    );
-                    match self.leaf(sig, ordinal as u32)? {
-                        Some(candidate) => out.push(candidate),
-                        None => return unsupported(),
-                    }
-                }
-                Ok(out)
+                self.signature_list(&list, 0)
             }
             SemanticNodeData::TypeParam { constraint, .. } => {
                 let constraint = *constraint;
@@ -345,18 +350,43 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 union_signatures(self.types.store, self.types, &lists)
             }
             SemanticNodeData::Intersection(members) => {
+                let category = members.origin_category();
                 let members: Vec<SemanticNodeId> = members.iter().copied().collect();
                 drop(data);
                 let mut lists = Vec::with_capacity(members.len());
                 for member in members {
                     lists.push(self.discover(member)?);
                 }
-                intersection_signatures(
-                    self.types.store,
-                    self.types,
-                    kernel_kind(self.kind),
-                    &lists,
-                )
+                match category {
+                    // An interface or class body with heritage is a
+                    // declaration, not an intersection type: it inherits
+                    // its bases' signatures by concatenation, own first.
+                    CompositeOriginCategory::Heritage => Ok(heritage_signatures(&lists)),
+                    // One method's overloads are its signature list, every
+                    // declaration's kept.
+                    CompositeOriginCategory::OverloadGroup => Ok(lists.concat()),
+                    CompositeOriginCategory::MergedOverloadGroup => {
+                        merged_declaration_signatures(self.types.store, &lists)
+                    }
+                    CompositeOriginCategory::Canonical(_)
+                    | CompositeOriginCategory::CanonicalUnproven
+                    | CompositeOriginCategory::AuthoredShell
+                    | CompositeOriginCategory::OrderedCarrier
+                    | CompositeOriginCategory::PreservingRebuild
+                    | CompositeOriginCategory::QuerySubject => intersection_signatures(
+                        self.types.store,
+                        self.types,
+                        kernel_kind(self.kind),
+                        &lists,
+                    ),
+                    #[cfg(any(test, feature = "test-support"))]
+                    CompositeOriginCategory::TestFixture => intersection_signatures(
+                        self.types.store,
+                        self.types,
+                        kernel_kind(self.kind),
+                        &lists,
+                    ),
+                }
             }
             SemanticNodeData::Primitive(primitive) => {
                 let name = match primitive {
@@ -392,6 +422,12 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             SemanticNodeData::TemplateLiteral { .. } => {
                 drop(data);
                 self.apparent("String", &[])
+            }
+            // An enum member's apparent type is its value's.
+            SemanticNodeData::EnumLiteral(literal) => {
+                let base = literal.base;
+                drop(data);
+                self.discover(base)
             }
             SemanticNodeData::TypeOfNominal(_) => {
                 drop(data);
@@ -474,11 +510,13 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
         // request's owning project, not the first workspace file.
         let request_canonical = crate::request_context::current_request_canonical();
         let Some(contributions) = d.collect_augmentation_contributions(
+            super::build::AugmentationContribution::TypeBody,
             crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
             name,
             type_arguments,
             ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Expanded),
             request_canonical.as_deref().unwrap_or(""),
+            None,
         ) else {
             return Ok(Vec::new());
         };
@@ -495,45 +533,89 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
         Ok(out)
     }
 
-    /// Apparent-type signatures of a global wrapper interface, read from the
-    /// resolved global population of the request's project. An absent global
-    /// (`noLib`) is the checker's empty apparent type: a complete negative.
+    /// Apparent-type signatures of a global wrapper interface: the wrapper
+    /// the demanding project declares
+    /// ([`ProjectSemanticDispatch::global_wrapper_surface`]). An absent
+    /// global (`noLib`) is the checker's empty apparent type: a complete
+    /// negative, which a declaration appearing later invalidates.
+    ///
+    /// A read of a primitive subject arrives with its key already rewritten
+    /// to that wrapper
+    /// ([`ProjectSemanticDispatch::scope_apparent_signature_subject`]); one
+    /// reached here — a union arm, an unscoped or wrapper-less read — depends
+    /// on the demanding project, which its key does not name, so the answer
+    /// stays out of the shared memo with every entry that reads it.
     fn apparent(&mut self, name: &str, args: &[SemanticNodeId]) -> Found {
         let d = self.dispatch();
-        let Some(canonical) = crate::request_context::current_request_canonical()
-            .or_else(|| d.lexical_demand_scope.borrow().last().cloned())
-        else {
+        let Some(canonical) = d.wrapper_demand_canonical() else {
             return unsettled();
         };
-        let Some(project) = d.project_stable_key_for_canonical(canonical.as_ref()) else {
-            return unsettled();
-        };
-        let Some(hit) = d.ctx.lookup_ambient_symbol(project, name) else {
-            return Ok(Vec::new());
-        };
-        d.ctx
-            .record_ambient_dependency(canonical.as_ref(), hit.virtual_id.as_ref());
-        let slot = d.type_slot_for(
-            Arc::clone(&hit.virtual_id),
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
-        );
-        let surface = d.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                slot,
-                Arc::from(args.to_vec().into_boxed_slice()),
-                d.instantiate_context_for(
-                    hit.virtual_id.as_ref(),
-                    ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Expanded,
-                    ),
-                ),
-            ),
-        ));
-        match surface.value {
-            crate::semantic_query::QueryResult::Value(surface) => self.discover(surface),
-            _ => unsettled(),
+        d.fold_into_top_build_local_taint(false, true);
+        match d.global_wrapper_surface(name, args, canonical.as_ref()) {
+            super::apparent_type::GlobalWrapper::Surface(surface) => self.discover(surface),
+            super::apparent_type::GlobalWrapper::Absent => Ok(Vec::new()),
+            super::apparent_type::GlobalWrapper::Unsettled => unsettled(),
         }
+    }
+
+    /// The candidates of an ordered list of signature nodes — one object's
+    /// call or construct list — whose ordinals start at `first_ordinal`.
+    fn signature_list(&mut self, list: &[SemanticNodeId], first_ordinal: u32) -> Found {
+        let mut out = Vec::with_capacity(list.len());
+        for (offset, sig) in list.iter().enumerate() {
+            let sig = self.dispatch().resolve_signature_source_carrier(
+                *sig,
+                ProjectionReductionContext::structural_transit(),
+            );
+            match self.leaf(sig, first_ordinal + offset as u32)? {
+                Some(candidate) => out.push(candidate),
+                None => return unsupported(),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The signatures of a merged declaration: every contributor's own
+    /// signatures in contributor order — one symbol, each contributor its
+    /// own declaration ([`merged_declaration_signatures`]) — then its
+    /// `extends` bases in clause order, each base once (the heritage rule
+    /// over the peer-merged body `reduce_merged_decl_with_graph` builds).
+    fn discover_merged_declaration(&mut self, contributors: &[SemanticNodeId]) -> Found {
+        let graph = self.dispatch().graph();
+        let mut own: Vec<Vec<SemanticNodeId>> = Vec::with_capacity(contributors.len());
+        let mut bases: Vec<SemanticNodeId> = Vec::new();
+        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        for contributor in contributors {
+            let mut surfaces = Vec::new();
+            super::walk::collect_merged_contributor_arms(
+                graph,
+                *contributor,
+                &mut surfaces,
+                &mut bases,
+            );
+            own.push(
+                surfaces
+                    .iter()
+                    .flat_map(|surface| match self.kind {
+                        GraphSignatureKind::Call => surface.call_signatures.iter(),
+                        GraphSignatureKind::Construct => surface.construct_signatures.iter(),
+                    })
+                    .copied()
+                    .filter(|signature| seen.insert(*signature))
+                    .collect(),
+            );
+        }
+        let mut lists = Vec::with_capacity(own.len());
+        let mut ordinal = 0u32;
+        for signatures in &own {
+            lists.push(self.signature_list(signatures, ordinal)?);
+            ordinal += signatures.len() as u32;
+        }
+        let mut out = merged_declaration_signatures(self.types.store, &lists)?;
+        for base in bases {
+            out.extend(self.discover(base)?);
+        }
+        Ok(out)
     }
 
     /// One authored signature node as a published candidate, or `None` when
@@ -547,7 +629,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
         let Some(data) = graph.node_data(node) else {
             return unsettled();
         };
-        let (kind, params, type_parameters, occurrence, carrier, span) = match &*data {
+        let (kind, params, type_parameters, occurrence, carrier, span, predicate) = match &*data {
             SemanticNodeData::Signature {
                 kind,
                 params,
@@ -555,6 +637,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 occurrence,
                 return_carrier,
                 signature_span,
+                predicate,
                 ..
             } => (
                 *kind,
@@ -563,6 +646,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 occurrence.clone(),
                 return_carrier.clone(),
                 *signature_span,
+                *predicate,
             ),
             SemanticNodeData::DeferredCallable(callable) => {
                 let parts = callable.parts(&ResolveOverloadSetConsumer::witness());
@@ -572,6 +656,8 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                     Arc::clone(parts.type_parameters),
                     Some(parts.occurrence.clone()),
                     parts.return_carrier.clone(),
+                    None,
+                    // A body-derived return carries no authored predicate.
                     None,
                 )
             }
@@ -668,7 +754,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             crate::semantic_query::SignatureReturnCarrier::Declared(return_type) => {
                 ResultInput::Declared {
                     return_type: *return_type,
-                    predicate_or_assertion: None,
+                    predicate_or_assertion: predicate,
                 }
             }
             crate::semantic_query::SignatureReturnCarrier::Function(source) => ResultInput::Body {
@@ -717,6 +803,11 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
             )
         });
+        // TypeScript's `HasLiteralTypes`: a parameter (the `this`
+        // receiver included) whose DECLARED type is a literal type makes
+        // the signature a specialized one, which call resolution tries
+        // first. A declaration fact, kept through instantiation.
+        let specialized = params.iter().any(|param| param.declared_literal);
         let locator = span.map_or(0, |s| hash_u64(&(s.start, s.end)));
         let input = SignatureInput {
             kind: kernel_kind(kind),
@@ -727,10 +818,12 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             receiver: receiver.map(to_param),
             params: fixed,
             rest,
-            flags: if untyped_js {
-                SignatureSemanticFlags::UNTYPED_JS
-            } else {
-                SignatureSemanticFlags::NONE
+            flags: match (untyped_js, specialized) {
+                (true, true) => SignatureSemanticFlags::UNTYPED_JS
+                    .union(SignatureSemanticFlags::LITERAL_SPECIALIZATION),
+                (true, false) => SignatureSemanticFlags::UNTYPED_JS,
+                (false, true) => SignatureSemanticFlags::LITERAL_SPECIALIZATION,
+                (false, false) => SignatureSemanticFlags::NONE,
             },
             result,
             provenance: SignatureProvenance::authored(
@@ -793,6 +886,8 @@ impl ProjectSemanticDispatch<'_> {
         };
         let _ = walk.context_id;
         let found = walk.discover(subject);
+        #[cfg(test)]
+        signatures_of_type_build_point(SignaturesOfTypeBuildPoint::Discovered);
         let published = found.and_then(|list| {
             let view = SemanticReadView::pin(store);
             let mut nodes_of: Vec<crate::signature_kernel::SignatureCandidateNodes> =
@@ -889,9 +984,24 @@ impl ProjectSemanticDispatch<'_> {
             None
         };
         let effects = if demand.reads_effects() {
-            self.recipe_effects(types, &view, descriptor, call_substitution, &recipe)?
-                .map(|node| store.intern_type_token(node, None))
-                .transpose()?
+            match self.recipe_effects(
+                types,
+                &view,
+                descriptor,
+                call_substitution,
+                evaluation,
+                &recipe,
+            )? {
+                Some(predicate) => Some(crate::signature_kernel::PredicateEffect {
+                    subject: predicate.subject,
+                    asserts: predicate.asserts,
+                    ty: predicate
+                        .ty
+                        .map(|node| store.intern_type_token(node, None))
+                        .transpose()?,
+                }),
+                None => None,
+            }
         } else {
             None
         };
@@ -915,27 +1025,223 @@ impl ProjectSemanticDispatch<'_> {
         view: &SemanticReadView,
         descriptor: SignatureDescriptorId,
         call: crate::signature_kernel::CallSubstitutionId,
+        evaluation: ResultEvaluationContextId,
         recipe: &SignatureResultRecipe,
-    ) -> Result<Option<SemanticNodeId>, DiscoveryError> {
+    ) -> Result<Option<crate::semantic_query::SignaturePredicate>, DiscoveryError> {
         match recipe {
             SignatureResultRecipe::Declared {
-                predicate_or_assertion: Some(token),
+                predicate_or_assertion: Some(effect),
                 ..
             } => {
-                let base = view.type_token_node(*token)?;
-                let map = self.composed_map(types.store, view, descriptor, call)?;
-                Ok(Some(self.substitute_canonical(base, &map)))
+                // The target composes through the same declaration + call
+                // maps as the return: `x is T` under `T := string` narrows
+                // to `string`.
+                let ty = match effect.ty {
+                    Some(token) => {
+                        let base = view.type_token_node(token)?;
+                        let map = self.composed_map(types.store, view, descriptor, call)?;
+                        Some(self.substitute_canonical(base, &map))
+                    }
+                    None => None,
+                };
+                Ok(Some(crate::semantic_query::SignaturePredicate {
+                    subject: effect.subject,
+                    asserts: effect.asserts,
+                    ty,
+                }))
             }
             SignatureResultRecipe::Declared {
                 predicate_or_assertion: None,
                 ..
             } => Ok(None),
-            SignatureResultRecipe::Body { .. }
-            | SignatureResultRecipe::UnionCommon { .. }
-            | SignatureResultRecipe::UnionSynthesized { .. }
-            | SignatureResultRecipe::IntersectionConstruct { .. } => Err(
-                DiscoveryError::Incomplete(IncompleteReason::UnresolvedObligation),
-            ),
+            // A body-derived result's effect is the predicate the checker
+            // infers from the body: the same body obligation the return
+            // read forces, under the same key. An unrecoverable body forces
+            // nothing.
+            SignatureResultRecipe::Body { .. } => {
+                let key = self.body_flow_key(types.store, view, descriptor, call, evaluation)?;
+                types.store.note_body_forced();
+                Ok(self.forced_body_result(key)?.inferred_predicate())
+            }
+            SignatureResultRecipe::UnionCommon { constituents, .. }
+            | SignatureResultRecipe::UnionSynthesized { constituents, .. } => {
+                let sequence = view.sequence(*constituents)?.clone();
+                self.union_effects(types, view, &sequence, call, evaluation)
+            }
+            // A mixin construct signature is its base constructor's
+            // signature with the mixed-in results: the base's own effect.
+            SignatureResultRecipe::IntersectionConstruct {
+                base_constructor,
+                mixins,
+            } => {
+                let sequence = view.sequence(*mixins)?.clone();
+                for edge in sequence.edges.iter() {
+                    if types.store.descriptor_source(edge.declaration)? == Some(*base_constructor) {
+                        let desc = view.descriptor(edge.residual)?;
+                        let template = view.template(desc.template)?;
+                        let recipe = *view.recipe(template.result_recipe)?;
+                        return self.recipe_effects(
+                            types,
+                            view,
+                            edge.residual,
+                            call,
+                            evaluation,
+                            &recipe,
+                        );
+                    }
+                }
+                Err(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput))
+            }
+        }
+    }
+
+    /// The effect of a UNION signature — the checker's
+    /// `getUnionOrIntersectionTypePredicate` over the constituents, never
+    /// an OR of their effects. Every constituent carries a type predicate
+    /// (`x is T` / `this is T`) of the same kind about the same subject,
+    /// and the union signature's predicate targets the union of theirs;
+    /// a constituent without a predicate is admitted only when it returns
+    /// exactly `false`. Any other constituent — a `boolean` or `true`
+    /// return, an assertion, a predicate about a different subject —
+    /// leaves the union signature with no predicate.
+    fn union_effects(
+        &self,
+        types: &GraphTypes<'_, '_>,
+        view: &SemanticReadView,
+        sequence: &crate::signature_kernel::ConstituentSequence,
+        call: crate::signature_kernel::CallSubstitutionId,
+        evaluation: ResultEvaluationContextId,
+    ) -> Result<Option<crate::semantic_query::SignaturePredicate>, DiscoveryError> {
+        let mut last: Option<crate::semantic_query::SignaturePredicate> = None;
+        let mut targets = Vec::with_capacity(sequence.edges.len());
+        for edge in sequence.edges.iter() {
+            let desc = view.descriptor(edge.residual)?;
+            let template = view.template(desc.template)?;
+            let recipe = *view.recipe(template.result_recipe)?;
+            match self.recipe_effects(types, view, edge.residual, call, evaluation, &recipe)? {
+                Some(predicate) => {
+                    let Some(target) = predicate.ty.filter(|_| !predicate.asserts) else {
+                        return Ok(None);
+                    };
+                    if last.is_some_and(|last| last.subject != predicate.subject) {
+                        return Ok(None);
+                    }
+                    last = Some(predicate);
+                    targets.push(target);
+                }
+                None => {
+                    let returned =
+                        self.recipe_return(types, view, edge.residual, call, evaluation, &recipe)?;
+                    if self.graph().node_data(returned).as_deref()
+                        != Some(&SemanticNodeData::Literal(
+                            crate::semantic_query::LiteralValue::Boolean(false),
+                        ))
+                    {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        Ok(last.map(|last| crate::semantic_query::SignaturePredicate {
+            ty: Some(self.intern_normalized_union_or_intersection(&targets, true)),
+            ..last
+        }))
+    }
+
+    /// The flow-return key of a body recipe's obligation under `call`: the
+    /// served function position its source signature names, instantiated
+    /// with the composed map's image of each declared binder (`unknown`
+    /// where the map leaves one open).
+    fn body_flow_key(
+        &self,
+        store: &SignatureStore,
+        view: &SemanticReadView,
+        descriptor: SignatureDescriptorId,
+        call: crate::signature_kernel::CallSubstitutionId,
+        evaluation: ResultEvaluationContextId,
+    ) -> Result<crate::semantic_query::FlowReturnKey, DiscoveryError> {
+        let Some(source) = store.descriptor_source(descriptor)? else {
+            return Err(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput));
+        };
+        let node = view.type_token_node(source)?;
+        let identity = {
+            let graph = self.graph();
+            let data = graph.node_data(node);
+            match data.as_deref() {
+                Some(SemanticNodeData::Signature {
+                    return_carrier:
+                        crate::semantic_query::SignatureReturnCarrier::Function(
+                            verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                        ),
+                    ..
+                }) => identity.clone(),
+                Some(SemanticNodeData::DeferredCallable(callable)) => {
+                    match callable
+                        .parts(&ResolveOverloadSetConsumer::witness())
+                        .return_carrier
+                    {
+                        crate::semantic_query::SignatureReturnCarrier::Function(
+                            verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                        ) => identity.clone(),
+                        _ => {
+                            return Err(DiscoveryError::Incomplete(
+                                IncompleteReason::UnresolvedObligation,
+                            ))
+                        }
+                    }
+                }
+                _ => {
+                    return Err(DiscoveryError::Incomplete(
+                        IncompleteReason::UnresolvedObligation,
+                    ))
+                }
+            }
+        };
+        let map = self.composed_map(store, view, descriptor, call)?;
+        let unknown = self
+            .graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+        let desc = view.descriptor(descriptor)?;
+        let env = view.environment(desc.declaration_environment)?;
+        let mut params: Vec<SemanticNodeId> = env.bindings().iter().map(|(p, _)| *p).collect();
+        params.sort_by_key(|p| {
+            env.bindings()
+                .iter()
+                .find(|(param, _)| param == p)
+                .and_then(|(_, token)| SignatureStore::binder_token_ordinal(*token))
+                .unwrap_or(u32::MAX)
+        });
+        let args: Vec<SemanticNodeId> = params
+            .iter()
+            .map(|p| {
+                map.bindings()
+                    .iter()
+                    .find_map(|(param, bound)| (param == p).then_some(*bound))
+                    .unwrap_or(unknown)
+            })
+            .collect();
+        Ok(self.flow_return_key_for_instantiation_with_evaluation(
+            &identity,
+            Arc::from(args.into_boxed_slice()),
+            map,
+            evaluation,
+        ))
+    }
+
+    /// The completed flow-return value of a body obligation.
+    fn forced_body_result(
+        &self,
+        key: crate::semantic_query::FlowReturnKey,
+    ) -> Result<crate::semantic_query::FlowReturnResult, DiscoveryError> {
+        match self.execute_flow_return(key) {
+            crate::semantic_query::FlowReturnStep::Complete(result) => Ok(result),
+            crate::semantic_query::FlowReturnStep::NoValue(
+                crate::semantic_query::FlowReturnFailure::Budget(_),
+            ) => Err(DiscoveryError::Incomplete(IncompleteReason::Budget)),
+            crate::semantic_query::FlowReturnStep::Hold(_)
+            | crate::semantic_query::FlowReturnStep::NoValue(_) => Err(DiscoveryError::Incomplete(
+                IncompleteReason::UnresolvedObligation,
+            )),
         }
     }
 
@@ -980,85 +1286,8 @@ impl ProjectSemanticDispatch<'_> {
             }
             SignatureResultRecipe::Body { .. } => {
                 store.note_body_forced();
-                let Some(source) = store.descriptor_source(descriptor)? else {
-                    return Err(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput));
-                };
-                let node = view.type_token_node(source)?;
-                let identity = {
-                    let graph = self.graph();
-                    let data = graph.node_data(node);
-                    match data.as_deref() {
-                        Some(SemanticNodeData::Signature {
-                            return_carrier:
-                                crate::semantic_query::SignatureReturnCarrier::Function(
-                                    verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-                                ),
-                            ..
-                        }) => identity.clone(),
-                        Some(SemanticNodeData::DeferredCallable(callable)) => {
-                            match callable
-                                .parts(&ResolveOverloadSetConsumer::witness())
-                                .return_carrier
-                            {
-                                crate::semantic_query::SignatureReturnCarrier::Function(
-                                    verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-                                ) => identity.clone(),
-                                _ => {
-                                    return Err(DiscoveryError::Incomplete(
-                                        IncompleteReason::UnresolvedObligation,
-                                    ))
-                                }
-                            }
-                        }
-                        _ => {
-                            return Err(DiscoveryError::Incomplete(
-                                IncompleteReason::UnresolvedObligation,
-                            ))
-                        }
-                    }
-                };
-                let map = self.composed_map(store, view, descriptor, call)?;
-                let unknown = self
-                    .graph()
-                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
-                let desc = view.descriptor(descriptor)?;
-                let env = view.environment(desc.declaration_environment)?;
-                let mut params: Vec<SemanticNodeId> =
-                    env.bindings().iter().map(|(p, _)| *p).collect();
-                params.sort_by_key(|p| {
-                    env.bindings()
-                        .iter()
-                        .find(|(param, _)| param == p)
-                        .and_then(|(_, token)| SignatureStore::binder_token_ordinal(*token))
-                        .unwrap_or(u32::MAX)
-                });
-                let args: Vec<SemanticNodeId> = params
-                    .iter()
-                    .map(|p| {
-                        map.bindings()
-                            .iter()
-                            .find_map(|(param, bound)| (param == p).then_some(*bound))
-                            .unwrap_or(unknown)
-                    })
-                    .collect();
-                let key = self.flow_return_key_for_instantiation_with_evaluation(
-                    &identity,
-                    Arc::from(args.into_boxed_slice()),
-                    map,
-                    evaluation,
-                );
-                match self.execute_flow_return(key) {
-                    crate::semantic_query::FlowReturnStep::Complete(result) => {
-                        Ok(result.return_type())
-                    }
-                    crate::semantic_query::FlowReturnStep::NoValue(
-                        crate::semantic_query::FlowReturnFailure::Budget(_),
-                    ) => Err(DiscoveryError::Incomplete(IncompleteReason::Budget)),
-                    crate::semantic_query::FlowReturnStep::Hold(_)
-                    | crate::semantic_query::FlowReturnStep::NoValue(_) => Err(
-                        DiscoveryError::Incomplete(IncompleteReason::UnresolvedObligation),
-                    ),
-                }
+                let key = self.body_flow_key(store, view, descriptor, call, evaluation)?;
+                Ok(self.forced_body_result(key)?.return_type())
             }
             SignatureResultRecipe::UnionCommon { constituents, .. }
             | SignatureResultRecipe::UnionSynthesized { constituents, .. }
@@ -1139,6 +1368,10 @@ pub(super) enum PositionalArgument {
         /// non-union is its own single arm, and an all-nullish type is the
         /// empty list.
         non_nullish_arms: Vec<SemanticNodeId>,
+        /// The position is optional and its type therefore includes
+        /// `undefined` beside `ty` (an optional parameter under
+        /// `strictNullChecks`).
+        includes_undefined: bool,
     },
 }
 
@@ -1146,8 +1379,9 @@ pub(super) enum PositionalArgument {
 /// any semantics is dispatched over them.
 struct RawPositional {
     receiver: Option<SemanticNodeId>,
-    /// `None` when the candidate declares nothing at the position.
-    argument: Option<SemanticNodeId>,
+    /// `None` when the candidate declares nothing at the position; else the
+    /// declared type and whether its optionality adds `undefined`.
+    argument: Option<(SemanticNodeId, bool)>,
 }
 
 /// One shared candidate's positional read.
@@ -1167,6 +1401,59 @@ pub(super) struct PositionalRead {
 /// single type.
 pub(super) type SharedPositionalReads = Result<Vec<PositionalRead>, IncompleteReason>;
 
+/// The parameter positions one signature comparison relates — see
+/// [`ProjectSemanticDispatch::signature_comparison_plan`].
+#[derive(Debug, Clone)]
+pub(super) struct SignatureComparisonPlan {
+    /// The source demands more arguments than the target supplies.
+    pub source_has_more_parameters: bool,
+    /// Each signature's authored `this` receiver, when it declares one.
+    pub source_receiver: Option<SemanticNodeId>,
+    pub target_receiver: Option<SemanticNodeId>,
+    /// `(source type, target type)` at each position both signatures
+    /// declare a type at, in position order.
+    pub positions: Vec<(SemanticNodeId, SemanticNodeId)>,
+}
+
+/// [`SignatureComparisonPlan`] as read under a pinned view, before any
+/// node is interned.
+struct RawComparisonPlan {
+    source_has_more_parameters: bool,
+    source_receiver: Option<SemanticNodeId>,
+    target_receiver: Option<SemanticNodeId>,
+    positions: Vec<(RawPosition, RawPosition)>,
+}
+
+/// The type one signature declares at one compared position.
+enum RawPosition {
+    Absent,
+    One(SemanticNodeId),
+    /// An optional parameter whose type includes `undefined` under
+    /// `strictNullChecks` (`getTypeOfParameter` adds it): its declared type
+    /// and `undefined`.
+    Optional(SemanticNodeId),
+    /// A rest run with a tail: the union of the run element and the tail.
+    Run(Vec<SemanticNodeId>),
+    /// A still-generic rest indexed by the position (`T[index]`).
+    GenericIndex {
+        rest: SemanticNodeId,
+        index: usize,
+    },
+    /// The rest of the parameter list from the position on.
+    Remaining(Vec<RawRestElement>),
+}
+
+/// One element of the rest of a parameter list.
+enum RawRestElement {
+    /// A rest: its array (`array`, over the element `node`) or its
+    /// still-generic type.
+    Whole { node: SemanticNodeId, array: bool },
+    Element {
+        node: SemanticNodeId,
+        optional: bool,
+    },
+}
+
 /// The ordered shared candidates of one subject as graph signature nodes.
 pub(super) enum SharedSignatureNodes {
     /// Every candidate, in candidate order. Empty is a complete negative.
@@ -1175,7 +1462,83 @@ pub(super) enum SharedSignatureNodes {
     Incomplete(IncompleteReason),
 }
 
+/// Why one read over a dispatched `SignaturesOfType` value did not answer.
+#[derive(Debug, Clone, Copy)]
+enum SignatureSetReadFailure {
+    /// The value's handles belong to a retired kernel epoch: a replacement
+    /// landed between the memo read and the pin, or while the read held
+    /// them. That is a miss, never an incomplete answer.
+    Retired,
+    Incomplete(IncompleteReason),
+}
+
+/// Whether `error` is a kernel handle a replacement retired.
+fn is_retired_handle(error: &DiscoveryError) -> bool {
+    matches!(
+        error,
+        DiscoveryError::Read(crate::signature_kernel::ReadError::StaleHandle)
+            | DiscoveryError::Store(crate::signature_kernel::StoreError::StaleHandle)
+    )
+}
+
 impl ProjectSemanticDispatch<'_> {
+    /// Dispatch the subject's shared `SignaturesOfType` read. Anything but a
+    /// signature set is the reason the subject did not settle.
+    fn signature_set_value(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+    ) -> Result<crate::signature_kernel::SignatureSetValue, IncompleteReason> {
+        use crate::semantic_query::{QueryResult, SemanticQueryKey, SemanticQueryValue};
+        let read = self.execute_via_cold_build_helper(SemanticQueryKey::SignaturesOfType {
+            subject,
+            kind,
+            context: SemanticContextId::production(),
+        });
+        match read.value {
+            QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => Ok(value),
+            _ => Err(if self.connected_demand_tripped() {
+                IncompleteReason::Budget
+            } else {
+                IncompleteReason::UnsettledInput
+            }),
+        }
+    }
+
+    /// Run `read` over the value `first` dispatched, and over one fresh
+    /// dispatch when `read` finds the value's kernel epoch retired.
+    ///
+    /// The memo read and the pin are two steps, so a kernel-epoch
+    /// replacement can land between them, and a joined build can finish in
+    /// an epoch the replacement retired. The re-dispatch cannot see that
+    /// value again: the memo's warm gate and its joiner fork both refuse a
+    /// retired-epoch value, so it recomputes in the current epoch. The retry
+    /// is bounded at one; only a second replacement inside it leaves the
+    /// read unsettled.
+    fn read_signature_set<T>(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        first: Result<crate::signature_kernel::SignatureSetValue, IncompleteReason>,
+        read: impl Fn(&crate::signature_kernel::SignatureSetValue) -> Result<T, SignatureSetReadFailure>,
+    ) -> Result<T, IncompleteReason> {
+        let attempt = |dispatched: Result<_, IncompleteReason>| {
+            dispatched
+                .map_err(SignatureSetReadFailure::Incomplete)
+                .and_then(|value| read(&value))
+        };
+        let outcome = match attempt(first) {
+            Err(SignatureSetReadFailure::Retired) => {
+                attempt(self.signature_set_value(subject, kind))
+            }
+            outcome => outcome,
+        };
+        outcome.map_err(|failure| match failure {
+            SignatureSetReadFailure::Retired => IncompleteReason::UnsettledInput,
+            SignatureSetReadFailure::Incomplete(reason) => reason,
+        })
+    }
+
     /// The subject's candidates of `kind`, read from `SignaturesOfType`, each
     /// as the graph signature node a node-based consumer reads: the authored
     /// node for a leaf, and for a composite the node form of its descriptor
@@ -1187,41 +1550,100 @@ impl ProjectSemanticDispatch<'_> {
         subject: SemanticNodeId,
         kind: GraphSignatureKind,
     ) -> SharedSignatureNodes {
-        use crate::semantic_query::{QueryResult, SemanticQueryKey, SemanticQueryValue};
-        let read = self.execute_via_cold_build_helper(SemanticQueryKey::SignaturesOfType {
-            subject,
-            kind,
-            context: SemanticContextId::production(),
-        });
-        let value = match read.value {
-            QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => value,
-            _ => {
-                return SharedSignatureNodes::Incomplete(if self.connected_demand_tripped() {
-                    IncompleteReason::Budget
-                } else {
-                    IncompleteReason::UnsettledInput
-                })
-            }
-        };
+        let first = self.signature_set_value(subject, kind);
+        self.shared_signature_nodes_from(subject, kind, first)
+    }
+
+    /// [`Self::shared_signature_nodes`] in the order call resolution tries
+    /// them: the kernel's [`crate::signature_kernel::resolution_order`]
+    /// (TypeScript's `reorderCandidates`) over the same candidates. Only
+    /// call resolution reads this order; conditional inference, which reads
+    /// the LAST signature, reads declaration order.
+    pub(super) fn shared_signature_nodes_in_resolution_order(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+    ) -> SharedSignatureNodes {
+        let first = self.signature_set_value(subject, kind);
+        self.shared_signature_nodes_ordered(subject, kind, first, true)
+    }
+
+    /// [`Self::shared_signature_nodes`] over an already-dispatched first
+    /// read.
+    fn shared_signature_nodes_from(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        first: Result<crate::signature_kernel::SignatureSetValue, IncompleteReason>,
+    ) -> SharedSignatureNodes {
+        self.shared_signature_nodes_ordered(subject, kind, first, false)
+    }
+
+    /// The shared read in declaration order, or with `resolution` in the
+    /// order call resolution tries the candidates.
+    fn shared_signature_nodes_ordered(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        first: Result<crate::signature_kernel::SignatureSetValue, IncompleteReason>,
+        resolution: bool,
+    ) -> SharedSignatureNodes {
+        match self.read_signature_set(subject, kind, first, |value| {
+            self.signature_nodes_of(kind, value, resolution)
+        }) {
+            Ok(nodes) => SharedSignatureNodes::Nodes(nodes),
+            Err(reason) => SharedSignatureNodes::Incomplete(reason),
+        }
+    }
+
+    /// The node form of every candidate of one dispatched set, in candidate
+    /// order — or, with `resolution`, in the kernel's resolution order.
+    fn signature_nodes_of(
+        &self,
+        kind: GraphSignatureKind,
+        value: &crate::signature_kernel::SignatureSetValue,
+        resolution: bool,
+    ) -> Result<Vec<SemanticNodeId>, SignatureSetReadFailure> {
+        let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
         let store = self.graph().signature_store();
-        let candidates: Vec<SignatureCandidate> = {
+        let (candidates, order): (Vec<SignatureCandidate>, Vec<usize>) = {
             let view = SemanticReadView::pin(store);
-            match view.read_set(value.set) {
+            if value.set.epoch().is_some_and(|epoch| epoch != view.epoch()) {
+                return Err(SignatureSetReadFailure::Retired);
+            }
+            let candidates = match view.read_set(value.set) {
                 Ok(crate::signature_kernel::BorrowedSet::Empty) => Vec::new(),
                 Ok(crate::signature_kernel::BorrowedSet::One { candidate, .. }) => vec![candidate],
                 Ok(crate::signature_kernel::BorrowedSet::Many(list)) => list.to_vec(),
-                Err(_) => {
-                    return SharedSignatureNodes::Incomplete(IncompleteReason::UnsettledInput)
+                Err(_) => return Err(unsettled),
+            };
+            let order = if resolution {
+                match crate::signature_kernel::resolution_order(&view, &candidates) {
+                    Ok(order) => order,
+                    Err(error) if is_retired_handle(&error) => {
+                        return Err(SignatureSetReadFailure::Retired)
+                    }
+                    Err(error) => {
+                        return Err(SignatureSetReadFailure::Incomplete(
+                            error.incomplete_reason(),
+                        ))
+                    }
                 }
-            }
+            } else {
+                (0..candidates.len()).collect()
+            };
+            (candidates, order)
         };
         if candidates.len() != value.nodes.len() {
-            return SharedSignatureNodes::Incomplete(IncompleteReason::UnsettledInput);
+            return Err(unsettled);
         }
         let mut nodes = Vec::with_capacity(candidates.len());
-        for (index, candidate) in candidates.iter().enumerate() {
+        for index in order {
+            let candidate = &candidates[index];
             let node = match value.nodes[index].authored {
                 Some(node) => node,
+                // The composite's node form is built after the view above is
+                // released, so a replacement can still retire the candidate.
                 None => match self.composite_signature_node(
                     store,
                     kind,
@@ -1229,14 +1651,19 @@ impl ProjectSemanticDispatch<'_> {
                     &value.nodes[index].constituents,
                 ) {
                     Ok(node) => node,
+                    Err(error) if is_retired_handle(&error) => {
+                        return Err(SignatureSetReadFailure::Retired)
+                    }
                     Err(error) => {
-                        return SharedSignatureNodes::Incomplete(error.incomplete_reason())
+                        return Err(SignatureSetReadFailure::Incomplete(
+                            error.incomplete_reason(),
+                        ))
                     }
                 },
             };
             nodes.push(node);
         }
-        SharedSignatureNodes::Nodes(nodes)
+        Ok(nodes)
     }
 
     /// The type at positional argument `position` of every shared candidate
@@ -1263,34 +1690,48 @@ impl ProjectSemanticDispatch<'_> {
         kind: GraphSignatureKind,
         position: usize,
     ) -> SharedPositionalReads {
-        use crate::semantic_query::{QueryResult, SemanticQueryKey, SemanticQueryValue};
+        let first = self.signature_set_value(subject, kind);
+        let raw = self.read_signature_set(subject, kind, first, |value| {
+            self.raw_positional_reads(value, position)
+        })?;
+        Ok(raw
+            .into_iter()
+            .map(|raw| PositionalRead {
+                receiver: raw.receiver,
+                argument: match raw.argument {
+                    None => PositionalArgument::Absent,
+                    Some((ty, includes_undefined)) => PositionalArgument::Type {
+                        ty,
+                        non_nullish_arms: self.non_nullish_arms(ty),
+                        includes_undefined,
+                    },
+                },
+            })
+            .collect())
+    }
+
+    /// Every candidate's positional slots at `position`, read under ONE
+    /// pinned view of the set's own epoch; no semantics is dispatched while
+    /// it is held.
+    fn raw_positional_reads(
+        &self,
+        value: &crate::signature_kernel::SignatureSetValue,
+        position: usize,
+    ) -> Result<Vec<RawPositional>, SignatureSetReadFailure> {
         use crate::signature_kernel::{PositionalShape, TypeAt};
 
-        let read = self.execute_via_cold_build_helper(SemanticQueryKey::SignaturesOfType {
-            subject,
-            kind,
-            context: SemanticContextId::production(),
-        });
-        let value = match read.value {
-            QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => value,
-            _ => {
-                return Err(if self.connected_demand_tripped() {
-                    IncompleteReason::Budget
-                } else {
-                    IncompleteReason::UnsettledInput
-                })
-            }
-        };
+        let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
         let store = self.graph().signature_store();
-        // Everything the positional model needs is read under ONE pinned
-        // view; no semantics is dispatched while it is held.
         let raw: Result<Vec<RawPositional>, ()> = {
             let view = SemanticReadView::pin(store);
+            if value.set.epoch().is_some_and(|epoch| epoch != view.epoch()) {
+                return Err(SignatureSetReadFailure::Retired);
+            }
             let candidates: Vec<SignatureCandidate> = match view.read_set(value.set) {
                 Ok(crate::signature_kernel::BorrowedSet::Empty) => Vec::new(),
                 Ok(crate::signature_kernel::BorrowedSet::One { candidate, .. }) => vec![candidate],
                 Ok(crate::signature_kernel::BorrowedSet::Many(list)) => list.to_vec(),
-                Err(_) => return Err(IncompleteReason::UnsettledInput),
+                Err(_) => return Err(unsettled),
             };
             let mut out = Vec::with_capacity(candidates.len());
             let mut failed = false;
@@ -1330,7 +1771,7 @@ impl ProjectSemanticDispatch<'_> {
                 let argument = match positional.type_at(position) {
                     TypeAt::Absent => None,
                     TypeAt::One(slot) => match view.type_token_node(slot.ty) {
-                        Ok(node) => Some(node),
+                        Ok(node) => Some((node, slot.optionality.includes_undefined)),
                         Err(_) => {
                             failed = true;
                             break;
@@ -1361,22 +1802,323 @@ impl ProjectSemanticDispatch<'_> {
                 Ok(out)
             }
         };
-        let Ok(raw) = raw else {
-            return Err(IncompleteReason::UnsettledInput);
+        raw.map_err(|()| unsettled)
+    }
+
+    /// The parameter positions one signature comparison relates, read
+    /// through the ONE positional model for both signatures — the checker's
+    /// `compareSignaturesRelated` over `getParameterCount`,
+    /// `tryGetTypeAtPosition` and `getRestOrAnyTypeAtPosition`:
+    ///
+    /// - the arity half is [`crate::signature_kernel::PositionalShape::source_has_more_parameters`]:
+    ///   a target with a rest run accepts every source, any other target
+    ///   rejects a source whose minimum exceeds its parameter count — or,
+    ///   under `strict_arity` (the checker's `StrictArity` mode, which its
+    ///   strict subtype relation uses), a source with a rest parameter or
+    ///   with more parameters than the target takes;
+    /// - without a still-generic rest on either side, every position up to
+    ///   the LARGER parameter count is related where both signatures declare
+    ///   a type there — a rest run supplies its element at every position
+    ///   past the fixed ones (`(...args: any[])` is `any` at 0, 1, …);
+    /// - with a still-generic rest, positions run to the SMALLER count and
+    ///   the last one relates the rest of each parameter list from there as
+    ///   one tuple (`any` when that is an array of `any`).
+    /// - an optional parameter's type includes `undefined` where its slot
+    ///   says so (`strictNullChecks`, the checker's `getTypeOfParameter`).
+    ///
+    /// Measured on 7.0.2: `((a: string) => void) extends ((...args: any[]) =>
+    /// void)` and the `new` form are true, `((a: string, b: number) => void)
+    /// extends ((...args: string[]) => void)` is false, `((...a: string[]) =>
+    /// void) extends ((x: string, y: string) => void)` is true.
+    pub(super) fn signature_comparison_plan(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        kind: GraphSignatureKind,
+        strict_arity: bool,
+    ) -> Result<SignatureComparisonPlan, IncompleteReason> {
+        let unsettled = IncompleteReason::UnsettledInput;
+        let mut attempt = 0;
+        let read = loop {
+            let source_set = self.signature_set_value(source, kind)?;
+            let target_set = self.signature_set_value(target, kind)?;
+            match self.raw_comparison_plan(&source_set, &target_set, strict_arity) {
+                Err(SignatureSetReadFailure::Retired) if attempt == 0 => attempt += 1,
+                Err(SignatureSetReadFailure::Retired) => return Err(unsettled),
+                Err(SignatureSetReadFailure::Incomplete(reason)) => return Err(reason),
+                Ok(read) => break read,
+            }
         };
-        Ok(raw
+        let graph = self.graph();
+        let materialize = |position: RawPosition| -> Option<SemanticNodeId> {
+            match position {
+                RawPosition::Absent => None,
+                RawPosition::One(node) => Some(node),
+                RawPosition::Optional(node) => {
+                    let undefined =
+                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                    Some(self.intern_normalized_union_or_intersection(&[node, undefined], true))
+                }
+                RawPosition::Run(members) => {
+                    Some(self.intern_normalized_union_or_intersection(&members, true))
+                }
+                RawPosition::GenericIndex { rest, index } => {
+                    let index = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(
+                        index as f64,
+                    )));
+                    Some(graph.intern_node(SemanticNodeData::IndexedAccess {
+                        object: rest,
+                        index: crate::semantic_query::IndexKey::Computed(index),
+                    }))
+                }
+                RawPosition::Remaining(elements) => {
+                    let any_array = |node: SemanticNodeId| {
+                        matches!(
+                            graph.node_data(node).as_deref(),
+                            Some(SemanticNodeData::Array { element, .. })
+                                if matches!(
+                                    graph.node_data(*element).as_deref(),
+                                    Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                                )
+                        )
+                    };
+                    let rest_or_any = |node: SemanticNodeId| {
+                        if any_array(node) {
+                            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                        } else {
+                            node
+                        }
+                    };
+                    let whole = |node: SemanticNodeId, array: bool| {
+                        if array {
+                            graph.intern_node(SemanticNodeData::Array {
+                                element: node,
+                                readonly: false,
+                            })
+                        } else {
+                            node
+                        }
+                    };
+                    Some(match elements.as_slice() {
+                        [RawRestElement::Whole { node, array }] => {
+                            rest_or_any(whole(*node, *array))
+                        }
+                        _ => rest_or_any(
+                            graph.intern_node(SemanticNodeData::Tuple {
+                                elements: elements
+                                    .iter()
+                                    .map(|element| match element {
+                                        RawRestElement::Whole { node, array } => {
+                                            crate::semantic_query::TupleElement {
+                                                label: None,
+                                                value: whole(*node, *array),
+                                                optional: false,
+                                                rest: true,
+                                            }
+                                        }
+                                        RawRestElement::Element { node, optional } => {
+                                            crate::semantic_query::TupleElement {
+                                                label: None,
+                                                value: *node,
+                                                optional: *optional,
+                                                rest: false,
+                                            }
+                                        }
+                                    })
+                                    .collect(),
+                                readonly: false,
+                            }),
+                        ),
+                    })
+                }
+            }
+        };
+        let positions = read
+            .positions
             .into_iter()
-            .map(|raw| PositionalRead {
-                receiver: raw.receiver,
-                argument: match raw.argument {
-                    None => PositionalArgument::Absent,
-                    Some(ty) => PositionalArgument::Type {
-                        ty,
-                        non_nullish_arms: self.non_nullish_arms(ty),
-                    },
-                },
+            .filter_map(|(source, target)| Some((materialize(source)?, materialize(target)?)))
+            .collect();
+        Ok(SignatureComparisonPlan {
+            source_has_more_parameters: read.source_has_more_parameters,
+            source_receiver: read.source_receiver,
+            target_receiver: read.target_receiver,
+            positions,
+        })
+    }
+
+    /// Both signatures' positional reads under ONE pinned view of the
+    /// sets' epoch; no semantics is dispatched while it is held.
+    fn raw_comparison_plan(
+        &self,
+        source: &crate::signature_kernel::SignatureSetValue,
+        target: &crate::signature_kernel::SignatureSetValue,
+        strict_arity: bool,
+    ) -> Result<RawComparisonPlan, SignatureSetReadFailure> {
+        use crate::signature_kernel::{
+            PositionalMode, PositionalShape, ProjectedKind, ProjectedTuple, RestKind, TypeAt,
+        };
+
+        let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
+        let store = self.graph().signature_store();
+        let view = SemanticReadView::pin(store);
+        for set in [source, target] {
+            if set.set.epoch().is_some_and(|epoch| epoch != view.epoch()) {
+                return Err(SignatureSetReadFailure::Retired);
+            }
+        }
+        let facts = GraphTypes {
+            dispatch: self,
+            store,
+        };
+        let only =
+            |value: &crate::signature_kernel::SignatureSetValue| match view.read_set(value.set) {
+                Ok(crate::signature_kernel::BorrowedSet::One { candidate, .. }) => Ok(candidate),
+                _ => Err(unsettled),
+            };
+        let parts = |candidate: SignatureCandidate| {
+            let descriptor = view
+                .descriptor(candidate.signature)
+                .map_err(|_| unsettled)?;
+            let template = view.template(descriptor.template).map_err(|_| unsettled)?;
+            let shape = view.shape(template.input_shape).map_err(|_| unsettled)?;
+            let layout = view.layout(shape.parameter_layout).map_err(|_| unsettled)?;
+            let receiver = match shape.this_parameter {
+                Some(id) => Some(*view.slot(id).map_err(|_| unsettled)?),
+                None => None,
+            };
+            Ok((layout, receiver, shape.signature_semantic_flags))
+        };
+        let (source_layout, source_this, source_flags) = parts(only(source)?)?;
+        let (target_layout, target_this, target_flags) = parts(only(target)?)?;
+        let source_shape = PositionalShape::new(source_layout, source_this, source_flags, &facts);
+        let target_shape = PositionalShape::new(target_layout, target_this, target_flags, &facts);
+        let node = |token| view.type_token_node(token).map_err(|_| unsettled);
+        // A rest of type `any` is `any` at every position, never a
+        // still-generic rest (`getNonArrayRestType` excludes it).
+        let generic_rest = |shape: &PositionalShape<'_>| -> Result<bool, SignatureSetReadFailure> {
+            match shape.rest() {
+                Some(rest) if rest.kind == RestKind::GenericTuple => {
+                    let rest_node = node(rest.slot.ty)?;
+                    Ok(!matches!(
+                        self.graph().node_data(rest_node).as_deref(),
+                        Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                    ))
+                }
+                _ => Ok(false),
+            }
+        };
+        let count = |shape: &PositionalShape<'_>| {
+            shape.parameter_count() + shape.rest().map_or(0, |rest| rest.tail.len())
+        };
+        let source_generic = generic_rest(&source_shape)?;
+        let target_generic = generic_rest(&target_shape)?;
+        let (source_count, target_count) = (count(&source_shape), count(&target_shape));
+        let generic = source_generic || target_generic;
+        let compared = if generic {
+            source_count.min(target_count)
+        } else {
+            source_count.max(target_count)
+        };
+        let rest_index = generic.then(|| compared.checked_sub(1)).flatten();
+        let at = |shape: &PositionalShape<'_>,
+                  pos: usize|
+         -> Result<RawPosition, SignatureSetReadFailure> {
+            Ok(match shape.type_at(pos) {
+                TypeAt::Absent => RawPosition::Absent,
+                TypeAt::One(slot) if slot.optionality.includes_undefined => {
+                    RawPosition::Optional(node(slot.ty)?)
+                }
+                TypeAt::One(slot) => RawPosition::One(node(slot.ty)?),
+                TypeAt::Run { element, tail } => {
+                    let mut members = vec![node(element)?];
+                    for slot in tail {
+                        members.push(node(slot.ty)?);
+                    }
+                    RawPosition::Run(members)
+                }
+                TypeAt::GenericRest { rest, index } => {
+                    let rest = node(rest)?;
+                    if matches!(
+                        self.graph().node_data(rest).as_deref(),
+                        Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                    ) {
+                        RawPosition::One(rest)
+                    } else {
+                        RawPosition::GenericIndex { rest, index }
+                    }
+                }
             })
-            .collect())
+        };
+        // `getRestTypeAtPosition`: the rest of the parameter list from
+        // `pos` on, as the rest type itself at its own position, an array of
+        // its element past it, else a tuple of the remaining positions.
+        let remaining = |shape: &PositionalShape<'_>,
+                         pos: usize|
+         -> Result<RawPosition, SignatureSetReadFailure> {
+            let rest_node = |rest: &crate::signature_kernel::RestSlot| -> Result<RawRestElement, SignatureSetReadFailure> {
+                Ok(RawRestElement::Whole {
+                    node: node(rest.slot.ty)?,
+                    array: rest.kind == RestKind::Array,
+                })
+            };
+            Ok(RawPosition::Remaining(
+                match shape.project_tuple(pos, PositionalMode::Comparison) {
+                    ProjectedTuple::Rest { exact: true, .. } => {
+                        let rest = shape.rest().ok_or(unsettled)?;
+                        vec![rest_node(rest)?]
+                    }
+                    ProjectedTuple::Rest { ty, exact: false } => {
+                        let rest = shape.rest().ok_or(unsettled)?;
+                        let element = match rest.kind {
+                            RestKind::Array => node(ty)?,
+                            RestKind::GenericTuple => return Ok(RawPosition::Absent),
+                        };
+                        vec![RawRestElement::Whole {
+                            node: element,
+                            array: true,
+                        }]
+                    }
+                    ProjectedTuple::Elements(elements) => {
+                        let mut out = Vec::with_capacity(elements.len());
+                        for element in elements {
+                            out.push(match element.kind {
+                                ProjectedKind::Variadic => {
+                                    let rest = shape.rest().ok_or(unsettled)?;
+                                    rest_node(rest)?
+                                }
+                                kind => RawRestElement::Element {
+                                    node: node(element.ty)?,
+                                    optional: kind == ProjectedKind::Optional,
+                                },
+                            });
+                        }
+                        out
+                    }
+                },
+            ))
+        };
+        let mut positions = Vec::with_capacity(compared);
+        for pos in 0..compared {
+            if Some(pos) == rest_index {
+                positions.push((
+                    remaining(&source_shape, pos)?,
+                    remaining(&target_shape, pos)?,
+                ));
+            } else {
+                positions.push((at(&source_shape, pos)?, at(&target_shape, pos)?));
+            }
+        }
+        Ok(RawComparisonPlan {
+            source_has_more_parameters: PositionalShape::source_has_more_parameters(
+                &source_shape,
+                &target_shape,
+                strict_arity,
+                PositionalMode::Comparison,
+            ),
+            source_receiver: source_this.map(|slot| node(slot.ty)).transpose()?,
+            target_receiver: target_this.map(|slot| node(slot.ty)).transpose()?,
+            positions,
+        })
     }
 
     /// `node`'s union arms without `null` / `undefined` (the checker's
@@ -1507,20 +2249,31 @@ impl ProjectSemanticDispatch<'_> {
             None,
         )?;
         drop(view);
-        let return_type = match self.read_signature_result(
+        let (return_type, predicate) = match self.read_signature_result(
             store,
             descriptor,
             call,
-            ResultDemand::Return,
+            ResultDemand::Both,
             CONTEXT_FREE_EVALUATION,
             SemanticContextId::production(),
         ) {
             QueryOutcome::Ready(Ready { value, .. }) => {
-                let token = store
-                    .applied_result(value)?
+                let applied = store.applied_result(value)?;
+                let token = applied
                     .return_type
                     .ok_or(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput))?;
-                store.type_token_node(token)?
+                let predicate = match applied.effects {
+                    Some(effect) => Some(crate::semantic_query::SignaturePredicate {
+                        subject: effect.subject,
+                        asserts: effect.asserts,
+                        ty: effect
+                            .ty
+                            .map(|token| store.type_token_node(token))
+                            .transpose()?,
+                    }),
+                    None => None,
+                };
+                (store.type_token_node(token)?, predicate)
             }
             QueryOutcome::Incomplete(reason) => return Err(DiscoveryError::Incomplete(reason)),
         };
@@ -1533,6 +2286,10 @@ impl ProjectSemanticDispatch<'_> {
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
             signature_span: None,
             return_type_span: None,
+            // The composite's effect: the union rule over its constituents,
+            // or a mixin construct's base.
+            predicate,
+            is_abstract: false,
         }))
     }
 
@@ -1604,12 +2361,18 @@ impl ProjectSemanticDispatch<'_> {
     ) -> super::walk::QueryBuildOutput<crate::semantic_query::SemanticQueryValue> {
         use crate::semantic_query::{QueryError, QueryResult, SemanticQueryValue};
         let fence = self.project_generation_signature();
-        match self.signatures_of_type_with_authored(
-            self.graph().signature_store(),
-            subject,
-            kind,
-            context,
-        ) {
+        let store = self.graph().signature_store();
+        let began = store.epoch();
+        let mut outcome = self.signatures_of_type_with_authored(store, subject, kind, context);
+        // A kernel-epoch replacement landing mid-walk retires what the walk
+        // interned (it fails, or answers in the retired epoch): that walk is
+        // a miss, run once more in the current epoch.
+        if store.epoch() != began {
+            outcome = self.signatures_of_type_with_authored(store, subject, kind, context);
+        }
+        #[cfg(test)]
+        signatures_of_type_build_point(SignaturesOfTypeBuildPoint::Settled);
+        match outcome {
             QueryOutcome::Ready(Ready { value, .. }) => {
                 let (roots, complete) =
                     match self.transitive_self_roots_from_nodes(std::iter::once(subject)) {
@@ -1664,6 +2427,39 @@ impl ProjectSemanticDispatch<'_> {
     }
 }
 
+/// The two windows of a `SignaturesOfType` build a kernel-epoch replacement
+/// can land in.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignaturesOfTypeBuildPoint {
+    /// The walk has discovered its candidates and not yet published the
+    /// set: a replacement here retires what the walk interned.
+    Discovered,
+    /// The build has settled its value and not yet handed it to the memo: a
+    /// replacement here makes the build publish a retired-epoch value.
+    Settled,
+}
+
+#[cfg(test)]
+type SignaturesOfTypeBuildHook = Box<dyn Fn(SignaturesOfTypeBuildPoint)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: runs on the building thread at each
+    /// [`SignaturesOfTypeBuildPoint`].
+    static SIGNATURES_OF_TYPE_BUILD_HOOK: std::cell::RefCell<Option<SignaturesOfTypeBuildHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn signatures_of_type_build_point(point: SignaturesOfTypeBuildPoint) {
+    SIGNATURES_OF_TYPE_BUILD_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook(point);
+        }
+    });
+}
+
 fn incomplete_output(
     fence: crate::semantic_query::DepSignature,
     reason: IncompleteReason,
@@ -1680,3 +2476,7 @@ fn incomplete_output(
     );
     output
 }
+
+#[cfg(test)]
+#[path = "signature_epoch_tests.rs"]
+mod signature_epoch_tests;

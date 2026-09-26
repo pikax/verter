@@ -233,6 +233,7 @@
           "crates/verter_session/src/typeinfo/vue_macro_codegen.rs",
           "crates/verter_session/src/u6_flow_expect_tests.rs",
           "crates/verter_session/src/u6_flow_shape_corpus_tests.rs",
+          "crates/verter_session/examples/signature_kernel_bench.rs",
           "crates/verter_session/tests/cases/component_meta_audit_corpus/chunk_harness.rs",
           "crates/verter_session/tests/cases/corpus_audit_layout.rs",
           "crates/verter_session/tests/cases/exposed_binding_regression.rs",
@@ -696,7 +697,7 @@
       "snapshot": {
         "pubFn": 0,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 15,
+        "pubCrateFn": 18,
         "pubType": 0,
         "pubCrateMod": 1,
         "inlinePubMod": 0,
@@ -867,7 +868,7 @@
       "snapshot": {
         "pubFn": 0,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 5,
+        "pubCrateFn": 9,
         "pubType": 0,
         "pubCrateMod": 0,
         "inlinePubMod": 0,
@@ -1008,13 +1009,13 @@
         }
       ],
       "snapshot": {
-        "pubFn": 170,
+        "pubFn": 179,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 41,
-        "pubType": 197,
+        "pubCrateFn": 46,
+        "pubType": 201,
         "pubCrateMod": 2,
         "inlinePubMod": 15,
-        "pubStructField": 284
+        "pubStructField": 306
       },
       "authority": [
         {
@@ -1062,6 +1063,8 @@
           "crates/verter_napi/src/lib.rs",
           "crates/verter_napi/src/typeinfo.rs",
           "crates/verter_session/benches/projection_safety_bench.rs",
+          "crates/verter_session/examples/signature_kernel_bench.rs",
+          "crates/verter_session/examples/signature_kernel_cancel_probe.rs",
           "crates/verter_session/tests/allocation_cases/flow_literal_provenance.rs",
           "crates/verter_session/tests/allocation_cases/flow_products.rs",
           "crates/verter_session/tests/allocator_canaries.rs",
@@ -1197,6 +1200,8 @@
             "to": "pub(crate)",
             "consumersAffected": [
               "crates/verter_session/benches/projection_safety_bench.rs",
+              "crates/verter_session/examples/signature_kernel_bench.rs",
+              "crates/verter_session/examples/signature_kernel_cancel_probe.rs",
               "crates/verter_session/tests/allocation_cases/flow_literal_provenance.rs",
               "crates/verter_session/tests/allocation_cases/flow_products.rs",
               "crates/verter_session/tests/cases/compile-fail/composite_mint_unforgeable.rs",
@@ -1351,13 +1356,13 @@
         }
       ],
       "snapshot": {
-        "pubFn": 13,
+        "pubFn": 22,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 11,
-        "pubType": 31,
-        "pubCrateMod": 1,
+        "pubCrateFn": 15,
+        "pubType": 64,
+        "pubCrateMod": 2,
         "inlinePubMod": 0,
-        "pubStructField": 44
+        "pubStructField": 117
       },
       "authority": [
         {

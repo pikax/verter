@@ -1947,6 +1947,50 @@ pub struct ValueTypeAnnotationFact {
     /// fabricated type expression.
     #[serde(default)]
     pub expression_source: Option<SemanticExpressionSource>,
+    /// Whether the declared type's literals are the checker's WIDENING
+    /// literal types — read, they widen wherever a bare literal would.
+    #[serde(default)]
+    pub literal_freshness: DeclaredLiteralFreshness,
+}
+
+/// Whether a value declaration's declared type is the checker's WIDENING
+/// literal type: a `const` without an annotation takes the FRESH literal
+/// type of its initializer (`const c = 1` declares `1`, and a read of `c`
+/// returns `number` from a function, as `return 1` does), while an
+/// annotation, an assertion or a mutable declaration declares a regular
+/// type (`const c: 1 = 1`, `1 as const`).
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum DeclaredLiteralFreshness {
+    /// The declared type's literals are regular.
+    #[default]
+    Regular,
+    /// Every literal of the declared type is fresh: the initializer is a
+    /// literal, or a conditional whose every branch is one.
+    Widening,
+    /// The initializer reads another value (`const d = c`): the literals are
+    /// fresh exactly when that value's are. The path is the value's
+    /// reference in the declaring scope.
+    Follows(Arc<[String]>),
+    /// A class: the named static members are `readonly` properties without
+    /// an annotation whose initializer is a literal (`static readonly s =
+    /// 1`), whose declared types are fresh as a `const`'s are — a read of
+    /// `C.s` widens.
+    WideningStaticMembers(Arc<[String]>),
+    /// The initializer is `null`, `undefined` or a `void` expression and
+    /// there is no annotation: with `strictNullChecks` off the checker
+    /// widens the declared type to `any`.
+    WideningNullish,
 }
 
 /// Locator for one authored reference argument. Macro payloads need the macro
@@ -2082,6 +2126,37 @@ pub struct NarrowTypeParam {
     /// valid) — never a session-wide flag.
     #[serde(default)]
     pub is_const: bool,
+    /// The authored variance annotation (`in T`, `out T`, `in out T`).
+    #[serde(default)]
+    pub variance: TypeParamVariance,
+}
+
+/// A declaration type parameter's authored variance annotation, which the
+/// checker reads instead of measuring the parameter's variance
+/// (`getVariances`).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum TypeParamVariance {
+    /// No annotation: the checker measures the variance.
+    #[default]
+    Unannotated,
+    /// `in T`: contravariant.
+    In,
+    /// `out T`: covariant.
+    Out,
+    /// `in out T`: invariant.
+    InOut,
 }
 
 /// A whole type-parameter declaration list.
@@ -2605,6 +2680,128 @@ pub struct EnumMemberEntry {
     pub name: String,
     /// The member's folded/sound value.
     pub value: EnumScalar,
+    /// The member's constant initializer when its value depends on another
+    /// declaration — another enum's member, a member of another declaration
+    /// of a merged enum, a `const` variable — so it is known only once that
+    /// declaration is read. `value` is then the computed member's domain,
+    /// and a reader that can resolve the references evaluates this instead.
+    pub initializer: Option<EnumConstantExpr>,
+}
+
+/// An enum member initializer the checker's constant evaluator reads, as a
+/// postfix program over the values it names: literals, references and the
+/// operators the evaluator folds. Evaluating it pushes each literal and
+/// each referenced value, and each operator pops its operands and pushes
+/// its result; the one value left is the member's.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct EnumConstantExpr {
+    /// The program's steps, in evaluation order.
+    pub steps: Arc<[EnumConstantStep]>,
+}
+
+/// One step of an [`EnumConstantExpr`].
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum EnumConstantStep {
+    /// A number literal, as the canonical `f64` display string.
+    Number(String),
+    /// A string literal.
+    String(String),
+    /// The value a path names: a member of the enum itself (`A`), another
+    /// enum's member (`Other.A`, `NS.Other.A`, `Other["A"]`), or a `const`
+    /// variable (`k`, `NS.k`).
+    Reference(Arc<[String]>),
+    /// A prefix operator over the value below.
+    Unary(EnumConstantUnaryOp),
+    /// A binary operator over the two values below (left deeper).
+    Binary(EnumConstantBinaryOp),
+    /// A template: the quasis concatenated around the `quasis.len() - 1`
+    /// values below, in order.
+    Template(Arc<[String]>),
+    /// The value below plus one when it is a number — the auto-incremented
+    /// value of a member without an initializer.
+    Increment,
+}
+
+/// A prefix operator of an [`EnumConstantExpr`].
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum EnumConstantUnaryOp {
+    /// `+x`.
+    Plus,
+    /// `-x`.
+    Minus,
+    /// `~x`.
+    BitNot,
+}
+
+/// A binary operator of an [`EnumConstantExpr`].
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum EnumConstantBinaryOp {
+    /// `|`.
+    BitOr,
+    /// `&`.
+    BitAnd,
+    /// `^`.
+    BitXor,
+    /// `<<`.
+    ShiftLeft,
+    /// `>>`.
+    ShiftRight,
+    /// `>>>`.
+    ShiftRightUnsigned,
+    /// `*`.
+    Multiply,
+    /// `/`.
+    Divide,
+    /// `+` (numeric addition, or concatenation with a string).
+    Add,
+    /// `-`.
+    Subtract,
+    /// `%`.
+    Remainder,
+    /// `**`.
+    Exponent,
 }
 
 /// The `PreparedValueDecl.enum_members` narrowing — the ordered inventory.
@@ -4268,6 +4465,7 @@ impl NarrowTypeParam {
             constraint: constraint.unwrap_or_else(|| self.constraint.clone()),
             default: default.unwrap_or_else(|| self.default.clone()),
             is_const: self.is_const,
+            variance: self.variance,
         })
     }
 }

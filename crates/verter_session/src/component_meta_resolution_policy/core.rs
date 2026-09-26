@@ -535,6 +535,10 @@ pub(super) fn body_root_is_resolvable(body: SemanticNodeId, ctx: &PolicyCtx<'_, 
     }
     match ctx.node_data(body).as_deref() {
         Some(SemanticNodeData::Alias(target)) => body_root_is_resolvable(*target, ctx),
+        // A class expression's instance body is its instance surface.
+        Some(SemanticNodeData::ClassExpressionInstance { surface, .. }) => {
+            body_root_is_resolvable(*surface, ctx)
+        }
         Some(SemanticNodeData::IndexedAccess { object, .. }) => {
             !indexed_access_targets_macro_participating(*object, ctx)
         }
@@ -563,6 +567,7 @@ pub(super) fn body_root_is_resolvable(body: SemanticNodeId, ctx: &PolicyCtx<'_, 
             | SemanticNodeData::Intersection(_)
             | SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Array { .. }
             | SemanticNodeData::Tuple { .. }
             | SemanticNodeData::TemplateLiteral { .. }

@@ -147,6 +147,7 @@ impl FlowBindingMap {
                 kind,
                 defining_function: function.clone(),
                 binding_slot: slot,
+                evolving_array: record.evolving_array,
             }));
         }
         if !declarations.is_empty() {

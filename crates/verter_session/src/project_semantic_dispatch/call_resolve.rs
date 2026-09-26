@@ -95,6 +95,9 @@ struct CallArgument {
     /// A function-valued argument with at least one un-annotated parameter.
     /// Its provisional type is withheld from the first inference pass.
     context_sensitive: bool,
+    /// The argument checked in its const context ([`CallArgKey::Eager`]),
+    /// the source a candidate's `const` type parameter infers from.
+    const_view: Option<SemanticNodeId>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -1069,6 +1072,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             CallCandidates::Candidates(visible) => visible,
             failed => return CandidateVerdict::Degraded(self.candidate_failure(callee, failed)),
         };
+        // `resolveNewExpression` refuses an abstract class before resolving
+        // anything: a `new` over a class's own construct signatures is an
+        // error ("cannot create an instance of an abstract class") whose
+        // answer is the error type, never the instance.
+        if bucket == SignatureKind::Construct
+            && visible
+                .iter()
+                .any(|candidate| self.is_abstract_class_construct_signature(candidate.node))
+        {
+            return CandidateVerdict::Degraded(ResolveCallFailure::NotCallable);
+        }
         let raw = if key.explicit_type_args.is_empty() {
             Arc::clone(&visible)
         } else {
@@ -1162,6 +1176,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                         substitution,
                                         return_type: _,
                                         fresh_literal_returns,
+                                        recovery_diagnostic,
                                     } => ResolveCallSelection::Selected {
                                         selected,
                                         selected_signature:
@@ -1170,6 +1185,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                             ),
                                         substitution,
                                         fresh_literal_returns: fresh_literal_returns.to_vec(),
+                                        recovery_diagnostic,
                                     },
                                     ResolvedCallResult::DynamicAny { .. } => {
                                         ResolveCallSelection::DynamicAny
@@ -1209,41 +1225,111 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // signature list, in list order: the first applicable candidate
         // wins. A union callee arrives as its common or synthesized union
         // signatures, so there is no per-arm acceptance here.
-        for (position, candidate) in visible.iter().enumerate() {
-            let Some(kind) = bucket_kind(candidate.node) else {
-                return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
-            };
-            // The set was demanded for exactly this bucket; a candidate of
-            // the other bucket is a producer contract violation, and the
-            // call fails closed rather than deciding on it.
-            if kind != bucket {
-                return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
+        //
+        // Several candidates are tried twice, as the checker's
+        // `resolveCall` does: first under the SUBTYPE relation, then under
+        // assignability, so an argument `{ a: any }` selects `(v: unknown)`
+        // before an earlier `(v: { a: string })` it is only assignable to.
+        let passes: &[crate::semantic_query::RelationKind] = if visible.len() > 1 {
+            &[
+                crate::semantic_query::RelationKind::Subtype,
+                crate::semantic_query::RelationKind::Assignable,
+            ]
+        } else {
+            &[crate::semantic_query::RelationKind::Assignable]
+        };
+        let outer_applicability = self.dispatch_txn.borrow().call.applicability;
+        let mut only_candidate = None;
+        for &applicability in passes {
+            for (position, candidate) in visible.iter().enumerate() {
+                let Some(kind) = bucket_kind(candidate.node) else {
+                    return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
+                };
+                // The set was demanded for exactly this bucket; a candidate of
+                // the other bucket is a producer contract violation, and the
+                // call fails closed rather than deciding on it.
+                if kind != bucket {
+                    return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
+                }
+                // Pair the (possibly instantiated) candidate with its RAW form
+                // through the content-free authored origin — instantiation
+                // preserves the occurrence but mints a new graph node, so a
+                // node-id pairing would lose the raw type parameters. A
+                // ROOTLESS candidate has no occurrence to compare: both lists
+                // are the same callee's ordered bucket, so its raw form is the
+                // candidate at the same flat position.
+                let raw_candidate = match candidate.occurrence.authored() {
+                    Some(occurrence) => raw.iter().find(|raw| {
+                        raw.occurrence.authored() == Some(occurrence)
+                            && bucket_kind(raw.node) == Some(kind)
+                    }),
+                    None => raw.get(position).filter(|raw| {
+                        raw.occurrence.authored().is_none() && bucket_kind(raw.node) == Some(kind)
+                    }),
+                };
+                let Some(raw_candidate) = raw_candidate else {
+                    return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
+                };
+                if !budget.start_candidate() {
+                    self.abandon_call_sessions_since(session_watermark);
+                    return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
+                }
+                self.dispatch_txn.borrow_mut().call.applicability = applicability;
+                let verdict = self.check_call_candidate(
+                    key,
+                    candidate,
+                    raw_candidate,
+                    &arguments,
+                    &mut budget,
+                    false,
+                    visible.len() == 1,
+                );
+                self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
+                match verdict {
+                    CandidateVerdict::Selected(result) => {
+                        return CandidateVerdict::Selected(result)
+                    }
+                    CandidateVerdict::Mismatch => {}
+                    CandidateVerdict::Degraded(failure) => {
+                        if failure == ResolveCallFailure::Budget {
+                            self.abandon_call_sessions_since(session_watermark);
+                        }
+                        // The first candidate that asks types a context-sensitive
+                        // argument: the checker assigns a function's contextual
+                        // parameter types once, under the first candidate that
+                        // reaches it, and later candidates read them.
+                        return CandidateVerdict::Degraded(failure);
+                    }
+                }
+                if visible.len() == 1 {
+                    only_candidate = Some((candidate, raw_candidate));
+                }
             }
-            // Pair the (possibly instantiated) candidate with its RAW form
-            // through the content-free authored origin — instantiation
-            // preserves the occurrence but mints a new graph node, so a
-            // node-id pairing would lose the raw type parameters. A
-            // ROOTLESS candidate has no occurrence to compare: both lists
-            // are the same callee's ordered bucket, so its raw form is the
-            // candidate at the same flat position.
-            let raw_candidate = match candidate.occurrence.authored() {
-                Some(occurrence) => raw.iter().find(|raw| {
-                    raw.occurrence.authored() == Some(occurrence)
-                        && bucket_kind(raw.node) == Some(kind)
-                }),
-                None => raw.get(position).filter(|raw| {
-                    raw.occurrence.authored().is_none() && bucket_kind(raw.node) == Some(kind)
-                }),
-            };
-            let Some(raw_candidate) = raw_candidate else {
-                return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
-            };
+        }
+        // Every candidate of the bucket was a definite mismatch. A call with
+        // ONE candidate continues with it as the checker's error-recovery
+        // candidate (`getCandidateForOverloadFailure` picks the only one,
+        // re-inferred from the arguments), carrying the diagnostic the
+        // checker reports. It is checked under assignability, the one pass
+        // a single candidate has.
+        if let Some((candidate, raw_candidate)) = only_candidate {
             if !budget.start_candidate() {
                 self.abandon_call_sessions_since(session_watermark);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
             }
-            match self.check_call_candidate(key, candidate, raw_candidate, &arguments, &mut budget)
-            {
+            self.dispatch_txn.borrow_mut().call.applicability =
+                crate::semantic_query::RelationKind::Assignable;
+            let verdict = self.check_call_candidate(
+                key,
+                candidate,
+                raw_candidate,
+                &arguments,
+                &mut budget,
+                true,
+                true,
+            );
+            self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
+            match verdict {
                 CandidateVerdict::Selected(result) => return CandidateVerdict::Selected(result),
                 CandidateVerdict::Mismatch => {}
                 CandidateVerdict::Degraded(failure) => {
@@ -1254,8 +1340,114 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
-        // Every candidate of the bucket was a definite mismatch.
         CandidateVerdict::Degraded(ResolveCallFailure::NoApplicableOverload)
+    }
+
+    /// Whether an eager argument is a GENERIC function value. The checker's
+    /// error-recovery inference skips such an argument
+    /// (`SkipGenericFunctions`) where applicability inference instantiates
+    /// it, so a candidate recovering over one does not re-infer what this
+    /// executor inferred.
+    fn arguments_hold_a_generic_function(&self, arguments: &[CallArgument]) -> bool {
+        arguments
+            .iter()
+            .filter(|argument| !argument.context_sensitive)
+            .any(
+                |argument| match self.shared_signature_nodes(argument.node, SignatureKind::Call) {
+                    super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                        nodes.iter().any(|node| {
+                            matches!(
+                                self.graph().node_data(*node).as_deref(),
+                                Some(SemanticNodeData::Signature { type_parameters, .. })
+                                    if !type_parameters.is_empty()
+                            )
+                        })
+                    }
+                    super::signature_discovery::SharedSignatureNodes::Incomplete(_) => true,
+                },
+            )
+    }
+
+    /// Whether the return of a call signature of `target` — the contextual
+    /// signature a context-sensitive function argument is checked under —
+    /// mentions one of `params`. A signature list that does not settle
+    /// answers `true`: nothing proves the return free of them.
+    /// The contextual type a context-sensitive argument is typed under: the
+    /// parameter type `target` with every type parameter `fixed`, its one
+    /// call signature's return read under the `inferred` bindings alone,
+    /// so an uninferred parameter stays itself there (a literal context
+    /// through its constraint).
+    fn contextual_argument_type(
+        &self,
+        target: SemanticNodeId,
+        fixed: &CanonicalTypeSubstitution,
+        inferred: &CanonicalTypeSubstitution,
+    ) -> SemanticNodeId {
+        let fixed_target = self.substitute_canonical(target, fixed);
+        let partial_target = self.substitute_canonical(target, inferred);
+        let single = |node: SemanticNodeId| match self
+            .shared_signature_nodes(node, SignatureKind::Call)
+        {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) if nodes.len() == 1 => {
+                Some(nodes[0])
+            }
+            _ => None,
+        };
+        let (Some(fixed_signature), Some(partial_signature)) =
+            (single(fixed_target), single(partial_target))
+        else {
+            return fixed_target;
+        };
+        let graph = self.graph();
+        let Some(SemanticNodeData::Signature { return_type, .. }) =
+            graph.node_data(partial_signature).as_deref().cloned()
+        else {
+            return fixed_target;
+        };
+        let Some(mut data) = graph.node_data(fixed_signature).as_deref().cloned() else {
+            return fixed_target;
+        };
+        let SemanticNodeData::Signature {
+            return_type: ref mut fixed_return,
+            ref mut return_carrier,
+            ..
+        } = data
+        else {
+            return fixed_target;
+        };
+        *fixed_return = return_type;
+        *return_carrier = crate::semantic_query::SignatureReturnCarrier::Declared(return_type);
+        graph.intern_node(data)
+    }
+
+    /// Whether the result of `target`'s call signatures — its return, or
+    /// the type its predicate names, the position the checker infers a
+    /// guard's type parameter from (`value is S`) — mentions one of
+    /// `params`.
+    fn contextual_return_mentions(
+        &self,
+        target: SemanticNodeId,
+        params: &[SemanticNodeId],
+    ) -> bool {
+        match self.shared_signature_nodes(target, SignatureKind::Call) {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                nodes.iter().any(|node| {
+                    let (return_type, predicate) = match self.graph().node_data(*node).as_deref() {
+                        Some(SemanticNodeData::Signature {
+                            return_type,
+                            predicate,
+                            ..
+                        }) => (*return_type, predicate.and_then(|predicate| predicate.ty)),
+                        _ => return false,
+                    };
+                    params.iter().any(|param| {
+                        self.mentions_node(return_type, *param)
+                            || predicate.is_some_and(|target| self.mentions_node(target, *param))
+                    })
+                })
+            }
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => true,
+        }
     }
 
     /// Demand the ordered candidates of the callee's `bucket`, instantiated
@@ -1358,6 +1550,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
         false
     }
 
+    /// Whether `signature` is an abstract class's OWN construct signature —
+    /// the checker's abstract signature flag. A class's construct signature
+    /// is the only construct signature with no authored return annotation
+    /// whose return is a class instance (the class's constructor, declared
+    /// or synthesized, returns the class it belongs to); a `new () =>
+    /// Base` type authors its return, so a factory typed over an abstract
+    /// class stays constructible.
+    fn is_abstract_class_construct_signature(&self, signature: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        let instance = match graph.node_data(signature).as_deref() {
+            Some(SemanticNodeData::Signature {
+                kind: SignatureKind::Construct,
+                return_type_span: None,
+                return_type,
+                ..
+            }) => *return_type,
+            _ => return false,
+        };
+        let class = match graph.node_data(instance).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
+            Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
+            _ => return false,
+        };
+        self.ctx
+            .ensure_indexed_ready_serve(class.canonical_id.as_ref())
+            .is_some_and(|serve| {
+                serve
+                    .indexed
+                    .shallow_state
+                    .decl_bodies()
+                    .header_index()
+                    .abstract_classes
+                    .contains(&verter_type_expr::DeclBindingKey::new(
+                        class.owner,
+                        class.decl_name.as_ref(),
+                    ))
+            })
+    }
+
     fn call_callee_is_dynamic_any(&self, mut node: SemanticNodeId) -> bool {
         let mut seen = rustc_hash::FxHashSet::default();
         while seen.insert(node) {
@@ -1377,13 +1608,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut result = Vec::new();
         for argument in key.args.iter() {
             let context_sensitive = argument.is_context_sensitive();
-            let (node, spread, literal_mode) = match argument {
+            let (node, spread, literal_mode, const_view) = match argument {
                 CallArgKey::Eager {
                     ty,
                     spread,
                     literal_mode,
+                    const_view,
                     ..
-                } => (*ty, *spread, *literal_mode),
+                } => (*ty, *spread, *literal_mode, *const_view),
                 CallArgKey::ProgramExpression {
                     point,
                     spread,
@@ -1413,7 +1645,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             expression.as_ref(),
                         )
                         .ok_or(ResolveCallFailure::Undecidable)?;
-                    (node, *spread, *literal_mode)
+                    (node, *spread, *literal_mode, None)
                 }
             };
             let freshness_origin = node;
@@ -1425,6 +1657,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     literal_mode,
                     indefinite_spread: false,
                     context_sensitive,
+                    const_view: const_view
+                        .map(|view| self.substitute_canonical(view, &key.context.substitution)),
                 });
                 continue;
             }
@@ -1455,6 +1689,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         literal_mode,
                         indefinite_spread: false,
                         context_sensitive,
+                        const_view: None,
                     }));
                 }
                 _ => result.push(CallArgument {
@@ -1463,6 +1698,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     literal_mode,
                     indefinite_spread: true,
                     context_sensitive,
+                    const_view: None,
                 }),
             }
         }
@@ -1476,6 +1712,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         raw_candidate: &SignatureRef,
         arguments: &[CallArgument],
         budget: &mut CallResolutionBudget,
+        recovery: bool,
+        sole_candidate: bool,
     ) -> CandidateVerdict {
         let graph = self.graph();
         let consumer = crate::semantic_query::ResolveCallConsumer::witness();
@@ -1557,10 +1795,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if indefinite && !supports_indefinite {
             return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
         }
-        if !indefinite && arguments.len() < required {
-            return CandidateVerdict::Mismatch;
+        let too_few = !indefinite && arguments.len() < required;
+        let too_many = maximum.is_some_and(|maximum| arguments.len() > maximum);
+        // The diagnostic the checker reports for this candidate when it is
+        // the call's error-recovery candidate (`recovery`): the first
+        // failure applicability meets. An applicable candidate has none.
+        let mut failure: Option<crate::semantic_query::CheckerDiagnosticCode> = None;
+        if too_few || too_many {
+            // Only a non-generic candidate recovers past an argument-count
+            // mismatch: it infers nothing from the arguments applicability
+            // never related.
+            if !recovery || !visible_type_params.is_empty() {
+                return CandidateVerdict::Mismatch;
+            }
+            // "Expected at least N" needs an EFFECTIVE rest: an array rest,
+            // or a tuple rest with a rest element. A fixed-length tuple rest
+            // counts exactly (TS2554).
+            let effective_rest = match rest.map(|rest| &rest.shape) {
+                None => false,
+                Some(RestShape::Array(_)) => true,
+                Some(RestShape::Tuple(elements)) => elements.iter().any(|element| element.rest),
+                Some(RestShape::GenericTuple(_) | RestShape::Unresolved) => {
+                    return CandidateVerdict::Mismatch;
+                }
+            };
+            failure = Some(if too_few && effective_rest {
+                crate::semantic_query::CheckerDiagnosticCode::ArgumentCountAtLeast
+            } else {
+                crate::semantic_query::CheckerDiagnosticCode::ArgumentCount
+            });
         }
-        if maximum.is_some_and(|maximum| arguments.len() > maximum) {
+        let arguments = if failure.is_some() {
+            &arguments[..0]
+        } else {
+            arguments
+        };
+        if recovery
+            && !visible_type_params.is_empty()
+            && self.arguments_hold_a_generic_function(arguments)
+        {
             return CandidateVerdict::Mismatch;
         }
 
@@ -1603,6 +1876,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .expect("fresh call session")
             .checkpoint();
         let mut deferred_for_relation_scc = false;
+        // An argument whose parameter IS a `const` type parameter of this
+        // candidate is checked in its const context (`isConstContext`): a
+        // literal the calling frame computes relates, and deposits, as its
+        // const view — literals kept, members and tuples readonly.
+        let argument_source =
+            |argument: &CallArgument, target: SemanticNodeId| match argument.const_view {
+                Some(view)
+                    if visible_type_params
+                        .iter()
+                        .any(|decl| decl.is_const && decl.param == target) =>
+                {
+                    (view, view, ArgumentLiteralMode::Literal)
+                }
+                _ => (
+                    argument.node,
+                    argument.freshness_origin,
+                    argument.literal_mode,
+                ),
+            };
 
         if let (Some(receiver_param), Some(receiver)) = (receiver_param, call_receiver) {
             let deposits_before = self.accepted_inference_deposits();
@@ -1696,15 +1988,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // an inference-RESULT rule, applied at the deposit under the
             // inferring parameter's const policy — never to the
             // assignability source.
-            let source = argument.node;
+            let (source, freshness_origin, literal_mode) = argument_source(argument, target);
             let deposits_before = self.accepted_inference_deposits();
-            let step = self.call_argument_relation(
-                source,
-                target,
-                argument.freshness_origin,
-                budget,
-                argument.literal_mode,
-            );
+            let step =
+                self.call_argument_relation(source, target, freshness_origin, budget, literal_mode);
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
             {
@@ -1713,6 +2000,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             match step {
                 RelationStep::Assignable { .. } => {}
+                // A non-generic candidate infers nothing here, so its
+                // error-recovery reading needs no complete relation pass.
+                RelationStep::NotAssignable if recovery && visible_type_params.is_empty() => {
+                    failure.get_or_insert(
+                        crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
+                    );
+                }
                 RelationStep::NotAssignable => {
                     return self.reject_call_candidate(session_id, &checkpoint)
                 }
@@ -1779,7 +2073,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let clause_len = inputs.len();
         for (position, input) in inputs.into_iter().enumerate() {
             let bound = if !input.candidates.is_empty() {
-                self.relation_combine_candidates(&input.candidates, input.variance)
+                match input.variance {
+                    VariancePhase::Covariant => self.widened_covariant_inference(
+                        self.call_common_supertype(&input.candidates)
+                            .unwrap_or_else(|| {
+                                self.relation_combine_candidates(&input.candidates, input.variance)
+                            }),
+                    ),
+                    _ => self.relation_combine_candidates(&input.candidates, input.variance),
+                }
             } else {
                 uninferred_positions.push(position);
                 defaults
@@ -1840,6 +2142,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             }
         }
+        let uninferred_params: Vec<SemanticNodeId> = uninferred_positions
+            .iter()
+            .map(|&position| fixed[position].param)
+            .collect();
+        // The uninferred parameters that took their DEFAULT. A default names
+        // earlier parameters, and the checker instantiates it with their
+        // INFERRED types — after literal widening — so a widened
+        // substitution re-derives these (`f<A, B = A[]>(a: A)` called with
+        // `1` is `B = number[]`, not `1[]`).
+        let defaulted: Vec<DefaultedParam> = uninferred_positions
+            .iter()
+            .filter_map(|&position| {
+                let param = fixed[position].param;
+                let default = defaults.get(&param).and_then(|default| *default)?;
+                (fixed[position].bound == self.substitute_bindings(default, &fixed)).then(|| {
+                    DefaultedParam {
+                        param,
+                        default,
+                        constraint: constraints.get(&param).and_then(|bound| *bound),
+                    }
+                })
+            })
+            .collect();
         let bindings = {
             let mut txn = self.dispatch_txn.borrow_mut();
             let Some(session) = txn
@@ -1884,6 +2209,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .collect(),
         );
 
+        // An inference that violates its parameter's constraint is, in the
+        // checker's `getInferredType`, replaced by the default when that
+        // satisfies the constraint and by the constraint otherwise; the
+        // arguments then fail against it. Applicability rejects the
+        // candidate outright; its error-recovery reading takes the
+        // replacement.
+        let mut clamped: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
         for decl in raw_type_params.iter() {
             let Some(bound) = substitution
                 .bindings()
@@ -1899,6 +2231,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     own_return_function.as_ref(),
                 ) {
                     Ok(Some(true)) => {}
+                    Ok(Some(false)) if recovery && key.explicit_type_args.is_empty() => {
+                        let default = decl
+                            .default
+                            .map(|default| self.substitute_canonical(default, &substitution));
+                        let default_satisfies = match default {
+                            Some(default) => matches!(
+                                decided_call_relation(
+                                    self.call_relation(
+                                        default, constraint, default, budget, false, false,
+                                    ),
+                                    own_return_function.as_ref(),
+                                ),
+                                Ok(Some(true))
+                            ),
+                            None => false,
+                        };
+                        clamped.push((
+                            decl.param,
+                            default.filter(|_| default_satisfies).unwrap_or(constraint),
+                        ));
+                    }
                     Ok(Some(false)) => return self.reject_call_candidate(session_id, &checkpoint),
                     Ok(None) => deferred_for_relation_scc = true,
                     Err(failure) => {
@@ -1908,6 +2261,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
+        let substitution = if clamped.is_empty() {
+            substitution
+        } else {
+            let rebound = CanonicalTypeSubstitution::new(
+                substitution
+                    .bindings()
+                    .iter()
+                    .map(|(param, bound)| {
+                        (
+                            *param,
+                            clamped
+                                .iter()
+                                .find_map(|(clamped, replacement)| {
+                                    (clamped == param).then_some(*replacement)
+                                })
+                                .unwrap_or(*bound),
+                        )
+                    })
+                    .collect(),
+            );
+            CanonicalTypeSubstitution::new(
+                rebound
+                    .bindings()
+                    .iter()
+                    .map(|(param, bound)| (*param, self.substitute_canonical(*bound, &rebound)))
+                    .collect(),
+            )
+        };
 
         if let (Some(receiver_param), Some(receiver)) = (receiver_param, call_receiver) {
             let target = self.substitute_canonical(receiver_param.ty, &substitution);
@@ -1958,6 +2339,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
+        let mut context_sensitive_targets: Vec<(usize, SemanticNodeId)> = Vec::new();
         for (index, argument) in arguments.iter().enumerate() {
             if deferred_generic_rest.is_some_and(|(_, rest_start)| index >= rest_start) {
                 continue;
@@ -1978,20 +2360,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
+            // A context-sensitive argument whose contextual type reads one of
+            // the callee's type parameters is typed under that type and
+            // checked on the next request, never as the untyped function it
+            // is here.
+            if argument.context_sensitive && key.explicit_type_args.is_empty() {
+                let reads_inference = (!uninferred_params.is_empty()
+                    && self.contextual_return_mentions(target, &uninferred_params))
+                    || (sole_candidate
+                        && raw_type_params
+                            .iter()
+                            .any(|decl| self.mentions_node(target, decl.param)));
+                if reads_inference {
+                    context_sensitive_targets.push((index, target));
+                    continue;
+                }
+            }
+            let (source, freshness_origin, _) = argument_source(argument, target);
             let target = self.substitute_canonical(target, &substitution);
-            let source = argument.node;
             match decided_call_relation(
-                self.call_relation(
-                    source,
-                    target,
-                    argument.freshness_origin,
-                    budget,
-                    false,
-                    true,
-                ),
+                self.call_relation(source, target, freshness_origin, budget, false, true),
                 own_return_function.as_ref(),
             ) {
                 Ok(Some(true)) => {}
+                Ok(Some(false)) if recovery => {
+                    failure.get_or_insert(
+                        crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
+                    );
+                }
                 Ok(Some(false)) => return self.reject_call_candidate(session_id, &checkpoint),
                 Ok(None) => deferred_for_relation_scc = true,
                 Err(failure) => {
@@ -2001,6 +2397,82 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
+        // An error-recovery reading answers only for a candidate that did
+        // fail, on decided relations alone.
+        if recovery && (failure.is_none() || deferred_for_relation_scc) {
+            self.abandon_session(session_id);
+            return CandidateVerdict::Mismatch;
+        }
+        // The checker infers a type parameter no other argument inferred
+        // from a context-sensitive function argument's RETURN: its second
+        // inference pass checks the function under the contextual signature
+        // and infers from what the body returns (`map<U>` over `x => x`).
+        // This executor types no function body: it names the argument and
+        // its contextual type, the caller types the argument under it and
+        // asks again, and no rail may answer the call with the parameter's
+        // fallback meanwhile.
+        // A context-sensitive argument whose contextual type reads one of the
+        // callee's type parameters is typed the same way: it fixes the
+        // parameters it reads (`withCtx((x) => x, 3)` types `x` as `number`).
+        if !context_sensitive_targets.is_empty() {
+            // The first context-sensitive argument is typed next, under its
+            // contextual type: its parameters instantiated with every
+            // parameter fixed, its return with the inferences alone (the
+            // checker's fixing and non-fixing mappers).
+            // An uninferred parameter reads as itself, its constraint on it,
+            // the way the checker reads a literal context through a type
+            // parameter's constraint.
+            let inferred = CanonicalTypeSubstitution::new(
+                substitution
+                    .bindings()
+                    .iter()
+                    .map(|(param, bound)| {
+                        if !uninferred_params.contains(param) {
+                            return (*param, *bound);
+                        }
+                        let constrained =
+                            constraints
+                                .get(param)
+                                .copied()
+                                .flatten()
+                                .and_then(|constraint| {
+                                    let data = graph.node_data(*param)?;
+                                    let SemanticNodeData::TypeParam {
+                                        decl,
+                                        param_index,
+                                        default,
+                                        display_name,
+                                        constraint: None,
+                                    } = &*data
+                                    else {
+                                        return None;
+                                    };
+                                    Some(graph.intern_node(SemanticNodeData::TypeParam {
+                                        decl: decl.clone(),
+                                        param_index: *param_index,
+                                        constraint: Some(constraint),
+                                        default: *default,
+                                        display_name: Arc::clone(display_name),
+                                    }))
+                                });
+                        (*param, constrained.unwrap_or(*param))
+                    })
+                    .collect(),
+            );
+            let contextual = context_sensitive_targets
+                .first()
+                .and_then(|(index, target)| {
+                    let index = u32::try_from(*index).ok()?;
+                    Some((
+                        index,
+                        self.contextual_argument_type(*target, &substitution, &inferred),
+                    ))
+                });
+            self.abandon_session(session_id);
+            return CandidateVerdict::Degraded(ResolveCallFailure::ContextSensitiveInference {
+                contextual,
+            });
+        }
         let ordered_args = raw_type_params
             .iter()
             .map(|decl| {
@@ -2052,11 +2524,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &substitution,
                     &mut fresh_literal_returns,
                 );
-                let widened = self.fresh_widened_substitution_outside_top_level(
+                let widened = match self.fresh_widened_substitution_outside_top_level(
                     session_id,
                     &substitution,
                     Some(*declared),
-                );
+                ) {
+                    Some(widened) => match self.rederive_defaults_under(
+                        widened,
+                        &defaulted,
+                        budget,
+                        own_return_function.as_ref(),
+                    ) {
+                        Ok(widened) => Some(widened),
+                        Err(failure) => {
+                            self.abandon_session(session_id);
+                            return CandidateVerdict::Degraded(failure);
+                        }
+                    },
+                    None => None,
+                };
                 concrete_seeds.push(
                     self.substitute_canonical(*declared, widened.as_ref().unwrap_or(&substitution)),
                 );
@@ -2135,14 +2621,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // and a recursive component's callees are
                             // never re-demanded for a question that does
                             // not arise.
+                            // A bound is one candidate or a union of several
+                            // (a fresh union argument, a rest parameter's
+                            // arguments): any fresh literal member counts.
                             let has_fresh_literal_deposit =
                                 substitution.bindings().iter().any(|(param, bound)| {
-                                    matches!(
-                                        self.graph().node_data(*bound).as_deref(),
-                                        Some(SemanticNodeData::Literal(_))
-                                    ) && self.binding_is_fresh_literal_deposit(
-                                        session_id, *param, *bound,
-                                    )
+                                    let graph = self.graph();
+                                    let candidates: Vec<SemanticNodeId> =
+                                        match graph.node_data(*bound).as_deref() {
+                                            Some(SemanticNodeData::Union(members)) => {
+                                                members.iter().copied().collect()
+                                            }
+                                            _ => vec![*bound],
+                                        };
+                                    candidates.into_iter().any(|candidate| {
+                                        super::enum_type::is_literal_type(graph, candidate)
+                                            && self.binding_is_fresh_literal_deposit(
+                                                session_id, *param, candidate,
+                                            )
+                                    })
                                 });
                             let binder_structure = if !has_fresh_literal_deposit {
                                 None
@@ -2201,6 +2698,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     binder_structure,
                                 )
                             {
+                                let widened_substitution = match self.rederive_defaults_under(
+                                    widened_substitution,
+                                    &defaulted,
+                                    budget,
+                                    own_return_function.as_ref(),
+                                ) {
+                                    Ok(widened) => widened,
+                                    Err(failure) => {
+                                        self.abandon_session(session_id);
+                                        return CandidateVerdict::Degraded(failure);
+                                    }
+                                };
                                 let widened_args: Vec<SemanticNodeId> = raw_type_params
                                     .iter()
                                     .map(|decl| {
@@ -2300,6 +2809,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 selected_signature,
                 substitution,
                 fresh_literal_returns,
+                recovery_diagnostic: failure.map(|code| crate::semantic_query::CheckerDiagnostic {
+                    code,
+                    operation: crate::semantic_query::CheckerDiagnosticOperation::CallResolution,
+                }),
             },
             concrete_seeds,
             holds,
@@ -2332,7 +2845,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 limit: MAX_APPLICABILITY_RELATIONS as u32,
             });
         }
-        let mut key = self.relate_key_for(source, target);
+        let applicability = self.dispatch_txn.borrow().call.applicability;
+        let mut key = self.relate_key_for_kind(source, target, applicability);
         key.source_freshness = self.freshness_for_source_node(freshness_origin);
         key.policy.excess_property_check =
             excess_property_check && key.source_freshness == FreshnessKey::Fresh;
@@ -2770,19 +3284,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) {
         let graph = self.graph();
         for (param, bound) in substitution.bindings() {
-            if !matches!(
-                graph.node_data(*bound).as_deref(),
-                Some(SemanticNodeData::Literal(_))
-            ) {
+            // A bound is one candidate, or several combined into a union
+            // (the arguments of a rest parameter): every fresh literal
+            // candidate stays fresh.
+            let candidates: Vec<SemanticNodeId> = match graph.node_data(*bound).as_deref() {
+                Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => {
+                    vec![*bound]
+                }
+                Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+                _ => continue,
+            };
+            if !self.deposit_at_union_top_level(structure, *param) {
                 continue;
             }
-            if !self.binding_is_fresh_literal_deposit(session_id, *param, *bound) {
-                continue;
-            }
-            if self.deposit_at_union_top_level(structure, *param)
-                && !fresh_literal_returns.contains(bound)
-            {
-                fresh_literal_returns.push(*bound);
+            for candidate in candidates {
+                if super::enum_type::is_literal_type(graph, candidate)
+                    && self.binding_is_fresh_literal_deposit(session_id, *param, candidate)
+                    && !fresh_literal_returns.contains(&candidate)
+                {
+                    fresh_literal_returns.push(candidate);
+                }
             }
         }
     }
@@ -2809,6 +3330,43 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// with no binder-bearing structure passes `None`: every fresh
     /// deposit then widens — the superset direction, never a value-match
     /// against an instantiated result.
+    /// `widened` with every DEFAULTED binding re-derived from it, in clause
+    /// order: the default instantiated with the widened inferences (a
+    /// default names earlier parameters only, TS2744), and the constraint
+    /// in its place when the widened default no longer satisfies it — the
+    /// same fallback the fixation sweep applies.
+    fn rederive_defaults_under(
+        &self,
+        widened: CanonicalTypeSubstitution,
+        defaulted: &[DefaultedParam],
+        budget: &mut CallResolutionBudget,
+        own_return_function: Option<&crate::semantic_query::FlowFunctionSlotIdentity>,
+    ) -> Result<CanonicalTypeSubstitution, ResolveCallFailure> {
+        let mut bindings = widened.bindings().to_vec();
+        for defaulted in defaulted {
+            let current = CanonicalTypeSubstitution::new(bindings.clone());
+            let mut bound = self.substitute_canonical(defaulted.default, &current);
+            if let Some(constraint) = defaulted.constraint {
+                let constraint = self.substitute_canonical(constraint, &current);
+                match decided_call_relation(
+                    self.call_relation(bound, constraint, bound, budget, false, false),
+                    own_return_function,
+                )? {
+                    Some(true) => {}
+                    Some(false) | None => bound = constraint,
+                }
+            }
+            match bindings
+                .iter_mut()
+                .find(|(param, _)| *param == defaulted.param)
+            {
+                Some(binding) => binding.1 = bound,
+                None => bindings.push((defaulted.param, bound)),
+            }
+        }
+        Ok(CanonicalTypeSubstitution::new(bindings))
+    }
+
     fn fresh_widened_substitution_outside_top_level(
         &self,
         session_id: SessionId,
@@ -2821,20 +3379,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .bindings()
             .iter()
             .map(|(param, bound)| {
-                let widened = match graph.node_data(*bound).as_deref() {
-                    Some(SemanticNodeData::Literal(value))
-                        if self.binding_is_fresh_literal_deposit(session_id, *param, *bound)
-                            && !return_structure.is_some_and(|structure| {
-                                self.deposit_at_top_level(structure, *param)
-                            }) =>
+                // One candidate widens when it is a fresh literal deposit.
+                let widen_fresh = |candidate: SemanticNodeId| {
+                    if super::enum_type::is_literal_type(graph, candidate)
+                        && self.binding_is_fresh_literal_deposit(session_id, *param, candidate)
                     {
-                        let primitive = match value {
-                            verter_type_expr::LiteralValue::String(_) => PrimitiveKind::String,
-                            verter_type_expr::LiteralValue::Number(_) => PrimitiveKind::Number,
-                            verter_type_expr::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
-                            verter_type_expr::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
-                        };
-                        graph.intern_node(SemanticNodeData::Primitive(primitive))
+                        self.widened_literal(candidate)
+                    } else {
+                        candidate
+                    }
+                };
+                let kept = return_structure
+                    .is_some_and(|structure| self.deposit_at_top_level(structure, *param));
+                let widened = match graph.node_data(*bound).as_deref() {
+                    _ if kept => *bound,
+                    Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => {
+                        widen_fresh(*bound)
+                    }
+                    // Several candidates combined into a union (the
+                    // arguments of a rest parameter): each fresh arm
+                    // widens, then the arms combine again.
+                    Some(SemanticNodeData::Union(members)) => {
+                        let arms: Vec<SemanticNodeId> =
+                            members.iter().map(|arm| widen_fresh(*arm)).collect();
+                        if arms
+                            .iter()
+                            .zip(members.iter())
+                            .any(|(arm, member)| arm != member)
+                        {
+                            self.relation_combine_candidates(&arms, VariancePhase::Covariant)
+                        } else {
+                            *bound
+                        }
                     }
                     _ => *bound,
                 };
@@ -2843,6 +3419,138 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
             .collect();
         any_widened.then(|| CanonicalTypeSubstitution::new(widened_bindings))
+    }
+
+    /// A covariant inference as the checker widens it (`getWidenedType` in
+    /// `getCovariantInference`): without `strictNullChecks` `null` and
+    /// `undefined` widen to `any`, so `id(null)` is `any`.
+    fn widened_covariant_inference(&self, bound: SemanticNodeId) -> SemanticNodeId {
+        let graph = self.graph();
+        if !self.relation_strict_config().strict_null_checks
+            && matches!(
+                graph.node_data(bound).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        {
+            return graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        }
+        bound
+    }
+
+    /// A call's covariant inference from several candidates (the checker's
+    /// `getCommonSupertype` in `getCovariantInference`): the leftmost
+    /// candidate no later one is a supertype of, with each candidate's
+    /// `null` / `undefined` set aside under `strictNullChecks` and added
+    /// back to the answer — `takes(u)` over `((x: unknown) => x is A) |
+    /// ((x: unknown) => x is B)` infers `A`, where a conditional type's
+    /// `infer` unions its candidates. Literals of one base primitive
+    /// union (`"a" | "b"`). `None` — the union the caller falls back to
+    /// — when a candidate is an object literal's fresh type, an array or a
+    /// tuple (the checker first unions object and array LITERAL candidates,
+    /// a provenance an array node does not carry) or a subtype relation is
+    /// undecided. A declared object type is an ordinary candidate: `two(x,
+    /// y)` over `A` and `B` infers `A`.
+    fn call_common_supertype(&self, candidates: &[SemanticNodeId]) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let mut ordered: Vec<SemanticNodeId> = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if !ordered.iter().any(|kept| {
+                crate::semantic_query::stable_key::provably_equal(graph, *kept, *candidate)
+            }) {
+                ordered.push(*candidate);
+            }
+        }
+        if let [only] = ordered.as_slice() {
+            return Some(*only);
+        }
+        let strict = self.relation_strict_config().strict_null_checks;
+        let is_nullish = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        };
+        let mut nullish: Vec<SemanticNodeId> = Vec::new();
+        let mut primary: Vec<SemanticNodeId> = Vec::with_capacity(ordered.len());
+        for candidate in &ordered {
+            let arms: Vec<SemanticNodeId> = match graph.node_data(*candidate).as_deref() {
+                Some(SemanticNodeData::Union(arms)) => arms.iter().copied().collect(),
+                _ => vec![*candidate],
+            };
+            if arms
+                .iter()
+                .any(|arm| match graph.node_data(*arm).as_deref() {
+                    // An object LITERAL's candidate is fresh; a declared object
+                    // type's is not, and takes part like any other.
+                    Some(SemanticNodeData::Object(_)) => {
+                        self.freshness_for_source_node(*arm) == FreshnessKey::Fresh
+                    }
+                    Some(
+                        SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Tuple { .. }
+                        | SemanticNodeData::ObjectSpreadProgram(_),
+                    ) => true,
+                    _ => false,
+                })
+            {
+                return None;
+            }
+            if strict && arms.iter().any(|arm| is_nullish(*arm)) {
+                let kept: Vec<SemanticNodeId> = arms
+                    .iter()
+                    .copied()
+                    .filter(|arm| !is_nullish(*arm))
+                    .collect();
+                nullish.extend(arms.iter().copied().filter(|arm| is_nullish(*arm)));
+                if kept.is_empty() {
+                    continue;
+                }
+                primary.push(self.intern_normalized_union_or_intersection(&kept, true));
+            } else {
+                primary.push(*candidate);
+            }
+        }
+        let literal_base = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Literal(value)) => Some(std::mem::discriminant(value)),
+            _ => None,
+        };
+        let supertype = match primary.as_slice() {
+            [] => None,
+            [first, rest @ ..]
+                if literal_base(*first).is_some()
+                    && rest
+                        .iter()
+                        .all(|other| literal_base(*other) == literal_base(*first)) =>
+            {
+                Some(self.intern_normalized_union_or_intersection(&primary, true))
+            }
+            [first, rest @ ..] => {
+                let mut supertype = *first;
+                for candidate in rest {
+                    match self.execute_relate_pair_kind(
+                        supertype,
+                        *candidate,
+                        crate::semantic_query::RelationKind::Subtype,
+                    ) {
+                        RelationStep::Assignable { .. } => supertype = *candidate,
+                        RelationStep::NotAssignable => {}
+                        _ => return None,
+                    }
+                }
+                Some(supertype)
+            }
+        };
+        let mut members: Vec<SemanticNodeId> = supertype.into_iter().collect();
+        members.extend(nullish);
+        match members.as_slice() {
+            [] => None,
+            [only] => Some(*only),
+            _ => Some(self.intern_normalized_union_or_intersection(&members, true)),
+        }
     }
 
     pub(super) fn call_inference_candidate(
@@ -2865,14 +3573,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let graph = self.graph();
         memo.insert(node, node);
         let result = match graph.node_data(node).as_deref() {
-            Some(SemanticNodeData::Literal(value)) if policy == ConstParamPolicy::NonConst => {
-                let primitive = match value {
-                    verter_type_expr::LiteralValue::String(_) => PrimitiveKind::String,
-                    verter_type_expr::LiteralValue::Number(_) => PrimitiveKind::Number,
-                    verter_type_expr::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
-                    verter_type_expr::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
-                };
-                graph.intern_node(SemanticNodeData::Primitive(primitive))
+            Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_))
+                if policy == ConstParamPolicy::NonConst =>
+            {
+                self.widened_literal(node)
             }
             Some(SemanticNodeData::Tuple { elements, .. }) => {
                 let values = elements
@@ -2924,18 +3628,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.relation_combine_candidates(&members, VariancePhase::Covariant)
             }
             Some(SemanticNodeData::Intersection(members)) => {
+                let category = members.origin_category();
                 let members = members
                     .iter()
                     .map(|member| self.call_shape_transform(*member, policy, memo))
                     .collect::<Vec<_>>();
                 // Order- and scope-preserving rebuild: an intersection
                 // reaching call-shape transformation may be an
-                // overload-ordered carrier, so the transformed arms keep
-                // their declaration order verbatim.
+                // overload-ordered carrier or a heritage body, so the
+                // transformed arms keep their declaration order verbatim
+                // and a heritage body stays one.
                 graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::Intersection(
-                        crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                        crate::semantic_query::composite::CompositeList::rebuilt_from(
+                            category,
                             Arc::from(members.into_boxed_slice()),
                         ),
                     ),
@@ -3019,6 +3726,15 @@ fn assumption_is_relation_only(
     own_return_function: Option<&crate::semantic_query::FlowFunctionSlotIdentity>,
 ) -> bool {
     own_return_function.is_none_or(|function| !evidence.reaches_flow_function(function))
+}
+
+/// One uninferred type parameter a call bound to its declared default: the
+/// raw default and constraint, instantiated again when the call's
+/// inferences widen.
+struct DefaultedParam {
+    param: SemanticNodeId,
+    default: SemanticNodeId,
+    constraint: Option<SemanticNodeId>,
 }
 
 /// What a rest parameter's type proves about arity and about each trailing
@@ -3219,9 +3935,10 @@ fn optional_parameter_target(
     // (`T | undefined`) routes through the one authority (which also
     // flattens a union-typed `T`); the evidence threads to the caller's
     // disposition boundary.
-    let composite = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+    let composite = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
         graph,
         &[param.ty, undefined],
+        crate::semantic_query::NullabilityPolicy::Strict,
     );
     evidence.absorb(composite.evidence);
     composite.node

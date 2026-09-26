@@ -13,6 +13,10 @@ pub enum IndexedValueExpression {
     Call(IndexedValueCall),
     /// A call-bearing compound outside the indexed expression domain.
     UnsupportedCall { point: u32 },
+    /// The template strings a tagged template passes as its first
+    /// argument: a value of the GLOBAL `TemplateStringsArray` type,
+    /// whatever the tag's scope declares under that name.
+    TemplateStrings { point: u32 },
 }
 
 /// Call vs construct for an indexed value expression.

@@ -155,6 +155,45 @@ fn recv_signal_within(rx: &std::sync::mpsc::Receiver<()>, label: &str) {
     }
 }
 
+/// The inert-structure bit and the unresolved-reach bit of a node live in
+/// ONE per-node entry, so the two memos share one lifecycle: an entry
+/// released for a node id takes both bits with it, and no second node-id
+/// map exists to outlive it.
+#[test]
+fn a_nodes_structural_bits_share_one_sidecar_entry() {
+    let store = SemanticGraphStore::new();
+    let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let array = store.intern_node(SemanticNodeData::Array {
+        element: number,
+        readonly: false,
+    });
+    assert_eq!(store.node_structure_bits_for_tests(array), None);
+    assert!(store.node_is_inert_structure(array));
+    assert_eq!(
+        store.node_structure_bits_for_tests(array),
+        Some(unresolved_reach::NodeStructureBits {
+            unresolved: None,
+            inert: Some(true),
+        })
+    );
+    assert!(!store.node_reaches_unresolved(array));
+    assert_eq!(
+        store.node_structure_bits_for_tests(array),
+        Some(unresolved_reach::NodeStructureBits {
+            unresolved: Some(false),
+            inert: Some(true),
+        }),
+        "both bits sit in the node's one entry"
+    );
+    assert_eq!(
+        store.node_structure_bits_for_tests(number),
+        Some(unresolved_reach::NodeStructureBits {
+            unresolved: Some(false),
+            inert: Some(true),
+        })
+    );
+}
+
 #[test]
 fn interning_returns_unique_stable_ids() {
     let store = SemanticGraphStore::new();
@@ -378,6 +417,8 @@ fn intern_span_participates_in_identity() {
         type_parameters: Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new()),
         signature_span: Some(verter_span::Span::new(0, end)),
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     };
     let id_a = store.intern_node(mk(10));
     let id_a_again = store.intern_node(mk(10));
@@ -8991,6 +9032,7 @@ mod env_scoped_key_identity_guards {
 
     fn mapper_key(id: SemanticNodeId) -> MapperKey {
         MapperKey {
+            over_type_variable: false,
             parameter_node: id,
             key_space: id,
             value_expr: id,
@@ -10547,6 +10589,7 @@ mod prepared_identity_bijection {
 
     fn mapper(id: u64) -> MapperKey {
         MapperKey {
+            over_type_variable: false,
             parameter_node: node(id),
             key_space: node(id),
             value_expr: node(id),
@@ -10708,12 +10751,14 @@ mod prepared_identity_bijection {
                     ),
                 },
             ),
-            SemanticQueryKeyTag::NormalizeUnion => (
-                SemanticQueryKey::NormalizeUnion {
+            SemanticQueryKeyTag::ReduceUnion => (
+                SemanticQueryKey::ReduceUnion {
                     members: nodes(&[1, 2]),
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
                 },
-                SemanticQueryKey::NormalizeUnion {
+                SemanticQueryKey::ReduceUnion {
                     members: nodes(&[1, 3]),
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
                 },
             ),
             SemanticQueryKeyTag::ReduceIntersection => (
@@ -11110,7 +11155,12 @@ mod prepared_identity_bijection {
                 project_identity: h16(0),
                 result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
-                policy: crate::semantic_query::FlowReturnPolicy {},
+                policy: crate::semantic_query::FlowReturnPolicy {
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                    no_implicit_any: true,
+                    use_unknown_in_catch_variables: true,
+                    no_implicit_this: true,
+                },
             },
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),

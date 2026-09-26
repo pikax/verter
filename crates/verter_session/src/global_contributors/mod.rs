@@ -54,6 +54,10 @@ pub enum ContributorOrigin {
     /// Top-level `namespace N` in a script (or automatic lib). Lowered
     /// through the same retained-body path as file-scope interfaces.
     FileScopeNamespace,
+    /// Top-level VALUE declaration (`var` / `let` / `const` / `function` /
+    /// `class` / `enum`) in a script: global by name. An automatic lib's
+    /// values are the lib environment's own and are not recorded.
+    FileScopeValue,
 }
 
 /// One per-file contribution to a resolved global / ambient symbol.
@@ -142,6 +146,31 @@ impl GlobalContributorPopulation {
             allow_automatic_libs,
             &[SymbolSpace::Type, SymbolSpace::Namespace],
         )
+    }
+
+    /// The fingerprint a read of `decl_name`'s contributors observes: every
+    /// symbol space and every automatic lib, so ONE observation covers any
+    /// lookup of the name, whatever space or lib filter the reader applied,
+    /// and the view validator recomputes exactly this.
+    #[must_use]
+    pub fn observation_fingerprint(
+        &self,
+        target: &AugmentationTargetKind,
+        decl_name: &str,
+        overlay_discriminator: Option<Hash16>,
+    ) -> Hash16 {
+        self.lookup_spaces(
+            target,
+            decl_name,
+            overlay_discriminator,
+            true,
+            &[
+                SymbolSpace::Type,
+                SymbolSpace::Namespace,
+                SymbolSpace::Value,
+            ],
+        )
+        .fingerprint
     }
 
     /// Contributors in one symbol space.
@@ -268,7 +297,8 @@ impl SymbolKey {
         let (target_tag, target_text) = match fact.origin {
             ContributorOrigin::DeclareGlobal
             | ContributorOrigin::FileScopeInterface
-            | ContributorOrigin::FileScopeNamespace => (3, Arc::from(GLOBAL_AUGMENTATION_TAG)),
+            | ContributorOrigin::FileScopeNamespace
+            | ContributorOrigin::FileScopeValue => (3, Arc::from(GLOBAL_AUGMENTATION_TAG)),
             ContributorOrigin::ModuleAugmentation => {
                 let spec = fact.specifier.as_ref()?.as_ref();
                 if spec == GLOBAL_AUGMENTATION_TAG {
@@ -525,6 +555,14 @@ impl GlobalContributorIndex {
         self.pending_overlay_ambient.lock().drain().collect()
     }
 
+    /// Whether a contributor recorded at upsert still waits for
+    /// contribution collection: until it is ingested, the published
+    /// population cannot speak for any name it may declare.
+    #[must_use]
+    pub fn has_pending_overlay_ambient(&self) -> bool {
+        !self.pending_overlay_ambient.lock().is_empty()
+    }
+
     pub fn clear(&self) {
         let _mutate = self.mutate.lock();
         let _guard = self.publish.lock();
@@ -716,6 +754,27 @@ fn collect_from_indexed(
         }
     }
 
+    if module_kind == FileModuleKind::Script && !is_automatic_lib {
+        let headers = indexed.shallow_state.decl_bodies().header_index();
+        for (binding, header) in headers.value_headers.iter() {
+            facts.push(GlobalContributionFact {
+                symbol: InternedName::from(binding.name.as_ref()),
+                space: SymbolSpace::Value,
+                owner: binding.owner,
+                origin: ContributorOrigin::FileScopeValue,
+                specifier: None,
+                fingerprint: crate::fact_emission::augmentation_header_fingerprint(
+                    &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+                    binding.owner,
+                    binding.name.as_ref(),
+                    format!("{:?}", header.kind).as_str(),
+                    header.object_member_headers.as_slice(),
+                    header.contributors.len(),
+                ),
+            });
+        }
+    }
+
     FileContributionRecord {
         artifact_key: key.clone(),
         module_kind,
@@ -731,7 +790,14 @@ fn collect_from_indexed(
 /// and nested `export` inside a namespace are not file-level module syntax.
 #[must_use]
 pub fn classify_module_kind(indexed: &IndexedReady) -> FileModuleKind {
-    let shallow = indexed.shallow_state.as_ref();
+    classify_shallow_module_kind(indexed.shallow_state.as_ref())
+}
+
+/// [`classify_module_kind`] over the retained shallow inventory alone.
+#[must_use]
+pub(crate) fn classify_shallow_module_kind(
+    shallow: &crate::resolver_core::ShallowFileState,
+) -> FileModuleKind {
     if !shallow.exports.is_empty()
         || !shallow.wildcard_reexports.is_empty()
         || !shallow.import_targets.is_empty()
@@ -1079,14 +1145,19 @@ fn source_has_file_module_syntax(source: &str) -> bool {
     false
 }
 
-/// File-level `interface` / `namespace` in a script (no import/export).
-/// Nested declarations and module files are not file-scope globals.
+/// File-level `interface` / `namespace` / value declaration (`var`, `let`,
+/// `const`, `function`, `class`, `enum`) in a script (no import/export), or
+/// a `var` in a nested block, which hoists to the file's top level. Other
+/// nested declarations and module files are not file-scope globals.
 #[must_use]
 pub(crate) fn source_may_have_file_scope_global_contribution(source: &str) -> bool {
     if source_has_file_module_syntax(source) {
         return false;
     }
-    if !source.contains("interface") && !source.contains("namespace") {
+    if !FILE_SCOPE_GLOBAL_KEYWORDS
+        .iter()
+        .any(|keyword| source.contains(std::str::from_utf8(keyword).unwrap_or_default()))
+    {
         return false;
     }
     let bytes = source.as_bytes();
@@ -1095,12 +1166,16 @@ pub(crate) fn source_may_have_file_scope_global_contribution(source: &str) -> bo
     let mut in_block = false;
     let mut string: Option<u8> = None;
     let mut at_statement = true;
+    // A statement boundary at ANY depth: a `var` in a nested block hoists to
+    // the file's top level.
+    let mut at_any_statement = true;
     let mut brace_depth: u32 = 0;
     while i < bytes.len() {
         let b = bytes[i];
         if in_line {
             if b == b'\n' {
                 in_line = false;
+                at_any_statement = true;
                 if brace_depth == 0 {
                     at_statement = true;
                 }
@@ -1140,22 +1215,32 @@ pub(crate) fn source_may_have_file_scope_global_contribution(source: &str) -> bo
             b'\'' | b'"' | b'`' => {
                 string = Some(b);
                 at_statement = false;
+                at_any_statement = false;
                 i += 1;
             }
             b'{' => {
                 brace_depth = brace_depth.saturating_add(1);
                 at_statement = true;
+                at_any_statement = true;
                 i += 1;
             }
             b'}' => {
                 brace_depth = brace_depth.saturating_sub(1);
                 at_statement = brace_depth == 0;
+                at_any_statement = true;
                 i += 1;
             }
             b'\n' | b';' => {
                 if brace_depth == 0 {
                     at_statement = true;
                 }
+                at_any_statement = true;
+                i += 1;
+            }
+            // `for (var …` and `if (c) var …` open a statement too.
+            b'(' | b')' => {
+                at_statement = false;
+                at_any_statement = true;
                 i += 1;
             }
             b if b.is_ascii_whitespace() => i += 1,
@@ -1164,8 +1249,9 @@ pub(crate) fn source_may_have_file_scope_global_contribution(source: &str) -> bo
                 while i < bytes.len() && bytes[i].is_ascii_whitespace() {
                     i += 1;
                 }
-                if starts_with_ident(bytes, i, b"namespace")
-                    || starts_with_ident(bytes, i, b"interface")
+                if FILE_SCOPE_GLOBAL_KEYWORDS
+                    .iter()
+                    .any(|keyword| starts_with_ident(bytes, i, keyword))
                 {
                     return true;
                 }
@@ -1185,19 +1271,36 @@ pub(crate) fn source_may_have_file_scope_global_contribution(source: &str) -> bo
             }
             _ if at_statement
                 && brace_depth == 0
-                && (starts_with_ident(bytes, i, b"interface")
-                    || starts_with_ident(bytes, i, b"namespace")) =>
+                && FILE_SCOPE_GLOBAL_KEYWORDS
+                    .iter()
+                    .any(|keyword| starts_with_ident(bytes, i, keyword)) =>
             {
                 return true;
             }
+            _ if at_any_statement && starts_with_ident(bytes, i, b"var") => return true,
             _ => {
                 at_statement = false;
+                at_any_statement = false;
                 i += 1;
             }
         }
     }
     false
 }
+
+/// The keywords that open a script's file-scope global declaration.
+const FILE_SCOPE_GLOBAL_KEYWORDS: &[&[u8]] = &[
+    b"interface",
+    b"namespace",
+    b"var",
+    b"let",
+    b"const",
+    b"function",
+    b"async",
+    b"class",
+    b"abstract",
+    b"enum",
+];
 
 fn starts_with_ident(bytes: &[u8], i: usize, word: &[u8]) -> bool {
     if i + word.len() > bytes.len() {

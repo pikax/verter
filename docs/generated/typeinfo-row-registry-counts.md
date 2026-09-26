@@ -33,9 +33,9 @@ preserved by a named equivalent-or-stronger successor row).
 | U13.PROJECTION | 0 | 0 | 0 | 0 | 0 |
 | U2.RELATION_INFER | 20 | 19 | 1 | 0 | 0 |
 | U2.UTILITIES | 32 | 32 | 0 | 0 | 0 |
-| U2.INDEXED_ACCESS | 24 | 9 | 0 | 15 | 0 |
+| U2.INDEXED_ACCESS | 25 | 9 | 0 | 16 | 0 |
 | U2.MAPPED_TEMPLATE | 18 | 13 | 0 | 5 | 0 |
-| U2.CLASS_SURFACES | 38 | 29 | 4 | 5 | 0 |
+| U2.CLASS_SURFACES | 37 | 29 | 4 | 4 | 0 |
 | U2.ENUMS | 7 | 7 | 0 | 0 | 0 |
 | U2.MODULE_AUGMENTATION | 4 | 4 | 0 | 0 | 0 |
 | U2.JSX_FOUNDATIONS | 7 | 7 | 0 | 0 | 0 |

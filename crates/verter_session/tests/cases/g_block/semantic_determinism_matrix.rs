@@ -1,6 +1,6 @@
 //! The §5.9 mandatory determinism matrix and the §5.4 stable-key
 //! variant/encoding table — the signature kernel's evidence-lock
-//! registration (acceptance V0-AC4): both tables are ENUMERATED against
+//! registration: both tables are ENUMERATED against
 //! their authorities (the checked-in contract's §5.9 table; the live
 //! `pub enum SemanticNodeData` declaration) and CONSUMED by executable
 //! replay drivers that perturb the CURRENT implementation and compare
@@ -11,10 +11,8 @@
 //! * Every §5.9 perturbation has exactly ONE row. A row is `Ready` only
 //!   when its driver drives EVERY axis of the §5.9 row; any axis the
 //!   current runtime cannot drive makes the whole row `Ignored` with
-//!   the successor block that owns the missing axis named in the
-//!   reason (the contract stages the combined vertical at V8, and the
-//!   storage vertical at V2 — a row may not claim `Ready` while part
-//!   of its axis set is only documented).
+//!   the missing PUBLIC SURFACE named in the reason — a row may not
+//!   claim `Ready` while part of its axis set is only documented.
 //! * An `Ignored` row's body asserts the KNOWN state — the typed
 //!   failure or the closest drivable clause of the row — never an
 //!   empty body, a vacuous non-empty check, or a bare `unreachable!`.
@@ -33,7 +31,7 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{ReturnProjectionDemand, SemanticNodeData};
+use verter_session::semantic_query::{FlowReturnResult, ReturnProjectionDemand, SemanticNodeData};
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -158,14 +156,31 @@ fn identity(canonical: &str, symbol: &str) -> verter_type_expr::facts::FlowFunct
 /// and structural order only — never node ids or allocation ordinals —
 /// with the workspace root normalized away so relocation compares.
 fn observe(host: &VerterHost, canonical: &str, symbol: &str) -> String {
-    let carrier = host.get_flow_return_type_with_audit(
-        &identity(canonical, symbol),
+    observe_demand(
+        host,
+        canonical,
+        symbol,
         ReturnProjectionDemand::whole_return(),
-    );
+    )
+}
+
+/// [`observe`] at an explicit demand point over the same function.
+fn observe_demand(
+    host: &VerterHost,
+    canonical: &str,
+    symbol: &str,
+    demand: ReturnProjectionDemand,
+) -> String {
+    let carrier = host.get_flow_return_type_with_audit(&identity(canonical, symbol), demand);
     let result = carrier
         .as_result()
         .ok()
         .unwrap_or_else(|| panic!("observe `{canonical}` / `{symbol}` did not complete"));
+    render_result(host, result)
+}
+
+/// One flow-return result as the stable observation text of [`observe`].
+fn render_result(host: &VerterHost, result: &FlowReturnResult) -> String {
     let graph = host.project_type_store().semantic_graph();
     let mut text = String::new();
     match result.degradation() {
@@ -381,6 +396,7 @@ fn kind_name(data: &SemanticNodeData) -> &'static str {
         SemanticNodeData::Intersection(_) => "Intersection",
         SemanticNodeData::Primitive(_) => "Primitive",
         SemanticNodeData::Literal(_) => "Literal",
+        SemanticNodeData::EnumLiteral(_) => "EnumLiteral",
         SemanticNodeData::Opaque(_) => "Opaque",
         SemanticNodeData::Array { .. } => "Array",
         SemanticNodeData::Tuple { .. } => "Tuple",
@@ -398,6 +414,7 @@ fn kind_name(data: &SemanticNodeData) -> &'static str {
         SemanticNodeData::DeferredCallable(_) => "DeferredCallable",
         SemanticNodeData::DeclRef { .. } => "DeclRef",
         SemanticNodeData::InstantiationRef { .. } => "InstantiationRef",
+        SemanticNodeData::ClassExpressionInstance { .. } => "ClassExpressionInstance",
         SemanticNodeData::MergedDecl { .. } => "MergedDecl",
         SemanticNodeData::BareRef(_) => "BareRef",
         SemanticNodeData::ImportType(_) => "ImportType",
@@ -434,43 +451,46 @@ struct StableKeyRow {
     domain: &'static str,
     /// The identity inputs the domain requires for THIS variant.
     inputs: &'static str,
-    /// `None` — encoding exists under the current content-free key
-    /// rails; `Some(block)` — the `VerterStableV1` encoding is owed to
-    /// the named block.
-    owed: Option<&'static str>,
+    /// `None` — the `VerterStableV1` encoder consumes exactly the
+    /// identity inputs above. `Some(residual)` — it consumes an
+    /// APPROXIMATION of one of them, named here, so the row's identity
+    /// claim is weaker than its `inputs` column reads.
+    residual: Option<&'static str>,
 }
 
 const STABLE_KEY_TABLE: &[StableKeyRow] = &[
-    StableKeyRow { variant: "IntrinsicApplication", domain: "synthetic", inputs: "closed intrinsic op tag plus ordered argument stable-key references", owed: None },
-    StableKeyRow { variant: "Alias", domain: "authored carriers", inputs: "owner/role anchor of the aliasing declaration plus the aliased stable-key reference", owed: None },
-    StableKeyRow { variant: "Object", domain: "authored carriers", inputs: "owner/role anchor plus member-name-keyed child stable keys (declared order where authored order is semantic)", owed: None },
-    StableKeyRow { variant: "ObjectSpreadProgram", domain: "synthetic", inputs: "closed spread-program recipe with stable arm references and authored member anchors", owed: None },
-    StableKeyRow { variant: "Union", domain: "synthetic", inputs: "set of member stable keys under the carrier category mint (first-occurrence dedup per the composite identity discipline)", owed: None },
-    StableKeyRow { variant: "Intersection", domain: "synthetic", inputs: "ORDERED member stable keys preserving the authored reduction grouping", owed: None },
-    StableKeyRow { variant: "Primitive", domain: "intrinsics/sentinels", inputs: "fixed distinct primitive tag; no source or allocation ordinal", owed: None },
-    StableKeyRow { variant: "Literal", domain: "literals", inputs: "canonical scalar value plus literal kind with explicit scalar edge-case handling", owed: None },
-    StableKeyRow { variant: "Opaque", domain: "intrinsics/sentinels", inputs: "typed error tag; a refusal identity, never an allocation ordinal", owed: None },
-    StableKeyRow { variant: "Array", domain: "synthetic", inputs: "readonly flag plus element stable-key reference", owed: None },
-    StableKeyRow { variant: "Tuple", domain: "synthetic", inputs: "ordered element stable keys with label/optionality/rest metadata", owed: None },
-    StableKeyRow { variant: "TemplateLiteral", domain: "synthetic", inputs: "ordered quasi text spans plus expression stable-key references", owed: None },
-    StableKeyRow { variant: "KeyOf", domain: "synthetic", inputs: "operand stable-key reference under the closed keyof recipe", owed: None },
-    StableKeyRow { variant: "IndexedAccess", domain: "synthetic", inputs: "object and index stable-key references under the closed indexed-access recipe", owed: None },
-    StableKeyRow { variant: "Mapped", domain: "synthetic", inputs: "source stable-key reference plus mapper key-space anchor", owed: None },
-    StableKeyRow { variant: "TypeOf", domain: "authored carriers", inputs: "value-root owner anchor plus remaining member path roles", owed: None },
-    StableKeyRow { variant: "TypeOfNominal", domain: "authored carriers", inputs: "the declaring value-declaration identity parts (nominal by construction)", owed: None },
-    StableKeyRow { variant: "TypeParam", domain: "binders", inputs: "declaration identity (owner anchor plus declaration-local ordinal only where the language needs disambiguation) and binder role", owed: None },
-    StableKeyRow { variant: "Infer", domain: "binders", inputs: "owner/recursive-region anchor plus infer binder position/role", owed: None },
-    StableKeyRow { variant: "InferRef", domain: "binders", inputs: "referenced infer binder's stable anchor", owed: None },
-    StableKeyRow { variant: "Conditional", domain: "synthetic", inputs: "closed conditional recipe: check/extrema/default arm stable-key references", owed: None },
-    StableKeyRow { variant: "Signature", domain: "authored carriers", inputs: "owner/role anchor plus the positional model (binder anchors, optionality, rest/receiver/predicate layout)", owed: Some("V5") },
-    StableKeyRow { variant: "DeferredCallable", domain: "authored carriers", inputs: "the deferred callable's closed carrier recipe with stable subject reference", owed: Some("V5") },
-    StableKeyRow { variant: "DeclRef", domain: "authored carriers", inputs: "logical source-unit identity plus declaration identity (content hashes stay freshness evidence, R6 content-free key rails)", owed: None },
-    StableKeyRow { variant: "InstantiationRef", domain: "synthetic", inputs: "base declaration's stable anchor plus ordered argument stable keys (content-free slot rails, R6)", owed: None },
-    StableKeyRow { variant: "MergedDecl", domain: "authored carriers", inputs: "merged declaration population: per-symbol logical membership and precedence before publication (V3 populations)", owed: Some("V3") },
-    StableKeyRow { variant: "BareRef", domain: "authored carriers", inputs: "owner scope anchor plus the unresolved head name (an authored-unresolved carrier, never a discovery ordinal)", owed: Some("V4") },
-    StableKeyRow { variant: "ImportType", domain: "authored carriers", inputs: "resolved module logical identity plus the imported anchor and qualifier path", owed: Some("V4") },
-    StableKeyRow { variant: "RawFallback", domain: "synthetic", inputs: "closed fallback recipe over the failed input's stable reference", owed: Some("V4") },
-    StableKeyRow { variant: "SyntheticBinding", domain: "binders", inputs: "stable owner/role anchor of the synthesizing operation plus binder position", owed: Some("V4") },
+    StableKeyRow { variant: "IntrinsicApplication", domain: "synthetic", inputs: "closed intrinsic op tag plus ordered argument stable-key references", residual: None },
+    StableKeyRow { variant: "Alias", domain: "authored carriers", inputs: "owner/role anchor of the aliasing declaration plus the aliased stable-key reference", residual: None },
+    StableKeyRow { variant: "Object", domain: "authored carriers", inputs: "owner/role anchor plus member-name-keyed child stable keys (declared order where authored order is semantic)", residual: None },
+    StableKeyRow { variant: "ObjectSpreadProgram", domain: "synthetic", inputs: "closed spread-program recipe with stable arm references and authored member anchors", residual: None },
+    StableKeyRow { variant: "Union", domain: "synthetic", inputs: "set of member stable keys under the carrier category mint (first-occurrence dedup per the composite identity discipline)", residual: None },
+    StableKeyRow { variant: "Intersection", domain: "synthetic", inputs: "ORDERED member stable keys preserving the authored reduction grouping", residual: None },
+    StableKeyRow { variant: "Primitive", domain: "intrinsics/sentinels", inputs: "fixed distinct primitive tag; no source or allocation ordinal", residual: None },
+    StableKeyRow { variant: "Literal", domain: "literals", inputs: "canonical scalar value plus literal kind with explicit scalar edge-case handling", residual: None },
+    StableKeyRow { variant: "EnumLiteral", domain: "authored carriers", inputs: "the enum declaration's logical source unit and qualified name plus the member name and member count, and the base value's stable-key reference (nominal by construction)", residual: None },
+    StableKeyRow { variant: "Opaque", domain: "intrinsics/sentinels", inputs: "typed error tag; a refusal identity, never an allocation ordinal", residual: None },
+    StableKeyRow { variant: "Array", domain: "synthetic", inputs: "readonly flag plus element stable-key reference", residual: None },
+    StableKeyRow { variant: "Tuple", domain: "synthetic", inputs: "ordered element stable keys with label/optionality/rest metadata", residual: None },
+    StableKeyRow { variant: "TemplateLiteral", domain: "synthetic", inputs: "ordered quasi text spans plus expression stable-key references", residual: None },
+    StableKeyRow { variant: "KeyOf", domain: "synthetic", inputs: "operand stable-key reference under the closed keyof recipe", residual: None },
+    StableKeyRow { variant: "IndexedAccess", domain: "synthetic", inputs: "object and index stable-key references under the closed indexed-access recipe", residual: None },
+    StableKeyRow { variant: "Mapped", domain: "synthetic", inputs: "source stable-key reference plus mapper key-space anchor", residual: None },
+    StableKeyRow { variant: "TypeOf", domain: "authored carriers", inputs: "value-root owner anchor plus remaining member path roles", residual: None },
+    StableKeyRow { variant: "TypeOfNominal", domain: "authored carriers", inputs: "the declaring value-declaration identity parts (nominal by construction)", residual: None },
+    StableKeyRow { variant: "TypeParam", domain: "binders", inputs: "declaration identity (owner anchor plus declaration-local ordinal only where the language needs disambiguation) and binder role", residual: None },
+    StableKeyRow { variant: "Infer", domain: "binders", inputs: "owner/recursive-region anchor plus infer binder position/role", residual: None },
+    StableKeyRow { variant: "InferRef", domain: "binders", inputs: "referenced infer binder's stable anchor", residual: None },
+    StableKeyRow { variant: "Conditional", domain: "synthetic", inputs: "closed conditional recipe: check/extrema/default arm stable-key references", residual: None },
+    StableKeyRow { variant: "Signature", domain: "authored carriers", inputs: "owner/role anchor plus the positional model (binder anchors, optionality, rest/receiver/predicate layout)", residual: None },
+    StableKeyRow { variant: "DeferredCallable", domain: "authored carriers", inputs: "the deferred callable's closed carrier recipe with stable subject reference", residual: Some("the encoder walks the carrier type arguments only; the deferred SUBJECT reference is not an encoding input, so two deferred callables over different subjects with equal arguments share a stable key") },
+    StableKeyRow { variant: "DeclRef", domain: "authored carriers", inputs: "logical source-unit identity plus declaration identity (content hashes stay freshness evidence, R6 content-free key rails)", residual: None },
+    StableKeyRow { variant: "InstantiationRef", domain: "synthetic", inputs: "base declaration's stable anchor plus ordered argument stable keys (content-free slot rails, R6)", residual: None },
+    StableKeyRow { variant: "ClassExpressionInstance", domain: "anonymous authored types", inputs: "the class expression's authored position (logical source unit, owner and offset) plus its printed name, its enclosing clauses (each declaration's printed name and parameter names) and its own arity, and the stable-key references of the reference's type arguments and the instance surface", residual: None },
+    StableKeyRow { variant: "MergedDecl", domain: "authored carriers", inputs: "merged declaration population: per-symbol logical membership and precedence before publication", residual: None },
+    StableKeyRow { variant: "BareRef", domain: "authored carriers", inputs: "owner scope anchor plus the unresolved head name (an authored-unresolved carrier, never a discovery ordinal)", residual: None },
+    StableKeyRow { variant: "ImportType", domain: "authored carriers", inputs: "resolved module logical identity plus the imported anchor and qualifier path", residual: Some("the encoder consumes the AUTHORED specifier text, not a resolved module logical identity, so two files reaching one module through different relative specifiers encode differently") },
+    StableKeyRow { variant: "RawFallback", domain: "synthetic", inputs: "closed fallback recipe over the failed input's stable reference", residual: Some("the encoder serialises the opaque payload's Debug form rather than a stable reference to the failed input") },
+    StableKeyRow { variant: "SyntheticBinding", domain: "binders", inputs: "stable owner/role anchor of the synthesizing operation plus binder position", residual: Some("the encoder serialises the content-free binding id's Debug form; the synthesizing operation's owner/role anchor is not an encoding input") },
 ];
 
 /// Extract the live variant list from the `pub enum SemanticNodeData`
@@ -505,11 +525,11 @@ fn live_semantic_node_data_variants() -> Vec<String> {
     variants
 }
 
-/// V0-AC4 (5.4 half): the stable-key table enumerates EVERY
+/// Stable-key registration: the table enumerates EVERY
 /// `SemanticNodeData` category — exactly the live declaration's variant
 /// set, no more, no less — with a non-empty domain and inputs for each,
-/// and every not-yet-encoded row naming the successor block that owns
-/// its `VerterStableV1` encoding.
+/// and every residual row naming the APPROXIMATION the current
+/// `VerterStableV1` encoder consumes in place of a declared identity input.
 #[test]
 fn stable_key_table_enumerates_every_semantic_node_data_category() {
     let live = live_semantic_node_data_variants();
@@ -535,10 +555,11 @@ fn stable_key_table_enumerates_every_semantic_node_data_category() {
              an unverified registration",
             row.variant
         );
-        if let Some(block) = row.owed {
+        if let Some(residual) = row.residual {
             assert!(
-                block.starts_with('V') && block.len() <= 3,
-                "{}: the owing block is a train block id (found `{block}`)",
+                residual.len() > 40 && residual.contains("encoder"),
+                "{}: a residual names what the ENCODER actually consumes instead of the \
+                 declared identity input (found `{residual}`)",
                 row.variant
             );
         }
@@ -549,95 +570,107 @@ fn stable_key_table_enumerates_every_semantic_node_data_category() {
 // §5.9 — the determinism perturbation matrix
 // ─────────────────────────────────────────────────────────────────────────
 
-/// One §5.9 perturbation row.
+/// One §5.9 perturbation row. Every row is Ready: its driver replays every
+/// axis the product has a surface for.
 struct MatrixRow {
     id: &'static str,
     /// The §5.9 first-column text (abbreviated to its stable prefix).
     perturbation: &'static str,
-    /// The executable driver test for a row replayable today, else the
-    /// `#[ignore]` reason naming the successor block.
-    driver: Driver,
+    /// The executable driver test.
+    driver: &'static str,
+    /// Axes the contract makes CONDITIONAL on a product surface that does not
+    /// exist yet. A dormant axis is not a skipped requirement: it has no
+    /// subject until its surface exists, the contract names it, and a
+    /// tripwire test fails the day the surface appears. Enforced below.
+    dormant: &'static [DormantAxis],
 }
 
-enum Driver {
-    Ready { test: &'static str },
-    Ignored { reason: &'static str },
+/// A conditional §5.9 axis with no subject in the product today.
+struct DormantAxis {
+    /// The axis, as the contract's conditional-axis note names it.
+    axis: &'static str,
+    /// The product surface whose existence activates the axis.
+    applies_when: &'static str,
 }
+
+/// DET-05's conditional axis (contract §5.9, conditional axis).
+const PERSISTED_CACHE_AXIS: &str = "persisted-cache axis";
 
 const MATRIX: &[MatrixRow] = &[
     MatrixRow {
         id: "DET-01",
         perturbation: "Same files arrive in forward/reverse/random order",
-        driver: Driver::Ready { test: "det_01_forward_reverse_random_arrival" },
+        driver: "det_01_forward_reverse_random_arrival",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-02",
         perturbation: "Lazy load versus eager preload; queried in different orders",
-        driver: Driver::Ready { test: "det_02_lazy_vs_eager_query_order" },
+        driver: "det_02_lazy_vs_eager_query_order",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-03",
         perturbation: "An unrelated type/literal is interned or queried first",
-        driver: Driver::Ready { test: "det_03_unrelated_interning_first" },
+        driver: "det_03_unrelated_interning_first",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-04",
         perturbation: "Worker counts 1/2/4/8, randomized delays/work stealing, duplicate publishers",
-        driver: Driver::Ready { test: "det_04_worker_counts_1_2_4_8" },
+        driver: "det_04_worker_counts_1_2_4_8",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-05",
-        perturbation: "Cold, warm, partial persisted cache, edit/revert, cancelled/retried work, epoch rebuild",
-        driver: Driver::Ignored {
-            reason: "V2 owns the epoch-safe storage vertical (partial persisted cache, \
-                     cancelled/retried work, epoch rebuild): those axes have no public \
-                     drivable surface today; the cold/warm/edit-revert subset is asserted \
-                     in the ignored body",
-        },
+        perturbation: "Cold, warm, partial resident cache, edit/revert, cancelled/retried work, epoch rebuild",
+        driver: "det_05_cache_lifecycle",
+        dormant: &[DormantAxis {
+            axis: PERSISTED_CACHE_AXIS,
+            applies_when: "the product persists a semantic cache across processes",
+        }],
     },
     MatrixRow {
         id: "DET-06",
         perturbation: "Hash seed changes, equal prefixes, forced full stable-fingerprint collisions",
-        driver: Driver::Ready { test: "det_06_hash_seed_and_forced_collisions" },
+        driver: "det_06_hash_seed_and_forced_collisions",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-07",
         perturbation: "Duplicate shapes with distinct authored/synthetic origins, anonymous/virtual units, recursive binders",
-        driver: Driver::Ready { test: "det_07_duplicate_origins_and_anonymous_units" },
+        driver: "det_07_duplicate_origins_and_anonymous_units",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-08",
         perturbation: "Contextual body demands with the same descriptor/type arguments",
-        driver: Driver::Ignored {
-            reason: "V1 owns complete body/result demand identity: only the canonical \
-                     whole-return demand point is answerable today (a narrower demand fails \
-                     closed with UnmodeledDemandPoint), so distinct coexisting result memo \
-                     entries under one descriptor cannot be replayed yet",
-        },
+        driver: "det_08_contextual_body_demands",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-09",
         perturbation: "Policy changes with resident parent caches",
-        driver: Driver::Ignored {
-            reason: "V1 owns real effective tsconfig option plumbing: changing semantic policy \
-                     with resident parent caches is un-drivable until effective options and \
-                     their parent-cache invalidation exist",
-        },
+        driver: "det_09_policy_change_with_resident_parents",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-10",
         perturbation: "Logical checkout relocation with fixed mappings and equivalent resolver facts",
-        driver: Driver::Ready { test: "det_10_relocation" },
+        driver: "det_10_relocation",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-11",
         perturbation: "Authored overload/intersection order is deliberately changed",
-        driver: Driver::Ready { test: "det_11_authored_reorder_detected" },
+        driver: "det_11_authored_reorder_detected",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-12",
         perturbation: "Same output requested with different preceding unrelated outputs",
-        driver: Driver::Ready { test: "det_12_unrelated_preceding_outputs" },
+        driver: "det_12_unrelated_preceding_outputs",
+        dormant: &[],
     },
 ];
 
@@ -670,23 +703,40 @@ fn matrix_row(id: &str) -> &'static MatrixRow {
 /// Ready, and names THIS test — a renamed test or a re-pointed row
 /// fails here instead of silently orphaning the perturbation.
 fn assert_ready(id: &str, test: &str) {
-    match matrix_row(id).driver {
-        Driver::Ready { test: named } => assert_eq!(
-            named, test,
-            "{id}: the registration names driver `{named}`, this test is `{test}` — keep them              pointed at each other"
-        ),
-        Driver::Ignored { reason } => panic!(
-            "{id}: this replay driver exists but the row is registered ignored ({reason})"
-        ),
-    }
+    let named = matrix_row(id).driver;
+    assert_eq!(
+        named, test,
+        "{id}: the registration names driver `{named}`, this test is `{test}` — keep them \
+         pointed at each other"
+    );
 }
 
-/// V0-AC4 (5.9 half): the matrix enumerates EVERY §5.9 perturbation
-/// exactly once, each with a non-empty driver or a block-named ignore
-/// reason, and the driver names are unique.
+/// The contract's §5.9 conditional-axis note: the paragraph that makes an
+/// axis conditional on a product surface.
+fn contract_5_9_conditional_note() -> String {
+    let contract = read_repo_file("docs/arch/signature-kernel.md");
+    let section = contract
+        .split("### 5.9 Mandatory determinism matrix")
+        .nth(1)
+        .expect("the contract's §5.9 section");
+    let section = section.split("## 6.").next().expect("§6 follows §5.9");
+    section
+        .split("**Conditional axis.**")
+        .nth(1)
+        .expect("the contract's §5.9 conditional-axis note")
+        .split("\n\n")
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Perturbation registration: the matrix enumerates EVERY §5.9 perturbation
+/// exactly once, each with a non-empty driver; the driver names are unique;
+/// and every dormant axis is one the contract itself makes conditional.
 #[test]
 fn determinism_matrix_enumerates_every_5_9_row() {
     let contract = contract_5_9_perturbations();
+    let conditional = contract_5_9_conditional_note();
     assert_eq!(
         contract.len(),
         MATRIX.len(),
@@ -707,34 +757,30 @@ fn determinism_matrix_enumerates_every_5_9_row() {
             row.perturbation,
             contract_text
         );
-        match row.driver {
-            Driver::Ready { test } => {
-                assert!(
-                    !test.is_empty(),
-                    "{}: a ready row names its driver test",
-                    row.id
-                );
-                drivers.push(test);
-            }
-            Driver::Ignored { reason } => {
-                assert!(
-                    reason.starts_with('V') && reason.contains(" owns "),
-                    "{}: the ignore reason names the successor block that un-ignores the row",
-                    row.id
-                );
-            }
+        assert!(
+            !row.driver.is_empty(),
+            "{}: a row names its driver test",
+            row.id
+        );
+        drivers.push(row.driver);
+        for dormant in row.dormant {
+            assert!(
+                conditional.contains(dormant.axis),
+                "{}: the dormant `{}` is not an axis the contract's §5.9 conditional-axis \
+                 note makes conditional — a requirement is never parked by registration alone",
+                row.id,
+                dormant.axis
+            );
+            assert!(
+                !dormant.applies_when.is_empty(),
+                "{}: a dormant axis names the product surface that activates it",
+                row.id
+            );
         }
     }
     drivers.sort_unstable();
     drivers.dedup();
-    assert_eq!(
-        drivers.len(),
-        MATRIX
-            .iter()
-            .filter(|row| matches!(row.driver, Driver::Ready { .. }))
-            .count(),
-        "driver test names are unique"
-    );
+    assert_eq!(drivers.len(), MATRIX.len(), "driver test names are unique");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -911,25 +957,241 @@ fn det_04_worker_counts_1_2_4_8() {
     }
 }
 
-/// DET-05 (ignored) — the cold/warm/edit-revert axes ARE driven below
-/// (cold equals warm on both bases; an authored edit changes both; the
-/// revert restores the original observation), but the row's remaining
-/// axes have no drivable surface today: the partial PERSISTED cache and
-/// the epoch rebuild need the epoch-safe storage vertical (no public
-/// persistence or epoch-rebuild API exists yet), and cancelled/retried
-/// work has no deterministic public drive. The row stays ignored naming
-/// the owning block; the driven axes stay asserted so the un-ignoring
-/// change inherits a real body, not a stub.
+/// DET-05 — every axis of the cache lifecycle the product has is driven:
+/// cold equals warm on both bases; an authored edit changes both and the
+/// revert restores the original observation; a caller-cancelled request
+/// answers complete-and-cold-equal or `Cancelled`, and its retry equals a
+/// cold host; the public `clear_compile_cache` advances the store-view epoch
+/// and the same logical snapshot then gives the same observation and bytes;
+/// and a PARTIAL resident cache — the family memo past its retention bound —
+/// re-answers an evicted witness exactly as a cold host does. The
+/// cross-process persisted-cache axis is registered DORMANT: the contract
+/// makes it conditional on the product persisting a semantic cache, which it
+/// does not (see `det_05_persisted_axis_is_dormant_while_no_semantic_cache_serializes`).
 #[test]
-#[ignore = "V2 owns the epoch-safe storage vertical (partial persisted cache, \
-            cancelled/retried work, epoch rebuild): those axes have no public \
-            drivable surface today, so the row cannot honestly claim Ready; the \
-            cold/warm/edit-revert axes below are the drivable subset"]
-fn det_05_cold_warm_edit_revert() {
-    match matrix_row("DET-05").driver {
-        Driver::Ignored { .. } => {}
-        Driver::Ready { test } => panic!("DET-05 is registered ready ({test}) — update this row"),
+fn det_05_cache_lifecycle() {
+    assert_ready("DET-05", "det_05_cache_lifecycle");
+    drive_det_05_subset();
+    drive_det_05_partial_resident_cache();
+}
+
+/// DET-05's dormant axis stays auditable: it may stay dormant only while no
+/// semantic cache can leave the process. The semantic memo and the signature
+/// kernel are the product's semantic caches; the day either becomes
+/// serializable, this fails, and the change that made it so must activate the
+/// persisted-cache axis — a driver that persists from one process, loads a
+/// partial cache in another and replays the same logical snapshot — before it
+/// lands (contract §5.9, conditional axis).
+#[test]
+fn det_05_persisted_axis_is_dormant_while_no_semantic_cache_serializes() {
+    let row = matrix_row("DET-05");
+    assert!(
+        row.dormant
+            .iter()
+            .any(|axis| axis.axis == PERSISTED_CACHE_AXIS),
+        "DET-05: the persisted-cache axis is no longer registered dormant — its driver must \
+         exist and run"
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for cache in ["semantic_query_memo", "signature_kernel"] {
+        let mut stack = vec![root.join(cache)];
+        // bounded-loop: the two cache module trees.
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("the cache module tree") {
+                let path = entry.expect("a directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("a cache source file");
+                for marker in ["serde", "Serialize", "Deserialize", "bincode", "rkyv"] {
+                    assert!(
+                        !source.contains(marker),
+                        "{}: `{marker}` — a semantic cache can now be serialized, so DET-05's \
+                         persisted-cache axis is no longer dormant: add and pass its driver \
+                         before landing (contract §5.9, conditional axis)",
+                        path.display()
+                    );
+                }
+            }
+        }
     }
+}
+
+/// More distinct answered questions than the family memo retains: the
+/// memo's retention bound is 4096 families, admitted in order and evicted
+/// oldest first.
+const FAMILY_EVICTION_FLOOD: usize = 4200;
+
+/// DET-05's partial-cache axis in the product's own terms. The family memo
+/// is bounded, so a host that has answered more distinct questions than the
+/// bound holds a PARTIAL cache: its oldest answers evicted, the rest
+/// resident. The witness answered first is evicted by the flood — re-asked,
+/// its record is cold while a question answered last is still served warm —
+/// and its answer equals a cold host's on both bases.
+fn drive_det_05_partial_resident_cache() {
+    let canonical = "/det/edit.ts";
+    let cold_host = build_host(&[(canonical, EDIT_ORIGINAL_TS)]);
+    let cold = observe(&cold_host, canonical, "witness");
+    let ask = |host: &VerterHost, canonical: &str, symbol: &str| {
+        host.get_flow_return_type_with_audit(
+            &identity(canonical, symbol),
+            ReturnProjectionDemand::whole_return(),
+        )
+        .audit()
+        .from_cache
+    };
+
+    let host = build_host(&[(canonical, EDIT_ORIGINAL_TS)]);
+    assert_eq!(observe(&host, canonical, "witness"), cold);
+    assert!(
+        ask(&host, canonical, "witness"),
+        "DET-05: precondition — the witness is served warm before the flood"
+    );
+    let mut last = String::new();
+    // bounded-loop: FAMILY_EVICTION_FLOOD distinct questions.
+    for i in 0..FAMILY_EVICTION_FLOOD {
+        last = format!("/det/flood{i}.ts");
+        upsert(
+            &host,
+            &last,
+            &format!("export function flood() {{ return {{ k: {i} }}; }}\n"),
+        );
+        ask(&host, &last, "flood");
+    }
+    assert!(
+        ask(&host, &last, "flood"),
+        "DET-05: precondition — the last question answered is still resident, so the \
+         cache is partial rather than empty"
+    );
+    assert!(
+        !ask(&host, canonical, "witness"),
+        "DET-05: precondition — the flood evicted the witness answered first"
+    );
+    assert_eq!(
+        observe(&host, canonical, "witness"),
+        cold,
+        "DET-05: the witness re-answered beside a partial cache disagrees with a cold host"
+    );
+    let witness_row = |host: &VerterHost| generated_byte_rows(host).remove(canonical);
+    assert!(witness_row(&cold_host).is_some());
+    assert_eq!(
+        witness_row(&host),
+        witness_row(&cold_host),
+        "DET-05: the witness's generated bytes changed under a partial cache"
+    );
+}
+
+/// A witness with enough connected work that a concurrent cancellation can
+/// land while it evaluates: a generic call chain and a union return.
+const CANCEL_TS: &str = r#"
+function c0<T>(x: T) { return { v: x, tag: "c" as const }; }
+function c1<T>(x: T) { return c0(x); }
+function c2<T>(x: T) { return c1(x); }
+function c3<T>(x: T) { return c2(x); }
+function c4<T>(x: T) { return c3(x); }
+function c5<T>(x: T) { return c4(x); }
+function c6<T>(x: T) { return c5(x); }
+function c7<T>(x: T) { return c6(x); }
+export function witness(v: number | string, flag: boolean) {
+    if (flag) return c7(v);
+    return [v] as const;
+}
+"#;
+
+/// DET-05's cancelled/retried axis. The caller's token cancels the audited
+/// request. Cancelled before it starts, the request answers the typed
+/// `Cancelled` error and publishes nothing. A concurrent cancellation, at
+/// whatever instant it lands, leaves the attempt either complete and equal
+/// to a cold host's answer or `Cancelled` — never a degraded value that
+/// would blame the program for the caller's cancellation. The retry under a
+/// fresh token answers exactly what a cold host answers, on both bases: a
+/// cancelled attempt never leaves a partial answer behind.
+fn drive_det_05_cancel_and_retry() {
+    use verter_scheduler::cancellation::CancellationToken;
+    use verter_session::host_flow_return_audit::FlowReturnError;
+    let canonical = "/det/cancel.ts";
+    let cold_host = build_host(&[(canonical, CANCEL_TS)]);
+    let cold = observe(&cold_host, canonical, "witness");
+    let cold_bytes = generated_bytes(&cold_host);
+    let cancellable = |host: &VerterHost, token: CancellationToken| {
+        host.get_flow_return_type_with_audit_cancellable(
+            &identity(canonical, "witness"),
+            ReturnProjectionDemand::whole_return(),
+            token,
+        )
+    };
+
+    let host = build_host(&[(canonical, CANCEL_TS)]);
+    let token = CancellationToken::new();
+    token.cancel();
+    let cancelled = cancellable(&host, token);
+    assert!(
+        matches!(cancelled.as_result(), Err(FlowReturnError::Cancelled)),
+        "DET-05: a request cancelled before it started answered {:?}",
+        cancelled.as_result().map(|result| result.degradation())
+    );
+    assert_eq!(
+        observe(&host, canonical, "witness"),
+        cold,
+        "DET-05: the retry after a pre-start cancellation disagrees with a cold host"
+    );
+    assert_eq!(
+        generated_bytes(&host),
+        cold_bytes,
+        "DET-05: the retry after a pre-start cancellation generated different bytes"
+    );
+
+    // bounded-loop: one concurrent cancellation per delay.
+    for delay_micros in [0_u64, 20, 100, 500, 2_000, 10_000] {
+        let host = build_host(&[(canonical, CANCEL_TS)]);
+        let token = CancellationToken::new();
+        let canceller = {
+            let token = token.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_micros(delay_micros));
+                token.cancel();
+            })
+        };
+        let attempt = cancellable(&host, token);
+        canceller.join().expect("the canceller thread finishes");
+        match attempt.as_result() {
+            Ok(result) => assert_eq!(
+                render_result(&host, result),
+                cold,
+                "DET-05: an attempt cancelled {delay_micros}µs in answered a value a cold \
+                 host does not"
+            ),
+            Err(FlowReturnError::Cancelled) => {}
+            Err(other) => {
+                panic!("DET-05: an attempt cancelled {delay_micros}µs in failed with {other:?}")
+            }
+        }
+        assert_eq!(
+            observe(&host, canonical, "witness"),
+            cold,
+            "DET-05: the retry after a cancellation {delay_micros}µs in disagrees with a cold host"
+        );
+        assert_eq!(
+            generated_bytes(&host),
+            cold_bytes,
+            "DET-05: the retry after a cancellation {delay_micros}µs in generated different bytes"
+        );
+    }
+}
+
+fn drive_det_05_subset() {
+    // The cancel witness's eight-level generic chain runs on the stack the
+    // product gives query work (the language server's serve thread and the
+    // host CPU pool are 8 MiB). An unoptimised build's frames exceed the
+    // test harness's 2 MiB default at that depth.
+    std::thread::Builder::new()
+        .name("det-05-cancel".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(drive_det_05_cancel_and_retry)
+        .expect("spawn the DET-05 cancellation driver")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     let host = build_host(&[("/det/edit.ts", EDIT_ORIGINAL_TS)]);
     let canonical = "/det/edit.ts";
     let cold = observe(&host, canonical, "witness");
@@ -961,32 +1223,102 @@ fn det_05_cold_warm_edit_revert() {
         cold, reverted,
         "DET-05: the revert did not restore the original completed observation"
     );
+
+    // Epoch rebuild: `clear_compile_cache` is a public host operation that
+    // advances the store-view epoch. The same logical snapshot must give the
+    // same observation and, once the same demand re-warms it, the same bytes.
+    let epoch_before = host.store_view_epoch();
+    host.clear_compile_cache();
+    assert!(
+        host.store_view_epoch() > epoch_before,
+        "DET-05: clear_compile_cache did not advance the store-view epoch — the rebuild \
+         axis drove nothing"
+    );
+    assert_eq!(
+        observe(&host, canonical, "witness"),
+        cold,
+        "DET-05: the epoch rebuild changed the completed observation"
+    );
+    assert_eq!(
+        generated_bytes(&host),
+        cold_bytes,
+        "DET-05: the epoch rebuild changed the generated bytes of the same logical snapshot"
+    );
 }
 
-/// DET-07 — duplicate same-shaped declarations with distinct authored
-/// origins and an anonymous class-expression unit: no early carrier
-/// loss (both duplicates answer), and BOTH bases give the SAME
-/// shape-normalized content because they are same-shaped authored
-/// facts. The virtual-unit and recursive-binder anchor axes stage with
-/// V3/V4 (the row's staging note).
+/// A recursive generic binder, authored identically in two files.
+const RECURSIVE_TS: &str = r#"
+interface Rec<T> { value: T; next: Rec<T> | null }
+export function witness(r: Rec<number>) { return r.next; }
+"#;
+
+/// The duplicate witness again, inside a VIRTUAL unit: a Vue SFC's script.
+const VIRTUAL_SFC: &str =
+    "<script lang=\"ts\">\nexport function witness() { return 1 as number | string; }\n</script>\n";
+
+/// One shape reached two ways: authored, and synthesized by a mapped
+/// utility. The witnesses READ THROUGH the shape (`v.a`) rather than return
+/// `v`: returning the parameter publishes its declared alias by NAME, and
+/// two differently named aliases never print alike whatever they denote.
+const SYNTHETIC_TS: &str = r#"
+type Authored = { a?: 1; b?: 2 };
+type Synthetic = Partial<{ a: 1; b: 2 }>;
+export function authored(v: Authored) { return v.a; }
+export function synthetic(v: Synthetic) { return v.a; }
+"#;
+
+/// DET-07 — duplicate shapes with distinct authored/synthetic origins,
+/// anonymous/virtual units and recursive binders: no early carrier loss and
+/// no discovery-based anchor.
+///
+/// * Authored duplicates in two files, and the same witness inside a Vue
+///   SFC's virtual script unit, all answer, and answer the same shape on
+///   both bases.
+/// * An anonymous class-expression unit answers.
+/// * A shape reached by a mapped utility (`Partial<…>`) and the same shape
+///   written out answer the same shape.
+/// * A recursive generic binder authored identically in two files keeps its
+///   recursive carrier in both. The two files' answers are NOT required to
+///   print alike: `VerterStableV1` orders a union's arms by stable-key
+///   fingerprint, a declaration's fingerprint includes its own identity, so
+///   `recA.ts`'s `Rec` and `recB.ts`'s `Rec` are different types that may
+///   sort differently against `null`. What must hold is that each file's
+///   answer depends on its ORIGIN and never on DISCOVERY: the same file
+///   answers the same way whichever arrives first.
 #[test]
 fn det_07_duplicate_origins_and_anonymous_units() {
     assert_ready("DET-07", "det_07_duplicate_origins_and_anonymous_units");
-    let host = build_host(&[
+    let files: [(&'static str, &'static str); 7] = [
         ("/det/dupA.ts", DUPLICATE_A_TS),
         ("/det/dupB.ts", DUPLICATE_B_TS),
         ("/det/anon.ts", ANONYMOUS_TS),
-    ]);
+        ("/det/Virtual.vue", VIRTUAL_SFC),
+        ("/det/recA.ts", RECURSIVE_TS),
+        ("/det/recB.ts", RECURSIVE_TS),
+        ("/det/synthetic.ts", SYNTHETIC_TS),
+    ];
+    let host = build_host(&files);
+
+    // Authored duplicates, and the same witness in a virtual unit.
     let a = observe(&host, "/det/dupA.ts", "witness");
     let b = observe(&host, "/det/dupB.ts", "witness");
-    assert!(
-        !a.contains("<absent>") && !b.contains("<absent>"),
-        "DET-07: a duplicate-origin carrier was lost — {a} vs {b}"
-    );
+    let virtual_unit = observe(&host, "/det/Virtual.vue", "witness");
+    for (label, answer) in [("dupA", &a), ("dupB", &b), ("virtual unit", &virtual_unit)] {
+        assert!(
+            !answer.contains("<absent>"),
+            "DET-07: the {label} carrier was lost — {answer}"
+        );
+    }
     assert_eq!(
         a.replace("/det/dupA", "/det/DUP"),
         b.replace("/det/dupB", "/det/DUP"),
         "DET-07: same-shaped authored duplicates must give same-shaped observations"
+    );
+    assert_eq!(
+        a.replace("/det/dupA", "/det/DUP"),
+        virtual_unit.replace("/det/Virtual", "/det/DUP"),
+        "DET-07: the virtual unit's duplicate must give the same-shaped observation as the \
+         authored one"
     );
     let bytes_rows = generated_byte_rows(&host);
     assert_eq!(
@@ -994,11 +1326,58 @@ fn det_07_duplicate_origins_and_anonymous_units() {
         bytes_rows.get("/det/dupB.ts"),
         "DET-07: same-shaped authored duplicates must generate same-shaped bytes"
     );
+
+    // An anonymous unit.
     let anonymous = observe(&host, "/det/anon.ts", "witness");
     assert!(
         !anonymous.contains("<absent>"),
         "DET-07: the anonymous unit's carrier was lost — {anonymous}"
     );
+
+    // Authored and synthetic origins of one shape.
+    let authored = observe(&host, "/det/synthetic.ts", "authored");
+    let synthetic = observe(&host, "/det/synthetic.ts", "synthetic");
+    assert!(
+        !authored.contains("<absent>") && !synthetic.contains("<absent>"),
+        "DET-07: an authored or synthetic carrier was lost — {authored} vs {synthetic}"
+    );
+    assert_eq!(
+        authored, synthetic,
+        "DET-07: one shape reached through an authored and a synthetic origin must give the \
+         same observation"
+    );
+
+    // Recursive binders: the carrier survives, and the answer depends on the
+    // file's origin, never on which file was discovered first.
+    let rec_a = observe(&host, "/det/recA.ts", "witness");
+    let rec_b = observe(&host, "/det/recB.ts", "witness");
+    for (label, answer) in [("recA", &rec_a), ("recB", &rec_b)] {
+        assert!(
+            !answer.contains("<absent>") && answer.contains("Rec"),
+            "DET-07: the recursive binder's carrier was lost in {label} — {answer}"
+        );
+    }
+    let mut reversed_files = files;
+    reversed_files.reverse();
+    let reversed = build_host(&reversed_files);
+    assert_eq!(
+        observe(&reversed, "/det/recA.ts", "witness"),
+        rec_a,
+        "DET-07: recA's answer changed with the order the files were discovered in"
+    );
+    assert_eq!(
+        observe(&reversed, "/det/recB.ts", "witness"),
+        rec_b,
+        "DET-07: recB's answer changed with the order the files were discovered in"
+    );
+    let reversed_rows = generated_byte_rows(&reversed);
+    for canonical in ["/det/recA.ts", "/det/recB.ts"] {
+        assert_eq!(
+            reversed_rows.get(canonical),
+            generated_byte_rows(&host).get(canonical),
+            "DET-07: {canonical}'s generated bytes changed with discovery order"
+        );
+    }
 }
 
 /// DET-10 — relocation: the same content under a different logical
@@ -1132,93 +1511,274 @@ export function witness(v: "a" | "ab" | "abc" | "b") { return v; }
     );
 }
 
-/// DET-08 (ignored) — contextual body demands with the same
-/// descriptor/type arguments must give correctly DISTINCT coexisting
-/// result memo entries. The body asserts the KNOWN FAILURE the ignore
-/// reason names: driving a contextual (non-whole-return) demand point
-/// today fails CLOSED with the typed `UnmodeledDemandPoint` refusal —
-/// the entry-point's documented behavior for every narrower point — so
-/// distinct coexisting memo entries under one descriptor cannot be
-/// replayed yet. When the owning block lands, this body's refusal
-/// assertion FAILS (the demand answers), which is the un-ignore signal.
+/// DET-08 — contextual body demands with the same descriptor/type
+/// arguments: correctly DISTINCT, COEXISTING result memo entries.
+///
+/// One function, one descriptor, three demand points over its return: the
+/// whole return, and the member projections `a` and `b` — the narrower
+/// point the evaluator models for `ReturnType<typeof f>["a"]`, which
+/// evaluates ONLY the demanded member of an object-literal return. Each
+/// point must answer its own question (a member point is never the whole
+/// object and never its sibling), all three must coexist (a later demand
+/// never overwrites or evicts an earlier one's answer), and no answer may
+/// depend on the order the demands arrive in.
+///
+/// `Demand::shallow()` — the members-facet projection — is a point the
+/// evaluation does NOT model. It stays pinned to its typed
+/// `UnmodeledDemandPoint` refusal: never a silently widened whole-return
+/// answer standing in for the narrower question.
 #[test]
-#[ignore = "V1 owns complete body/result demand identity: only the canonical whole-return \
-            demand point is answerable today (a narrower demand fails closed with \
-            UnmodeledDemandPoint), so distinct coexisting result memo entries under one \
-            descriptor cannot be replayed yet"]
 fn det_08_contextual_body_demands() {
-    match matrix_row("DET-08").driver {
-        Driver::Ignored { .. } => {}
-        Driver::Ready { test } => panic!("DET-08 is registered ready ({test}) — update this row"),
-    }
+    assert_ready("DET-08", "det_08_contextual_body_demands");
     use verter_session::host_flow_return_audit::FlowReturnError;
-    use verter_session::semantic_query::demand::Demand;
-    use verter_session::semantic_query::{FlowReturnFailure, ReturnProjectionDemand};
-    let host = build_host(&[("/det/main.ts", MAIN_TS)]);
-    // The canonical whole-return point answers (the row's baseline).
-    let whole = host.get_flow_return_type_with_audit(
-        &identity("/det/main.ts", "localUnion"),
-        ReturnProjectionDemand::whole_return(),
+    use verter_session::semantic_query::demand::{Demand, ProjectionPath};
+    use verter_session::semantic_query::{FlowReturnFailure, PathSegment, PropertyKey};
+
+    const CONTEXT_TS: &str =
+        "export function contextual(v: number | string) { return { a: v, b: 1 as const }; }";
+    const CANONICAL: &str = "/det/context.ts";
+    const SYMBOL: &str = "contextual";
+    let member = |name: &str| {
+        let mut point = Demand::identity();
+        point.projection.path = ProjectionPath::from_segments([PathSegment::Member(
+            PropertyKey::identifier(Arc::<str>::from(name)),
+        )]);
+        ReturnProjectionDemand { point }
+    };
+    let demand_for = |label: &str| match label {
+        "whole" => ReturnProjectionDemand::whole_return(),
+        member_name => member(member_name),
+    };
+
+    // Two hosts, the three demands arriving in OPPOSITE orders.
+    let forward = build_host(&[(CANONICAL, CONTEXT_TS)]);
+    let reverse = build_host(&[(CANONICAL, CONTEXT_TS)]);
+    let mut answers: Vec<(&str, String)> = Vec::new();
+    for label in ["whole", "a", "b"] {
+        answers.push((
+            label,
+            observe_demand(&forward, CANONICAL, SYMBOL, demand_for(label)),
+        ));
+    }
+    let mut reversed: Vec<(&str, String)> = Vec::new();
+    for label in ["b", "a", "whole"] {
+        reversed.push((
+            label,
+            observe_demand(&reverse, CANONICAL, SYMBOL, demand_for(label)),
+        ));
+    }
+    let answer = |set: &[(&str, String)], label: &str| {
+        set.iter()
+            .find(|(l, _)| *l == label)
+            .map(|(_, a)| a.clone())
+            .expect("every demand was observed")
+    };
+    for label in ["whole", "a", "b"] {
+        assert_eq!(
+            answer(&answers, label),
+            answer(&reversed, label),
+            "DET-08: the `{label}` demand answered differently depending on which demands \
+             arrived before it"
+        );
+    }
+    assert_eq!(
+        generated_bytes(&forward),
+        generated_bytes(&reverse),
+        "DET-08: the same demands in opposite orders left different generated bytes"
     );
-    assert!(
-        whole.as_result().is_ok(),
-        "DET-08: the canonical whole-return demand must complete — the baseline of the \
-         contextual-demand comparison is gone"
+
+    // Distinct: no demand point answers another point's question.
+    let (whole, a, b) = (
+        answer(&answers, "whole"),
+        answer(&answers, "a"),
+        answer(&answers, "b"),
     );
-    // A contextual (narrower) demand point — `Demand::shallow()`, the
-    // members-facet projection over the same function — is a DISTINCT
-    // demand point that the evaluation does not model: it fails closed
-    // with the typed `UnmodeledDemandPoint` refusal, never a silently
-    // widened whole-return result. THAT refusal is the known failure.
-    let contextual = host.get_flow_return_type_with_audit(
-        &identity("/det/main.ts", "localUnion"),
+    assert_ne!(
+        a, whole,
+        "DET-08: the `a` member demand answered the WHOLE return: {a}"
+    );
+    assert_ne!(
+        b, whole,
+        "DET-08: the `b` member demand answered the WHOLE return: {b}"
+    );
+    assert_ne!(a, b, "DET-08: the two member demands share one answer: {a}");
+
+    // Coexisting: re-asking every point after all three were computed
+    // returns each one's own answer — a later demand overwrote nothing.
+    for label in ["whole", "a", "b"] {
+        assert_eq!(
+            observe_demand(&forward, CANONICAL, SYMBOL, demand_for(label)),
+            answer(&answers, label),
+            "DET-08: the `{label}` answer did not survive the other demands on the same \
+             descriptor"
+        );
+    }
+
+    // The unmodeled point still refuses, typed.
+    let unmodeled = forward.get_flow_return_type_with_audit(
+        &identity(CANONICAL, SYMBOL),
         ReturnProjectionDemand {
             point: Demand::shallow(),
         },
     );
-    match contextual.as_result() {
+    match unmodeled.as_result() {
         Err(FlowReturnError::Failure(FlowReturnFailure::UnmodeledDemandPoint)) => {}
         Err(other) => panic!(
-            "DET-08: the narrower demand refused with {other:?} — the typed refusal class \
-             changed; re-examine this row's registration"
+            "DET-08: the unmodeled members-facet demand refused with {other:?} — the typed \
+             refusal class changed"
         ),
         Ok(_) => panic!(
-            "DET-08: a contextual demand point ANSWERED — the demand lattice now models \
-             narrower points; un-ignore this row and assert the distinct coexisting memo \
-             entries under one descriptor"
+            "DET-08: the members-facet demand ANSWERED — it is now modeled; add it to the \
+             distinct-coexisting comparison above"
         ),
     }
 }
 
-/// DET-09 (ignored) — policy changes with resident parent caches:
-/// parents and leaves must use the new policy while formatting-only
-/// changes do not rebuild resolution. The body asserts the KNOWN STATE
-/// on the one axis that is expressible today: a formatting-only edit
-/// (pure whitespace) leaves the completed observation IDENTICAL — the
-/// resolution-visible answer does not move for a change that must not
-/// rebuild it. The policy-change-with-resident-parents axis itself has
-/// no drivable surface (the host owns no mid-flight effective-options
-/// mutation), which is what the ignore reason names.
+/// The DET-09 project root and its tsconfig.
+const DET_POLICY_ROOT: &str = "/det";
+const DET_POLICY_TSCONFIG: &str = "/det/tsconfig.json";
+
+/// Publish `tsconfig_json` as the DET-09 project's configuration, the way an
+/// edited tsconfig reaches a live host: the file's content changes, the real
+/// tsconfig loader re-reads it (extends-aware, effective-option
+/// canonicalising), and the host is re-configured through the same
+/// `configure_projects` entry the IDE uses. A tsconfig-backed project
+/// publishes as CONFIGURED; a project with no tsconfig publishes as a
+/// fallback that ignores its compiler options entirely.
+fn det_apply_tsconfig(
+    host: &VerterHost,
+    workspace: &verter_workspace::MemoryWorkspace,
+    tsconfig_json: &str,
+) {
+    workspace.inject_file(DET_POLICY_TSCONFIG.to_string(), Arc::from(tsconfig_json));
+    let mut project = verter_workspace::ide_project_config(
+        DET_POLICY_ROOT.to_string(),
+        DET_POLICY_ROOT.to_string(),
+        Some(DET_POLICY_TSCONFIG.to_string()),
+    );
+    project.compiler_options =
+        verter_workspace::load_compiler_options(workspace, DET_POLICY_TSCONFIG);
+    host.configure_projects(vec![project]);
+}
+
+/// DET-09 — policy changes with resident parent caches: parents and leaves
+/// must use the new policy, and a formatting-only change must not rebuild
+/// resolution.
+///
+/// The policy change is an edited tsconfig reaching a live host through
+/// [`det_apply_tsconfig`]; the effective option reads back from the file's
+/// own project. The witness returns a nullish arm whose presence depends on
+/// `strictNullChecks` — kept under strict, erased when the option is off —
+/// so a leaf or a parent still holding the old policy's answer is
+/// observable: both must MOVE with the policy, and after each change the
+/// live host must answer exactly what a fresh host under that policy
+/// answers, on both comparison bases.
 #[test]
-#[ignore = "V1 owns real effective tsconfig option plumbing: changing semantic policy with \
-            resident parent caches is un-drivable until effective options and their \
-            parent-cache invalidation exist"]
 fn det_09_policy_change_with_resident_parents() {
-    match matrix_row("DET-09").driver {
-        Driver::Ignored { .. } => {}
-        Driver::Ready { test } => panic!("DET-09 is registered ready ({test}) — update this row"),
-    }
-    const POLICY_BASE_TS: &str = "export function witness(v: number | string) { return v; }";
-    const POLICY_FORMATTED_TS: &str =
-        "export function witness(v: number | string) {\n    return v;\n}\n";
-    let host = build_host(&[("/det/policy.ts", POLICY_BASE_TS)]);
-    let before = observe(&host, "/det/policy.ts", "witness");
-    upsert(&host, "/det/policy.ts", POLICY_FORMATTED_TS);
-    let after = observe(&host, "/det/policy.ts", "witness");
+    assert_ready("DET-09", "det_09_policy_change_with_resident_parents");
+    const LEAF_TS: &str = "export function leaf(c: boolean) { if (c) return \"a\"; return null; }";
+    const LEAF_FORMATTED_TS: &str =
+        "export function leaf(c: boolean) {\n    if (c) return \"a\";\n    return null;\n}\n";
+    const PARENT_TS: &str =
+        "import { leaf } from \"./leaf\";\nexport function parent(c: boolean) { return leaf(c); }";
+    const LOOSE: &str = r#"{ "compilerOptions": { "strictNullChecks": false } }"#;
+    const STRICT: &str = r#"{ "compilerOptions": { "strictNullChecks": true } }"#;
+
+    let policy_host = || {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        let host = Arc::new(VerterHost::new(
+            HostConfig {
+                audit_enabled: true,
+                ..HostConfig::default()
+            },
+            workspace.clone(),
+        ));
+        (host, workspace)
+    };
+    let apply_policy = |host: &VerterHost,
+                        workspace: &verter_workspace::MemoryWorkspace,
+                        tsconfig: &str,
+                        strict: bool| {
+        det_apply_tsconfig(host, workspace, tsconfig);
+        assert_eq!(
+            host.semantic_compiler_options_for("/det/leaf.ts")
+                .strict_null_checks,
+            strict,
+            "DET-09: the policy change never reached the file's project"
+        );
+    };
+    let observe_both = |host: &VerterHost| {
+        (
+            observe(host, "/det/leaf.ts", "leaf"),
+            observe(host, "/det/parent.ts", "parent"),
+        )
+    };
+    // A host that never saw any other policy.
+    let fresh_under = |tsconfig: &str, strict: bool| {
+        let (fresh, fresh_ws) = policy_host();
+        apply_policy(&fresh, &fresh_ws, tsconfig, strict);
+        upsert(&fresh, "/det/leaf.ts", LEAF_TS);
+        upsert(&fresh, "/det/parent.ts", PARENT_TS);
+        (observe_both(&fresh), generated_bytes(&fresh))
+    };
+
+    let (live, live_ws) = policy_host();
+    apply_policy(&live, &live_ws, LOOSE, false);
+    upsert(&live, "/det/leaf.ts", LEAF_TS);
+    upsert(&live, "/det/parent.ts", PARENT_TS);
+    let loose = observe_both(&live);
+    // Both answers are now resident under the loose policy.
+    apply_policy(&live, &live_ws, STRICT, true);
+    let strict = observe_both(&live);
+
+    assert_ne!(
+        loose.0, strict.0,
+        "DET-09: the leaf's answer did not move with the policy — the witness no longer \
+         observes it"
+    );
+    assert_ne!(
+        loose.1, strict.1,
+        "DET-09: the parent kept its answer across the policy change — a resident parent \
+         outlived it"
+    );
+    let (fresh_strict, fresh_strict_bytes) = fresh_under(STRICT, true);
     assert_eq!(
-        before, after,
-        "DET-09: a formatting-only edit moved the resolution-visible observation — a \
-         change that must not rebuild resolution changed the answer"
+        strict, fresh_strict,
+        "DET-09: after the change to strict the live host disagrees with a fresh strict host"
+    );
+    assert_eq!(
+        generated_bytes(&live),
+        fresh_strict_bytes,
+        "DET-09: after the change to strict the live host's generated bytes differ from a \
+         fresh strict host's"
+    );
+
+    apply_policy(&live, &live_ws, LOOSE, false);
+    let (fresh_loose, fresh_loose_bytes) = fresh_under(LOOSE, false);
+    assert_eq!(
+        observe_both(&live),
+        loose,
+        "DET-09: restoring the policy did not restore the original observations"
+    );
+    assert_eq!(
+        loose, fresh_loose,
+        "DET-09: after the change back to loose the live host disagrees with a fresh loose host"
+    );
+    assert_eq!(
+        generated_bytes(&live),
+        fresh_loose_bytes,
+        "DET-09: after the change back to loose the live host's generated bytes differ from a \
+         fresh loose host's"
+    );
+
+    upsert(&live, "/det/leaf.ts", LEAF_FORMATTED_TS);
+    assert_eq!(
+        observe(&live, "/det/leaf.ts", "leaf"),
+        loose.0,
+        "DET-09: a formatting-only edit moved the resolution-visible observation — a change \
+         that must not rebuild resolution changed the answer"
     );
 }
 

@@ -33,7 +33,9 @@ fn lowered(source: &str) -> LoweredFileParts {
 
 fn svelte_runes_statement(source: &str) -> crate::analysis::type_eval_build::LoweredStatementParts {
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     assert!(!parsed.panicked, "fixture must parse: {source}");
     let statement = parsed.program.body.first().expect("one statement fixture");
     crate::analysis::type_eval_build::lower_svelte_runes_statement_parts(statement, source)
@@ -43,8 +45,8 @@ fn svelte_runes_statement(source: &str) -> crate::analysis::type_eval_build::Low
 fn owner_aware_eval_env_keeps_setup_and_module_locators_distinct() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
@@ -103,8 +105,8 @@ fn jsdoc_typedef_bodies_lower_by_exact_owner_qualified_comment() {
     use crate::analysis::decl_headers::build_decl_header_index_with_owners;
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
@@ -1181,8 +1183,8 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
 /// into a sibling test module.
 fn header_index_for(source: &str) -> crate::analysis::decl_headers::DeclHeaderIndex {
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
 
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
@@ -2790,9 +2792,10 @@ fn call_bearing_initializer_uses_an_indexed_semantic_expression_source() {
 fn indexed_call_ir_preserves_nested_calls_and_rebases_program_points() {
     let source = "make(id())";
     let allocator = oxc_allocator::Allocator::default();
-    let expression = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-        .parse_expression()
-        .expect("fixture expression");
+    let expression =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse_expression()
+            .expect("fixture expression");
     let mut indexed =
         crate::analysis::type_eval_build::lower_indexed_value_expression(&expression, source);
     crate::analysis::type_eval_build::offset_indexed_value_expression(&mut indexed, 40);
@@ -2821,9 +2824,10 @@ fn indexed_call_with_observed_roots(
         lower_indexed_call_expression, lower_indexed_call_expression_with_read_roots,
     };
     let allocator = oxc_allocator::Allocator::default();
-    let expression = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-        .parse_expression()
-        .expect("fixture expression");
+    let expression =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse_expression()
+            .expect("fixture expression");
     let oxc_ast::ast::Expression::CallExpression(call) = expression else {
         panic!("fixture must be a direct call");
     };
@@ -3077,9 +3081,10 @@ fn indexed_call_read_roots_observe_the_actual_member_receiver_once() {
 fn value_expression_inference_carries_calls_as_the_honest_carrier() {
     fn inferred(source: &str) -> TypeExpr {
         let allocator = oxc_allocator::Allocator::default();
-        let expression = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts())
-            .parse_expression()
-            .expect("fixture expression");
+        let expression =
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse_expression()
+                .expect("fixture expression");
         crate::analysis::type_eval_build::infer_declaration_expression_type(
             &expression,
             source,
@@ -3141,9 +3146,13 @@ fn value_expression_inference_carries_calls_as_the_honest_carrier() {
     // record, and a call-bearing compound is a TYPED unsupported carrier —
     // never a fabricated value.
     let allocator = oxc_allocator::Allocator::default();
-    let compound = oxc_parser::Parser::new(&allocator, "{ a: fn() }", oxc_span::SourceType::ts())
-        .parse_expression()
-        .expect("fixture expression");
+    let compound = verter_parser::oxc_parse::Parser::new(
+        &allocator,
+        "{ a: fn() }",
+        oxc_span::SourceType::ts(),
+    )
+    .parse_expression()
+    .expect("fixture expression");
     assert!(matches!(
         crate::analysis::type_eval_build::lower_indexed_value_expression(&compound, "{ a: fn() }"),
         crate::analysis::type_eval_build::IndexedValueExpression::UnsupportedCall { .. }
@@ -4194,56 +4203,36 @@ fn merged_same_name_enum_unions_all_contributor_members_in_both_spaces() {
 }
 
 #[test]
-fn unsupported_initializer_makes_running_auto_increment_unknown_not_fabricated() {
-    // `1 << 2` is a computed (binary) initializer Verter cannot statically
-    // fold, so `A`'s value is DEFERRED AND the running auto-increment value
-    // becomes UNKNOWN. A bare member with an unknown running value (`B`) is
-    // therefore ALSO deferred — its foldable value must NOT be fabricated as
-    // `0` off a stale counter. An explicit literal (`C = 5`) RESEEDS the
-    // counter to KNOWN, so the following bare member `D` folds to `6`. The
-    // FOLDABLE rail (`enum_member_names`) therefore holds only `C`/`D`.
+fn a_constant_initializer_seeds_auto_increment_and_a_computed_one_stops_it() {
+    // A member value is the checker's constant evaluation: `1 << 2` is the
+    // constant `4`, so the bare `B` that follows is `5`, and `C = 5`, `D = 6`.
+    // TypeScript 7.0.2 prints `A = 4, B = 5, C = 5, D = 6`.
     let env = parse_and_build_env("export enum E { A = 1 << 2, B, C = 5, D }");
-    let names = enum_member_names(&env, "E");
-    assert_eq!(
-        names,
-        vec!["C", "D"],
-        "A (unfoldable) and B (bare after an unknown running value) are deferred, not folded; \
-         C/D fold because C = 5 reseeds the counter"
-    );
-    // Negative: B must NOT be present in the FOLDABLE rail with a fabricated-0
-    // literal — its value is deferred, not invented.
-    assert!(
-        !names.iter().any(|n| n == "B"),
-        "a bare member after an unknown running value must NOT be fabricated into the foldable rail"
-    );
+    assert_eq!(enum_member_names(&env, "E"), vec!["A", "B", "C", "D"]);
+    assert_eq!(enum_member_value(&env, "E", "A"), number_scalar("4"));
+    assert_eq!(enum_member_value(&env, "E", "B"), number_scalar("5"));
     assert_eq!(enum_member_value(&env, "E", "C"), number_scalar("5"));
+    assert_eq!(enum_member_value(&env, "E", "D"), number_scalar("6"));
+    // A member with no constant value is computed, and a bare member after it
+    // has no value either — never one fabricated off a stale counter.
+    let env = parse_and_build_env("export enum G { A = someFn(), B, C = 5, D }");
     assert_eq!(
-        enum_member_value(&env, "E", "D"),
-        number_scalar("6"),
-        "auto-increment resumes from the explicit C = 5, not from the deferred A/B"
+        enum_member_names(&env, "G"),
+        vec!["C", "D"],
+        "A (a call) and B (bare after a computed member) are computed, not folded"
     );
+    assert_eq!(enum_member_value(&env, "G", "D"), number_scalar("6"));
 }
 
 #[test]
-fn bitwise_not_initializer_defers_member_and_following_bare_members() {
-    // `~1` is a bitwise (unary, non-`±`) initializer — unfoldable. `B`'s value
-    // is deferred and the running value becomes UNKNOWN, so the following bare
-    // `C` is ALSO deferred: its value would be `previous + 1`, and the previous
-    // member's value is unknown. Only `A = 0` folds, so the FOLDABLE rail holds
-    // `A` alone; a deferred member's foldable value is never fabricated off a
-    // stale counter.
+fn a_bitwise_not_initializer_is_a_constant_the_next_member_increments() {
+    // `~1` is the constant `-2`, so the bare `C` that follows is `-1`.
+    // TypeScript 7.0.2 prints `A = 0, B = -2, C = -1`.
     let env = parse_and_build_env("export enum F { A = 0, B = ~1, C }");
-    let names = enum_member_names(&env, "F");
-    assert_eq!(
-        names,
-        vec!["A"],
-        "B (~1 unfoldable) and C (bare after an unknown running value) are both deferred, not folded"
-    );
-    assert!(
-        !names.iter().any(|n| n == "C"),
-        "a bare member after an unknown running value must NOT be fabricated into the foldable rail"
-    );
+    assert_eq!(enum_member_names(&env, "F"), vec!["A", "B", "C"]);
     assert_eq!(enum_member_value(&env, "F", "A"), number_scalar("0"));
+    assert_eq!(enum_member_value(&env, "F", "B"), number_scalar("-2"));
+    assert_eq!(enum_member_value(&env, "F", "C"), number_scalar("-1"));
 }
 
 #[test]
@@ -4279,12 +4268,12 @@ fn computed_template_enum_member_name_resolves_to_static_single_quasi() {
 #[test]
 fn enum_member_inventory_records_all_static_names_folding_or_degrading_each_value() {
     // The member inventory carries the NAME of EVERY statically-named member —
-    // including ones whose VALUE is deferred — so the name rail is the SUPERSET
-    // the foldable rail filters. For `enum E { A = 1 << 2, B, C = 5, D }`: all
-    // four NAMES are recorded; `A` (unfoldable `1 << 2`) and `B` (bare after an
-    // unknown running value) are deferred, each carrying the degraded `number`
-    // domain scalar; `C = 5` reseeds and `D = 6` fold.
-    let env = parse_and_build_env("export enum E { A = 1 << 2, B, C = 5, D }");
+    // including one whose value is computed — so the name rail is the SUPERSET
+    // the foldable rail filters. For `enum E { A = someFn(), B, C = 5, D }`:
+    // all four NAMES are recorded; `A` (a call) and `B` (bare after a computed
+    // member) are computed and carry the `number` domain; `C = 5` and `D = 6`
+    // fold.
+    let env = parse_and_build_env("export enum E { A = someFn(), B, C = 5, D }");
     let inventory = &env.value_symbols["E"]
         .primary()
         .enum_members
@@ -4295,32 +4284,23 @@ fn enum_member_inventory_records_all_static_names_folding_or_degrading_each_valu
     assert_eq!(
         all_names,
         vec!["A", "B", "C", "D"],
-        "every statically-named member is recorded, even with a deferred value"
+        "every statically-named member is recorded, even with a computed value"
     );
     assert_eq!(
         inventory[0].value,
         EnumScalar::Primitive(EnumPrimitiveDomain::Number),
-        "A's value is DEFERRED and degrades to `number` (the numeric `1 << 2`)"
+        "A is computed and carries the `number` domain"
     );
     assert_eq!(
         inventory[1].value,
         EnumScalar::Primitive(EnumPrimitiveDomain::Number),
-        "B is DEFERRED (bare after an unknown running value) and degrades to `number`"
+        "B (bare after a computed member) is computed"
     );
-    assert_eq!(
-        inventory[2].value,
-        number_scalar("5"),
-        "C = 5 folds and reseeds the counter"
-    );
-    assert_eq!(
-        inventory[3].value,
-        number_scalar("6"),
-        "D resumes auto-increment from the reseeded C"
-    );
+    assert_eq!(inventory[2].value, number_scalar("5"));
+    assert_eq!(inventory[3].value, number_scalar("6"));
 
-    // The rail-explicit view is a lossless bijection over the stored scalar:
-    // a `Primitive` scalar classifies back to `Deferred`, a literal to
-    // `Folded`.
+    // The rail-explicit view over the stored scalar: a `Primitive` scalar
+    // classifies back to `Deferred`, a literal to `Folded`.
     assert_eq!(
         EnumMemberValue::from_scalar(&inventory[0].value),
         EnumMemberValue::Deferred(EnumPrimitiveDomain::Number),
@@ -4331,9 +4311,8 @@ fn enum_member_inventory_records_all_static_names_folding_or_degrading_each_valu
     );
 
     // The rails derive consistently from this single inventory: the FOLDABLE
-    // rail (`merged_enum_members`) is the `Folded` subset, the NAME rail
-    // (the stored `EnumMemberNamesFact`, unioned by
-    // `merged_enum_member_names_fact`) is the full superset.
+    // rail (`merged_enum_members`) is the `Folded` subset, the NAME rail the
+    // full superset.
     let value_rail = env.value_symbols["E"]
         .merged_enum_members()
         .expect("foldable rail");
@@ -4341,7 +4320,7 @@ fn enum_member_inventory_records_all_static_names_folding_or_degrading_each_valu
     assert_eq!(
         value_names,
         vec!["C", "D"],
-        "the foldable rail filters out deferred members"
+        "the foldable rail filters out computed members"
     );
     let presence_names = env.value_symbols["E"]
         .merged_enum_member_names_fact()
@@ -4354,87 +4333,67 @@ fn enum_member_inventory_records_all_static_names_folding_or_degrading_each_valu
 }
 
 #[test]
-fn all_deferred_numeric_enum_type_union_degrades_to_number_not_never() {
-    // `enum Flags { A = 1 << 0, B = 1 << 1 }` — BOTH members carry a computed
-    // (deferred) value, so NO member folds to a literal. The enum's TYPE arm
-    // set must NOT collapse to empty (a confident-wrong bottom type) just
-    // because no value folded: a non-empty enum is inhabited. Each deferred
-    // numeric-expression member degrades to its narrowest sound domain
-    // (`number`), so the deduped arm set is exactly `[number]`.
+fn constant_initializers_fold_and_computed_members_keep_a_number_arm() {
+    // `enum Flags { A = 1 << 0, B = 1 << 1 }` — both initializers are
+    // constants (TypeScript 7.0.2 prints `A = 1, B = 2`), so the enum's arm
+    // set is the two literals; an enum whose members are all computed keeps
+    // one `number` arm, never the empty (`never`) arm set.
     let env = parse_and_build_env("export enum Flags { A = 1 << 0, B = 1 << 1 }");
     let union = env.value_symbols["Flags"]
         .enum_type_union()
         .expect("enum value group derives a type union");
-    assert!(
-        !union.is_empty(),
-        "an all-deferred NON-EMPTY enum must NOT resolve to the empty (never) arm set"
-    );
+    assert_eq!(union, vec![number_scalar("1"), number_scalar("2")]);
+    let env = parse_and_build_env("export enum C { A = f(), B = g() }");
     assert_eq!(
-        union,
+        env.value_symbols["C"]
+            .enum_type_union()
+            .expect("enum value group derives a type union"),
         vec![EnumScalar::Primitive(EnumPrimitiveDomain::Number)],
-        "two numeric-expression members both degrade to `number`; the deduped \
-         arm set is `[number]`, not empty and not one arm per member"
+        "two computed members degrade to one `number` arm, not the empty set"
     );
 }
 
 #[test]
-fn partial_deferred_enum_type_union_keeps_degraded_arm_for_deferred_member() {
-    // `enum P { A = "x", B = someFn() }` — `A` folds to `"x"`, `B`'s value is a
-    // computed call (deferred). The TYPE arm set must NOT narrow to just `"x"`
-    // (silently dropping `B` is false absence). It carries the folded `"x"` arm
-    // PLUS a DEGRADED arm for `B` — an unclassifiable call initializer proves no
-    // narrower domain than `unknown`.
+fn a_computed_member_keeps_a_number_arm_beside_a_folded_literal() {
+    // `enum P { A = "x", B = someFn() }` — `A` folds to `"x"`, `B` is a
+    // computed member (TypeScript 7.0.2 prints `A = "x", B`). The arm set
+    // carries the folded `"x"` PLUS the computed member's `number` arm.
     let env = parse_and_build_env("export enum P { A = \"x\", B = someFn() }");
     let union = env.value_symbols["P"]
         .enum_type_union()
         .expect("enum value group derives a type union");
-    assert!(
-        union.contains(&string_scalar("x")),
-        "the folded `A` literal must remain an arm: {union:?}"
-    );
-    assert!(
-        union.contains(&EnumScalar::Primitive(EnumPrimitiveDomain::Unknown)),
-        "the deferred `B` must contribute a DEGRADED arm, never vanish: {union:?}"
-    );
     assert_eq!(
-        union.len(),
-        2,
-        "the arm set must NOT narrow to the single folded literal `\"x\"`"
+        union,
+        vec![
+            string_scalar("x"),
+            EnumScalar::Primitive(EnumPrimitiveDomain::Number)
+        ],
+        "the computed `B` contributes a `number` arm, never vanishes"
     );
 }
 
 #[test]
 fn deferred_members_degrade_into_enum_type_union_alongside_folded_literals() {
-    // `enum E { A = 1 << 2, B, C = 5, D }` — `A` (computed) and `B` (bare after
-    // a deferred running value) are deferred; `C = 5`, `D = 6` fold. The TYPE
-    // arm set must carry the folded literals `5`/`6` AND a degraded `number`
-    // arm for the deferred members — never drop `A`/`B`.
-    let env = parse_and_build_env("export enum E { A = 1 << 2, B, C = 5, D }");
+    // `enum E { A = f(), B, C = 5, D }` — `A` (a call) and `B` (bare after a
+    // computed member) are computed; `C = 5`, `D = 6` fold. The arm set
+    // carries `5`, `6` AND a `number` arm for the computed members.
+    let env = parse_and_build_env("export enum E { A = f(), B, C = 5, D }");
     let union = env.value_symbols["E"]
         .enum_type_union()
         .expect("enum value group derives a type union");
-    assert!(
-        union.contains(&number_scalar("5")),
-        "the folded `C = 5` literal arm must be present: {union:?}"
-    );
-    assert!(
-        union.contains(&number_scalar("6")),
-        "the folded `D = 6` literal arm must be present: {union:?}"
-    );
+    assert!(union.contains(&number_scalar("5")), "{union:?}");
+    assert!(union.contains(&number_scalar("6")), "{union:?}");
     assert!(
         union.contains(&EnumScalar::Primitive(EnumPrimitiveDomain::Number)),
-        "the deferred `A`/`B` members degrade to a `number` arm: {union:?}"
+        "the computed `A`/`B` members contribute a `number` arm: {union:?}"
     );
 }
 
 #[test]
-fn tagged_template_enum_member_degrades_to_unknown_not_string() {
-    // A TAGGED template (`tag`...``) is a CALL — `tag` is invoked with the
-    // template parts and can return ANY type — so `string` is NOT a sound upper
-    // bound for its degraded domain; the narrowest sound bound is `unknown`. A
-    // PLAIN template literal (no tag) IS a string expression and keeps `string`.
-    // Both members are VALUE-deferred (neither folds to a literal), so
-    // `degraded_member_domain` classifies each from its initializer kind.
+fn a_tagged_template_member_is_computed_and_a_plain_template_is_constant() {
+    // A TAGGED template is a call, so the member is computed (`number`
+    // domain); a PLAIN template literal is a constant. TypeScript 7.0.2
+    // prints `A, B = "y"`.
     let env = parse_and_build_env("export enum E { A = tag`x`, B = `y` }");
     let inventory = &env.value_symbols["E"]
         .primary()
@@ -4442,31 +4401,24 @@ fn tagged_template_enum_member_degrades_to_unknown_not_string() {
         .as_ref()
         .expect("enum carries the member inventory")
         .members;
-    let all_names: Vec<&str> = inventory.iter().map(|entry| entry.name.as_str()).collect();
-    assert_eq!(
-        all_names,
-        vec!["A", "B"],
-        "both statically-named members are recorded with deferred values"
-    );
     assert_eq!(
         inventory[0].value,
-        EnumScalar::Primitive(EnumPrimitiveDomain::Unknown),
-        "a TAGGED template is a call returning an arbitrary type; `string` would \
-         under-approximate, so `A` degrades to the sound `unknown`"
+        EnumScalar::Primitive(EnumPrimitiveDomain::Number),
+        "a tagged template is a computed member"
     );
     assert_eq!(
         inventory[1].value,
-        EnumScalar::Primitive(EnumPrimitiveDomain::String),
-        "a PLAIN template literal (no tag) is a string expression; `B` keeps the \
-         `string` domain — the soundness fix touches only the tagged case"
+        string_scalar("y"),
+        "a plain template is the constant string"
     );
 }
 
 #[test]
-fn plus_initializer_degrades_to_number_or_string_domain() {
-    // `A = x + y` is numeric add OR string concat — the narrowest sound bound
-    // is the `number | string` domain, encoded by the dedicated
-    // `NumberOrString` arm (neither `Number` nor `String` alone is sound).
+fn a_member_naming_values_outside_the_enum_carries_its_initializer() {
+    // `A = x + y` over two values the enum does not declare is left for the
+    // session to evaluate: the member stores the computed `number` domain and
+    // carries its initializer program. TypeScript 7.0.2 prints `A` (over two
+    // `declare const x: number, y: number`, which are no constants).
     let env = parse_and_build_env("export enum E { A = x + y }");
     let inventory = &env.value_symbols["E"]
         .primary()
@@ -4476,7 +4428,11 @@ fn plus_initializer_degrades_to_number_or_string_domain() {
         .members;
     assert_eq!(
         inventory[0].value,
-        EnumScalar::Primitive(EnumPrimitiveDomain::NumberOrString),
+        EnumScalar::Primitive(EnumPrimitiveDomain::Number),
+    );
+    assert!(
+        inventory[0].initializer.is_some(),
+        "a member naming values outside the enum carries its initializer"
     );
 }
 

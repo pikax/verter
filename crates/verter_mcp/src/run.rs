@@ -20,6 +20,42 @@ use crate::scanner;
 use crate::tools;
 use crate::VerterMcpServer;
 
+/// The native stack of the thread that runs the server and of every tokio
+/// worker and blocking thread under it, the size of every analysis thread
+/// (`verter_scheduler::WORKER_STACK_BYTES`: 8 MiB optimized, 32 MiB
+/// unoptimized). A tool call runs its analysis on the worker that polls it,
+/// and the platform defaults (1 MiB for the Windows main thread
+/// `#[tokio::main]` ran on, 2 MiB for tokio's threads) held a fraction of
+/// what the analysis of a deeply nested source takes (2.6 MB optimized for
+/// 256 nested arrow functions). A reservation costs address space, not
+/// memory.
+pub const RUNTIME_STACK_BYTES: usize = if cfg!(debug_assertions) {
+    32 * 1024 * 1024
+} else {
+    8 * 1024 * 1024
+};
+
+/// [`run`] on a thread and a multi-thread tokio runtime whose threads all
+/// reserve [`RUNTIME_STACK_BYTES`], blocking until the server exits.
+pub fn run_blocking(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    std::thread::Builder::new()
+        .name("verter-mcp".to_string())
+        .stack_size(RUNTIME_STACK_BYTES)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(RUNTIME_STACK_BYTES)
+                .build()
+                .map_err(|error| error.to_string())?
+                .block_on(run(cli))
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|error| format!("the MCP server thread must spawn: {error}"))?
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        .map_err(Into::into)
+}
+
 /// Run the MCP server for parsed CLI arguments until the transport closes.
 ///
 /// The caller owns process-global setup (tracing subscriber installation);

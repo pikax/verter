@@ -145,6 +145,13 @@ pub mod carrier;
 pub mod composite;
 mod flow_return_result;
 pub use flow_return_result::{FlowReturnResult, FlowReturnWrap};
+mod signature_predicate;
+pub use signature_predicate::{PredicateSubject, SignaturePredicate};
+mod checker_diagnostic;
+pub use checker_diagnostic::{
+    CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
+};
+pub(crate) use checker_diagnostic::{LIB_AWAITED_NESTED_STEPS, LIB_AWAITED_TAIL_STEPS};
 
 /// The ONE owner of the legacy compatibility-spelling family (exact
 /// spellings + parameterised prefixes) and the shared display-family
@@ -1086,6 +1093,229 @@ impl DeclIdentity {
     }
 }
 
+/// The payload of [`SemanticNodeData::EnumLiteral`]: the literal type of one
+/// member of an enum declaration.
+///
+/// The type is NOMINAL: it is identified by the enum's type declaration
+/// and the member's name, never by its value, so `E.A` and `F.A` differ
+/// though both are `1`, and neither is the plain literal `1`. Its `base` is
+/// the value it stands for — the number or string literal of a constant
+/// member, `number` for a member whose value the checker does not compute
+/// (a member of a non-`const` ambient enum without an initializer, or one
+/// initialized by a non-constant expression) — and every operation that
+/// does not ask about identity (apparent members, a template placeholder,
+/// a relation to a non-enum type) reads the base.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EnumLiteralType {
+    /// The enum's TYPE declaration — the identity a reference to the enum
+    /// resolves to. Its `decl_name` is the enum's qualified name
+    /// (`NS.Inner`), which is how the checker prints it.
+    pub enum_decl: DeclIdentity,
+    /// The member's name.
+    pub member: Arc<str>,
+    /// The value the member stands for.
+    pub base: SemanticNodeId,
+    /// How many members the enum declares (across every declaration of a
+    /// merged enum). A one-member enum's type IS its member's literal type,
+    /// which then prints as the enum, and a union holding every member of
+    /// an enum prints as the enum.
+    pub member_count: u32,
+}
+
+impl EnumLiteralType {
+    /// How the checker prints this type: the enum's name for the only
+    /// member of an enum, `Enum.Member` otherwise.
+    #[must_use]
+    pub fn printed_name(&self) -> String {
+        if self.is_sole() {
+            self.enum_decl.decl_name.to_string()
+        } else {
+            format!("{}.{}", self.enum_decl.decl_name, self.member)
+        }
+    }
+
+    /// Whether the member is the enum's only member.
+    #[must_use]
+    pub fn is_sole(&self) -> bool {
+        self.member_count == 1
+    }
+}
+
+/// One constituent of a union as the checker prints it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrintedUnionArm {
+    /// A constituent printed on its own.
+    Node(SemanticNodeId),
+    /// Every member of one enum, printed as the enum's name.
+    Enum(DeclIdentity),
+}
+
+/// A union's constituents as the checker prints them: a union holding
+/// every member of an enum prints the enum's name in place of them, where
+/// its first member stands (`E.A | E.B` over a two-member `E` prints `E`;
+/// `E3.A | E3.B` over a three-member `E3` prints both members).
+pub(crate) fn printed_union_arms(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    members: &[SemanticNodeId],
+) -> Vec<PrintedUnionArm> {
+    let literals: Vec<Option<EnumLiteralType>> = members
+        .iter()
+        .map(|member| match graph.node_data(*member).as_deref() {
+            Some(SemanticNodeData::EnumLiteral(literal)) => Some(literal.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut present: std::collections::HashMap<&DeclIdentity, u32> =
+        std::collections::HashMap::new();
+    for literal in literals.iter().flatten() {
+        *present.entry(&literal.enum_decl).or_default() += 1;
+    }
+    let mut printed: std::collections::HashSet<&DeclIdentity> = std::collections::HashSet::new();
+    let mut arms = Vec::with_capacity(members.len());
+    for (member, literal) in members.iter().zip(literals.iter()) {
+        match literal {
+            Some(literal) if present.get(&literal.enum_decl) == Some(&literal.member_count) => {
+                if printed.insert(&literal.enum_decl) {
+                    arms.push(PrintedUnionArm::Enum(literal.enum_decl.clone()));
+                }
+            }
+            _ => arms.push(PrintedUnionArm::Node(*member)),
+        }
+    }
+    arms
+}
+
+/// Identity of one class EXPRESSION — the payload of
+/// [`SemanticNodeData::ClassExpressionInstance`].
+///
+/// A class expression declares nothing a [`DeclIdentity`] could name, so it
+/// is identified by where it was authored: the defining file and owner, and
+/// the expression's offset in that file. The print fields are what the
+/// checker spells a reference to the instance type with (measured on
+/// TypeScript 7.0.2): the class's own name, and every type-parameter clause
+/// that encloses it, whose declaration qualifies a reference that
+/// instantiates that clause.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassExpressionIdentity {
+    /// The file the class expression is authored in.
+    pub canonical_id: Arc<str>,
+    /// The authored top-level owner within `canonical_id`.
+    pub owner: verter_type_expr::TopLevelOwnerId,
+    /// The class expression's start offset in `canonical_id`.
+    pub offset: u32,
+    /// The class's own printed name: its binding identifier
+    /// (`class Foo {}`), else the name it is assigned to (`const C = class
+    /// {}`, `{ C: class {} }`, `C = class {}`), else the checker's
+    /// `(Anonymous class)`.
+    pub name: Arc<str>,
+    /// The type-parameter clauses that enclose the class — its OUTER type
+    /// parameters, outermost clause first, a class member's class clause
+    /// before the member's own.
+    pub outer_clauses: Arc<[ClassExpressionClause]>,
+    /// How many type parameters the class declares itself; a reference
+    /// prints their arguments after the name (`(Anonymous class)<string>`).
+    pub own_arity: u32,
+    /// The accessibility of the declaration behind the class's construct
+    /// signatures — its first constructor's, else its base's — that the
+    /// checker's `constructorVisibilitiesAreCompatible` reads; `None` for
+    /// a declaration-less default constructor.
+    pub constructor_visibility: Option<verter_type_expr::MemberVisibility>,
+    /// The class's `prototype`: the class instance with `any` for every
+    /// type parameter it has, outer and own (the checker's
+    /// `getTypeOfPrototypeProperty`), recorded where the class is authored
+    /// — an instantiation of the enclosing clauses substitutes into the
+    /// instance but never re-types the prototype, which has no parameter
+    /// left. `None` for the prototype instance itself.
+    pub prototype: Option<SemanticNodeId>,
+    /// Whether the identity is an OBJECT LITERAL's anonymous type rather
+    /// than a class's instance: a literal one of whose methods returns (or
+    /// otherwise holds) the literal's own `this`, the checker's recursive
+    /// `{ v: number; me(): ...; }`. The literal's `this` is not
+    /// polymorphic — it is always the literal itself — so a structural read
+    /// through the identity binds the surface's `this` to the identity, and
+    /// the identity prints as its surface rather than a name.
+    pub object_literal: bool,
+}
+
+/// One type-parameter clause enclosing a class expression.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassExpressionClause {
+    /// The name the checker prints for the clause's declaration when it
+    /// qualifies a reference: `outer` for a function, `Holder.make` for a
+    /// class method, `o.m` for a method of an object literal a variable
+    /// holds, `arrow` for the arrow a variable holds, `GHolder` for a
+    /// class.
+    pub container: Arc<str>,
+    /// The clause's type parameters, in declaration order.
+    pub parameters: Arc<[Arc<str>]>,
+}
+
+impl ClassExpressionIdentity {
+    /// The name the checker prints for a reference to this class with
+    /// `type_arguments` (one per outer type parameter, then one per own
+    /// type parameter), without the own arguments' list.
+    ///
+    /// The checker's `typeReferenceToTypeNode`: each enclosing clause whose
+    /// arguments are not exactly its own parameters prints its
+    /// declaration, in order, before the class's name — so a reference
+    /// read inside the declaring body (`C`) stays unqualified, and an
+    /// instantiated one (`outer.(Anonymous class)`,
+    /// `outer3.inner.(Anonymous class)`) is qualified by every clause it
+    /// instantiates.
+    #[must_use]
+    pub fn printed_name(
+        &self,
+        type_arguments: &[SemanticNodeId],
+        is_parameter: impl Fn(SemanticNodeId, &str) -> bool,
+    ) -> String {
+        let mut printed = String::new();
+        let mut start = 0;
+        for clause in self.outer_clauses.iter() {
+            let end = start + clause.parameters.len();
+            let instantiated = clause.parameters.iter().enumerate().any(|(index, name)| {
+                type_arguments
+                    .get(start + index)
+                    .is_none_or(|argument| !is_parameter(*argument, name))
+            });
+            if instantiated {
+                printed.push_str(&clause.container);
+                printed.push('.');
+            }
+            start = end;
+        }
+        printed.push_str(&self.name);
+        printed
+    }
+
+    /// [`Self::printed_name`] over `store`: an argument is its clause's
+    /// parameter when it is the type parameter of that name.
+    #[must_use]
+    pub(crate) fn printed_name_in(
+        &self,
+        store: &crate::semantic_query_memo::SemanticGraphStore,
+        type_arguments: &[SemanticNodeId],
+    ) -> String {
+        self.printed_name(type_arguments, |argument, name| {
+            matches!(
+                store.node_data(argument).as_deref(),
+                Some(SemanticNodeData::TypeParam { display_name, .. })
+                    if display_name.as_ref() == name
+            )
+        })
+    }
+
+    /// The arguments a reference passes to the class's OWN type
+    /// parameters (the trailing `own_arity` of `type_arguments`).
+    #[must_use]
+    pub fn own_type_arguments<'a>(
+        &self,
+        type_arguments: &'a [SemanticNodeId],
+    ) -> &'a [SemanticNodeId] {
+        let own = (self.own_arity as usize).min(type_arguments.len());
+        &type_arguments[type_arguments.len() - own..]
+    }
+}
+
 /// Content-free identity for a synthetic slot-binding / `defineSlots`
 /// binding carrier.
 ///
@@ -1463,16 +1693,90 @@ impl CanonicalTypeSubstitution {
     }
 }
 
-/// The behavioral policy axes of a `FlowReturn` query. EMPTY today — the
-/// whole-return producer has no policy fork; the struct exists so a later
-/// policy axis lands as key data, never as an implicit global.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct FlowReturnPolicy {}
+/// The `null` / `undefined` algebra one union is constructed under —
+/// TypeScript's `strictNullChecks`, carried as a construction input
+/// rather than read from an ambient setting.
+///
+/// With `strictNullChecks` off, `null` and `undefined` inhabit every type,
+/// so the checker's `getUnionType` never adds a nullable member to a
+/// union's type set: `string | null` IS `string`, and a union made only of
+/// nullable members is `null` when it names `null`, else `undefined`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NullabilityPolicy {
+    /// `strictNullChecks` on (TypeScript's default): `null` and
+    /// `undefined` are ordinary union members.
+    Strict,
+    /// `strictNullChecks` off: a union erases its `null` / `undefined`
+    /// members whenever any other member remains.
+    Erased,
+}
+
+impl NullabilityPolicy {
+    /// The policy a project's effective `strictNullChecks` selects.
+    #[must_use]
+    pub fn from_strict_null_checks(strict_null_checks: bool) -> Self {
+        if strict_null_checks {
+            Self::Strict
+        } else {
+            Self::Erased
+        }
+    }
+
+    /// Whether `null` / `undefined` are their own types (`strictNullChecks`
+    /// on).
+    #[must_use]
+    pub fn is_strict(self) -> bool {
+        matches!(self, Self::Strict)
+    }
+}
+
+/// The behavioral policy axes of a `FlowReturn` query: the options of the
+/// function's OWN project that change what its body infers. The values are
+/// also folded into the context's `type_env_hash`; stating them here is
+/// what makes the key say which semantics it hashes, and it is the one
+/// place the evaluator reads them from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FlowReturnPolicy {
+    /// `strictNullChecks` of the project owning the function: whether
+    /// an optional parameter, an optional member read, an optional chain
+    /// or a fall-through adds `undefined`, and which union algebra every
+    /// join of the body runs.
+    pub nullability: NullabilityPolicy,
+    /// `noImplicitAny` of the project owning the function: whether an
+    /// unannotated `let` / `var` with no initializer or a bare `null` /
+    /// `undefined` one is the checker's AUTO-TYPED variable (its type
+    /// follows its assignments) or is declared as its initializer's
+    /// widened type (`any` with no initializer).
+    pub no_implicit_any: bool,
+    /// `useUnknownInCatchVariables` of the project owning the function:
+    /// whether an unannotated `catch` variable is `unknown` or `any`.
+    pub use_unknown_in_catch_variables: bool,
+    /// `noImplicitThis` of the project owning the function: whether an
+    /// object literal's method or accessor reads `this` as the literal
+    /// (`getContextualThisParameterType`) or, with the option off, as
+    /// `any`.
+    pub no_implicit_this: bool,
+}
+
+impl FlowReturnPolicy {
+    /// The flow policy one project's effective compiler options select.
+    #[must_use]
+    pub fn from_compiler_options(
+        options: &verter_semantic::resolver_core::SemanticCompilerOptions,
+    ) -> Self {
+        Self {
+            nullability: NullabilityPolicy::from_strict_null_checks(options.strict_null_checks),
+            no_implicit_any: options.no_implicit_any,
+            use_unknown_in_catch_variables: options.use_unknown_in_catch_variables,
+            no_implicit_this: options.no_implicit_this,
+        }
+    }
+}
 
 /// Env a [`SemanticQueryKey::FlowReturn`] value depends on: the full
 /// `P R T L J` set (whole-function program analysis is the widest-env
 /// operation in the key surface), the TYPE-ONLY substitution axis, and the
-/// (empty) policy axis.
+/// policy axis of the function's own project.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlowReturnContext {
     /// Parse-env dimension (`P`) — the value is a function of the parsed
@@ -1492,7 +1796,7 @@ pub struct FlowReturnContext {
     /// The active TYPE-ONLY substitution environment (type-parameter →
     /// node). Value bindings, locals, and `this` never enter it.
     pub type_substitution: CanonicalTypeSubstitution,
-    /// The policy axis (no forks today).
+    /// The policy axis: the function's own project's null semantics.
     pub policy: FlowReturnPolicy,
 }
 
@@ -1659,9 +1963,9 @@ pub enum FlowReturnDegradation {
     /// structure composed AROUND it.
     ///
     /// One reason for the whole class of "this position has no modelled
-    /// value": an unmodelled CALL form (`new f()`, `` tag`...` ``,
-    /// `f?.()`, `await f()`, `(0, new f())`, `z = f()`, a leaf answer
-    /// embedding an unreduced `ReturnType<callee>` carrier), and a name
+    /// value": an unmodelled CALL form (`f?.()`, `(0, f?.())`,
+    /// `z = f()`, a leaf answer embedding an unreduced
+    /// `ReturnType<callee>` carrier), and a name
     /// the frame's lexical authority resolved to a FUNCTION-LOCAL binding
     /// the flow content does not model (a destructuring element, a local
     /// `class` / `enum` / `namespace` / `import =`, a `catch` parameter, a
@@ -1826,6 +2130,11 @@ pub enum CallArgKey {
         /// Whether the argument is a function value at least one of whose
         /// parameters carries no authored type annotation.
         context_sensitive: bool,
+        /// The argument checked in its const context — an object or array
+        /// literal the calling frame computes, read as `as const` reads it —
+        /// which a `const` type parameter the argument is passed to infers
+        /// from (`isConstContext`). `None` for any other argument.
+        const_view: Option<SemanticNodeId>,
     },
     /// An argument identified by its program expression (the identity of
     /// the expression record the applicability executor evaluates).
@@ -2012,6 +2321,12 @@ pub enum ResolvedCallResult {
         /// listed constituent, and a `const` initializer records them as
         /// the binding's widening membership.
         fresh_literal_returns: std::sync::Arc<[SemanticNodeId]>,
+        /// The diagnostic the checker reports when NO candidate applies
+        /// and this is its error-recovery candidate
+        /// (`getCandidateForOverloadFailure`): the call's value is then
+        /// the checker's recovery answer, never a silent success. `None`
+        /// for an applicable winner.
+        recovery_diagnostic: Option<CheckerDiagnostic>,
     },
     /// The callee is genuine dynamic `any` — a COMPLETE result, not a
     /// fallback.
@@ -2077,6 +2392,20 @@ pub enum ResolveCallFailure {
     Undecidable,
     /// The call-resolution work envelope tripped.
     Budget,
+    /// A type parameter no other argument infers occurs in the return of
+    /// the contextual signature a context-sensitive function argument is
+    /// checked under: the checker infers it from what that function
+    /// returns, which applicability does not model. Undecided like
+    /// [`Self::Undecidable`], but no rail may answer the call with the
+    /// parameter's fallback instead. `contextual` names the first
+    /// context-sensitive argument (its position) and the contextual type it
+    /// is checked under, instantiated with the inferences of the arguments
+    /// before it: the caller types that argument under it and asks again —
+    /// the checker's second inference pass. `None` when the callee has
+    /// several candidates, each of which would type it differently.
+    ContextSensitiveInference {
+        contextual: Option<(u32, SemanticNodeId)>,
+    },
 }
 
 /// The env-free declaration-slot SEED — exactly the four env-free
@@ -2394,6 +2723,24 @@ impl MapperKind {
     }
 }
 
+/// Whether a mapped type's lowered `keyof` operand is a TYPE VARIABLE — a
+/// type parameter binder or an `infer` declaration or reference — so the
+/// mapping is homomorphic over it ([`MapperKey::over_type_variable`]).
+#[must_use]
+pub fn keyof_operand_is_type_variable(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    operand: SemanticNodeId,
+) -> bool {
+    matches!(
+        graph.node_data(operand).as_deref(),
+        Some(
+            SemanticNodeData::TypeParam { .. }
+                | SemanticNodeData::Infer { .. }
+                | SemanticNodeData::InferRef { .. }
+        )
+    )
+}
+
 /// Mapper identity for mapped-type queries. Separates the key space from the
 /// value expression so two mappers that share the same key space but differ
 /// in the value expression do not alias.
@@ -2417,6 +2764,14 @@ pub struct MapperKey {
     /// Lowering-time classification of `value_expr`. See
     /// [`MapperKind`].
     pub kind: MapperKind,
+    /// Whether the mapping was declared over `keyof T` for a TYPE
+    /// PARAMETER `T` — TypeScript's homomorphic type variable — so `source`
+    /// is `T` or the type that instantiated it. Such a mapping maps each
+    /// union constituent of its source, passes a primitive through and
+    /// maps an array or tuple element-wise (`instantiateMappedType`); one
+    /// written over a concrete type (`{ [K in keyof (A | B)]: … }`) maps
+    /// that type's own keys.
+    pub over_type_variable: bool,
 }
 
 /// Indexed-access key operand. Mirrors the three TypeScript forms:
@@ -3959,6 +4314,55 @@ pub enum SurfaceKeyProjection<'a> {
     AbsentProven,
 }
 
+/// The accessor members one key names on a surface
+/// ([`SurfaceView::project_known_key_accessor`]); at least one is present.
+pub(crate) struct KnownKeyAccessor<'a> {
+    getter: Option<&'a SurfaceMember>,
+    setter: Option<&'a SurfaceMember>,
+}
+
+impl KnownKeyAccessor<'_> {
+    /// The accessor as the one PROPERTY every reader sees: its read value
+    /// ([`Self::read_value`]), `readonly` when there is no setter.
+    pub(crate) fn property_member(
+        &self,
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+    ) -> Option<SurfaceMember> {
+        let value = self.read_value(graph)?;
+        let declared = self.getter.or(self.setter)?;
+        Some(SurfaceMember {
+            value,
+            optional: false,
+            readonly: self.setter.is_none(),
+            method_kind: None,
+            has_implementation_body: false,
+            ..declared.clone()
+        })
+    }
+
+    /// The accessor's VALUE type as a read sees it: the getter's return,
+    /// else the setter's parameter. `None` when the accessor's signature
+    /// carries neither.
+    pub(crate) fn read_value(
+        &self,
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+    ) -> Option<SemanticNodeId> {
+        if let Some(getter) = self.getter {
+            return match graph.node_data(getter.value).as_deref() {
+                Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
+                _ => None,
+            };
+        }
+        let setter = self.setter?;
+        match graph.node_data(setter.value).as_deref() {
+            Some(SemanticNodeData::Signature { params, .. }) => {
+                split_this_receiver(params).1.first().map(|param| param.ty)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl SurfaceView {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -4140,6 +4544,42 @@ impl SurfaceView {
                 .map(|ordinal| group[ordinal].value)
                 .collect(),
         )
+    }
+
+    /// The ACCESSOR a key names: the public `get` and / or `set` members
+    /// colliding with `key`, when every public member colliding with it is
+    /// an accessor. `None` for a key with no accessor member.
+    ///
+    /// An accessor is one PROPERTY to every reader: reading it reads its
+    /// value type — the getter's return, else the setter's parameter — never
+    /// the accessor function, and a get/set pair reads through the getter
+    /// whichever of the two was declared first.
+    pub(crate) fn project_known_key_accessor(
+        &self,
+        key: &PropertyKey,
+    ) -> Option<KnownKeyAccessor<'_>> {
+        let mut accessor = KnownKeyAccessor {
+            getter: None,
+            setter: None,
+        };
+        for member in self.members.iter().filter(|member| {
+            member.visibility.is_public()
+                && member
+                    .key
+                    .as_known()
+                    .is_some_and(|known| known.element_access_collides(&key.as_ref()))
+        }) {
+            match member.method_kind {
+                Some(verter_type_expr::ObjectMethodKind::Get) => {
+                    accessor.getter.get_or_insert(member);
+                }
+                Some(verter_type_expr::ObjectMethodKind::Set) => {
+                    accessor.setter.get_or_insert(member);
+                }
+                _ => return None,
+            }
+        }
+        (accessor.getter.is_some() || accessor.setter.is_some()).then_some(accessor)
     }
 
     /// Project an ordinary string key supplied by a string-only external
@@ -5065,9 +5505,15 @@ pub enum QueryError {
     /// declaration expanding into itself (e.g., `type TreeNode = {
     /// children: TreeNode[] }`). `raise_node_to_type_expr` converts
     /// this to [`TypeExpr::RecursiveRef`] so the materialiser stops at
-    /// the back-edge instead of recursing indefinitely. /
-    /// recursion handling.
-    RecursiveRef { name: Arc<str> },
+    /// the back-edge instead of recursing indefinitely.
+    ///
+    /// `args` are the type arguments of the instantiation the back-edge
+    /// stands for (`G<[T]>` inside the body of `G<string>` records
+    /// `[[string]]`); empty for a reference without type arguments.
+    RecursiveRef {
+        name: Arc<str>,
+        args: Arc<[SemanticNodeId]>,
+    },
     /// Catch-all for text-bearing failures surfaced to the caller.
     Other(Arc<str>),
     /// Declaration resolved but not yet materialized. The node
@@ -5137,6 +5583,17 @@ pub enum QueryError {
     /// minted itself one frame down: doing so fed the marker straight back
     /// into the frame-level failure it exists to avoid.
     UnmodeledPosition,
+    /// The checker's ERROR TYPE after a diagnostic it recovers from: the
+    /// operation [`CheckerDiagnostic::operation`] names raised
+    /// [`CheckerDiagnostic::code`], and the checker continues with its error
+    /// type, which reads as the diagnostic's
+    /// [`recovery`](CheckerDiagnostic::recovery) (`any`).
+    ///
+    /// A complete, language-defined answer: it relates, absorbs and raises
+    /// as that recovery, carrying the diagnostic that produced it. Never a
+    /// stand-in for something this substrate cannot answer — those stay
+    /// typed gaps.
+    CheckerRecovery(CheckerDiagnostic),
 }
 
 impl QueryError {
@@ -5144,13 +5601,16 @@ impl QueryError {
     ///
     /// Recursive references and declaration placeholders are publishable type
     /// carriers: the former is a settled recursion leaf, while the latter is
-    /// an addressable declaration shell. Every other variant represents a
+    /// an addressable declaration shell. A checker recovery is the checker's
+    /// own answer after a diagnostic. Every other variant represents a
     /// failure, unresolved control state, or unrepresentable/open value and
     /// therefore cannot contribute a recovered inference value.
     #[must_use]
     pub(crate) fn means_type_is_not_yet_known(&self) -> bool {
         match self {
-            QueryError::RecursiveRef { .. } | QueryError::DeclPlaceholder { .. } => false,
+            QueryError::RecursiveRef { .. }
+            | QueryError::DeclPlaceholder { .. }
+            | QueryError::CheckerRecovery(_) => false,
             QueryError::Miss
             | QueryError::UnsupportedIntrinsic { .. }
             | QueryError::BudgetExceeded(_)
@@ -5188,6 +5648,9 @@ impl QueryError {
     ///   resolved to an intrinsic the registry cannot compute.
     /// - [`ValueDomainMismatch`](Self::ValueDomainMismatch) — a genuine
     ///   value-domain type error.
+    /// - [`CheckerRecovery`](Self::CheckerRecovery) — the checker's own error
+    ///   type after a diagnostic it recovers from (it raises as its recovery
+    ///   rather than as a failure shell).
     ///
     /// The CONTROL / recursion sentinels are NOT the error type and keep their
     /// existing semantics — the walker / raiser / relation engine interpret
@@ -5206,8 +5669,8 @@ impl QueryError {
     ///
     /// Derived from the SINGLE `QueryError` disposition authority
     /// (`project_semantic_dispatch::query_error_disposition`) — the §22 error
-    /// type is exactly the `Failure` disposition. There is no second listing
-    /// of which arms are errors.
+    /// type is exactly the `Failure` and `CheckerRecovery` dispositions. There
+    /// is no second listing of which arms are errors.
     #[must_use]
     pub(crate) fn is_error_type(&self) -> bool {
         crate::project_semantic_dispatch::query_error_disposition::query_error_disposition(self)
@@ -5240,7 +5703,16 @@ impl PartialEq for QueryError {
                 Self::IncompleteSemanticOperand { reasons: b },
             ) => a == b,
             (Self::AliasCycle { chain: a }, Self::AliasCycle { chain: b }) => a == b,
-            (Self::RecursiveRef { name: a }, Self::RecursiveRef { name: b }) => a == b,
+            (
+                Self::RecursiveRef {
+                    name: a,
+                    args: a_args,
+                },
+                Self::RecursiveRef {
+                    name: b,
+                    args: b_args,
+                },
+            ) => a == b && a_args == b_args,
             (Self::Other(a), Self::Other(b)) => a == b,
             (
                 Self::DeclPlaceholder {
@@ -5273,6 +5745,7 @@ impl PartialEq for QueryError {
             (Self::UnrepresentableSurfaceMember, Self::UnrepresentableSurfaceMember) => true,
             (Self::OpenSurface, Self::OpenSurface) => true,
             (Self::UnmodeledPosition, Self::UnmodeledPosition) => true,
+            (Self::CheckerRecovery(a), Self::CheckerRecovery(b)) => a == b,
             _ => false,
         }
     }
@@ -5307,6 +5780,7 @@ impl QueryError {
             Self::ForeignSemanticOperand => 18,
             Self::StaleSemanticOperand => 19,
             Self::IncompleteSemanticOperand { .. } => 20,
+            Self::CheckerRecovery(_) => 21,
         }
     }
 }
@@ -5327,8 +5801,9 @@ impl std::hash::Hash for QueryError {
             Self::AliasCycle { chain } => {
                 chain.hash(state);
             }
-            Self::RecursiveRef { name } => {
+            Self::RecursiveRef { name, args } => {
                 name.hash(state);
+                args.hash(state);
             }
             Self::Other(msg) => {
                 msg.hash(state);
@@ -5361,6 +5836,7 @@ impl std::hash::Hash for QueryError {
             | Self::UnrepresentableSurfaceMember
             | Self::UnmodeledPosition
             | Self::OpenSurface => {}
+            Self::CheckerRecovery(diagnostic) => diagnostic.hash(state),
         }
     }
 }
@@ -6892,9 +7368,9 @@ impl Default for RelationKind {
 }
 
 /// The comparison policy that governs a relation and is part of relation
-/// IDENTITY — the three §2.7 / §4.0 policy axes: overload selection,
+/// IDENTITY — the §2.7 / §4.0 policy axes: overload selection,
 /// excess-property checking, and variance (including method-parameter
-/// bivariance). Two judgements over the same nodes that differ in any policy
+/// bivariance) — and whether the target is an intersection target's arm. Two judgements over the same nodes that differ in any policy
 /// axis can reach a different OUTCOME / bindings, so they are DISTINCT and must
 /// not share a memo slot. SHAPE only: the policy-driven comparison substrate is
 /// the relation-inference reducer (not yet implemented).
@@ -6915,6 +7391,11 @@ pub struct RelationPolicy {
     /// Context-owned semantic policy set. Changing it changes the identity
     /// of a resident `Relate` parent; a formatting-only change does not.
     pub policy_set: SemanticPolicySetId,
+    /// The target is one arm of an intersection target, related on its own
+    /// after the whole intersection passed the weak-type check (the
+    /// checker's `IntersectionState.Target`): the arm itself skips that
+    /// check, its members' relations do not.
+    pub intersection_target_arm: bool,
 }
 
 /// How an overloaded callee's signatures are selected during a relation
@@ -7031,7 +7512,7 @@ pub enum InferencePassKind {
 /// Content-free identity of the set of inferable (open) type parameters in an
 /// inference session (§4.2). Realised as the interned set of graph node ids —
 /// the same content-free realisation the graph uses for node sets elsewhere
-/// (e.g. [`SemanticQueryKey::NormalizeUnion`]) — never a content/version hash
+/// (e.g. [`SemanticQueryKey::ReduceUnion`]) — never a content/version hash
 /// (R6). `Default` / [`empty`](Self::empty) is the empty set (no open
 /// parameters). SHAPE only: the interning substrate is the relation-inference
 /// reducer (not yet implemented).
@@ -7629,8 +8110,13 @@ pub enum SemanticQueryKey {
         path: Arc<[Arc<str>]>,
         context: TypeOfContext,
     },
-    NormalizeUnion {
+    /// Canonical union construction over `members` under `nullability` —
+    /// the `null` / `undefined` algebra is part of the identity, so a
+    /// reduction answered for one `strictNullChecks` setting never serves
+    /// the other.
+    ReduceUnion {
         members: Arc<[SemanticNodeId]>,
+        nullability: NullabilityPolicy,
     },
     /// Ordered intersection reduction over an explicit construction input.
     /// Binary inputs allocate no recipe. Grouping is the input recipe.
@@ -7930,7 +8416,7 @@ pub enum SemanticQueryKey {
     /// (the alternating literal text spans) and `args` mirrors its
     /// `expressions` (the interpolated type nodes). `args` is ORDER-
     /// SIGNIFICANT — it is part of semantic identity and is NEVER reordered
-    /// (concatenation order matters, unlike `NormalizeUnion`'s
+    /// (concatenation order matters, unlike `ReduceUnion`'s
     /// order-insensitive members). `context` carries the `{R, T, L, J}` env
     /// (NO `P`; substitution rides on `args` — see
     /// [`TemplateLiteralReduceContext`]).
@@ -7941,7 +8427,7 @@ pub enum SemanticQueryKey {
     /// shared deferred evaluator, then forms the CARTESIAN PRODUCT of those
     /// choices. An all-single-literal template folds to one
     /// [`SemanticNodeData::Literal`] string; a finite union of choices
-    /// renormalises through `NormalizeUnion`; any non-finite expression — or a
+    /// renormalises through `ReduceUnion`; any non-finite expression — or a
     /// finite product whose width exceeds the keyspace budget — carrier-stops
     /// to the `TemplateLiteral` shell (an over-budget product is additionally
     /// non-cacheable / budget-tainted). Value domain:
@@ -8174,9 +8660,9 @@ pub enum SemanticQueryKey {
     ///   clause);
     /// - a `Promise<V>` carrier — recognised by RESOLVED declaration
     ///   identity through the intrinsic registry, never by spelling —
-    ///   RE-ENTERS this family on `V`, so nesting unwraps through the
-    ///   memo / singleflight / cycle machinery rather than a private
-    ///   recursion;
+    ///   continues this relation's RUN on `V` as a tail step, in one loop
+    ///   that costs no query depth however long the chain (every step
+    ///   charged to the connected-work budget);
     /// - a union DISTRIBUTES by re-entering this family per arm and
     ///   renormalising through the canonical union; any undecidable arm
     ///   defers the whole reduction (partial distribution would silently
@@ -8195,17 +8681,23 @@ pub enum SemanticQueryKey {
     ///   application is awaited again;
     /// - an object surface follows the checker's thenable protocol: no
     ///   callable `then` ⇒ itself; a callable `then` whose `onfulfilled`
-    ///   is callable RE-ENTERS this family on the promised value; a callable
+    ///   is callable continues the run on a single promised value; a callable
     ///   `then` that promises nothing, or an optional callable `then` ⇒
     ///   `any` (the checker reports the operand);
     /// - a declaration carrier (`DeclRef` / `InstantiationRef`) expands
-    ///   one level through `Instantiate` and re-enters this family on the
+    ///   one level through `Instantiate` and continues the run on the
     ///   body; an unchanged body answers with the CARRIER, so a
     ///   non-thenable alias keeps its identity;
+    /// - a thenable whose promised value is a type this family is ALREADY
+    ///   unwrapping on the current path is the checker's recursive
+    ///   thenable: TS1062, with the arm dropped from an enclosing union and
+    ///   otherwise the checker's error type as the answer
+    ///   (`Opaque(QueryError::CheckerRecovery(..))`, reading as `any`) —
+    ///   complete, but ReturnOnly;
     /// - a `then` shape the reader cannot enumerate, a carrier that does
-    ///   not expand, a cyclic carrier, an exhausted budget, or any other
-    ///   unsettled shape is an HONEST REFUSAL (the deferred `Opaque(Miss)`
-    ///   shell), never a fabricated passthrough.
+    ///   not expand, an exhausted budget, or any other unsettled shape is
+    ///   an HONEST REFUSAL (the deferred `Opaque(Miss)` shell), never a
+    ///   fabricated passthrough.
     ///
     /// Value domain: [`SemanticQueryValueTag::TypeNode`].
     ///
@@ -8250,7 +8742,8 @@ pub enum SemanticQueryKey {
     ///   first: a reduced application is this family's operand, a deferred
     ///   one strips to this family over `X`;
     /// - object surfaces and declaration carriers follow the same thenable
-    ///   protocol and carrier expansion as [`Self::AwaitedNormalize`], each
+    ///   protocol, carrier expansion and recursive-thenable rule (TS1062,
+    ///   raised by the async return) as [`Self::AwaitedNormalize`], each
     ///   re-entering THIS family;
     /// - anything else is an honest refusal.
     ///
@@ -8286,7 +8779,7 @@ pub enum SemanticQueryKeyTag {
     MappedType,
     Conditional,
     TypeOf,
-    NormalizeUnion,
+    ReduceUnion,
     ReduceIntersection,
     ProjectObjectSpread,
     ProjectPath,
@@ -8325,7 +8818,7 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::MappedType,
         SemanticQueryKeyTag::Conditional,
         SemanticQueryKeyTag::TypeOf,
-        SemanticQueryKeyTag::NormalizeUnion,
+        SemanticQueryKeyTag::ReduceUnion,
         SemanticQueryKeyTag::ReduceIntersection,
         SemanticQueryKeyTag::ProjectObjectSpread,
         SemanticQueryKeyTag::ProjectPath,
@@ -8366,7 +8859,7 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::MappedType => "MappedType",
             SemanticQueryKeyTag::Conditional => "Conditional",
             SemanticQueryKeyTag::TypeOf => "TypeOf",
-            SemanticQueryKeyTag::NormalizeUnion => "NormalizeUnion",
+            SemanticQueryKeyTag::ReduceUnion => "ReduceUnion",
             SemanticQueryKeyTag::ReduceIntersection => "ReduceIntersection",
             SemanticQueryKeyTag::ProjectObjectSpread => "ProjectObjectSpread",
             SemanticQueryKeyTag::ProjectPath => "ProjectPath",
@@ -8459,7 +8952,7 @@ impl SemanticQueryKey {
             SemanticQueryKey::MappedType { .. } => SemanticQueryKeyTag::MappedType,
             SemanticQueryKey::Conditional { .. } => SemanticQueryKeyTag::Conditional,
             SemanticQueryKey::TypeOf { .. } => SemanticQueryKeyTag::TypeOf,
-            SemanticQueryKey::NormalizeUnion { .. } => SemanticQueryKeyTag::NormalizeUnion,
+            SemanticQueryKey::ReduceUnion { .. } => SemanticQueryKeyTag::ReduceUnion,
             SemanticQueryKey::ReduceIntersection { .. } => SemanticQueryKeyTag::ReduceIntersection,
             SemanticQueryKey::ProjectObjectSpread { .. } => {
                 SemanticQueryKeyTag::ProjectObjectSpread
@@ -8960,6 +9453,11 @@ pub enum SemanticNodeData {
     /// classes: `Primitive(String)` is the broad string kind (all
     /// strings), `Literal(String("idle"))` is the specific literal.
     Literal(LiteralValue),
+    /// The nominal literal type of one enum member (`E.A`). An enum's type
+    /// is the union of these (a one-member enum's type IS its member's
+    /// literal), and each relates to its value only through the enum rules
+    /// ([`EnumLiteralType`]).
+    EnumLiteral(EnumLiteralType),
     Opaque(QueryError),
     /// Array shell. Publishes `T[]` / `Array<T>` /
     /// `ReadonlyArray<T>` directly rather than routing through generic
@@ -9182,6 +9680,15 @@ pub enum SemanticNodeData {
         /// OXC span of the return-type annotation, stamped from the IR
         /// `FunctionExpr`'s return span. `None` when absent.
         return_type_span: Option<verter_span::Span>,
+        /// The signature's type predicate, beside a `boolean` (type
+        /// predicate) or `void` (assertion) `return_type`. `None` for an
+        /// ordinary signature. Participates in node interning.
+        predicate: Option<SignaturePredicate>,
+        /// Whether a CONSTRUCT signature is abstract (`abstract new () =>
+        /// T`, an abstract class's construct signatures) — the checker's
+        /// `SignatureFlags.Abstract`. Always `false` for a call signature.
+        /// Participates in node interning.
+        is_abstract: bool,
     },
     /// An index-composed callable whose body-derived return is deferred to
     /// its return carrier. It has NO return-type slot, so a deferred
@@ -9223,6 +9730,34 @@ pub enum SemanticNodeData {
     InstantiationRef {
         base: DeclIdentity,
         args: Arc<[SemanticNodeId]>,
+    },
+
+    /// The INSTANCE type of a class expression (`return class extends
+    /// Base { … }`) — the checker's `Mixin.(Anonymous class)`.
+    ///
+    /// A class expression declares nothing a [`Self::DeclRef`] could
+    /// resolve, so the class identity rides the payload
+    /// ([`ClassExpressionIdentity`]) and the instance SURFACE — the class's
+    /// own members over its inherited base instance — is the `surface`
+    /// child, produced where the class expression was evaluated. The node
+    /// is nominal exactly where a `DeclRef` is: display, stable keys and a
+    /// declaration-keeping read keep the identity, and a structural read
+    /// reads through to `surface` exactly as a `DeclRef` read resolves its
+    /// declaration's body. Instantiating a type parameter the class can see
+    /// substitutes into `type_arguments` and `surface` under the same
+    /// identity — the checker's type reference to the class, whose
+    /// arguments decide how it prints.
+    ///
+    /// Raises to the raised `surface` — the declaration emitter's own
+    /// spelling of a class expression's instance type.
+    ClassExpressionInstance {
+        identity: Arc<ClassExpressionIdentity>,
+        /// The reference's arguments: one per outer type parameter (in
+        /// [`ClassExpressionIdentity::outer_clauses`] order), then one per
+        /// own type parameter. Where the class is authored each is its
+        /// parameter itself.
+        type_arguments: Arc<[SemanticNodeId]>,
+        surface: SemanticNodeId,
     },
 
     /// A same-name merged declaration carrier (TS same-file declaration
@@ -9363,6 +9898,7 @@ impl SemanticNodeData {
             | Self::Intersection(_)
             | Self::Primitive(_)
             | Self::Literal(_)
+            | Self::EnumLiteral(_)
             | Self::Array { .. }
             | Self::Tuple { .. }
             | Self::TemplateLiteral { .. }
@@ -9380,6 +9916,8 @@ impl SemanticNodeData {
             | Self::DeferredCallable(_)
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
+            // A class expression's instance IS its identity plus its surface.
+            | Self::ClassExpressionInstance { .. }
             // A deferred intrinsic application is a KNOWN value — the operation
             // is decided, only the operand's binder is still open.
             | Self::IntrinsicApplication { .. }
@@ -9416,6 +9954,7 @@ impl PartialEq for SemanticNodeData {
             (Self::Intersection(a), Self::Intersection(b)) => a == b,
             (Self::Primitive(a), Self::Primitive(b)) => a == b,
             (Self::Literal(a), Self::Literal(b)) => a == b,
+            (Self::EnumLiteral(a), Self::EnumLiteral(b)) => a == b,
             (Self::Opaque(a), Self::Opaque(b)) => a == b,
             (
                 Self::Array {
@@ -9542,6 +10081,8 @@ impl PartialEq for SemanticNodeData {
                     return_carrier: arc,
                     signature_span: asig,
                     return_type_span: aret,
+                    predicate: apred,
+                    is_abstract: aabs,
                 },
                 Self::Signature {
                     kind: bk,
@@ -9552,6 +10093,8 @@ impl PartialEq for SemanticNodeData {
                     return_carrier: brc,
                     signature_span: bsig,
                     return_type_span: bret,
+                    predicate: bpred,
+                    is_abstract: babs,
                 },
                 // Spans participate in identity: provenance-aware interning so
                 // an identical same-file signature shape at a different source
@@ -9568,12 +10111,26 @@ impl PartialEq for SemanticNodeData {
                     && arc == brc
                     && asig == bsig
                     && aret == bret
+                    && apred == bpred
+                    && aabs == babs
             }
             (Self::DeclRef { identity: a }, Self::DeclRef { identity: b }) => a == b,
             (
                 Self::InstantiationRef { base: ab, args: aa },
                 Self::InstantiationRef { base: bb, args: ba },
             ) => ab == bb && aa == ba,
+            (
+                Self::ClassExpressionInstance {
+                    identity: ai,
+                    type_arguments: ata,
+                    surface: asf,
+                },
+                Self::ClassExpressionInstance {
+                    identity: bi,
+                    type_arguments: bta,
+                    surface: bsf,
+                },
+            ) => ai == bi && ata == bta && asf == bsf,
             (
                 Self::IntrinsicApplication { op: ao, args: aa },
                 Self::IntrinsicApplication { op: bo, args: ba },
@@ -9625,6 +10182,9 @@ impl std::hash::Hash for SemanticNodeData {
             }
             Self::Literal(value) => {
                 value.hash(state);
+            }
+            Self::EnumLiteral(literal) => {
+                literal.hash(state);
             }
             Self::Opaque(err) => {
                 err.hash(state);
@@ -9709,8 +10269,11 @@ impl std::hash::Hash for SemanticNodeData {
                 return_carrier,
                 signature_span,
                 return_type_span,
+                predicate,
+                is_abstract,
             } => {
                 kind.hash(state);
+                is_abstract.hash(state);
                 params.hash(state);
                 return_type.hash(state);
                 type_parameters.hash(state);
@@ -9721,6 +10284,7 @@ impl std::hash::Hash for SemanticNodeData {
                 // Spans participate in identity (provenance-aware interning).
                 signature_span.hash(state);
                 return_type_span.hash(state);
+                predicate.hash(state);
             }
             Self::DeferredCallable(callable) => {
                 callable.hash(state);
@@ -9731,6 +10295,15 @@ impl std::hash::Hash for SemanticNodeData {
             Self::InstantiationRef { base, args } => {
                 base.hash(state);
                 args.hash(state);
+            }
+            Self::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => {
+                identity.hash(state);
+                type_arguments.hash(state);
+                surface.hash(state);
             }
             Self::IntrinsicApplication { op, args } => {
                 // The FROZEN tag, for the same reason the TypeExpr stream uses
@@ -9778,6 +10351,24 @@ pub struct FunctionParam {
     /// include it) but never enters `parse_stable_hash`. `None` for a synthetic
     /// parameter with no source site.
     pub span: Option<verter_span::Span>,
+    /// The parameter's DECLARED type is a literal type — a string, number,
+    /// bigint or boolean literal, or `null` (TypeScript's
+    /// `HasLiteralTypes`). A declaration fact: an instantiation keeps it, so
+    /// `(x: T)` instantiated at `'a'` is not literal-declared.
+    pub declared_literal: bool,
+}
+
+/// Whether a declared parameter type is a literal type in TypeScript's
+/// syntax (`LiteralType`): a string, number, bigint or boolean literal, or
+/// `null`. A reference to a literal alias, a union of literals, a template
+/// literal type and `undefined` are not.
+#[must_use]
+pub fn declares_literal_type(ty: &verter_type_expr::TypeExpr) -> bool {
+    matches!(
+        ty,
+        verter_type_expr::TypeExpr::Literal(_)
+            | verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Null)
+    )
 }
 
 impl FunctionParam {
@@ -9796,6 +10387,7 @@ impl FunctionParam {
             optional,
             rest,
             span: None,
+            declared_literal: false,
         }
     }
 }
@@ -10134,6 +10726,7 @@ mod tests {
             },
             QueryError::RecursiveRef {
                 name: Arc::from("R"),
+                args: std::sync::Arc::from([]),
             },
             QueryError::Other(Arc::from("x")),
             QueryError::DeclPlaceholder {
@@ -10153,6 +10746,10 @@ mod tests {
             QueryError::UnrepresentableSurfaceMember,
             QueryError::OpenSurface,
             QueryError::UnmodeledPosition,
+            QueryError::CheckerRecovery(CheckerDiagnostic {
+                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                operation: CheckerDiagnosticOperation::LibAwaited,
+            }),
         ];
         let mut tags = HashSet::new();
         for variant in &variants {

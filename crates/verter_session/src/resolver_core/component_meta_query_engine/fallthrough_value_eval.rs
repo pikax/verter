@@ -219,9 +219,9 @@ impl ComponentMetaQueryEngine<'_> {
             IndexedValueExpression::Value(lowered) => {
                 collect_dynamic_root_candidates_from_type(lowered, imports)
             }
-            IndexedValueExpression::Call(_) | IndexedValueExpression::UnsupportedCall { .. } => {
-                Vec::new()
-            }
+            IndexedValueExpression::Call(_)
+            | IndexedValueExpression::UnsupportedCall { .. }
+            | IndexedValueExpression::TemplateStrings { .. } => Vec::new(),
         };
         if let Some(node) = self.evaluate_fallthrough_value_node(
             scope_canonical_id,
@@ -351,6 +351,7 @@ impl ComponentMetaQueryEngine<'_> {
                 ty,
                 spread: argument.spread,
                 context_sensitive: argument.context_sensitive,
+                const_view: None,
                 literal_mode: match argument.literal_mode {
                     verter_type_expr::IndexedValueLiteralMode::Widened => {
                         crate::semantic_query::ArgumentLiteralMode::Widened

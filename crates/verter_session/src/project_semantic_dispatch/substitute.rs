@@ -27,6 +27,9 @@
 //! fence observes the new dep-signature through the shared memo once
 //! the substituted result enters a build flow.
 //!
+//! A class's polymorphic `this` rides a [`SemanticNodeData::TypeParam`]
+//! at [`THIS_BINDER_INDEX`] (see `this_binder`).
+//!
 //! **Binder identity contract.** Binder matching is done by
 //! `SemanticNodeId` equality (the binder's interned `TypeParam`
 //! node id) rather than by `display_name` string equality. This
@@ -34,6 +37,16 @@
 //! file share a display name (`K`) but are otherwise distinct
 //! identities — the substitute only touches the binder whose node
 //! id matches the caller's `parameter_node` argument.
+
+/// The clause position a class's polymorphic `this` binder carries: no
+/// authored clause has this many parameters, so it names no authored one.
+pub(crate) const THIS_BINDER_INDEX: u16 = u16::MAX;
+
+/// The declaration name of the `this` binder an object literal's methods
+/// read the literal through: the literal's start offset identifies it.
+pub(crate) fn object_literal_this_name(offset: u32) -> String {
+    format!("(object literal)@{offset}")
+}
 
 use std::sync::Arc;
 
@@ -102,6 +115,348 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .substitute_memo_publish(node, parameter_node, arg, result);
         }
         result
+    }
+
+    /// A class's polymorphic `this` type as a class member body reads it:
+    /// a binder whose constraint is the class instance `instance` (none for
+    /// a class expression, whose instance is built from its members). A
+    /// member read off a receiver binds it to the receiver
+    /// ([`Self::bind_this_receiver`]), the checker's instantiation of a
+    /// class's `this` type with the reference it is accessed through.
+    pub(super) fn this_binder(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &Arc<str>,
+        instance: Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        self.graph().intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::from(canonical),
+                owner,
+                whole_hash: crate::semantic_query::HashValue::default(),
+                decl_name: Arc::clone(class),
+            },
+            param_index: THIS_BINDER_INDEX,
+            constraint: instance,
+            default: None,
+            display_name: Arc::from("this"),
+        })
+    }
+
+    /// The class instance a polymorphic `this` binder stands for, when
+    /// `node` is one.
+    pub(super) fn this_binder_instance(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        match self.graph().node_data(node)?.as_ref() {
+            SemanticNodeData::TypeParam {
+                param_index: THIS_BINDER_INDEX,
+                constraint,
+                ..
+            } => *constraint,
+            _ => None,
+        }
+    }
+
+    /// Whether `node` mentions `target` anywhere below it.
+    pub(super) fn mentions_node(&self, node: SemanticNodeId, target: SemanticNodeId) -> bool {
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if current == target {
+                return true;
+            }
+            if !visited.insert(current) {
+                continue;
+            }
+            if let Some(data) = self.graph().node_data(current) {
+                let _ = data.for_each_child(|child| stack.push(child));
+            }
+        }
+        false
+    }
+
+    /// Whether a member read off `node` binds a polymorphic `this`: a
+    /// reference to a class (or class expression) instance.
+    pub(super) fn is_this_receiver(&self, node: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. }
+            )
+        )
+    }
+
+    /// The surface a structural read of the class-expression (or object
+    /// literal) instance `instance` reads through. An object literal's
+    /// `this` is the literal itself, never the reference it is read
+    /// through, so its surface reads with that `this` bound to the
+    /// instance.
+    pub(super) fn class_expression_read_surface(
+        &self,
+        instance: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let (surface, object_literal) = match self.graph().node_data(instance)?.as_ref() {
+            SemanticNodeData::ClassExpressionInstance {
+                identity, surface, ..
+            } => (*surface, identity.object_literal),
+            _ => return None,
+        };
+        Some(if object_literal {
+            self.bind_this_receiver(surface, instance)
+        } else {
+            surface
+        })
+    }
+
+    /// Whether `binder` is the `this` of the object literal `identity`
+    /// names — the binder its methods read the literal through.
+    pub(super) fn is_object_literal_this_binder(
+        &self,
+        identity: &crate::semantic_query::ClassExpressionIdentity,
+        binder: SemanticNodeId,
+    ) -> bool {
+        matches!(
+            self.graph().node_data(binder).as_deref(),
+            Some(SemanticNodeData::TypeParam { decl, param_index: THIS_BINDER_INDEX, .. })
+                if decl.canonical_id == identity.canonical_id
+                    && decl.owner == identity.owner
+                    && decl.decl_name.as_ref() == object_literal_this_name(identity.offset)
+        )
+    }
+
+    /// Bind every polymorphic `this` binder `node` mentions to
+    /// `receiver`, the reference its member was read through.
+    pub(super) fn bind_this_receiver(
+        &self,
+        node: SemanticNodeId,
+        receiver: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let mut binders: Vec<SemanticNodeId> = Vec::new();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                continue;
+            };
+            if let SemanticNodeData::TypeParam { param_index, .. } = data.as_ref() {
+                if *param_index == THIS_BINDER_INDEX && current != receiver {
+                    binders.push(current);
+                }
+                continue;
+            }
+            // An object literal's own `this` is bound by the literal's
+            // identity, never by a reference it is read through.
+            if let SemanticNodeData::ClassExpressionInstance { identity, .. } = data.as_ref() {
+                if identity.object_literal {
+                    continue;
+                }
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        binders.into_iter().fold(node, |result, binder| {
+            self.substitute_semantic_type_param(result, binder, receiver)
+        })
+    }
+
+    /// Rebind the ENCLOSING type parameters a body-derived return mentions
+    /// to what the declaration lowering reading it binds them to.
+    ///
+    /// The flow lane interns an enclosing clause's parameter (a class's
+    /// `H` in a method body) as the signature-scoped binder of the
+    /// defining file — `DeclIdentity::from_scope(scope, name)` at ordinal
+    /// 0 — while the lowering that reads the return binds the same name to
+    /// its own binder or to an instantiation argument (`GH<number>` binds
+    /// `H` to `number`). Every such binder of `canonical` whose name
+    /// `bind` answers is replaced by the answer. A signature's OWN
+    /// parameters are the caller's to refuse: the call resolver
+    /// instantiates those through the body-derived carrier itself.
+    pub(super) fn rebind_flow_return_binders(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        bind: impl Fn(&str) -> Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        let mut binders: Vec<(SemanticNodeId, Arc<str>)> = Vec::new();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                continue;
+            };
+            if let SemanticNodeData::TypeParam {
+                decl,
+                param_index: 0,
+                display_name,
+                ..
+            } = data.as_ref()
+            {
+                if decl.canonical_id.as_ref() == canonical && decl.decl_name == *display_name {
+                    binders.push((current, Arc::clone(display_name)));
+                }
+                continue;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        binders
+            .into_iter()
+            .fold(node, |result, (binder, name)| match bind(&name) {
+                Some(target) if target != binder => {
+                    self.substitute_semantic_type_param(result, binder, target)
+                }
+                _ => result,
+            })
+    }
+
+    /// Bind a function's OWN clause in its body-derived return by
+    /// declaration order, exactly as an instantiated frame's binder
+    /// environment binds it: every binder the flow lane interned for
+    /// `names[i]` in `canonical`'s `owner` scope becomes `args[i]`, all
+    /// at once.
+    ///
+    /// A nested function value's clause interns its own binder identities
+    /// (see the flow lane's binder environment), so a returned generic
+    /// function value re-declaring one of `names` keeps its own parameter.
+    /// A signature that declares one of the binders being replaced — the
+    /// same node, as a function TYPE written in the body with a same-name
+    /// clause lowers to — answers `None`, and so does an ordinal `args`
+    /// does not cover.
+    ///
+    /// The binding is simultaneous: `g<A, B>` instantiated at `[B, A]`
+    /// from a same-file `f<A, B>` (whose root clause shares `g`'s
+    /// name-keyed binders) swaps them, as the instantiated frame's
+    /// environment does, rather than collapsing both onto one.
+    pub(super) fn bind_flow_return_own_clause(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        names: &[Arc<str>],
+        args: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        let mut binders: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
+        let mut declared: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let data = self.graph().node_data(current)?;
+            match data.as_ref() {
+                SemanticNodeData::TypeParam {
+                    decl,
+                    param_index: 0,
+                    display_name,
+                    ..
+                } => {
+                    if decl.canonical_id.as_ref() == canonical
+                        && decl.owner == owner
+                        && decl.decl_name == *display_name
+                    {
+                        if let Some(ordinal) = names.iter().position(|name| name == display_name) {
+                            binders.push((current, *args.get(ordinal)?));
+                        }
+                    }
+                    continue;
+                }
+                SemanticNodeData::Signature {
+                    type_parameters, ..
+                } => declared.extend(type_parameters.iter().map(|param| param.param)),
+                _ => {}
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        binders.retain(|(binder, argument)| binder != argument);
+        if binders.iter().any(|(binder, _)| declared.contains(binder)) {
+            return None;
+        }
+        let replaced: Vec<SemanticNodeId> = binders.iter().map(|(binder, _)| *binder).collect();
+        // One binder at a time is already simultaneous unless an argument
+        // mentions a binder being replaced; then every binder first moves
+        // to a placeholder no argument can mention.
+        if !binders
+            .iter()
+            .any(|(_, argument)| self.mentions_any(*argument, &replaced))
+        {
+            return Some(
+                binders
+                    .into_iter()
+                    .fold(node, |result, (binder, argument)| {
+                        self.substitute_semantic_type_param(result, binder, argument)
+                    }),
+            );
+        }
+        let placeholders: Vec<SemanticNodeId> = (0..binders.len())
+            .map(|ordinal| self.simultaneous_binding_placeholder(canonical, owner, ordinal))
+            .collect();
+        let parked =
+            binders
+                .iter()
+                .zip(&placeholders)
+                .fold(node, |result, ((binder, _), placeholder)| {
+                    self.substitute_semantic_type_param(result, *binder, *placeholder)
+                });
+        Some(binders.iter().zip(&placeholders).fold(
+            parked,
+            |result, ((_, argument), placeholder)| {
+                self.substitute_semantic_type_param(result, *placeholder, *argument)
+            },
+        ))
+    }
+
+    /// The `ordinal`-th placeholder binder of a simultaneous binding in
+    /// `canonical`'s `owner` scope: a `TypeParam` whose identity no
+    /// authored or flow-minted clause produces (its name begins with the
+    /// `\u{1}` separator no identifier can hold), interned once per
+    /// ordinal and never left in a bound value.
+    fn simultaneous_binding_placeholder(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        ordinal: usize,
+    ) -> SemanticNodeId {
+        let name: Arc<str> = Arc::from(format!("\u{1}{ordinal}").as_str());
+        self.graph().intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::from(canonical),
+                owner,
+                whole_hash: crate::semantic_query::HashValue::default(),
+                decl_name: Arc::clone(&name),
+            },
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: name,
+        })
+    }
+
+    /// Whether `node` is, or reaches through its children, any of `targets`.
+    fn mentions_any(&self, node: SemanticNodeId, targets: &[SemanticNodeId]) -> bool {
+        if targets.is_empty() {
+            return false;
+        }
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if targets.contains(&current) {
+                return true;
+            }
+            if !visited.insert(current) {
+                continue;
+            }
+            if let Some(data) = self.graph().node_data(current) {
+                let _ = data.for_each_child(|child| stack.push(child));
+            }
+        }
+        false
     }
 
     /// Apply a stored positional substitution frame to a demanded winner
@@ -275,6 +630,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
+            // Instantiating a type parameter a class expression can see
+            // substitutes into the reference's type arguments and its
+            // instance surface; the class identity is unchanged.
+            SemanticNodeData::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => {
+                let mut any_changed = false;
+                let mut new_arguments = Vec::with_capacity(type_arguments.len());
+                for argument in type_arguments.iter() {
+                    let (sub, changed) =
+                        self.substitute_with_change_tracking(*argument, parameter_node, arg);
+                    any_changed |= changed;
+                    new_arguments.push(sub);
+                }
+                // An object literal's surface mentions no `this` but its
+                // own, which its identity binds.
+                let (sub, changed) = if identity.object_literal
+                    && self.is_object_literal_this_binder(identity, parameter_node)
+                {
+                    (*surface, false)
+                } else {
+                    self.substitute_with_change_tracking(*surface, parameter_node, arg)
+                };
+                if !changed && !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ClassExpressionInstance {
+                            identity: Arc::clone(identity),
+                            type_arguments: Arc::from(new_arguments.into_boxed_slice()),
+                            surface: sub,
+                        },
+                    ),
+                    true,
+                )
+            }
             // Substitution is a composite CONSTRUCTION site (the ruling's
             // "substitution and post-substitution finalization" inclusion
             // arm): a CHANGED union routes through the canonical authority
@@ -325,16 +720,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !any_changed {
                     return (node, false);
                 }
-                let rebuilt = if new_members.iter().any(|member| {
-                    crate::project_semantic_dispatch::walk::value_may_contribute_call_signatures(
-                        self.graph(),
-                        *member,
-                    )
-                }) {
+                // A heritage body is a declaration, not an intersection type:
+                // its substitution stays a heritage body whatever it carries.
+                let category = members.origin_category();
+                let rebuilt = if category
+                    == crate::semantic_query::composite::CompositeOriginCategory::Heritage
+                    || new_members.iter().any(|member| {
+                        crate::project_semantic_dispatch::walk::value_may_contribute_call_signatures(
+                            self.graph(),
+                            *member,
+                        )
+                    }) {
                     self.graph().intern_preserving_scope(
                         node,
                         SemanticNodeData::Intersection(
-                            crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                            crate::semantic_query::composite::CompositeList::rebuilt_from(
+                                category,
                                 Arc::from(new_members.into_boxed_slice()),
                             ),
                         ),
@@ -696,6 +1097,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // identity `T[K]` remains identity after the
                                 // type-parameter rewrite.
                                 kind: mapper.kind,
+                                // Substitution instantiates the type
+                                // variable; the mapping stays homomorphic
+                                // over its instantiation.
+                                over_type_variable: mapper.over_type_variable,
                             },
                         },
                     ),
@@ -891,6 +1296,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_carrier,
                 signature_span,
                 return_type_span,
+                predicate,
+                is_abstract,
             } => {
                 // Signature-local TypeParams need no spelling-based stop:
                 // legitimate outer references carry an exact InferRef;
@@ -906,13 +1313,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ty: sub_ty,
                         optional: param.optional,
                         rest: param.rest,
-                        // Substitution preserves the parameter's OXC span.
+                        // Substitution preserves the parameter's OXC span
+                        // and its declaration facts.
                         span: param.span,
+                        declared_literal: param.declared_literal,
                     });
                 }
-                let (sub_return, return_changed) =
+                let (mut sub_return, return_changed) =
                     self.substitute_with_change_tracking(*return_type, parameter_node, arg);
                 any_changed |= return_changed;
+                // A generic predicate instantiates with the signature:
+                // `x is T` at `T := string` narrows to `string`.
+                let mut sub_predicate = predicate.map(|predicate| {
+                    predicate.map_type(|target| {
+                        let (sub, changed) =
+                            self.substitute_with_change_tracking(target, parameter_node, arg);
+                        any_changed |= changed;
+                        sub
+                    })
+                });
                 let mut new_type_parameters = Vec::with_capacity(type_parameters.len());
                 for tp in type_parameters.iter() {
                     let new_constraint = match tp.constraint {
@@ -965,6 +1384,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         is_const: tp.is_const,
                     });
                 }
+                // A binder re-interned with its moved bounds is still the
+                // parameter its signature's positions name: every occurrence
+                // of the old binder node follows it, so inference and
+                // substitution, which bind the exact binder node, reach them
+                // (`pick<S extends T>(x: S): S` over `Bx<string | number>`
+                // infers `S` from `x`).
+                for (old, new) in type_parameters
+                    .iter()
+                    .zip(new_type_parameters.iter())
+                    .filter(|(old, new)| old.param != new.param)
+                    .map(|(old, new)| (old.param, new.param))
+                {
+                    for param in new_params.iter_mut() {
+                        param.ty = self.substitute_with_change_tracking(param.ty, old, new).0;
+                    }
+                    sub_return = self.substitute_with_change_tracking(sub_return, old, new).0;
+                    sub_predicate = sub_predicate.map(|predicate| {
+                        predicate.map_type(|target| {
+                            self.substitute_with_change_tracking(target, old, new).0
+                        })
+                    });
+                }
                 if !any_changed {
                     return (node, false);
                 }
@@ -997,6 +1438,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // Substitution preserves the signature's OXC spans.
                             signature_span: *signature_span,
                             return_type_span: *return_type_span,
+                            predicate: sub_predicate,
+                            is_abstract: *is_abstract,
                         },
                     ),
                     true,
@@ -1068,6 +1511,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         optional: param.optional,
                         rest: param.rest,
                         span: param.span,
+                        declared_literal: param.declared_literal,
                     });
                 }
                 let mut new_type_parameters = Vec::with_capacity(parts.type_parameters.len());
@@ -1219,6 +1663,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     for param in params.iter() {
@@ -1233,6 +1678,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             stack.push(d);
                         }
                     }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 SemanticNodeData::InstantiationRef { args, .. } => {
                     for arg in args.iter() {
@@ -1333,6 +1779,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::Alias(t) => {
                     stack.push(*t);
                 }
+                SemanticNodeData::ClassExpressionInstance {
+                    type_arguments,
+                    surface,
+                    ..
+                } => {
+                    stack.extend(type_arguments.iter().copied());
+                    stack.push(*surface);
+                }
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");
                     for member in members.iter() {
@@ -1428,6 +1882,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     for param in params.iter() {
@@ -1442,6 +1897,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             stack.push(d);
                         }
                     }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 // Unresolved carriers (`BareRef` / `TypeOf` / `ImportType`)
                 // descend into their structural `type_args` exactly as

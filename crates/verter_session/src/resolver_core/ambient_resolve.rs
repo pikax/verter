@@ -4,14 +4,9 @@
 //! import graph. Looks the symbol up against the workspace's per-project
 //! ambient lib symbol_index (A2) and produces a `ResolvedRootIdentity`
 //! whose `canonical_id` is the project-scoped ambient virtual id
-//! (`ambient:/<tag>/<canonical>`).
-//!
-//! The full session-side scheduler submission (lazy parse → analysis →
-//! type lowering) is intentionally deferred to a follow-up: this stops
-//! at the symbol-resolution and dep-recording infrastructure, and the
-//! bare-name resolver is the first caller. The signature below is
-//! fixed; later work extends it to issue the scheduler request
-//! internally.
+//! (`ambient:/<tag>/<canonical>`). The dispatch's library-global lookup
+//! (`ProjectSemanticDispatch::lib_global_declaration`) is its caller, and
+//! every reader of a library global asks that lookup.
 
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_semantic::resolver_core::ProjectStableKey;
@@ -29,9 +24,6 @@ use crate::resolver_core::ResolverContext;
 /// - returns a `ResolvedRootIdentity` whose `canonical_id` is the ambient
 ///   virtual id, so the recorded fact reaches the ambient `WholeHash`
 ///   arm on warm-read validation through the live `StoreView`.
-///
-/// First production caller is the bare-name resolver fallback.
-#[allow(dead_code)]
 pub(crate) fn resolve_ambient_global(
     ctx: &dyn ResolverContext,
     consumer_canonical: &str,

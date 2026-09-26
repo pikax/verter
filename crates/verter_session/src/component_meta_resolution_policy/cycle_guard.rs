@@ -325,8 +325,24 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
             }
         }
+        SemanticNodeData::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            surface,
+        } => {
+            identity.hash(hasher);
+            hasher.write_u64(type_arguments.len() as u64);
+            for argument in type_arguments.iter() {
+                hash_node_rec(ctx, *argument, hasher, seen, depth + 1);
+            }
+            hash_node_rec(ctx, *surface, hasher, seen, depth + 1);
+        }
         SemanticNodeData::Literal(value) => {
             value.hash(hasher);
+        }
+        SemanticNodeData::EnumLiteral(literal) => {
+            literal.enum_decl.hash(hasher);
+            literal.member.hash(hasher);
         }
         SemanticNodeData::Primitive(kind) => {
             kind.hash(hasher);
@@ -535,6 +551,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
             params,
             return_type,
             type_parameters,
+            predicate,
             ..
         } => {
             // The kind is semantic identity: `() => R` and `new () => R`
@@ -559,6 +576,15 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hasher.write_u64(type_parameters.len() as u64);
             for param in type_parameters.iter() {
                 hasher.write(param.name.as_bytes());
+            }
+            // Trailing, present only on a predicate signature, so every
+            // predicate-less signature keeps its fingerprint.
+            if let Some(predicate) = predicate {
+                predicate.subject.hash(hasher);
+                hasher.write_u8(u8::from(predicate.asserts));
+                if let Some(target) = predicate.ty {
+                    hash_node_rec(ctx, target, hasher, seen, depth + 1);
+                }
             }
         }
         SemanticNodeData::MergedDecl { contributors } => {

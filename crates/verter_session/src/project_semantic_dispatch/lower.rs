@@ -34,6 +34,104 @@ use crate::semantic_query::{
     SurfaceView, TupleElement, ValueRootKey,
 };
 
+/// The lowering context the explicit-stack positions of
+/// [`ProjectSemanticDispatch::lower_type_expr_with_infer_factory`] share
+/// with their children: everything but the reduction context, which each
+/// position derives for its own children.
+struct TypeExprLowering<'a> {
+    infer_binders: &'a crate::semantic_query::InferBinderFactory,
+    env: &'a FxHashMap<String, SemanticNodeId>,
+    scope: &'a NodeScopeId,
+    name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+    scope_payload: Option<&'a DeclarationScopePayload>,
+    shadowing: &'a ScopeShadowing,
+}
+
+impl TypeExprLowering<'_> {
+    /// Whether a reference lowers through its head's resolution: it
+    /// neither substitutes a parameter bound in the environment nor names
+    /// a script-setup generic parameter (both leaves).
+    fn resolves_through_head(&self, name: &str, type_arguments: &[TypeExpr]) -> bool {
+        !type_arguments.is_empty()
+            || !(self.env.contains_key(name)
+                || self
+                    .scope_payload
+                    .is_some_and(|payload| payload.scope_type_bindings().contains_key(name)))
+    }
+}
+
+/// One step of the explicit-stack lowering: a finished node's value, or
+/// the child to lower next (the node itself waits on the stack).
+enum LowerStep<'e> {
+    Value(SemanticNodeId),
+    Descend(&'e TypeExpr, ProjectionReductionContext),
+}
+
+/// A node of the explicit-stack lowering waiting for a child's value:
+/// what remains of its own lowering.
+enum LowerFrame<'e> {
+    /// A named reference whose resolved head consumes its arguments: the
+    /// resolution's owned second half, finished once every argument is
+    /// lowered.
+    RefArguments {
+        continuation: crate::project_semantic_dispatch::carrier::CarrierArgsContinuation,
+        arguments: &'e [TypeExpr],
+        context: ProjectionReductionContext,
+        lowered: Vec<SemanticNodeId>,
+    },
+    /// A union (`union`) or intersection's arms.
+    Composite {
+        arms: &'e [TypeExpr],
+        union: bool,
+        context: ProjectionReductionContext,
+        lowered: Vec<SemanticNodeId>,
+    },
+    Array {
+        readonly: bool,
+    },
+    Tuple {
+        elements: &'e [verter_type_expr::TupleElement],
+        readonly: bool,
+        context: ProjectionReductionContext,
+        lowered: Vec<TupleElement>,
+    },
+    Template {
+        quasis: &'e [String],
+        expressions: &'e [TypeExpr],
+        context: ProjectionReductionContext,
+        lowered: Vec<SemanticNodeId>,
+    },
+    KeyOf {
+        context: ProjectionReductionContext,
+    },
+    /// An indexed access whose object is being lowered.
+    IndexedObject {
+        index: &'e TypeExpr,
+        context: ProjectionReductionContext,
+    },
+    /// An indexed access whose computed index is being lowered.
+    IndexedIndex {
+        object: SemanticNodeId,
+        context: ProjectionReductionContext,
+    },
+    /// An object type in its member loop at member `next`.
+    Object {
+        object: &'e verter_type_expr::ObjectExpr,
+        next: usize,
+        entries: Vec<SurfaceEntry>,
+        context: ProjectionReductionContext,
+        awaiting: ObjectMemberAwait<'e>,
+    },
+}
+
+/// The object member whose child is being lowered.
+enum ObjectMemberAwait<'e> {
+    PropertyValue(&'e verter_type_expr::ObjectProperty),
+    IndexKey(&'e verter_type_expr::IndexSignature),
+    /// The index signature's value, beside its lowered key.
+    IndexValue(&'e verter_type_expr::IndexSignature, SemanticNodeId),
+}
+
 fn infer_declaration_env_key(name: &str) -> String {
     format!("\0verter:infer-declaration:{name}")
 }
@@ -73,6 +171,18 @@ fn register_eager_function_alias(
     if let (Some(alias), Some(original)) = (
         alias_function.return_type.as_deref(),
         original.return_type.as_deref(),
+    ) {
+        infer_binders.register_equivalent_subtree(alias, original);
+    }
+    if let (Some(alias), Some(original)) = (
+        alias_function
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref()),
+        original
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref()),
     ) {
         infer_binders.register_equivalent_subtree(alias, original);
     }
@@ -567,71 +677,71 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Project a dotted type-position reference `Enum.Member` to the named
-    /// member's projected type (a folded literal for a foldable member, the
-    /// degraded sound primitive for a deferred one), GATED strictly on the typed
+    /// The literal type a dotted type-position reference `Enum.Member`
+    /// names — the enum member's own nominal literal type — GATED strictly
+    /// on the typed
     /// [`ValueDeclKind::Enum`](verter_semantic::analysis::type_eval::ValueDeclKind::Enum)
     /// fact. Returns `None` for any prefix that is not a proven enum value
     /// declaration (so a non-enum `Ns.Member` reference is never
-    /// mis-projected) or an unknown member name. The prefix is resolved to
-    /// its declaring `(canonical, name)` through the prepared decl's
-    /// pre-resolved map first, then the shared bare-name resolver — so a
-    /// locally-declared OR an imported enum binding both resolve, with no
-    /// private drill-down path.
-    ///
-    /// LIMITATION: only a TOP-LEVEL `Enum.Member` is projected. The
-    /// `split_once('.')` below takes the FIRST dotted segment as the prefix, so
-    /// a namespace-nested enum member (`Ns.Enum.Member`) resolves the prefix
-    /// `Ns` — a namespace, not an enum — and returns `None` (a miss). Projecting
-    /// `Ns.Enum.Member` would require first walking the namespace to its inner
-    /// `Enum` binding.
-    pub(super) fn resolve_enum_member_value(
+    /// mis-projected) or an unknown member name. A one-segment prefix
+    /// resolves through the prepared decl's pre-resolved map first, then
+    /// the shared bare-name resolver, so a locally-declared OR an imported
+    /// enum binding both resolve; a qualified prefix (`Ns.Enum.Member`)
+    /// resolves as a value path does, so a namespace's enum resolves in the
+    /// namespace's own file.
+    pub(super) fn resolve_enum_member_type(
         &self,
         scope_canonical: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
         name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         dotted_name: &str,
-    ) -> Option<TypeExpr> {
-        let (prefix, member) = dotted_name.split_once('.')?;
-        let identity = if let Some(direct) = name_resolution.get(prefix) {
-            direct.clone()
-        } else {
-            resolve_bare_name_in_scope(
-                self.ctx,
-                scope_canonical,
-                scope_owner,
-                scope_payload,
-                prefix,
-            )?
+    ) -> Option<SemanticNodeId> {
+        let (prefix, member) = dotted_name.rsplit_once('.')?;
+        let identity = match prefix.split_once('.') {
+            None => match name_resolution.get(prefix) {
+                Some(direct) => direct.clone(),
+                None => resolve_bare_name_in_scope(
+                    self.ctx,
+                    scope_canonical,
+                    scope_owner,
+                    scope_payload,
+                    prefix,
+                )?,
+            },
+            Some((root, rest)) => {
+                let value_root = crate::semantic_query::ValueRootKey {
+                    scope: crate::semantic_query::ScopeId {
+                        canonical_id: Arc::from(scope_canonical),
+                        owner: scope_owner,
+                        local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                            scope_owner,
+                        ),
+                    },
+                    name: Arc::from(root),
+                };
+                let path: Vec<Arc<str>> = rest.split('.').map(Arc::from).collect();
+                let (identity, remaining) = self.value_path_declaration(
+                    &value_root,
+                    &path,
+                    &mut rustc_hash::FxHashSet::default(),
+                )?;
+                if !remaining.is_empty() {
+                    return None;
+                }
+                identity
+            }
         };
-        // Resolve the prefix's enum VALUE decl through the SAME export-target
-        // chase `typeof Enum` uses ([`Self::effective_prepared_value_decl`]): a
-        // locally-declared enum resolves directly; a barrel re-export
-        // (`export { E } from "./leaf"`) chases to the declaring leaf's decl. So
-        // a re-exported enum projects its members exactly like a local one,
-        // matching `typeof E`'s cross-file behaviour — one shared chase, no
-        // forked resolution path.
-        let (_, _, _, prepared) = self.effective_prepared_value_decl(
+        // The enum resolves through the SAME export-target chase
+        // `typeof Enum` uses, so a re-exported enum names its declaring
+        // file's members.
+        let enumeration = self.enum_declaration(
             identity.canonical_id.as_ref(),
             identity.owner,
             identity.symbol_name.as_ref(),
         )?;
-        if prepared.kind != verter_semantic::analysis::type_eval::ValueDeclKind::Enum {
-            return None;
-        }
-        // A DECLARED member projects to its type — the folded literal for a
-        // foldable member, the degraded sound primitive for a deferred one
-        // (the stored scalar via [`enum_scalar_type_expr`]), never a miss. An
-        // UNDECLARED name is genuinely absent (`find` yields `None`) and
-        // stays a miss, so the member-existence gate is preserved.
-        prepared
-            .enum_members
-            .as_ref()?
-            .members
-            .iter()
-            .find(|entry| entry.name == member)
-            .map(|entry| enum_scalar_type_expr(&entry.value))
+        self.enum_member_type(&enumeration, member)
     }
 
     /// The ONE script-setup generic `TypeParam` node construction. BOTH
@@ -929,6 +1039,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
+    /// Lower `expr` — the ONE eager lowering entry every arm recurses
+    /// through.
+    ///
+    /// A type's syntax nests without bound (`Box<Box<…<1>>>`,
+    /// `T['a']['b']…`, `{ a: { a: … } }`), so the positions that lower a
+    /// child under this lowering's own scope, binder environment and infer
+    /// factory — a named reference's arguments, union and intersection
+    /// arms, an array's element, tuple elements, a template's holes, a
+    /// parenthesised type, a `keyof` operand, an indexed access's object
+    /// and index, and an object type's property values and index
+    /// signatures — are lowered from an explicit stack of
+    /// [`LowerFrame`]s, not the native one: each such node records what
+    /// remains of its own lowering and resumes when its child's value is
+    /// delivered. Children are lowered in the order, and under the
+    /// contexts, the node's own lowering demands them, so every intern,
+    /// query and substitution happens in the same sequence as a recursive
+    /// descent would make it. Every other form is lowered by
+    /// [`Self::lower_type_expr_leaf`] and costs one native level.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn lower_type_expr_with_infer_factory(
         &self,
@@ -942,16 +1070,935 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId {
+        let lowering = TypeExprLowering {
+            infer_binders,
+            env,
+            scope,
+            name_resolution,
+            scope_payload,
+            shadowing,
+        };
+        let mut frames: Vec<LowerFrame<'_>> = Vec::new();
+        let (mut next, mut next_context) = (expr, reduction_context);
+        loop {
+            let mut value = match self.lower_type_expr_step(
+                &lowering,
+                next,
+                next_context,
+                substitutions,
+                &mut frames,
+            ) {
+                LowerStep::Value(value) => value,
+                LowerStep::Descend(child, context) => {
+                    (next, next_context) = (child, context);
+                    continue;
+                }
+            };
+            // Deliver the value to the node waiting for it, until one
+            // needs another child or the outermost node completes.
+            loop {
+                let Some(frame) = frames.pop() else {
+                    return value;
+                };
+                match self.resume_type_expr_frame(
+                    &lowering,
+                    frame,
+                    value,
+                    substitutions,
+                    &mut frames,
+                ) {
+                    LowerStep::Value(done) => value = done,
+                    LowerStep::Descend(child, context) => {
+                        (next, next_context) = (child, context);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Begin lowering one node: a structural position pushes its frame and
+    /// descends into its first child (see
+    /// [`Self::lower_type_expr_with_infer_factory`]); every other form is
+    /// lowered in place.
+    fn lower_type_expr_step<'e>(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        expr: &'e TypeExpr,
+        reduction_context: ProjectionReductionContext,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        frames: &mut Vec<LowerFrame<'e>>,
+    ) -> LowerStep<'e> {
         // Watchdog hooks for hang investigation. Both calls are inert
         // when the watchdog has not been spawned (single relaxed atomic
         // load + early return). When active, they advance a heartbeat
         // counter and respond to the watchdog's stall signal by
-        // printing a self-backtrace from inside this recursion.
+        // printing a self-backtrace from inside this lowering.
         // See `loop5_instrumentation.rs` watchdog module.
         crate::loop5_instrumentation::watchdog_beat();
         crate::loop5_instrumentation::watchdog_check_and_dump("shallow_lower_type_expr");
         let graph = self.graph();
         graph.record_decl_subexpression_lowering();
+        match expr {
+            // Named type reference (`type Foo<T> = { y: Other<T> }` ->
+            // `Other<T>` at `y`'s position) that neither substitutes a bound
+            // parameter nor names a script-setup generic parameter (those
+            // are leaves). The head resolves FIRST through the shared
+            // `plan_bare_ref_head` resolver -- the ONE bare-name resolver,
+            // equally reached from carrier-subject normalization -- which
+            // performs builtin-shadowing-aware utility / Promise carriers,
+            // the bare-name + augmentation + enum resolution, the recursive-ref
+            // back-edge, and the route through `DeclRef` / `InstantiationRef`
+            // (carrier modes) or `ResolveDecl` / `Instantiate` (eager modes).
+            // The type-args lower LAZILY: an unresolvable head never lowers
+            // dead args; they are lowered only when the plan's continuation
+            // consumes them (substituting INTO the resolved decl body, never
+            // the macro-T own body). Self-referential types are bounded by
+            // the memo's same-path recursion sentinel.
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if lowering.resolves_through_head(name, type_arguments) => {
+                let ctx = crate::project_semantic_dispatch::carrier::CarrierResolverContext::new(
+                    lowering.env,
+                    lowering.scope,
+                    lowering.name_resolution,
+                    lowering.scope_payload,
+                    lowering.shadowing,
+                    reduction_context,
+                );
+                let continuation = match self.plan_bare_ref_head(&ctx, name, type_arguments.len()) {
+                    crate::project_semantic_dispatch::carrier::CarrierResolutionPlan::Ready(
+                        value,
+                    ) => {
+                        return LowerStep::Value(value);
+                    }
+                    crate::project_semantic_dispatch::carrier::CarrierResolutionPlan::NeedsArgs(
+                        continuation,
+                    ) => continuation,
+                };
+                // Type ARGUMENTS lower as CARRIERS, never eagerly.
+                //
+                // An argument is an operand of the instantiation, and
+                // whether it is a LIVE operand is decided by the callee's
+                // body — a parameter the body never mentions consumes its
+                // argument nowhere. Lowering arguments in the caller's
+                // eager mode resolves every argument at the reference
+                // site, BEFORE any parameter usage is known, so the cost
+                // of `Ignore<A, B> = { only: A }` scales with the
+                // structure of the dead `B` argument.
+                //
+                // Demoting the argument mode to `Navigate` keeps each
+                // argument an addressable carrier (`DeclRef` /
+                // `InstantiationRef`); a LIVE argument is then forced by
+                // the ordinary forcing authority when the substituted
+                // body is evaluated under the caller's own context, and a
+                // DEAD argument is never forced at all. Identity is
+                // unaffected: distinct argument EXPRESSIONS still lower to
+                // distinct carriers, so distinct argument environments
+                // keep distinct instantiation identities — and the
+                // arguments now lower mode-independently, so the same
+                // reference reached from a `Navigate` and an `Expanded`
+                // demand populates ONE family slot instead of two.
+                let context = reduction_context.into_structural_provenance().with_mode(
+                    match reduction_context.mode {
+                        crate::semantic_query::ProjectionMode::Expanded
+                        | crate::semantic_query::ProjectionMode::Identity => {
+                            crate::semantic_query::ProjectionMode::Navigate
+                        }
+                        other => other,
+                    },
+                );
+                match type_arguments.first() {
+                    None => LowerStep::Value(
+                        self.finish_carrier_resolution(continuation, Arc::from(Vec::new())),
+                    ),
+                    Some(first) => {
+                        frames.push(LowerFrame::RefArguments {
+                            continuation,
+                            arguments: type_arguments,
+                            context,
+                            lowered: Vec::with_capacity(type_arguments.len()),
+                        });
+                        LowerStep::Descend(first, context)
+                    }
+                }
+            }
+            TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => match arms.first() {
+                None => LowerStep::Value(
+                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+                ),
+                Some(first) => {
+                    frames.push(LowerFrame::Composite {
+                        arms,
+                        union: matches!(expr, TypeExpr::Union(_)),
+                        context: reduction_context,
+                        lowered: Vec::with_capacity(arms.len()),
+                    });
+                    LowerStep::Descend(first, reduction_context)
+                }
+            },
+            // Arrays publish through the dedicated
+            // `SemanticNodeData::Array { element, readonly }` variant per
+            // B4 + §7.14: array indexed-access is hot and must not
+            // pay generic `Array<T>` declaration-instantiation cost on
+            // every access.
+            TypeExpr::Array { element, readonly } => {
+                frames.push(LowerFrame::Array {
+                    readonly: *readonly,
+                });
+                LowerStep::Descend(element, reduction_context)
+            }
+            // Tuples publish via `SemanticNodeData::Tuple` preserving
+            // label / optional / rest metadata for every element (plan
+            // §3 B4 + §7.14). Element bodies are lazily interned at
+            // shell level — deeper expansion happens through
+            // `ProjectPath` sub-queries when a caller reaches into a
+            // specific slot.
+            TypeExpr::Tuple { elements, readonly } => match elements.first() {
+                None => LowerStep::Value(self.finish_tuple_lowering(
+                    Vec::new(),
+                    *readonly,
+                    lowering.scope,
+                )),
+                Some(first) => {
+                    frames.push(LowerFrame::Tuple {
+                        elements,
+                        readonly: *readonly,
+                        context: reduction_context,
+                        lowered: Vec::with_capacity(elements.len()),
+                    });
+                    LowerStep::Descend(&first.ty, reduction_context)
+                }
+            },
+            // Template-literal shells publish verbatim — the relation
+            // engine's infer-pattern support for template matching is a
+            // follow-up per, but the shell carrier itself is
+            // not deferred.
+            TypeExpr::TemplateLiteral {
+                quasis,
+                expressions,
+            } => match expressions.first() {
+                None => LowerStep::Value(self.finish_template_lowering(
+                    quasis,
+                    Vec::new(),
+                    lowering.scope,
+                )),
+                Some(first) => {
+                    frames.push(LowerFrame::Template {
+                        quasis,
+                        expressions,
+                        context: reduction_context,
+                        lowered: Vec::with_capacity(expressions.len()),
+                    });
+                    LowerStep::Descend(first, reduction_context)
+                }
+            },
+            // Parenthesised types are structurally transparent — `(A | B)`
+            // is equivalent to `A | B`. Unwrap and descend (plan B4
+            // follow-up).
+            TypeExpr::Parenthesized(inner) => LowerStep::Descend(inner, reduction_context),
+            // KeyOf at shell level routes through the KeyOf dispatch.
+            TypeExpr::KeyOf(operand) => {
+                frames.push(LowerFrame::KeyOf {
+                    context: reduction_context,
+                });
+                LowerStep::Descend(operand, reduction_context)
+            }
+            // Indexed access at shell level routes through the IndexedAccess
+            // dispatch. The path walker materialises `T[K]` via
+            // `ProjectPath` semantics.
+            TypeExpr::IndexedAccess { object, index } => {
+                // Path-precision rule (mirrors `evaluate.rs`): in a NESTED
+                // `A['a']['b']`, the OUTER `['b']` access has an `object`
+                // operand that is ITSELF a `TypeExpr::IndexedAccess`
+                // (`A['a']`) — an INTERMEDIATE hop. That intermediate
+                // operand reduction demotes to `ProjectionMode::Navigate`
+                // so its sibling members are NOT eagerly expanded when the
+                // caller demanded `Expanded`; only the consumed TERMINAL
+                // segment (`['b']`) runs in the caller's mode (the
+                // eager-projection arm of [`Self::finish_indexed_access_lowering`]).
+                //
+                // When the `object` operand is NOT itself an indexed access
+                // (a `Ref` / generic instantiation / inline object — e.g.
+                // `ComponentSurface<T>['status']`), THIS access is the
+                // single consumed terminal hop, so the object base keeps
+                // the caller's mode. Demoting it unconditionally would lower
+                // the base to a shallow carrier, flip the `should_defer`
+                // shape gate to a deferred shell, and leave a demanded
+                // `Expanded` single-hop terminal unreduced.
+                let object_context = if matches!(object.as_ref(), TypeExpr::IndexedAccess { .. }) {
+                    reduction_context.with_mode(ProjectionMode::Navigate)
+                } else {
+                    reduction_context
+                };
+                frames.push(LowerFrame::IndexedObject {
+                    index,
+                    context: reduction_context,
+                });
+                LowerStep::Descend(object, object_context)
+            }
+            // A spread-bearing object literal folds through the shared
+            // spread materializer (ordered left fold over direct members
+            // and spread operands) as a leaf.
+            TypeExpr::Object(object)
+                if !object
+                    .properties
+                    .iter()
+                    .any(|member| matches!(member, ObjectMember::Spread(_))) =>
+            {
+                self.advance_object_lowering(
+                    lowering,
+                    object,
+                    0,
+                    Vec::with_capacity(object.properties.len()),
+                    reduction_context,
+                    substitutions,
+                    frames,
+                )
+            }
+            _ => LowerStep::Value(self.lower_type_expr_leaf(
+                lowering.infer_binders,
+                expr,
+                lowering.env,
+                lowering.scope,
+                lowering.name_resolution,
+                lowering.scope_payload,
+                lowering.shadowing,
+                substitutions,
+                reduction_context,
+            )),
+        }
+    }
+
+    /// Deliver `value`, the child `frame` descended into, and continue that
+    /// node's lowering.
+    fn resume_type_expr_frame<'e>(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        frame: LowerFrame<'e>,
+        value: SemanticNodeId,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        frames: &mut Vec<LowerFrame<'e>>,
+    ) -> LowerStep<'e> {
+        let graph = self.graph();
+        match frame {
+            LowerFrame::RefArguments {
+                continuation,
+                arguments,
+                context,
+                mut lowered,
+            } => {
+                lowered.push(value);
+                match arguments.get(lowered.len()) {
+                    Some(next) => {
+                        frames.push(LowerFrame::RefArguments {
+                            continuation,
+                            arguments,
+                            context,
+                            lowered,
+                        });
+                        LowerStep::Descend(next, context)
+                    }
+                    None => LowerStep::Value(self.finish_carrier_resolution(
+                        continuation,
+                        Arc::from(lowered.into_boxed_slice()),
+                    )),
+                }
+            }
+            LowerFrame::Composite {
+                arms,
+                union,
+                context,
+                mut lowered,
+            } => {
+                lowered.push(value);
+                if let Some(next) = arms.get(lowered.len()) {
+                    frames.push(LowerFrame::Composite {
+                        arms,
+                        union,
+                        context,
+                        lowered,
+                    });
+                    return LowerStep::Descend(next, context);
+                }
+                if lowered.len() == 1 {
+                    return LowerStep::Value(value);
+                }
+                // Authored-syntax lowering: the shell keeps authored
+                // order and scope; a reduction here is forbidden.
+                let arms: Arc<[SemanticNodeId]> = Arc::from(lowered.into_boxed_slice());
+                LowerStep::Value(graph.intern_node_with_scope(
+                    if union {
+                        SemanticNodeData::Union(
+                            crate::semantic_query::composite::CompositeList::authored_shell(arms),
+                        )
+                    } else {
+                        SemanticNodeData::Intersection(
+                            crate::semantic_query::composite::CompositeList::authored_shell(arms),
+                        )
+                    },
+                    lowering.scope.clone(),
+                ))
+            }
+            LowerFrame::Array { readonly } => LowerStep::Value(graph.intern_node_with_scope(
+                SemanticNodeData::Array {
+                    element: value,
+                    readonly,
+                },
+                lowering.scope.clone(),
+            )),
+            LowerFrame::Tuple {
+                elements,
+                readonly,
+                context,
+                mut lowered,
+            } => {
+                let element = &elements[lowered.len()];
+                lowered.push(TupleElement {
+                    label: element.label.as_deref().map(Arc::<str>::from),
+                    value,
+                    optional: element.optional,
+                    rest: element.rest,
+                });
+                match elements.get(lowered.len()) {
+                    Some(next) => {
+                        frames.push(LowerFrame::Tuple {
+                            elements,
+                            readonly,
+                            context,
+                            lowered,
+                        });
+                        LowerStep::Descend(&next.ty, context)
+                    }
+                    None => LowerStep::Value(self.finish_tuple_lowering(
+                        lowered,
+                        readonly,
+                        lowering.scope,
+                    )),
+                }
+            }
+            LowerFrame::Template {
+                quasis,
+                expressions,
+                context,
+                mut lowered,
+            } => {
+                lowered.push(value);
+                match expressions.get(lowered.len()) {
+                    Some(next) => {
+                        frames.push(LowerFrame::Template {
+                            quasis,
+                            expressions,
+                            context,
+                            lowered,
+                        });
+                        LowerStep::Descend(next, context)
+                    }
+                    None => LowerStep::Value(self.finish_template_lowering(
+                        quasis,
+                        lowered,
+                        lowering.scope,
+                    )),
+                }
+            }
+            LowerFrame::KeyOf { context } => {
+                LowerStep::Value(self.finish_keyof_lowering(value, context, lowering.scope))
+            }
+            LowerFrame::IndexedObject { index, context } => {
+                use crate::semantic_query::IndexKey;
+                // Try to reduce literal-string / literal-number indices
+                // to a `PathSegment::Index` — fall back to TypeNode for
+                // general type-expression indices.
+                //
+                // G4.4 (bounded): the numeric fold routes through the
+                // single shared producer predicate
+                // `build::integer_convention_index_key` — a literal
+                // becomes `IndexKey::Number(i)` ONLY when `i`'s
+                // `Display` IS its canonical `js_number_to_string`
+                // spelling, so consumers rendering the needle with
+                // `i64::to_string()` are correct by construction.
+                // `evaluate::normalized_index_key_node` (and through it
+                // `substitute::substitute_index_key_with_change_tracking`)
+                // applies the same predicate; recovery is the symmetric
+                // exact `as f64` raise (`raise::raise_index_key_to_type_expr`,
+                // the walker's `Index(Number)` arm). Non-integer
+                // literals (`Foo[1.5]`), exponent-regime literals
+                // (`Foo[1e21]`), and integral literals whose shortest
+                // round-trip diverges from their exact digits
+                // (`Foo[4611686018427387904]`) stay `TypeNode`, where
+                // the walker's G4.5 recovery re-derives the canonical
+                // needle from the literal node.
+                let folded_key = match index {
+                    TypeExpr::Literal(verter_type_expr::LiteralValue::String(s)) => {
+                        Some(IndexKey::String(Arc::<str>::from(s.as_str())))
+                    }
+                    TypeExpr::Literal(verter_type_expr::LiteralValue::Number(n)) => {
+                        crate::project_semantic_dispatch::build::integer_convention_index_key(*n)
+                            .map(IndexKey::Number)
+                    }
+                    computed @ TypeExpr::TypeOf(_) => {
+                        let (node, identity) = self.lower_typeof_for_authored_key(
+                            computed,
+                            lowering.infer_binders,
+                            lowering.env,
+                            lowering.scope,
+                            lowering.name_resolution,
+                            lowering.scope_payload,
+                            lowering.shadowing,
+                            substitutions,
+                            context,
+                        );
+                        Some(
+                            identity
+                                .map(IndexKey::UniqueSymbol)
+                                .unwrap_or(IndexKey::Computed(node)),
+                        )
+                    }
+                    _ => None,
+                };
+                match folded_key {
+                    Some(key) => LowerStep::Value(self.finish_indexed_access_lowering(
+                        value,
+                        key,
+                        context,
+                        lowering.scope,
+                    )),
+                    None => {
+                        frames.push(LowerFrame::IndexedIndex {
+                            object: value,
+                            context,
+                        });
+                        LowerStep::Descend(index, context)
+                    }
+                }
+            }
+            LowerFrame::IndexedIndex { object, context } => {
+                LowerStep::Value(self.finish_indexed_access_lowering(
+                    object,
+                    crate::semantic_query::IndexKey::Computed(value),
+                    context,
+                    lowering.scope,
+                ))
+            }
+            LowerFrame::Object {
+                object,
+                next,
+                mut entries,
+                context,
+                awaiting,
+            } => {
+                let member_context = context.into_structural_provenance();
+                match awaiting {
+                    ObjectMemberAwait::PropertyValue(prop) => {
+                        // `declared_in_macro_type_arg` reflects the
+                        // surface-provenance context: when this object
+                        // is lowered directly at the macro
+                        // type-argument's own body (an inline
+                        // `defineProps<{ a: string }>()` literal, the
+                        // directly-referenced declaration's own body
+                        // via `build_instantiate`, or an explicit
+                        // Object arm of an intersection literal) the
+                        // member is author-declared in the macro T.
+                        // Otherwise (`Structural`) it is `false`.
+                        // This is the canonical typed-IR producer of the
+                        // macro-root provenance bit consumed by terminal
+                        // projections.
+                        entries.push(SurfaceEntry::Member(SurfaceMember {
+                            key: self.lower_authored_property_key(
+                                &prop.key,
+                                lowering.infer_binders,
+                                lowering.env,
+                                lowering.scope,
+                                lowering.name_resolution,
+                                lowering.scope_payload,
+                                lowering.shadowing,
+                                substitutions,
+                                member_context,
+                            ),
+                            value,
+                            optional: prop.optional,
+                            readonly: prop.readonly,
+                            method_kind: None,
+                            has_implementation_body: false,
+                            // Carry the IR member's declared accessibility
+                            // verbatim onto the graph payload (Public for
+                            // every non-class origin).
+                            visibility: prop.visibility,
+                            // Carry the IR member's excess-property
+                            // provenance verbatim (`FreshOwn` only from
+                            // direct object-literal materialization).
+                            excess_origin: prop.excess_origin,
+                            // Carry the IR member's OXC declaration-site
+                            // spans verbatim onto the graph payload.
+                            spans: prop.spans,
+                            // The member's DECLARATION lives in THIS object's
+                            // lowering file — independent of where its value
+                            // type resolves (an unresolved `MissingType` value
+                            // is scope-less but the member still declares here).
+                            declaration_origin: lowering.scope.canonical_file(),
+                            declared_in_macro_type_arg: context.own_body_stamp(),
+                            // Leaf stamping of the surface-merge role from
+                            // the threaded context (by design):
+                            // an interface/class own `Object` arm flows
+                            // `OwnBody`, a heritage reference arm flows
+                            // `Heritage`, everything else stays `Authored`.
+                            merge_role: context.role_stamp(),
+                        }));
+                    }
+                    ObjectMemberAwait::IndexKey(sig) => {
+                        frames.push(LowerFrame::Object {
+                            object,
+                            next,
+                            entries,
+                            context,
+                            awaiting: ObjectMemberAwait::IndexValue(sig, value),
+                        });
+                        return LowerStep::Descend(&sig.value_type, context);
+                    }
+                    ObjectMemberAwait::IndexValue(sig, key_type) => {
+                        entries.push(SurfaceEntry::IndexSignature(IndexSignature {
+                            key_type,
+                            value_type: value,
+                            readonly: sig.readonly,
+                            // Carry the IR index signature's OXC spans.
+                            spans: sig.spans,
+                            // Declaration file of THIS index signature —
+                            // from the object's lowering scope, not the
+                            // (possibly scope-less) value-type node.
+                            declaration_origin: lowering.scope.canonical_file(),
+                        }));
+                    }
+                }
+                self.advance_object_lowering(
+                    lowering,
+                    object,
+                    next + 1,
+                    entries,
+                    context,
+                    substitutions,
+                    frames,
+                )
+            }
+        }
+    }
+
+    /// Continue an object type's member loop at member `next`: a method,
+    /// call or construct signature lowers in place as a function type; a
+    /// property value or an index signature descends from the explicit
+    /// stack. With no member left, the object interns.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_object_lowering<'e>(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        object: &'e verter_type_expr::ObjectExpr,
+        mut next: usize,
+        mut entries: Vec<SurfaceEntry>,
+        context: ProjectionReductionContext,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        frames: &mut Vec<LowerFrame<'e>>,
+    ) -> LowerStep<'e> {
+        while let Some(member) = object.properties.get(next) {
+            match member {
+                ObjectMember::Property(prop) => {
+                    frames.push(LowerFrame::Object {
+                        object,
+                        next,
+                        entries,
+                        context,
+                        awaiting: ObjectMemberAwait::PropertyValue(prop),
+                    });
+                    // Member VALUE lowering downgrades to
+                    // structural provenance (Stage
+                    // 1): a nested object inside this member's
+                    // type (`{ outer: { inner: T } }`) is NOT the
+                    // macro-T own body — only THIS object's
+                    // direct members are. Stamping the value with
+                    // macro provenance would mis-mark `inner`.
+                    return LowerStep::Descend(&prop.ty, context.into_structural_provenance());
+                }
+                ObjectMember::Method(method) => {
+                    // Mapped+conditional infer closure: lower
+                    // methods to canonical Function nodes (matching
+                    // CallSignature handling below) so
+                    // `PricingPlanSlots[K]` IndexedAccess can
+                    // resolve to a real Function for the
+                    // Function-extends infer-binding arm. An
+                    // `Opaque(Miss)` placeholder here would break
+                    // `IndexedAccess<I, "method-name">`
+                    // projection: the path walker finds the
+                    // member but its value is opaque, so the
+                    // downstream `let Some(Function...) =
+                    // graph.node_data(check_resolved)` match
+                    // fails and the conditional drops to a
+                    // deferred shell.
+                    let function_expr = TypeExpr::Function(Arc::new(method.function.clone()));
+                    register_eager_function_alias(
+                        lowering.infer_binders,
+                        &function_expr,
+                        &method.function,
+                    );
+                    // Method VALUE (its function shape) lowers
+                    // structurally — see the `ObjectMember::Property`
+                    // companion note. Only the method's presence on
+                    // THIS object is macro-T own-body, not the
+                    // function's nested parameter/return objects.
+                    let value = self.lower_type_expr_with_infer_factory(
+                        lowering.infer_binders,
+                        &function_expr,
+                        lowering.env,
+                        lowering.scope,
+                        lowering.name_resolution,
+                        lowering.scope_payload,
+                        lowering.shadowing,
+                        substitutions,
+                        context.into_structural_provenance(),
+                    );
+                    // `declared_in_macro_type_arg` mirrors the
+                    // `ObjectMember::Property` arm: a method
+                    // literally written in the macro type
+                    // argument's own body is author-declared.
+                    entries.push(SurfaceEntry::Member(SurfaceMember {
+                        key: self.lower_authored_property_key(
+                            &method.key,
+                            lowering.infer_binders,
+                            lowering.env,
+                            lowering.scope,
+                            lowering.name_resolution,
+                            lowering.scope_payload,
+                            lowering.shadowing,
+                            substitutions,
+                            context.into_structural_provenance(),
+                        ),
+                        value,
+                        optional: method.optional,
+                        readonly: false,
+                        method_kind: Some(method.method_kind),
+                        has_implementation_body: method.has_implementation_body,
+                        // Carry the IR method's declared accessibility
+                        // (Public for every non-class origin).
+                        visibility: method.visibility,
+                        // Carry the IR method's excess-property
+                        // provenance verbatim.
+                        excess_origin: method.excess_origin,
+                        // Carry the IR method's OXC member spans.
+                        spans: method.spans,
+                        // Declaration file of THIS method (see the
+                        // `Property` companion note).
+                        declaration_origin: lowering.scope.canonical_file(),
+                        declared_in_macro_type_arg: context.own_body_stamp(),
+                        // Leaf stamping of the surface-merge role —
+                        // mirrors the `Property` arm.
+                        merge_role: context.role_stamp(),
+                    }));
+                }
+                ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                    // Lower call signatures as canonical `Function`
+                    // nodes so utility dispatch (`ReturnType`,
+                    // `Parameters`, `InstanceType`,
+                    // `ConstructorParameters`, `Awaited`) can
+                    // inspect parameter / return structure at the
+                    // graph level instead of falling back to an
+                    // opaque miss. The reverse mapping
+                    // `raise_node_to_type_expr` reconstitutes
+                    // `ObjectMember::CallSignature` entries from
+                    // `SurfaceView.call_signatures` by matching
+                    // `TypeExpr::Function(...)`.
+                    let construct = matches!(member, ObjectMember::ConstructSignature(_));
+                    let function_expr = if construct {
+                        TypeExpr::ConstructorType(Arc::new(func.clone()))
+                    } else {
+                        TypeExpr::Function(Arc::new(func.clone()))
+                    };
+                    register_eager_function_alias(lowering.infer_binders, &function_expr, func);
+                    let fn_id = self.lower_type_expr_with_infer_factory(
+                        lowering.infer_binders,
+                        &function_expr,
+                        lowering.env,
+                        lowering.scope,
+                        lowering.name_resolution,
+                        lowering.scope_payload,
+                        lowering.shadowing,
+                        substitutions,
+                        context,
+                    );
+                    entries.push(if construct {
+                        SurfaceEntry::ConstructSignature(fn_id)
+                    } else {
+                        SurfaceEntry::CallSignature(fn_id)
+                    });
+                }
+                // Unreachable by construction: a spread-bearing object
+                // lowers through the spread materializer as a leaf.
+                ObjectMember::Spread(_) => {}
+                ObjectMember::IndexSignature(sig) => {
+                    frames.push(LowerFrame::Object {
+                        object,
+                        next,
+                        entries,
+                        context,
+                        awaiting: ObjectMemberAwait::IndexKey(sig),
+                    });
+                    return LowerStep::Descend(&sig.key_type, context);
+                }
+            }
+            next += 1;
+        }
+        let has_index_signature = entries
+            .iter()
+            .any(|entry| matches!(entry, SurfaceEntry::IndexSignature(_)));
+        let view = SurfaceView::from_entries(entries, None, has_index_signature);
+        LowerStep::Value(
+            self.graph()
+                .intern_node_with_scope(SemanticNodeData::Object(view), lowering.scope.clone()),
+        )
+    }
+
+    /// A tuple of its lowered elements.
+    fn finish_tuple_lowering(
+        &self,
+        lowered_elements: Vec<TupleElement>,
+        readonly: bool,
+        scope: &NodeScopeId,
+    ) -> SemanticNodeId {
+        // Normalize-on-intern (the variadic-spread rule): when an
+        // instantiation env already substituted a rest element's
+        // binder to a concrete tuple (`[...A, ...B]` lowered with
+        // `A = [1, 2]`), the spread splices in place; a sole
+        // rest-of-array tuple collapses to the array. Open rest
+        // values (unbound generics, carriers) are preserved
+        // verbatim — decl-body lowering stays carrier-shaped.
+        match self.normalize_tuple_spread(&lowered_elements, readonly) {
+            crate::project_semantic_dispatch::build::NormalizedTupleShape::Array(array_node) => {
+                array_node
+            }
+            crate::project_semantic_dispatch::build::NormalizedTupleShape::Tuple(normalized) => {
+                self.graph().intern_node_with_scope(
+                    SemanticNodeData::Tuple {
+                        elements: Arc::from(normalized.into_boxed_slice()),
+                        readonly,
+                    },
+                    scope.clone(),
+                )
+            }
+        }
+    }
+
+    /// A template literal of its lowered holes.
+    fn finish_template_lowering(
+        &self,
+        quasis: &[String],
+        lowered_expressions: Vec<SemanticNodeId>,
+        scope: &NodeScopeId,
+    ) -> SemanticNodeId {
+        let lowered_quasis: Vec<Arc<str>> = quasis
+            .iter()
+            .map(|q| Arc::<str>::from(q.as_str()))
+            .collect();
+        self.graph().intern_node_with_scope(
+            SemanticNodeData::TemplateLiteral {
+                quasis: Arc::from(lowered_quasis.into_boxed_slice()),
+                expressions: Arc::from(lowered_expressions.into_boxed_slice()),
+            },
+            scope.clone(),
+        )
+    }
+
+    /// `keyof` over its lowered operand.
+    fn finish_keyof_lowering(
+        &self,
+        base_id: SemanticNodeId,
+        reduction_context: ProjectionReductionContext,
+        scope: &NodeScopeId,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        if crate::semantic_query::may_reduce_operator(reduction_context) {
+            match self.execute_type_node(SemanticQueryKey::KeyOf {
+                base: base_id,
+                context: reduction_context,
+            }) {
+                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                _ => self.opaque(QueryError::Miss),
+            }
+        } else {
+            match graph.node_data(base_id).as_deref() {
+                Some(SemanticNodeData::Opaque(_)) | None => self.opaque(QueryError::Miss),
+                _ => graph.intern_node_with_scope(
+                    SemanticNodeData::KeyOf { base: base_id },
+                    scope.clone(),
+                ),
+            }
+        }
+    }
+
+    /// An indexed access over its lowered object and key.
+    fn finish_indexed_access_lowering(
+        &self,
+        obj_id: SemanticNodeId,
+        index_key: crate::semantic_query::IndexKey,
+        reduction_context: ProjectionReductionContext,
+        scope: &NodeScopeId,
+    ) -> SemanticNodeId {
+        use crate::semantic_query::IndexKey;
+        let graph = self.graph();
+        let should_defer = matches!(index_key, IndexKey::Computed(_))
+            || !matches!(
+                graph.node_data(obj_id).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            )
+            // A terminal that reads a named declaration (`(typeof
+            // C)['prototype']` is `C`) stays the access: each
+            // consumer reads it at its own altitude, and a printed
+            // answer keeps the name.
+            || self.indexed_access_reads_named_declaration(obj_id, &index_key);
+        if should_defer {
+            graph.intern_node_with_scope(
+                SemanticNodeData::IndexedAccess {
+                    object: obj_id,
+                    index: index_key,
+                },
+                scope.clone(),
+            )
+        } else {
+            // Path-precision rule: the literal `T[K]` single-hop
+            // is the TERMINAL projection of THIS indexed access,
+            // so it runs in the CALLER's mode (not a hardcoded
+            // `Navigate`). When `object` was itself an indexed
+            // access (an intermediate hop), it was lowered in
+            // `Navigate` so its sibling members never expand;
+            // a non-indexed-access base kept the caller's mode so a
+            // demanded `Expanded` single-hop terminal still reduces.
+            // A structural-transit caller keeps transit/Navigate via
+            // its own `reduction_context.mode`.
+            match self.execute_type_node(SemanticQueryKey::IndexedAccess {
+                base: obj_id,
+                index: index_key,
+                mode: reduction_context.mode,
+            }) {
+                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                _ => self.opaque(QueryError::Miss),
+            }
+        }
+    }
+
+    /// Lower one node that is not a structural position of
+    /// [`Self::lower_type_expr_with_infer_factory`]'s explicit stack: its
+    /// children lower through that entry, one native level beneath this
+    /// one.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_type_expr_leaf(
+        &self,
+        infer_binders: &crate::semantic_query::InferBinderFactory,
+        expr: &TypeExpr,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        scope_payload: Option<&DeclarationScopePayload>,
+        shadowing: &ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        reduction_context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
         match expr {
             TypeExpr::Primitive(name) => graph.intern_node_with_scope(
                 SemanticNodeData::Primitive(map_primitive_name(*name)),
@@ -1078,542 +2125,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     reduction_context,
                 )
             }
-            // Named type reference (`type Foo<T> = { y: Other<T> }` ->
-            // `Other<T>` at `y`'s position). The head resolves FIRST through the
-            // shared `resolve_bare_ref_head` resolver -- the ONE bare-name
-            // resolver, equally reached from carrier-subject normalization --
-            // which performs builtin-shadowing-aware utility / Promise carriers,
-            // the bare-name + augmentation + enum resolution, the recursive-ref
-            // back-edge, and the route through `DeclRef` / `InstantiationRef`
-            // (carrier modes) or `ResolveDecl` / `Instantiate` (eager modes).
-            // The type-args lower LAZILY through the passed closure: an
-            // unresolvable head never lowers dead args; the closure fires only on
-            // the branches that consume the args (substituting INTO the resolved
-            // decl body, never the macro-T own body), keeping the helper
-            // typed-IR-only. Self-referential types are bounded by the memo's
-            // same-path recursion sentinel.
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } => {
-                let ctx = crate::project_semantic_dispatch::carrier::CarrierResolverContext::new(
-                    env,
-                    scope,
-                    name_resolution,
-                    scope_payload,
-                    shadowing,
-                    reduction_context,
-                );
-                // Lower the type-args LAZILY — only on the branch the head
-                // resolves to (the helper invokes this closure exactly on a
-                // Promise / builtin / carrier-mode / eager `Instantiate`
-                // branch). An UNRESOLVABLE head misses without lowering +
-                // dispatching dead args. The closure routes through the SAME
-                // structural lowering (typed-IR-only); the carrier-substituted
-                // args carry `Structural` provenance.
-                // Type ARGUMENTS lower as CARRIERS, never eagerly.
-                //
-                // An argument is an operand of the instantiation, and
-                // whether it is a LIVE operand is decided by the callee's
-                // body — a parameter the body never mentions consumes its
-                // argument nowhere. Lowering arguments in the caller's
-                // eager mode resolves every argument at the reference
-                // site, BEFORE any parameter usage is known, so the cost
-                // of `Ignore<A, B> = { only: A }` scales with the
-                // structure of the dead `B` argument.
-                //
-                // Demoting the argument mode to `Navigate` keeps each
-                // argument an addressable carrier (`DeclRef` /
-                // `InstantiationRef`); a LIVE argument is then forced by
-                // the ordinary forcing authority when the substituted
-                // body is evaluated under the caller's own context, and a
-                // DEAD argument is never forced at all. Identity is
-                // unaffected: distinct argument EXPRESSIONS still lower to
-                // distinct carriers, so distinct argument environments
-                // keep distinct instantiation identities — and the
-                // arguments now lower mode-independently, so the same
-                // reference reached from a `Navigate` and an `Expanded`
-                // demand populates ONE family slot instead of two.
-                let arg_context = reduction_context.into_structural_provenance().with_mode(
-                    match reduction_context.mode {
-                        crate::semantic_query::ProjectionMode::Expanded
-                        | crate::semantic_query::ProjectionMode::Identity => {
-                            crate::semantic_query::ProjectionMode::Navigate
-                        }
-                        other => other,
-                    },
-                );
-                self.resolve_bare_ref_head(&ctx, name, type_arguments.len(), || {
-                    let arg_ids: Vec<SemanticNodeId> = type_arguments
-                        .iter()
-                        .map(|arg| {
-                            self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                arg,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                arg_context,
-                            )
-                        })
-                        .collect();
-                    Arc::from(arg_ids.into_boxed_slice())
-                })
-            }
-            TypeExpr::Union(arms) => {
-                let mut arm_ids: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
-                for arm in arms.iter() {
-                    arm_ids.push(self.lower_type_expr_with_infer_factory(
-                        infer_binders,
-                        arm,
-                        env,
-                        scope,
-                        name_resolution,
-                        scope_payload,
-                        shadowing,
-                        substitutions,
-                        reduction_context,
-                    ));
-                }
-                if arm_ids.is_empty() {
-                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-                } else if arm_ids.len() == 1 {
-                    arm_ids[0]
-                } else {
-                    // Authored-syntax lowering: the shell keeps authored
-                    // order and scope; a reduction here is forbidden.
-                    graph.intern_node_with_scope(
-                        SemanticNodeData::Union(
-                            crate::semantic_query::composite::CompositeList::authored_shell(
-                                Arc::from(arm_ids.into_boxed_slice()),
-                            ),
-                        ),
-                        scope.clone(),
-                    )
-                }
-            }
-            TypeExpr::Intersection(arms) => {
-                let mut arm_ids: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
-                for arm in arms.iter() {
-                    arm_ids.push(self.lower_type_expr_with_infer_factory(
-                        infer_binders,
-                        arm,
-                        env,
-                        scope,
-                        name_resolution,
-                        scope_payload,
-                        shadowing,
-                        substitutions,
-                        reduction_context,
-                    ));
-                }
-                if arm_ids.is_empty() {
-                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-                } else if arm_ids.len() == 1 {
-                    arm_ids[0]
-                } else {
-                    // Authored-syntax lowering: see the Union arm above.
-                    graph.intern_node_with_scope(
-                        SemanticNodeData::Intersection(
-                            crate::semantic_query::composite::CompositeList::authored_shell(
-                                Arc::from(arm_ids.into_boxed_slice()),
-                            ),
-                        ),
-                        scope.clone(),
-                    )
-                }
-            }
-            TypeExpr::Object(obj) => {
-                // A spread-bearing object literal folds through the shared
-                // spread materializer (ordered left fold over direct members
-                // and spread operands) instead of the plain member loop below.
-                if obj
-                    .properties
-                    .iter()
-                    .any(|m| matches!(m, ObjectMember::Spread(_)))
-                {
-                    return self.lower_spread_object_literal(
-                        obj,
-                        infer_binders,
-                        env,
-                        scope,
-                        name_resolution,
-                        scope_payload,
-                        shadowing,
-                        substitutions,
-                        reduction_context,
-                    );
-                }
-                let mut entries = Vec::with_capacity(obj.properties.len());
-                for member in &obj.properties {
-                    match member {
-                        ObjectMember::Property(prop) => {
-                            // Member VALUE lowering downgrades to
-                            // structural provenance (Stage
-                            // 1): a nested object inside this member's
-                            // type (`{ outer: { inner: T } }`) is NOT the
-                            // macro-T own body — only THIS object's
-                            // direct members are. Stamping the value with
-                            // macro provenance would mis-mark `inner`.
-                            let value = self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                &prop.ty,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context.into_structural_provenance(),
-                            );
-                            // `declared_in_macro_type_arg` reflects the
-                            // surface-provenance context: when this object
-                            // is lowered directly at the macro
-                            // type-argument's own body (an inline
-                            // `defineProps<{ a: string }>()` literal, the
-                            // directly-referenced declaration's own body
-                            // via `build_instantiate`, or an explicit
-                            // Object arm of an intersection literal) the
-                            // member is author-declared in the macro T.
-                            // Otherwise (`Structural`) it is `false`.
-                            // This is the canonical typed-IR producer of the
-                            // macro-root provenance bit consumed by terminal
-                            // projections.
-                            entries.push(SurfaceEntry::Member(SurfaceMember {
-                                key: self.lower_authored_property_key(
-                                    &prop.key,
-                                    infer_binders,
-                                    env,
-                                    scope,
-                                    name_resolution,
-                                    scope_payload,
-                                    shadowing,
-                                    substitutions,
-                                    reduction_context.into_structural_provenance(),
-                                ),
-                                value,
-                                optional: prop.optional,
-                                readonly: prop.readonly,
-                                method_kind: None,
-                                has_implementation_body: false,
-                                // Carry the IR member's declared accessibility
-                                // verbatim onto the graph payload (Public for
-                                // every non-class origin).
-                                visibility: prop.visibility,
-                                // Carry the IR member's excess-property
-                                // provenance verbatim (`FreshOwn` only from
-                                // direct object-literal materialization).
-                                excess_origin: prop.excess_origin,
-                                // Carry the IR member's OXC declaration-site
-                                // spans verbatim onto the graph payload.
-                                spans: prop.spans,
-                                // The member's DECLARATION lives in THIS object's
-                                // lowering file — independent of where its value
-                                // type resolves (an unresolved `MissingType` value
-                                // is scope-less but the member still declares here).
-                                declaration_origin: scope.canonical_file(),
-                                declared_in_macro_type_arg: reduction_context.own_body_stamp(),
-                                // Leaf stamping of the surface-merge role from
-                                // the threaded context (by design):
-                                // an interface/class own `Object` arm flows
-                                // `OwnBody`, a heritage reference arm flows
-                                // `Heritage`, everything else stays `Authored`.
-                                merge_role: reduction_context.role_stamp(),
-                            }));
-                        }
-                        ObjectMember::Method(method) => {
-                            // Mapped+conditional infer closure: lower
-                            // methods to canonical Function nodes (matching
-                            // CallSignature handling below) so
-                            // `PricingPlanSlots[K]` IndexedAccess can
-                            // resolve to a real Function for the
-                            // Function-extends infer-binding arm. An
-                            // `Opaque(Miss)` placeholder here would break
-                            // `IndexedAccess<I, "method-name">`
-                            // projection: the path walker finds the
-                            // member but its value is opaque, so the
-                            // downstream `let Some(Function...) =
-                            // graph.node_data(check_resolved)` match
-                            // fails and the conditional drops to a
-                            // deferred shell.
-                            let function_expr =
-                                TypeExpr::Function(Arc::new(method.function.clone()));
-                            register_eager_function_alias(
-                                infer_binders,
-                                &function_expr,
-                                &method.function,
-                            );
-                            // Method VALUE (its function shape) lowers
-                            // structurally — see the `ObjectMember::Property`
-                            // companion note. Only the method's presence on
-                            // THIS object is macro-T own-body, not the
-                            // function's nested parameter/return objects.
-                            let value = self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                &function_expr,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context.into_structural_provenance(),
-                            );
-                            // `declared_in_macro_type_arg` mirrors the
-                            // `ObjectMember::Property` arm: a method
-                            // literally written in the macro type
-                            // argument's own body is author-declared.
-                            entries.push(SurfaceEntry::Member(SurfaceMember {
-                                key: self.lower_authored_property_key(
-                                    &method.key,
-                                    infer_binders,
-                                    env,
-                                    scope,
-                                    name_resolution,
-                                    scope_payload,
-                                    shadowing,
-                                    substitutions,
-                                    reduction_context.into_structural_provenance(),
-                                ),
-                                value,
-                                optional: method.optional,
-                                readonly: false,
-                                method_kind: Some(method.method_kind),
-                                has_implementation_body: method.has_implementation_body,
-                                // Carry the IR method's declared accessibility
-                                // (Public for every non-class origin).
-                                visibility: method.visibility,
-                                // Carry the IR method's excess-property
-                                // provenance verbatim.
-                                excess_origin: method.excess_origin,
-                                // Carry the IR method's OXC member spans.
-                                spans: method.spans,
-                                // Declaration file of THIS method (see the
-                                // `Property` companion note).
-                                declaration_origin: scope.canonical_file(),
-                                declared_in_macro_type_arg: reduction_context.own_body_stamp(),
-                                // Leaf stamping of the surface-merge role —
-                                // mirrors the `Property` arm.
-                                merge_role: reduction_context.role_stamp(),
-                            }));
-                        }
-                        ObjectMember::CallSignature(func) => {
-                            // Lower call signatures as canonical `Function`
-                            // nodes so utility dispatch (`ReturnType`,
-                            // `Parameters`, `InstanceType`,
-                            // `ConstructorParameters`, `Awaited`) can
-                            // inspect parameter / return structure at the
-                            // graph level instead of falling back to an
-                            // opaque miss. The reverse mapping
-                            // `raise_node_to_type_expr` reconstitutes
-                            // `ObjectMember::CallSignature` entries from
-                            // `SurfaceView.call_signatures` by matching
-                            // `TypeExpr::Function(...)`.
-                            let function_expr = TypeExpr::Function(Arc::new(func.clone()));
-                            register_eager_function_alias(infer_binders, &function_expr, func);
-                            let fn_id = self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                &function_expr,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            );
-                            entries.push(SurfaceEntry::CallSignature(fn_id));
-                        }
-                        ObjectMember::ConstructSignature(func) => {
-                            let function_expr = TypeExpr::ConstructorType(Arc::new(func.clone()));
-                            register_eager_function_alias(infer_binders, &function_expr, func);
-                            let fn_id = self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                &function_expr,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            );
-                            entries.push(SurfaceEntry::ConstructSignature(fn_id));
-                        }
-                        // Unreachable by construction: the spread-bearing
-                        // branch above routes the whole object through the
-                        // spread lowering before this member loop runs.
-                        ObjectMember::Spread(_) => {}
-                        ObjectMember::IndexSignature(sig) => {
-                            let key_type = self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                &sig.key_type,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            );
-                            let value_type = self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                &sig.value_type,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            );
-                            entries.push(SurfaceEntry::IndexSignature(IndexSignature {
-                                key_type,
-                                value_type,
-                                readonly: sig.readonly,
-                                // Carry the IR index signature's OXC spans.
-                                spans: sig.spans,
-                                // Declaration file of THIS index signature —
-                                // from the object's lowering scope, not the
-                                // (possibly scope-less) value-type node.
-                                declaration_origin: scope.canonical_file(),
-                            }));
-                        }
-                    }
-                }
-                let has_index_signature = entries
-                    .iter()
-                    .any(|entry| matches!(entry, SurfaceEntry::IndexSignature(_)));
-                let view = SurfaceView::from_entries(entries, None, has_index_signature);
-                graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
-            }
-            // Arrays publish through the dedicated
-            // `SemanticNodeData::Array { element, readonly }` variant per
-            // B4 + §7.14: array indexed-access is hot and must not
-            // pay generic `Array<T>` declaration-instantiation cost on
-            // every access.
-            TypeExpr::Array { element, readonly } => {
-                let element_id = self.lower_type_expr_with_infer_factory(
-                    infer_binders,
-                    element,
-                    env,
-                    scope,
-                    name_resolution,
-                    scope_payload,
-                    shadowing,
-                    substitutions,
-                    reduction_context,
-                );
-                graph.intern_node_with_scope(
-                    SemanticNodeData::Array {
-                        element: element_id,
-                        readonly: *readonly,
-                    },
-                    scope.clone(),
-                )
-            }
-            // Tuples publish via `SemanticNodeData::Tuple` preserving
-            // label / optional / rest metadata for every element (plan
-            // §3 B4 + §7.14). Element bodies are lazily interned at
-            // shell level — deeper expansion happens through
-            // `ProjectPath` sub-queries when a caller reaches into a
-            // specific slot.
-            TypeExpr::Tuple { elements, readonly } => {
-                let mut lowered_elements: Vec<TupleElement> = Vec::with_capacity(elements.len());
-                for element in elements.iter() {
-                    let value = self.lower_type_expr_with_infer_factory(
-                        infer_binders,
-                        &element.ty,
-                        env,
-                        scope,
-                        name_resolution,
-                        scope_payload,
-                        shadowing,
-                        substitutions,
-                        reduction_context,
-                    );
-                    lowered_elements.push(TupleElement {
-                        label: element.label.as_deref().map(Arc::<str>::from),
-                        value,
-                        optional: element.optional,
-                        rest: element.rest,
-                    });
-                }
-                // Normalize-on-intern (the variadic-spread rule): when an
-                // instantiation env already substituted a rest element's
-                // binder to a concrete tuple (`[...A, ...B]` lowered with
-                // `A = [1, 2]`), the spread splices in place; a sole
-                // rest-of-array tuple collapses to the array. Open rest
-                // values (unbound generics, carriers) are preserved
-                // verbatim — decl-body lowering stays carrier-shaped.
-                match self.normalize_tuple_spread(&lowered_elements, *readonly) {
-                    crate::project_semantic_dispatch::build::NormalizedTupleShape::Array(
-                        array_node,
-                    ) => array_node,
-                    crate::project_semantic_dispatch::build::NormalizedTupleShape::Tuple(
-                        normalized,
-                    ) => graph.intern_node_with_scope(
-                        SemanticNodeData::Tuple {
-                            elements: Arc::from(normalized.into_boxed_slice()),
-                            readonly: *readonly,
-                        },
-                        scope.clone(),
-                    ),
-                }
-            }
-            // Template-literal shells publish verbatim — the relation
-            // engine's infer-pattern support for template matching is a
-            // follow-up per, but the shell carrier itself is
-            // not deferred.
-            TypeExpr::TemplateLiteral {
-                quasis,
-                expressions,
-            } => {
-                let lowered_quasis: Vec<Arc<str>> = quasis
-                    .iter()
-                    .map(|q| Arc::<str>::from(q.as_str()))
-                    .collect();
-                let lowered_expressions: Vec<SemanticNodeId> = expressions
-                    .iter()
-                    .map(|expr| {
-                        self.lower_type_expr_with_infer_factory(
-                            infer_binders,
-                            expr,
-                            env,
-                            scope,
-                            name_resolution,
-                            scope_payload,
-                            shadowing,
-                            substitutions,
-                            reduction_context,
-                        )
-                    })
-                    .collect();
-                graph.intern_node_with_scope(
-                    SemanticNodeData::TemplateLiteral {
-                        quasis: Arc::from(lowered_quasis.into_boxed_slice()),
-                        expressions: Arc::from(lowered_expressions.into_boxed_slice()),
-                    },
-                    scope.clone(),
-                )
-            }
-            // Parenthesised types are structurally transparent — `(A | B)`
-            // is equivalent to `A | B`. Unwrap and recurse (plan B4
-            // follow-up).
-            TypeExpr::Parenthesized(inner) => self.lower_type_expr_with_infer_factory(
-                infer_binders,
-                inner,
-                env,
-                scope,
-                name_resolution,
-                scope_payload,
-                shadowing,
-                substitutions,
-                reduction_context,
-            ),
             // Mapped types (`{ [K in keyof T]: T[K] }` and friends)
             // route through `SemanticQueryKey::MappedType` so `build_mapped_type`
             // produces the correct shell + per-member
@@ -1770,6 +2281,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                     scope.clone(),
                 );
+                // A `keyof` operand the environment binds names a type
+                // parameter even once it lowers to its argument: the mapping
+                // stays homomorphic over it. An unbound operand is read off
+                // its lowered node below.
+                let over_type_variable = match source.as_ref() {
+                    TypeExpr::KeyOf(inner) => match inner.as_ref() {
+                        TypeExpr::TypeParameter(param) => env.contains_key(param.name.as_str()),
+                        TypeExpr::Ref {
+                            name,
+                            type_arguments,
+                        } => type_arguments.is_empty() && env.contains_key(name.as_ref()),
+                        _ => false,
+                    },
+                    _ => false,
+                };
                 let (source_sem, key_space_sem, base_infer_name) = match source.as_ref() {
                     // `{ [K in keyof T]: ... }` — extract T.
                     TypeExpr::KeyOf(inner) => {
@@ -1927,6 +2453,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     readonly: readonly_mod,
                     name_remap,
                     kind,
+                    over_type_variable: over_type_variable
+                        || (matches!(source.as_ref(), TypeExpr::KeyOf(_))
+                            && crate::semantic_query::keyof_operand_is_type_variable(
+                                graph, source_sem,
+                            )),
                 };
 
                 // Route/mode-INDEPENDENT L1 carrier-stop (LOWERING
@@ -1966,179 +2497,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }) {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => self.opaque(QueryError::Miss),
-                }
-            }
-            // KeyOf at shell level routes through the KeyOf dispatch.
-            TypeExpr::KeyOf(operand) => {
-                let base_id = self.lower_type_expr_with_infer_factory(
-                    infer_binders,
-                    operand,
-                    env,
-                    scope,
-                    name_resolution,
-                    scope_payload,
-                    shadowing,
-                    substitutions,
-                    reduction_context,
-                );
-                if crate::semantic_query::may_reduce_operator(reduction_context) {
-                    match self.execute_type_node(SemanticQueryKey::KeyOf {
-                        base: base_id,
-                        context: reduction_context,
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                        _ => self.opaque(QueryError::Miss),
-                    }
-                } else {
-                    match graph.node_data(base_id).as_deref() {
-                        Some(SemanticNodeData::Opaque(_)) | None => self.opaque(QueryError::Miss),
-                        _ => graph.intern_node_with_scope(
-                            SemanticNodeData::KeyOf { base: base_id },
-                            scope.clone(),
-                        ),
-                    }
-                }
-            }
-            // Indexed access at shell level routes through the IndexedAccess
-            // dispatch. The path walker materialises `T[K]` via
-            // `ProjectPath` semantics.
-            TypeExpr::IndexedAccess { object, index } => {
-                use crate::semantic_query::IndexKey;
-                // Path-precision rule (mirrors `evaluate.rs`): in a NESTED
-                // `A['a']['b']`, the OUTER `['b']` access has an `object`
-                // operand that is ITSELF a `TypeExpr::IndexedAccess`
-                // (`A['a']`) — an INTERMEDIATE hop. That intermediate
-                // operand reduction demotes to `ProjectionMode::Navigate`
-                // so its sibling members are NOT eagerly expanded when the
-                // caller demanded `Expanded`; only the consumed TERMINAL
-                // segment (`['b']`) runs in the caller's mode (the
-                // eager-projection arm below).
-                //
-                // When the `object` operand is NOT itself an indexed access
-                // (a `Ref` / generic instantiation / inline object — e.g.
-                // `ComponentSurface<T>['status']`), THIS access is the
-                // single consumed terminal hop, so the object base keeps
-                // the caller's mode. Demoting it unconditionally would lower
-                // the base to a shallow carrier, flip the `should_defer`
-                // shape gate below to a deferred shell, and leave a demanded
-                // `Expanded` single-hop terminal unreduced.
-                let object_is_intermediate_indexed_access =
-                    matches!(object.as_ref(), TypeExpr::IndexedAccess { .. });
-                let object_context = if object_is_intermediate_indexed_access {
-                    reduction_context.with_mode(ProjectionMode::Navigate)
-                } else {
-                    reduction_context
-                };
-                let obj_id = self.lower_type_expr_with_infer_factory(
-                    infer_binders,
-                    object,
-                    env,
-                    scope,
-                    name_resolution,
-                    scope_payload,
-                    shadowing,
-                    substitutions,
-                    object_context,
-                );
-                // Try to reduce literal-string / literal-number indices
-                // to a `PathSegment::Index` — fall back to TypeNode for
-                // general type-expression indices.
-                //
-                // G4.4 (bounded): the numeric fold routes through the
-                // single shared producer predicate
-                // `build::integer_convention_index_key` — a literal
-                // becomes `IndexKey::Number(i)` ONLY when `i`'s
-                // `Display` IS its canonical `js_number_to_string`
-                // spelling, so consumers rendering the needle with
-                // `i64::to_string()` are correct by construction.
-                // `evaluate::normalized_index_key_node` (and through it
-                // `substitute::substitute_index_key_with_change_tracking`)
-                // applies the same predicate; recovery is the symmetric
-                // exact `as f64` raise (`raise::raise_index_key_to_type_expr`,
-                // the walker's `Index(Number)` arm). Non-integer
-                // literals (`Foo[1.5]`), exponent-regime literals
-                // (`Foo[1e21]`), and integral literals whose shortest
-                // round-trip diverges from their exact digits
-                // (`Foo[4611686018427387904]`) stay `TypeNode`, where
-                // the walker's G4.5 recovery re-derives the canonical
-                // needle from the literal node.
-                let folded_key = match index.as_ref() {
-                    TypeExpr::Literal(verter_type_expr::LiteralValue::String(s)) => {
-                        Some(IndexKey::String(Arc::<str>::from(s.as_str())))
-                    }
-                    TypeExpr::Literal(verter_type_expr::LiteralValue::Number(n)) => {
-                        crate::project_semantic_dispatch::build::integer_convention_index_key(*n)
-                            .map(IndexKey::Number)
-                    }
-                    computed @ TypeExpr::TypeOf(_) => {
-                        let (node, identity) = self.lower_typeof_for_authored_key(
-                            computed,
-                            infer_binders,
-                            env,
-                            scope,
-                            name_resolution,
-                            scope_payload,
-                            shadowing,
-                            substitutions,
-                            reduction_context,
-                        );
-                        Some(
-                            identity
-                                .map(IndexKey::UniqueSymbol)
-                                .unwrap_or(IndexKey::Computed(node)),
-                        )
-                    }
-                    _ => None,
-                };
-                let index_key = match folded_key {
-                    Some(key) => key,
-                    None => {
-                        let idx_id = self.lower_type_expr_with_infer_factory(
-                            infer_binders,
-                            index,
-                            env,
-                            scope,
-                            name_resolution,
-                            scope_payload,
-                            shadowing,
-                            substitutions,
-                            reduction_context,
-                        );
-                        IndexKey::Computed(idx_id)
-                    }
-                };
-                let should_defer = matches!(index_key, IndexKey::Computed(_))
-                    || !matches!(
-                        graph.node_data(obj_id).as_deref(),
-                        Some(SemanticNodeData::Object(_))
-                    );
-                if should_defer {
-                    graph.intern_node_with_scope(
-                        SemanticNodeData::IndexedAccess {
-                            object: obj_id,
-                            index: index_key,
-                        },
-                        scope.clone(),
-                    )
-                } else {
-                    // Path-precision rule: the literal `T[K]` single-hop
-                    // is the TERMINAL projection of THIS indexed access,
-                    // so it runs in the CALLER's mode (not a hardcoded
-                    // `Navigate`). When `object` was itself an indexed
-                    // access (an intermediate hop), it was lowered in
-                    // `Navigate` above so its sibling members never expand;
-                    // a non-indexed-access base kept the caller's mode so a
-                    // demanded `Expanded` single-hop terminal still reduces.
-                    // A structural-transit caller keeps transit/Navigate via
-                    // its own `reduction_context.mode`.
-                    match self.execute_type_node(SemanticQueryKey::IndexedAccess {
-                        base: obj_id,
-                        index: index_key,
-                        mode: reduction_context.mode,
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                        _ => self.opaque(QueryError::Miss),
-                    }
                 }
             }
             TypeExpr::Conditional {
@@ -2541,8 +2899,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         rest: param.rest,
                         // Carry the IR parameter's OXC span verbatim.
                         span: param.span,
+                        declared_literal: crate::semantic_query::declares_literal_type(&param.ty),
                     })
                     .collect();
+                // A body-derived return carries the predicate the checker infers
+                // from the body beside it.
+                let mut inferred_predicate = None;
                 let (return_type, return_carrier) = match &func.flow_return {
                     // A body-derived return is demanded from the
                     // whole-function producer through the sealed helper:
@@ -2579,6 +2941,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     scope_canonical.as_ref(),
                                 ) {
                                     super::flow_return::FunctionReturnNode::Flow(result) => {
+                                        inferred_predicate = result.inferred_predicate();
                                         result.return_type()
                                     }
                                     _ => self.opaque(QueryError::Miss),
@@ -2661,6 +3024,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         is_const: tp.is_const,
                     })
                     .collect();
+                // The predicate target lowers under the signature's own
+                // binders, exactly like the return it rides beside.
+                let predicate = func
+                    .predicate
+                    .as_deref()
+                    .and_then(|predicate| {
+                        let target = predicate.ty.as_deref().map(|target| {
+                            self.lower_type_expr_with_infer_factory(
+                                infer_binders,
+                                target,
+                                env,
+                                scope,
+                                name_resolution,
+                                scope_payload,
+                                shadowing,
+                                substitutions,
+                                reduction_context,
+                            )
+                        });
+                        crate::semantic_query::SignaturePredicate::resolve(
+                            predicate, &params, target,
+                        )
+                    })
+                    .or(inferred_predicate);
                 let kind = match expr {
                     TypeExpr::ConstructorType(_) => crate::semantic_query::SignatureKind::Construct,
                     _ => crate::semantic_query::SignatureKind::Call,
@@ -2681,6 +3068,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         // FunctionExpr (NOT recovered from child node ids).
                         signature_span: func.spans.signature,
                         return_type_span: func.spans.return_type,
+                        predicate,
+                        is_abstract: func.is_abstract,
                     },
                     scope.clone(),
                 )
@@ -2774,6 +3163,48 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                 )
             }
+            // A spread-bearing object literal folds through the shared
+            // spread materializer (ordered left fold over direct members
+            // and spread operands).
+            TypeExpr::Object(obj)
+                if obj
+                    .properties
+                    .iter()
+                    .any(|m| matches!(m, ObjectMember::Spread(_))) =>
+            {
+                self.lower_spread_object_literal(
+                    obj,
+                    infer_binders,
+                    env,
+                    scope,
+                    name_resolution,
+                    scope_payload,
+                    shadowing,
+                    substitutions,
+                    reduction_context,
+                )
+            }
+            // Every other structural position lowers from the explicit stack.
+            TypeExpr::Ref { .. }
+            | TypeExpr::Union(_)
+            | TypeExpr::Intersection(_)
+            | TypeExpr::Array { .. }
+            | TypeExpr::Tuple { .. }
+            | TypeExpr::TemplateLiteral { .. }
+            | TypeExpr::Parenthesized(_)
+            | TypeExpr::KeyOf(_)
+            | TypeExpr::IndexedAccess { .. }
+            | TypeExpr::Object(_) => self.lower_type_expr_with_infer_factory(
+                infer_binders,
+                expr,
+                env,
+                scope,
+                name_resolution,
+                scope_payload,
+                shadowing,
+                substitutions,
+                reduction_context,
+            ),
             // Conditionals, rest, recursive-ref, and unknown
             // constructs remain out of this pass's scope — they route
             // through their own dispatch builders (conditional /

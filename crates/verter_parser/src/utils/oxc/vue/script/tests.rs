@@ -1,6 +1,6 @@
 use super::*;
+use crate::oxc_parse::Parser;
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 
 #[test]

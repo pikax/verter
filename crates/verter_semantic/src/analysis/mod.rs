@@ -25,6 +25,7 @@ mod classify;
 pub mod component_meta;
 pub mod decl_dependencies;
 pub mod decl_headers;
+pub mod enum_constant;
 
 #[cfg(test)]
 #[path = "decl_dependencies_tests.rs"]

@@ -305,6 +305,7 @@ fn selector_liveness_prunes_only_shadowed_recursive_key_effects() {
     let recursive = graph.intern_node(SemanticNodeData::Opaque(
         crate::semantic_query::QueryError::RecursiveRef {
             name: Arc::from("Self"),
+            args: std::sync::Arc::from([]),
         },
     ));
     let late_write = program(
@@ -376,6 +377,8 @@ fn whole_program_excess_and_direct_signature_rules_survive_open_spreads() {
         type_parameters: Arc::from([]),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     let callable_operand = object(graph, []);
     let callable_operand = match graph.node_data(callable_operand).as_deref() {
@@ -498,6 +501,8 @@ fn accessor_effects_normalize_to_writable_property_values() {
         type_parameters: Arc::from([]),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     let setter = graph.intern_node(SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
@@ -515,6 +520,8 @@ fn accessor_effects_normalize_to_writable_property_values() {
         type_parameters: Arc::from([]),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     let program = program(
         graph,
@@ -1003,11 +1010,16 @@ fn spread_index_signature_never_manufactures_required_named_presence() {
         ),
         "optional absence succeeds and the index value is compatible"
     );
+    // The index value is never related to an optional member the source
+    // does not name. TypeScript 7.0.2 accepts `const t: { x?: string } = {
+    // ...rec }` over `rec: { [k: string]: number }` with no diagnostic.
     let optional_bad = object(graph, [surface_member("x", string, true)]);
-    assert_eq!(
-        relate(&dispatch, spread_record, optional_bad),
-        crate::semantic_query::RelationResult::NotAssignable,
-        "a present-via-index x would carry the index value type"
+    assert!(
+        matches!(
+            relate(&dispatch, spread_record, optional_bad),
+            crate::semantic_query::RelationResult::Assignable { .. }
+        ),
+        "an optional member the source does not name relates no index value"
     );
 
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
@@ -1355,6 +1367,8 @@ fn accessor_checker_parity_getter_setter_paired_duplicate_around_spreads() {
             type_parameters: Arc::from([]),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
+            is_abstract: false,
         })
     };
     let setter = |value: SemanticNodeId| {
@@ -1374,6 +1388,8 @@ fn accessor_checker_parity_getter_setter_paired_duplicate_around_spreads() {
             type_parameters: Arc::from([]),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
+            is_abstract: false,
         })
     };
     let member_x = |program: SemanticNodeId| {
@@ -1699,6 +1715,7 @@ fn cap_and_cycle_partials_are_never_admitted_and_later_queries_heal() {
     let recursive = graph.intern_node(SemanticNodeData::Opaque(
         crate::semantic_query::QueryError::RecursiveRef {
             name: Arc::from("Self"),
+            args: std::sync::Arc::from([]),
         },
     ));
     let cyclic = program(
@@ -2434,12 +2451,18 @@ fn program_index_obligations_cover_cross_domain_contributions() {
         "a numeric-string named member is inside the number index domain"
     );
 
+    // An optional target member the source does not name is satisfied
+    // without relating the covering index value to it. TypeScript 7.0.2
+    // accepts `const t: { 42?: number } = { ...c }` over `c: { [k:
+    // number]: string }` with no diagnostic.
     let optional_42 = object(graph, [surface_member("42", number, true)]);
     let number_index_string_value2 = spread(index_object(graph, number, string));
-    assert_eq!(
-        relate(&dispatch, number_index_string_value2, optional_42),
-        crate::semantic_query::RelationResult::NotAssignable,
-        "an optional numeric target relates the covering index value and rejects"
+    assert!(
+        matches!(
+            relate(&dispatch, number_index_string_value2, optional_42),
+            crate::semantic_query::RelationResult::Assignable { .. }
+        ),
+        "an optional numeric target member is satisfied without relating the covering index"
     );
 
     let number_index_number_source = spread(index_object(graph, number, number));
@@ -2568,6 +2591,8 @@ fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
         type_parameters: Arc::from([]),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     let setter = graph.intern_node(SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
@@ -2585,6 +2610,8 @@ fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
         type_parameters: Arc::from([]),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("T"),
@@ -3353,6 +3380,8 @@ fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
         type_parameters: Arc::from([]),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     let setter_sig = graph.intern_node(SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
@@ -3370,6 +3399,8 @@ fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
         type_parameters: Arc::from([]),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     let accessor_effect = |key: AuthoredPropertyKey, signature| AuthoredAccessorEffect {
         key,
@@ -3795,6 +3826,8 @@ fn raise_fold_keeps_index_signature_off_the_single_call_fast_path() {
         type_parameters: Arc::from([]),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     // Closed program `{ (): void; [k: string]: number }` — one call
     // signature AND one index signature. The raise fold's single-call
@@ -3984,15 +4017,17 @@ fn program_index_obligations_relate_every_overlapping_source_index() {
         "every domain-overlapping source index relates — the refuting number index rejects"
     );
 
-    // Named fill: an optional numeric target member falls to the source
-    // index fill, where the same all-overlapping rule applies — the
-    // number-domain index value `string` refutes even though the
-    // string-domain index accepts via `any`.
+    // An optional numeric target member the source does not name relates
+    // no source index at all. TypeScript 7.0.2 accepts `const t: { 42?:
+    // number } = { ...m }` over `m: { [s: string]: any; [n: number]:
+    // string }` with no diagnostic.
     let target_named = object(graph, [surface_member("42", number, true)]);
-    assert_eq!(
-        relate(&dispatch, source, target_named),
-        crate::semantic_query::RelationResult::NotAssignable,
-        "the named index fill relates every applicable source index"
+    assert!(
+        matches!(
+            relate(&dispatch, source, target_named),
+            crate::semantic_query::RelationResult::Assignable { .. }
+        ),
+        "an optional target member relates no source index"
     );
 }
 

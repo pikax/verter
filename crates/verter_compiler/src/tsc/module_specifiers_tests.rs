@@ -3,8 +3,8 @@
 
 use super::*;
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
+use verter_parser::oxc_parse::Parser;
 
 fn texts(source: &str) -> Vec<String> {
     collect_module_specifier_spans(source)

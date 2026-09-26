@@ -466,7 +466,7 @@ fn spawn_decl_workers(worker_count: usize) -> Vec<std::sync::mpsc::Sender<Worker
         let (tx, rx) = std::sync::mpsc::channel::<WorkerJob>();
         std::thread::Builder::new()
             .name(format!("verter-decl-lower-{index}"))
-            .stack_size(8 * 1024 * 1024)
+            .stack_size(verter_scheduler::WORKER_STACK_BYTES)
             .spawn(move || {
                 let mut shard = SnapshotShard::new();
                 while let Ok(job) = rx.recv() {

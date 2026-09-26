@@ -538,7 +538,7 @@ pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
         QueryError::AliasCycle { chain } => {
             format!("{}{})", spell::ALIAS_CYCLE_PREFIX, chain.len())
         }
-        QueryError::RecursiveRef { name } => format!("{}{name})", spell::RECURSIVE_REF_PREFIX),
+        QueryError::RecursiveRef { name, .. } => format!("{}{name})", spell::RECURSIVE_REF_PREFIX),
         QueryError::DeclPlaceholder { name, .. } => {
             format!("{}{name})", spell::DECL_PLACEHOLDER_PREFIX)
         }
@@ -563,6 +563,13 @@ pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
                 "{}{})",
                 spell::SEMANTIC_INCOMPLETE_OPERAND_PREFIX,
                 spell::spell_partial_reasons(*reasons)
+            )
+        }
+        QueryError::CheckerRecovery(diagnostic) => {
+            format!(
+                "{}TS{})",
+                spell::CHECKER_RECOVERY_PREFIX,
+                diagnostic.code.code()
             )
         }
     }

@@ -2149,7 +2149,7 @@ const MECHANISM_TO_KEYS = new Map([
   ["LedgerCoverageGate", []],
   [
     "QueryValueDomainFoundation",
-    ["ResolveDecl", "TypeOf", "NormalizeUnion", "ReduceIntersection", "SignaturesOfType"],
+    ["ResolveDecl", "TypeOf", "ReduceUnion", "ReduceIntersection", "SignaturesOfType"],
   ],
   // The algebra closure owns ONE key of its own — the demand-scoped
   // truthiness-domain classifier. The normalization queries it closes
@@ -3057,7 +3057,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "Instantiate",
         "IndexedAccess",
         "KeyOf",
-        "NormalizeUnion",
+        "ReduceUnion",
         "LowerLocator",
       ],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
@@ -3146,20 +3146,19 @@ const LIFTED_ROW_OVERRIDES = new Map([
       "class_features_static_generic_method_instantiation_projects_return_with_substitution",
     ),
     {
-      mech: "ClassSurfaceProjection",
+      mech: "IndexedAccessUnionDistribution",
       proof: "ProofRequirement::Ts7Oracle(OracleId::ClassSurface)",
       semantic_queries: [
         "ResolveDecl",
         "Instantiate",
         "TypeOf",
         "ProjectPath",
-        "ResolveClassSurface",
         "LowerLocator",
         "SignaturesOfType",
       ],
-      consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
+      consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
-        "lifted by U2.CLASS_SURFACES: `ReturnType<typeof GenericStatic.make<string>>` lowers the instantiation-expression args on the typeof path and instantiates the static generic method to `{ wrapped: string }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+        "lifted by U2.CLASS_SURFACES: `ReturnType<typeof GenericStatic.make<string>>` lowers the instantiation-expression args on the typeof path, reads the static member where the class declares it (no whole static surface), and instantiates the static generic method to `{ wrapped: string }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
     },
   ],
   [
@@ -3483,7 +3482,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "Instantiate",
         "IndexedAccess",
         "MappedType",
-        "NormalizeUnion",
+        "ReduceUnion",
         "ProjectPath",
         "TemplateLiteralReduce",
         "LowerLocator",
@@ -3528,10 +3527,9 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "TypeOf",
         "FlowReturn",
         "LowerLocator",
-        "ClassifyTruthinessDomain",
         "SignaturesOfType",
       ],
-      consumed_mechanisms: ["QueryValueDomainFoundation", "CanonicalTypeAlgebraClosure"],
+      consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
         "lifted by U6.FLOW_RETURN_SUBSTRATE: `ReturnType<typeof bodyReturn>` solves the two-return-site body through the demand-sliced FlowReturn dispatch to the exact per-arm union (`as const` discriminants preserved, `value` widened to `number`), proven against the checked-in tsgo oracle snapshot via oracle::run_row",
     },
@@ -3668,7 +3666,7 @@ function consumedMechsForBlock(blockVar) {
 const KEY_OWNING_BLOCK = new Map([
   ["ResolveDecl", "U2QueryValueDomain"],
   ["TypeOf", "U2QueryValueDomain"],
-  ["NormalizeUnion", "U2QueryValueDomain"],
+  ["ReduceUnion", "U2QueryValueDomain"],
   ["ReduceIntersection", "U2QueryValueDomain"],
   // Shared signature discovery is value-domain substrate: the signature
   // utilities and call/construct resolution both read it.

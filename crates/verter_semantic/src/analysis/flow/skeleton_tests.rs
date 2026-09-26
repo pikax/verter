@@ -12,7 +12,7 @@ fn parse_and_build<T>(
 ) -> T {
     let allocator = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::ts();
-    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+    let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
     assert!(
         ret.errors.is_empty(),
         "fixture must parse: {:?}",
@@ -60,7 +60,9 @@ fn indexed_structure_of(source: &str) -> PreparedFunctionBodySkeleton {
     use crate::analysis::function_program::build_function_program_index;
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     assert!(parsed.errors.is_empty());
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index =
@@ -215,7 +217,9 @@ fn indexed_skeleton_retains_exact_nested_capture_paths_and_runtime_aliases() {
     let source =
         "function f(x) { {var x;} let unused = 0; { let x = {a: 1}; return () => () => x.a; } }";
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     assert!(parsed.errors.is_empty());
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index =
@@ -293,7 +297,8 @@ fn prepared_graph_does_not_resolve_free_parameter_inputs_as_body_bindings() {
     ] {
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
-            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse();
         assert!(parsed.errors.is_empty());
         let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
         let index = build_function_program_index(
@@ -350,7 +355,8 @@ fn indexed_skeleton_retains_write_only_capture_subjects_without_value_reads() {
     ] {
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
-            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse();
         assert!(parsed.errors.is_empty());
         let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
         let index = build_function_program_index(
@@ -444,7 +450,9 @@ fn object_entries(
 ) -> Vec<SkeletonObjectEntry> {
     match &skeleton.expr_site(site).shape {
         SkeletonExprShape::ObjectLiteral { entries } => entries.to_vec(),
-        SkeletonExprShape::BranchJoin { .. } | SkeletonExprShape::Other => {
+        SkeletonExprShape::BranchJoin { .. }
+        | SkeletonExprShape::ArrayLiteral { .. }
+        | SkeletonExprShape::Other => {
             panic!("site must be an object literal")
         }
     }
@@ -825,7 +833,9 @@ fn prepared_occurrences_distinguish_free_shadowed_and_captured_targets() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     let source = "const seed='global'; function root(arg=seed) { const seed=1; let value=0; { let twin=1; consume(twin); } { let twin=2; consume(twin); } return () => { value=2; return value; }; }";
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index = build_function_program_index(
         &parsed.program,
@@ -899,7 +909,9 @@ fn prepared_class_occurrences_distinguish_outer_free_and_static_local_bindings()
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     let source = "function f(x) { class C { static { touch(); var touch; { let x; x = 1; } x = 2; try {} catch (caught) { caught = 3; } for (let item of []) { item = 4; } } static { touch(); x = 5; } method() { deferred(); } p = deferredInit(); static p = immediate(); } const named = class own { static { own(); } }; return x; }";
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let (index, nodes) = build_function_program_index_with_nodes(
@@ -973,7 +985,9 @@ fn runtime_shape_preserves_parameter_var_and_pattern_alias_boundaries() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     let source = "function f(p,q,r) { var p; var [q] = []; { let q = 0; q; } return r; }";
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     assert!(parsed.errors.is_empty());
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index =
@@ -1081,7 +1095,7 @@ fn declaration_span_index_preserves_authored_alias_and_shadow_identities() {
 
 /// A site is not a callback identity. Several callables share one
 /// expression site whenever the site is a compound the skeleton does not
-/// open per element — a call's argument list, an array literal — so the
+/// open per operand — a call's argument list, a logical expression — so the
 /// site-level capture union answers "is this cell retained here" and can
 /// never answer "which callback retains it". The per-callable inventory
 /// is the partition that can: exactly one record per authored callable,
@@ -1092,7 +1106,7 @@ fn declaration_span_index_preserves_authored_alias_and_shadow_identities() {
 fn each_callable_sharing_one_site_retains_its_own_capture_partition() {
     for source in [
         "function root() { const a = 1; const b = 2; sink(() => a, () => b); return 1; }",
-        "function root() { const a = 1; const b = 2; return [() => a, () => b]; }",
+        "function root() { const a = 1; const b = 2; return (() => a) || (() => b); }",
     ] {
         let prepared = indexed_structure_of(source);
         let skeleton = prepared.skeleton();
@@ -1249,41 +1263,69 @@ fn per_callable_captures_are_shadow_exact_and_transitive() {
     );
 }
 
-/// The indexed program serves no class member body or field initializer
-/// and no parameter-list callable, so a cell retained there is named by
-/// no index record. A class evaluated at a site is therefore an unserved
-/// callable, and a SERVED callable whose body creates one only knows a
-/// lower bound of its captures. Neither may read as an exact capture set:
-/// an exact empty set is a capture-free proof, and every fixture here
-/// really retains `a`.
+/// The indexed program serves no class static block, no write a class's
+/// field initializer makes, and no parameter-list callable, so a cell
+/// retained there is named by no index record. A class evaluated at a site
+/// that runs such code is therefore an unserved callable, and a SERVED
+/// callable whose body creates a class only knows a lower bound of its
+/// captures. Neither may read as an exact capture set: an exact empty set
+/// is a capture-free proof, and every fixture here really retains `a`. A
+/// class expression's method, and a callable its initializer holds, ARE
+/// served: each is its own callable at the site, with the exact capture
+/// set its index record names — and a class with nothing else to run adds
+/// no callable of its own (its field initializers are the frame's own
+/// footprint).
 #[test]
 fn callables_the_index_cannot_serve_never_read_as_an_exact_capture_set() {
-    use SkeletonClosureCorrelation::{Partial, Uncorrelated};
+    use SkeletonClosureCorrelation::{Exact, Partial, Uncorrelated};
     for (source, expected) in [
         (
             "function root() { const a = 1; sink(class { m() { return a; } }); return 1; }",
-            Uncorrelated,
+            &[Exact][..],
         ),
         (
             "function root() { const a = 1; sink(class { m = () => a; }); return 1; }",
-            Uncorrelated,
+            &[Exact][..],
+        ),
+        (
+            "function root() { let a = 1; sink(class { v = (a = 2); m() { return a; } }); return 1; }",
+            &[Uncorrelated, Exact][..],
+        ),
+        (
+            "function root() { const a = 1; sink(class { static { use(a); } m() { return a; } }); return 1; }",
+            &[Uncorrelated, Exact][..],
         ),
         (
             "function root() { const a = 1; sink(() => class { m() { return a; } }); return 1; }",
-            Partial,
+            &[Partial][..],
         ),
         (
             "function root() { const a = 1; sink(() => { function g(q = () => a) { return q; } return g; }); return 1; }",
-            Partial,
+            &[Partial][..],
         ),
     ] {
         let prepared = indexed_structure_of(source);
-        let closures = sole_closure_inventory(prepared.skeleton());
-        assert_eq!(closures.len(), 1, "one authored callable at the site: {source}");
+        let skeleton = prepared.skeleton();
+        let a = single_binding_named(skeleton, "a");
+        let closures = sole_closure_inventory(skeleton);
         assert_eq!(
-            closures[0].correlation, expected,
+            closures
+                .iter()
+                .map(|closure| closure.correlation)
+                .collect::<Vec<_>>(),
+            expected,
             "an unserved capture is never an exact set: {source}"
         );
+        for closure in closures
+            .iter()
+            .filter(|closure| closure.correlation == Exact)
+        {
+            assert_eq!(
+                closure.captures.as_ref(),
+                &[FlowBindingRef::Local(a)],
+                "a served class member names the cell it retains: {source}"
+            );
+        }
     }
 }
 
@@ -1354,4 +1396,48 @@ fn sole_closure_inventory(skeleton: &FunctionBodySkeleton) -> &[SkeletonClosure]
     let site = sites.next().expect("the fixture authors one callable");
     assert!(sites.next().is_none(), "exactly one site holds a callable");
     &site.closures
+}
+
+#[test]
+// @ai-generated - A tagged template is one call occurrence of its tag.
+fn a_tagged_template_is_a_call_occurrence_of_its_tag() {
+    let source = "function f(x: string) { return tag`a${x}b`; }";
+    let skeleton = skeleton_of(source);
+    let calls: Vec<&SkeletonCall> = skeleton
+        .expr_sites
+        .iter()
+        .flat_map(|site| site.calls.iter())
+        .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "the tagged template calls its tag once; the substitution calls nothing"
+    );
+    assert_eq!(
+        calls[0].callee,
+        SkeletonCallee::Named(skeleton.name_id("tag").expect("tag interned"))
+    );
+    assert!(!calls[0].new_construct);
+}
+
+/// An array literal opens one child site per element, but a nest of array
+/// literals deeper than the shallow inference's nesting budget is a leaf:
+/// that inference answers it whole and reports the typed budget
+/// exhaustion, so neither half descends it level by level. Sixty-four
+/// levels are structural; sixty-five are one leaf.
+#[test]
+fn array_nests_past_the_inference_budget_are_leaves() {
+    let nest = |levels: usize| format!("{}0{}", "[".repeat(levels), "]".repeat(levels));
+    let return_shape = |levels: usize| {
+        let skeleton = skeleton_of(&format!("function f() {{ return {}; }}", nest(levels)));
+        let site = skeleton.return_sites[0]
+            .argument
+            .expect("the return carries a value");
+        matches!(
+            skeleton.expr_site(site).shape,
+            SkeletonExprShape::ArrayLiteral { .. }
+        )
+    };
+    assert!(return_shape(64), "a 64-level nest opens its array sites");
+    assert!(!return_shape(65), "a 65-level nest is one leaf");
 }

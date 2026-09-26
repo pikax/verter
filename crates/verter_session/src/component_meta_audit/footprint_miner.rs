@@ -452,7 +452,9 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
         SemanticNodeData::Primitive(_) => SemanticNodeKind::Primitive,
         // Literals collapse to `Primitive` in v1 — `display_label`
         // distinguishes the exact literal value.
-        SemanticNodeData::Literal(_) => SemanticNodeKind::Primitive,
+        SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_) => {
+            SemanticNodeKind::Primitive
+        }
         SemanticNodeData::Opaque(_) => SemanticNodeKind::Opaque,
         SemanticNodeData::Array { .. } => SemanticNodeKind::Array,
         SemanticNodeData::Tuple { .. } => SemanticNodeKind::Tuple,
@@ -478,6 +480,9 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
         },
         SemanticNodeData::InstantiationRef { .. } => SemanticNodeKind::Other {
             name: Arc::from("InstantiationRef"),
+        },
+        SemanticNodeData::ClassExpressionInstance { .. } => SemanticNodeKind::Other {
+            name: Arc::from("ClassExpressionInstance"),
         },
         SemanticNodeData::MergedDecl { .. } => SemanticNodeKind::Other {
             name: Arc::from("MergedDecl"),
@@ -512,6 +517,7 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
         SemanticNodeData::Intersection(arms) => Arc::from(format!("Intersection[{}]", arms.len())),
         SemanticNodeData::Primitive(p) => Arc::from(format!("{p:?}")),
         SemanticNodeData::Literal(lit) => Arc::from(format!("{lit:?}")),
+        SemanticNodeData::EnumLiteral(literal) => Arc::from(literal.printed_name()),
         SemanticNodeData::Opaque(_) => Arc::from("Opaque"),
         SemanticNodeData::Array { readonly, .. } => {
             Arc::from(if *readonly { "ReadonlyArray" } else { "Array" })
@@ -565,6 +571,9 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
             base.decl_name,
             args.len()
         )),
+        SemanticNodeData::ClassExpressionInstance { identity, .. } => {
+            Arc::from(format!("ClassExpressionInstance({})", identity.name))
+        }
         SemanticNodeData::MergedDecl { contributors } => {
             Arc::from(format!("MergedDecl[{}]", contributors.len()))
         }
@@ -656,7 +665,7 @@ fn node_kind_discriminant(kind: &SemanticNodeKind) -> u32 {
         SemanticNodeKind::TypeOf => 14,
         SemanticNodeKind::Mapped => 15,
         SemanticNodeKind::TemplateLiteral => 16,
-        SemanticNodeKind::NormalizeUnion => 17,
+        SemanticNodeKind::ReduceUnion => 17,
         SemanticNodeKind::ReduceIntersection => 18,
         SemanticNodeKind::Other { .. } => 19,
         // `SemanticNodeKind` is `#[non_exhaustive]`; the catch-all

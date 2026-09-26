@@ -119,7 +119,36 @@ struct Cli {
     _force: Option<String>,
 }
 
+/// The native stack of the thread that runs the checker and of the rayon
+/// workers that compile its components in parallel, the size of every
+/// analysis thread (`verter_scheduler::WORKER_STACK_BYTES`: 8 MiB optimized,
+/// 32 MiB unoptimized). Public-API extraction and macro input run on the
+/// calling thread, and the platform defaults (1 MiB for the Windows main
+/// thread, 2 MiB for rayon's workers) held a fraction of what the analysis
+/// of a deeply nested source takes. A reservation costs address space, not
+/// memory.
+const STACK_BYTES: usize = if cfg!(debug_assertions) {
+    32 * 1024 * 1024
+} else {
+    8 * 1024 * 1024
+};
+
 fn main() {
+    // The global pool is built before anything parallel runs; a pool
+    // already built (never, in this binary) keeps its own threads.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .stack_size(STACK_BYTES)
+        .build_global();
+    std::thread::Builder::new()
+        .name("verter-tsc".to_string())
+        .stack_size(STACK_BYTES)
+        .spawn(check)
+        .expect("the checker thread must spawn")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
+fn check() {
     let cli = Cli::parse();
 
     // Resolve project path: -p takes precedence, then -b positional, then default

@@ -1437,6 +1437,7 @@ impl PreparedValueDecl {
                 annotation: None,
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
                 expression_source: None,
+                literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
             },
             signatures: Vec::new(),
             object_shape: None,
@@ -2012,10 +2013,12 @@ mod tests {
                 EnumMemberEntry {
                     name: "Red".to_string(),
                     value: EnumScalar::Number("0".to_string()),
+                    initializer: None,
                 },
                 EnumMemberEntry {
                     name: "Green".to_string(),
                     value: EnumScalar::Number("1".to_string()),
+                    initializer: None,
                 },
             ]),
         });
@@ -2535,6 +2538,7 @@ mod tests {
             constraint: None,
             default: None,
             is_const: false,
+            variance: verter_type_expr::facts::TypeParamVariance::Unannotated,
         }
     }
 

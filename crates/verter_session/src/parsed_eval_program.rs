@@ -68,7 +68,7 @@ impl ParsedEvalProgram {
                 source_type,
             },
             |owner| {
-                let result = oxc_parser::Parser::new(
+                let result = verter_parser::oxc_parse::Parser::new(
                     &owner.allocator,
                     owner.source.as_ref(),
                     owner.source_type,
@@ -149,13 +149,16 @@ impl ParsedEvalProgram {
         Some(lower(retained.nodes.get(&entry.key)?, indexed))
     }
 
-    pub(crate) fn with_indexed_call<R>(
+    /// Lower the indexed call, `new` or tagged template addressed by `span`.
+    pub(crate) fn with_indexed_call_site<R>(
         &self,
         span: verter_span::Span,
-        lower: impl for<'a> FnOnce(&'a oxc_ast::ast::CallExpression<'a>) -> R,
+        lower: impl for<'a> FnOnce(
+            verter_semantic::analysis::function_program::IndexedCallSite<'a>,
+        ) -> R,
     ) -> Option<R> {
         let cell = self.functions.get()?;
-        Some(lower(cell.borrow_dependent().nodes.call(span)?))
+        Some(lower(cell.borrow_dependent().nodes.call_site(span)?))
     }
 
     /// Whether the parse recovered from errors (`ParserReturn::errors`

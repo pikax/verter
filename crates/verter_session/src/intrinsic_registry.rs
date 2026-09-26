@@ -81,6 +81,21 @@ pub enum RuntimeNominal {
 }
 
 impl RuntimeNominal {
+    /// The global interface name this nominal is.
+    #[must_use]
+    pub fn global_name(self) -> &'static str {
+        match self {
+            Self::Date => "Date",
+            Self::Map => "Map",
+            Self::Set => "Set",
+            Self::WeakMap => "WeakMap",
+            Self::WeakSet => "WeakSet",
+            Self::Promise => "Promise",
+            Self::Error => "Error",
+            Self::Function => "Function",
+        }
+    }
+
     #[must_use]
     pub fn from_global_name(name: &str) -> Option<Self> {
         match name {
@@ -94,6 +109,17 @@ impl RuntimeNominal {
             "Function" => Some(Self::Function),
             _ => None,
         }
+    }
+
+    /// The runtime nominal a `__builtin__` declaration identity names — the
+    /// unshadowed global lib type whose application carrier the lowering
+    /// fast path interns (`Promise<T>`, `Date`, …). That carrier IS the
+    /// resolved type: it has no declaration body to resolve further.
+    #[must_use]
+    pub fn of_builtin_identity(identity: &crate::semantic_query::DeclIdentity) -> Option<Self> {
+        (identity.canonical_id.as_ref() == "__builtin__")
+            .then(|| Self::from_global_name(identity.decl_name.as_ref()))
+            .flatten()
     }
 }
 

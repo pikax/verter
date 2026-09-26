@@ -13,10 +13,63 @@ use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    CacheRead, IndexKey, LiteralValue, PartialReasonSet, ProjectionMode,
+    CacheRead, IndexKey, LiteralValue, PartialReasonSet, PrimitiveKind, ProjectionMode,
     ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ResultCompleteness,
     ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
+
+/// How the checker prints an application of a named declaration — the
+/// altitude the declaration-keeping structural-fact demand stops at (see
+/// `ProjectSemanticDispatch::printed_declaration`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrintedDeclaration {
+    /// An interface or class, or a mapped utility application the checker
+    /// names (`Partial<Face>`): printed by its name.
+    Named,
+    /// An alias the checker prints by name when its application settles
+    /// on the type the alias constructs.
+    AliasNamed,
+    /// An alias whose body is an intersection: the checker names only the
+    /// intersection or the distributed union its application constructs
+    /// (`type NN<T> = T & {}` prints `NN<string | number | null>`), never
+    /// a constituent the intersection reduced to (`NN<{ a: string } |
+    /// null>` prints `{ a: string; }`, `NN<unknown>` prints `{}`) nor an
+    /// argument it returned as it is (`type NU<T> = T & unknown` prints
+    /// `NU<string | null>` as `string | null`).
+    AliasNamedIntersection,
+    /// An alias the checker prints as the application its body writes: a
+    /// reference to a non-generic declaration (`type ToFace = Face` prints
+    /// `Face`) or a homomorphic mapped application (`type P<T> =
+    /// Partial<T>` prints `P<{ a: 1 }>` as `Partial<{ a: 1; }>`).
+    AliasThrough,
+    /// An alias the checker prints as what it resolves to.
+    AliasTransparent,
+}
+
+/// A builtin mapped utility, by whether its mapping is homomorphic (its
+/// keys are `keyof` its source).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuiltinMappedUtility {
+    /// `Partial` / `Required` / `Readonly`.
+    Homomorphic,
+    /// `Pick` / `Record` / `Omit`.
+    Keyed,
+}
+
+impl BuiltinMappedUtility {
+    fn of(name: &str) -> Option<Self> {
+        match name {
+            "Partial" | "Required" | "Readonly" => Some(Self::Homomorphic),
+            "Pick" | "Record" | "Omit" => Some(Self::Keyed),
+            _ => None,
+        }
+    }
+}
+
+/// Whether `identity` names a builtin (lib) declaration.
+fn is_builtin(identity: &crate::semantic_query::DeclIdentity) -> bool {
+    identity.canonical_id.as_ref() == "__builtin__"
+}
 
 /// Map a residual-carrier resolution read's `QueryError` onto the demand
 /// loop's typed exit classification.
@@ -511,7 +564,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> StructuralFactDemandOutcome {
         // Full structural-fact demand: resolve BOTH residual carriers
         // (`DeclRef` via `ResolveDecl`, `InstantiationRef` via `Instantiate`).
-        self.resolve_structural_fact_demand(node, context, true)
+        self.resolve_structural_fact_demand(node, context, true, true)
     }
 
     /// Carrier-PRESERVING sibling of
@@ -549,21 +602,131 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> StructuralFactDemandOutcome {
         // Carrier-preserving peel: resolve `DeclRef` shells but STOP at an
         // `InstantiationRef` (do NOT instantiate — leave the args readable).
-        self.resolve_structural_fact_demand(node, context, false)
+        self.resolve_structural_fact_demand(node, context, false, true)
     }
 
-    /// Shared residual-carrier resolution loop backing both
-    /// [`Self::normalize_node_for_structural_fact_demand`]
-    /// (`instantiate_instantiation_refs = true`) and
-    /// [`Self::peel_node_for_uninstantiated_carrier_fact_demand`]
-    /// (`= false`). ONE loop, one resolver — the two entry points differ ONLY by
-    /// whether the `InstantiationRef` arm instantiates (there is no divergent
-    /// second implementation).
+    /// Declaration-KEEPING sibling of
+    /// [`Self::normalize_node_for_structural_fact_demand`]: resolves
+    /// residual carriers through the shared `ResolveDecl` / `Instantiate`
+    /// queries exactly as it does, but STOPS where the checker prints a
+    /// NAME instead of resolving it to the declaration's body.
+    ///
+    /// That is the altitude a type is PRINTED at: a utility or conditional
+    /// application (`InstanceType<…>`, `ReturnType<…>`, `Awaited<…>`) is
+    /// reduced, while a named interface is shown by its name, and so is an
+    /// alias application the checker names by its alias — each with its
+    /// omitted defaulted arguments filled (see
+    /// `ProjectSemanticDispatch::printed_declaration`). The checker's
+    /// printed answer to `InstanceType<typeof CtorA & typeof CtorB>` is `B`,
+    /// the interface — not `{ b: 2 }`, its body — and to a `WithDefault`
+    /// reference it is `WithDefault<string>`, so an evidence lane that
+    /// compares a live answer against a recorded print needs this stop, and
+    /// the fully resolving demand overshoots it by exactly one step.
+    ///
+    /// Same loop, same resolver, same bounds and typed `Partial` outcome as
+    /// its siblings; STRICTLY test-scoped because its only consumer is the
+    /// in-crate signature-corpus driver.
+    #[cfg(test)]
+    pub(crate) fn normalize_node_keeping_declaration_refs_for_tests(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> StructuralFactDemandOutcome {
+        self.resolve_structural_fact_demand(node, context, true, false)
+    }
+
+    /// The named declaration an indexed access reads, when its terminal is
+    /// one: the object evaluated, the member read at navigate altitude, and
+    /// the read kept only when it is a declaration or class reference.
+    /// `None` for any other access (a computed index, a partial read, a
+    /// terminal that is not a named reference).
+    fn named_indexed_access(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<EvaluateDeferredOutcome> {
+        let (object, index) = match self.graph().node_data(node)?.as_ref() {
+            SemanticNodeData::IndexedAccess { object, index }
+                if !matches!(index, IndexKey::Computed(_)) =>
+            {
+                (*object, clone_index_key(index))
+            }
+            _ => return None,
+        };
+        let base =
+            self.evaluate_deferred_outcome(object, context.with_mode(ProjectionMode::Navigate));
+        if !matches!(base.completeness, ResultCompleteness::Complete) {
+            return None;
+        }
+        let read = self.execute_read(SemanticQueryKey::IndexedAccess {
+            base: base.node,
+            index,
+            mode: ProjectionMode::Navigate,
+        });
+        if read.result_is_partial {
+            return None;
+        }
+        let QueryResult::Value(value) = read.value else {
+            return None;
+        };
+        self.is_named_reference(value)
+            .then(|| EvaluateDeferredOutcome::complete(value))
+    }
+
+    /// Whether `node` is a type the checker prints by name: a declaration
+    /// or class reference, or a union or intersection of them.
+    fn is_named_reference(&self, node: SemanticNodeId) -> bool {
+        match self.graph().node_data(node).as_deref() {
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::ClassExpressionInstance { .. },
+            ) => true,
+            Some(SemanticNodeData::Union(arms)) => {
+                arms.iter().all(|arm| self.is_named_reference(*arm))
+            }
+            Some(SemanticNodeData::Intersection(arms)) => {
+                arms.iter().all(|arm| self.is_named_reference(*arm))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether reading `index` off the evaluated `object` at navigate
+    /// altitude ends at a named declaration or class reference.
+    pub(super) fn indexed_access_reads_named_declaration(
+        &self,
+        object: SemanticNodeId,
+        index: &IndexKey,
+    ) -> bool {
+        let read = self.execute_read(SemanticQueryKey::IndexedAccess {
+            base: object,
+            index: clone_index_key(index),
+            mode: ProjectionMode::Navigate,
+        });
+        if read.result_is_partial {
+            return false;
+        }
+        let QueryResult::Value(value) = read.value else {
+            return false;
+        };
+        self.is_named_reference(value)
+    }
+
+    /// Shared residual-carrier resolution loop backing
+    /// [`Self::normalize_node_for_structural_fact_demand`] (both residual arms
+    /// resolve), [`Self::peel_node_for_uninstantiated_carrier_fact_demand`]
+    /// (`instantiate_instantiation_refs = false`) and, under test,
+    /// `normalize_node_keeping_declaration_refs_for_tests`
+    /// (`resolve_declaration_refs = false`). ONE loop, one resolver — the
+    /// entry points differ ONLY in which residual arm is allowed to resolve
+    /// (there is no divergent second implementation).
     fn resolve_structural_fact_demand(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
         instantiate_instantiation_refs: bool,
+        resolve_declaration_refs: bool,
     ) -> StructuralFactDemandOutcome {
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
         if let Some(reasons) = initial_trip {
@@ -573,7 +736,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Step 1: evaluate deferred shells (Alias / KeyOf / IndexedAccess /
         // Mapped / Conditional / TemplateLiteral / DeclPlaceholder / bare-import),
         // merging the evaluation's typed completeness into the demand outcome.
-        let first = self.evaluate_deferred_outcome(node, context);
+        // The declaration-keeping mode prints an indexed access that reads
+        // a named declaration by that name, as the checker does (`W['d']`
+        // over `d: Decl` is `Decl`, a class constructor's `prototype` its
+        // class): the read stops at the reference its terminal holds.
+        let first = match (!resolve_declaration_refs)
+            .then(|| self.named_indexed_access(node, context))
+            .flatten()
+        {
+            Some(named) => named,
+            None => self.evaluate_deferred_outcome(node, context),
+        };
         let mut completeness = first.completeness;
         let mut n = first.node;
         // Step 2: resolve residual DeclRef / InstantiationRef carriers the
@@ -593,6 +766,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `PROPAGATED`), so the completeness survives even with NO
         // `RequestContext` installed.
         let mut visited = rustc_hash::FxHashSet::default();
+        // The declaration-keeping mode's OUTERMOST alias application the
+        // checker names, recorded as the chain resolves through it and
+        // printed when the chain settles on a type that alias names.
+        // An intersection-bodied alias also keeps its application's
+        // arguments: an argument the construction returns as it is was not
+        // constructed by the alias.
+        let mut named_alias_application: Option<(SemanticNodeId, Option<Vec<SemanticNodeId>>)> =
+            None;
         // The loop's own exit classification: `None` = a stable (Complete)
         // stop; `Some(reasons)` = an operational truncation/fault.
         let exit_reasons: Option<PartialReasonSet> = loop {
@@ -601,20 +782,128 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // cannot read.
                 break Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA);
             };
+            // The declaration-keeping mode prints a named declaration the
+            // way the checker does: an interface or class by its name, an
+            // alias application by its alias when the alias names the type
+            // it resolves to — each with its omitted defaulted arguments
+            // filled — and every other alias by what it resolves to.
+            let printed = if resolve_declaration_refs {
+                None
+            } else {
+                match data.as_ref() {
+                    SemanticNodeData::DeclRef { identity } => Some((identity.clone(), None)),
+                    SemanticNodeData::InstantiationRef { base, args } => {
+                        Some((base.clone(), Some(Arc::clone(args))))
+                    }
+                    _ => None,
+                }
+            };
+            let printed = printed.map(|(identity, args)| {
+                let kind = if is_builtin(&identity) {
+                    self.printed_builtin_application(
+                        &identity,
+                        args.as_deref().unwrap_or_default(),
+                        context,
+                    )
+                } else {
+                    self.printed_declaration(&identity)
+                };
+                (identity, args, kind)
+            });
             // TERMINAL-BEFORE-FUSE: classify whether `n` is a residual
             // resolvable carrier BEFORE consulting the fuse, so a result that
             // reached its terminal structural body on exactly the last
             // permitted step is a stable stop, never a false partial. The
             // non-residual break also covers the peel's deliberate
-            // un-instantiated `InstantiationRef` stop.
-            let is_residual = match data.as_ref() {
-                SemanticNodeData::DeclRef { .. } => true,
-                SemanticNodeData::InstantiationRef { .. } => instantiate_instantiation_refs,
+            // un-instantiated `InstantiationRef` stop, and the
+            // declaration-keeping mode's stop at a declaration printed by
+            // its name or at a class-expression instance.
+            let is_residual = match (data.as_ref(), &printed) {
+                (_, Some((_, _, Some(PrintedDeclaration::Named)))) => false,
+                (_, Some((_, _, Some(_)))) => true,
+                (
+                    SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. },
+                    _,
+                ) => resolve_declaration_refs,
+                (SemanticNodeData::InstantiationRef { .. }, _) => instantiate_instantiation_refs,
                 _ => false,
             };
+            drop(data);
+            if let Some((identity, args, Some(kind))) = &printed {
+                let args = args.as_deref().unwrap_or_default();
+                match kind {
+                    // A builtin application is its own printed name.
+                    PrintedDeclaration::Named if is_builtin(identity) => {}
+                    PrintedDeclaration::Named => {
+                        n = self.declared_application(n, identity, args, context);
+                    }
+                    PrintedDeclaration::AliasNamed | PrintedDeclaration::AliasNamedIntersection
+                        if named_alias_application.is_none() =>
+                    {
+                        let intersection_arguments =
+                            (*kind == PrintedDeclaration::AliasNamedIntersection).then(|| {
+                                args.iter()
+                                    .flat_map(|arg| {
+                                        [*arg, self.evaluate_deferred_outcome(*arg, context).node]
+                                    })
+                                    .collect()
+                            });
+                        named_alias_application = Some((
+                            self.declared_application(n, identity, args, context),
+                            intersection_arguments,
+                        ));
+                    }
+                    // The application the alias's body writes, substituted
+                    // and still unreduced — classified in turn.
+                    PrintedDeclaration::AliasThrough => {
+                        let read = self.execute_read(SemanticQueryKey::Instantiate(
+                            crate::semantic_query::InstantiateKey::new(
+                                self.type_slot_for(
+                                    Arc::clone(&identity.canonical_id),
+                                    identity.owner,
+                                    Arc::clone(&identity.decl_name),
+                                ),
+                                Arc::from(args.to_vec().into_boxed_slice()),
+                                self.instantiate_context_for(
+                                    &identity.canonical_id,
+                                    ProjectionReductionContext::structural_transit_with_mode(
+                                        ProjectionMode::Navigate,
+                                    ),
+                                ),
+                            ),
+                        ));
+                        crate::request_context::observe_component_meta_read_suppress(&read);
+                        crate::meta_resolve::emit_dispatch_dep_signature_facts(
+                            self.ctx,
+                            &read.dep_signature,
+                        );
+                        completeness = completeness
+                            .or_partial_if(read.result_is_partial, read.partial_reason_classes());
+                        if let QueryResult::Value(target) = read.value {
+                            if target != n {
+                                if !visited.insert(n) {
+                                    break Some(PartialReasonSet::SAME_PATH_RECURSION);
+                                }
+                                if let Err(reasons) = self.charge_connected_work() {
+                                    break Some(reasons);
+                                }
+                                n = target;
+                                continue;
+                            }
+                        }
+                    }
+                    PrintedDeclaration::AliasNamed
+                    | PrintedDeclaration::AliasNamedIntersection
+                    | PrintedDeclaration::AliasTransparent => {}
+                }
+            }
             if !is_residual {
                 break None;
             }
+            let Some(data) = self.graph().node_data(n) else {
+                break Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA);
+            };
             if !visited.insert(n) {
                 // Residual-carrier cycle (`type MutA = MutB; type MutB = MutA`):
                 // the chain can never settle.
@@ -627,6 +916,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 break Some(reasons);
             }
             let resolved = match data.as_ref() {
+                // A class expression's instance resolves to the instance surface
+                // it carries — the body a `DeclRef` resolves to, already in hand.
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                    let surface = *surface;
+                    drop(data);
+                    self.class_expression_read_surface(n).unwrap_or(surface)
+                }
                 // Residual DeclRef → the canonical shallow `ResolveDecl` query
                 // (the `ScopeId { canonical_id, local_scope: None }` shape the
                 // canonical resolver issues).
@@ -727,6 +1023,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         if let Some(reasons) = exit_reasons {
             completeness = completeness.merge(ResultCompleteness::partial(reasons));
+        } else {
+            if let Some(reduced) = self.composite_over_resolved_arms(n) {
+                n = reduced;
+            }
+            if let Some(reduced) = self.union_over_evaluated_key_arms(n, context) {
+                n = reduced;
+            }
+        }
+        // The alias names the type its application settled on only while
+        // that type is one the alias itself constructs; a union that
+        // collapsed to one member (`type U<T> = T | string` at `string`) or
+        // an intersection reduced to `never` is printed as itself.
+        if let Some((named, intersection_arguments)) = named_alias_application {
+            let named_by_alias = if let Some(arguments) = intersection_arguments {
+                matches!(
+                    self.graph().node_data(n).as_deref(),
+                    Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
+                ) && !arguments.contains(&n)
+            } else {
+                self.alias_names_settled_type(n) && !self.mapped_alias_over_array(named, n)
+            };
+            if named_by_alias {
+                n = named;
+            }
+        }
+        // The declaration-keeping mode prints an application's arguments as
+        // the checker prints them.
+        if !resolve_declaration_refs && !completeness.is_partial() {
+            n = self.application_over_printed_arguments(n, context);
         }
         match completeness {
             ResultCompleteness::Complete => StructuralFactDemandOutcome::Complete(n),
@@ -761,6 +1086,409 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 StructuralFactDemandOutcome::Partial(reasons)
             }
         }
+    }
+
+    /// How the checker prints an application of the named declaration
+    /// `identity` — measured on the pinned TypeScript 7.0.2 through the
+    /// corpus's two-step wrapper:
+    ///
+    /// - an interface or class application is printed by its name
+    ///   (`GI` with `interface GI<T = number>` prints `GI<number>`);
+    /// - an alias whose declared body is a type the alias itself
+    ///   constructs — an object, function, mapped, array or tuple type, a
+    ///   union or an intersection — is printed by the alias (`Tup<number>`,
+    ///   `Fn<number>`);
+    /// - an alias whose body references another declaration prints as
+    ///   [`Self::printed_alias_reference`] decides;
+    /// - every other alias is not named by the alias: a conditional
+    ///   (`Cond` prints its selected branch), a bare parameter
+    ///   (`type Lit<T> = T`) or a primitive.
+    ///
+    /// `None` when the declaration's kind or body cannot be recovered.
+    fn printed_declaration(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<PrintedDeclaration> {
+        self.printed_declaration_within(identity, &mut rustc_hash::FxHashSet::default())
+    }
+
+    fn printed_declaration_within(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+        visited: &mut rustc_hash::FxHashSet<crate::semantic_query::DeclIdentity>,
+    ) -> Option<PrintedDeclaration> {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        if !visited.insert(identity.clone()) {
+            // An alias cycle names nothing.
+            return Some(PrintedDeclaration::AliasTransparent);
+        }
+        match self.prepared_decl_kind(identity)? {
+            TypeDeclKind::Interface | TypeDeclKind::Class => {
+                return Some(PrintedDeclaration::Named)
+            }
+            TypeDeclKind::Alias => {}
+        }
+        let Some(body) = self.declared_alias_body(identity)? else {
+            return Some(PrintedDeclaration::AliasTransparent);
+        };
+        Some(match self.graph().node_data(body).as_deref() {
+            Some(
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::Signature { .. }
+                | SemanticNodeData::Mapped { .. }
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Union(_),
+            ) => PrintedDeclaration::AliasNamed,
+            Some(SemanticNodeData::Intersection(_)) => PrintedDeclaration::AliasNamedIntersection,
+            Some(SemanticNodeData::DeclRef { identity: target }) => {
+                self.printed_alias_reference(target, &[], visited)
+            }
+            Some(SemanticNodeData::InstantiationRef { base: target, args }) => {
+                self.printed_alias_reference(target, args, visited)
+            }
+            _ => PrintedDeclaration::AliasTransparent,
+        })
+    }
+
+    /// How the checker prints an alias whose declared body references
+    /// `target` with the declared arguments `args`, measured on TypeScript
+    /// 7.0.2:
+    ///
+    /// - a reference to a NON-generic declaration is that declaration's
+    ///   type, printed as it prints (`type ToFace = Face` prints `Face`,
+    ///   `type ToObj = Obj` prints `Obj`, `type ToToFace = ToFace` prints
+    ///   `Face`);
+    /// - a generic interface or class application is named by the alias
+    ///   (`type ToGFace = GFace<string>` prints `ToGFace`,
+    ///   `type ToGFaceDefault = GFace` prints `ToGFaceDefault`,
+    ///   `type PromAlias<T> = Promise<T>` prints `PromAlias<number>`);
+    /// - a homomorphic mapped application — `Partial` / `Required` /
+    ///   `Readonly`, or an alias declaring one — keeps the MAPPED name
+    ///   unless its declared source is a union (`type P<T> = Partial<T>`
+    ///   prints `P<{ a: 1 }>` as `Partial<{ a: 1; }>`, `type PP<T> = P<T>`
+    ///   too, `type MpA<T> = Mp<T>` over `type Mp<T> = { [K in keyof T]:
+    ///   T[K] }` prints `Mp<{ a: 1; }>`, `type PFace = Partial<Face>` prints
+    ///   `Partial<Face>`, while `type PU = Partial<Face | Obj>` prints `PU`);
+    /// - a keyed mapped application is named by the alias (`type PickA<T> =
+    ///   Pick<T, 'a'>` prints `PickA<{ a: 1; b: 2; }>`, `type Rec<K> =
+    ///   Record<K, number>` prints `Rec<"x">`, `type PickAB = Pick<…>`
+    ///   prints `PickAB`);
+    /// - a generic alias application is named by the outer alias unless the
+    ///   target itself prints as what it resolves to (`type G<U> = F<U[]>`
+    ///   prints `G<boolean>`, `type OuterCond<T> = Cond<T>` prints the
+    ///   selected branch);
+    /// - any other builtin (a conditional utility) is what it resolves to.
+    fn printed_alias_reference(
+        &self,
+        target: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        visited: &mut rustc_hash::FxHashSet<crate::semantic_query::DeclIdentity>,
+    ) -> PrintedDeclaration {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        if is_builtin(target) {
+            return match BuiltinMappedUtility::of(&target.decl_name) {
+                Some(BuiltinMappedUtility::Homomorphic) if !self.declared_union(args.first()) => {
+                    PrintedDeclaration::AliasThrough
+                }
+                Some(_) => PrintedDeclaration::AliasNamed,
+                None if self.runtime_nominal_identity(target).is_some() => {
+                    PrintedDeclaration::AliasNamed
+                }
+                None => PrintedDeclaration::AliasTransparent,
+            };
+        }
+        let (Some(kind), Some(generic)) = (
+            self.prepared_decl_kind(target),
+            self.prepared_decl_is_generic(target),
+        ) else {
+            return PrintedDeclaration::AliasTransparent;
+        };
+        match kind {
+            _ if !generic => PrintedDeclaration::AliasThrough,
+            TypeDeclKind::Interface | TypeDeclKind::Class => PrintedDeclaration::AliasNamed,
+            TypeDeclKind::Alias if self.alias_declares_homomorphic_mapping(target) => {
+                PrintedDeclaration::AliasThrough
+            }
+            TypeDeclKind::Alias => match self.printed_declaration_within(target, visited) {
+                Some(PrintedDeclaration::AliasTransparent) | None => {
+                    PrintedDeclaration::AliasTransparent
+                }
+                Some(_) => PrintedDeclaration::AliasNamed,
+            },
+        }
+    }
+
+    /// Whether the alias `identity` declares a homomorphic mapped type — a
+    /// mapping over `keyof` one of its type parameters, a `Partial` /
+    /// `Required` / `Readonly` application over a source that is not a
+    /// union, or an application of another alias that does. The checker
+    /// gives such a declaration the mapped type's own name, so an alias of
+    /// it is printed by that name.
+    fn alias_declares_homomorphic_mapping(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> bool {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        let mut visited = rustc_hash::FxHashSet::default();
+        let mut current = identity.clone();
+        loop {
+            if !visited.insert(current.clone()) {
+                return false;
+            }
+            let Some(Some(body)) = self.declared_alias_body(&current) else {
+                return false;
+            };
+            let graph = self.graph();
+            let next = match graph.node_data(body).as_deref() {
+                Some(SemanticNodeData::Mapped { mapper, .. }) => {
+                    return match graph.node_data(mapper.key_space).as_deref() {
+                        Some(SemanticNodeData::KeyOf { base }) => matches!(
+                            graph.node_data(*base).as_deref(),
+                            Some(SemanticNodeData::TypeParam { .. })
+                        ),
+                        _ => false,
+                    };
+                }
+                Some(SemanticNodeData::InstantiationRef { base, args }) if is_builtin(base) => {
+                    return BuiltinMappedUtility::of(&base.decl_name)
+                        == Some(BuiltinMappedUtility::Homomorphic)
+                        && !self.declared_union(args.first());
+                }
+                Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
+                _ => return false,
+            };
+            if self.prepared_decl_kind(&next) != Some(TypeDeclKind::Alias) {
+                return false;
+            }
+            current = next;
+        }
+    }
+
+    /// Whether a declared (unsubstituted) type argument is a union.
+    fn declared_union(&self, argument: Option<&SemanticNodeId>) -> bool {
+        argument.is_some_and(|argument| {
+            matches!(
+                self.graph().node_data(*argument).as_deref(),
+                Some(SemanticNodeData::Union(_))
+            )
+        })
+    }
+
+    /// How the checker prints a builtin application reached directly: a
+    /// mapped utility is printed by its name (`Partial<{ a: 1 }>` prints
+    /// `Partial<{ a: 1; }>`, `Pick<…, 'a'>` prints `Pick<{ a: 1; b: 2; },
+    /// "a">`, `Partial<Face | Obj>` prints `Partial<Face | Obj>`) except a
+    /// homomorphic one over a primitive, array or tuple, which the checker
+    /// maps into that type (`Partial<string>` prints `string`). `None` for
+    /// every other builtin, which resolves as before.
+    fn printed_builtin_application(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        context: ProjectionReductionContext,
+    ) -> Option<PrintedDeclaration> {
+        match BuiltinMappedUtility::of(&identity.decl_name)? {
+            BuiltinMappedUtility::Keyed => Some(PrintedDeclaration::Named),
+            BuiltinMappedUtility::Homomorphic => {
+                let source = self
+                    .normalize_node_for_structural_fact_demand(*args.first()?, context)
+                    .into_complete_node()?;
+                (!matches!(
+                    self.graph().node_data(source).as_deref(),
+                    Some(
+                        SemanticNodeData::Primitive(_)
+                            | SemanticNodeData::Literal(_)
+                            | SemanticNodeData::TemplateLiteral { .. }
+                            | SemanticNodeData::Array { .. }
+                            | SemanticNodeData::Tuple { .. }
+                    )
+                ))
+                .then_some(PrintedDeclaration::Named)
+            }
+        }
+    }
+
+    /// An alias's declared body shape with `Alias` wrappers peeled: `None`
+    /// when the body cannot be recovered, `Some(None)` for an alias cycle.
+    fn declared_alias_body(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<Option<SemanticNodeId>> {
+        let mut body = self.declared_body_shape(identity)?;
+        let mut aliases = rustc_hash::FxHashSet::default();
+        while let Some(SemanticNodeData::Alias(target)) = self.graph().node_data(body).as_deref() {
+            if !aliases.insert(body) {
+                return Some(None);
+            }
+            body = *target;
+        }
+        Some(Some(body))
+    }
+
+    /// The declaration's own unsubstituted body shape, through the
+    /// memoized locator provider every declaration body lowers through.
+    fn declared_body_shape(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<SemanticNodeId> {
+        use verter_type_expr::locators::{
+            AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodySlot,
+        };
+        match self.lower_locator(AuthoredBodyLocator::DeclBody(TypeBodySlot {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::clone(&identity.canonical_id),
+                owner: identity.owner,
+                symbol: Arc::clone(&identity.decl_name),
+                space: LocatorSymbolSpace::Type,
+            },
+            path: Arc::from(Vec::new().into_boxed_slice()),
+        })) {
+            QueryResult::Value(body) => Some(body),
+            QueryResult::Recursive(_) | QueryResult::Error(_) => None,
+        }
+    }
+
+    /// Whether the alias application `named` declares a mapped type and
+    /// settled on an array or tuple: the checker maps a homomorphic mapped
+    /// type over an array or tuple to an array or tuple type
+    /// (`instantiateMappedType`), which no alias names (`type Boxed<T> = {
+    /// [K in keyof T]: { v: T[K] } }` prints `Boxed<[1, 2]>` as `[{ v: 1; },
+    /// { v: 2; }]`).
+    fn mapped_alias_over_array(&self, named: SemanticNodeId, settled: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        if !matches!(
+            graph.node_data(settled).as_deref(),
+            Some(SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. })
+        ) {
+            return false;
+        }
+        let identity = match graph.node_data(named).as_deref() {
+            Some(
+                SemanticNodeData::InstantiationRef { base: identity, .. }
+                | SemanticNodeData::DeclRef { identity },
+            ) => identity.clone(),
+            _ => return false,
+        };
+        matches!(
+            self.declared_alias_body(&identity),
+            Some(Some(body)) if matches!(
+                graph.node_data(body).as_deref(),
+                Some(SemanticNodeData::Mapped { .. })
+            )
+        )
+    }
+
+    /// Whether a named alias application still names the type it settled
+    /// on: one of the constructed types the checker attaches an alias to,
+    /// a lib interface application (`Promise<number>`) included.
+    fn alias_names_settled_type(&self, settled: SemanticNodeId) -> bool {
+        match self.graph().node_data(settled).as_deref() {
+            Some(
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::Signature { .. }
+                | SemanticNodeData::Mapped { .. }
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Union(_)
+                | SemanticNodeData::Intersection(_),
+            ) => true,
+            Some(SemanticNodeData::InstantiationRef { base, .. }) => {
+                self.runtime_nominal_identity(base).is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// The application `application` with each argument read as the checker
+    /// prints it ([`Self::resolve_structural_fact_demand`] keeping
+    /// declaration names): the checker instantiates an application's
+    /// arguments as types, resolving the operators they write
+    /// (`Promise<Awaited<T>>` at `T = string` prints `Promise<string>`). An
+    /// argument that does not settle stays as written.
+    fn application_over_printed_arguments(
+        &self,
+        application: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let (base, args) = match self.graph().node_data(application).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                (base.clone(), Arc::clone(args))
+            }
+            _ => return application,
+        };
+        let printed: Vec<SemanticNodeId> = args
+            .iter()
+            .map(
+                |&arg| match self.resolve_structural_fact_demand(arg, context, true, false) {
+                    StructuralFactDemandOutcome::Complete(node) => node,
+                    _ => arg,
+                },
+            )
+            .collect();
+        if printed.as_slice() == args.as_ref() {
+            return application;
+        }
+        self.graph().intern_preserving_scope(
+            application,
+            SemanticNodeData::InstantiationRef {
+                base,
+                args: Arc::from(printed.into_boxed_slice()),
+            },
+        )
+    }
+
+    /// The application of `identity` the checker prints for `carrier`: its
+    /// supplied arguments followed by every omitted defaulted one
+    /// ([`Self::declared_application_arguments`]). The carrier itself when
+    /// nothing is omitted or the defaults cannot be recovered.
+    fn declared_application(
+        &self,
+        carrier: SemanticNodeId,
+        identity: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        match self.declared_application_arguments(identity, args, context) {
+            Some(complete) if complete.len() > args.len() => self.graph().intern_preserving_scope(
+                carrier,
+                SemanticNodeData::InstantiationRef {
+                    base: identity.clone(),
+                    args: complete,
+                },
+            ),
+            _ => carrier,
+        }
+    }
+
+    /// The keys a `keyof` carrier over a declaration, an application or a
+    /// mapped type settles to under a demand that reduces operators
+    /// ([`Self::key_of_through_carrier`]); `None` when `keys` is no such
+    /// carrier or its keys stay the carrier.
+    fn settled_key_of_carrier(
+        &self,
+        keys: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        if !crate::semantic_query::may_reduce_operator(context) {
+            return None;
+        }
+        let base = match self.graph().node_data(keys).as_deref() {
+            Some(SemanticNodeData::KeyOf { base }) => *base,
+            _ => return None,
+        };
+        if !matches!(
+            self.graph().node_data(base).as_deref(),
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::Mapped { .. }
+                    | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
+            )
+        ) {
+            return None;
+        }
+        self.key_of_through_carrier(base, context)
     }
 
     /// Entry-scoped workhorse for the deferred-shell evaluator. Returns the
@@ -857,10 +1585,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match std::mem::replace(&mut frame.stage, DeferredEvaluationStage::EvaluateCurrent)
                 {
                     DeferredEvaluationStage::AwaitKeyOfBase => {
-                        let read = self.execute_read(SemanticQueryKey::KeyOf {
+                        let mut read = self.execute_read(SemanticQueryKey::KeyOf {
                             base: child.node,
                             context: frame.context,
                         });
+                        // A `keyof` the builder kept as a carrier over a
+                        // declaration, an application or a mapped type is
+                        // evaluated here, at a demand for its value: its
+                        // keys where they settle, as the checker prints
+                        // them.
+                        if let QueryResult::Value(keys) = read.value {
+                            if let Some(settled) = self.settled_key_of_carrier(keys, frame.context)
+                            {
+                                read.value = QueryResult::Value(settled);
+                            }
+                        }
                         let fallback = self.opaque(QueryError::Miss);
                         self.deferred_read_action(frame, read, fallback)
                     }
@@ -1112,6 +1851,308 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
+    }
+
+    /// The union or intersection `node` reduced over its arms' RESOLVED
+    /// types, as the checker's `getUnionType` / `getIntersectionType`
+    /// construct it: an arm written as a name (an alias, an enum, an
+    /// application, a `typeof`) takes part in literal subsumption, the
+    /// `any` / `unknown` / `never` lattice, disjoint-literal collapse and
+    /// intersection distribution as the type it names. `None` when the
+    /// reduction changes nothing, or no arm is such a name.
+    ///
+    /// A union reads a named arm that resolves to a union as that union's
+    /// members; any other arm is read as its resolved type only where that
+    /// type is made of literals, primitives and enum members (an
+    /// intersection distributes over a named union of them only): an object
+    /// type takes part in no reduction here, so its arm keeps its name. A union keeps its written names as the checker keeps its
+    /// origin (`getUnionType`): one named union holding every other
+    /// member is that name (`A | 1` is `A`), and named unions that do not
+    /// overlap stay beside the remaining members (`A | 3 | S` is `A | S`);
+    /// a reduction that removed a member of a named union answers the
+    /// reduced set (`A | number` is `number`). An intersection arm that
+    /// resolves to the missing-member marker makes the intersection that
+    /// marker: its value is unknown.
+    ///
+    /// A composite whose reduction re-enters itself (an alias union naming
+    /// itself through its arms) stays as written: the re-entry reads
+    /// through the same `carrier_normalizing` in-progress record the
+    /// carrier normalizer keeps, never a depth limit.
+    pub(super) fn composite_over_resolved_arms(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        use crate::semantic_query::composite::CompositeOriginCategory as Category;
+        let graph = self.graph();
+        let (arms, is_union) = match graph.node_data(node)?.as_ref() {
+            SemanticNodeData::Union(members) => (members.members_arc(), true),
+            SemanticNodeData::Intersection(members)
+                if matches!(
+                    members.origin_category(),
+                    Category::Canonical(_) | Category::CanonicalUnproven | Category::AuthoredShell
+                ) =>
+            {
+                (members.members_arc(), false)
+            }
+            _ => return None,
+        };
+        let is_name = |arm: SemanticNodeId| {
+            matches!(
+                graph.node_data(arm).as_deref(),
+                Some(
+                    SemanticNodeData::Alias(_)
+                        | SemanticNodeData::DeclRef { .. }
+                        | SemanticNodeData::InstantiationRef { .. }
+                        | SemanticNodeData::TypeOf(_)
+                        | SemanticNodeData::Conditional { .. }
+                        | SemanticNodeData::IndexedAccess { .. }
+                        | SemanticNodeData::BareRef(_)
+                        | SemanticNodeData::ImportType(_)
+                        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
+                )
+            )
+        };
+        if !arms.iter().any(|arm| is_name(*arm)) {
+            return None;
+        }
+        if self.carrier_normalizing.borrow().contains(&node) {
+            return None;
+        }
+        self.carrier_normalizing.borrow_mut().push(node);
+        let reduced = self.reduce_over_resolved_arms(node, &arms, is_union, &is_name);
+        self.carrier_normalizing.borrow_mut().pop();
+        reduced
+    }
+
+    /// The union `node` with each `keyof` arm read as the keys it settles
+    /// to under `context`: the checker resolves `keyof` over a type that is
+    /// not generic when it builds the type, so the union holds those keys
+    /// (`keyof { a: 1 } | keyof { b: 2 }` is `"a" | "b"`). An arm whose keys
+    /// keep their `keyof` origin (`keyof Face` over an interface) or do not
+    /// settle stays as written. `None` when no arm changes.
+    fn union_over_evaluated_key_arms(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let arms = match graph.node_data(node)?.as_ref() {
+            SemanticNodeData::Union(members) => members.members_arc(),
+            _ => return None,
+        };
+        let mut changed = false;
+        let views: Vec<SemanticNodeId> = arms
+            .iter()
+            .map(|&arm| {
+                if !matches!(
+                    graph.node_data(arm).as_deref(),
+                    Some(SemanticNodeData::KeyOf { .. })
+                ) {
+                    return arm;
+                }
+                let keys = self.evaluate_deferred_outcome(arm, context);
+                let settled = matches!(keys.completeness, ResultCompleteness::Complete)
+                    && !matches!(
+                        graph.node_data(keys.node).as_deref(),
+                        Some(SemanticNodeData::KeyOf { .. } | SemanticNodeData::Opaque(_))
+                    );
+                if settled {
+                    changed = true;
+                    keys.node
+                } else {
+                    arm
+                }
+            })
+            .collect();
+        changed.then(|| self.intern_normalized_union_or_intersection(&views, true))
+    }
+
+    fn reduce_over_resolved_arms(
+        &self,
+        node: SemanticNodeId,
+        arms: &[SemanticNodeId],
+        is_union: bool,
+        is_name: &dyn Fn(SemanticNodeId) -> bool,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let transit =
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+        // Whether a resolved type is a literal, a primitive or an enum member
+        // — the types these reductions act on.
+        let is_scalar = |view: SemanticNodeId| {
+            matches!(
+                graph.node_data(view).as_deref(),
+                Some(
+                    SemanticNodeData::Primitive(_)
+                        | SemanticNodeData::Literal(_)
+                        | SemanticNodeData::EnumLiteral(_)
+                        | SemanticNodeData::Opaque(_)
+                )
+            )
+        };
+        // Each arm as the reduction reads it, and the resolved union a named
+        // arm stands for.
+        let mut views: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        let mut named_unions: Vec<(SemanticNodeId, Vec<SemanticNodeId>)> = Vec::new();
+        for &arm in arms {
+            if !is_name(arm) {
+                views.push(arm);
+                continue;
+            }
+            let StructuralFactDemandOutcome::Complete(resolved) =
+                self.normalize_node_for_structural_fact_demand(arm, transit)
+            else {
+                return None;
+            };
+            // A union joins a named union's members, whatever they are; an
+            // intersection distributes over one made of scalars only.
+            let is_named_union = matches!(
+                graph.node_data(resolved).as_deref(),
+                Some(SemanticNodeData::Union(_))
+            );
+            if !is_named_union {
+                views.push(if is_scalar(resolved) { resolved } else { arm });
+                continue;
+            }
+            let members = self.resolved_union_members(arm, resolved, is_name, transit)?;
+            if !is_union && !members.iter().all(|member| is_scalar(*member)) {
+                views.push(arm);
+                continue;
+            }
+            views.push(self.intern_normalized_union_or_intersection(&members, true));
+            named_unions.push((arm, members));
+        }
+        if views.as_slice() == arms {
+            return None;
+        }
+        let is_opaque = |view: SemanticNodeId| {
+            matches!(
+                graph.node_data(view).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            )
+        };
+        if !is_union {
+            if let Some(marker) = views.iter().copied().find(|view| is_opaque(*view)) {
+                return Some(marker);
+            }
+            let reduced = self
+                .distributed_intersection(&views)
+                .unwrap_or_else(|| self.intern_normalized_union_or_intersection(&views, false));
+            return (reduced != node).then_some(reduced);
+        }
+        // An arm this demand could not type leaves the union's member set
+        // unknown: it stays as written.
+        if views.iter().any(|view| is_opaque(*view)) {
+            return None;
+        }
+        let reduced = self.intern_normalized_union_or_intersection(&views, true);
+        let type_set: Vec<SemanticNodeId> = match graph.node_data(reduced).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown)) => {
+                return Some(reduced)
+            }
+            _ => vec![reduced],
+        };
+        // The checker's union origin: the named unions, when they do not
+        // overlap and the reduction kept every member they name.
+        let in_named = |member: &SemanticNodeId| {
+            named_unions
+                .iter()
+                .any(|(_, members)| members.contains(member))
+        };
+        let remaining: Vec<SemanticNodeId> = type_set
+            .iter()
+            .copied()
+            .filter(|member| !in_named(member))
+            .collect();
+        let named_count: usize = named_unions.iter().map(|(_, members)| members.len()).sum();
+        let result = match named_unions.as_slice() {
+            [(named, _)] if remaining.is_empty() => *named,
+            [] => reduced,
+            _ if named_count + remaining.len() == type_set.len() => {
+                let origin: Vec<SemanticNodeId> = remaining
+                    .into_iter()
+                    .chain(named_unions.iter().map(|(named, _)| *named))
+                    .collect();
+                // The written arms ARE the origin: the union stays as written.
+                if origin.len() == arms.len() && origin.iter().all(|arm| arms.contains(arm)) {
+                    return None;
+                }
+                self.intern_normalized_union_or_intersection(&origin, true)
+            }
+            _ => reduced,
+        };
+        (result != node).then_some(result)
+    }
+
+    /// The members of the resolved union `union` — what the named arm
+    /// `name` stands for — with every member that is itself a named union
+    /// read as that union's members, flattened as the checker's union holds
+    /// them. `None` when a name's resolution did not complete, or when the
+    /// walk reaches a name on its own active path: a union that contains
+    /// itself is the checker's circularity, and it stays deferred.
+    fn resolved_union_members(
+        &self,
+        name: SemanticNodeId,
+        union: SemanticNodeId,
+        is_name: &dyn Fn(SemanticNodeId) -> bool,
+        transit: ProjectionReductionContext,
+    ) -> Option<Vec<SemanticNodeId>> {
+        enum Step {
+            Read(SemanticNodeId),
+            Leave(SemanticNodeId),
+        }
+        let graph = self.graph();
+        let mut members: Vec<SemanticNodeId> = Vec::new();
+        // The names on the walk's active path, and those fully read.
+        let mut active: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut read: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        active.insert(name);
+        let mut pending: Vec<Step> = vec![Step::Leave(name), Step::Read(union)];
+        while let Some(step) = pending.pop() {
+            let node = match step {
+                Step::Read(node) => node,
+                Step::Leave(node) => {
+                    active.remove(&node);
+                    read.insert(node);
+                    continue;
+                }
+            };
+            if let Some(SemanticNodeData::Union(arms)) = graph.node_data(node).as_deref() {
+                pending.extend(arms.iter().rev().map(|arm| Step::Read(*arm)));
+                continue;
+            }
+            if !is_name(node) {
+                members.push(node);
+                continue;
+            }
+            if active.contains(&node) {
+                return None;
+            }
+            if read.contains(&node) {
+                continue;
+            }
+            let StructuralFactDemandOutcome::Complete(resolved) =
+                self.normalize_node_for_structural_fact_demand(node, transit)
+            else {
+                return None;
+            };
+            match graph.node_data(resolved).as_deref() {
+                Some(SemanticNodeData::Union(_)) => {
+                    active.insert(node);
+                    pending.push(Step::Leave(node));
+                    pending.push(Step::Read(resolved));
+                }
+                // A name for a primitive or a literal is that type.
+                Some(
+                    SemanticNodeData::Primitive(_)
+                    | SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_),
+                ) => members.push(resolved),
+                _ => members.push(node),
+            }
+        }
+        Some(members)
     }
 
     /// Fold a LOCALLY-PRODUCED partial — one no `CacheRead` carried (a step

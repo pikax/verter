@@ -180,15 +180,16 @@ export function r5CallOnConditionalVar(flag: boolean, cb: () => 1 | 2) {
   return cb();
 }
 
-export function r5LoopHelper(value: number) {
-  while (value > 0) {
-    return "a";
-  }
-  return "b";
+export function r5InvokedHelper(value: number) {
+  let r = value;
+  (() => {
+    r = 0;
+  })();
+  return r;
 }
 
 export function r5CallOnFailedInit(v: number) {
-  const q = r5LoopHelper(v);
+  const q = r5InvokedHelper(v);
   return q();
 }
 
@@ -334,7 +335,7 @@ export function r5MutualA(c: boolean) {
 
 export function r5MutualB(c: boolean) {
   let z = 1;
-  z += 2;
+  while ((z = 2)) { break; }
   return r5MutualA(!!z);
 }
 
@@ -1413,18 +1414,18 @@ export function ncUse(k: boolean) {
 }
 
 // ── Call forms reached through a COMPOSITE expression ─────────────────
-// A call in a TERNARY arm is a call: the branch has a structural arm, so
-// the callee's clause is instantiated and an overload group reached
-// through one degrades exactly as it does at a bare call.
+// A call in a TERNARY arm or a `&&` / `||` operand is a call: the form
+// has a structural arm, so the callee's clause is instantiated and an
+// overload group reached through one degrades exactly as it does at a
+// bare call.
 //
-// A call in a LOGICAL / NULLISH operand, under a non-null assertion, or
-// as a MEMBER BASE does NOT: those forms are `Leaf` to the shared
-// descent, and the shallow leaf pass answers each of them `any` BEFORE
-// the call-carrier gate can refuse anything. They publish
-// `Primitive(Any)` cleanly and warm — under the checker's answer, never
-// over it, and never the callee's raw return carrier — and the rows
-// below assert exactly that, so a change that starts routing any of them
-// through the call sink has to say so here.
+// A call in a LOGICAL / NULLISH operand is one too: the logical
+// expression's operands are flow values, so the call rides the call
+// rails. A call as a MEMBER BASE reads the member off the resolved
+// call's value. A call under a non-null assertion is not: that form is
+// `Leaf` to the shared descent, and the rows below assert it fails
+// closed, so a change that starts routing it through the call sink has
+// to say so here.
 //
 // A call in a SEQUENCE's value operand is the one composite spelling
 // that DOES route to the call sink (D7): the sequence's value is its
@@ -2050,16 +2051,8 @@ fn function_return(expr: &TypeExpr) -> &TypeExpr {
 fn flow_return_unmodelable_local_binding_never_falls_through_to_file_scope() {
     let host = make_r5_host();
     for name in [
-        // A destructuring declarator element (`const { a } = …`).
-        "r5DestructuredConst",
-        // A NESTED destructured formal parameter (`({ b: { c } }: …)`)
-        // — plain and aliased object-pattern elements are modelled,
-        // nested patterns are not.
-        "r5DestructuredParamNested",
         // A local `class` declaration's name.
         "r5LocalClass",
-        // A hoisted nested function declaration's name read as a value.
-        "r5NestedFnRead",
         // A local `enum` declaration's name.
         "r5LocalEnum",
         // A local `namespace` declaration's name.
@@ -2069,12 +2062,34 @@ fn flow_return_unmodelable_local_binding_never_falls_through_to_file_scope() {
     }
 }
 
+/// A hoisted nested function declaration's name read as a value is the
+/// function value it declares, never the file-scope bait of the same
+/// name. TypeScript 7.0.2: `r5NestedFnRead` is `() => number`.
+#[test]
+fn flow_return_nested_function_declaration_read_is_its_value() {
+    let host = make_r5_host();
+    assert_clean_warm(
+        &host,
+        "r5NestedFnRead",
+        TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(number())),
+            Vec::new(),
+        ))),
+    );
+}
+
 /// A destructured object-pattern parameter element binds its annotation
 /// member — plain (`{ b }`) and aliased (`{ b: renamed }`) spellings
-/// alike. TypeScript 7.0.2: both are `number`.
+/// alike, a nested pattern (`({ b: { c } }: …)`) through each level, and
+/// a destructuring declarator element (`const { a } = { a: 1 }`) its
+/// initializer's member — never the file-scope bait of the same name.
+/// TypeScript 7.0.2: every one is `number`.
 #[test]
 fn flow_return_destructured_param_element_binds_the_annotation_member() {
     let host = make_r5_host();
+    assert_clean_warm(&host, "r5DestructuredConst", number());
+    assert_clean_warm(&host, "r5DestructuredParamNested", number());
     assert_clean_warm(&host, "r5DestructuredParam", number());
     assert_clean_warm(&host, "r5DestructuredParamAliased", number());
 }
@@ -2151,9 +2166,14 @@ fn flow_return_labeled_statement_body_reaches_every_inner_rail() {
     // — clean `number`, exactly like the unlabeled twin.
     assert_clean_warm(&host, "r5UnlabeledBlockVar", number());
     assert_clean_warm(&host, "r5LabeledBlockVar", number());
-    // A return-free loop declaring a `var` escapes the loop: the typed
-    // loop rail fails closed.
-    assert_fails_closed(&host, "r5LabeledLoopVar");
+    // A return-free loop declaring a `var` escapes the loop: the loop
+    // lowers structurally, and the `var` the entering path never defines
+    // is conditionally defined past it, exactly like the `if` twin.
+    assert_degraded(
+        &host,
+        "r5LabeledLoopVar",
+        crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+    );
     // A conditional `var` has no single reaching definition: degraded.
     assert_degraded(
         &host,
@@ -2197,18 +2217,24 @@ fn flow_return_using_declaration_is_block_scoped_not_a_hoisted_var() {
 // ──────────────────────────────────────────────────────────────────────
 
 /// Reading a local for a CALL folds the same membership flags a value
-/// read does: a conditionally-defined `var` degrades, and a binding
-/// whose initializer failed degrades. Before the fix the call site took
-/// the bound node WITHOUT the flags, so
-/// `r5CallOnConditionalVar` published the literal `1` clean and warm
-/// where TypeScript 7.0.2 says `1 | 2`.
+/// read does: a binding whose initializer failed degrades. A `var`
+/// redeclaring a parameter inside an arm (`r5CallOnConditionalVar`) is
+/// defined on every path — the arm's initializer, else the parameter —
+/// so the call reads the join of the two signatures: TypeScript 7.0.2
+/// says `1 | 2` (published in its `VerterStableV1` order).
 #[test]
 fn flow_return_call_on_binding_folds_the_read_membership_flags() {
     let host = make_r5_host();
-    assert_degraded(
+    assert_clean_warm(
         &host,
         "r5CallOnConditionalVar",
-        crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+        TypeExpr::Union(Arc::from(
+            vec![
+                TypeExpr::Literal(verter_type_expr::LiteralValue::Number(2.0)),
+                TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0)),
+            ]
+            .into_boxed_slice(),
+        )),
     );
     assert_degraded(
         &host,
@@ -2654,6 +2680,11 @@ fn flow_return_type_space_names_are_not_classified_against_the_value_inventory()
 /// printed name: `const w: import("./q").QE = qEnum(0)` is `TS2322 Type
 /// 'QE' is not assignable to type 'import("…").QE'`.
 ///
+/// The declaration file reuses the authored `QE.M` node for `qNoShadow`;
+/// the type itself is the module enum's only member's literal type, which
+/// the checker prints as the enum (`const r: QE.M = x as any; return r`
+/// emits `QE`).
+///
 /// Mutation recipe: pushing the DOTTED name into `ReferencedNames`
 /// instead of its head (the pre-fix `recursive_traversal` `Ref` /
 /// `RecursiveRef` arms) makes `"QE.M"` compare against binding names,
@@ -2661,8 +2692,8 @@ fn flow_return_type_space_names_are_not_classified_against_the_value_inventory()
 /// never fires, and all three shadowed rows publish the owner scope's
 /// answer CLEAN and WARM. The `qNoShadow` row is the value control: it
 /// pins that taking the head leaves an UNSHADOWED qualified reference's
-/// resolved answer (the module enum member's literal) untouched, so the
-/// gate cannot be widened into a blanket fail-closed on every qualified
+/// resolved answer (the module enum member's literal type) untouched, so
+/// the gate cannot be widened into a blanket fail-closed on every qualified
 /// reference.
 #[test]
 fn flow_return_qualified_type_reference_is_owned_by_its_head_segment() {
@@ -2671,7 +2702,14 @@ fn flow_return_qualified_type_reference_is_owned_by_its_head_segment() {
     // Control: no local `QE` at all, so the module enum member governs
     // and the answer stays clean + warm. This is the over-fire guard —
     // a head split that fires on an unshadowed name breaks this row.
-    assert_clean_warm(&host, "qNoShadow", string_lit("outer"));
+    assert_clean_warm(
+        &host,
+        "qNoShadow",
+        TypeExpr::Ref {
+            name: Arc::from("QE"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        },
+    );
 
     // The frame declares the HEAD in type space (`enum` / `namespace`,
     // both unconditionally unmodelable), so every one of these must fail
@@ -3792,13 +3830,12 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 /// The call-resolution executor now answers most of these routes: an
 /// explicit type argument instantiates the clause exactly, and argument
 /// inference from a literal publishes the un-widened literal of the
-/// checker's widened answer. What remains is the shape TypeScript itself
-/// cannot infer (`gcBareInferred`, where `unknown` IS the checker's
-/// answer) and the routes the executor does not read: the annotated-alias
-/// value type (`gcViaAnnotated`) keeps the sb15 interim `unknown`, and a
-/// NAMESPACE-scoped callee (`GcNs.nsCall`) is outside the executor's
-/// reach — it refuses, and the position degrades as an unrepresentable
-/// callee rather than guessing.
+/// checker's widened answer, a NAMESPACE-scoped callee (`GcNs.nsCall`)
+/// included — its exported function is a declaration of its own. What
+/// remains is the shape TypeScript itself cannot infer (`gcBareInferred`,
+/// where `unknown` IS the checker's answer) and the route the executor does
+/// not read: the annotated-alias value type (`gcViaAnnotated`) keeps the
+/// sb15 interim `unknown`.
 ///
 /// Oracle (tsgo checker, `--strict --declaration`):
 ///
@@ -3807,16 +3844,16 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 /// gcFlowExplicit(): string     gcFlowInferred(): string
 /// gcBareExplicit(): string     gcBareInferred(): unknown   ← exact
 /// gcViaAnnotated(): string     gcNonGeneric():   string
+/// GcNs.nsCall():    string
 /// new GcHolder<number>().viaCall(): string
 /// new GcHolder<number>().ownT():   number
+/// GcNs.nsCall(): string            GcNs.nsPlainCall(): string
 /// ```
 ///
 /// The `Literal(String("a"))` rows are the un-widened literals of the
 /// checker's widened `string`. `gcBareInferred` stays `unknown` — it is
 /// the row where sb15 IS the checker's answer. `gcViaAnnotated` keeps the
-/// interim (the annotated-alias route is not call-resolved), and
-/// `GcNs.nsCall` degrades (a namespace-scoped callee is outside the
-/// executor's reach).
+/// interim (the annotated-alias route is not call-resolved).
 ///
 /// Mutation recipes:
 ///
@@ -3827,11 +3864,6 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 ///   `gcFlow*` green and flips `gcDecl*` / `gcBare*`; dropping only the
 ///   FLOW branch's leaves `gcDecl*` / `gcBare*` green and flips
 ///   `gcFlow*`, `GcNs.nsCall`, and the `viaCall` identity row.
-/// - Reading the callee's clause off its PREPARED value declaration
-///   instead of the function program index leaves every file-scope row
-///   green and flips `GcNs.nsCall` alone: a namespace-scoped function has
-///   no prepared declaration, so the clause reads EMPTY and nothing is
-///   instantiated.
 /// - Dropping the deferred-head arm from the name-driven binder
 ///   collection (`include_unbound_heads`) leaves `gcFlow*` green and
 ///   flips `gcDecl*` / `gcBare*`: a DECLARED return `: GD` lowers in the
@@ -3916,19 +3948,17 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
         },
     );
 
-    // A NAMESPACE-scoped generic callee is outside the executor's reach:
-    // it refuses, and the position degrades as an unrepresentable callee
-    // rather than guessing from a clause it cannot read.
-    assert_degraded(
+    // A NAMESPACE-scoped generic callee instantiates its clause from the
+    // explicit type argument too.
+    assert_clean_warm(
         &host,
         "GcNs.nsCall",
-        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+        TypeExpr::Primitive(PrimitiveName::String),
     );
 
     // CONTROLS — a NON-generic direct callee is untouched: the rule fires
     // on the callee's declared clause, not on "any direct call".
-    // `GcNs.nsPlainCall` is the namespace control: non-generic, so the
-    // executor's reach gap on namespace-scoped callees does not fire.
+    // `GcNs.nsPlainCall` is the namespace control.
     for name in ["gcNonGeneric", "GcNs.nsPlainCall"] {
         assert_clean_warm(&host, name, TypeExpr::Primitive(PrimitiveName::String));
     }
@@ -4043,15 +4073,12 @@ fn reachable_type_param_names(
 /// new RvHolder<number>().ownRL(): RL
 /// ```
 ///
-/// The local-binding and parameter routes now resolve through argument
+/// The local-binding, parameter and IIFE routes resolve through argument
 /// inference: the published value is the un-widened literal of the
-/// checker's widened `string`. Both callees keep Rootless origin as
-/// provenance (a local arrow and a parameter's function type have no
-/// authored function occurrence) but their dependency proof is complete,
-/// so the enclosing FlowReturn warms. The IIFE route is not
-/// call-resolved: `unknown` is the recorded interim there — not the
-/// checker's answer, but a leaked binder is not either, and it is the
-/// answer that cannot be substituted into.
+/// checker's widened `string`. The callees keep Rootless origin as
+/// provenance (a local arrow, a parameter's function type and an invoked
+/// function expression have no authored function occurrence) but their
+/// dependency proof is complete, so the enclosing FlowReturn warms.
 ///
 /// Mutation recipes (each verified to flip exactly these rows):
 ///
@@ -4068,7 +4095,7 @@ fn flow_return_every_call_route_instantiates_the_callees_clause() {
     // Rootless-origin callees whose inputs are fully rooted: a local
     // arrow and a generic function-typed parameter resolve from the
     // literal argument and warm-admit under the dependency proof.
-    for name in ["rvLocalLambdaCall", "rvParamCall"] {
+    for name in ["rvLocalLambdaCall", "rvParamCall", "rvIife"] {
         r5_node(
             &host,
             name,
@@ -4083,20 +4110,6 @@ fn flow_return_every_call_route_instantiates_the_callees_clause() {
             },
         );
     }
-
-    // The IIFE route is not call-resolved: the recorded interim stands.
-    r5_node(
-        &host,
-        "rvIife",
-        FunctionPartIdentity::DeclarationBody,
-        |dispatch, node| {
-            assert_eq!(
-                node_shape(dispatch, node),
-                NodeShape::Primitive(PrimitiveKind::Unknown),
-                "rvIife keeps the interim: the IIFE route is not call-resolved"
-            );
-        },
-    );
 
     // The MEMBER-ALIASING pair: the local lambda's clause is spelled
     // `RL`, exactly the enclosing class's, so before the fix both members
@@ -5125,7 +5138,8 @@ fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
 /// Two halves close it. A CONDITIONAL is a `Branches` disposition of the
 /// shared value-structural classifier, so both branches lower as flow
 /// expressions and their calls ride the one call sink, joining through
-/// the same normalizing interner the contributor join uses. And a leaf
+/// the same normalizing interner the contributor join uses; an ARRAY
+/// literal is an `Array` disposition whose elements do the same. And a leaf
 /// answer that would EMBED the carrier goes through `lower_leaf`'s
 /// call-carrier gate and FAILS CLOSED rather than publishing it.
 ///
@@ -5163,8 +5177,9 @@ fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
 /// Mutation recipe: dispositioning `ConditionalExpression` as
 /// `ValueDescent::Leaf` in the shared classifier flips `tnAmbTernary`
 /// back to `deg=None cands=1` and puts a `ReturnType` `InstantiationRef`
-/// inside every generic row; deleting only the `lower_leaf` gate flips
-/// the two array rows back to a published carrier.
+/// inside every generic row; dispositioning `ArrayExpression` as
+/// `ValueDescent::Leaf` again sends both array rows back through the leaf
+/// gate, which fails them closed.
 #[test]
 fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_return() {
     let host = make_r5_host();
@@ -5227,10 +5242,21 @@ fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_retur
         },
     );
 
-    // A form with NO structural arm fails CLOSED rather than publishing
-    // the carrier.
-    for name in ["tnAmbArray", "tnGenericArray"] {
-        assert_fails_closed(&host, name);
+    // An ARRAY literal is structural too: its element call rides the one
+    // call sink, so the element is the resolved call return — never the
+    // carrier.
+    for (name, element) in [
+        ("tnAmbArray", string_lit("TA")),
+        ("tnGenericArray", string()),
+    ] {
+        assert_clean_warm(
+            &host,
+            name,
+            TypeExpr::Array {
+                element: Arc::new(element),
+                readonly: false,
+            },
+        );
     }
 
     // CONTROL — a call-free ternary is untouched: same answer as its
@@ -5392,23 +5418,11 @@ fn flow_return_method_position_overload_groups_resolve_by_arguments() {
 /// ctArrow:         () => number
 /// ```
 ///
-/// Four rows carry a recorded, PRE-EXISTING divergence from that oracle,
-/// none of them introduced or removed here, all of them shape-level and
-/// none of them a leak:
-///
-/// - `ctObjBoth` publishes two structurally identical arms where the
-///   checker publishes one. Union dedup is by interned NODE id and two
-///   object literals at different spans intern distinct nodes; the
-///   `if` / `return` twin dedups the same way (`arms.contains`), so this
-///   is a property of the whole rail, not of the branch join.
-/// - `ctObjDisjoint` publishes no `?: undefined` normalization.
-/// - `ctNestedTernary` publishes a NESTED union
-///   (`Union([Union([2, { a }]), 3])`);
-///   `intern_normalized_union_or_intersection` sorts and dedups but does
-///   not flatten a union arm.
-/// - `ctObjEmpty` publishes `2 | {}` where the checker's subtype
-///   reduction collapses it to `{}`; `ctIdent` publishes `boolean | 2`
-///   where the checker narrows the consequent to `true`.
+/// Every row matches: `ctObjDisjoint` with each literal arm taking the
+/// other's property as `?: undefined` (the same answer in all four
+/// `strictNullChecks` × `noImplicitAny` projects), `ctObjBoth` as one arm,
+/// `ctNestedTernary` flattened, `ctObjEmpty` subtype-reduced to `{}` and
+/// `ctIdent` narrowed to `true` by the truthiness test.
 ///
 /// Mutation recipe: dispositioning `ObjectExpression` as
 /// `ValueDescent::Leaf` in the classifier flips every object row to a
@@ -5428,7 +5442,12 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
         // as the checker publishes it: the arms differ only in where they
         // were written, and source coordinates are not constituent identity.
         ("ctObjBoth", "{a:number}"),
-        ("ctObjDisjoint", "{a:number}|{b:number}"),
+        // The checker widens the join: each literal arm takes the other's
+        // property as `?: undefined`.
+        (
+            "ctObjDisjoint",
+            "{b:number,a?:undefined}|{a:number,b?:undefined}",
+        ),
         ("ctObjLocalRead", "{a:number}|2"),
         ("ctObjMethod", "{m():number}|2"),
         ("ctObjNested", "{a:{b:number}}|2"),
@@ -5440,12 +5459,14 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
         // A nested branch join FLATTENS at union construction, exactly
         // like the checker's own `2 | 3 | { a: number }`.
         ("ctNestedTernary", "{a:number}|3|2"),
+        // The branch join is subtype-reduced as the checker's is: `2` is
+        // below the empty object type, so only `{}` survives.
+        ("ctObjEmpty", "{}"),
         // CONTROLS — rows whose constituent SET the descent must leave
         // alone; every row renders its members in `VerterStableV1`
         // (fingerprint, exact) order, not authored order.
-        ("ctObjEmpty", "{}|2"),
         ("ctArray", "number[]"),
-        ("ctIdent", "boolean|2"),
+        ("ctIdent", "true|2"),
         ("ctNull", "null|1"),
         ("ctArrow", "()=>number"),
     ] {
@@ -5460,7 +5481,8 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
 }
 
 /// A compact, span-free spelling of one published `TypeExpr`, so a
-/// branch-join assertion compares MEANING and not member spans.
+/// branch-join assertion compares MEANING and not member spans. An
+/// optional property spells its key `key?`.
 fn shape_of(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Literal(verter_type_expr::LiteralValue::Number(n)) => {
@@ -5472,6 +5494,7 @@ fn shape_of(ty: &TypeExpr) -> String {
             }
         }
         TypeExpr::Literal(verter_type_expr::LiteralValue::String(s)) => format!("\"{s}\""),
+        TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(value)) => value.to_string(),
         TypeExpr::Primitive(name) => format!("{name:?}").to_lowercase(),
         // A nested union arm is PARENTHESISED: the substrate does not
         // flatten one, and a spelling that silently joined it would hide
@@ -5498,8 +5521,9 @@ fn shape_of(ty: &TypeExpr) -> String {
                 .iter()
                 .map(|member| match member {
                     verter_type_expr::ObjectMember::Property(property) => format!(
-                        "{}:{}",
+                        "{}{}:{}",
                         property.key.as_string().unwrap_or_default(),
+                        if property.optional { "?" } else { "" },
                         shape_of(&property.ty)
                     ),
                     verter_type_expr::ObjectMember::Method(method) => format!(
@@ -5784,10 +5808,16 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 ///
 /// ```text
 ///                    checker           published here
-/// tnAmbLogical       "TA" | true       fails closed ← composes a call
-/// tnAmbNullish       "TA"              fails closed ← composes a call
-/// tnGenericLogical   string | true     fails closed ← composes a call
-/// tnGenericMember    string            fails closed ← composes a call
+/// tnAmbLogical       "TA" | true       "TA" | true  ← exact: a logical
+/// tnAmbNullish       "TA"              "TA"            expression's
+/// tnGenericLogical   string | true     string | true   operands are flow
+///                                                     values, the call
+///                                                     rides the call
+///                                                     rails — asserted
+///                                                     in their own test
+/// tnGenericMember    string            string       ← exact: the member
+///                                                     is read off the
+///                                                     call's value
 /// tnAmbSequence      "TA"              "TA"         ← D7: the sequence's
 ///                                                     value operand IS
 ///                                                     the call, so it
@@ -5795,26 +5825,20 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 ///                                                     rails — asserted
 ///                                                     in its own test
 /// tnAmbNonNull       "TA"              fails closed ← call position
-/// tnAmbAs            "TA"              "TA"         ← exact value, but
-///                                                     DEGRADED and never
-///                                                     warm: the folded
-///                                                     call's callee is an
-///                                                     exported overload
-///                                                     pair, unprovable
-///                                                     under the per-callee
-///                                                     certification
+/// tnAmbAs            "TA"              "TA"         ← exact: the call the
+///                                                     carrier wraps is
+///                                                     never entered into
+///                                                     control flow
 /// tnStrTernary       "a" | "b"         "a" | "b"    ← exact
 /// tnGenericBare      string            string       ← exact: the explicit
 ///                                                     type argument
 ///                                                     instantiates the clause
 /// ```
 ///
-/// Mutation recipe: dropping the `embeds_any && composes` half of
-/// `leaf_answer_is_fabricated_at_a_call_position` flips the four
-/// composing rows back to a warm `Primitive(Any)` with `degradation:
-/// None`; dropping `SequenceExpression` / the type-carrier recursion
-/// from `value_is_unmodeled_call` flips the `tnAmbNonNull` call-position
-/// row the same way (the `tnAmbSequence` row left this table at D7 and
+/// Mutation recipe: dropping `SequenceExpression` / the type-carrier
+/// recursion from `value_is_unmodeled_call` flips the `tnAmbNonNull`
+/// call-position row back to a warm `Primitive(Any)` with `degradation:
+/// None` (the `tnAmbSequence` row left this table at D7 and
 /// now fails under `flow_return_sequence_call_context_value_surfaces`
 /// when the sequence delegation is dropped); making the gate
 /// unconditional on the form (dropping the `embeds_any` conjunct) flips
@@ -5823,17 +5847,6 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 #[test]
 fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     let host = make_r5_host();
-
-    // The COMPOSING forms: a join / projection over a call the substrate
-    // has no arm for. The pass fabricated an `any`; it is not published.
-    for name in [
-        "tnAmbLogical",
-        "tnAmbNullish",
-        "tnGenericLogical",
-        "tnGenericMember",
-    ] {
-        assert_fails_closed(&host, name);
-    }
 
     // The CALL POSITIONS: the form's own value is the call's return, and
     // the substrate has no arm for it. `any` is not published.
@@ -5847,23 +5860,10 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     // above from "everything answers `any`".
     //
     // `tnAmbAs`: the carrier pins the value — `"TA"` is the carrier's own
-    // exact answer, and the call's result is genuinely discarded — but the
-    // call under the carrier is certified decided-above ONLY when the
-    // callee provably establishes no narrowing, and `tnAmb` is an
-    // EXPORTED, OVERLOADED ambient pair: its checker-visible signature set
-    // is not enumerable from this file (a merged `declare module` overload
-    // could carry an `asserts` predicate). The value still publishes
-    // exact, DEGRADED through the typed guard-narrowing gap, never warm.
-    let tn_amb_as = r5_eval(&host, "tnAmbAs").expect("tnAmbAs must produce a value");
-    assert_eq!(tn_amb_as.ty, string_lit("TA"), "tnAmbAs return type");
-    assert_eq!(
-        tn_amb_as.degradation,
-        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            crate::semantic_query::FlowGap::GuardNarrowing
-        )),
-        "tnAmbAs: the unprovable carrier-folded call degrades to the typed gap"
-    );
-    assert_eq!(tn_amb_as.candidates, 0, "tnAmbAs never warms");
+    // exact answer — and the call it wraps is never entered into control
+    // flow, so whatever its signature set holds, it narrows nothing: the
+    // value publishes exact, clean and warm.
+    assert_clean_warm(&host, "tnAmbAs", string_lit("TA"));
     assert_clean_warm(
         &host,
         "tnStrTernary",
@@ -5874,6 +5874,13 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     assert_clean_warm(
         &host,
         "tnGenericBare",
+        TypeExpr::Primitive(PrimitiveName::String),
+    );
+    // A static member read off a call's value is the member of the
+    // resolved call's return.
+    assert_clean_warm(
+        &host,
+        "tnGenericMember",
         TypeExpr::Primitive(PrimitiveName::String),
     );
 }
@@ -5989,38 +5996,13 @@ fn visible_overload_ordinals_covers_every_group_shape() {
 // would silently retire the framework ledger's own emptiness assertions.
 // ──────────────────────────────────────────────────────────────────────
 
-/// A heritage-REDECLARED method degrades where the checker answers the
-/// declared literal.
-///
-/// A derived `class` / `interface` that re-declares a base method leaves
-/// the composed surface carrying BOTH contributors under one key, so the
-/// shared PathWalker's Object hop sees a two-member same-name method
-/// collision and hands the call rail an overload GROUP of arity 2 — which
-/// the rail refuses (`UnrepresentableCallee`). It is not an overload
-/// group: TypeScript's derived declaration OVERRIDES the base one.
-///
-/// OWNER: the shared PathWalker / type-resolution heritage member
-/// projection — the composed surface must not retain a base contributor
-/// a derived declaration overrides. Not the flow rail: the rail's refusal
-/// is correct for a genuine arity-2 group, and the defect is that this is
-/// not one. Pre-existing (the reviewer proved it by mutation control
-/// against the pre-carrier tree).
+/// A derived `class` / `interface` that re-declares a base method
+/// overrides it: the call reads the derived declaration alone, never an
+/// overload group of both.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `hbClassCall()` is `"BASE"`, `ebIfaceCall()` is
 /// `"EB"`.
-///
-/// Verbatim failure, un-ignored on this tree:
-///
-/// ```text
-/// assertion `left == right` failed: hbClassCall must evaluate clean
-///   left: Some(UnrepresentableCallee)
-///  right: None
-/// ```
-#[ignore = "owned by the shared PathWalker / type-resolution heritage member projection: a \
-            derived re-declaration must OVERRIDE the base contributor on the composed surface \
-            rather than leave both under one key, which the method-overload-group carrier then \
-            reads as an arity-2 group"]
 #[test]
 fn heritage_redeclared_method_answers_the_derived_declaration() {
     let host = make_r5_host();
@@ -6028,35 +6010,12 @@ fn heritage_redeclared_method_answers_the_derived_declaration() {
     assert_clean_warm(&host, "ebIfaceCall", string_lit("EB"));
 }
 
-/// Reading an accessor pair publishes the GETTER's `Signature` node
-/// instead of the getter's RETURN.
-///
-/// `class C { get a(): "GA"; set a(v: "GA") }` — reading `.a` publishes
-/// the getter's callable signature, cleanly and warm, where the property
-/// read's value is the getter's return type.
-///
-/// OWNER: the shared PathWalker / type-resolution accessor member
-/// projection. Structurally untouched by the flow-return substrate — the
-/// flow rail only reads whatever the member hop published.
+/// Reading an accessor pair publishes the getter's RETURN: `class C {
+/// get a(): "GA"; set a(v: "GA") }` read as `.a` is `"GA"`, never the
+/// getter's callable signature.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `gaRead()` is `"GA"`.
-///
-/// Verbatim failure, un-ignored on this tree:
-///
-/// ```text
-/// assertion `left == right` failed: gaRead's read of an accessor pair must publish the getter's RETURN, not its signature
-///   left: Other("Signature { kind: Call, params: [], return_type: SemanticNodeId(3), type_parameters: [], signature_span: Some(Span { start: 41651, end: 41660 }), return_type_span: Some(Span { start: 41655, end: 41659 }) }")
-///  right: Other("Literal(String(\"GA\"))")
-/// ```
-///
-/// (The `SemanticNodeId` and the two spans are fixture-POSITION
-/// dependent — an edit anywhere above `GaClass` in the shared R5 fixture
-/// moves them. The load-bearing part is the node KIND: a `Signature`
-/// where the read's value must be that signature's return.)
-#[ignore = "owned by the shared PathWalker / type-resolution accessor member projection: a \
-            property read of a get/set pair must project the GETTER's return type, not the \
-            getter's Signature node"]
 #[test]
 fn accessor_pair_read_publishes_the_getters_return() {
     let host = make_r5_host();
@@ -6075,46 +6034,11 @@ fn accessor_pair_read_publishes_the_getters_return() {
     );
 }
 
-/// The `undefined` IDENTIFIER publishes a semantic-miss carrier instead
-/// of the `undefined` primitive.
-///
-/// `k ? undefined : 1` publishes
-/// `Union([1, Unknown { raw: "semanticMiss" }])`: the `undefined`
-/// identifier resolves to nothing the value pass models, so the leaf
-/// lowering answers a miss carrier rather than
-/// `PrimitiveKind::Undefined`. The result is a DEGRADED success — the
-/// value reaches an unresolved carrier, so nothing warms — which is why
-/// the row now fails at the "must evaluate clean" gate before it can
-/// reach the arm comparison it was written to make.
-///
-/// OWNER: `U6.VALUE_INFERENCE` — the `undefined`-identifier gap in the
-/// shared shallow value pass. Pre-existing; it is newly REACHABLE through
-/// the conditional's structural arm (before it, the whole ternary folded
-/// through one leaf answer), not newly wrong.
+/// The `undefined` IDENTIFIER publishes the `undefined` primitive:
+/// `k ? undefined : 1` is `1 | undefined`, clean.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `undefTernary(k)` is `1 | undefined`.
-///
-/// Verbatim failure, un-ignored on this tree:
-///
-/// ```text
-/// assertion `left == right` failed: undefTernary must evaluate clean
-///   left: Some(UnresolvedValue)
-///  right: None
-/// ```
-///
-/// (The row dies at `r5_node`'s clean-and-warm gate, BEFORE the arm
-/// comparison: a value that reaches a miss carrier is a degraded success.
-/// The arm comparison it would then make is
-/// `["Opaque", "Other(\"Literal(Number(1.0))\")"]` against
-/// `["Other(\"Literal(Number(1.0))\")", "Primitive(Undefined)"]`, sorted,
-/// because the union interner orders by node id. `Opaque` is
-/// `node_shape`'s spelling of `SemanticNodeData::Opaque(QueryError::Miss)`
-/// — the same node the PROJECTED surface renders as
-/// `Unknown { raw: "semanticMiss" }`.)
-#[ignore = "owned by U6.VALUE_INFERENCE: the `undefined` identifier must lower to \
-            PrimitiveKind::Undefined in the shared shallow value pass instead of a \
-            semantic-miss carrier"]
 #[test]
 fn undefined_identifier_publishes_the_undefined_primitive() {
     let host = make_r5_host();
@@ -6145,43 +6069,17 @@ fn undefined_identifier_publishes_the_undefined_primitive() {
     );
 }
 
-/// A call in a LOGICAL operand FAILS CLOSED where it must publish the
-/// operand union.
+/// A call in a LOGICAL operand publishes the checker's logical result over
+/// the operand types: the operands are flow values, so the call rides the
+/// ONE call sink (overload choice included) and the result is the left's
+/// truthy part beside the right for `||`, the left's non-nullable part
+/// beside the right for `??`.
 ///
-/// `k || tnAmb("a")` used to answer `Primitive(Any)` cleanly and warm —
-/// the shallow pass's per-expression fallback (`_ => Ok(Primitive(Any))`)
-/// surfaced as a value. It no longer publishes: the leaf gate refuses an
-/// answer that embeds `any` when the expression's value COMPOSES over a
-/// call with no structural arm, so the position carries the typed
-/// unresolved marker and the result is a degraded success admitting
-/// nothing.
-///
-/// That closes the fabricated-value half. The CAPABILITY half is still
-/// open, and is what this row pins.
-///
-/// OWNER: the SHALLOW PASS (`verter_semantic::analysis::type_eval_build`
-/// per-expression lowering) under `U6.VALUE_INFERENCE` — not the flow
-/// rail, which owns only what happens to an answer the shallow pass
-/// produced. The green counterpart
-/// (`flow_return_leaf_answered_call_forms_publish_any_not_a_carrier`)
-/// pins the fail-closed disposition; this row pins the answer it must
-/// eventually give.
-///
-/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
-/// --ignoreConfig`): `tnAmbLogical(k)` is `"TA" | true`. (The `"TA"` half
-/// additionally needs argument-driven overload resolution —
-/// `U6.CALL_RESOLVE` — so this row does not close until both land.)
-///
-/// Verbatim failure, un-ignored on this tree:
-///
-/// ```text
-/// assertion `left == right` failed: tnAmbLogical must evaluate clean
-///   left: Some(UnmodeledPosition)
-///  right: None
-/// ```
-#[ignore = "owned by U6.VALUE_INFERENCE (the shallow pass's `_ => Ok(Primitive(Any))` \
-            per-expression fallback) plus U6.CALL_RESOLVE for the overload half: a call in a \
-            logical operand must publish the operand union, not the typed unresolved marker"]
+/// Oracle (TypeScript 7.0.2 `tsc --declaration --emitDeclarationOnly`,
+/// every `strictNullChecks` × `noImplicitAny` setting): `tnAmbLogical(k)`
+/// is `"TA" | true` (the overload the argument selects),
+/// `tnAmbNullish(k)` is `"TA"`, `tnGenericLogical(k)` is `string | true`.
+/// The union is published in its `VerterStableV1` order.
 #[test]
 fn call_in_a_logical_operand_publishes_the_operand_union() {
     let host = make_r5_host();
@@ -6190,12 +6088,24 @@ fn call_in_a_logical_operand_publishes_the_operand_union() {
         "tnAmbLogical",
         TypeExpr::Union(Arc::from(
             vec![
-                string_lit("TA"),
                 TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(true)),
+                string_lit("TA"),
             ]
             .into_boxed_slice(),
         )),
     );
+    assert_clean_warm(
+        &host,
+        "tnGenericLogical",
+        TypeExpr::Union(Arc::from(
+            vec![
+                TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(true)),
+                TypeExpr::Primitive(PrimitiveName::String),
+            ]
+            .into_boxed_slice(),
+        )),
+    );
+    assert_clean_warm(&host, "tnAmbNullish", string_lit("TA"));
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -6415,10 +6325,6 @@ fn string() -> TypeExpr {
     TypeExpr::Primitive(PrimitiveName::String)
 }
 
-fn boolean() -> TypeExpr {
-    TypeExpr::Primitive(PrimitiveName::Boolean)
-}
-
 fn null() -> TypeExpr {
     TypeExpr::Primitive(PrimitiveName::Null)
 }
@@ -6488,17 +6394,19 @@ fn flow_return_labeled_break_drops_the_arm_assertion() {
 
 /// A conditional labeled break joins the break path's value with the
 /// fall-through path's write. Oracle: TypeScript 7.0.2 `tsc` prints
-/// `number | true` (the `boolean` arm assignment-reduced to its `true`
-/// constituent; first recorded as `number | boolean` on tsgo
-/// 7.0.0-dev.20260526.1 — the version difference is ledgered as SDL-1).
-/// The assertion below still records this substrate's `boolean` arm.
+/// `number | true` — the `true` initializer assignment-reduces the
+/// declared `boolean` to its `true` constituent (tsgo
+/// 7.0.0-dev.20260526.1 printed `number | boolean`).
 #[test]
 fn flow_return_conditional_labeled_break_joins_the_write() {
     let host = make_r1_host();
     assert_r1_clean_warm(
         &host,
         "r1ConditionalBreakWrite",
-        union(vec![number(), boolean()]),
+        union(vec![
+            TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(true)),
+            number(),
+        ]),
     );
 }
 
@@ -6876,4 +6784,66 @@ fn flow_return_finally_write_stays_off_the_abrupt_edge() {
 fn flow_return_terminated_if_arm_contributes_nothing() {
     let host = make_r2_host();
     assert_r2_clean_warm(&host, "r2TerminatedArmContributesNothing", number());
+}
+
+const MEMBER_CALL_SHADOW: &str = "\
+declare class DK { m(): \"km\"; }
+function c() { return 1; }
+export function shadow() { const c = new DK(); return c.m(); }
+export function shadowObject() { const c = { m: () => \"om\" as const }; return c.m(); }
+export function shadowLet() { let c = new DK(); return c.m(); }
+export function shadowParam(c: DK) { return c.m(); }
+export function unshadowed() { return c(); }
+";
+
+/// A member call rooted at a local or parameter reads that binding, not a
+/// same-name declaration of the file it shadows: the callee references no
+/// other name, and the call resolves its root through the frame.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --declaration
+/// --emitDeclarationOnly --strict`, alike on the four `strictNullChecks` ×
+/// `noImplicitAny` settings): `shadow`, `shadowLet` and `shadowParam` are
+/// `"km"`, `shadowObject` `"om"`, and `unshadowed` (the file's `c`)
+/// `number`.
+///
+/// Mutation: failing every frame-shadowed member call whose root the owner
+/// scope also answers leaves the four shadowed rows a typed miss.
+#[test]
+fn a_member_call_on_a_shadowing_binding_reads_the_binding() {
+    let failures = super::checker_probe_lane_tests::mismatches(
+        MEMBER_CALL_SHADOW,
+        &[
+            ("ReturnType<typeof shadow>", "\"km\""),
+            ("ReturnType<typeof shadowObject>", "\"om\""),
+            ("ReturnType<typeof shadowLet>", "\"km\""),
+            ("ReturnType<typeof shadowParam>", "\"km\""),
+            ("ReturnType<typeof unshadowed>", "number"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A nested generic function's own `T` shadows the enclosing one, in a
+/// function value as in a function type: calling the inner signature reads
+/// its own constraint.
+///
+/// Measured on TypeScript 7.0.2 (strict): each row below is `number`, the
+/// inner `T`'s constraint (the outer one is `string`).
+#[test]
+fn a_nested_same_name_type_parameter_names_the_innermost_declaration() {
+    let failures = super::checker_probe_lane_tests::mismatches(
+        concat!(
+            "export function pf<T extends string>(x: T) { return <T extends number>(y: T) => y; }\n",
+            "export const af = <T extends string>(x: T) => <T extends number>(y: T) => y;\n",
+            "type F = <T extends string>(x: T) => <T extends number>(y: T) => T;\n",
+        ),
+        &[
+            ("ReturnType<ReturnType<typeof pf>>", "number"),
+            ("ReturnType<ReturnType<typeof af>>", "number"),
+            ("Parameters<ReturnType<typeof pf>>[0]", "number"),
+            ("ReturnType<ReturnType<F>>", "number"),
+            ("Parameters<ReturnType<F>>[0]", "number"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

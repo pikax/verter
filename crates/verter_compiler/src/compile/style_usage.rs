@@ -6,10 +6,10 @@
 //! callers fail open and never publish a false unused-binding diagnostic.
 
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 use verter_css_syntax::CssDialect;
+use verter_parser::oxc_parse::Parser;
 
 use crate::style_planner::{
     transform_vue_v_bind, AuthoredStyleInput, PreparedStyleIr, StyleRewriteOutcome,

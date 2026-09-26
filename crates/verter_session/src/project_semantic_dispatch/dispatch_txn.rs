@@ -154,18 +154,19 @@ impl StrictFamilyConfig {
     }
 }
 
-/// The environment one dispatch runs its relation judgements under: the
-/// `R/T/L/J` dimensions and the strict-family configuration of the project
-/// owning the REQUEST's canonical (the program doing the checking, as in
-/// TypeScript, where strictness is a program-wide option — never the file a
-/// related node happens to be declared in).
+/// The environment a relation judgement runs under: the `R/T/L/J`
+/// dimensions and the strict-family configuration of the project doing the
+/// checking (as in TypeScript, where strictness is a program-wide option —
+/// never the file a related node happens to be declared in). That project
+/// owns the file whose answer is being decided: a flow-return frame's own
+/// function file while the frame evaluates, the REQUEST's canonical
+/// otherwise ([`super::ProjectSemanticDispatch::relation_environment`]).
 ///
-/// Derived once per dispatch ([`super::ProjectSemanticDispatch::relation_environment`])
-/// from the same published project tables the env hashes were composed
-/// from, so the key's `T` and the reducer's branch are two projections of
-/// ONE option set. A dispatch running outside any request context (no
-/// canonical to own it) runs the workspace default: TypeScript's default
-/// options under the workspace-default env.
+/// Derived from the same published project tables the env hashes were
+/// composed from, so the key's `T` and the reducer's branch are two
+/// projections of ONE option set. A dispatch running outside any request
+/// context and any flow frame (no canonical to own it) runs the workspace
+/// default: TypeScript's default options under the workspace-default env.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RelationEnvironment {
     pub(crate) env: crate::session_view::EnvHashes,
@@ -295,6 +296,10 @@ pub(crate) struct RelationFrameState {
     /// relation. It follows the member through SCC deferral and is either
     /// completed by the root's batched publish or explicitly aborted.
     pub(crate) inline_flight: Option<InlineMemberFlight>,
+    /// Where this frame sits in its relation chain — the relation frames
+    /// directly above one another, the checker's one `checkTypeRelatedTo`
+    /// call (see [`RelationChainPosition`]).
+    pub(crate) chain: RelationChainPosition,
 }
 
 impl RelationFrameState {
@@ -303,8 +308,42 @@ impl RelationFrameState {
             session_delta: false,
             opened_session: None,
             inline_flight: None,
+            chain: RelationChainPosition::default(),
         }
     }
+}
+
+/// One relation frame's place in its relation chain: the relation frames
+/// stacked directly on one another, which the checker relates in one
+/// `checkTypeRelatedTo` call with one recursion depth, one overflow flag
+/// and one pair of recursion stacks. A frame of another domain between two
+/// relation frames starts a new chain. Transient: it lives on the frame and
+/// is released at pop.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RelationChainPosition {
+    /// Stack index of the chain's first frame.
+    pub(crate) base: usize,
+    /// The chain's structured frames up to and including this one — the
+    /// checker's `sourceDepth` / `targetDepth` after this frame's push.
+    /// A frame counts once its operands, unwrapped, are known to be a
+    /// structured pair (a pair of simple types never reaches
+    /// `recursiveTypeRelatedTo`).
+    pub(crate) depth: u16,
+    /// This frame counted in `depth` — it is an entry of the checker's
+    /// recursion stacks.
+    pub(crate) counted: bool,
+    /// Set on the chain's first frame once a relation in the chain
+    /// overflowed the checker's depth: every structured relation after it
+    /// answers false, as the checker's `overflow` flag makes it.
+    pub(crate) overflowed: bool,
+    /// The checker's `expandingFlags` in force at this frame: bit 1 the
+    /// source side, bit 2 the target side was found deeply nested at this
+    /// frame or one below it in the chain.
+    pub(crate) expanding: u8,
+    /// The recursion identities of this counted frame's source and target
+    /// with the node each was read from (see
+    /// `ProjectSemanticDispatch::relation_recursion_identity`).
+    pub(crate) identities: [Option<(crate::semantic_query::DeclIdentity, SemanticNodeId)>; 2],
 }
 
 /// The flow-return-domain payload of one in-flight frame. The ordered
@@ -743,6 +782,9 @@ pub(crate) enum ResolveCallSelection {
         /// literal the caller's return position widens, and every listed
         /// deposit widens at the caller's value (member) positions.
         fresh_literal_returns: Vec<SemanticNodeId>,
+        /// The diagnostic of an error-recovery winner (see
+        /// [`ResolvedCallResult::Selected`]).
+        recovery_diagnostic: Option<crate::semantic_query::CheckerDiagnostic>,
     },
     DynamicAny,
 }
@@ -771,6 +813,7 @@ impl ResolveCallSelection {
                 selected_signature,
                 substitution,
                 fresh_literal_returns,
+                recovery_diagnostic,
             } => ResolvedCallResult::Selected {
                 selected: selected.clone(),
                 selected_signature: match selected_signature {
@@ -782,6 +825,7 @@ impl ResolveCallSelection {
                 substitution: substitution.clone(),
                 return_type,
                 fresh_literal_returns: std::sync::Arc::from(fresh_literal_returns.as_slice()),
+                recovery_diagnostic: *recovery_diagnostic,
             },
             Self::DynamicAny => ResolvedCallResult::DynamicAny { return_type },
         }
@@ -819,8 +863,9 @@ pub(crate) struct ResolveCallPendingState {
 pub(crate) enum PendingObligationDomain {
     /// Relation deferral state.
     Relate(RelationPendingState),
-    /// Flow-return deferral state.
-    FlowReturn(FlowReturnPendingState),
+    /// Flow-return deferral state (boxed: the evaluated result it carries
+    /// dwarfs the relation domain).
+    FlowReturn(Box<FlowReturnPendingState>),
     /// ResolveCall deferral state (boxed: the union-selection payload
     /// makes this by far the largest domain).
     ResolveCall(Box<ResolveCallPendingState>),
@@ -2189,6 +2234,12 @@ pub(crate) struct InferenceSession {
     reverse_projection: Option<ReverseProjectionState>,
     /// Immutable fixed bindings retained across staging and commit.
     staged_bindings: Option<Arc<[InferBinding]>>,
+    /// The reentry-stack depth when this session opened. Every frame
+    /// below it was already open and encloses the session — whichever
+    /// frame opened it, a relation root or a call executor — so only a
+    /// frame at or above this depth mutates an outer session when it
+    /// deposits.
+    pub(crate) opened_at_depth: usize,
     /// Session lifecycle.
     pub(crate) state: InferenceSessionState,
 }
@@ -2217,6 +2268,7 @@ impl InferenceSession {
             infos,
             reverse_projection,
             staged_bindings: None,
+            opened_at_depth: 0,
             state: InferenceSessionState::Collecting,
         }
     }
@@ -2482,12 +2534,6 @@ impl InferenceSession {
             variance,
         });
         true
-    }
-
-    /// Whether `param_node` is one of this session's frozen inference
-    /// declarations — a deposit target the forward relation arm binds.
-    pub(crate) fn declares(&self, param_node: SemanticNodeId) -> bool {
-        self.infos.iter().any(|info| info.param_node == param_node)
     }
 
     /// Record a FRESH primitive-literal deposit for `param_node`. A
@@ -2842,6 +2888,35 @@ pub(crate) struct CompletedFlowReturnMember {
     /// The materialised point set the member's compute ACTUALLY produced
     /// (§3.4) — carried to the fenced member publish.
     pub(crate) materialized: crate::semantic_query::demand::MaterializedSet,
+    /// Set when a later demand for the same key on this transaction may
+    /// reuse the proven value instead of re-evaluating the body (§12:
+    /// shared body-obligation consumers reuse completed return work): the
+    /// member closed as its OWN SCC root, so its value came only from work
+    /// inside its frame, and every read that work made was recorded and
+    /// clean. `None` for a member closed inside a larger component, whose
+    /// value also rests on frames outside its own, and for any member
+    /// whose evaluation was not recorded or read something a replay cannot
+    /// reproduce.
+    pub(crate) reuse: Option<FlowMemberReuse>,
+}
+
+/// What reusing a completed flow member replays at the demanding site: the
+/// reads its evaluation made on every channel an enclosing build observes,
+/// so a scope that was not live when the member ran still sees them — the
+/// transaction-local counterpart of a warm hit bubbling its stored
+/// signature. Only a CLEAN evaluation is recorded as reusable (no
+/// non-cacheable read, no partial or cache-suppressing taint, a complete
+/// cold-compute scope), so these three rails are all a replay needs.
+#[derive(Debug, Clone)]
+pub(crate) struct FlowMemberReuse {
+    /// The fact reads, fanned out again into the live tracers.
+    pub(crate) reads: crate::resolver_core::resolver_context::RecordedFactReads,
+    /// The file self-roots canonical construction deposited, re-deposited
+    /// on the live build-local frame.
+    pub(crate) observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// Whether the evaluation deposited canonical evidence, which a
+    /// substitution's cache decision watches for.
+    pub(crate) canonical_evidence_deposited: bool,
 }
 
 /// A call member whose mixed component closed cleanly, queued for the
@@ -2881,11 +2956,18 @@ pub(crate) struct FlowReturnDomainRuntime {
     /// values, so a degraded root's typed failure rides the transaction to
     /// the demanding caller (never admitted, never a cache value).
     pub(crate) last_root_failure: Option<crate::semantic_query::FlowReturnFailure>,
+    /// The callee schedule session while frames evaluate: the callee
+    /// returns a schedule already settled, and the instantiated returns
+    /// each uninstantiated frame's call resolution demanded.
+    pub(crate) schedule: super::flow_return::schedule::FlowScheduleSession,
 }
 
 /// The call-resolution domain runtime.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ResolveCallDomainRuntime {
+    /// The relation the candidate being checked is applicable under: the
+    /// subtype pass of a multi-candidate call, else assignability.
+    pub(crate) applicability: crate::semantic_query::RelationKind,
     /// Mixed-component members awaiting the root carrier's drain (fenced
     /// backfill behind the root's committing admission).
     pub(crate) completed_members: Vec<CompletedResolveCallMember>,
@@ -2899,6 +2981,17 @@ pub(crate) struct ResolveCallDomainRuntime {
     /// decided, so the call's relation obligations have no decided
     /// evidence to claim.
     pub(crate) undecided_relations: u64,
+}
+
+impl Default for ResolveCallDomainRuntime {
+    fn default() -> Self {
+        Self {
+            applicability: crate::semantic_query::RelationKind::Assignable,
+            completed_members: Vec::new(),
+            last_root_failure: None,
+            undecided_relations: 0,
+        }
+    }
 }
 
 /// The per-obligation-root cold-compute frame (design §2.1 /
@@ -3002,9 +3095,9 @@ impl CheckerDispatchTransaction {
         reverse_projection: Option<ReverseProjectionState>,
     ) -> SessionId {
         let id = self.alloc_session_id();
-        self.relation
-            .sessions
-            .push(InferenceSession::new(id, setup, reverse_projection));
+        let mut session = InferenceSession::new(id, setup, reverse_projection);
+        session.opened_at_depth = self.reentry().depth();
+        self.relation.sessions.push(session);
         id
     }
 
@@ -3097,14 +3190,6 @@ impl CheckerDispatchTransaction {
             .is_some_and(|policy| policy.top_level_infer_targets.contains(&param_node))
     }
 
-    /// The session the frame at `idx` opened, if any.
-    pub(crate) fn frame_opened_session(&self, idx: usize) -> Option<SessionId> {
-        self.reentry()
-            .frame(idx)
-            .and_then(|frame| frame.relation())
-            .and_then(|state| state.opened_session)
-    }
-
     /// Mark the frame at `idx` as having opened session `session`.
     pub(crate) fn note_opened_session(&mut self, idx: usize, session: SessionId) {
         if let Some(state) = self
@@ -3138,18 +3223,23 @@ impl CheckerDispatchTransaction {
         }
     }
 
-    /// Mark every active non-owner frame when an accepted candidate write
-    /// mutates an outer session.
+    /// Mark every active frame opened inside `active_id`'s lifetime when an
+    /// accepted candidate write mutates that (for them, outer) session.
+    /// The frames below the session's opening depth enclose it: the
+    /// session is local to their subtree — a relation root's own session,
+    /// or a call executor's candidate session under an enclosing relation
+    /// — so a write into it is not a delta to them.
     pub(crate) fn note_candidate_write(&mut self, active_id: Option<SessionId>) {
         let depth = self.reentry().depth();
         if depth == 0 {
             return;
         }
-        let owner = (0..depth).rev().find(|index| {
-            self.frame_opened_session(*index)
-                .is_some_and(|opened| Some(opened) == active_id)
-        });
-        let first_non_owner = owner.map_or(0, |index| index + 1);
+        let first_non_owner = self
+            .relation
+            .sessions
+            .iter()
+            .find(|session| Some(session.id) == active_id)
+            .map_or(0, |session| session.opened_at_depth);
         self.note_session_delta_range(first_non_owner, depth);
     }
 

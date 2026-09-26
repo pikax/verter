@@ -884,15 +884,33 @@ fn comparable_shared_members_use_one_relation_check() {
 /// proof.
 ///
 /// The oracle's permissive arm is a PROMISE ("no proof of empty overlap
-/// exists"); an operand whose content was never read — an indexed access, a
-/// mapped type, a `keyof`, a deferred `typeof` — cannot back that promise,
-/// so answering `Holds` would convert missing knowledge into a positive,
-/// memo-admitted fact. Both wrong directions are pinned per row: `Holds`
-/// (a fabricated completeness, warm-admissible through the shared memo) and
+/// exists"); an operand whose content was never read — a `keyof`, a
+/// deferred `typeof` — cannot back that promise, so answering
+/// `Holds` would convert missing knowledge into a positive, memo-admitted
+/// fact. Both wrong directions are pinned per row: `Holds` (a fabricated
+/// completeness, warm-admissible through the shared memo) and
 /// `DoesNotHold` (a disjointness proof from an unread operand, which the
 /// flow consumer publishes as a complete warm `never`). The exact verdict —
 /// `Undecided` — also pins the admission consequence below: zero candidates,
-/// so an unread operand can never warm-serve either answer.
+/// so an unread operand can never warm-serve either answer. A `keyof` over
+/// an import that does not resolve is such an operand.
+///
+/// A `keyof` whose keys settle IS read: it is that key set. Measured on
+/// TypeScript 7.0.2 (`tsc --noEmit --strict`): over `x: keyof SingleKey`
+/// (`{ a: number }`) and `x: keyof Partial<SingleKey>`, `x === b` with
+/// `b: "b"` is TS2367 quoting `'"a"' and '"b"'` while `x === a` is
+/// accepted.
+///
+/// An indexed access over a type that is not generic IS read: it is the
+/// property type (`Holder["kind"]` is `"a"`), comparable with `"a"` and
+/// disjoint from `"b"` — measured on TypeScript 7.0.2, `x === b` over
+/// `x: Holder["kind"]` and `b: "b"` is TS2367 (no overlap) while `x === a`
+/// is accepted. An OPTIONAL property reads its type plus `undefined`
+/// (`OptionalHolder["kind"]` is `"a" | undefined`), with the same verdicts:
+/// `x === b` is TS2367 quoting `'"a" | undefined' and '"b"'`, `x === a` is
+/// accepted. A homomorphic mapped type read through an access is the mapped
+/// property (`MappedHolder["kind"]` is `"a"`: TS2367 against `"b"`, accepted
+/// against `"a"`).
 #[test]
 fn comparable_treats_unreduced_operands_as_undecided() {
     let host = make_audit_host();
@@ -900,10 +918,12 @@ fn comparable_treats_unreduced_operands_as_undecided() {
         &host,
         "/relation-authority/deferred.ts",
         "type Holder = { kind: \"a\"; other: \"b\" };\n\
+         type OptionalHolder = { kind?: \"a\" };\n\
          type MappedHolder = { [K in keyof Holder]: Holder[K] };\n\
          type SingleKey = { a: number };\n\
          type LiteralA = \"a\";\n\
-         type LiteralB = \"b\";",
+         type LiteralB = \"b\";\n\
+         import type { Missing } from \"./missing-keyof-module\";",
     );
     let node = |name: &str| {
         dispatch_resolve_type_decl_for_tests(&host, "/relation-authority/deferred.ts", name)
@@ -931,14 +951,10 @@ fn comparable_treats_unreduced_operands_as_undecided() {
         ))),
     };
 
-    for (subject, boundary) in [
-        (lower(&indexed("Holder", "kind")), "an indexed access"),
-        (lower(&indexed("MappedHolder", "kind")), "a mapped type"),
-        (
-            lower(&TypeExpr::KeyOf(Arc::new(type_ref("SingleKey")))),
-            "a keyof operator",
-        ),
-    ] {
+    for (subject, boundary) in [(
+        lower(&TypeExpr::KeyOf(Arc::new(type_ref("Missing")))),
+        "a keyof over an unresolved import",
+    )] {
         for other in ["LiteralA", "LiteralB"] {
             assert_eq!(
                 dispatch_execute_relate_verdict_for_tests(
@@ -954,9 +970,57 @@ fn comparable_treats_unreduced_operands_as_undecided() {
         }
     }
 
+    // A `keyof` whose keys settle is that key set.
+    let partial_single_key = TypeExpr::Ref {
+        name: Arc::from("Partial"),
+        type_arguments: Arc::from(vec![type_ref("SingleKey")].into_boxed_slice()),
+    };
+    for (operand, subject) in [
+        ("keyof SingleKey", type_ref("SingleKey")),
+        ("keyof Partial<SingleKey>", partial_single_key),
+    ] {
+        let keys = lower(&TypeExpr::KeyOf(Arc::new(subject)));
+        for (other, verdict) in [
+            ("LiteralA", RelateVerdictForTests::Holds),
+            ("LiteralB", RelateVerdictForTests::DoesNotHold),
+        ] {
+            assert_eq!(
+                dispatch_execute_relate_verdict_for_tests(
+                    &host,
+                    keys,
+                    node(other),
+                    RelationKind::Comparable,
+                ),
+                verdict,
+                "`{operand}` compared with {other}",
+            );
+        }
+    }
+
+    // An indexed access over a type that is not generic is the property
+    // type it reads.
+    for holder in ["Holder", "OptionalHolder", "MappedHolder"] {
+        let read = lower(&indexed(holder, "kind"));
+        for (other, verdict) in [
+            ("LiteralA", RelateVerdictForTests::Holds),
+            ("LiteralB", RelateVerdictForTests::DoesNotHold),
+        ] {
+            assert_eq!(
+                dispatch_execute_relate_verdict_for_tests(
+                    &host,
+                    read,
+                    node(other),
+                    RelationKind::Comparable,
+                ),
+                verdict,
+                "`{holder}[\"kind\"]` compared with {other}",
+            );
+        }
+    }
+
     // The admission consequence: an undecided comparability verdict admits
     // no candidate, so it cannot be warm-served as either answer.
-    let subject = lower(&indexed("Holder", "kind"));
+    let subject = lower(&TypeExpr::KeyOf(Arc::new(type_ref("Missing"))));
     let key =
         relate_query_key_for_tests(&host, subject, node("LiteralB"), RelationKind::Comparable);
     assert_eq!(

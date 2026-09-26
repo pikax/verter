@@ -39,17 +39,39 @@
 //!   — the shell stays recoverable for display while any DERIVED composite
 //!   built FROM it routes canonical.
 //! * [`CompositeCarrierCategory::OrderedCarrier`] — every order-sensitive
-//!   heritage or overload carrier: the own-body-LAST heritage
-//!   reconstruction, same-name method overload groups, possibly-callable
-//!   member-value intersections, and their companion filters. Arm order is
+//!   overload carrier of an intersection TYPE: possibly-callable
+//!   member-value intersections and their companion filters. Arm order is
 //!   overload precedence and rendered-type-text fidelity; a commutative
 //!   sort would silently reverse the observed overload set.
+//! * [`CompositeCarrierCategory::OverloadGroup`] and
+//!   [`CompositeCarrierCategory::MergedOverloadGroup`] — a same-name
+//!   method's overloads accumulated across the declarations of one merged
+//!   symbol. An `OverloadGroup`'s arms are ONE declaration's overloads in
+//!   source order; a `MergedOverloadGroup`'s arms are the declarations in
+//!   declaration order, each arm one overload or that declaration's
+//!   `OverloadGroup`. Either is ONE method's signature list, not an
+//!   intersection type: `SignaturesOfType` concatenates the arms'
+//!   signatures and drops nothing (two identical overloads both stay, as
+//!   TypeScript's `getSignaturesOfSymbol` keeps every declaration), and the
+//!   merged arms are the declarations call resolution groups its candidates
+//!   by.
+//! * [`CompositeCarrierCategory::Heritage`] — an interface or class
+//!   declaration body with `extends` heritage, its bases in clause order
+//!   and its own body LAST (a single declaration's projected body and the
+//!   merged-declaration reconstruction). It is an intersection NODE but not
+//!   an intersection TYPE: the declaration inherits its bases' signatures
+//!   by concatenation, own signatures first (TypeScript's
+//!   `resolveObjectTypeMembers`), with no identical-signature dedup and no
+//!   mixin composition, so `SignaturesOfType` reads the category to answer
+//!   it by the heritage rule. Composite identity is carrier-qualified
+//!   ([`CompositeMembers`]' `PartialEq`), which keeps a heritage body apart
+//!   from the authored intersection `Base & { … }` over the same arms.
 //! * [`CompositeCarrierCategory::PreservingRebuild`] — an order- and
 //!   scope-preserving member-wise rebuild of an EXISTING composite whose
 //!   carrier semantics the rebuild site could not prove safe to re-decide.
 //!   The rebuilt list inherits the original carrier's semantics verbatim.
 //! * [`CompositeCarrierCategory::QuerySubject`] — a query-argument
-//!   representation: the `NormalizeUnion` / `ReduceIntersection`
+//!   representation: the `ReduceUnion` / `ReduceIntersection`
 //!   SUBJECT (the pre-normalization member list interned verbatim so the
 //!   query's subject stays distinct from its canonical result), and the
 //!   uniform arity-1 key-domain `Union` shell that carries a `Pick` /
@@ -71,9 +93,11 @@
 //! the canonical authority, while a rebuild of an `OrderedCarrier` (or of
 //! any category whose original semantics the tag cannot prove
 //! re-decidable — `PreservingRebuild`, `QuerySubject`, `TestFixture`)
-//! preserves the arm list verbatim. The pre-seal flow closure uses the
-//! same fact as its O(1) canonicality test — keyed on exactly
-//! `Canonical`, which the canonical builder stamps ONLY on a COMPLETE
+//! preserves the arm list verbatim. A rebuild of a `Heritage` body stays a
+//! `Heritage` body ([`CompositeList::rebuilt_from`]): substituting into a
+//! declaration body never turns it into an intersection type. The pre-seal
+//! flow closure uses the same fact as its O(1) canonicality test — keyed on
+//! exactly `Canonical`, which the canonical builder stamps ONLY on a COMPLETE
 //! canonicalization (an incomplete run — over-cap arm set, exhausted
 //! compare budget, dangling arm, undecided peek — stamps
 //! `CanonicalUnproven` instead): a `Canonical`-tagged top is proven
@@ -81,6 +105,10 @@
 //! instead of re-proving a no-op, while an unproven top pays the full
 //! re-close and its evidence re-deposit on every resurfacing —
 //! budget-degraded results are never skip-classified canonical form.
+//! `Canonical` records the `null` / `undefined` algebra it was proven
+//! under ([`super::NullabilityPolicy`]), and the skip accepts only its own
+//! algebra: a list canonical with `strictNullChecks` on can still carry
+//! the nullable members the erased algebra removes.
 //!
 //! **Identity discipline.** The category is EXCLUDED from `Eq` / `Hash`:
 //! arena identity stays `(members, kind, sidecar scope)` exactly as
@@ -315,7 +343,7 @@ impl<K: CompositeKind> CompositeList<K> {
             // `CanonicalUnproven` — same value, no canonical-form claim.
             CompositeCarrierCategory::Canonical(witness) => {
                 if witness.certifies_canonical_form() {
-                    CompositeOriginCategory::Canonical
+                    CompositeOriginCategory::Canonical(witness.nullability())
                 } else {
                     CompositeOriginCategory::CanonicalUnproven
                 }
@@ -328,6 +356,13 @@ impl<K: CompositeKind> CompositeList<K> {
             }
             CompositeCarrierCategory::OrderedCarrier(_witness) => {
                 CompositeOriginCategory::OrderedCarrier
+            }
+            CompositeCarrierCategory::Heritage(_witness) => CompositeOriginCategory::Heritage,
+            CompositeCarrierCategory::OverloadGroup(_witness) => {
+                CompositeOriginCategory::OverloadGroup
+            }
+            CompositeCarrierCategory::MergedOverloadGroup(_witness) => {
+                CompositeOriginCategory::MergedOverloadGroup
             }
             CompositeCarrierCategory::PreservingRebuild(_witness) => {
                 CompositeOriginCategory::PreservingRebuild
@@ -371,6 +406,40 @@ impl<K: CompositeKind> CompositeList<K> {
         )
     }
 
+    /// The order-preserving member-wise rebuild of a composite minted under
+    /// `original`: a [`CompositeOriginCategory::Heritage`] body stays a
+    /// heritage body and an overload group stays an overload group of the
+    /// same kind; every other category preserves as
+    /// [`CompositeCarrierCategory::PreservingRebuild`].
+    #[must_use]
+    pub(crate) fn rebuilt_from(
+        original: CompositeOriginCategory,
+        members: Arc<[SemanticNodeId]>,
+    ) -> Self {
+        match original {
+            CompositeOriginCategory::Heritage => Self::minted(
+                members,
+                CompositeCarrierCategory::Heritage(HeritageMint { _sealed: () }),
+            ),
+            CompositeOriginCategory::OverloadGroup => Self::minted(
+                members,
+                CompositeCarrierCategory::OverloadGroup(OverloadGroupMint { _sealed: () }),
+            ),
+            CompositeOriginCategory::MergedOverloadGroup => Self::minted(
+                members,
+                CompositeCarrierCategory::MergedOverloadGroup(OverloadGroupMint { _sealed: () }),
+            ),
+            CompositeOriginCategory::Canonical(_)
+            | CompositeOriginCategory::CanonicalUnproven
+            | CompositeOriginCategory::AuthoredShell
+            | CompositeOriginCategory::OrderedCarrier
+            | CompositeOriginCategory::PreservingRebuild
+            | CompositeOriginCategory::QuerySubject => Self::preserving_rebuild(members),
+            #[cfg(any(test, feature = "test-support"))]
+            CompositeOriginCategory::TestFixture => Self::preserving_rebuild(members),
+        }
+    }
+
     /// Mint under [`CompositeCarrierCategory::QuerySubject`].
     #[must_use]
     pub(crate) fn query_subject(members: Arc<[SemanticNodeId]>) -> Self {
@@ -392,6 +461,40 @@ impl<K: CompositeKind> CompositeList<K> {
     }
 }
 
+impl CompositeList<IntersectionKind> {
+    /// Mint an interface or class declaration body with heritage under
+    /// [`CompositeCarrierCategory::Heritage`]: its bases in clause order,
+    /// its own body LAST.
+    #[must_use]
+    pub(crate) fn heritage(members: Arc<[SemanticNodeId]>) -> Self {
+        Self::minted(
+            members,
+            CompositeCarrierCategory::Heritage(HeritageMint { _sealed: () }),
+        )
+    }
+
+    /// Mint one declaration's overloads of a merged method under
+    /// [`CompositeCarrierCategory::OverloadGroup`], in source order.
+    #[must_use]
+    pub(crate) fn overload_group(members: Arc<[SemanticNodeId]>) -> Self {
+        Self::minted(
+            members,
+            CompositeCarrierCategory::OverloadGroup(OverloadGroupMint { _sealed: () }),
+        )
+    }
+
+    /// Mint a merged method's overloads under
+    /// [`CompositeCarrierCategory::MergedOverloadGroup`]: one arm per
+    /// declaration, in declaration order.
+    #[must_use]
+    pub(crate) fn merged_overload_group(members: Arc<[SemanticNodeId]>) -> Self {
+        Self::minted(
+            members,
+            CompositeCarrierCategory::MergedOverloadGroup(OverloadGroupMint { _sealed: () }),
+        )
+    }
+}
+
 impl<K: CompositeKind> std::ops::Deref for CompositeList<K> {
     type Target = CompositeMembers;
 
@@ -406,9 +509,14 @@ impl<K: CompositeKind> std::ops::Deref for CompositeList<K> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum CompositeOriginCategory {
     /// Minted by a COMPLETE canonicalization: the list is PROVEN canonical
-    /// form. This is the sole tag the pre-seal closure's O(1) skip
-    /// accepts.
-    Canonical,
+    /// form under the recorded `null` / `undefined` algebra. This is the
+    /// sole tag the pre-seal closure's O(1) skip accepts, and only for a
+    /// closure running that same algebra: a strict-null canonical list
+    /// may still carry the nullable members an erased closure removes, so
+    /// two `strictNullChecks` settings never share the skip. The algebra
+    /// is part of the payload's identity, so the same member list minted
+    /// under both settings interns as two nodes.
+    Canonical(super::NullabilityPolicy),
     /// Minted by the canonical algebra from an INCOMPLETE canonicalization
     /// (over-cap arm set, exhausted compare budget, dangling arm,
     /// undecided bounded peek): the value is the deterministic budgeted
@@ -422,9 +530,19 @@ pub(crate) enum CompositeOriginCategory {
     /// Authored-syntax / locator-shape shell: authored order, authored
     /// scope. A member-wise rebuild of one is a DERIVED result.
     AuthoredShell,
-    /// Order-sensitive heritage / overload carrier: arm order is overload
-    /// precedence — never re-decided.
+    /// Order-sensitive overload carrier of an intersection type: arm order
+    /// is overload precedence — never re-decided.
     OrderedCarrier,
+    /// One declaration's overloads of a merged method, in source order: a
+    /// signature list, never re-decided.
+    OverloadGroup,
+    /// A merged method's overloads, one arm per declaration in declaration
+    /// order: a signature list, never re-decided.
+    MergedOverloadGroup,
+    /// An interface or class declaration body with heritage (bases in
+    /// clause order, own body last): it inherits by concatenation, never
+    /// by the intersection rules, and is never re-decided.
+    Heritage,
     /// A preserving rebuild: the ORIGINAL's category was not proven
     /// re-decidable, so downstream rebuilds stay preserving too.
     PreservingRebuild,
@@ -447,14 +565,22 @@ pub(crate) enum CompositeCarrierCategory {
     /// Authored-syntax / locator-shape shell lowering: authored order,
     /// authored scope, no reduction.
     AuthoredShell(AuthoredShellMint),
-    /// An order-sensitive heritage or overload carrier: arm order is
-    /// overload precedence and rendered-type-text fidelity.
+    /// An order-sensitive overload carrier of an intersection type: arm
+    /// order is overload precedence and rendered-type-text fidelity.
     OrderedCarrier(OrderedCarrierMint),
+    /// One declaration's overloads of a merged method, in source order.
+    OverloadGroup(OverloadGroupMint),
+    /// A merged method's overloads, one arm per declaration in declaration
+    /// order.
+    MergedOverloadGroup(OverloadGroupMint),
+    /// An interface or class declaration body with heritage: bases in
+    /// clause order, own body last, inherited by concatenation.
+    Heritage(HeritageMint),
     /// An order- and scope-preserving member-wise rebuild of an existing
     /// composite whose carrier semantics were not proven re-decidable: the
     /// rebuilt list inherits the original's semantics verbatim.
     PreservingRebuild(PreservingRebuildMint),
-    /// A query-argument representation: the `NormalizeUnion` /
+    /// A query-argument representation: the `ReduceUnion` /
     /// `ReduceIntersection` subject, or the uniform arity-1 key-domain
     /// argument shell — the member list, verbatim.
     QuerySubject(QuerySubjectMint),
@@ -471,6 +597,17 @@ pub(crate) struct AuthoredShellMint {
 
 /// Witness of an [`CompositeCarrierCategory::OrderedCarrier`] mint.
 pub(crate) struct OrderedCarrierMint {
+    _sealed: (),
+}
+
+/// Witness of a [`CompositeCarrierCategory::OverloadGroup`] or
+/// [`CompositeCarrierCategory::MergedOverloadGroup`] mint.
+pub(crate) struct OverloadGroupMint {
+    _sealed: (),
+}
+
+/// Witness of a [`CompositeCarrierCategory::Heritage`] mint.
+pub(crate) struct HeritageMint {
     _sealed: (),
 }
 

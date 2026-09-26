@@ -514,7 +514,7 @@ fn rewrite_expression_dialect(
         ExprDialect::Tsx => SourceType::tsx(),
         ExprDialect::PlainJs => SourceType::mjs(),
     };
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, source_type).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         // A fragment that does not parse is a refusal — never emit it verbatim.
         return Err(UnsupportedSvelteRuntimeSurface::DestructuringWrite {

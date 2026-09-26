@@ -9,7 +9,7 @@ use verter_type_expr::facts::FunctionPartIdentity;
 fn index_of(source: &str) -> FunctionProgramIndex {
     let allocator = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::ts();
-    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+    let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
     assert!(
         ret.errors.is_empty(),
         "fixture must parse: {:?}",
@@ -142,7 +142,9 @@ fn nested_value_frames_have_exact_indexed_locators() {
     let index = index_of(source);
     assert_eq!(index.entries.len(), 4, "every nested callable owns a frame");
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     for entry in index.entries.iter() {
         let resolved = resolve_function_node(&parsed.program, &entry.locator)
             .expect("indexed locator resolves");
@@ -322,7 +324,9 @@ fn flow_binding_map_is_bijective_for_value_bindings() {
     let index = index_of(source);
     let entry = entry_of(&index, "inventory");
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     let Statement::FunctionDeclaration(function) = &parsed.program.body[0] else {
         panic!("function fixture");
     };
@@ -1098,6 +1102,7 @@ function outer() {
             kind: FunctionBindingKind::Const,
             defining_function: outer.key.clone(),
             binding_slot: 0,
+            evolving_array: false,
         }],
         "the nested body captures `x` from the parent frame (defining frame + slot)"
     );
@@ -1139,6 +1144,7 @@ function outer() {
             kind: FunctionBindingKind::Const,
             defining_function: entry_of(&index, "outer").key.clone(),
             binding_slot: 0,
+            evolving_array: false,
         }],
         "the callback captures the enclosing `x`"
     );
@@ -1205,6 +1211,7 @@ function outer() {
             kind: FunctionBindingKind::NestedFunction,
             defining_function: entry_of(&index, "outer").key.clone(),
             binding_slot: 0,
+            evolving_array: false,
         }],
         "the hoisted nested name is a capture of kind NestedFunction"
     );
@@ -1337,7 +1344,8 @@ namespace N {
 }
 "#;
     let allocator = oxc_allocator::Allocator::default();
-    let ret = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+        .parse();
     assert!(
         ret.errors.is_empty(),
         "fixture must parse: {:?}",
@@ -1463,7 +1471,9 @@ fn exact_value_function_lookup_does_not_scan_sibling_functions() {
 fn retained_function_addresses_preserve_exact_locator_metadata() {
     let source = "namespace N { export const arrow = () => 0; export class Box<T> { method<U>(x:T) { return () => x; } field = () => 1; } } const named = function internal(){ return named(); }; const obj = { method() { return () => 2; } }; function root() { return () => ({ method(){ return () => 3; } }); }";
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let (index, nodes) = build_function_program_index_with_nodes(
@@ -1512,5 +1522,99 @@ fn class_evaluation_occurrences_are_indexed_without_promoting_static_locals() {
             .iter()
             .any(|binding| binding.name.as_ref() == "y"),
         "static-block locals never enter the function's runtime inventory"
+    );
+}
+
+/// Every bare `typeof name` in a frame's type positions is recorded with
+/// the position that reads it — the parameter list, a declarator's
+/// annotation (named by the declared binding), or a type an expression
+/// carries — and resolves through the frame's lexical scope like any other
+/// value-space name. A parameter annotated with a bare type reference
+/// records the name it spells.
+#[test]
+fn type_positions_record_their_typeof_names_and_bare_parameter_annotations() {
+    let source = r#"
+function f() { return 1; }
+function g() { return "g"; }
+function h() { return true; }
+export function reader<T>(p: ReturnType<typeof f>, q: T, r: T[]) {
+  let a!: ReturnType<typeof g>;
+  const local = 1;
+  let b!: typeof local;
+  const { c } = { c: true } as { c: ReturnType<typeof h> };
+  const inner = (y: ReturnType<typeof f>) => y;
+  return [a, b, c, p, q, r, inner];
+}
+"#;
+    let index = index_of(source);
+    let entry = entry_of(&index, "reader");
+    let at = |text: &str| {
+        let start = source.find(text).expect("fixture text") as u32;
+        verter_span::Span::new(start, start + 1)
+    };
+    let queries: Vec<(&str, FunctionTypeQueryPosition, bool)> = entry
+        .type_queries
+        .iter()
+        .map(|query| {
+            (
+                query.name.as_ref(),
+                query.position,
+                matches!(query.binding, FunctionReferenceBinding::Free),
+            )
+        })
+        .collect();
+    assert_eq!(
+        queries,
+        vec![
+            ("f", FunctionTypeQueryPosition::Parameter, true),
+            ("g", FunctionTypeQueryPosition::Declarator(at("a!")), true),
+            ("local", FunctionTypeQueryPosition::Declarator(at("b!")), false),
+            ("h", FunctionTypeQueryPosition::Expression, true),
+        ],
+        "the frame's type positions in source order; a nested function's own signature belongs to its own frame"
+    );
+    let annotations: Vec<Option<&str>> = entry
+        .params
+        .iter()
+        .map(|param| param.annotation_reference.as_deref())
+        .collect();
+    assert_eq!(annotations, vec![None, Some("T"), None]);
+}
+
+#[test]
+fn every_class_records_the_members_its_body_declares() {
+    let source = "class A { x = 1; m(): { p: number } { return { p: 1 }; } }\n\
+                  function f() { class L extends A { y = 2 } return class { constructor(protected z: number, w: number) {} }; }";
+    let index = index_of(source);
+    let span_of = |text: &str| {
+        let start = source.find(text).expect("fixture text") as u32;
+        verter_span::Span::new(start, start + text.len() as u32)
+    };
+    let a = index
+        .class_declaring_member(span_of("x = 1;"))
+        .expect("a class element");
+    assert!(!a.expression && !a.has_heritage);
+    assert!(!index.class_encloses(a.span));
+    assert_eq!(
+        index.class_declaring_member(span_of("m(): { p: number } { return { p: 1 }; }")),
+        Some(a)
+    );
+    assert_eq!(
+        index.class_declaring_member(span_of("p: number")),
+        None,
+        "a type literal's member is no class member"
+    );
+    let local = index
+        .class_declaring_member(span_of("y = 2"))
+        .expect("a local class element");
+    assert!(!local.expression && local.has_heritage);
+    let expression = index
+        .class_declaring_member(span_of("protected z: number"))
+        .expect("a property-declaring constructor parameter");
+    assert!(expression.expression && !expression.has_heritage);
+    assert_eq!(
+        index.class_declaring_member(span_of("w: number")),
+        None,
+        "a plain parameter declares no property"
     );
 }

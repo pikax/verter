@@ -204,7 +204,9 @@ fn indexed_returned_arrow(source: &str) -> FunctionBodySkeleton {
     };
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index =
         build_function_program_index(&parsed.program, source, &owners, Arc::from("/capture.ts"));
@@ -868,7 +870,9 @@ fn flow_graph_enumerates_every_node_family_and_empty_graphs() {
         bindings: Arc::from([]),
         expr_sites: Arc::from([]),
         return_sites: Arc::from([]),
+        yield_sites: Arc::from([]),
         writes: Arc::from([]),
+        closure_assignments: Arc::from([]),
     };
     let captured = indexed_returned_arrow("function root() { const x = 1; return () => x; }");
     for (skeleton, captures) in [(populated, 0), (empty, 0), (captured, 1)] {

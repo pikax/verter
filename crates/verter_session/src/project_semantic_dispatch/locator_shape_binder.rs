@@ -425,19 +425,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         AugmentationScopeKind::Module(specifier.as_ref().to_string())
                     }
                 };
-                bundle
-                    .as_ref()
-                    .and_then(|bundle| {
-                        bundle
-                            .prepare_augmentation_type_decl_in(
-                                &scope_kind,
-                                anchor.owner,
-                                anchor_symbol.as_ref(),
-                            )
-                            .ok()
-                            .flatten()
-                    })
-                    .map(|prepared| AnchorPreparedDecl::Augmentation(Box::new(prepared)))
+                match anchor.space {
+                    verter_type_expr::locators::LocatorSymbolSpace::Value => bundle
+                        .as_ref()
+                        .and_then(|bundle| {
+                            bundle
+                                .prepare_augmentation_value_decl_in(
+                                    &scope_kind,
+                                    anchor.owner,
+                                    anchor_symbol.as_ref(),
+                                )
+                                .ok()
+                                .flatten()
+                        })
+                        .map(|prepared| AnchorPreparedDecl::Value(Arc::new(prepared))),
+                    _ => bundle
+                        .as_ref()
+                        .and_then(|bundle| {
+                            bundle
+                                .prepare_augmentation_type_decl_in(
+                                    &scope_kind,
+                                    anchor.owner,
+                                    anchor_symbol.as_ref(),
+                                )
+                                .ok()
+                                .flatten()
+                        })
+                        .map(|prepared| AnchorPreparedDecl::Augmentation(Box::new(prepared))),
+                }
             }
             // A JSDoc typedef declares NO header type parameters (its deref
             // returns `type_parameters: Vec::new()`) and its comment-derived

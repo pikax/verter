@@ -15,8 +15,8 @@ use crate::analysis::scope::AnalysisScope;
 use crate::analysis::top_level_owners::TopLevelOwnerTable;
 use crate::analysis::types::AnalyzedMacroKind;
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
+use verter_parser::oxc_parse::Parser;
 use verter_type_expr::{ConstructorBindingOutcome, DeclBindingKey, TopLevelOwnerId};
 
 /// Parse `source` as an ordinary (single-owner) TS module and run the full

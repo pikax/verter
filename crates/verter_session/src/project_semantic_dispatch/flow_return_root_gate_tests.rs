@@ -364,31 +364,74 @@ fn string_lit(value: &str) -> TypeExpr {
 /// was `(() => "OUTERNEST")[]`, and `{ ...spreadBait, x: 1 }` was
 /// `{ a: "OUTERSPREAD"; x: number }` (tsgo: `{ a: number; x: number }`).
 ///
-/// A CONDITIONAL expression and an object SPREAD are no longer
-/// fail-closed rows: both have a structural arm now, so their operands
-/// resolve through the frame's own lexical authority. `c ? condBait : 2`
-/// is the checker's `1 | 2` and `{ ...spreadBait, x: 1 }` is the
-/// checker's `{ a: number; x: number }` — the local and the parameter,
-/// exactly. They stay in this suite as the rows that prove the frame
-/// binding WINS rather than merely blocking an answer: an owner-scope
-/// resolution of the same names reads `"OUTERCOND" | 2` and
-/// `{ a: "OUTERSPREAD"; x: number }`.
+/// A CONDITIONAL expression, an object SPREAD and an ARRAY literal are not
+/// fail-closed rows: each has a structural arm, so their operands resolve
+/// through the frame's own lexical authority. Nor is a member path rooted
+/// at a frame binding, read or called: its root is the only name the
+/// answer references, so it reads through the frame whatever the owner
+/// scope answers — `paramBait.s` is the parameter's `number`, and
+/// `objBait.m()` over the local object the local method's `number`, the
+/// checker's answers (TypeScript 7.0.2, alike on the four
+/// `strictNullChecks` × `noImplicitAny` settings).
+/// `c ? condBait : 2` is the checker's `1 | 2`, `{ ...spreadBait, x: 1 }`
+/// is the checker's `{ a: number; x: number }`, and `[arrBait]` /
+/// `[() => nestBait]` are the checker's `number[]` / `(() => number)[]`
+/// — the locals and the parameter, exactly. They stay in this suite as the
+/// rows that prove the frame binding WINS rather than merely blocking an
+/// answer: an owner-scope resolution of the same names reads
+/// `"OUTERCOND" | 2`, `{ a: "OUTERSPREAD"; x: number }`, `"OUTERARR"[]`
+/// and `(() => "OUTERNEST")[]`.
 ///
 /// Mutation recipe: dropping the gate's answer half republishes every one
 /// of these as the bait value, cleanly and warm.
 #[test]
 fn flow_return_leaf_answer_never_binds_a_frame_owned_name_in_owner_scope() {
     let host = make_host();
-    for name in [
-        "gateStaticMemberOnLocalClass",
-        "gateMethodCallOnLocal",
-        "gateStaticMemberOnParam",
-        "gateArrayElement",
-        "gateNestedArrowInArray",
-        "gateTypeSpaceLocalClass",
-    ] {
+    for name in ["gateStaticMemberOnLocalClass", "gateTypeSpaceLocalClass"] {
         assert_fails_closed(&host, name);
     }
+    // A member path rooted at the frame's parameter reads through the frame,
+    // and so does a member call rooted at the frame's local.
+    assert_clean_warm(&host, "gateStaticMemberOnParam", number());
+    assert_clean_warm(&host, "gateMethodCallOnLocal", number());
+
+    // The array element resolves to the frame's own local — its fresh
+    // `1` widened at the element — never the owner-scope bait.
+    assert_clean_warm(
+        &host,
+        "gateArrayElement",
+        TypeExpr::Array {
+            element: std::sync::Arc::new(number()),
+            readonly: false,
+        },
+    );
+    with_dispatch(&host, |dispatch| {
+        let key = r6_key(dispatch, "gateNestedArrowInArray");
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
+        else {
+            panic!("gateNestedArrowInArray must produce a value");
+        };
+        assert_eq!(result.degradation(), None);
+        let graph = dispatch.graph();
+        let element = match graph.node_data(result.return_type()).as_deref() {
+            Some(SemanticNodeData::Array { element, .. }) => *element,
+            other => panic!("gateNestedArrowInArray is an array, got {other:?}"),
+        };
+        match graph.node_data(element).as_deref() {
+            Some(SemanticNodeData::Signature { return_type, .. }) => assert!(
+                matches!(
+                    graph.node_data(*return_type).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+                ),
+                "the closure reads the frame's local: {:?}",
+                graph.node_data(*return_type)
+            ),
+            other => panic!("the element is the closure's signature, got {other:?}"),
+        }
+    });
 
     // The conditional arm RESOLVES — to the frame's own binding, never
     // the owner-scope bait.
@@ -486,20 +529,16 @@ fn assert_clean_warm_object(host: &Arc<VerterHost>, name: &str, expected: &[(&st
 /// tsgo gives `number` for every one of them (`{ z: number }` for the
 /// `new` case).
 ///
-/// `gateOptionalChain` LEFT this set when the typed optional-member
-/// carrier landed: its root lowers through the frame (the `Local`
-/// carrier, substitution and narrowing included), so nothing can
-/// mis-bind — the row now asserts the checker's `number`, clean and
-/// warm, in the test below.
+/// `gateOptionalChain`, `gateTaggedTemplate` and `gateComputedMember`
+/// are not in this set: the optional-member carrier, the tagged-template
+/// call and a literal-keyed element access all lower their root through
+/// the frame (the `Local` carrier, substitution and narrowing included),
+/// so nothing can mis-bind — the rows assert the checker's `number`,
+/// clean and warm, below.
 #[test]
 fn flow_return_unmodelled_form_read_through_a_frame_binding_fails_closed() {
     let host = make_host();
-    for name in [
-        "gateComputedMember",
-        "gateNewExpression",
-        "gateTaggedTemplate",
-        "gatePrivateField",
-    ] {
+    for name in ["gateNewExpression", "gatePrivateField"] {
         assert_fails_closed(&host, name);
     }
     // A MEMBER-valued optional chain over a FRAME-OWNED root resolves the
@@ -507,6 +546,12 @@ fn flow_return_unmodelled_form_read_through_a_frame_binding_fails_closed() {
     // no `| undefined`), never the owner-scope `declare const` of the
     // same name.
     assert_clean_warm(&host, "gateOptionalChain", number());
+    // A tagged template's tag is the frame's local arrow, whose return is
+    // `number` — never the owner-scope `"OUTERTAG"` tag of the same name.
+    assert_clean_warm(&host, "gateTaggedTemplate", number());
+    // A literal-keyed element access reads the frame's local `compBait`
+    // exactly as `compBait.x` would — never the owner-scope bait.
+    assert_clean_warm(&host, "gateComputedMember", number());
 }
 
 /// The positive controls. The gate is about names the FRAME owns, so a
@@ -644,19 +689,17 @@ fn flow_return_block_level_function_declaration_does_not_reach_function_scope() 
 ///
 /// A ROOT-region function declaration still reaches function scope: the
 /// read at `return hoistBait()` — written BEFORE the declaration —
-/// resolves to it and takes the substrate's documented fail-closed rail
-/// for a nested function declaration's own return (tsgo: `number`; the
-/// exact recovery is separate substrate debt). The file-scope
-/// `declare const hoistBait: () => "OUTERHOISTED"` is what makes this
-/// discriminating: without the root-region hoist the name would be FREE
-/// and the read would publish `"OUTERHOISTED"`, clean and warm.
+/// resolves to it and calls the value it declares (tsgo: `number`). The
+/// file-scope `declare const hoistBait: () => "OUTERHOISTED"` is what
+/// makes this discriminating: without the root-region hoist the name
+/// would be FREE and the read would publish `"OUTERHOISTED"`.
 ///
 /// A block `var` still hoists out of its block unconditionally — the
 /// region gate narrows the nested-function arm ONLY.
 #[test]
 fn flow_return_root_function_and_block_var_still_hoist() {
     let host = make_host();
-    assert_fails_closed(&host, "rootFunctionStillHoists");
+    assert_clean_warm(&host, "rootFunctionStillHoists", number());
     assert_clean_warm(&host, "blockVarStillHoists", number());
 }
 

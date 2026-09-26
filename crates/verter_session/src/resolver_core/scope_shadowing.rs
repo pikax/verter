@@ -38,7 +38,6 @@
 //! the two lowering entry points agree on which builtin names are
 //! shadowed in any given owner scope.
 
-use rustc_hash::FxHashSet;
 use std::sync::Arc;
 
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
@@ -46,20 +45,23 @@ use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 // `from_host_scope` migrates to `&dyn ResolverContext`; the
 // `crate::VerterHost` type is no longer needed in this file.
 
-/// Captures, once per resolver context, the set of bare type names
-/// the owner scope already declares. Consumed by the dispatch
-/// fast-path and the materialise-path identity gate so `Pick<…>` /
-/// `Omit<…>` / etc. resolve to the userland declaration when the
-/// SFC's same-file scope already declares one.
+/// The bare type names the owner scope already declares. Consumed by the
+/// dispatch fast-path and the materialise-path identity gate so `Pick<…>`
+/// / `Omit<…>` / etc. resolve to the userland declaration when the SFC's
+/// same-file scope already declares one.
+///
+/// A VIEW over the owner scope's declaration-scope payload, as
+/// [`DeclarationScopePayload`] itself is: construction is one refcount
+/// bump, and a probe reads the prepared bundle's three name surfaces in
+/// place. Folding them into a set of its own made every construction walk
+/// every name the file declares — one construction per instantiation, so
+/// a file's instantiations cost the square of its size.
 ///
 /// See module docs for the construction-source matrix.
 #[derive(Debug, Clone)]
 pub(crate) struct ScopeShadowing {
-    /// Bare type names declared in the owner scope (script-setup type
-    /// bindings, scope-local type aliases, scope-local interfaces).
-    /// Membership in this set means the userland declaration MUST win
-    /// over a same-named ambient-lib builtin.
-    shadowed_type_names: Arc<FxHashSet<Arc<str>>>,
+    /// The owner scope's payload; `None` shadows nothing.
+    payload: Option<DeclarationScopePayload>,
 }
 
 impl ScopeShadowing {
@@ -69,18 +71,16 @@ impl ScopeShadowing {
     /// declaration shadows any builtin" — the ambient-lib fast-path
     /// stays active.
     pub(crate) fn empty() -> Self {
-        Self {
-            shadowed_type_names: Arc::new(FxHashSet::default()),
-        }
+        Self { payload: None }
     }
 
-    /// Build a shadow set from a [`DeclarationScopePayload`] —
-    /// dispatch-path entry point. The payload's `scope_type_names`
-    /// (covering script-setup type params + scope-local type aliases),
+    /// The shadow set of a [`DeclarationScopePayload`] — dispatch-path
+    /// entry point. The payload's `scope_type_names` (covering
+    /// script-setup type params + scope-local type aliases),
     /// `scope_type_bindings` (covering script-setup generics), AND
-    /// `import_bindings` (covering imported names) are merged into the
-    /// shadow set; each source independently shadows a same-named
-    /// ambient-lib builtin per the foundation (`524f469d`) gate.
+    /// `import_bindings` (covering imported names) each shadow a
+    /// same-named ambient-lib builtin per the foundation (`524f469d`)
+    /// gate.
     ///
     /// `import_bindings` membership is load-bearing for the carrier
     /// head-resolution path, which rehydrates an EMPTY `name_resolution`
@@ -90,20 +90,15 @@ impl ScopeShadowing {
     /// import binding must shadow the builtin THROUGH this set instead, or
     /// an imported `Partial` would wrongly resolve to `__builtin__.Partial`.
     pub(crate) fn from_scope_payload(payload: Option<&DeclarationScopePayload>) -> Self {
-        let Some(payload) = payload else {
-            return Self::empty();
-        };
-        Self::from_payload_parts(
-            payload.scope_type_names().iter(),
-            payload.scope_type_bindings().keys(),
-            payload.import_bindings().keys(),
-        )
+        Self {
+            payload: payload.cloned(),
+        }
     }
 
-    /// Build a shadow set from `(host, scope_canonical_id)` —
-    /// materialise-path entry point. Mirrors the dispatch-path shape
-    /// by going through the host's prepared decl bundle so both paths
-    /// observe identical scope-type-name / scope-type-binding sets.
+    /// The shadow set of `(host, scope_canonical_id)` — materialise-path
+    /// entry point. Mirrors the dispatch-path shape by going through the
+    /// host's prepared decl bundle so both paths observe identical
+    /// scope-type-name / scope-type-binding sets.
     ///
     /// Returns [`ScopeShadowing::empty`] when the host has no bundle
     /// for the canonical id (e.g. the file is unknown to the
@@ -115,33 +110,22 @@ impl ScopeShadowing {
         owner: verter_type_expr::TopLevelOwnerId,
     ) -> Self {
         match ctx.prepared_decl_bundle(scope_canonical_id) {
-            Some(bundle) => Self::from_prepared_decl_bundle(bundle.as_ref(), owner),
+            Some(bundle) => Self::from_prepared_decl_bundle(&bundle, owner),
             None => Self::empty(),
         }
     }
 
-    /// Build a shadow set directly from a [`PreparedDeclBundle`].
-    /// Helper used by [`Self::from_host_scope`] and by tests that
-    /// already hold a bundle. Reads the SAME three bundle surfaces
-    /// [`Self::from_scope_payload`] reads through the payload view
-    /// (`scope_type_names` + `script_setup_type_bindings` keys +
-    /// `import_bindings` keys), merged by the shared
-    /// `from_payload_parts`. Keeping the two construction shapes
-    /// aligned is the load-bearing invariant: the dispatch path and
-    /// the materialise path MUST observe the same shadow set per
-    /// scope.
+    /// The shadow set of a [`PreparedDeclBundle`]'s owner scope: the SAME
+    /// three bundle surfaces [`Self::from_scope_payload`] reads through the
+    /// payload view (`scope_type_names` + `script_setup_type_bindings`
+    /// keys + `import_bindings` keys). Keeping the two construction shapes
+    /// aligned is the load-bearing invariant: the dispatch path and the
+    /// materialise path MUST observe the same shadow set per scope.
     pub(crate) fn from_prepared_decl_bundle(
-        bundle: &PreparedDeclBundle,
+        bundle: &Arc<PreparedDeclBundle>,
         owner: verter_type_expr::TopLevelOwnerId,
     ) -> Self {
-        let Some(scope) = bundle.owner_scope(owner) else {
-            return Self::empty();
-        };
-        Self::from_payload_parts(
-            scope.scope_type_names.iter(),
-            scope.script_setup_type_bindings.keys(),
-            scope.import_bindings.keys(),
-        )
+        Self::from_scope_payload(Some(&DeclarationScopePayload::from_bundle(bundle, owner)))
     }
 
     /// Returns `true` when `name` is declared in the owner scope and
@@ -150,25 +134,15 @@ impl ScopeShadowing {
     /// fast-path and the materialise-path identity gate suppress
     /// their `__builtin__` route when this returns `true`,
     /// dispatching through the standard `ResolveDecl` path so the
-    /// userland declaration wins.
+    /// userland declaration wins. Three hash probes, whatever the scope's
+    /// size.
     pub(crate) fn is_shadowing_lib(&self, name: &str) -> bool {
-        // O(1) hash-set membership. `FxHashSet<Arc<str>>` accepts a borrowed
-        // `&str` probe (`Arc<str>: Borrow<str>`, and `Arc<str>` hashes as its
-        // `str` pointee), so this is behaviour-identical to the prior
-        // `iter().any(|n| n == name)` linear scan — the same names shadow —
-        // without walking the set on every probe. Both shadow consumers (the
-        // dispatch fast-path and the materialise-path gate) get the O(1)
-        // lookup.
-        self.shadowed_type_names.contains(name)
+        Self::scope_payload_shadows_lib(self.payload.as_ref(), name)
     }
 
     /// Whether `name` is shadowed in `payload`'s scope, answered without
-    /// building a shadow set.
-    ///
-    /// For gates with no per-scope memo to consult (the stateless dispatch
-    /// adapter): it probes the SAME three sources [`Self::from_scope_payload`]
-    /// folds, so `scope_payload_shadows_lib(p, n)` equals
-    /// `from_scope_payload(p).is_shadowing_lib(n)` — pinned by
+    /// constructing a shadow set: it probes the three sources
+    /// [`Self::is_shadowing_lib`] reads — pinned by
     /// `payload_probe_agrees_with_the_folded_shadow_set`.
     pub(crate) fn scope_payload_shadows_lib(
         payload: Option<&DeclarationScopePayload>,
@@ -179,47 +153,6 @@ impl ScopeShadowing {
                 || payload.scope_type_bindings().contains_key(name)
                 || payload.import_bindings().contains_key(name)
         })
-    }
-
-    /// Internal — merge a `scope_type_names` set with the keys of
-    /// `scope_type_bindings` and `import_bindings` into a deduplicated
-    /// shadow set. Each source independently shadows ambient-lib builtins
-    /// per the foundation gate; this keeps the merge in one place so any
-    /// future shadow-source addition lands here once.
-    fn from_payload_parts<'a, S, K, I>(
-        scope_type_names: S,
-        type_binding_keys: K,
-        import_binding_keys: I,
-    ) -> Self
-    where
-        S: IntoIterator<Item = &'a String>,
-        K: IntoIterator<Item = &'a String>,
-        I: IntoIterator<Item = &'a String>,
-        S::IntoIter: ExactSizeIterator,
-        K::IntoIter: ExactSizeIterator,
-        I::IntoIter: ExactSizeIterator,
-    {
-        let scope_type_names = scope_type_names.into_iter();
-        let type_binding_keys = type_binding_keys.into_iter();
-        let import_binding_keys = import_binding_keys.into_iter();
-        // The three sources are typically disjoint, so their summed length
-        // is a tight capacity bound (duplicates only ever shrink it).
-        let mut set: FxHashSet<Arc<str>> = FxHashSet::with_capacity_and_hasher(
-            scope_type_names.len() + type_binding_keys.len() + import_binding_keys.len(),
-            Default::default(),
-        );
-        for name in scope_type_names {
-            set.insert(Arc::from(name.as_str()));
-        }
-        for binding in type_binding_keys {
-            set.insert(Arc::from(binding.as_str()));
-        }
-        for binding in import_binding_keys {
-            set.insert(Arc::from(binding.as_str()));
-        }
-        Self {
-            shadowed_type_names: Arc::new(set),
-        }
     }
 }
 
@@ -245,6 +178,15 @@ mod tests {
         type_bindings: &[&str],
         import_names: &[&str],
     ) -> DeclarationScopePayload {
+        let (bundle, owner) = bundle_with_imports(names, type_bindings, import_names);
+        DeclarationScopePayload::from_bundle(&bundle, owner)
+    }
+
+    fn bundle_with_imports(
+        names: &[&str],
+        type_bindings: &[&str],
+        import_names: &[&str],
+    ) -> (Arc<PreparedDeclBundle>, verter_type_expr::TopLevelOwnerId) {
         use crate::resolver_core::prepared_decl::{
             build_prepared_decl_bundle, ImportBinding, ImportCanonicalization,
         };
@@ -283,7 +225,7 @@ mod tests {
         owner_scope.scope_type_names = scope_type_names;
         owner_scope.import_bindings = import_bindings;
         owner_scope.script_setup_type_bindings = bindings;
-        DeclarationScopePayload::from_bundle(&Arc::new(bundle), owner)
+        (Arc::new(bundle), owner)
     }
 
     #[test]
@@ -367,6 +309,33 @@ mod tests {
         assert!(!shadow.is_shadowing_lib("Pick"));
     }
 
+    /// A shadow set is a view: constructing one takes a reference to the
+    /// owner scope's prepared bundle and copies none of its names, so a
+    /// scope with thousands of declared types costs one refcount per
+    /// construction — the dispatch constructs one per instantiation.
+    #[test]
+    fn a_shadow_set_views_its_bundle_without_copying_names() {
+        let names: Vec<String> = (0..3000).map(|index| format!("T{index}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (bundle, owner) = bundle_with_imports(&names, &[], &[]);
+        let before = Arc::strong_count(&bundle);
+        let shadows: Vec<ScopeShadowing> = (0..8)
+            .map(|_| ScopeShadowing::from_prepared_decl_bundle(&bundle, owner))
+            .collect();
+        assert_eq!(
+            Arc::strong_count(&bundle),
+            before + shadows.len(),
+            "each shadow set holds the bundle it reads"
+        );
+        for shadow in &shadows {
+            let payload = shadow.payload.as_ref().expect("a bundle-backed shadow set");
+            assert!(Arc::ptr_eq(payload.bundle_for_tests(), &bundle));
+            assert!(shadow.is_shadowing_lib("T2999"));
+        }
+        drop(shadows);
+        assert_eq!(Arc::strong_count(&bundle), before);
+    }
+
     #[test]
     fn from_scope_payload_none_returns_empty_set() {
         let shadow = ScopeShadowing::from_scope_payload(None);
@@ -380,45 +349,32 @@ mod tests {
 
     #[test]
     fn shadow_sets_from_payload_and_bundle_observe_same_names() {
-        // Single-source-of-truth invariant: a `DeclarationScopePayload`
-        // built from the same source merges identically across both
-        // construction paths. Build a shared map, then construct a
-        // PreparedDeclBundle stub to verify the bundle path returns
-        // the same shadow set.
-        let names: rustc_hash::FxHashSet<String> = ["Pick".to_string(), "Cfg".to_string()]
-            .into_iter()
-            .collect();
-        let mut bindings: FxHashMap<String, TypeParamBinding> = FxHashMap::default();
-        bindings.insert("T".to_string(), make_binding("T", 0));
-
-        let payload = payload_with(&["Pick", "Cfg"], &["T"]);
-        let shadow_from_payload = ScopeShadowing::from_scope_payload(Some(&payload));
-
-        // Cross-check: every payload-shadowed name is also recognised
-        // when we feed the same data through `from_prepared_decl_bundle`
-        // semantically (a full bundle requires a real ShallowFileState
-        // — covered by the §5.10 §5.D.2 integration test below; this
-        // sub-test asserts the merge logic itself is identical to the
-        // payload path's handling of the same `(names, bindings)`
-        // input).
-        let empty_imports: FxHashMap<String, ()> = FxHashMap::default();
-        let shadow_from_payload_again =
-            ScopeShadowing::from_payload_parts(names.iter(), bindings.keys(), empty_imports.keys());
-        assert_eq!(
-            shadow_from_payload.is_shadowing_lib("Pick"),
-            shadow_from_payload_again.is_shadowing_lib("Pick"),
-        );
-        assert_eq!(
-            shadow_from_payload.is_shadowing_lib("Cfg"),
-            shadow_from_payload_again.is_shadowing_lib("Cfg"),
-        );
-        assert_eq!(
-            shadow_from_payload.is_shadowing_lib("T"),
-            shadow_from_payload_again.is_shadowing_lib("T"),
-        );
+        // Single-source-of-truth invariant: the payload path and the bundle
+        // path read the same three surfaces of the same owner scope.
+        let (bundle, owner) = bundle_with_imports(&["Pick", "Cfg"], &["T"], &["Imported"]);
+        let shadow_from_payload = ScopeShadowing::from_scope_payload(Some(
+            &DeclarationScopePayload::from_bundle(&bundle, owner),
+        ));
+        let shadow_from_bundle = ScopeShadowing::from_prepared_decl_bundle(&bundle, owner);
+        for name in ["Pick", "Cfg", "T", "Imported", "Omit", ""] {
+            assert_eq!(
+                shadow_from_payload.is_shadowing_lib(name),
+                shadow_from_bundle.is_shadowing_lib(name),
+                "{name:?}"
+            );
+        }
+        for name in ["Pick", "Cfg", "T", "Imported"] {
+            assert!(shadow_from_bundle.is_shadowing_lib(name), "{name:?}");
+        }
         // Negative: an unrelated builtin remains unshadowed via
         // BOTH construction paths.
         assert!(!shadow_from_payload.is_shadowing_lib("Omit"));
-        assert!(!shadow_from_payload_again.is_shadowing_lib("Omit"));
+        assert!(!shadow_from_bundle.is_shadowing_lib("Omit"));
+        // Another owner scope of the same bundle declares nothing.
+        let other = ScopeShadowing::from_prepared_decl_bundle(
+            &bundle,
+            verter_type_expr::TopLevelOwnerId::instance(1),
+        );
+        assert!(!other.is_shadowing_lib("Pick"));
     }
 }

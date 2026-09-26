@@ -4,8 +4,8 @@ use super::route_inventory::{
     ScriptLocalExportRoute, ScriptReexportRoute, ScriptRouteCounts, ScriptSideEffectImport,
     ScriptWildcardRoute,
 };
+use crate::oxc_parse::Parser;
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 use verter_type_expr::TopLevelOwnerId;
 
@@ -274,6 +274,98 @@ fn default_export_surfaces_route_through_the_default_symbol() {
                 capability,
             }],
             "the route must target the canonical default header: {source}",
+        );
+    }
+}
+
+fn parse_as(source: &str, source_type: SourceType) -> oxc_parser::ParserReturn<'_> {
+    let allocator = Box::leak(Box::new(Allocator::default()));
+    Parser::new(allocator, source, source_type).parse()
+}
+
+fn exported_names(source: &str, source_type: SourceType) -> Vec<String> {
+    let parsed = parse_as(source, source_type);
+    assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+    let mut names: Vec<String> = build_script_route_inventory(&parsed.program)
+        .local_exports
+        .into_iter()
+        .map(|route| route.exported)
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_declaration_file_module_without_export_declarations_exports_every_declaration() {
+    let source = "export function top(): 1;\ndeclare function hidden(): 2;\n\
+                  declare namespace N { const c: 3; }\ninterface I {}\ndeclare global { var g: 4; }\n";
+    assert_eq!(
+        exported_names(source, SourceType::d_ts()),
+        ["I", "N", "hidden", "top"]
+    );
+    // An export declaration ends the implicit exports.
+    assert_eq!(
+        exported_names(&format!("{source}export {{}};\n"), SourceType::d_ts()),
+        ["top"]
+    );
+    // Outside a declaration file only `export` exports.
+    assert_eq!(exported_names(source, SourceType::ts()), ["top"]);
+    // A declaration file without module syntax is a global script.
+    assert!(exported_names("declare function hidden(): 2;\n", SourceType::d_ts()).is_empty());
+}
+
+#[test]
+fn an_import_assignment_is_an_import_route() {
+    let parsed =
+        parse("import N = require('./n');\nimport type T = require('./t');\nimport Q = N.Q;\n");
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let imports = build_script_route_inventory(&parsed.program).imports;
+    assert_eq!(
+        imports
+            .iter()
+            .map(|route| (
+                route.local.as_str(),
+                route.source.as_str(),
+                route.form,
+                route.capability
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "N",
+                "./n",
+                RouteImportForm::ImportEquals,
+                RouteCapability::TypeAndValue
+            ),
+            (
+                "T",
+                "./t",
+                RouteImportForm::ImportEquals,
+                RouteCapability::TypeOnly
+            ),
+        ]
+    );
+}
+
+#[test]
+fn export_declarations_are_not_export_modifiers() {
+    use super::route_inventory::statements_have_export_declarations;
+    for (source, expected) in [
+        ("export {};", true),
+        ("export { a };", true),
+        ("export * from './a';", true),
+        ("export = a;", true),
+        ("export default 1;", true),
+        ("export const a = 1;", false),
+        ("export function f() {}", false),
+        ("export default function f() {}", false),
+        ("declare const a: 1;", false),
+    ] {
+        let parsed = parse(source);
+        assert_eq!(
+            statements_have_export_declarations(&parsed.program.body),
+            expected,
+            "{source}"
         );
     }
 }

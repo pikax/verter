@@ -374,6 +374,14 @@ pub struct SkeletonBinding {
     /// the binding: a callable authored there is created and retains its
     /// captures whenever the binding is demanded.
     pub pattern_sites: Arc<[SkeletonExprSiteId]>,
+    /// Whether the declaration has the checker's EVOLVING-array form: an
+    /// unannotated whole-identifier declarator initialised to an empty array
+    /// literal (`const a = []`). Under `noImplicitAny` its type follows the
+    /// operations that reach each read — `push` / `unshift` calls and
+    /// element writes ([`evolving_array_mutation_root`],
+    /// [`evolving_array_element_write_root`]) — so each records a write of
+    /// the values it adds into the binding.
+    pub evolving_array: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +514,13 @@ pub enum SkeletonExprShape {
     BranchJoin {
         /// The arm sites, in authored order (consequent, alternate).
         arms: Arc<[SkeletonExprSiteId]>,
+    },
+    /// An array literal: every element site (a spread's argument site for
+    /// a spread element) is a whole-value input of this site's value,
+    /// whatever part of the array is demanded.
+    ArrayLiteral {
+        /// The element sites, in authored order (elisions have none).
+        elements: Arc<[SkeletonExprSiteId]>,
     },
     /// Any other expression shape (footprint-only).
     Other,
@@ -723,8 +738,19 @@ pub struct FunctionBodySkeleton {
     pub expr_sites: Arc<[SkeletonExprSite]>,
     /// The return-site index, in source order.
     pub return_sites: Arc<[SkeletonReturnSite]>,
+    /// The argument site of every statement-position `yield x` (not
+    /// `yield*`), in source order. A generator's yield type is the join of
+    /// these values, so a whole-return demand is a demand for each of them
+    /// as well as for the return sites.
+    pub yield_sites: Arc<[SkeletonExprSiteId]>,
     /// The assignment / kill summary, in source order.
     pub writes: Arc<[SkeletonWrite]>,
+    /// The bindings this frame declares that a nested callable ASSIGNS
+    /// whole, at any depth ([`FunctionProgramEntry::descendant_assignments`]).
+    /// With the whole-binding entries of [`Self::writes`] it is every
+    /// assignment the checker's `isSymbolAssigned` reads; a closure that
+    /// only reads a binding, or writes one of its members, adds nothing.
+    pub closure_assignments: Arc<[SkeletonBindingId]>,
 }
 
 /// The authored kind of one function body — the `async` and `generator`
@@ -1103,6 +1129,12 @@ fn prepare_function_body_skeleton(
     let mut bindings =
         FlowBindingMap::build(&skeleton, &entry.bindings, &entry.key, entry.span.start)?;
     bindings.prepare_occurrences(entry)?;
+    skeleton.closure_assignments = entry
+        .descendant_assignments
+        .iter()
+        .filter_map(|identity| bindings.local(identity))
+        .collect::<Vec<_>>()
+        .into();
     for (ordinal, binding) in Arc::make_mut(&mut skeleton.bindings).iter_mut().enumerate() {
         binding.runtime_binding = binding
             .kind
@@ -1157,7 +1189,139 @@ fn prepare_function_body_skeleton(
             write.binding = bindings.required_occurrence(span)?;
         }
     }
+    attach_declaration_closures(&mut skeleton, &bindings, entry)?;
     Ok(PreparedFunctionBodySkeleton { skeleton, bindings })
+}
+
+/// A local function DECLARATION is hoisted: its value is created at its
+/// frame's entry, not at an expression site, and is read wherever its name
+/// is. Each site that reads (or calls) such a declaration of this frame
+/// therefore retains the declaration's captures exactly as a site creating
+/// the callable would — its own [`SkeletonClosure`], its capture subjects
+/// and its captured reads — so demanding the read selects what the
+/// declaration's body reads from this frame.
+fn attach_declaration_closures(
+    skeleton: &mut FunctionBodySkeleton,
+    bindings: &FlowBindingMap,
+    entry: &FunctionProgramEntry,
+) -> Result<(), FlowBindingMapError> {
+    let anchor = entry.span.start;
+    let declaration_of = |binding: &FlowBindingRef| -> Option<SkeletonBindingId> {
+        let FlowBindingRef::Local(local) = binding else {
+            return None;
+        };
+        (skeleton.bindings[local.index()].kind == SkeletonBindingKind::NestedFunction)
+            .then_some(*local)
+    };
+    let mut attachments: Vec<(usize, SkeletonBindingId)> = Vec::new();
+    for (index, site) in skeleton.expr_sites.iter().enumerate() {
+        let mut seen: Vec<SkeletonBindingId> = Vec::new();
+        let referenced = site
+            .reads
+            .iter()
+            .filter_map(|read| read.binding.as_ref())
+            .chain(site.calls.iter().filter_map(|call| call.binding.as_ref()));
+        for binding in referenced {
+            if let Some(local) = declaration_of(binding) {
+                if !seen.contains(&local) {
+                    seen.push(local);
+                    attachments.push((index, local));
+                }
+            }
+        }
+    }
+    for (index, local) in attachments {
+        // The declaration's own capture record: the nested callable whose
+        // span holds the declared name.
+        let name = skeleton.bindings[local.index()].span.to_absolute(anchor);
+        let Some(captures) = entry
+            .nested_captures
+            .iter()
+            .find(|child| child.span.start <= name.start && child.span.end >= name.end)
+        else {
+            continue;
+        };
+        let mut own: Vec<FlowBindingRef> = Vec::new();
+        for identity in captures.bindings.0.iter() {
+            let binding = bindings.resolve_identity(identity)?;
+            if !own.contains(&binding) {
+                own.push(binding);
+            }
+        }
+        let mut own_reads: Vec<FlowBindingRef> = Vec::new();
+        let mut reads: Vec<SkeletonRead> = Vec::new();
+        for read in captures.reads.iter() {
+            let binding = bindings.resolve_identity(&read.binding)?;
+            if !own_reads.contains(&binding) {
+                own_reads.push(binding.clone());
+            }
+            let name = intern_skeleton_name(skeleton, &read.binding.name);
+            let path: Arc<[SkeletonPathSegment]> = read
+                .path
+                .iter()
+                .map(|segment| SkeletonPathSegment::Static(intern_skeleton_name(skeleton, segment)))
+                .collect::<Vec<_>>()
+                .into();
+            reads.push(SkeletonRead {
+                name,
+                path,
+                span: FrameSpan::rebase(anchor, read.span),
+                binding: Some(binding),
+                kind: FlowReadKind::Input,
+            });
+        }
+        let names: Vec<FlowNameId> = captures
+            .bindings
+            .0
+            .iter()
+            .map(|identity| intern_skeleton_name(skeleton, &identity.name))
+            .collect();
+        let site = &mut Arc::make_mut(&mut skeleton.expr_sites)[index];
+        for binding in &own {
+            if !site.capture_bindings.contains(binding) {
+                arc_push(&mut site.capture_bindings, binding.clone());
+            }
+        }
+        for name in names {
+            if !site.captures.contains(&name) {
+                arc_push(&mut site.captures, name);
+            }
+        }
+        arc_push(
+            &mut site.closures,
+            SkeletonClosure {
+                span: FrameSpan::rebase(anchor, captures.span),
+                correlation: if captures.exhaustive {
+                    SkeletonClosureCorrelation::Exact
+                } else {
+                    SkeletonClosureCorrelation::Partial
+                },
+                captures: Arc::from(own.into_boxed_slice()),
+                read_captures: Arc::from(own_reads.into_boxed_slice()),
+            },
+        );
+        for read in reads {
+            arc_push(&mut site.reads, read);
+        }
+    }
+    Ok(())
+}
+
+/// The id of `text` in the skeleton's name table, interning it when new.
+fn intern_skeleton_name(skeleton: &mut FunctionBodySkeleton, text: &str) -> FlowNameId {
+    if let Some(id) = skeleton.name_id(text) {
+        return id;
+    }
+    let id = FlowNameId(u32::try_from(skeleton.names.len()).unwrap_or(u32::MAX));
+    arc_push(&mut skeleton.names, Arc::from(text));
+    id
+}
+
+/// `slot` with `value` appended.
+fn arc_push<T: Clone>(slot: &mut Arc<[T]>, value: T) {
+    let mut values = slot.to_vec();
+    values.push(value);
+    *slot = Arc::from(values.into_boxed_slice());
 }
 
 fn build_body_skeleton(
@@ -1227,10 +1391,20 @@ struct SkeletonBuilder<'entry> {
     site_stack: Vec<usize>,
     read_kind: FlowReadKind,
     return_sites: Vec<SkeletonReturnSite>,
+    yield_sites: Vec<SkeletonExprSiteId>,
     writes: Vec<SkeletonWrite>,
     nested_captures: FxHashMap<verter_span::Span, &'entry FunctionNestedCaptures>,
+    /// The spans of this frame's references to an enclosing frame's
+    /// EVOLVING-array binding
+    /// ([`crate::analysis::function_program::FlowBindingIdentity::evolving_array`]).
+    captured_evolving_references: FxHashSet<verter_span::Span>,
     capture_subjects: FxHashSet<(SkeletonExprSiteId, FlowBindingRef)>,
     capture_names: FxHashSet<(SkeletonExprSiteId, FlowNameId)>,
+    /// How many class expressions' value positions enclose the walk. Their
+    /// reads are the class site's footprint, but no write there is one this
+    /// frame's flow applies: an instance initializer's runs at construction,
+    /// and the class lowering answers every class write with its typed gap.
+    class_values: u32,
 }
 
 impl<'entry> SkeletonBuilder<'entry> {
@@ -1259,15 +1433,31 @@ impl<'entry> SkeletonBuilder<'entry> {
             site_stack: Vec::new(),
             read_kind: FlowReadKind::Input,
             return_sites: Vec::new(),
+            yield_sites: Vec::new(),
             writes: Vec::new(),
             capture_subjects: FxHashSet::default(),
             capture_names: FxHashSet::default(),
+            class_values: 0,
             nested_captures: entry
                 .map(|entry| {
                     entry
                         .nested_captures
                         .iter()
                         .map(|child| (child.span, child))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            captured_evolving_references: entry
+                .map(|entry| {
+                    entry
+                        .references
+                        .iter()
+                        .filter(|reference| {
+                            reference.binding.resolved().is_some_and(|identity| {
+                                identity.evolving_array && identity.defining_function != entry.key
+                            })
+                        })
+                        .map(|reference| reference.span)
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -1421,6 +1611,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             // span), exactly as a parenthesized expression's does.
             ValueDescent::Awaited(awaited) => self.open_site_at(&awaited.argument, parent, span),
             ValueDescent::Object(object) => self.open_object_site(object, parent, span),
+            ValueDescent::Array(array) => self.open_array_site(array, parent, span),
             ValueDescent::Branches(conditional) => self.open_branch_site(conditional, parent, span),
             // An unmodeled CALL POSITION has no value-providing child
             // either — a call's arguments do not provide its value — so
@@ -1471,6 +1662,34 @@ impl<'entry> SkeletonBuilder<'entry> {
         let alternate = self.open_site(&conditional.alternate, Some(id));
         self.sites[id.index()].shape = SkeletonExprShape::BranchJoin {
             arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
+        };
+        id
+    }
+
+    /// An ARRAY site: each element (a spread's argument for a spread
+    /// element) opens as its own child site, so the element structure the
+    /// content half lowers is the structure the graph selects.
+    fn open_array_site(
+        &mut self,
+        array: &oxc_ast::ast::ArrayExpression<'_>,
+        parent: Option<SkeletonExprSiteId>,
+        span: verter_span::Span,
+    ) -> SkeletonExprSiteId {
+        let id = self.alloc_site(span, parent);
+        let mut elements = Vec::with_capacity(array.elements.len());
+        for element in &array.elements {
+            let value = match element {
+                oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => &spread.argument,
+                oxc_ast::ast::ArrayExpressionElement::Elision(_) => continue,
+                other => match other.as_expression() {
+                    Some(expression) => expression,
+                    None => continue,
+                },
+            };
+            elements.push(self.open_site(value, Some(id)));
+        }
+        self.sites[id.index()].shape = SkeletonExprShape::ArrayLiteral {
+            elements: Arc::from(elements.into_boxed_slice()),
         };
         id
     }
@@ -1673,6 +1892,9 @@ impl<'entry> SkeletonBuilder<'entry> {
         span: verter_span::Span,
         target_span: Option<verter_span::Span>,
     ) {
+        if self.class_values > 0 {
+            return;
+        }
         let site = self.footprint_site(span);
         let region = self.current_region();
         let span = self.frame_span(span);
@@ -1710,6 +1932,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             annotation_span: None,
             destructured,
             pattern_sites: Arc::from([]),
+            evolving_array: false,
         });
     }
 
@@ -1826,16 +2049,21 @@ impl<'entry> SkeletonBuilder<'entry> {
                 self.record_member_write_target(MemberRef::Private(member), certainty, value);
             }
             AssignmentTarget::TSAsExpression(as_expression) => {
-                self.record_expression_write_target(&as_expression.expression, certainty, value);
+                self.record_expression_write_target(
+                    &as_expression.expression,
+                    true,
+                    certainty,
+                    value,
+                );
             }
             AssignmentTarget::TSSatisfiesExpression(satisfies) => {
-                self.record_expression_write_target(&satisfies.expression, certainty, value);
+                self.record_expression_write_target(&satisfies.expression, true, certainty, value);
             }
             AssignmentTarget::TSNonNullExpression(non_null) => {
-                self.record_expression_write_target(&non_null.expression, certainty, value);
+                self.record_expression_write_target(&non_null.expression, false, certainty, value);
             }
             AssignmentTarget::TSTypeAssertion(assertion) => {
-                self.record_expression_write_target(&assertion.expression, certainty, value);
+                self.record_expression_write_target(&assertion.expression, true, certainty, value);
             }
             AssignmentTarget::ArrayAssignmentTarget(array) => {
                 for element in array.elements.iter().flatten() {
@@ -1995,12 +2223,24 @@ impl<'entry> SkeletonBuilder<'entry> {
 
     /// A TS-carrier-wrapped write target (`(x as T) = v`): unwrap to the
     /// inner identifier / member target.
+    /// Record the target an assignment names through TS carriers:
+    /// `asserted` says a type assertion already wraps `expression`. An
+    /// identifier under a type assertion is a read, never a write
+    /// ([`WrappedAssignmentTarget`]).
     fn record_expression_write_target(
         &mut self,
         expression: &Expression<'_>,
+        asserted: bool,
         certainty: SkeletonWriteCertainty,
         value: Option<SkeletonExprSiteId>,
     ) {
+        if let WrappedAssignmentTarget::Asserted(identifier) =
+            wrapped_assignment_target(expression, asserted)
+        {
+            let name = self.intern(identifier.name.as_str());
+            self.push_read(name, identifier.span.into());
+            return;
+        }
         match unwrap_expression_carriers(expression) {
             Expression::Identifier(identifier) => {
                 let name = self.intern(identifier.name.as_str());
@@ -2094,7 +2334,9 @@ impl<'entry> SkeletonBuilder<'entry> {
                     .into_boxed_slice(),
             ),
             return_sites: Arc::from(self.return_sites.into_boxed_slice()),
+            yield_sites: Arc::from(self.yield_sites.into_boxed_slice()),
             writes: Arc::from(self.writes.into_boxed_slice()),
+            closure_assignments: Arc::from([]),
         }
     }
 }
@@ -2127,11 +2369,66 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     // A class expression is itself a callable (its constructor) and
-    // creates more (members, field initializers); no index record serves
-    // any of them. A class DECLARATION binds a name instead and is never
-    // walked here.
+    // creates more. Its constructor body and methods are nested callables
+    // recorded on their own below, and its field initializers are this
+    // frame's footprint — except their WRITES, which run at construction
+    // and are not this frame's (see `Self::class_values`), and a STATIC
+    // BLOCK, which no index record serves. A class holding either records
+    // itself as an unserved callable; any other adds no callable of its
+    // own. A class DECLARATION binds a name instead and is never walked
+    // here.
+    //
+    // The class's VALUE positions read this frame: its decorators, its
+    // `extends` value, its computed keys and its static initializers run
+    // at class evaluation, and its instance initializers read this frame's
+    // lexical scope at construction. The flow lane types every one of them
+    // in this frame, so their reads are this site's footprint — their
+    // writes are not this frame's (see `Self::class_values`). Its methods
+    // and accessors are nested callables the function index serves. A
+    // static block keeps its own lexical scope and stays unwalked.
     fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
-        self.push_unserved_callable(it.span.into());
+        if class_runs_unserved_code(it) {
+            self.push_unserved_callable(it.span.into());
+        }
+        self.class_values += 1;
+        self.visit_decorators(&it.decorators);
+        if let Some(super_class) = &it.super_class {
+            self.visit_expression(super_class);
+        }
+        for element in &it.body.body {
+            match element {
+                oxc_ast::ast::ClassElement::MethodDefinition(method) => {
+                    self.visit_decorators(&method.decorators);
+                    if method.computed {
+                        self.visit_property_key(&method.key);
+                    }
+                    if method.value.body.is_some() {
+                        self.push_nested_callable(method.value.span.into());
+                    }
+                }
+                oxc_ast::ast::ClassElement::PropertyDefinition(property) => {
+                    self.visit_decorators(&property.decorators);
+                    if property.computed {
+                        self.visit_property_key(&property.key);
+                    }
+                    if let Some(value) = &property.value {
+                        self.visit_expression(value);
+                    }
+                }
+                oxc_ast::ast::ClassElement::AccessorProperty(property) => {
+                    self.visit_decorators(&property.decorators);
+                    if property.computed {
+                        self.visit_property_key(&property.key);
+                    }
+                    if let Some(value) = &property.value {
+                        self.visit_expression(value);
+                    }
+                }
+                oxc_ast::ast::ClassElement::StaticBlock(_)
+                | oxc_ast::ast::ClassElement::TSIndexSignature(_) => {}
+            }
+        }
+        self.class_values -= 1;
     }
 
     fn visit_statement(&mut self, it: &Statement<'a>) {
@@ -2375,6 +2672,22 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_expression_statement(&mut self, it: &oxc_ast::ast::ExpressionStatement<'a>) {
+        // A statement-position `yield x` provides the generator's yield
+        // type exactly as a return argument provides its return type: the
+        // ARGUMENT is the tracked root, so its structure opens the way a
+        // return argument's does and a whole-return demand selects it. A
+        // `yield*` delegation keeps the whole expression as one site.
+        let mut expression = &it.expression;
+        while let Expression::ParenthesizedExpression(paren) = expression {
+            expression = &paren.expression;
+        }
+        if let Expression::YieldExpression(yield_expr) = expression {
+            if let (false, Some(argument)) = (yield_expr.delegate, yield_expr.argument.as_ref()) {
+                let site = self.open_root_site(argument);
+                self.yield_sites.push(site);
+                return;
+            }
+        }
         self.open_root_site(&it.expression);
     }
 
@@ -2394,14 +2707,22 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                 .as_ref()
                 .map(|annotation| self.frame_span(annotation.span.into()));
             self.collect_declarator_pattern(&declarator.id, kind, initializer, annotation_span);
+            if declarator.type_annotation.is_none()
+                && matches!(declarator.id, BindingPattern::BindingIdentifier(_))
+                && is_evolving_array_initializer(declarator.init.as_ref())
+            {
+                self.bindings.last_mut().unwrap().evolving_array = true;
+            }
         }
     }
 
     fn visit_expression(&mut self, it: &Expression<'a>) {
         let previous = self.read_kind;
+        // An array walked inside another site's footprint reads its
+        // elements whole, exactly as its own site's element edges do.
         if matches!(
             value_descent(it),
-            ValueDescent::Leaf | ValueDescent::UnmodeledCall
+            ValueDescent::Leaf | ValueDescent::UnmodeledCall | ValueDescent::Array(_)
         ) {
             self.read_kind = FlowReadKind::Input;
         }
@@ -2468,6 +2789,40 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
         let containing = self
             .current_site()
             .expect("assignment scope guarantees a current site");
+        // An element write into an EVOLVING array adds the written value
+        // to the element type when its index is number-like: the value and
+        // the index are each their own value site, and both are values of
+        // the binding (the index decides whether the write adds anything).
+        if let Some((member, root)) =
+            evolving_array_element_write_root(it).filter(|(_, root)| self.evolving_reference(root))
+        {
+            let name = self.intern(root.name.as_str());
+            self.push_read(name, root.span.into());
+            let index = self.open_site(&member.expression, Some(containing));
+            let value = self.open_site(&it.right, Some(containing));
+            let path: Arc<[SkeletonPathSegment]> =
+                Arc::from(vec![SkeletonPathSegment::Computed].into_boxed_slice());
+            self.push_write(
+                SkeletonWriteTarget::Named(name),
+                Arc::clone(&path),
+                SkeletonWriteCertainty::Definite,
+                Some(value),
+                member.span.into(),
+                Some(root.span.into()),
+            );
+            self.push_write(
+                SkeletonWriteTarget::Named(name),
+                path,
+                SkeletonWriteCertainty::Optional,
+                Some(index),
+                member.span.into(),
+                Some(root.span.into()),
+            );
+            if scoped {
+                self.site_stack.pop();
+            }
+            return;
+        }
         let certainty = match it.operator {
             oxc_ast::ast::AssignmentOperator::LogicalAnd
             | oxc_ast::ast::AssignmentOperator::LogicalOr
@@ -2484,8 +2839,10 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
 
     fn visit_update_expression(&mut self, it: &oxc_ast::ast::UpdateExpression<'a>) {
         let scoped = self.ensure_site_scope(it.span.into());
-        match &it.argument {
-            SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+        // `x++`, `x!++` and `(x)++` alike read and write the binding.
+        let binding = simple_assignment_target_binding(&it.argument);
+        match (&it.argument, binding) {
+            (_, Some(identifier)) => {
                 let name = self.intern(identifier.name.as_str());
                 self.push_read(name, identifier.span.into());
                 self.push_write(
@@ -2497,55 +2854,60 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                     Some(identifier.span.into()),
                 );
             }
-            SimpleAssignmentTarget::StaticMemberExpression(member) => {
+            (SimpleAssignmentTarget::StaticMemberExpression(member), None) => {
                 self.record_member_write_target(
                     MemberRef::Static(member),
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
-            SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+            (SimpleAssignmentTarget::ComputedMemberExpression(member), None) => {
                 self.record_member_write_target(
                     MemberRef::Computed(member),
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
-            SimpleAssignmentTarget::PrivateFieldExpression(member) => {
+            (SimpleAssignmentTarget::PrivateFieldExpression(member), None) => {
                 self.record_member_write_target(
                     MemberRef::Private(member),
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
-            SimpleAssignmentTarget::TSAsExpression(inner) => {
+            (SimpleAssignmentTarget::TSAsExpression(inner), None) => {
                 self.record_expression_write_target(
                     &inner.expression,
+                    true,
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
-            SimpleAssignmentTarget::TSSatisfiesExpression(inner) => {
+            (SimpleAssignmentTarget::TSSatisfiesExpression(inner), None) => {
                 self.record_expression_write_target(
                     &inner.expression,
+                    true,
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
-            SimpleAssignmentTarget::TSNonNullExpression(inner) => {
+            (SimpleAssignmentTarget::TSNonNullExpression(inner), None) => {
                 self.record_expression_write_target(
                     &inner.expression,
+                    false,
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
-            SimpleAssignmentTarget::TSTypeAssertion(inner) => {
+            (SimpleAssignmentTarget::TSTypeAssertion(inner), None) => {
                 self.record_expression_write_target(
                     &inner.expression,
+                    true,
                     SkeletonWriteCertainty::Definite,
                     None,
                 );
             }
+            (SimpleAssignmentTarget::AssignmentTargetIdentifier(_), None) => {}
         }
         if scoped {
             self.site_stack.pop();
@@ -2563,6 +2925,32 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                     binding: None,
                 });
         });
+        // A `push` / `unshift` on an EVOLVING array writes each argument
+        // into the array's element type: every argument is its own value
+        // site, a value provider of the binding like an element write's
+        // right-hand side.
+        if let Some(root) =
+            evolving_array_mutation_root(it).filter(|root| self.evolving_reference(root))
+        {
+            let name = self.intern(root.name.as_str());
+            self.visit_expression(&it.callee);
+            for argument in &it.arguments {
+                let expression = match argument {
+                    oxc_ast::ast::Argument::SpreadElement(spread) => &spread.argument,
+                    other => other.to_expression(),
+                };
+                let value = self.open_site(expression, Some(site));
+                self.push_write(
+                    SkeletonWriteTarget::Named(name),
+                    Arc::from(vec![SkeletonPathSegment::Computed].into_boxed_slice()),
+                    SkeletonWriteCertainty::Definite,
+                    Some(value),
+                    it.span.into(),
+                    Some(root.span.into()),
+                );
+            }
+            return;
+        }
         walk::walk_call_expression(self, it);
     }
 
@@ -2570,9 +2958,35 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
         self.push_call(&it.callee, true, it.span.into());
         walk::walk_new_expression(self, it);
     }
+
+    // A tagged template calls its tag.
+    fn visit_tagged_template_expression(
+        &mut self,
+        it: &oxc_ast::ast::TaggedTemplateExpression<'a>,
+    ) {
+        self.push_call(&it.tag, false, it.span.into());
+        walk::walk_tagged_template_expression(self, it);
+    }
 }
 
 impl SkeletonBuilder<'_> {
+    /// Whether `root` names an EVOLVING array: the innermost declaration
+    /// of its name visible here ([`SkeletonBinding::evolving_array`]), or,
+    /// when this frame declares none, the enclosing frame's binding it
+    /// captures ([`crate::analysis::function_program::FlowBindingIdentity::evolving_array`]).
+    fn evolving_reference(&self, root: &oxc_ast::ast::IdentifierReference<'_>) -> bool {
+        let name = root.name.as_str();
+        match self.bindings.iter().rev().find(|binding| {
+            self.names[binding.name.index()].as_ref() == name
+                && self.region_stack.contains(&binding.region.index())
+        }) {
+            Some(binding) => binding.evolving_array,
+            None => self
+                .captured_evolving_references
+                .contains(&verter_span::Span::from(root.span)),
+        }
+    }
+
     fn record_for_left(
         &mut self,
         left: &oxc_ast::ast::ForStatementLeft<'_>,
@@ -2630,6 +3044,158 @@ impl SkeletonBuilder<'_> {
                 }
             }
         }
+    }
+}
+
+/// What a wrapped assignment target writes, as the checker reads
+/// assignment targets (`getAssignmentTarget`): the walk up from an
+/// identifier to the assignment crosses parentheses and non-null `!`, and
+/// stops at a type assertion (`as`, `satisfies`, `<T>`, an instantiation
+/// expression) — the identifier inside one is a REFERENCE, not an
+/// assignment target (tsc 7.0.2: `(x as any) = 5` leaves `x` narrowed as
+/// it was, `x! = 5` and `(x) = 5` retype it).
+#[derive(Debug, Clone, Copy)]
+pub enum WrappedAssignmentTarget<'a, 'ast> {
+    /// The target writes this binding.
+    Binding(&'a oxc_ast::ast::IdentifierReference<'ast>),
+    /// The target names this binding under a type assertion: a read.
+    Asserted(&'a oxc_ast::ast::IdentifierReference<'ast>),
+    /// Any other expression (a member access, …), carriers unwrapped.
+    Other(&'a Expression<'ast>),
+}
+
+/// Classify a wrapped assignment target expression
+/// ([`WrappedAssignmentTarget`]); `asserted` says a type assertion
+/// already wraps it.
+#[must_use]
+pub fn wrapped_assignment_target<'a, 'ast>(
+    expression: &'a Expression<'ast>,
+    mut asserted: bool,
+) -> WrappedAssignmentTarget<'a, 'ast> {
+    let mut current = expression;
+    loop {
+        current = match current {
+            Expression::Identifier(identifier) if asserted => {
+                return WrappedAssignmentTarget::Asserted(identifier)
+            }
+            Expression::Identifier(identifier) => {
+                return WrappedAssignmentTarget::Binding(identifier)
+            }
+            Expression::ParenthesizedExpression(inner) => &inner.expression,
+            Expression::TSNonNullExpression(inner) => &inner.expression,
+            Expression::TSAsExpression(inner) => {
+                asserted = true;
+                &inner.expression
+            }
+            Expression::TSSatisfiesExpression(inner) => {
+                asserted = true;
+                &inner.expression
+            }
+            Expression::TSTypeAssertion(inner) => {
+                asserted = true;
+                &inner.expression
+            }
+            Expression::TSInstantiationExpression(inner) => {
+                asserted = true;
+                &inner.expression
+            }
+            other => return WrappedAssignmentTarget::Other(other),
+        };
+    }
+}
+
+/// The binding a whole-binding assignment target writes: an identifier,
+/// or one under non-null `!` / parentheses; `None` for a member, a
+/// destructuring pattern, or an identifier under a type assertion
+/// ([`WrappedAssignmentTarget::Asserted`]).
+#[must_use]
+pub fn assignment_target_binding<'a, 'ast>(
+    target: &'a AssignmentTarget<'ast>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'ast>> {
+    match target {
+        AssignmentTarget::AssignmentTargetIdentifier(identifier) => Some(identifier),
+        AssignmentTarget::TSNonNullExpression(inner) => {
+            match wrapped_assignment_target(&inner.expression, false) {
+                WrappedAssignmentTarget::Binding(identifier) => Some(identifier),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// [`assignment_target_binding`] for an update expression's operand.
+#[must_use]
+pub fn simple_assignment_target_binding<'a, 'ast>(
+    target: &'a SimpleAssignmentTarget<'ast>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'ast>> {
+    match target {
+        SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => Some(identifier),
+        SimpleAssignmentTarget::TSNonNullExpression(inner) => {
+            match wrapped_assignment_target(&inner.expression, false) {
+                WrappedAssignmentTarget::Binding(identifier) => Some(identifier),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether a declarator initializer is the checker's EVOLVING-array form:
+/// an empty array literal, not parenthesized (tsc 7.0.2 does not look
+/// through parentheses: `const a = ([])` is `never[]`).
+#[must_use]
+pub fn is_evolving_array_initializer(init: Option<&Expression<'_>>) -> bool {
+    matches!(init, Some(Expression::ArrayExpression(array)) if array.elements.is_empty())
+}
+
+/// The root identifier of a `push` / `unshift` call on an identifier —
+/// `a.push(..)`, `(a).unshift(..)`, `a?.push(..)`, `a.push?.(..)` — the
+/// calls that evolve an evolving array's element type (the checker's
+/// array-mutation flow node, whose reference root looks through
+/// parentheses).
+#[must_use]
+pub fn evolving_array_mutation_root<'a, 'ast>(
+    call: &'a oxc_ast::ast::CallExpression<'ast>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'ast>> {
+    let Expression::StaticMemberExpression(member) = &call.callee else {
+        return None;
+    };
+    if !matches!(member.property.name.as_str(), "push" | "unshift") {
+        return None;
+    }
+    reference_root_identifier(&member.object)
+}
+
+/// The element write `a[i] = v` into an identifier (`(a)[i] = v` alike):
+/// the checker's other array-mutation flow node. Only a plain `=` whose
+/// target is the element access itself — a compound operator, or an
+/// element inside a destructuring pattern, is an ordinary reference.
+#[must_use]
+pub fn evolving_array_element_write_root<'a, 'ast>(
+    assignment: &'a oxc_ast::ast::AssignmentExpression<'ast>,
+) -> Option<(
+    &'a oxc_ast::ast::ComputedMemberExpression<'ast>,
+    &'a oxc_ast::ast::IdentifierReference<'ast>,
+)> {
+    if assignment.operator != oxc_ast::ast::AssignmentOperator::Assign {
+        return None;
+    }
+    let AssignmentTarget::ComputedMemberExpression(member) = &assignment.left else {
+        return None;
+    };
+    Some((member, reference_root_identifier(&member.object)?))
+}
+
+/// The identifier a reference expression names, looking through
+/// parentheses.
+fn reference_root_identifier<'a, 'ast>(
+    expression: &'a Expression<'ast>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'ast>> {
+    match expression {
+        Expression::Identifier(root) => Some(root),
+        Expression::ParenthesizedExpression(paren) => reference_root_identifier(&paren.expression),
+        _ => None,
     }
 }
 
@@ -2740,4 +3306,56 @@ fn collect_binding_pattern<'a, 'ast>(
             collect_binding_pattern(&assignment.left, destructured, identifiers, defaults);
         }
     }
+}
+
+/// Whether a class expression runs code no index record serves: a static
+/// block, or a write in a field initializer, computed key or heritage (a
+/// write the frame does not record — see the skeleton's `class_values`).
+/// Nested callables and nested classes answer for their own bodies.
+fn class_runs_unserved_code(class: &oxc_ast::ast::Class<'_>) -> bool {
+    #[derive(Default)]
+    struct Writes(bool);
+    impl<'a> Visit<'a> for Writes {
+        fn visit_assignment_expression(&mut self, _it: &oxc_ast::ast::AssignmentExpression<'a>) {
+            self.0 = true;
+        }
+        fn visit_update_expression(&mut self, _it: &oxc_ast::ast::UpdateExpression<'a>) {
+            self.0 = true;
+        }
+        fn visit_function(&mut self, _it: &Function<'a>, _flags: oxc_syntax::scope::ScopeFlags) {}
+        fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {}
+        fn visit_class(&mut self, _it: &oxc_ast::ast::Class<'a>) {}
+    }
+    let mut writes = Writes::default();
+    if let Some(heritage) = &class.super_class {
+        writes.visit_expression(heritage);
+    }
+    for element in &class.body.body {
+        match element {
+            oxc_ast::ast::ClassElement::StaticBlock(_) => return true,
+            oxc_ast::ast::ClassElement::MethodDefinition(method) => {
+                if method.computed {
+                    writes.visit_property_key(&method.key);
+                }
+            }
+            oxc_ast::ast::ClassElement::PropertyDefinition(property) => {
+                if property.computed {
+                    writes.visit_property_key(&property.key);
+                }
+                if let Some(value) = &property.value {
+                    writes.visit_expression(value);
+                }
+            }
+            oxc_ast::ast::ClassElement::AccessorProperty(property) => {
+                if property.computed {
+                    writes.visit_property_key(&property.key);
+                }
+                if let Some(value) = &property.value {
+                    writes.visit_expression(value);
+                }
+            }
+            oxc_ast::ast::ClassElement::TSIndexSignature(_) => {}
+        }
+    }
+    writes.0
 }

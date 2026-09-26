@@ -1091,6 +1091,13 @@ pub(crate) fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
             if let Some(ref ret) = func.return_type {
                 collect_type_refs(ret, out);
             }
+            if let Some(target) = func
+                .predicate
+                .as_deref()
+                .and_then(|predicate| predicate.ty.as_deref())
+            {
+                collect_type_refs(target, out);
+            }
         }
         TypeExpr::Mapped { source, value, .. } => {
             collect_type_refs(source, out);

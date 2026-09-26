@@ -34,8 +34,8 @@ mod tests {
     use super::*;
     use crate::semantic_query::{
         CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-        FlowReturnKey, FlowReturnPolicy, PrimitiveKind, ResolvedDeclSlotIdentity,
-        ReturnProjectionDemand, SemanticNodeData, SemanticQueryKey,
+        FlowReturnKey, FlowReturnPolicy, NullabilityPolicy, PrimitiveKind,
+        ResolvedDeclSlotIdentity, ReturnProjectionDemand, SemanticNodeData, SemanticQueryKey,
     };
     use std::sync::Arc;
     use verter_semantic::analysis::flow::flow_graph::FlowNodeKind;
@@ -100,7 +100,12 @@ mod tests {
                     project_identity: [0; 16],
                     result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                     type_substitution: CanonicalTypeSubstitution::empty(),
-                    policy: FlowReturnPolicy {},
+                    policy: FlowReturnPolicy {
+                        nullability: NullabilityPolicy::Strict,
+                        no_implicit_any: true,
+                        use_unknown_in_catch_variables: true,
+                        no_implicit_this: true,
+                    },
                 },
                 demand: ReturnProjectionDemand::whole_return(),
                 input: FlowInputContext::empty(),
@@ -435,6 +440,7 @@ mod tests {
                 binding: entering.identity(&subject).unwrap(),
                 path: Arc::from([]),
                 narrowed_to: string,
+                fresh_literal: None,
             }]),
         );
         let observation = entering.observe_writes();
@@ -633,6 +639,9 @@ impl FlowFrameProducts {
             if assignment == assignment.with_state(state) {
                 e.field_u32(9, tag as u32);
             }
+        }
+        if reaching.is_some_and(ReachingTypeProduct::widening_nullish) {
+            e.field_bool(10, true);
         }
         e.finish()
     }

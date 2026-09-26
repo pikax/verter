@@ -792,6 +792,12 @@ fn lower_node(
                 readonly,
                 name_remap,
                 kind,
+                over_type_variable: match source.as_ref() {
+                    TypeExpr::KeyOf(_) => {
+                        crate::semantic_query::keyof_operand_is_type_variable(graph, source_node)
+                    }
+                    _ => false,
+                },
             };
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::Mapped {
@@ -975,6 +981,7 @@ fn lower_function_signature(
             optional: p.optional,
             rest: p.rest,
             span: p.span,
+            declared_literal: crate::semantic_query::declares_literal_type(&p.ty),
         });
     }
     let return_type = match func.return_type.as_deref() {
@@ -988,6 +995,17 @@ fn lower_function_signature(
             verter_type_expr::facts::FunctionReturnSource::Absent,
         )
     };
+    let predicate = match func.predicate.as_deref() {
+        Some(predicate) => {
+            let target = predicate
+                .ty
+                .as_deref()
+                .map(|target| lower_node(graph, target, scope, &inner_ctx))
+                .transpose()?;
+            crate::semantic_query::SignaturePredicate::resolve(predicate, &params, target)
+        }
+        None => None,
+    };
     Ok(graph.intern_node_with_scope(
         SemanticNodeData::Signature {
             kind,
@@ -998,6 +1016,8 @@ fn lower_function_signature(
             return_carrier,
             signature_span: func.spans.signature,
             return_type_span: func.spans.return_type,
+            predicate,
+            is_abstract: func.is_abstract,
         },
         scope.clone(),
     ))

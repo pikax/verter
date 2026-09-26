@@ -52,7 +52,7 @@ fn union_key_access_two_key_union_projects_member_type_union() {
 // uniformly to the keyof carve-out family). The DAG-terminal producer is
 // `IndexedAccessUnionDistribution` (block `U2.INDEXED_ACCESS`); the measured
 // dispatch trace is
-// `[ResolveDecl, Instantiate, IndexedAccess, KeyOf, NormalizeUnion]`, proven
+// `[ResolveDecl, Instantiate, IndexedAccess, KeyOf, ReduceUnion]`, proven
 // live by `lifted_row_mechanism_trace_matches_manifest`.
 #[oracle_row]
 #[test]

@@ -370,6 +370,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             CarrierArgsContinuation::Instantiate { identity, context } => {
+                // The same back-edge rule as a 0-arg head: an application of
+                // a declaration an enclosing `build_instantiate` frame is
+                // still materialising is its recursive reference, recording
+                // the instantiation it stands for (`G<[T]>` inside the body
+                // of `G<string>` is the back-edge to `G<[string]>`), never an
+                // eager re-entry of the declaration being built.
+                if self.is_instantiate_active(
+                    identity.canonical_id.as_ref(),
+                    identity.owner,
+                    identity.decl_name.as_ref(),
+                ) {
+                    return self.recursive_ref_sentinel(&identity, type_args);
+                }
                 match self.execute_type_node(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
@@ -647,12 +660,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         {
             return false;
         }
-        if let Some(project) = self.project_stable_key_for_canonical(scope_canonical_id) {
-            if let Some(hit) = self.ctx.lookup_ambient_symbol(project, name) {
-                self.ctx
-                    .record_ambient_dependency(scope_canonical_id, hit.virtual_id.as_ref());
-                return true;
-            }
+        if self
+            .lib_global_declaration(scope_canonical_id, name, super::build::GlobalSpace::Type)
+            .is_some()
+        {
+            return true;
         }
         self.runtime_nominal_global_name(name).is_some()
             || verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name)
@@ -748,6 +760,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 scope_payload,
                 name.as_ref(),
             )
+            // A bare name nothing in scope declares or imports is a GLOBAL
+            // name: it names the merged global declaration of the project's
+            // library and the program, whose identity is its first
+            // declaration in declaration precedence order (the
+            // declaration's `Instantiate` folds in the rest).
+            .or_else(|| {
+                (!name.contains('.')
+                    && !self.unresolved_head_is_authored_import(scope, name.as_ref()))
+                .then(|| self.first_global_declaration(canonical_id.as_ref(), name.as_ref()))
+                .flatten()
+            })
         } else {
             None
         };
@@ -837,31 +860,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ..
             } = scope
             {
-                if let Some(member_value) = self.resolve_enum_member_value(
+                if let Some(member_type) = self.resolve_enum_member_type(
                     canonical_id.as_ref(),
                     *owner,
                     name_resolution,
                     scope_payload,
                     name.as_ref(),
                 ) {
-                    // The projected member value is a raw `TypeExpr`; lower it
-                    // through the shared eager lowering with the SAME value-side
-                    // inputs (an enum member value carries no own type args).
-                    let env = ctx.env();
-                    let shadowing = ctx.shadowing();
-                    let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-                    return CarrierResolutionPlan::Ready(
-                        self.shallow_lower_type_expr_with_context(
-                            &member_value,
-                            env,
-                            scope,
-                            name_resolution,
-                            scope_payload,
-                            shadowing,
-                            &mut substitutions,
-                            reduction_context,
-                        ),
-                    );
+                    return CarrierResolutionPlan::Ready(member_type);
                 }
             }
             // Currently-unresolved authored reference. Under the carrier
@@ -906,12 +912,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .ctx
                 .shallow_file_state(resolved_root.canonical_id.as_ref())
                 .map_or(HashValue::default(), |s| s.whole_hash);
-            return CarrierResolutionPlan::Ready(self.recursive_ref_sentinel(&DeclIdentity {
-                canonical_id: Arc::clone(&resolved_root.canonical_id),
-                owner: resolved_root.owner,
-                whole_hash,
-                decl_name: Arc::clone(&resolved_root.symbol_name),
-            }));
+            return CarrierResolutionPlan::Ready(self.recursive_ref_sentinel(
+                &DeclIdentity {
+                    canonical_id: Arc::clone(&resolved_root.canonical_id),
+                    owner: resolved_root.owner,
+                    whole_hash,
+                    decl_name: Arc::clone(&resolved_root.symbol_name),
+                },
+                Arc::from([]),
+            ));
         }
 
         let whole_hash = self

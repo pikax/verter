@@ -22,7 +22,8 @@ use oxc_ast::ast::{
     BindingPattern, FormalParameters, PropertyKey, TSFunctionType, TSImportType,
     TSImportTypeQualifier, TSMappedType, TSMappedTypeModifierOperator, TSQualifiedName,
     TSSignature, TSThisParameter, TSTupleElement, TSType, TSTypeName, TSTypeOperatorOperator,
-    TSTypeParameterDeclaration, TSTypeQuery, TSTypeQueryExprName, TSTypeReference, UnaryOperator,
+    TSTypeParameterDeclaration, TSTypePredicate, TSTypePredicateName, TSTypeQuery,
+    TSTypeQueryExprName, TSTypeReference, UnaryOperator,
 };
 use oxc_span::GetSpan;
 
@@ -32,7 +33,8 @@ use verter_type_expr::{
     AuthoredPropertyKey, CanonicalIndexInt, FunctionExpr, FunctionParam, FunctionSpans,
     IndexSignature, IndexSignatureSpans, MappedModifier, MemberSpans, MethodSignature, ObjectExpr,
     ObjectMember, ObjectProperty, PrimitiveName, PropertyKey as TypedPropertyKey, SpreadMember,
-    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, UnknownValue, ValueRef,
+    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, TypePredicate,
+    TypePredicateSubject, UnknownValue, ValueRef,
 };
 
 mod dependency_facts;
@@ -44,6 +46,10 @@ pub use dependency_facts::{
 
 #[cfg(test)]
 mod dependency_facts_tests;
+#[cfg(test)]
+mod lower_depth_tests;
+#[cfg(test)]
+mod type_parameter_scope_tests;
 
 /// Lower an OXC `TSType` node into a `TypeExpr`.
 ///
@@ -58,11 +64,134 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
 pub fn lower_ts_type_with_whole_query(
     ts_type: &TSType<'_>,
     source: &str,
-    mut whole_query: Option<&mut Option<verter_span::Span>>,
+    whole_query: Option<&mut Option<verter_span::Span>>,
 ) -> TypeExpr {
-    if let Some(root) = whole_query.as_deref_mut() {
-        *root = None;
+    if let Some(root) = whole_query {
+        *root = match ts_type {
+            TSType::TSTypeQuery(query)
+                if matches!(query.expr_name, TSTypeQueryExprName::IdentifierReference(_)) =>
+            {
+                type_query_identifier(query).map(|identifier| identifier.span.into())
+            }
+            _ => None,
+        };
     }
+    lower_from_explicit_stack(ts_type, source)
+}
+
+/// How a node's builder lowers each child type it holds.
+type LowerChild<'l, 'b, 'a> = dyn FnMut(&'b TSType<'a>) -> TypeExpr + 'l;
+
+/// Lower a type from an explicit stack, so a type nested to any depth
+/// costs no native stack per level. Each node's builder
+/// ([`build_ts_type`]) runs once with a placeholder for every child that
+/// has children of its own, which enumerates those in the order it lowers
+/// them; once they are lowered, it runs again over their results. A child
+/// without children ([`is_leaf_type`]) is built where the builder asks for
+/// it, and a node whose children are all such leaves is built by its first
+/// run.
+fn lower_from_explicit_stack<'b, 'a>(root: &'b TSType<'a>, source: &str) -> TypeExpr {
+    enum Frame<'b, 'a> {
+        Enter(&'b TSType<'a>),
+        Build(&'b TSType<'a>, usize),
+    }
+    // The root enters first, outside the loop: a root whose children are
+    // all leaves is built without the stacks.
+    let mut children: Vec<&'b TSType<'a>> = Vec::new();
+    let built = build_ts_type(root, source, &mut |child| {
+        if is_leaf_type(child) {
+            return build_leaf_type(child, source);
+        }
+        children.push(child);
+        TypeExpr::Primitive(PrimitiveName::Any)
+    });
+    if children.is_empty() {
+        return built;
+    }
+    let mut frames = Vec::with_capacity(children.len() + 1);
+    frames.push(Frame::Build(root, children.len()));
+    frames.extend(children.drain(..).rev().map(Frame::Enter));
+    let mut values: Vec<TypeExpr> = Vec::new();
+    while let Some(frame) = frames.pop() {
+        match frame {
+            Frame::Enter(node) => {
+                let built = build_ts_type(node, source, &mut |child| {
+                    if is_leaf_type(child) {
+                        return build_leaf_type(child, source);
+                    }
+                    children.push(child);
+                    TypeExpr::Primitive(PrimitiveName::Any)
+                });
+                if children.is_empty() {
+                    values.push(built);
+                } else {
+                    frames.push(Frame::Build(node, children.len()));
+                    frames.extend(children.drain(..).rev().map(Frame::Enter));
+                }
+            }
+            Frame::Build(node, count) => {
+                let start = values.len() - count;
+                let built = {
+                    let mut lowered = values.drain(start..);
+                    build_ts_type(node, source, &mut |child| {
+                        if is_leaf_type(child) {
+                            return build_leaf_type(child, source);
+                        }
+                        lowered
+                            .next()
+                            .expect("a builder asks for the children it enumerated, in order")
+                    })
+                };
+                values.push(built);
+            }
+        }
+    }
+    values
+        .pop()
+        .expect("the root's value is the one value left")
+}
+
+/// Whether a type's lowering reads no child type: a keyword, a literal,
+/// `this`, an `infer` binder or a reference without type arguments.
+fn is_leaf_type(ts_type: &TSType<'_>) -> bool {
+    match ts_type {
+        TSType::TSTypeReference(reference) => reference
+            .type_arguments
+            .as_ref()
+            .is_none_or(|arguments| arguments.params.is_empty()),
+        TSType::TSStringKeyword(_)
+        | TSType::TSNumberKeyword(_)
+        | TSType::TSBooleanKeyword(_)
+        | TSType::TSSymbolKeyword(_)
+        | TSType::TSBigIntKeyword(_)
+        | TSType::TSAnyKeyword(_)
+        | TSType::TSUnknownKeyword(_)
+        | TSType::TSVoidKeyword(_)
+        | TSType::TSNeverKeyword(_)
+        | TSType::TSNullKeyword(_)
+        | TSType::TSUndefinedKeyword(_)
+        | TSType::TSObjectKeyword(_)
+        | TSType::TSLiteralType(_)
+        | TSType::TSThisType(_)
+        | TSType::TSIntrinsicKeyword(_)
+        | TSType::TSInferType(_) => true,
+        _ => false,
+    }
+}
+
+/// Build a type [`is_leaf_type`] holds for.
+fn build_leaf_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
+    build_ts_type(ts_type, source, &mut |_| {
+        unreachable!("a leaf type lowers no child type")
+    })
+}
+
+/// Build one type node from its children, each lowered through `lower`.
+fn build_ts_type<'b, 'a>(
+    ts_type: &'b TSType<'a>,
+    source: &str,
+    lower: &mut LowerChild<'_, 'b, 'a>,
+) -> TypeExpr {
     match ts_type {
         // -- Primitive keywords --
         TSType::TSStringKeyword(_) => TypeExpr::Primitive(PrimitiveName::String),
@@ -86,15 +215,15 @@ pub fn lower_ts_type_with_whole_query(
         // The arms collect straight into the `Arc<[TypeExpr]>` payload via
         // the exact-size factories — one allocation, no intermediate `Vec`.
         TSType::TSUnionType(union) => {
-            TypeExpr::union_from_exact_iter(union.types.iter().map(|t| lower_ts_type(t, source)))
+            TypeExpr::union_from_exact_iter(union.types.iter().map(&mut *lower))
         }
-        TSType::TSIntersectionType(intersection) => TypeExpr::intersection_from_exact_iter(
-            intersection.types.iter().map(|t| lower_ts_type(t, source)),
-        ),
+        TSType::TSIntersectionType(intersection) => {
+            TypeExpr::intersection_from_exact_iter(intersection.types.iter().map(&mut *lower))
+        }
 
         // -- Array --
         TSType::TSArrayType(arr) => TypeExpr::Array {
-            element: Arc::new(lower_ts_type(&arr.element_type, source)),
+            element: Arc::new(lower(&arr.element_type)),
             readonly: false,
         },
 
@@ -105,7 +234,7 @@ pub fn lower_ts_type_with_whole_query(
             elements: tuple
                 .element_types
                 .iter()
-                .map(|elem| lower_tuple_element(elem, source))
+                .map(|elem| lower_tuple_element(elem, lower))
                 .collect(),
             readonly: false,
         },
@@ -120,7 +249,7 @@ pub fn lower_ts_type_with_whole_query(
                 literal
                     .members
                     .iter()
-                    .filter_map(|m| lower_ts_signature(m, source)),
+                    .filter_map(|m| lower_ts_signature(m, source, lower)),
             );
             TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: members,
@@ -129,7 +258,7 @@ pub fn lower_ts_type_with_whole_query(
 
         // -- Function type --
         TSType::TSFunctionType(func) => {
-            TypeExpr::Function(Arc::new(lower_function_type(func, source)))
+            TypeExpr::Function(Arc::new(lower_function_type(func, lower)))
         }
 
         // -- Constructor type: `new (x: T) => R`.
@@ -146,33 +275,29 @@ pub fn lower_ts_type_with_whole_query(
         // construct semantics walks the inner function exactly as before.
         TSType::TSConstructorType(ctor) => {
             let func = normalize_function_type_params(FunctionExpr::with_spans(
-                lower_formal_parameters(&ctor.params, None, source),
-                Some(Arc::new(lower_ts_type(
-                    &ctor.return_type.type_annotation,
-                    source,
-                ))),
+                lower_formal_parameters(&ctor.params, None, lower),
+                Some(Arc::new(lower(&ctor.return_type.type_annotation))),
                 ctor.type_parameters
                     .as_ref()
-                    .map(|tp| lower_type_params(tp, source))
+                    .map(|tp| lower_type_params(tp, lower))
                     .unwrap_or_default(),
                 FunctionSpans {
                     signature: Some(ctor.span.into()),
                     return_type: Some(ctor.return_type.type_annotation.span().into()),
                 },
-            ));
+            ))
+            .with_abstract(ctor.r#abstract);
             TypeExpr::ConstructorType(Arc::new(func))
         }
 
         // -- Type reference --
-        TSType::TSTypeReference(type_ref) => lower_type_reference(type_ref, source),
+        TSType::TSTypeReference(type_ref) => lower_type_reference(type_ref, source, lower),
 
         // -- Type operators (keyof, readonly, unique) --
         TSType::TSTypeOperatorType(op) => match op.operator {
-            TSTypeOperatorOperator::Keyof => {
-                TypeExpr::KeyOf(Arc::new(lower_ts_type(&op.type_annotation, source)))
-            }
+            TSTypeOperatorOperator::Keyof => TypeExpr::KeyOf(Arc::new(lower(&op.type_annotation))),
             TSTypeOperatorOperator::Readonly => {
-                let inner = lower_ts_type(&op.type_annotation, source);
+                let inner = lower(&op.type_annotation);
                 // `TypeExpr` implements `Drop` (iterative deep-drop), so we
                 // cannot move `element` / `elements` out of `inner` by
                 // value. Clone the (cheap, refcounted) `Arc` child instead
@@ -189,41 +314,41 @@ pub fn lower_ts_type_with_whole_query(
                     _ => inner,
                 }
             }
-            TSTypeOperatorOperator::Unique => lower_ts_type(&op.type_annotation, source),
+            TSTypeOperatorOperator::Unique => lower(&op.type_annotation),
         },
 
         // -- Indexed access: T[K] --
         TSType::TSIndexedAccessType(idx) => TypeExpr::IndexedAccess {
-            object: Arc::new(lower_ts_type(&idx.object_type, source)),
-            index: Arc::new(lower_ts_type(&idx.index_type, source)),
+            object: Arc::new(lower(&idx.object_type)),
+            index: Arc::new(lower(&idx.index_type)),
         },
 
         // -- Conditional type: T extends U ? A : B --
         TSType::TSConditionalType(cond) => TypeExpr::Conditional {
-            check: Arc::new(lower_ts_type(&cond.check_type, source)),
-            extends: Arc::new(lower_ts_type(&cond.extends_type, source)),
-            true_type: Arc::new(lower_ts_type(&cond.true_type, source)),
-            false_type: Arc::new(lower_ts_type(&cond.false_type, source)),
+            check: Arc::new(lower(&cond.check_type)),
+            extends: Arc::new(lower(&cond.extends_type)),
+            true_type: Arc::new(lower(&cond.true_type)),
+            false_type: Arc::new(lower(&cond.false_type)),
         },
 
         // -- Mapped type: { [K in T]: V } --
-        TSType::TSMappedType(mapped) => lower_mapped_type(mapped, source),
+        TSType::TSMappedType(mapped) => lower_mapped_type(mapped, lower),
 
         // -- Template literal type: `prefix${T}suffix` --
         TSType::TSTemplateLiteralType(tpl) => TypeExpr::TemplateLiteral {
             quasis: tpl.quasis.iter().map(|q| q.value.raw.to_string()).collect(),
             // Exact-size collect straight into the `Arc<[TypeExpr]>`
             // payload — one allocation, no intermediate `Vec`.
-            expressions: tpl.types.iter().map(|t| lower_ts_type(t, source)).collect(),
+            expressions: tpl.types.iter().map(&mut *lower).collect(),
         },
 
         // -- Parenthesized type --
         TSType::TSParenthesizedType(paren) => {
-            TypeExpr::Parenthesized(Arc::new(lower_ts_type(&paren.type_annotation, source)))
+            TypeExpr::Parenthesized(Arc::new(lower(&paren.type_annotation)))
         }
 
         // -- typeof (type query) --
-        TSType::TSTypeQuery(query) => lower_type_query(query, source, whole_query),
+        TSType::TSTypeQuery(query) => lower_type_query(query, source, lower),
 
         // -- infer T --
         TSType::TSInferType(infer) => TypeExpr::Infer {
@@ -234,7 +359,7 @@ pub fn lower_ts_type_with_whole_query(
         //    `import("./m").Member`. Lowered to the typed-IR `ImportType`
         //    carrier (NOT the raw-text `Unknown` fallback) — the shared
         //    dispatch resolves the module + TYPE-export member cross-file.
-        TSType::TSImportType(import) => lower_import_type(import, source, false),
+        TSType::TSImportType(import) => lower_import_type(import, false, lower),
 
         // -- this type --
         TSType::TSThisType(_) => TypeExpr::named("this"),
@@ -242,12 +367,100 @@ pub fn lower_ts_type_with_whole_query(
         // -- Intrinsic keyword --
         TSType::TSIntrinsicKeyword(_) => TypeExpr::named("intrinsic"),
 
+        // -- Type predicate: `x is T` / `asserts x [is T]` / `this is T` --
+        //
+        // Standing alone, a predicate annotation denotes the type TypeScript
+        // gives it (`getTypeFromTypeNode`): `void` for an assertion,
+        // `boolean` for a type predicate. A function-like node's return
+        // position reads it through [`lower_return_annotation`], which also
+        // keeps the predicate itself beside that return.
+        TSType::TSTypePredicate(predicate) => TypeExpr::Primitive(if predicate.asserts {
+            PrimitiveName::Void
+        } else {
+            PrimitiveName::Boolean
+        }),
+
         // -- Catch-all --
         _ => {
             let span = ts_type.span();
             TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(source, span)))
         }
     }
+}
+
+/// Lower a function-like node's authored RETURN annotation: the return type
+/// and, when the annotation is a type predicate (`x is T`, `asserts x is T`,
+/// `asserts x`, `this is T`, `asserts this [is T]`), the predicate that
+/// rides beside it. A predicate signature returns `boolean` (a type
+/// predicate) or `void` (an assertion) — TypeScript's own model — so the
+/// predicate never replaces the return.
+pub fn lower_return_annotation(
+    ts_type: &TSType<'_>,
+    source: &str,
+) -> (TypeExpr, Option<Arc<TypePredicate>>) {
+    match ts_type {
+        TSType::TSTypePredicate(predicate) => {
+            let predicate =
+                lower_type_predicate(predicate, &mut |child| lower_ts_type(child, source));
+            (predicate.return_type(), Some(Arc::new(predicate)))
+        }
+        _ => (lower_ts_type(ts_type, source), None),
+    }
+}
+
+/// [`lower_return_annotation`] with each child type lowered through
+/// `lower`.
+fn lower_return_annotation_with<'b, 'a>(
+    ts_type: &'b TSType<'a>,
+    lower: &mut LowerChild<'_, 'b, 'a>,
+) -> (TypeExpr, Option<Arc<TypePredicate>>) {
+    match ts_type {
+        TSType::TSTypePredicate(predicate) => {
+            let predicate = lower_type_predicate(predicate, lower);
+            (predicate.return_type(), Some(Arc::new(predicate)))
+        }
+        _ => (lower(ts_type), None),
+    }
+}
+
+fn lower_type_predicate<'b, 'a>(
+    predicate: &'b TSTypePredicate<'a>,
+    lower: &mut LowerChild<'_, 'b, 'a>,
+) -> TypePredicate {
+    TypePredicate {
+        subject: match &predicate.parameter_name {
+            TSTypePredicateName::Identifier(name) => {
+                TypePredicateSubject::Parameter(Arc::from(name.name.as_str()))
+            }
+            TSTypePredicateName::This(_) => TypePredicateSubject::This,
+        },
+        asserts: predicate.asserts,
+        ty: predicate
+            .type_annotation
+            .as_ref()
+            .map(|annotation| Arc::new(lower(&annotation.type_annotation))),
+    }
+}
+
+/// [`FunctionExpr::with_spans`] over an authored return annotation: the
+/// return lowers through [`lower_return_annotation`], so a predicate
+/// annotation keeps its predicate beside the `boolean` / `void` return.
+fn function_with_authored_return<'b, 'a>(
+    parameters: Vec<FunctionParam>,
+    return_annotation: Option<&'b TSType<'a>>,
+    type_parameters: Vec<TypeParam>,
+    spans: FunctionSpans,
+    lower: &mut LowerChild<'_, 'b, 'a>,
+) -> FunctionExpr {
+    let (return_type, predicate) = match return_annotation {
+        Some(annotation) => {
+            let (return_type, predicate) = lower_return_annotation_with(annotation, lower);
+            (Some(Arc::new(return_type)), predicate)
+        }
+        None => (None, None),
+    };
+    FunctionExpr::with_spans(parameters, return_type, type_parameters, spans)
+        .with_predicate(predicate)
 }
 
 fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExpr {
@@ -319,7 +532,11 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
     }
 }
 
-fn lower_type_reference(type_ref: &TSTypeReference<'_>, source: &str) -> TypeExpr {
+fn lower_type_reference<'b, 'a>(
+    type_ref: &'b TSTypeReference<'a>,
+    source: &str,
+    lower: &mut LowerChild<'_, 'b, 'a>,
+) -> TypeExpr {
     let name = match &type_ref.type_name {
         TSTypeName::IdentifierReference(id) => id.name.to_string(),
         TSTypeName::QualifiedName(qualified) => qualified_name_to_string(qualified),
@@ -331,7 +548,7 @@ fn lower_type_reference(type_ref: &TSTypeReference<'_>, source: &str) -> TypeExp
         }
     };
 
-    let params: &[TSType<'_>] = type_ref
+    let params: &'b [TSType<'a>] = type_ref
         .type_arguments
         .as_ref()
         .map_or(&[], |args| &args.params);
@@ -341,7 +558,7 @@ fn lower_type_reference(type_ref: &TSTypeReference<'_>, source: &str) -> TypeExp
     // straight into the `Array` node.
     if params.len() == 1 && (name == "Array" || name == "ReadonlyArray") {
         return TypeExpr::Array {
-            element: Arc::new(lower_ts_type(&params[0], source)),
+            element: Arc::new(lower(&params[0])),
             readonly: name == "ReadonlyArray",
         };
     }
@@ -355,7 +572,7 @@ fn lower_type_reference(type_ref: &TSTypeReference<'_>, source: &str) -> TypeExp
         name: Arc::from(name),
         // Exact-size collect straight into the `Arc<[TypeExpr]>` payload —
         // one allocation, no intermediate `Vec`.
-        type_arguments: params.iter().map(|p| lower_ts_type(p, source)).collect(),
+        type_arguments: params.iter().map(&mut *lower).collect(),
     }
 }
 
@@ -366,7 +583,11 @@ fn lower_type_reference(type_ref: &TSTypeReference<'_>, source: &str) -> TypeExp
 /// for a bare `import(...)` in type position (the TYPE-export space).
 /// The qualifier and instantiation type-arguments are captured so the
 /// node is FULLY consumed — no raw-text reparsing downstream.
-fn lower_import_type(import: &TSImportType<'_>, source: &str, typeof_query: bool) -> TypeExpr {
+fn lower_import_type<'b, 'a>(
+    import: &'b TSImportType<'a>,
+    typeof_query: bool,
+    lower: &mut LowerChild<'_, 'b, 'a>,
+) -> TypeExpr {
     let specifier: Arc<str> = Arc::from(import.source.value.as_str());
     let mut qualifier: Vec<Arc<str>> = Vec::new();
     if let Some(q) = &import.qualifier {
@@ -379,13 +600,7 @@ fn lower_import_type(import: &TSImportType<'_>, source: &str, typeof_query: bool
         .type_arguments
         .as_ref()
         .filter(|params| !params.params.is_empty())
-        .map(|params| {
-            params
-                .params
-                .iter()
-                .map(|p| lower_ts_type(p, source))
-                .collect()
-        })
+        .map(|params| params.params.iter().map(&mut *lower).collect())
         .unwrap_or_else(verter_type_expr::empty_type_args);
     TypeExpr::ImportType {
         specifier,
@@ -457,19 +672,13 @@ pub fn is_const_assertion_type(ty: &TSType<'_>) -> bool {
     }
 }
 
-fn lower_type_query(
-    query: &TSTypeQuery<'_>,
+fn lower_type_query<'b, 'a>(
+    query: &'b TSTypeQuery<'a>,
     source: &str,
-    whole_query: Option<&mut Option<verter_span::Span>>,
+    lower: &mut LowerChild<'_, 'b, 'a>,
 ) -> TypeExpr {
     let path = match &query.expr_name {
-        TSTypeQueryExprName::IdentifierReference(id) => {
-            if let Some(whole_query) = whole_query {
-                *whole_query =
-                    type_query_identifier(query).map(|identifier| identifier.span.into());
-            }
-            vec![id.name.to_string()]
-        }
+        TSTypeQueryExprName::IdentifierReference(id) => vec![id.name.to_string()],
         TSTypeQueryExprName::QualifiedName(qualified) => {
             let mut segments = Vec::new();
             collect_qualified_parts(qualified, &mut segments);
@@ -480,7 +689,7 @@ fn lower_type_query(
         // typed-IR `ImportType` carrier (`typeof_query == true`) — the
         // shared dispatch resolves the module's value exports cross-file.
         TSTypeQueryExprName::TSImportType(import) => {
-            return lower_import_type(import, source, true);
+            return lower_import_type(import, true, lower);
         }
         _ => {
             return TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
@@ -495,26 +704,23 @@ fn lower_type_query(
     let type_args: Vec<TypeExpr> = query
         .type_arguments
         .as_ref()
-        .map(|params| {
-            params
-                .params
-                .iter()
-                .map(|p| lower_ts_type(p, source))
-                .collect()
-        })
+        .map(|params| params.params.iter().map(&mut *lower).collect())
         .unwrap_or_default();
 
     TypeExpr::TypeOf(ValueRef { path, type_args })
 }
 
-fn lower_mapped_type(mapped: &TSMappedType<'_>, source: &str) -> TypeExpr {
+fn lower_mapped_type<'b, 'a>(
+    mapped: &'b TSMappedType<'a>,
+    lower: &mut LowerChild<'_, 'b, 'a>,
+) -> TypeExpr {
     // In OXC 0.117, the key is `mapped.key` (BindingIdentifier)
     let parameter = mapped.key.name.to_string();
-    let source_type = lower_ts_type(&mapped.constraint, source);
+    let source_type = lower(&mapped.constraint);
     let value = mapped
         .type_annotation
         .as_ref()
-        .map(|t| lower_ts_type(t, source))
+        .map(&mut *lower)
         .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
 
     let optional = match mapped.optional {
@@ -531,10 +737,7 @@ fn lower_mapped_type(mapped: &TSMappedType<'_>, source: &str) -> TypeExpr {
         None => MappedModifier::None,
     };
 
-    let name_type = mapped
-        .name_type
-        .as_ref()
-        .map(|n| Arc::new(lower_ts_type(n, source)));
+    let name_type = mapped.name_type.as_ref().map(|n| Arc::new(lower(n)));
 
     TypeExpr::Mapped {
         parameter,
@@ -546,14 +749,18 @@ fn lower_mapped_type(mapped: &TSMappedType<'_>, source: &str) -> TypeExpr {
     }
 }
 
-fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMember> {
+fn lower_ts_signature<'b, 'a>(
+    sig: &'b TSSignature<'a>,
+    source: &str,
+    lower: &mut LowerChild<'_, 'b, 'a>,
+) -> Option<ObjectMember> {
     match sig {
         TSSignature::TSPropertySignature(prop) => {
             let key = lower_property_key(&prop.key, source);
             let ty = prop
                 .type_annotation
                 .as_ref()
-                .map(|ta| lower_ts_type(&ta.type_annotation, source))
+                .map(|ta| lower(&ta.type_annotation))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
 
             let spans = MemberSpans {
@@ -570,16 +777,13 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
         }
         TSSignature::TSMethodSignature(method) => {
             let key = lower_property_key(&method.key, source);
-            let func = normalize_function_type_params(FunctionExpr::with_spans(
-                lower_formal_parameters(&method.params, method.this_param.as_deref(), source),
-                method
-                    .return_type
-                    .as_ref()
-                    .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
+            let func = normalize_function_type_params(function_with_authored_return(
+                lower_formal_parameters(&method.params, method.this_param.as_deref(), lower),
+                method.return_type.as_ref().map(|rt| &rt.type_annotation),
                 method
                     .type_parameters
                     .as_ref()
-                    .map(|tp| lower_type_params(tp, source))
+                    .map(|tp| lower_type_params(tp, lower))
                     .unwrap_or_default(),
                 FunctionSpans {
                     signature: Some(method.span.into()),
@@ -588,6 +792,7 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
                         .as_ref()
                         .map(|rt| rt.type_annotation.span().into()),
                 },
+                lower,
             ));
             let spans = MemberSpans {
                 declaration: Some(method.span.into()),
@@ -599,14 +804,12 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
             ))
         }
         TSSignature::TSCallSignatureDeclaration(call) => {
-            let func = normalize_function_type_params(FunctionExpr::with_spans(
-                lower_formal_parameters(&call.params, call.this_param.as_deref(), source),
-                call.return_type
-                    .as_ref()
-                    .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
+            let func = normalize_function_type_params(function_with_authored_return(
+                lower_formal_parameters(&call.params, call.this_param.as_deref(), lower),
+                call.return_type.as_ref().map(|rt| &rt.type_annotation),
                 call.type_parameters
                     .as_ref()
-                    .map(|tp| lower_type_params(tp, source))
+                    .map(|tp| lower_type_params(tp, lower))
                     .unwrap_or_default(),
                 FunctionSpans {
                     signature: Some(call.span.into()),
@@ -615,13 +818,14 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
                         .as_ref()
                         .map(|rt| rt.type_annotation.span().into()),
                 },
+                lower,
             ));
             Some(ObjectMember::CallSignature(func))
         }
         TSSignature::TSIndexSignature(idx) => {
             let (key_name, key_type, key_span) = if let Some(param) = idx.parameters.first() {
                 let name = param.name.to_string();
-                let ty = lower_ts_type(&param.type_annotation.type_annotation, source);
+                let ty = lower(&param.type_annotation.type_annotation);
                 (name, ty, Some(param.span.into()))
             } else {
                 (
@@ -631,7 +835,7 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
                 )
             };
 
-            let value_type = lower_ts_type(&idx.type_annotation.type_annotation, source);
+            let value_type = lower(&idx.type_annotation.type_annotation);
             let spans = IndexSignatureSpans {
                 declaration: Some(idx.span.into()),
                 key: key_span,
@@ -647,13 +851,13 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
         }
         TSSignature::TSConstructSignatureDeclaration(ctor) => {
             let func = normalize_function_type_params(FunctionExpr::with_spans(
-                lower_formal_parameters(&ctor.params, None, source),
+                lower_formal_parameters(&ctor.params, None, lower),
                 ctor.return_type
                     .as_ref()
-                    .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
+                    .map(|rt| Arc::new(lower(&rt.type_annotation))),
                 ctor.type_parameters
                     .as_ref()
-                    .map(|tp| lower_type_params(tp, source))
+                    .map(|tp| lower_type_params(tp, lower))
                     .unwrap_or_default(),
                 FunctionSpans {
                     signature: Some(ctor.span.into()),
@@ -668,17 +872,20 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
     }
 }
 
-fn lower_tuple_element(elem: &TSTupleElement<'_>, source: &str) -> TupleElement {
+fn lower_tuple_element<'b, 'a>(
+    elem: &'b TSTupleElement<'a>,
+    lower: &mut LowerChild<'_, 'b, 'a>,
+) -> TupleElement {
     match elem {
         TSTupleElement::TSOptionalType(opt) => TupleElement {
             label: None,
-            ty: lower_ts_type(&opt.type_annotation, source),
+            ty: lower(&opt.type_annotation),
             optional: true,
             rest: false,
         },
         TSTupleElement::TSRestType(rest) => TupleElement {
             label: None,
-            ty: lower_ts_type(&rest.type_annotation, source),
+            ty: lower(&rest.type_annotation),
             optional: false,
             rest: true,
         },
@@ -686,7 +893,7 @@ fn lower_tuple_element(elem: &TSTupleElement<'_>, source: &str) -> TupleElement 
             let label = Some(named.label.name.to_string());
             // Named tuple member has its own `optional` field
             let ty = if let Some(t) = named.element_type.as_ts_type() {
-                lower_ts_type(t, source)
+                lower(t)
             } else {
                 TypeExpr::Primitive(PrimitiveName::Any)
             };
@@ -701,7 +908,7 @@ fn lower_tuple_element(elem: &TSTupleElement<'_>, source: &str) -> TupleElement 
             if let Some(t) = elem.as_ts_type() {
                 TupleElement {
                     label: None,
-                    ty: lower_ts_type(t, source),
+                    ty: lower(t),
                     optional: false,
                     rest: false,
                 }
@@ -717,21 +924,22 @@ fn lower_tuple_element(elem: &TSTupleElement<'_>, source: &str) -> TupleElement 
     }
 }
 
-fn lower_function_type(func: &TSFunctionType<'_>, source: &str) -> FunctionExpr {
-    normalize_function_type_params(FunctionExpr::with_spans(
-        lower_formal_parameters(&func.params, func.this_param.as_deref(), source),
-        Some(Arc::new(lower_ts_type(
-            &func.return_type.type_annotation,
-            source,
-        ))),
+fn lower_function_type<'b, 'a>(
+    func: &'b TSFunctionType<'a>,
+    lower: &mut LowerChild<'_, 'b, 'a>,
+) -> FunctionExpr {
+    normalize_function_type_params(function_with_authored_return(
+        lower_formal_parameters(&func.params, func.this_param.as_deref(), lower),
+        Some(&func.return_type.type_annotation),
         func.type_parameters
             .as_ref()
-            .map(|tp| lower_type_params(tp, source))
+            .map(|tp| lower_type_params(tp, lower))
             .unwrap_or_default(),
         FunctionSpans {
             signature: Some(func.span.into()),
             return_type: Some(func.return_type.type_annotation.span().into()),
         },
+        lower,
     ))
 }
 
@@ -741,80 +949,78 @@ fn lower_function_type(func: &TSFunctionType<'_>, source: &str) -> FunctionExpr 
 /// `ThisParameterType` / `OmitThisParameter` read. OXC carries it outside
 /// `FormalParameters`, so callers pass it explicitly; a node that cannot
 /// author one (a constructor type / construct signature) passes `None`.
-fn lower_formal_parameters(
-    params: &FormalParameters<'_>,
-    this_param: Option<&TSThisParameter<'_>>,
-    source: &str,
+fn lower_formal_parameters<'b, 'a>(
+    params: &'b FormalParameters<'a>,
+    this_param: Option<&'b TSThisParameter<'a>>,
+    lower: &mut LowerChild<'_, 'b, 'a>,
 ) -> Vec<FunctionParam> {
-    this_param
-        .map(|this| {
-            FunctionParam::with_span(
-                Some("this".to_string()),
-                this.type_annotation
-                    .as_ref()
-                    .map(|ta| lower_ts_type(&ta.type_annotation, source))
-                    .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any)),
-                false,
-                false,
-                Some(this.span.into()),
-                this.type_annotation.is_some(),
-            )
-        })
-        .into_iter()
-        .chain(params.items.iter().map(|param| {
-            let name = binding_pattern_name(&param.pattern);
-            // OXC structural fact: did this parameter carry an explicit TS
-            // annotation? (An explicit `: any` lowers to `Primitive(Any)` like a
-            // missing annotation, so the lowered `ty` cannot distinguish them.)
-            let has_ts_annotation = param.type_annotation.is_some();
-            let ty = param
-                .type_annotation
+    let mut lowered = Vec::with_capacity(
+        usize::from(this_param.is_some()) + params.items.len() + usize::from(params.rest.is_some()),
+    );
+    if let Some(this) = this_param {
+        lowered.push(FunctionParam::with_span(
+            Some("this".to_string()),
+            this.type_annotation
                 .as_ref()
-                .map(|ta| lower_ts_type(&ta.type_annotation, source))
-                .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-            FunctionParam::with_span(
-                name,
-                ty,
-                param.optional,
-                false,
-                Some(param.span().into()),
-                has_ts_annotation,
-            )
-        }))
-        .chain(params.rest.as_ref().map(|rest| {
-            let name = binding_pattern_name(&rest.rest.argument);
-            let has_ts_annotation = rest.type_annotation.is_some();
-            let ty = rest
-                .type_annotation
-                .as_ref()
-                .map(|ta| lower_ts_type(&ta.type_annotation, source))
-                .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-            FunctionParam::with_span(
-                name,
-                ty,
-                false,
-                true,
-                Some(rest.span().into()),
-                has_ts_annotation,
-            )
-        }))
-        .collect()
+                .map(|ta| lower(&ta.type_annotation))
+                .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any)),
+            false,
+            false,
+            Some(this.span.into()),
+            this.type_annotation.is_some(),
+        ));
+    }
+    for param in &params.items {
+        let name = binding_pattern_name(&param.pattern);
+        // OXC structural fact: did this parameter carry an explicit TS
+        // annotation? (An explicit `: any` lowers to `Primitive(Any)` like a
+        // missing annotation, so the lowered `ty` cannot distinguish them.)
+        let has_ts_annotation = param.type_annotation.is_some();
+        let ty = param
+            .type_annotation
+            .as_ref()
+            .map(|ta| lower(&ta.type_annotation))
+            .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
+        lowered.push(FunctionParam::with_span(
+            name,
+            ty,
+            param.optional,
+            false,
+            Some(param.span().into()),
+            has_ts_annotation,
+        ));
+    }
+    if let Some(rest) = &params.rest {
+        let name = binding_pattern_name(&rest.rest.argument);
+        let has_ts_annotation = rest.type_annotation.is_some();
+        let ty = rest
+            .type_annotation
+            .as_ref()
+            .map(|ta| lower(&ta.type_annotation))
+            .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
+        lowered.push(FunctionParam::with_span(
+            name,
+            ty,
+            false,
+            true,
+            Some(rest.span().into()),
+            has_ts_annotation,
+        ));
+    }
+    lowered
 }
 
-fn lower_type_params(type_params: &TSTypeParameterDeclaration<'_>, source: &str) -> Vec<TypeParam> {
+fn lower_type_params<'b, 'a>(
+    type_params: &'b TSTypeParameterDeclaration<'a>,
+    lower: &mut LowerChild<'_, 'b, 'a>,
+) -> Vec<TypeParam> {
     type_params
         .params
         .iter()
         .map(|p| TypeParam {
             name: p.name.to_string(),
-            constraint: p
-                .constraint
-                .as_ref()
-                .map(|c| Arc::new(lower_ts_type(c, source))),
-            default: p
-                .default
-                .as_ref()
-                .map(|d| Arc::new(lower_ts_type(d, source))),
+            constraint: p.constraint.as_ref().map(|c| Arc::new(lower(c))),
+            default: p.default.as_ref().map(|d| Arc::new(lower(d))),
             is_const: p.r#const,
         })
         .collect()
@@ -837,8 +1043,27 @@ fn normalize_function_type_params(mut func: FunctionExpr) -> FunctionExpr {
     func.return_type = func
         .return_type
         .map(|ret| Arc::new(normalize_type_parameter_refs(ret.as_ref(), &scope)));
+    func.predicate = normalize_predicate_type_params(func.predicate.as_deref(), &scope);
     func.type_parameters = scope;
     func
+}
+
+/// A predicate whose target names an in-scope type parameter (`x is T`)
+/// resolves that name to the binder, exactly as the return does.
+fn normalize_predicate_type_params(
+    predicate: Option<&TypePredicate>,
+    scope: &[TypeParam],
+) -> Option<Arc<TypePredicate>> {
+    predicate.map(|predicate| {
+        Arc::new(TypePredicate {
+            subject: predicate.subject.clone(),
+            asserts: predicate.asserts,
+            ty: predicate
+                .ty
+                .as_deref()
+                .map(|ty| Arc::new(normalize_type_parameter_refs(ty, scope))),
+        })
+    })
 }
 
 fn normalize_type_parameter_decls(type_parameters: Vec<TypeParam>) -> Vec<TypeParam> {
@@ -865,14 +1090,312 @@ fn normalize_type_parameter_decls(type_parameters: Vec<TypeParam>) -> Vec<TypePa
     normalized
 }
 
+/// What one normalization step rewrites: a type, or a function nested in
+/// one, which binds its own type parameters over the enclosing scope.
+#[derive(Clone, Copy)]
+enum NormalizeJob<'e> {
+    Type(&'e TypeExpr),
+    Function(&'e FunctionExpr),
+}
+
+/// The result of a [`NormalizeJob`].
+enum Normalized {
+    Type(TypeExpr),
+    Function(FunctionExpr),
+}
+
+impl Normalized {
+    fn into_type(self) -> TypeExpr {
+        match self {
+            Self::Type(ty) => ty,
+            Self::Function(_) => unreachable!("a type job normalizes to a type"),
+        }
+    }
+
+    fn into_function(self) -> FunctionExpr {
+        match self {
+            Self::Function(func) => func,
+            Self::Type(_) => unreachable!("a function job normalizes to a function"),
+        }
+    }
+}
+
+/// How a node's rebuild normalizes each child it holds.
+type NormalizeChild<'l, 'e> = dyn FnMut(NormalizeJob<'e>) -> Normalized + 'l;
+
+/// The type parameters in scope, shared by every child normalized under
+/// them: a function's own, then those of the scopes enclosing it.
+type ParamScope = std::rc::Rc<ParamScopeNode>;
+
+/// One function's type parameters in a [`ParamScope`] chain. It lives for
+/// one [`normalize_type_parameter_refs`] call.
+struct ParamScopeNode {
+    params: Vec<TypeParam>,
+    enclosing: Option<ParamScope>,
+}
+
+impl ParamScopeNode {
+    /// The parameter a reference named `name` resolves to: the first of
+    /// that name in the outermost scope declaring one, as a lookup over the
+    /// enclosing parameters followed by the function's own reads it.
+    fn resolve(&self, name: &str) -> Option<&TypeParam> {
+        let mut found = None;
+        let mut scope = Some(self);
+        while let Some(current) = scope {
+            if let Some(param) = current.params.iter().find(|param| param.name == name) {
+                found = Some(param);
+            }
+            scope = current.enclosing.as_deref();
+        }
+        found
+    }
+}
+
+impl Drop for ParamScopeNode {
+    /// Release a chain of scopes from a loop, not a native level per scope.
+    fn drop(&mut self) {
+        let mut enclosing = self.enclosing.take();
+        while let Some(scope) = enclosing {
+            enclosing = match std::rc::Rc::try_unwrap(scope) {
+                Ok(mut node) => node.enclosing.take(),
+                Err(_) => None,
+            };
+        }
+    }
+}
+
+/// Rewrite every reference to an in-scope type parameter into that
+/// parameter, from an explicit stack: a type nested to any depth costs no
+/// native stack per level. A node is rebuilt as [`lower_ts_type`] builds
+/// one — once with a placeholder per child to enumerate its children, then
+/// over their results — and a nested function normalizes its own type
+/// parameters one at a time (each under the ones before it), then its
+/// parameters, return and predicate under the enclosing scope and its own.
 fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeExpr {
+    enum Frame<'e> {
+        Enter(NormalizeJob<'e>, ParamScope),
+        Rebuild(&'e TypeExpr, ParamScope, usize),
+        Declare {
+            function: &'e FunctionExpr,
+            outer: ParamScope,
+            declared: Vec<TypeParam>,
+        },
+        Declared {
+            function: &'e FunctionExpr,
+            outer: ParamScope,
+            declared: Vec<TypeParam>,
+        },
+        Body {
+            function: &'e FunctionExpr,
+            declared: Vec<TypeParam>,
+            count: usize,
+        },
+    }
+    let mut frames = vec![Frame::Enter(
+        NormalizeJob::Type(expr),
+        std::rc::Rc::new(ParamScopeNode {
+            params: scope.to_vec(),
+            enclosing: None,
+        }),
+    )];
+    let mut values: Vec<Normalized> = Vec::new();
+    let mut children: Vec<NormalizeJob<'_>> = Vec::new();
+    while let Some(frame) = frames.pop() {
+        match frame {
+            Frame::Enter(NormalizeJob::Type(node), scope) => {
+                let rebuilt = rebuild_normalized(node, &scope, &mut |child| {
+                    children.push(child);
+                    match child {
+                        NormalizeJob::Type(_) => {
+                            Normalized::Type(TypeExpr::Primitive(PrimitiveName::Any))
+                        }
+                        NormalizeJob::Function(_) => {
+                            Normalized::Function(FunctionExpr::with_spans(
+                                Vec::new(),
+                                None,
+                                Vec::new(),
+                                FunctionSpans::default(),
+                            ))
+                        }
+                    }
+                });
+                if children.is_empty() {
+                    values.push(Normalized::Type(rebuilt));
+                } else {
+                    frames.push(Frame::Rebuild(node, scope.clone(), children.len()));
+                    frames.extend(
+                        children
+                            .drain(..)
+                            .rev()
+                            .map(|child| Frame::Enter(child, scope.clone())),
+                    );
+                }
+            }
+            Frame::Enter(NormalizeJob::Function(function), outer) => {
+                frames.push(Frame::Declare {
+                    function,
+                    outer,
+                    declared: Vec::with_capacity(function.type_parameters.len()),
+                });
+            }
+            Frame::Rebuild(node, scope, count) => {
+                let mut normalized = values.split_off(values.len() - count).into_iter();
+                let rebuilt = rebuild_normalized(node, &scope, &mut |_| {
+                    normalized
+                        .next()
+                        .expect("a rebuild asks for the children it enumerated, in order")
+                });
+                values.push(Normalized::Type(rebuilt));
+            }
+            // A nested function's own type parameters see only the ones
+            // declared before them, not the enclosing scope.
+            Frame::Declare {
+                function,
+                outer,
+                declared,
+            } => match function.type_parameters.get(declared.len()) {
+                Some(param) => {
+                    let scope = std::rc::Rc::new(ParamScopeNode {
+                        params: declared.clone(),
+                        enclosing: None,
+                    });
+                    frames.push(Frame::Declared {
+                        function,
+                        outer,
+                        declared,
+                    });
+                    if let Some(default) = &param.default {
+                        frames.push(Frame::Enter(
+                            NormalizeJob::Type(default.as_ref()),
+                            scope.clone(),
+                        ));
+                    }
+                    if let Some(constraint) = &param.constraint {
+                        frames.push(Frame::Enter(NormalizeJob::Type(constraint.as_ref()), scope));
+                    }
+                }
+                None => {
+                    let combined = std::rc::Rc::new(ParamScopeNode {
+                        params: declared.clone(),
+                        enclosing: Some(outer),
+                    });
+                    let jobs = function
+                        .parameters
+                        .iter()
+                        .map(|param| &param.ty)
+                        .chain(function.return_type.as_deref())
+                        .chain(
+                            function
+                                .predicate
+                                .as_deref()
+                                .and_then(|predicate| predicate.ty.as_deref()),
+                        );
+                    let start = frames.len() + 1;
+                    frames.push(Frame::Body {
+                        function,
+                        declared,
+                        count: 0,
+                    });
+                    frames.extend(
+                        jobs.map(|ty| Frame::Enter(NormalizeJob::Type(ty), combined.clone())),
+                    );
+                    let count = frames.len() - start;
+                    frames[start..].reverse();
+                    if let Some(Frame::Body { count: body, .. }) = frames.get_mut(start - 1) {
+                        *body = count;
+                    }
+                }
+            },
+            Frame::Declared {
+                function,
+                outer,
+                mut declared,
+            } => {
+                let param = &function.type_parameters[declared.len()];
+                let default = param
+                    .default
+                    .as_ref()
+                    .map(|_| Arc::new(values.pop().expect("the default").into_type()));
+                let constraint = param
+                    .constraint
+                    .as_ref()
+                    .map(|_| Arc::new(values.pop().expect("the constraint").into_type()));
+                declared.push(TypeParam {
+                    name: param.name.clone(),
+                    constraint,
+                    default,
+                    is_const: param.is_const,
+                });
+                frames.push(Frame::Declare {
+                    function,
+                    outer,
+                    declared,
+                });
+            }
+            Frame::Body {
+                function,
+                declared,
+                count,
+            } => {
+                let mut normalized = values
+                    .split_off(values.len() - count)
+                    .into_iter()
+                    .map(Normalized::into_type);
+                let parameters = function
+                    .parameters
+                    .iter()
+                    .map(|param| {
+                        FunctionParam::with_span(
+                            param.name.clone(),
+                            normalized.next().expect("each parameter's type"),
+                            param.optional,
+                            param.rest,
+                            param.span,
+                            param.has_ts_annotation,
+                        )
+                    })
+                    .collect();
+                let return_type = function
+                    .return_type
+                    .as_ref()
+                    .map(|_| Arc::new(normalized.next().expect("the return type")));
+                let predicate = function.predicate.as_deref().map(|predicate| {
+                    Arc::new(TypePredicate {
+                        subject: predicate.subject.clone(),
+                        asserts: predicate.asserts,
+                        ty: predicate
+                            .ty
+                            .as_ref()
+                            .map(|_| Arc::new(normalized.next().expect("the predicate's type"))),
+                    })
+                });
+                values.push(Normalized::Function(
+                    FunctionExpr::with_spans(parameters, return_type, declared, function.spans)
+                        .with_predicate(predicate),
+                ));
+            }
+        }
+    }
+    values
+        .pop()
+        .expect("the root's value is the one value left")
+        .into_type()
+}
+
+/// Rebuild one node of [`normalize_type_parameter_refs`] from its children,
+/// each normalized through `child`.
+fn rebuild_normalized<'e>(
+    expr: &'e TypeExpr,
+    scope: &ParamScopeNode,
+    child: &mut NormalizeChild<'_, 'e>,
+) -> TypeExpr {
+    let mut ty = |expr: &'e TypeExpr| child(NormalizeJob::Type(expr)).into_type();
     match expr {
         TypeExpr::Ref {
             name,
             type_arguments,
         } if type_arguments.is_empty() => scope
-            .iter()
-            .find(|param| param.name == name.as_ref())
+            .resolve(name)
             .cloned()
             .map(TypeExpr::TypeParameter)
             .unwrap_or_else(|| expr.clone()),
@@ -881,12 +1404,7 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
             type_arguments,
         } => TypeExpr::Ref {
             name: Arc::clone(name),
-            type_arguments: Arc::from(
-                type_arguments
-                    .iter()
-                    .map(|arg| normalize_type_parameter_refs(arg, scope))
-                    .collect::<Vec<_>>(),
-            ),
+            type_arguments: Arc::from(type_arguments.iter().map(ty).collect::<Vec<_>>()),
         },
         // A compiler intrinsic BINDS and NAMES nothing: its identity is a closed
         // op, never a spelling the enclosing generic scope could capture. Only
@@ -894,12 +1412,7 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
         // — the application itself is never rewritten into a `TypeParameter`.
         TypeExpr::IntrinsicApplication { op, arguments } => TypeExpr::IntrinsicApplication {
             op: *op,
-            arguments: Arc::from(
-                arguments
-                    .iter()
-                    .map(|argument| normalize_type_parameter_refs(argument, scope))
-                    .collect::<Vec<_>>(),
-            ),
+            arguments: Arc::from(arguments.iter().map(ty).collect::<Vec<_>>()),
         },
         // `import("m").Gen<T>` — only the instantiation type-arguments can
         // reference the enclosing generic scope; specifier / qualifier /
@@ -913,27 +1426,12 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
             specifier: Arc::clone(specifier),
             qualifier: Arc::clone(qualifier),
             typeof_query: *typeof_query,
-            type_arguments: Arc::from(
-                type_arguments
-                    .iter()
-                    .map(|arg| normalize_type_parameter_refs(arg, scope))
-                    .collect::<Vec<_>>(),
-            ),
+            type_arguments: Arc::from(type_arguments.iter().map(ty).collect::<Vec<_>>()),
         },
-        TypeExpr::Union(types) => TypeExpr::union(
-            types
-                .iter()
-                .map(|ty| normalize_type_parameter_refs(ty, scope))
-                .collect(),
-        ),
-        TypeExpr::Intersection(types) => TypeExpr::intersection(
-            types
-                .iter()
-                .map(|ty| normalize_type_parameter_refs(ty, scope))
-                .collect(),
-        ),
+        TypeExpr::Union(types) => TypeExpr::union(types.iter().map(ty).collect()),
+        TypeExpr::Intersection(types) => TypeExpr::intersection(types.iter().map(ty).collect()),
         TypeExpr::Array { element, readonly } => TypeExpr::Array {
-            element: Arc::new(normalize_type_parameter_refs(element.as_ref(), scope)),
+            element: Arc::new(ty(element.as_ref())),
             readonly: *readonly,
         },
         TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
@@ -942,7 +1440,7 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
                     .iter()
                     .map(|element| TupleElement {
                         label: element.label.clone(),
-                        ty: normalize_type_parameter_refs(&element.ty, scope),
+                        ty: ty(&element.ty),
                         optional: element.optional,
                         rest: element.rest,
                     })
@@ -954,26 +1452,23 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
             properties: obj
                 .properties
                 .iter()
-                .map(|member| normalize_object_member_type_params(member, scope))
+                .map(|member| normalize_object_member_type_params(member, child))
                 .collect(),
         })),
         TypeExpr::Function(func) => TypeExpr::Function(Arc::new(
-            normalize_nested_function_type_params(func.as_ref(), scope),
+            child(NormalizeJob::Function(func.as_ref())).into_function(),
         )),
         // A constructor type carries the same `FunctionExpr` payload as a
         // function type — its parameters / return may reference the enclosing
         // generic scope (e.g. `<T>(...) => new () => T[]`), so it normalises
         // identically; only the variant tag differs.
         TypeExpr::ConstructorType(func) => TypeExpr::ConstructorType(Arc::new(
-            normalize_nested_function_type_params(func.as_ref(), scope),
+            child(NormalizeJob::Function(func.as_ref())).into_function(),
         )),
-        TypeExpr::KeyOf(inner) => TypeExpr::KeyOf(Arc::new(normalize_type_parameter_refs(
-            inner.as_ref(),
-            scope,
-        ))),
+        TypeExpr::KeyOf(inner) => TypeExpr::KeyOf(Arc::new(ty(inner.as_ref()))),
         TypeExpr::IndexedAccess { object, index } => TypeExpr::IndexedAccess {
-            object: Arc::new(normalize_type_parameter_refs(object.as_ref(), scope)),
-            index: Arc::new(normalize_type_parameter_refs(index.as_ref(), scope)),
+            object: Arc::new(ty(object.as_ref())),
+            index: Arc::new(ty(index.as_ref())),
         },
         TypeExpr::Conditional {
             check,
@@ -981,10 +1476,10 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
             true_type,
             false_type,
         } => TypeExpr::Conditional {
-            check: Arc::new(normalize_type_parameter_refs(check.as_ref(), scope)),
-            extends: Arc::new(normalize_type_parameter_refs(extends.as_ref(), scope)),
-            true_type: Arc::new(normalize_type_parameter_refs(true_type.as_ref(), scope)),
-            false_type: Arc::new(normalize_type_parameter_refs(false_type.as_ref(), scope)),
+            check: Arc::new(ty(check.as_ref())),
+            extends: Arc::new(ty(extends.as_ref())),
+            true_type: Arc::new(ty(true_type.as_ref())),
+            false_type: Arc::new(ty(false_type.as_ref())),
         },
         TypeExpr::Mapped {
             parameter,
@@ -995,33 +1490,21 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
             name_type,
         } => TypeExpr::Mapped {
             parameter: parameter.clone(),
-            source: Arc::new(normalize_type_parameter_refs(source.as_ref(), scope)),
-            value: Arc::new(normalize_type_parameter_refs(value.as_ref(), scope)),
+            source: Arc::new(ty(source.as_ref())),
+            value: Arc::new(ty(value.as_ref())),
             optional: *optional,
             readonly: *readonly,
-            name_type: name_type
-                .as_ref()
-                .map(|expr| Arc::new(normalize_type_parameter_refs(expr.as_ref(), scope))),
+            name_type: name_type.as_ref().map(|expr| Arc::new(ty(expr.as_ref()))),
         },
         TypeExpr::TemplateLiteral {
             quasis,
             expressions,
         } => TypeExpr::TemplateLiteral {
             quasis: quasis.clone(),
-            expressions: Arc::from(
-                expressions
-                    .iter()
-                    .map(|expr| normalize_type_parameter_refs(expr, scope))
-                    .collect::<Vec<_>>(),
-            ),
+            expressions: Arc::from(expressions.iter().map(ty).collect::<Vec<_>>()),
         },
-        TypeExpr::Rest(inner) => TypeExpr::Rest(Arc::new(normalize_type_parameter_refs(
-            inner.as_ref(),
-            scope,
-        ))),
-        TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(Arc::new(
-            normalize_type_parameter_refs(inner.as_ref(), scope),
-        )),
+        TypeExpr::Rest(inner) => TypeExpr::Rest(Arc::new(ty(inner.as_ref()))),
+        TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(Arc::new(ty(inner.as_ref()))),
         // Synthetic slot-binding carrier is a TERMINAL leaf. The carrier
         // is shallow-by-construction and is never resolved as a type
         // alias via the type registry — return it unchanged.
@@ -1036,7 +1519,11 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
     }
 }
 
-fn normalize_object_member_type_params(member: &ObjectMember, scope: &[TypeParam]) -> ObjectMember {
+fn normalize_object_member_type_params<'e>(
+    member: &'e ObjectMember,
+    child: &mut NormalizeChild<'_, 'e>,
+) -> ObjectMember {
+    let mut ty = |expr: &'e TypeExpr| child(NormalizeJob::Type(expr)).into_type();
     match member {
         // Reconstruction of an EXISTING member (only the type-parameter refs in
         // its value are rewritten): preserve the member's declared accessibility
@@ -1045,8 +1532,8 @@ fn normalize_object_member_type_params(member: &ObjectMember, scope: &[TypeParam
         // instance shape is normalized.
         ObjectMember::Property(prop) => ObjectMember::Property(
             ObjectProperty::with_key_visibility(
-                normalize_property_key_type_params(&prop.key, scope),
-                normalize_type_parameter_refs(&prop.ty, scope),
+                normalize_property_key_type_params(&prop.key, &mut ty),
+                ty(&prop.ty),
                 prop.optional,
                 prop.readonly,
                 prop.visibility,
@@ -1059,37 +1546,38 @@ fn normalize_object_member_type_params(member: &ObjectMember, scope: &[TypeParam
         ObjectMember::IndexSignature(sig) => {
             ObjectMember::IndexSignature(IndexSignature::with_spans(
                 sig.key_name.clone(),
-                normalize_type_parameter_refs(&sig.key_type, scope),
-                normalize_type_parameter_refs(&sig.value_type, scope),
+                ty(&sig.key_type),
+                ty(&sig.value_type),
                 sig.readonly,
                 sig.spans,
             ))
         }
         ObjectMember::CallSignature(func) => {
-            ObjectMember::CallSignature(normalize_nested_function_type_params(func, scope))
+            ObjectMember::CallSignature(child(NormalizeJob::Function(func)).into_function())
         }
         ObjectMember::ConstructSignature(func) => {
-            ObjectMember::ConstructSignature(normalize_nested_function_type_params(func, scope))
+            ObjectMember::ConstructSignature(child(NormalizeJob::Function(func)).into_function())
         }
-        ObjectMember::Method(method) => ObjectMember::Method(
-            MethodSignature::with_key_visibility(
-                normalize_property_key_type_params(&method.key, scope),
-                normalize_nested_function_type_params(&method.function, scope),
-                method.optional,
-                method.visibility,
-                method.spans,
+        ObjectMember::Method(method) => {
+            let key = normalize_property_key_type_params(&method.key, &mut ty);
+            ObjectMember::Method(
+                MethodSignature::with_key_visibility(
+                    key,
+                    child(NormalizeJob::Function(&method.function)).into_function(),
+                    method.optional,
+                    method.visibility,
+                    method.spans,
+                )
+                .with_excess_origin(method.excess_origin),
             )
-            .with_excess_origin(method.excess_origin),
-        ),
-        ObjectMember::Spread(spread) => ObjectMember::Spread(SpreadMember::new(
-            normalize_type_parameter_refs(&spread.ty, scope),
-        )),
+        }
+        ObjectMember::Spread(spread) => ObjectMember::Spread(SpreadMember::new(ty(&spread.ty))),
     }
 }
 
-fn normalize_property_key_type_params(
-    key: &TypeAuthoredPropertyKey,
-    scope: &[TypeParam],
+fn normalize_property_key_type_params<'e>(
+    key: &'e TypeAuthoredPropertyKey,
+    ty: &mut impl FnMut(&'e TypeExpr) -> TypeExpr,
 ) -> TypeAuthoredPropertyKey {
     match key {
         AuthoredPropertyKey::String(value) => AuthoredPropertyKey::String(value.clone()),
@@ -1097,37 +1585,8 @@ fn normalize_property_key_type_params(
         AuthoredPropertyKey::UniqueSymbol(identity) => {
             AuthoredPropertyKey::UniqueSymbol(identity.clone())
         }
-        AuthoredPropertyKey::Computed(expression) => {
-            AuthoredPropertyKey::Computed(normalize_type_parameter_refs(expression, scope))
-        }
+        AuthoredPropertyKey::Computed(expression) => AuthoredPropertyKey::Computed(ty(expression)),
     }
-}
-
-fn normalize_nested_function_type_params(func: &FunctionExpr, scope: &[TypeParam]) -> FunctionExpr {
-    let mut combined_scope = scope.to_vec();
-    let nested_scope = normalize_type_parameter_decls(func.type_parameters.clone());
-    combined_scope.extend(nested_scope.clone());
-
-    FunctionExpr::with_spans(
-        func.parameters
-            .iter()
-            .map(|param| {
-                FunctionParam::with_span(
-                    param.name.clone(),
-                    normalize_type_parameter_refs(&param.ty, &combined_scope),
-                    param.optional,
-                    param.rest,
-                    param.span,
-                    param.has_ts_annotation,
-                )
-            })
-            .collect(),
-        func.return_type
-            .as_ref()
-            .map(|ret| Arc::new(normalize_type_parameter_refs(ret.as_ref(), &combined_scope))),
-        nested_scope,
-        func.spans,
-    )
 }
 
 // ---------------------------------------------------------------------------

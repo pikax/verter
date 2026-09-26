@@ -963,7 +963,7 @@
     {
       "file": "class_features.rs",
       "function": "class_features_static_generic_method_instantiation_projects_return_with_substitution",
-      "block": "U2.CLASS_SURFACES",
+      "block": "U2.INDEXED_ACCESS",
       "capability": "ClassFeatures",
       "status": "lifted"
     },

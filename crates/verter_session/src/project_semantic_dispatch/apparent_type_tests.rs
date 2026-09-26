@@ -89,6 +89,12 @@ fn upsert_ambient(host: &VerterHost, virtual_id: &Arc<str>, source: &str) {
 /// `Function` corpus, plus one plain source file per project so the demand
 /// canonicals resolve to their projects.
 fn two_project_ambient_host() -> Arc<VerterHost> {
+    two_project_host(AMBIENT_LIB_A, AMBIENT_LIB_B)
+}
+
+/// Two configured projects (`/a`, `/b`) with the ambient corpora `lib_a`
+/// and `lib_b`, plus one plain source file per project.
+fn two_project_host(lib_a: &'static str, lib_b: &'static str) -> Arc<VerterHost> {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -97,7 +103,7 @@ fn two_project_ambient_host() -> Arc<VerterHost> {
         project_config("/b"),
     ]));
     let mut virtual_ids = Vec::new();
-    for (ordinal, (lib_id, lib)) in [("lib.a.d.ts", AMBIENT_LIB_A), ("lib.b.d.ts", AMBIENT_LIB_B)]
+    for (ordinal, (lib_id, lib)) in [("lib.a.d.ts", lib_a), ("lib.b.d.ts", lib_b)]
         .into_iter()
         .enumerate()
     {
@@ -165,6 +171,8 @@ fn rootless_signature(dispatch: &ProjectSemanticDispatch<'_>) -> SemanticNodeId 
         return_carrier: SignatureReturnCarrier::Declared(return_type),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     })
 }
 
@@ -402,4 +410,268 @@ fn rootless_apparent_without_demand_site_fails_closed() {
         None,
         "a rootless callable with no member-access/call site on the stack has no scope"
     );
+}
+
+/// A `String` and `Array` corpus carrying project-A-only marker members.
+const WRAPPER_LIB_A: &str = "interface String { readonly length: number; onlyA: \"a\"; }\n\
+                             interface Array<T> { length: number; onlyA: \"a\"; }\n";
+
+/// A `String` and `Array` corpus carrying project-B-only marker members.
+const WRAPPER_LIB_B: &str = "interface String { readonly length: number; onlyB: \"b\"; }\n\
+                             interface Array<T> { length: number; onlyB: \"b\"; }\n";
+
+/// A primitive's member read reaches its global wrapper through the
+/// demanding project and is admitted under that project's wrapper: the
+/// SAME interned `string` node read from two projects with different
+/// `String` corpora answers each project's own member, each answer is one
+/// memo candidate keyed by that project's `String` surface (the shared
+/// `string` subject itself is never admitted), and a warm repeat is served
+/// from the memo without a single miss.
+///
+/// Mutation recipe: stop rewriting the shared subject to the demand
+/// project's wrapper before admission and the scoped candidates are never
+/// written (or, with the walker's scoping also dropped, project B is served
+/// A's warm `"a"`).
+#[test]
+fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
+    let host = two_project_host(WRAPPER_LIB_A, WRAPPER_LIB_B);
+    let graph = host.project_type_store().semantic_graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let path_key = |base: SemanticNodeId, member: &str| SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![crate::semantic_query::PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier(member),
+            )]
+            .into_boxed_slice(),
+        ),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
+    };
+    // Each read runs through a fresh store view, as a warm read of a
+    // published candidate does.
+    let read = |canonical: &str, member: &str| {
+        with_fresh_dispatch(&host, |dispatch| {
+            let _scope = super::super::LexicalDemandScopeGuard::push(
+                &dispatch.lexical_demand_scope,
+                Arc::from(canonical),
+            );
+            dispatch.execute_read(path_key(string, member))
+        })
+    };
+    // The string literal a read answers, if it answers one.
+    let value = |result: &QueryResult<SemanticNodeId>| match result {
+        QueryResult::Value(node) => match graph.node_data(*node).as_deref() {
+            Some(SemanticNodeData::Literal(verter_type_expr::LiteralValue::String(text))) => {
+                Some(text.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let surface_of = |canonical: &str| {
+        with_fresh_dispatch(&host, |dispatch| {
+            match dispatch.global_wrapper_surface("String", &[], canonical) {
+                super::GlobalWrapper::Surface(surface) => surface,
+                _ => panic!("{canonical}'s project declares String"),
+            }
+        })
+    };
+
+    let a = read("/a/main.ts", "onlyA");
+    assert_eq!(
+        value(&a.value),
+        Some("a".to_string()),
+        "project A reads its own String member"
+    );
+    assert!(!a.cache_suppress, "a scoped wrapper read is admissible");
+
+    let b = read("/b/main.ts", "onlyA");
+    assert!(
+        matches!(b.value, QueryResult::Value(node) if matches!(
+            graph.node_data(node).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        )),
+        "project B's String declares no `onlyA`: never A's answer, got {:?}",
+        b.value
+    );
+    assert_eq!(
+        value(&read("/b/main.ts", "onlyB").value),
+        Some("b".to_string()),
+        "project B reads its own String member"
+    );
+
+    let (surface_a, surface_b) = (surface_of("/a/main.ts"), surface_of("/b/main.ts"));
+    assert_ne!(surface_a, surface_b, "each project has its own String");
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&path_key(surface_a, "onlyA")),
+        1,
+        "project A's read is admitted under A's String"
+    );
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&path_key(surface_b, "onlyB")),
+        1,
+        "project B's read is admitted under B's String"
+    );
+    for member in ["onlyA", "onlyB"] {
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&path_key(string, member)),
+            0,
+            "the shared subject is never admitted ({member})"
+        );
+    }
+
+    let before = graph.stats_snapshot();
+    let warm = read("/a/main.ts", "onlyA");
+    let after = graph.stats_snapshot();
+    assert_eq!(value(&warm.value), Some("a".to_string()));
+    assert_eq!(
+        after.misses, before.misses,
+        "a warm repeat is served from the memo"
+    );
+    assert!(after.hits > before.hits, "a warm repeat is a memo hit");
+}
+
+/// A project that declares no wrapper reads its members as a miss, and
+/// that miss is admitted too — under the `Miss` subject every such project
+/// shares, never under the shared `string` subject a project WITH a
+/// `String` reads through.
+#[test]
+fn a_wrapper_member_read_without_a_wrapper_is_an_admitted_miss() {
+    let host = no_ambient_host();
+    let graph = host.project_type_store().semantic_graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let path_key = |base: SemanticNodeId| SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![crate::semantic_query::PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("length"),
+            )]
+            .into_boxed_slice(),
+        ),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
+    };
+    let (read, miss) = with_fresh_dispatch(&host, |dispatch| {
+        let _scope = super::super::LexicalDemandScopeGuard::push(
+            &dispatch.lexical_demand_scope,
+            Arc::from("/ws/main.ts"),
+        );
+        (
+            dispatch.execute_read(path_key(string)),
+            dispatch.opaque(QueryError::Miss),
+        )
+    });
+    assert!(
+        matches!(read.value, QueryResult::Value(node) if matches!(
+            graph.node_data(node).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::Miss))
+        )),
+        "no String declares `length`, got {:?}",
+        read.value
+    );
+    assert!(!read.cache_suppress, "the miss is admissible");
+    assert_eq!(graph.slot_candidate_count_for_tests(&path_key(miss)), 1);
+    assert_eq!(graph.slot_candidate_count_for_tests(&path_key(string)), 0);
+}
+
+/// Run `f` over a dispatch on a fresh store view of `host`.
+fn with_fresh_dispatch<R>(
+    host: &Arc<VerterHost>,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R,
+) -> R {
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    f(&ProjectSemanticDispatch::new(&host_ctx))
+}
+
+/// A flow whose return reads a primitive's or an array's wrapper member
+/// (`s.length`, `arr.length`) is admitted and served warm: two demands,
+/// one cold computation, one candidate, and the member's declared type.
+///
+/// Mutation recipe: keep every wrapper read out of the shared memo (the
+/// walker's taint on every read) and each demand recomputes cold with zero
+/// candidates.
+#[test]
+fn a_flow_reading_a_wrapper_member_is_admitted_and_reused_warm() {
+    const FLOW: &str = "/a/flow.ts";
+    let host = two_project_host(WRAPPER_LIB_A, WRAPPER_LIB_B);
+    upsert_ts(
+        &host,
+        FLOW,
+        "declare const arr: string[];\n\
+         declare const s: string;\n\
+         export function readArrayLength() { return arr.length }\n\
+         export function readStringLength() { return s.length }\n",
+    );
+    for name in ["readArrayLength", "readStringLength"] {
+        let key = |dispatch: &ProjectSemanticDispatch<'_>| crate::semantic_query::FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(FLOW),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from(name),
+                verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(FLOW),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::super::flow_solve::flow_return_result_contract_id(),
+        };
+        let with_dispatch = |f: &dyn Fn(&ProjectSemanticDispatch<'_>) -> Option<String>| {
+            with_fresh_dispatch(&host, f)
+        };
+        let request = crate::request_context::RequestContext::new(1, Arc::from(FLOW), false, None);
+        let _request = crate::request_context::RequestContextGuard::install(request);
+        let mut served = None;
+        // bounded-loop: two demands, the cold one and its warm repeat.
+        for _ in 0..2 {
+            served =
+                with_dispatch(
+                    &|dispatch| match crate::semantic_query::SemanticQueryApi::execute(
+                        dispatch,
+                        SemanticQueryKey::FlowReturn(Box::new(key(dispatch))),
+                    ) {
+                        QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+                            value: crate::semantic_query::SemanticQueryValue::FlowReturn(result),
+                            ..
+                        }) => host
+                            .project_node_to_type_expr_for_test(result.return_type())
+                            .map(|expr| format!("{expr:?}")),
+                        _ => None,
+                    },
+                );
+        }
+        assert_eq!(
+            served.as_deref(),
+            Some(
+                format!(
+                    "{:?}",
+                    verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+                )
+                .as_str()
+            ),
+            "{name} returns the wrapper's declared `length`"
+        );
+        let cold = crate::request_context::current_request_context()
+            .expect("the request is installed")
+            .flow_return_cold_computes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(cold, 1, "{name}: the second demand is a warm hit");
+        let candidates = with_dispatch(&|dispatch| {
+            Some(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key(
+                        dispatch,
+                    ))))
+                    .to_string(),
+            )
+        });
+        assert_eq!(candidates.as_deref(), Some("1"), "{name} is admitted");
+    }
 }

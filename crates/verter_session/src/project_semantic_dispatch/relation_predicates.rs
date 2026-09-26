@@ -283,7 +283,7 @@ pub(super) fn index_signature_applies_to_property(
 /// are not). Routed through the single `js_number_to_string`
 /// canonicalizer — never an integer-only parse, never a second
 /// formatting path.
-fn is_numeric_literal_name(property_name: &str) -> bool {
+pub(super) fn is_numeric_literal_name(property_name: &str) -> bool {
     property_name
         .parse::<f64>()
         .is_ok_and(|value| super::build::js_number_to_string(value) == property_name)

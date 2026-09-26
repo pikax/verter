@@ -82,11 +82,14 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                     type_expr_from_json(r)
                 }
             });
-            Some(TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
-                params,
-                ret.map(Arc::new),
-                json_to_type_params(v.get("typeParameters"))?,
-            ))))
+            Some(TypeExpr::Function(Arc::new(
+                FunctionExpr::synthetic(
+                    params,
+                    ret.map(Arc::new),
+                    json_to_type_params(v.get("typeParameters"))?,
+                )
+                .with_predicate(json_to_type_predicate(v.get("predicate"))?),
+            )))
         }
         "constructorType" => {
             let params = json_to_func_params(v.get("parameters")?)?;
@@ -102,6 +105,10 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                     params,
                     ret.map(Arc::new),
                     json_to_type_params(v.get("typeParameters"))?,
+                )
+                .with_predicate(json_to_type_predicate(v.get("predicate"))?)
+                .with_abstract(
+                    v.get("abstract").and_then(serde_json::Value::as_bool) == Some(true),
                 ),
             )))
         }
@@ -448,19 +455,44 @@ fn json_to_func_params(v: &serde_json::Value) -> Option<Vec<FunctionParam>> {
 }
 
 fn json_to_function_expr(v: &serde_json::Value) -> Option<FunctionExpr> {
-    Some(FunctionExpr::synthetic(
-        json_to_func_params(v.get("parameters")?)?,
-        v.get("returnType")
-            .and_then(|ret| {
-                if ret.is_null() {
-                    None
-                } else {
-                    type_expr_from_json(ret)
-                }
-            })
-            .map(Arc::new),
-        json_to_type_params(v.get("typeParameters"))?,
-    ))
+    Some(
+        FunctionExpr::synthetic(
+            json_to_func_params(v.get("parameters")?)?,
+            v.get("returnType")
+                .and_then(|ret| {
+                    if ret.is_null() {
+                        None
+                    } else {
+                        type_expr_from_json(ret)
+                    }
+                })
+                .map(Arc::new),
+            json_to_type_params(v.get("typeParameters"))?,
+        )
+        .with_predicate(json_to_type_predicate(v.get("predicate"))?),
+    )
+}
+
+/// Decode a function's optional `predicate` object: `Some(None)` when
+/// absent, `None` (a hard decode failure) when present but malformed.
+fn json_to_type_predicate(v: Option<&serde_json::Value>) -> Option<Option<Arc<TypePredicate>>> {
+    let Some(value) = v else {
+        return Some(None);
+    };
+    let subject = match (value.get("parameter"), value.get("this")) {
+        (Some(name), None) => TypePredicateSubject::Parameter(Arc::from(name.as_str()?)),
+        (None, Some(this)) if this.as_bool()? => TypePredicateSubject::This,
+        _ => return None,
+    };
+    let ty = match value.get("ty") {
+        Some(ty) => Some(Arc::new(type_expr_from_json(ty)?)),
+        None => None,
+    };
+    Some(Some(Arc::new(TypePredicate {
+        subject,
+        asserts: value.get("asserts")?.as_bool()?,
+        ty,
+    })))
 }
 
 fn json_to_type_params(v: Option<&serde_json::Value>) -> Option<Vec<TypeParam>> {
@@ -778,6 +810,22 @@ impl TypeExpr {
                 .iter()
                 .map(Self::type_param_to_json)
                 .collect::<Vec<serde_json::Value>>());
+        }
+        if let Some(predicate) = func.predicate.as_deref() {
+            let mut encoded = json!({ "asserts": predicate.asserts });
+            match &predicate.subject {
+                TypePredicateSubject::Parameter(name) => {
+                    encoded["parameter"] = json!(name.as_ref());
+                }
+                TypePredicateSubject::This => encoded["this"] = json!(true),
+            }
+            if let Some(ty) = predicate.ty.as_deref() {
+                encoded["ty"] = ty.to_json_value();
+            }
+            v["predicate"] = encoded;
+        }
+        if func.is_abstract {
+            v["abstract"] = json!(true);
         }
         v
     }

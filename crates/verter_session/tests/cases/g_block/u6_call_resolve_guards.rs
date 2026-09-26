@@ -116,6 +116,7 @@ fn base_key() -> ResolveCallKey {
                 spread: false,
                 literal_mode: ArgumentLiteralMode::Widened,
                 context_sensitive: false,
+                const_view: None,
             }]
             .into_boxed_slice(),
         ),
@@ -254,6 +255,7 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
                     spread: false,
                     literal_mode: ArgumentLiteralMode::Widened,
                     context_sensitive: false,
+                    const_view: None,
                 }]
                 .into_boxed_slice(),
             );
@@ -271,6 +273,7 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
                     spread: true,
                     literal_mode: ArgumentLiteralMode::Widened,
                     context_sensitive: false,
+                    const_view: None,
                 }]
                 .into_boxed_slice(),
             );
@@ -288,6 +291,7 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
                     spread: false,
                     literal_mode: ArgumentLiteralMode::Literal,
                     context_sensitive: false,
+                    const_view: None,
                 }]
                 .into_boxed_slice(),
             );
@@ -528,6 +532,7 @@ fn const_modifier_survives_type_param_and_narrow_type_param() {
         constraint: None,
         default: None,
         is_const: true,
+        variance: verter_type_expr::facts::TypeParamVariance::Unannotated,
     };
     let verter_type_expr::facts::NarrowTypeParam {
         name,
@@ -535,6 +540,7 @@ fn const_modifier_survives_type_param_and_narrow_type_param() {
         constraint,
         default,
         is_const,
+        ..
     } = &narrow;
     assert_eq!(name, "T");
     assert_eq!(*ordinal, 0);

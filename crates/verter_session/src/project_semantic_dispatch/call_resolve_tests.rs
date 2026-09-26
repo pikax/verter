@@ -99,6 +99,8 @@ fn signature_with_carrier(
         return_carrier,
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     })
 }
 
@@ -310,6 +312,7 @@ pub(super) fn eager(ty: SemanticNodeId) -> CallArgKey {
         spread: false,
         literal_mode: ArgumentLiteralMode::Literal,
         context_sensitive: false,
+        const_view: None,
     }
 }
 
@@ -321,6 +324,7 @@ fn fresh_literal(ty: SemanticNodeId) -> CallArgKey {
         spread: false,
         literal_mode: ArgumentLiteralMode::Widened,
         context_sensitive: false,
+        const_view: None,
     }
 }
 
@@ -328,6 +332,22 @@ fn selected(step: super::call_resolve::ResolveCallStep) -> ResolvedCallResult {
     match step {
         super::call_resolve::ResolveCallStep::Complete(result) => result,
         other => panic!("call must select, got {other:?}"),
+    }
+}
+
+/// The diagnostic of a call its only candidate does not accept: the
+/// executor answers with that candidate as the checker's error-recovery
+/// candidate and carries the code the checker reports. `None` for a call
+/// that applied, or one that did not resolve at all.
+fn recovery_code(
+    step: super::call_resolve::ResolveCallStep,
+) -> Option<crate::semantic_query::CheckerDiagnosticCode> {
+    match step {
+        super::call_resolve::ResolveCallStep::Complete(ResolvedCallResult::Selected {
+            recovery_diagnostic: Some(diagnostic),
+            ..
+        }) => Some(diagnostic.code),
+        _ => None,
     }
 }
 
@@ -528,6 +548,7 @@ fn bucket_arity_rest_and_spread_mapping_are_decisive() {
             spread: true,
             literal_mode: ArgumentLiteralMode::Literal,
             context_sensitive: false,
+            const_view: None,
         }],
     )));
     assert!(matches!(
@@ -557,6 +578,7 @@ fn bucket_arity_rest_and_spread_mapping_are_decisive() {
                 spread: true,
                 literal_mode: ArgumentLiteralMode::Widened,
                 context_sensitive: false,
+                const_view: None,
             }],
         )),
         super::call_resolve::ResolveCallStep::Degraded(
@@ -1099,6 +1121,8 @@ fn anonymous_signature(
         return_carrier: SignatureReturnCarrier::Declared(return_type),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     })
 }
 
@@ -1440,8 +1464,9 @@ fn incomplete_independent_nested_call_taints_enclosing_build() {
 
 /// A context-sensitive argument (a function value with an un-annotated
 /// parameter) is withheld from the FIRST inference pass: the eager argument
-/// alone fixes `T`, and the withheld argument is then checked for
-/// applicability under that fixed substitution. Mutation: drop the
+/// alone fixes `T`, and the executor hands the withheld argument back with
+/// its contextual type instantiated under that fixed substitution; typed
+/// under it, the argument selects the candidate. Mutation: drop the
 /// context-sensitivity withholding — the lambda's `any` parameter deposits
 /// and beats the literal, and `T` binds `any`. The second half is the
 /// negative control: the SAME nodes with the argument marked
@@ -1511,22 +1536,54 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         spread: false,
         literal_mode: ArgumentLiteralMode::Literal,
         context_sensitive,
+        const_view: None,
     };
 
-    let withheld = selected(dispatch.execute_resolve_call(call_key(
+    let withheld = dispatch.execute_resolve_call(call_key(
         &dispatch,
         callee,
         CallKind::Call,
         None,
         vec![lambda_arg(true), eager(literal)],
-    )));
-    let ResolvedCallResult::Selected { return_type, .. } = withheld else {
-        panic!("the generic candidate must select")
+    ));
+    let super::call_resolve::ResolveCallStep::Degraded(
+        crate::semantic_query::ResolveCallFailure::ContextSensitiveInference {
+            contextual: Some((0, contextual)),
+        },
+    ) = withheld
+    else {
+        panic!("the withheld lambda must be handed back for typing, got {withheld:?}")
+    };
+    let parameter = match graph.node_data(contextual).as_deref() {
+        Some(SemanticNodeData::Signature { params, .. }) => params.first().map(|param| param.ty),
+        other => panic!("the contextual type must be the callback signature, got {other:?}"),
     };
     assert_eq!(
-        return_type, literal,
+        parameter,
+        Some(literal),
         "the eager argument alone fixes T; the withheld lambda contributes no candidate"
     );
+    // The caller types the lambda under that signature and asks again.
+    let typed_lambda = signature(
+        &dispatch,
+        "typedLambda",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, literal, false, false)],
+        Vec::new(),
+        literal,
+    );
+    let typed = selected(dispatch.execute_resolve_call(call_key(
+        &dispatch,
+        callee,
+        CallKind::Call,
+        None,
+        vec![eager(typed_lambda), eager(literal)],
+    )));
+    let ResolvedCallResult::Selected { return_type, .. } = typed else {
+        panic!("the generic candidate must select")
+    };
+    assert_eq!(return_type, literal);
     assert_ne!(return_type, any);
 
     // Negative control: the same nodes, marked context-FREE, DO deposit.
@@ -1759,19 +1816,19 @@ fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
 
     // ROW 2 — the assembled tuple is still constraint-checked.
     let constrained = variadic("variadicConstrained", tuple(vec![string, string]), ret);
-    assert!(
-        matches!(
-            dispatch.execute_resolve_call(call_key(
-                &dispatch,
-                constrained,
-                CallKind::Call,
-                None,
-                vec![eager(number), eager(number)],
-            )),
-            super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::NoApplicableOverload
-            )
-        ),
+    // `variadicConstrained<A extends [string, string]>(...args: A)` called
+    // with `(1, 2)`: the inference violates the constraint, takes it, and
+    // the arguments fail against it (tsc --strict: TS2345). The candidate
+    // is the call's error-recovery answer.
+    assert_eq!(
+        recovery_code(dispatch.execute_resolve_call(call_key(
+            &dispatch,
+            constrained,
+            CallKind::Call,
+            None,
+            vec![eager(number), eager(number)],
+        ))),
+        Some(crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable),
         "an assembled tuple that violates the declaration-site constraint is rejected"
     );
 
@@ -1786,19 +1843,16 @@ fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
         ret,
     );
     let fixed_callee = callable(&dispatch, vec![fixed], Vec::new());
-    assert!(
-        matches!(
-            dispatch.execute_resolve_call(call_key(
-                &dispatch,
-                fixed_callee,
-                CallKind::Call,
-                None,
-                vec![eager(number), eager(number)],
-            )),
-            super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::NoApplicableOverload
-            )
-        ),
+    // tsc --strict: TS2554 "Expected 1 arguments, but got 2".
+    assert_eq!(
+        recovery_code(dispatch.execute_resolve_call(call_key(
+            &dispatch,
+            fixed_callee,
+            CallKind::Call,
+            None,
+            vec![eager(number), eager(number)],
+        ))),
+        Some(crate::semantic_query::CheckerDiagnosticCode::ArgumentCount),
         "a concrete one-parameter candidate still caps arity at one"
     );
 }
@@ -1924,19 +1978,17 @@ fn excess_property_checking_is_an_argument_position_rule() {
         ret,
     );
     let argument_callee = callable(&dispatch, vec![argument_sig], Vec::new());
-    assert!(
-        matches!(
-            dispatch.execute_resolve_call(call_key(
-                &dispatch,
-                argument_callee,
-                CallKind::Call,
-                None,
-                vec![eager(fresh)],
-            )),
-            super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::NoApplicableOverload
-            )
-        ),
+    // The argument relation fails (tsc --strict prints its elaboration,
+    // TS2353 "Object literal may only specify known properties").
+    assert_eq!(
+        recovery_code(dispatch.execute_resolve_call(call_key(
+            &dispatch,
+            argument_callee,
+            CallKind::Call,
+            None,
+            vec![eager(fresh)],
+        ))),
+        Some(crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable),
         "an argument position DOES excess-check the identical fresh literal"
     );
 
@@ -2617,6 +2669,8 @@ fn prototype_call_rebase_onto_a_rootless_callable_keeps_its_return() {
         return_carrier: SignatureReturnCarrier::Declared(rootless_return),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     let key = prototype_call_key(&dispatch, call_member, extracted, vec![undefined, string]);
     let result = match dispatch.execute_resolve_call(key) {
@@ -2819,19 +2873,16 @@ fn tuple_argument_literal_elements_select_concrete_tuple_targets() {
         number,
     );
     let literal_callee = callable(&dispatch, vec![literal_sig], Vec::new());
-    assert!(
-        matches!(
-            dispatch.execute_resolve_call(call_key(
-                &dispatch,
-                literal_callee,
-                CallKind::Call,
-                None,
-                vec![eager(tuple_of(&dispatch, vec![number]))],
-            )),
-            super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::NoApplicableOverload
-            )
-        ),
+    // tsc --strict: TS2345, answering `number`.
+    assert_eq!(
+        recovery_code(dispatch.execute_resolve_call(call_key(
+            &dispatch,
+            literal_callee,
+            CallKind::Call,
+            None,
+            vec![eager(tuple_of(&dispatch, vec![number]))],
+        ))),
+        Some(crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable),
         "[number] must not satisfy (x: [1])"
     );
 }
@@ -2971,19 +3022,16 @@ fn required_arity_ends_at_last_required_position() {
         number,
     );
     let callee = callable(&dispatch, vec![sig], Vec::new());
-    assert!(
-        matches!(
-            dispatch.execute_resolve_call(call_key(
-                &dispatch,
-                callee,
-                CallKind::Call,
-                None,
-                vec![fresh_literal(one)],
-            )),
-            super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::NoApplicableOverload
-            )
-        ),
+    // tsc --strict: TS2554 "Expected 2 arguments, but got 1".
+    assert_eq!(
+        recovery_code(dispatch.execute_resolve_call(call_key(
+            &dispatch,
+            callee,
+            CallKind::Call,
+            None,
+            vec![fresh_literal(one)],
+        ))),
+        Some(crate::semantic_query::CheckerDiagnosticCode::ArgumentCount),
         "f(1) must reject: the required span ends at the second parameter"
     );
     let both = selected(dispatch.execute_resolve_call(call_key(
@@ -3048,19 +3096,17 @@ fn rest_tuple_required_elements_count_all_fixed_params() {
     let required_callee = callable(&dispatch, vec![required_sig], Vec::new());
     for args in [Vec::new(), vec![fresh_literal(one)]] {
         let arg_count = args.len();
-        assert!(
-            matches!(
-                dispatch.execute_resolve_call(call_key(
-                    &dispatch,
-                    required_callee,
-                    CallKind::Call,
-                    None,
-                    args,
-                )),
-                super::call_resolve::ResolveCallStep::Degraded(
-                    crate::semantic_query::ResolveCallFailure::NoApplicableOverload
-                )
-            ),
+        // A fixed-length tuple rest counts exactly: TS2554, never the
+        // "at least" TS2555 of an array rest.
+        assert_eq!(
+            recovery_code(dispatch.execute_resolve_call(call_key(
+                &dispatch,
+                required_callee,
+                CallKind::Call,
+                None,
+                args,
+            ))),
+            Some(crate::semantic_query::CheckerDiagnosticCode::ArgumentCount),
             "(a?: number, ...rest: [string]) requires two arguments, accepted {arg_count}"
         );
     }
@@ -3233,6 +3279,7 @@ fn approximate_spread_mapping_degrades_instead_of_selecting_weaker_overload() {
         spread: true,
         literal_mode: ArgumentLiteralMode::Literal,
         context_sensitive: false,
+        const_view: None,
     };
     let key = call_key(
         &dispatch,
@@ -3579,11 +3626,12 @@ fn union_arm_overload_order_is_per_arm_not_cross_arm() {
 /// Partial applicability rejects: `((x: string) => 1) | ((x: number) => 2)`
 /// has no common signature, so the list synthesizes ONE signature whose
 /// parameter is `string & number` (`never`); `"s"` is not assignable to it
-/// and the whole call is `NoApplicableOverload` (`tsc --strict` TS2345).
-/// Mutation recipe: let an applicable arm stand in for the whole union and
-/// this call silently answers `1`.
+/// (`tsc --strict` TS2345), and that signature is the call's error-recovery
+/// candidate: the call answers `1 | 2` beside the diagnostic. Mutation
+/// recipe: let an applicable arm stand in for the whole union and this call
+/// silently answers `1`.
 #[test]
-fn union_partial_applicability_is_no_applicable_overload() {
+fn union_partial_applicability_answers_the_synthesized_signatures_recovery() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
@@ -3618,21 +3666,23 @@ fn union_partial_applicability_is_no_applicable_overload() {
     );
     let callee = union_callee(&dispatch, vec![arm_a, arm_b]);
     let key = call_key(&dispatch, callee, CallKind::Call, None, vec![eager(s_lit)]);
+    let step = dispatch.execute_resolve_call(key);
     assert!(
         matches!(
-            dispatch.execute_resolve_call(key.clone()),
-            super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::NoApplicableOverload
+            &step,
+            super::call_resolve::ResolveCallStep::Complete(ResolvedCallResult::Selected {
+                return_type,
+                recovery_diagnostic: Some(crate::semantic_query::CheckerDiagnostic {
+                    code: crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
+                    ..
+                }),
+                ..
+            }) if matches!(
+                dispatch.graph().node_data(*return_type).as_deref(),
+                Some(SemanticNodeData::Union(arms)) if arms.contains(&one) && arms.contains(&two)
             )
         ),
-        "the synthesized union signature accepts no argument of either arm alone"
-    );
-    assert_eq!(
-        dispatch
-            .graph()
-            .slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(key))),
-        0,
-        "the rejected union call admits nothing"
+        "the synthesized union signature accepts no argument of either arm alone, got {step:?}"
     );
 }
 

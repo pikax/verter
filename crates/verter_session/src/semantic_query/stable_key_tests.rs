@@ -175,8 +175,11 @@ fn identity_audit_four_discriminators() {
     let graph = SemanticGraphStore::new();
     let n = prim(&graph, PrimitiveKind::Number);
     let members: Arc<[SemanticNodeId]> = Arc::from([n, n]);
-    let union =
-        crate::project_semantic_dispatch::canonical_algebra::canonical_union(&graph, &members);
+    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+        &graph,
+        &members,
+        crate::semantic_query::NullabilityPolicy::Strict,
+    );
     match graph.node_data(union.node).as_deref() {
         Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => {}
         Some(SemanticNodeData::Union(list)) => {
@@ -207,5 +210,49 @@ fn identity_audit_four_discriminators() {
         shown.to_string(),
         format!("{authored_a:?}"),
         "display is not node-id identity"
+    );
+}
+
+/// A union's member view lives with the store whose arena its id indexes.
+/// Node ids are arena-local, so the SAME id in two stores names two
+/// unrelated unions; a view kept for the process would hand the second store
+/// the first store's members.
+#[test]
+fn union_views_are_scoped_to_their_store() {
+    use crate::semantic_query::stable_key::semantic_union_members;
+    let a = SemanticGraphStore::new();
+    let b = SemanticGraphStore::new();
+    let a_members: Arc<[SemanticNodeId]> = Arc::from([
+        prim(&a, PrimitiveKind::Number),
+        prim(&a, PrimitiveKind::String),
+    ]);
+    let b_members: Arc<[SemanticNodeId]> = Arc::from([lit_str(&b, "x"), lit_str(&b, "y")]);
+    let a_union = a.intern_node(SemanticNodeData::Union(
+        CompositeList::<UnionKind>::authored_shell(Arc::clone(&a_members)),
+    ));
+    let b_union = b.intern_node(SemanticNodeData::Union(
+        CompositeList::<UnionKind>::authored_shell(Arc::clone(&b_members)),
+    ));
+    assert_eq!(
+        a_union, b_union,
+        "the fixture needs two unrelated unions under one arena-local id"
+    );
+    let ctx = SemanticContext::production();
+    let sorted = |members: &[SemanticNodeId]| {
+        let mut members = members.to_vec();
+        members.sort();
+        members
+    };
+    let a_view = semantic_union_members(&a, a_union, &ctx);
+    let b_view = semantic_union_members(&b, b_union, &ctx);
+    assert_eq!(
+        sorted(&a_view),
+        sorted(&a_members),
+        "store A reads its own union"
+    );
+    assert_eq!(
+        sorted(&b_view),
+        sorted(&b_members),
+        "store B must read ITS union, not the view store A built under the same id"
     );
 }

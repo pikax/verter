@@ -25,7 +25,7 @@
 //!   `IndexedAccess { base, index, mode }` admission-canonicalise to the
 //!   length-1 `ProjectPath` form **before** memo hashing so sugar and
 //!   canonical share one warm entry and one in-flight wait graph.
-//! - `NormalizeUnion` / `ReduceIntersection` — structural dedup over the
+//! - `ReduceUnion` / `ReduceIntersection` — structural dedup over the
 //!   supplied members with stable ordering.
 //! - `KeyOf` / `MappedType` / `Conditional` — navigation operations that
 //!   walk the base node's shared-graph payload. Paths that do not reach a
@@ -96,17 +96,25 @@ pub(crate) mod carrier;
 // dispatcher holds a ledger; it does not implement one.
 pub(crate) mod connected_demand;
 pub(crate) mod cycle_gate;
+mod enum_type;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
+#[cfg(test)]
+mod flow_narrowing_parity_tests;
 pub(crate) mod locator_shape;
 pub(crate) mod locator_view;
 mod locator_view_worklist;
 pub(crate) mod lower;
+mod module_object;
 pub(crate) mod output_materialization;
 pub(crate) mod query_error_disposition;
 pub(crate) mod signature_discovery;
 #[cfg(test)]
 mod signature_discovery_tests;
+#[cfg(test)]
+mod signature_predicate_inference_tests;
+#[cfg(test)]
+mod signature_predicate_tests;
 pub(crate) mod signature_utility;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
 // guards for the output-materialization carrier escape fence. No runtime
@@ -115,23 +123,40 @@ mod call_resolve;
 #[cfg(test)]
 mod call_resolve_tests;
 pub(crate) mod dispatch_txn;
+#[cfg(test)]
+mod equality_value_narrowing_tests;
 pub(crate) mod flow_return;
+#[cfg(test)]
+mod flow_return_accessor_tests;
 pub(crate) mod flow_return_callee;
+#[cfg(test)]
+mod flow_return_class_tests;
+#[cfg(test)]
+mod flow_return_construct_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_coverage_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_frame_seal_tests;
 #[cfg(test)]
+mod flow_return_global_tests;
+#[cfg(test)]
 pub(crate) mod flow_return_lexical_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_loop_completion_tests;
+#[cfg(test)]
+mod flow_return_null_policy_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_positional_tests;
 mod flow_return_products;
 #[cfg(test)]
 pub(crate) mod flow_return_root_gate_tests;
 #[cfg(test)]
+mod flow_return_tagged_template_tests;
+#[cfg(test)]
 pub(crate) mod flow_return_tests;
+#[cfg(test)]
+mod flow_return_type_argument_default_tests;
+mod flow_return_widening;
 // The completeness-proof layer for flow-bearing operations: production-live
 // (the flow evaluator's demand preparation installs demands from here and
 // the component close finalizes through it), and the `FlowReturnKey`
@@ -176,6 +201,7 @@ pub(crate) mod semantic_source_leaf_facts;
 pub(crate) mod substitute;
 pub(crate) mod symbol_identity;
 pub(crate) mod template_class_facts;
+mod template_relation;
 pub(crate) mod walk;
 
 /// Shared structural depth-fuse cap. The walker's per-request depth
@@ -309,6 +335,11 @@ pub(super) type InstantiateIdentity = (Arc<str>, verter_type_expr::TopLevelOwner
 pub struct ProjectSemanticDispatch<'a> {
     pub(super) ctx: &'a dyn ResolverContext,
     pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
+    /// The operands each awaited relation is unwrapping on the current
+    /// path — the checker's `awaitedTypeStack`. A run pushes every operand
+    /// it reaches, its query-free tail steps included, and pops them when
+    /// it ends (`build::AwaitedPathGuard`).
+    pub(super) awaited_active: std::cell::RefCell<build::AwaitedPath>,
     /// Carrier-normalization visited set — the small PRE-MEMO cycle guard for
     /// carrier-subject head resolution at the canonical query entry.
     ///
@@ -435,6 +466,23 @@ pub struct ProjectSemanticDispatch<'a> {
     /// key carries and the strict-family configuration the reducer
     /// branches on — two projections of the one effective option set.
     pub(super) relation_env: std::cell::OnceCell<dispatch_txn::RelationEnvironment>,
+    /// The relation environments of the answers currently being decided,
+    /// innermost last: a flow-return frame pushes the environment of its
+    /// function's OWN file for the length of its evaluation, so every
+    /// relation root it opens (return-arm subtype reduction, narrowing,
+    /// overload applicability) is keyed and decided under that file's
+    /// project options rather than the request's. Empty outside such a
+    /// frame, where [`Self::relation_environment`] falls back to the
+    /// request environment. Pushed and popped only through
+    /// [`RelationEnvironmentScope`].
+    pub(super) relation_env_scope:
+        std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
+    /// The relation environment of each file a flow-return frame has been
+    /// decided under in this dispatch — resolved once per file, like
+    /// [`Self::relation_env`] for the request, since every frame of a
+    /// function in that file asks again.
+    pub(super) relation_env_by_file:
+        std::cell::RefCell<rustc_hash::FxHashMap<Arc<str>, dispatch_txn::RelationEnvironment>>,
     /// Monotonic count of NON-TRIVIAL canonical-evidence deposits (a
     /// deposit carrying file self-roots or an `incomplete` verdict).
     /// Snapshot-and-compare fences an evidence-blind memo publish: the
@@ -561,6 +609,40 @@ impl<'g> Drop for LexicalDemandScopeGuard<'g> {
     }
 }
 
+/// RAII scope of one entry on
+/// [`ProjectSemanticDispatch::relation_env_scope`]: the environment — and
+/// its strict-family configuration as the relation reducer's snapshot — is
+/// in force until the scope drops, which restores the outer snapshot
+/// (panic-safe).
+pub(super) struct RelationEnvironmentScope<'g> {
+    stack: &'g std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
+    txn: &'g std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
+    outer_strict: Option<dispatch_txn::StrictFamilyConfig>,
+}
+
+impl<'g> RelationEnvironmentScope<'g> {
+    pub(super) fn push(
+        stack: &'g std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
+        txn: &'g std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
+        environment: dispatch_txn::RelationEnvironment,
+    ) -> Self {
+        stack.borrow_mut().push(environment);
+        let outer_strict = txn.borrow_mut().relation.strict.replace(environment.strict);
+        Self {
+            stack,
+            txn,
+            outer_strict,
+        }
+    }
+}
+
+impl<'g> Drop for RelationEnvironmentScope<'g> {
+    fn drop(&mut self) {
+        self.txn.borrow_mut().relation.strict = self.outer_strict;
+        self.stack.borrow_mut().pop();
+    }
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Create a dispatcher bound to a sealed request context.
     ///
@@ -579,6 +661,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Self {
             ctx,
             instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            awaited_active: std::cell::RefCell::new(build::AwaitedPath::default()),
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
@@ -589,6 +672,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 dispatch_txn::CheckerDispatchTransaction::default(),
             ),
             relation_env: std::cell::OnceCell::new(),
+            relation_env_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            relation_env_by_file: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             canonical_evidence_epoch: std::cell::Cell::new(0),
             connected_demand: connected_demand::ConnectedDemandLedger::new(
                 connected_demand::DemandCancellation::from_context(ctx),
@@ -683,10 +768,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 distributive: *distributive,
                 pending: pending.clone(),
             }),
-            // The normalize-query SUBJECT representation: the
-            // pre-normalization member list interned verbatim (the query's
+            // The reduce-query SUBJECT representation: the
+            // pre-reduction member list interned verbatim (the query's
             // subject must stay distinct from its canonical result).
-            SemanticQueryKey::NormalizeUnion { members } => {
+            SemanticQueryKey::ReduceUnion { members, .. } => {
                 graph.intern_node(SemanticNodeData::Union(
                     crate::semantic_query::composite::CompositeList::query_subject(Arc::clone(
                         members,
@@ -1551,10 +1636,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn recursive_ref_sentinel(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
+        args: Arc<[SemanticNodeId]>,
     ) -> SemanticNodeId {
         self.graph().intern_node_with_scope(
             SemanticNodeData::Opaque(QueryError::RecursiveRef {
                 name: Arc::clone(&identity.decl_name),
+                args,
             }),
             NodeScopeId::File {
                 canonical_id: Arc::clone(&identity.canonical_id),
@@ -1588,7 +1675,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Build a dep-signature fragment that records only the project
     /// generation. Used by derived semantic operations (e.g. `Instantiate`,
-    /// `NormalizeUnion`) where no single canonical scope owns the result —
+    /// `ReduceUnion`) where no single canonical scope owns the result —
     /// dep signatures flow in through the warm memo hits of the bases the
     /// caller already supplied.
     pub(super) fn project_generation_signature(&self) -> DepSignature {
@@ -2105,8 +2192,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> (SemanticQueryKey, CarrierNormalizationPrelude) {
-        // Cheap subject-shape probe — a non-carrier key skips the tracer.
-        if !self.key_subject_is_carrier(&key) {
+        // Cheap subject-shape probe — a key with neither a carrier subject,
+        // nor a first step through a shared subject's apparent wrapper, nor a
+        // subject taking its signatures from a global wrapper skips the
+        // tracer.
+        if !self.key_subject_is_carrier(&key)
+            && !self.key_reads_apparent_wrapper(&key)
+            && !self.key_reads_apparent_signatures(&key)
+        {
             return (key, CarrierNormalizationPrelude::none());
         }
         let ((normalized, partial_reasons), finalise) =
@@ -2115,6 +2208,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 || {
                     let normalized = self.normalize_carrier_subject_key(key);
                     let partial_reasons = self.carrier_normalization_partial_reasons(&normalized);
+                    // The wrapper read is scoped to the demand's project here,
+                    // so its lookup's facts root the admitted entry too: a
+                    // member path through an apparent wrapper, or a
+                    // signature read of a subject taking its signatures from
+                    // one.
+                    let normalized = self.scope_apparent_wrapper_subject(normalized);
+                    let normalized = self.scope_apparent_signature_subject(normalized);
                     // Test-only: force a fenced (ReturnOnly) serve observation onto
                     // the prelude tracer so the suppress wiring is exercisable
                     // without a superseded-artifact fixture. Zero-cost when unset.
@@ -2286,7 +2386,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //     entry and one in-flight wait graph.
         //   - `IndexedAccess { base, index, mode }` rewrites the same way to
         //     `ProjectPath { base, path: [Index(index)], mode }`.
-        //   - `NormalizeUnion` / `ReduceIntersection` get structural
+        //   - `ReduceUnion` / `ReduceIntersection` get structural
         //     member-list canonicalisation so `{A, B}` and `{B, A}` converge.
         //   - Symmetric `Relate` operands get the same ordering as typed
         //     relation callers before the family memo or wait graph sees them.
@@ -2330,8 +2430,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 }
             }
-            SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
+            SemanticQueryKey::ReduceUnion {
+                members,
+                nullability,
+            } => SemanticQueryKey::ReduceUnion {
                 members: canonicalize_node_list(self.graph(), &members),
+                nullability,
             },
             SemanticQueryKey::ReduceIntersection {
                 input,
@@ -2418,7 +2522,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the aggregate work-budget gate: the projection operators PLUS
         // `Instantiate` / `Conditional` (the generic-expansion-storm
         // kinds) and the demand-bearing `TypeOf`. Kinds outside that
-        // set (ResolveDecl, NormalizeUnion, …) bypass the early-exit —
+        // set (ResolveDecl, ReduceUnion, …) bypass the early-exit —
         // their cost is not what the work budget bounds.
         if !exact_same_path && semantic_query_counts_toward_projection_budget(&key) {
             if let Some(budget) = crate::request_context::current_request_budget() {
@@ -2502,6 +2606,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if let SemanticQueryKey::Instantiate(k) = &sentinel_key {
                     return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
                         name: Arc::clone(&k.base().merged_symbol_name),
+                        args: Arc::clone(k.args()),
                     }));
                 }
                 graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
@@ -2651,7 +2756,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     *distributive,
                     pending.clone(),
                 ),
-                SemanticQueryKey::NormalizeUnion { members } => self.build_normalize_union(members),
+                SemanticQueryKey::ReduceUnion {
+                    members,
+                    nullability,
+                } => self.build_reduce_union(members, *nullability),
                 SemanticQueryKey::ReduceIntersection {
                     input,
                     purpose,
@@ -3053,7 +3161,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         Some(AuditEvent::SemanticQueryProjectPathWarm)
                     }
                 }
-                // ResolveDecl, NormalizeUnion, ReduceIntersection,
+                // ResolveDecl, ReduceUnion, ReduceIntersection,
                 // Relate, ResolveMacroPayload — not in the focused
                 // counter set.
                 _ => None,
@@ -4073,6 +4181,120 @@ mod broad_runtime_tests;
 mod cycle_gate_tests;
 
 #[cfg(test)]
+mod abstract_construct_tests;
+#[cfg(test)]
+mod ambient_module_value_tests;
+#[cfg(test)]
+mod base_signature_tests;
+#[cfg(test)]
+mod callee_signature_effect_tests;
+#[cfg(test)]
+mod captured_declared_type_tests;
+#[cfg(test)]
+mod checker_probe_lane_tests;
+#[cfg(test)]
+mod class_member_return_tests;
+#[cfg(test)]
+mod class_owner_tests;
+#[cfg(test)]
+mod class_prototype_property_tests;
+#[cfg(test)]
+mod class_self_reference_tests;
+#[cfg(test)]
+mod class_value_heritage_tests;
+#[cfg(test)]
+mod closure_narrowing_tests;
+#[cfg(test)]
+mod conditional_indexed_check_tests;
+#[cfg(test)]
+mod const_literal_widening_tests;
+#[cfg(test)]
+mod differential_call_tests;
+#[cfg(test)]
+mod differential_class_tests;
+#[cfg(test)]
+mod differential_depth_tests;
+#[cfg(test)]
+mod differential_flow_tests;
+#[cfg(test)]
+mod differential_global_library_tests;
+#[cfg(test)]
+mod differential_harness_tests;
+#[cfg(test)]
+mod differential_literal_tests;
+#[cfg(test)]
+mod differential_module_tests;
+#[cfg(test)]
+mod differential_narrowing_tests;
+#[cfg(test)]
+mod differential_relation_tests;
+#[cfg(test)]
+mod differential_type_operator_tests;
+#[cfg(test)]
+mod enum_literal_tests;
+#[cfg(test)]
+mod heritage_signature_tests;
+#[cfg(test)]
+mod homomorphic_mapped_tests;
+#[cfg(test)]
+mod index_signature_access_tests;
+#[cfg(test)]
+mod indexed_access_name_tests;
+#[cfg(test)]
+mod indexed_access_relation_tests;
+#[cfg(test)]
+mod intersection_distribution_tests;
+#[cfg(test)]
+mod keyof_application_tests;
+#[cfg(test)]
+mod lib_global_tests;
+#[cfg(test)]
+mod local_declaration_tests;
+#[cfg(test)]
+mod member_accessibility_relation_tests;
+#[cfg(test)]
+mod merged_declaration_signature_tests;
+#[cfg(test)]
+mod module_object_tests;
+#[cfg(test)]
+mod module_value_surface_tests;
+#[cfg(test)]
+mod named_arm_reduction_tests;
+#[cfg(test)]
+mod namespace_member_value_tests;
+#[cfg(test)]
+mod namespace_value_tests;
+#[cfg(test)]
+mod never_callee_tests;
+#[cfg(test)]
+mod object_literal_accessor_tests;
+#[cfg(test)]
+mod object_literal_key_tests;
+#[cfg(test)]
+mod projected_terminal_surface_tests;
+#[cfg(test)]
 mod projection_stack_safety_tests;
 #[cfg(test)]
+mod relation_depth_tests;
+#[cfg(test)]
+mod relation_operand_tests;
+#[cfg(test)]
+mod signature_relation_tests;
+#[cfg(test)]
+mod string_mapping_template_tests;
+#[cfg(test)]
+mod template_pattern_relation_tests;
+#[cfg(test)]
+mod this_receiver_tests;
+#[cfg(test)]
 mod truthiness_domain_tests;
+#[cfg(test)]
+mod tuple_length_and_apparent_member_tests;
+#[cfg(test)]
+mod type_syntax_depth_tests;
+#[cfg(test)]
+mod unique_symbol_widening_tests;
+#[cfg(test)]
+mod unread_marker_relation_tests;
+#[cfg(test)]
+mod wide_union_relation_tests;

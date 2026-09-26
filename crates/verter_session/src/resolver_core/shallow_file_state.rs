@@ -182,8 +182,24 @@ pub struct ImportTarget {
     pub source_specifier: String,
     /// The original exported name in the source module.
     pub imported_name: String,
-    /// Whether the local binding is a namespace import (`import * as NS`).
+    /// Whether the local binding is a namespace import (`import * as NS`)
+    /// or an import assignment (`import NS = require("m")`).
     pub is_namespace: bool,
+}
+
+/// The [`ImportTarget::imported_name`] of an import assignment
+/// (`import x = require("m")`) — TypeScript's own name for the value a
+/// module assigns with `export =`, which the binding is when the module has
+/// one (its namespace otherwise). No identifier can spell it.
+pub const IMPORT_EQUALS_NAME: &str = "export=";
+
+impl ImportTarget {
+    /// Whether the binding is an import assignment
+    /// (`import x = require("m")`).
+    #[must_use]
+    pub fn is_import_equals(&self) -> bool {
+        self.is_namespace && self.imported_name == IMPORT_EQUALS_NAME
+    }
 }
 
 /// Narrow type-resolution view over [`ShallowFileState`].
@@ -612,7 +628,8 @@ impl ShallowFileState {
     ) -> (Arc<Self>, Arc<crate::types::MetaProvenance>) {
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
-            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse();
         assert!(!parsed.panicked, "service-backed test fixture must parse");
         let owner_table = Arc::new(match statement_owners {
             Some(owners) => {
@@ -856,11 +873,15 @@ impl ShallowFileState {
         for binding in &route_inventory.imports {
             let target = ImportTarget {
                 source_specifier: binding.source.clone(),
-                imported_name: match &binding.imported {
-                    RouteImportedName::Namespace => binding.local.clone(),
-                    RouteImportedName::Name(name) => name.clone(),
+                imported_name: match (&binding.imported, binding.form) {
+                    (_, RouteImportForm::ImportEquals) => IMPORT_EQUALS_NAME.to_string(),
+                    (RouteImportedName::Namespace, _) => binding.local.clone(),
+                    (RouteImportedName::Name(name), _) => name.clone(),
                 },
-                is_namespace: matches!(binding.form, RouteImportForm::Namespace),
+                is_namespace: matches!(
+                    binding.form,
+                    RouteImportForm::Namespace | RouteImportForm::ImportEquals
+                ),
             };
             let key = DeclBindingKey::new(binding.owner, binding.local.as_str());
             if ambiguous_imports.contains(&key) {
@@ -1364,6 +1385,28 @@ impl ShallowFileState {
         self.export_assignment.as_deref()
     }
 
+    /// Whether the value `export = X` assigns can be called or constructed
+    /// (X is a function or class declaration): a namespace import of the
+    /// module names X by `default` only then. `None` for a module without an
+    /// export assignment.
+    pub(crate) fn export_assignment_is_callable(&self) -> Option<bool> {
+        use verter_semantic::analysis::type_eval::ValueDeclKind;
+        let assigned = self.export_assignment_target()?;
+        Some(
+            self.decl_bodies()
+                .header_index()
+                .value_header_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), assigned)
+                .is_some_and(|header| {
+                    matches!(
+                        header.kind,
+                        ValueDeclKind::Function
+                            | ValueDeclKind::AsyncFunction
+                            | ValueDeclKind::Class
+                    )
+                }),
+        )
+    }
+
     /// Get the narrow type-resolution view over this file state.
     pub fn type_view(&self) -> ShallowTypeView<'_> {
         ShallowTypeView { state: self }
@@ -1756,6 +1799,74 @@ impl ShallowFileState {
         }
         self.decl_bodies
             .augmentation_type_decl_outcome_in(scope, owner, name)
+    }
+
+    /// The ambient block whose value `(owner, name)` the file's identity
+    /// `(canonical, owner, name)` names when the file surface declares no
+    /// such value: a MODULE's own `declare global { … }` member, else the
+    /// member of the one `declare module "…" { … }` block that declares it.
+    /// `None` when neither does, or when several module blocks do (the
+    /// identity cannot say which). A script's `declare global` binds
+    /// nothing.
+    pub(crate) fn value_fallback_augmentation_scope(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<verter_semantic::analysis::type_eval::AugmentationScopeKind> {
+        use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+        let headers = self.decl_bodies.header_index();
+        if crate::global_contributors::classify_shallow_module_kind(self)
+            == crate::global_contributors::FileModuleKind::Module
+            && headers
+                .augmentation_value_header_in(&AugmentationScopeKind::Global, owner, name)
+                .is_some()
+        {
+            return Some(AugmentationScopeKind::Global);
+        }
+        headers
+            .sole_module_augmentation_value_scope(owner, name)
+            .cloned()
+    }
+
+    /// The ambient block whose type `(owner, name)` the file's identity
+    /// `(canonical, owner, name)` names when the file surface declares no
+    /// such type: the file's `declare global { … }` member (a global is
+    /// visible from any scope), else the member of the one
+    /// `declare module "…" { … }` block that declares it — what the block's
+    /// own references to the name read. `None` when neither does, or when
+    /// several module blocks do.
+    pub(crate) fn type_fallback_augmentation_scope(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<verter_semantic::analysis::type_eval::AugmentationScopeKind> {
+        if self.has_global_augmentation(name) {
+            return Some(verter_semantic::analysis::type_eval::AugmentationScopeKind::Global);
+        }
+        self.decl_bodies
+            .header_index()
+            .sole_module_augmentation_type_scope(owner, name)
+            .cloned()
+    }
+
+    /// Lease-aware value-space counterpart of
+    /// [`Self::augmentation_type_decl_outcome_in`].
+    pub(crate) fn augmentation_value_decl_outcome_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<LoweredValueDecl> {
+        if self
+            .decl_bodies
+            .header_index()
+            .augmentation_value_header_in(scope, owner, name)
+            .is_none()
+        {
+            return DemandOutcome::Ready(None);
+        }
+        self.decl_bodies
+            .augmentation_value_decl_outcome_in(scope, owner, name)
     }
 
     /// Value-space counterpart of [`Self::augmentation_type_decl`].
@@ -2707,6 +2818,13 @@ fn push_type_expr_children<'a>(expr: &'a TypeExpr, pending: &mut Vec<&'a TypeExp
         if let Some(return_type) = function.return_type.as_deref() {
             pending.push(return_type);
         }
+        if let Some(target) = function
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref())
+        {
+            pending.push(target);
+        }
         for parameter in &function.type_parameters {
             push_type_param(parameter, pending);
         }
@@ -2825,7 +2943,8 @@ mod tests {
         ];
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
-            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse();
         assert!(!parsed.panicked, "owner-qualified route fixture must parse");
         let owner_table = verter_semantic::analysis::TopLevelOwnerTable::try_from_statement_owners(
             parsed.program.body.len(),
@@ -3046,7 +3165,9 @@ mod tests {
 
     fn make_routes(source: &str) -> Arc<ScriptRouteInventory> {
         let alloc = oxc_allocator::Allocator::new();
-        let parsed = oxc_parser::Parser::new(&alloc, source, oxc_span::SourceType::ts()).parse();
+        let parsed =
+            verter_parser::oxc_parse::Parser::new(&alloc, source, oxc_span::SourceType::ts())
+                .parse();
         assert!(!parsed.panicked, "route fixture must parse");
         Arc::new(
             verter_parser::utils::oxc::script::route_inventory::build_script_route_inventory(

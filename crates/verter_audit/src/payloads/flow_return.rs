@@ -146,6 +146,9 @@ pub enum FlowFailureTag {
     /// bounded retry window, so the query was not resolved against
     /// superseded state.
     UnstableState,
+    /// The caller cancelled the request before it produced a complete
+    /// answer; nothing it computed was admitted.
+    Cancelled,
 }
 
 /// Per-request counters and the typed partiality reason for one

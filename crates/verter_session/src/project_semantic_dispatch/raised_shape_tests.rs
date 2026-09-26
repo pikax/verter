@@ -304,6 +304,7 @@ fn parity_opaque_errors_and_raw_fallback() {
     // (a materialized leaf, not a sentinel).
     let recursive = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Tree"),
+        args: std::sync::Arc::from([]),
     }));
     assert_classifier_parity(&host, recursive, "opaque-recursive-ref");
     assert!(
@@ -1140,6 +1141,7 @@ fn parity_deferred_operator_shells() {
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: tp,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: tp,
             key_space: keyspace,
             value_expr: value_tp,
@@ -1472,6 +1474,8 @@ fn parity_function_and_constructor_type() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     assert_classifier_parity(&host, func, "function-materialized");
     assert!(
@@ -1505,6 +1509,8 @@ fn parity_function_and_constructor_type() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     assert_classifier_parity(&host, func_miss_param, "function-miss-param");
     assert!(
@@ -2001,6 +2007,8 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
 
     // The oracle shape the node raises to (param `has_ts_annotation: false`).
@@ -2386,6 +2394,7 @@ fn mapped_fixture(
     graph.intern_node(SemanticNodeData::Mapped {
         source,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: source,
             key_space,
             value_expr,
@@ -2454,6 +2463,7 @@ fn node_improvement_verdict_matches_type_expr_improvement_over_raise() {
     // non-structural).
     let rr = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Loop"),
+        args: std::sync::Arc::from([]),
     }));
 
     // (candidate, current) pairs. Each verdict is asserted equal to the verdict
@@ -2557,14 +2567,30 @@ fn publication_score_corpus(
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
 
+    let zero = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::Number(0.0),
+    ));
     vec![
         ("primitive", string),
         (
             "literal",
             graph.intern_node(SemanticNodeData::Literal(
                 crate::semantic_query::LiteralValue::String("idle".to_string()),
+            )),
+        ),
+        (
+            "enum_literal",
+            graph.intern_node(SemanticNodeData::EnumLiteral(
+                crate::semantic_query::EnumLiteralType {
+                    enum_decl: decl_identity_unscoped("/w/m.ts", "Status"),
+                    member: Arc::from("Idle"),
+                    base: zero,
+                    member_count: 2,
+                },
             )),
         ),
         (
@@ -2698,6 +2724,7 @@ fn publication_score_corpus(
             "opaque_recursive_ref",
             graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
                 name: Arc::from("Loop"),
+                args: std::sync::Arc::from([]),
             })),
         ),
         (
@@ -2778,6 +2805,27 @@ fn publication_score_corpus(
                 value_node: foo.0,
             }),
         ),
+        (
+            "class_expression_instance",
+            graph.intern_node(SemanticNodeData::ClassExpressionInstance {
+                identity: Arc::new(crate::semantic_query::ClassExpressionIdentity {
+                    canonical_id: Arc::from("/w/m.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    offset: 42,
+                    name: Arc::from("(Anonymous class)"),
+                    outer_clauses: Arc::from([crate::semantic_query::ClassExpressionClause {
+                        container: Arc::from("Mixin"),
+                        parameters: Arc::from([Arc::from("S")]),
+                    }]),
+                    own_arity: 0,
+                    constructor_visibility: None,
+                    prototype: None,
+                    object_literal: false,
+                }),
+                type_arguments: Arc::from([foo]),
+                surface: obj_a,
+            }),
+        ),
     ]
 }
 
@@ -2826,6 +2874,7 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
         match data {
             SemanticNodeData::Primitive(_) => "primitive",
             SemanticNodeData::Literal(_) => "literal",
+            SemanticNodeData::EnumLiteral(_) => "enum_literal",
             SemanticNodeData::Alias(_) => "alias",
             SemanticNodeData::Union(_) => "union",
             SemanticNodeData::Intersection(_) => "intersection",
@@ -2852,6 +2901,7 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
             SemanticNodeData::Signature { .. } => "function",
             SemanticNodeData::DeclRef { .. } => "decl_ref",
             SemanticNodeData::InstantiationRef { .. } => "instantiation_ref",
+            SemanticNodeData::ClassExpressionInstance { .. } => "class_expression_instance",
             SemanticNodeData::BareRef(_) => "bare_ref",
             SemanticNodeData::IntrinsicApplication { .. } => "intrinsic_application",
             SemanticNodeData::ImportType(_) => "import_type",
@@ -2866,6 +2916,7 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
     const EXPECTED: &[&str] = &[
         "primitive",
         "literal",
+        "enum_literal",
         "alias",
         "union",
         "intersection",
@@ -2891,6 +2942,7 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
         "raw_fallback",
         "constructor_type",
         "synthetic_binding",
+        "class_expression_instance",
     ];
 
     let host = host();
@@ -3097,6 +3149,8 @@ fn function_with_unraisable_return_fails_whole() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     assert!(
         !fold_raises(&host, node),
@@ -3126,6 +3180,8 @@ fn function_with_unraisable_parameter_fails_whole() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     assert!(
         !fold_raises(&host, node),
