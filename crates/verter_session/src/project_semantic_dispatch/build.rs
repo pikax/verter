@@ -1424,7 +1424,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ) && self
                             .semantic_expression_source_is_fresh(source, effective_owner) =>
                     {
-                        self.widened_literal(node)
+                        let members = match self.graph().node_data(node).as_deref() {
+                            Some(SemanticNodeData::Union(members)) => {
+                                Some(members.iter().copied().collect::<Vec<_>>())
+                            }
+                            _ => None,
+                        };
+                        match members {
+                            Some(arms) => {
+                                let widened: Vec<SemanticNodeId> =
+                                    arms.iter().map(|arm| self.widened_literal(*arm)).collect();
+                                self.intern_normalized_union_or_intersection(&widened, true)
+                            }
+                            None => self.widened_literal(node),
+                        }
                     }
                     Some(node) => node,
                     None => {

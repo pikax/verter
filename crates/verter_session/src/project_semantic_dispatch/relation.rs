@@ -3584,21 +3584,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // nested positions — an array element, an object member —
             // widen as before.
             if literal_mode == crate::semantic_query::ArgumentLiteralMode::Widened {
+                // A fresh union (a call's result whose literal members are
+                // fresh, `h(1)` over `h<T>(x: T): T | undefined`) is kept
+                // whole at a naked position as a fresh literal is.
+                let fresh_literals: Vec<SemanticNodeId> =
+                    match self.graph().node_data(bound).as_deref() {
+                        Some(SemanticNodeData::Literal(_)) => vec![bound],
+                        Some(SemanticNodeData::Union(members)) => members
+                            .iter()
+                            .copied()
+                            .filter(|member| {
+                                matches!(
+                                    self.graph().node_data(*member).as_deref(),
+                                    Some(SemanticNodeData::Literal(_))
+                                )
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
                 let preserve_top_literal = deposit_is_top_level
                     && policy == crate::semantic_query::ConstParamPolicy::NonConst
-                    && matches!(
-                        self.graph().node_data(bound).as_deref(),
-                        Some(SemanticNodeData::Literal(_))
-                    );
+                    && !fresh_literals.is_empty();
                 if !preserve_top_literal {
                     bound = self.call_inference_candidate(bound, policy);
                 } else {
-                    // A preserved bare literal at a naked position is FRESH
+                    // A preserved literal at a naked position is FRESH
                     // provenance for an unconstrained parameter (the note
                     // is a no-op for a constrained one, whose preserved
                     // literal is regular).
                     if let Some(session) = self.dispatch_txn.borrow_mut().active_session_mut() {
-                        session.note_fresh_literal_deposit(param_node, bound);
+                        for literal in fresh_literals {
+                            session.note_fresh_literal_deposit(param_node, literal);
+                        }
                     }
                 }
             }

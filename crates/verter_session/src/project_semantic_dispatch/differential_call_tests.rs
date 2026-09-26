@@ -464,6 +464,16 @@ export function wCallbackLiteralReturn() { return runN(() => f(f(1))); }
 export function wContextualReturn() { const r: () => 1 = () => f(f(1)); return r; }
 export function wImmediate() { return (() => f(f(1)))(); }
 export function wUnionLet() { let x = f(h(1)); return x; }
+declare function hn<T extends number>(x: T): T | undefined;
+export function wUnionArray() { return g(h(1)); }
+export function wUnionMember() { return { a: f(h(1)) }; }
+export function wUnionConstrained() { let x = f(hn(1)); return x; }
+export function wUnionNested() { let x = f(f(h(1))); return x; }
+let mUL = f(h(1));
+const mUC = f(h(1));
+export function wModuleUnionLet() { return mUL; }
+export function wModuleUnionConst() { return mUC; }
+export function wModuleUnionConstLet() { let x = mUC; return x; }
 const mTop = f(f(1));
 let mLet = f(f(1));
 const mArr = g(f(1));
@@ -533,19 +543,44 @@ fn a_generic_call_keeps_or_widens_a_literal_as_the_checker_infers_it() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A union a call returns keeps its fresh literal for a mutable binding to
+/// A union a call returns keeps its fresh literal members through an
+/// enclosing call, for a mutable binding, a member or an array element to
 /// widen: `let x = f(h(1))` over `h<T>(x: T): T | undefined` is `number |
-/// undefined`. Measured on TypeScript 7.0.2 under all four settings.
-///
-/// What the lane gives:
-/// - `wUnionLet`: the checker answers `number | undefined` (`number` without
-///   `strictNullChecks`); the lane measured `undefined | 1` with
-///   `strictNullChecks`.
+/// undefined`, `g(h(1))` over `g<T>(x: T): T[]` is `(number | undefined)[]`;
+/// a constrained parameter's literal stays regular (`1 | undefined`). A
+/// module `let` of such a call widens it, and a module `const` of one reads
+/// as that fresh union, which the return keeps (not a unit type) and a
+/// mutable binding widens.
+/// Measured on TypeScript 7.0.2 under all four settings.
 #[test]
-#[ignore = "a call's fresh union constituent widens in a mutable binding"]
-fn wrong_clean_a_fresh_union_constituent_of_a_nested_call_widens() {
+fn a_fresh_union_constituent_of_a_nested_call_widens() {
     let matrix = Matrix::new(LITERAL_INFERENCE);
-    let failures = matrix.nullness(&[(Read::Return("wUnionLet"), "number | undefined", "number")]);
+    let failures = matrix.nullness(&[
+        (Read::Return("wUnionLet"), "number | undefined", "number"),
+        (
+            Read::Return("wUnionArray"),
+            "(number | undefined)[]",
+            "number[]",
+        ),
+        (
+            Read::Return("wUnionMember"),
+            "{ a: number | undefined; }",
+            "{ a: number; }",
+        ),
+        (Read::Return("wUnionConstrained"), "1 | undefined", "1"),
+        (Read::Return("wUnionNested"), "number | undefined", "number"),
+        (
+            Read::Return("wModuleUnionLet"),
+            "number | undefined",
+            "number",
+        ),
+        (Read::Return("wModuleUnionConst"), "1 | undefined", "number"),
+        (
+            Read::Return("wModuleUnionConstLet"),
+            "number | undefined",
+            "number",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

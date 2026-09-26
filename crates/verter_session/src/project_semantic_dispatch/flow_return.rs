@@ -7692,7 +7692,7 @@ impl ProjectSemanticDispatch<'_> {
         };
         let graph = self.graph();
         let literals = top_level_literal_nodes_in(graph, return_type);
-        literals.as_slice() == [return_type]
+        !literals.is_empty()
             && literals.iter().all(|literal| {
                 let data = graph.node_data(*literal);
                 fresh_literal_returns
@@ -23444,7 +23444,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         let graph = self.dispatch.graph();
         let literals = self.top_level_literal_nodes(node);
-        literals.as_slice() == [node]
+        !literals.is_empty()
             && self
                 .call_fresh_literal_returns
                 .iter()
