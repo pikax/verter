@@ -512,32 +512,6 @@ Recorded plainly so no reader mistakes absence for a pass:
   with the recursion restored). The declaration-lowering worker's deepest
   stack there is its re-parse of the file (4.0 MiB at 2,000).
 
-* **Every production thread that analyzes reserves the workers' stack.**
-  Several host APIs compute on the caller's own thread (`compile_entry`,
-  public-API extraction, the scheduler-missed analysis lane), so the
-  caller's stack matters as much as the workers'. Before, the LSP's tokio
-  workers and blocking pool (sync coordinator, background drain,
-  diagnostics, scanner compile, document analysis), every MCP tool call,
-  `verter-tsc`'s main thread and rayon pool, and the WebAssembly module ran
-  on 2 MiB, 1 MiB (Windows main threads) or 1 MiB (wasm32's linker
-  default). Measured on the calling thread with a 256-deep nest, the flow
-  evaluation of nested functions, blocks and object literals takes up to
-  2.6 MB optimized and 11.4 MB unoptimized (arrow functions; `if` 1.2 /
-  6.1 MB, object literals 0.5 / 2.6 MB, class expressions 1.6 / 6.8 MB), and
-  the declaration-lowering worker up to 1.3 / 7.2 MB. Every analysis
-  thread now reserves `verter_scheduler::WORKER_STACK_BYTES` (8 MiB
-  optimized, 32 MiB unoptimized): the scheduler's and host's workers, the
-  declaration-lowering workers, the LSP serve thread and its runtime's
-  workers and blocking threads (`thread_stack_size`), MCP's server thread
-  and runtime (`verter_mcp::run::run_blocking`), `verter-tsc`'s checker
-  thread and global rayon pool, and the WebAssembly module
-  (`crates/verter_wasm/build.rs`: `-zstack-size=8388608`; the built
-  module's stack pointer starts at 8 MiB). Node's own main thread, which
-  `verter_napi` computes on synchronously, is 8 MiB on Windows
-  (`SizeOfStackReserve` of node.exe) and the `ulimit` on Linux. On the
-  8 MiB wasm module every measured form at 250 levels answers through
-  `evaluateTypeExpressionWithAudit`.
-
 * **oxc's parse runs on a stack its source cannot exhaust.** oxc_parser
   0.126's recursive descent has no depth limit and aborts the process when
   a thread's stack runs out, before returning an AST: on an 8 MiB stack at
@@ -558,7 +532,8 @@ Recorded plainly so no reader mistakes absence for a pass:
   `oxc_parser::Parser`. The scan costs about a third of the parse (8.1 ms
   against 6.1 ms for `lib.dom.d.ts`, optimized); a source short enough
   that every byte could be a level skips it. `stacker` cannot grow the
-  stack on wasm32, where the module's 8 MiB bounds the parse. What runs
+  stack on wasm32, where the module's stack (1 MiB, wasm32's linker default)
+  bounds the parse. What runs
   after the parse (the syntax-tree clone, the semantic builder and
   Verter's own passes) still recurses per level in places.
 
