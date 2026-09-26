@@ -44,6 +44,8 @@ use crate::semantic_query::HotTypeRef;
 /// `&TypeExpr` folding). Owns the single exhaustive traversal so the
 /// materialization and the node-domain facts/key cannot drift.
 mod shape_engine;
+#[cfg(test)]
+pub(crate) use shape_engine::folded_nodes_for_tests;
 
 // Crate-wide re-export of the ONE semantic-primitive-kind → `PrimitiveName`
 // conversion so fact producers (the macro-output expansion sink's leaf-fact

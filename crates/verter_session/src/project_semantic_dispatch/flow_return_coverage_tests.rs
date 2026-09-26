@@ -1737,7 +1737,9 @@ fn assignment_expression_return_is_the_assigned_type() {
 /// `typeof (Anonymous class)`, declaration-emitted as `{ new (): {}; }`.
 /// The constructor type carries the `prototype` property the checker
 /// gives every class (`keyof ReturnType<typeof leafClassExpr>` is
-/// `"prototype"`), which its declaration emit omits.
+/// `"prototype"`, and the lane's graph keeps it for member reads); the
+/// raised type is the declaration emitter's spelling, which omits it, as
+/// the raise already spells the anonymous instance structurally.
 ///
 /// The value is complete and undegraded, and warms: the class's implicit
 /// constructor only runs its field initializers, which are the enclosing
@@ -1752,23 +1754,13 @@ fn class_expression_return_is_its_constructor_type() {
         eval(&host, LEAF, "leafClassExpr"),
         Outcome::Value {
             ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                properties: vec![
-                    verter_type_expr::ObjectMember::Property(
-                        verter_type_expr::ObjectProperty::synthetic_public_key(
-                            verter_type_expr::TypeAuthoredPropertyKey::string("prototype"),
-                            instance.clone(),
-                            false,
-                            false,
-                        ),
+                properties: vec![verter_type_expr::ObjectMember::ConstructSignature(
+                    verter_type_expr::FunctionExpr::synthetic(
+                        Vec::new(),
+                        Some(Arc::new(instance)),
+                        Vec::new(),
                     ),
-                    verter_type_expr::ObjectMember::ConstructSignature(
-                        verter_type_expr::FunctionExpr::synthetic(
-                            Vec::new(),
-                            Some(Arc::new(instance)),
-                            Vec::new(),
-                        ),
-                    ),
-                ],
+                ),],
             })),
             degradation: None,
             candidates: 1,

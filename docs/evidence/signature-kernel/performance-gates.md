@@ -442,6 +442,28 @@ Recorded plainly so no reader mistakes absence for a pass:
   8 MiB wasm module every measured form at 250 levels answers through
   `evaluateTypeExpressionWithAudit`.
 
+* **A class expression raises one instance per level.** The lane's graph
+  of `class { m() { return class { … } } }` nested `n` deep is linear
+  (evaluation 3–10 ms from 4 to 24 levels, optimized), but its raised type
+  printed the `prototype` property the checker declares on every class
+  constructor beside the construct signature, each spelling the anonymous
+  instance structurally, so the raised shape doubled per level: 8,451,
+  143,091, 2,297,331 and 36,765,171 JSON bytes at 4, 8, 12 and 16 levels,
+  62 s to serialize 16 levels natively, 72 s for
+  `evaluateTypeExpressionWithAudit` on the WebAssembly host at 16 and no
+  answer at 20. No query or memo recomputed work (the audit's hops and
+  expansions are 3 and 2 at every depth); the output did. The raise now
+  omits that synthetic prototype property, as the checker's declaration
+  emit does (`{ new (): { m(): … } }`, 9,806 bytes at 24 levels), while
+  the graph keeps it for member reads and `keyof`: 1,088 to 6,348 bytes
+  from 4 to 24 levels, 3.5 ms to serialize 24, and 77–86 ms per call on
+  the WebAssembly host at every depth.
+  `flow_return_class_tests.rs` →
+  `a_nested_class_expression_raises_one_instance_per_level` asserts the
+  folded nodes (a test counter in the raise's `fold_node`) and the raised
+  size grow by the same amount per level over 4, 8 and 12; with the
+  prototype printed they grow 136, 2,296, 36,856.
+
 * **A call's arguments lower once per enclosing call.** A call nested
   as an argument (`g(g(…g(1)…))`) lowers again from the enclosing call's
   frame-lowered arguments (`Lowerer::lower_call_arguments`), and each
