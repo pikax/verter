@@ -13820,6 +13820,28 @@ impl<'a> Lowerer<'a> {
     /// take the shared shallow-pass per-expression lowering for the
     /// position.
     fn lower_expr(&mut self, expr: &Expression<'_>, mode: ExprMode) -> SliceExpr {
+        // A value-transparent wrapper (a parenthesis) lowers as its operand:
+        // each level is re-entered from this loop, not a native level each.
+        let mut expr = expr;
+        loop {
+            let mut transparent = None;
+            let value = self.lower_expr_level(expr, mode, &mut transparent);
+            match transparent {
+                Some(inner) => expr = inner,
+                None => return value,
+            }
+        }
+    }
+
+    /// One level of [`Self::lower_expr`]: the lowering of `expr`, or, for a
+    /// value-transparent wrapper, its operand in `transparent` (the value
+    /// returned beside it is then unused).
+    fn lower_expr_level<'e, 'x>(
+        &mut self,
+        expr: &'e Expression<'x>,
+        mode: ExprMode,
+        transparent: &mut Option<&'e Expression<'x>>,
+    ) -> SliceExpr {
         match self.lower_evolving_operation(expr, mode) {
             EvolvingLowering::Operation(operation) => {
                 return SliceExpr::EvolvingArray(Box::new(operation))
@@ -14147,7 +14169,10 @@ impl<'a> Lowerer<'a> {
                     };
                 }
                 match value_descent(other) {
-                    ValueDescent::Transparent(inner) => self.lower_expr(inner, mode),
+                    ValueDescent::Transparent(inner) => {
+                        *transparent = Some(inner);
+                        SliceExpr::Elided
+                    }
                     // Unreachable in practice — the await arm above takes
                     // `Expression::AwaitExpression` before the classifier
                     // dispatch — but the classifier's verdict is the
