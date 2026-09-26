@@ -41,7 +41,7 @@ guard that fails on regression.
 
 | Gate | Evidence |
 |---|---|
-| A finite linear call chain consumes connected work, not native stack or connected-query depth per level | The flow-return callee schedule (`project_semantic_dispatch/flow_return_schedule.rs`) evaluates the callee returns a frame's body will demand bottom-up from an explicit stack before the body runs, and records each as a reusable completed member exactly as the inline path does, so the body reuses it instead of recursing. `flow_return_coverage_tests.rs` → `schedule::a_128_level_generic_chain_needs_no_more_query_depth_than_a_short_one` (the 128-level chain answers like the three-level one under the smallest depth cap the three-level one needs), `schedule::a_128_level_generic_chain_runs_on_the_short_chains_native_stack` (the 128-level chain on a 512 KiB thread), `schedule::chains_through_other_call_shapes_consume_no_depth_per_level` (non-generic, `const`-arrow and local-arrow chains), `schedule::a_chain_across_modules_needs_no_more_query_depth_than_a_short_one` (generic and non-generic chains of imported callees: 32 modules under the 4-module chain's depth cap and on its stack), `schedule::a_new_instantiation_of_a_warm_chain_runs_on_the_short_chains_native_stack` (a new call site instantiating a warm 128-level chain, on a 512 KiB thread), `schedule::a_200_level_nested_argument_chain_answers_on_the_default_stack` and `schedule::a_nested_argument_chain_costs_the_same_work_per_level` (every edge a call inside a generic call's argument: 200 levels on the default test stack under the three-level chain's depth cap, the same work per level at 16, 64 and 200 levels), `schedule::a_200_level_type_position_chain_answers_on_the_default_stack`, `schedule::a_type_position_chain_costs_the_same_work_per_level` and `schedule::a_1000_level_type_position_chain_answers` (every edge a `ReturnType<typeof f>` type position: 200 levels on the default test stack under the three-level chain's depth cap, the same work per level at 16, 64 and 200 levels, and 1,000 levels answer), `schedule::a_new_instantiation_of_a_warm_200_level_local_arrow_chain_answers_on_the_default_stack` and `schedule::a_new_instantiation_of_a_warm_local_arrow_chain_costs_the_same_work_per_level` (a new call site instantiating a warm 200-level chain whose levels call through local arrow functions, on the default test stack, the same work per level), `schedule::a_warm_chain_passing_a_parameter_member_read_instantiates_stacklessly`, `…_a_local_member_read_…`, `…_a_literal_…` and `…_a_call_on_its_parameter_…` (a new call site instantiating a warm 200-level chain whose levels pass the next a member read, a literal or a call: on the default test stack, the same work per level at 16, 32 and 64 levels), `schedule::a_deep_chain_over_a_reduced_budget_ends_on_the_work_rail` (a reduced work budget ends the 128-level chain on `PROJECTION_WORK_LIMIT`, never the depth rail), and `schedule::recursive_components_evaluate_exactly_as_the_recursive_path` (self-recursive and mutually recursive components answer from the same connected work as with the schedule off: a cycle is never evaluated out of order). |
+| A finite linear call chain consumes connected work, not native stack or connected-query depth per level | The flow-return callee schedule (`project_semantic_dispatch/flow_return_schedule.rs`) evaluates the callee returns a frame's body will demand bottom-up from an explicit stack before the body runs, and records each as a reusable completed member exactly as the inline path does, so the body reuses it instead of recursing. `flow_return_coverage_tests.rs` → `schedule::a_128_level_generic_chain_needs_no_more_query_depth_than_a_short_one` (the 128-level chain answers like the three-level one under the smallest depth cap the three-level one needs), `schedule::a_128_level_generic_chain_runs_on_the_short_chains_native_stack` (the 128-level chain on a 512 KiB thread), `schedule::chains_through_other_call_shapes_consume_no_depth_per_level` (non-generic, `const`-arrow and local-arrow chains), `schedule::a_chain_across_modules_needs_no_more_query_depth_than_a_short_one` (generic and non-generic chains of imported callees: 32 modules under the 4-module chain's depth cap and on its stack), `schedule::a_new_instantiation_of_a_warm_chain_runs_on_the_short_chains_native_stack` (a new call site instantiating a warm 128-level chain, on a 512 KiB thread), `schedule::a_200_level_nested_argument_chain_answers_on_the_default_stack` and `schedule::a_nested_argument_chain_costs_the_same_work_per_level` (every edge a call inside a generic call's argument: 200 levels on the default test stack under the three-level chain's depth cap, the same work per level at 16, 64 and 200 levels), `schedule::a_200_level_nested_argument_chain_in_local_arrows_answers_on_the_default_stack` and `schedule::a_nested_argument_chain_in_local_arrows_costs_the_same_work_per_level` (the same edge inside a local arrow function, `aN<T>(x: T) { const f = (y: T) => id(a(N-1)(y)); return f(x); }`: each level's probe records its callee's uninstantiated and instantiated returns, and the instantiated one is read off the uninstantiated one once that is evaluated — a read the schedule counts as reusable as a member, since every later demand reads it the same way; 200 levels on the default test stack under the three-level chain's depth cap, 37 units of work per level at 16, 64 and 200 levels, and at most two flow evaluations open at any length. Counting that read unreusable left every level still being walked to its demand, each evaluated beneath the one above it: refused on the depth rail from 12 levels, and overflowing the default test stack before 200 in an unoptimized build), `schedule::a_200_level_type_position_chain_answers_on_the_default_stack`, `schedule::a_type_position_chain_costs_the_same_work_per_level` and `schedule::a_1000_level_type_position_chain_answers` (every edge a `ReturnType<typeof f>` type position: 200 levels on the default test stack under the three-level chain's depth cap, the same work per level at 16, 64 and 200 levels, and 1,000 levels answer), `schedule::a_new_instantiation_of_a_warm_200_level_local_arrow_chain_answers_on_the_default_stack` and `schedule::a_new_instantiation_of_a_warm_local_arrow_chain_costs_the_same_work_per_level` (a new call site instantiating a warm 200-level chain whose levels call through local arrow functions, on the default test stack, the same work per level), `schedule::a_warm_chain_passing_a_parameter_member_read_instantiates_stacklessly`, `…_a_local_member_read_…`, `…_a_literal_…` and `…_a_call_on_its_parameter_…` (a new call site instantiating a warm 200-level chain whose levels pass the next a member read, a literal or a call: on the default test stack, the same work per level at 16, 32 and 64 levels), `schedule::a_deep_chain_over_a_reduced_budget_ends_on_the_work_rail` (a reduced work budget ends the 128-level chain on `PROJECTION_WORK_LIMIT`, never the depth rail), and `schedule::recursive_components_evaluate_exactly_as_the_recursive_path` (self-recursive and mutually recursive components answer from the same connected work as with the schedule off: a cycle is never evaluated out of order). |
 | Native recursion the schedule does not predict ends typed, never in a stack overflow | An inline flow evaluation that would open more nested frames than the connected demand's depth cap (24) is refused with `CONNECTED_QUERY_DEPTH_LIMIT` — the same typed incompleteness the connected-query depth guard ends query nesting with. `flow_return_coverage_tests.rs` → `schedule::an_unpredicted_deep_chain_ends_in_the_typed_depth_refusal` (a same-file chain evaluated with the schedule off, so every level nests its callee natively: 16 levels answer; at 256 levels, which overflows the 8 MiB worker stack without the bound in an unoptimized build, it is refused partial and never admitted). |
 | An instantiated callee return is read off its uninstantiated return, so a generic chain across modules costs the same connected work per module | `ProjectSemanticDispatch::instantiated_from_uninstantiated` (`project_semantic_dispatch/flow_return.rs`) answers an instantiated `FlowReturn` key whose uninstantiated return is already answered (a validated warm candidate or a reusable completed member) with that return under the instantiation — the checker's rule, the return type of an instantiated signature is its target's return type under the mapper — instead of re-evaluating the body; nothing new is stored (the substitution goes through the store-owned substitution memo). `flow_return_coverage_tests.rs` → `schedule::a_generic_chain_across_modules_costs_the_same_work_per_module` (9 / 10 / 11 and 32 / 64 / 128 modules: every added module costs the same work, asserted structurally), `schedule::a_generic_chain_across_201_modules_answers_without_a_refusal` (the checker's `{ v: string \| number; tag: "c"; }`, clean and admitted, under the production budget), `schedule::an_edit_in_the_middle_of_a_module_chain_reaches_the_top` (an edit to module 100 of 201 reaches the witness), `schedule::a_new_instantiation_of_a_warm_local_arrow_chain_is_read_off_its_uninstantiated_return` (256 levels, on a 512 KiB stack), and `schedule::a_256_level_chain_returning_a_same_name_generic_answers` (a head returning `id: <T,>(z: T) => z` or `K: class<T> { own!: T; }`: the nested clause interns its own binders, 256 levels answer and a new instantiation answers on 512 KiB), `an_instantiated_return_keeps_a_nested_clause_of_the_same_name` (every nested clause keeps its own parameter; a function type written in the body with a same-name clause is evaluated under the instantiation) and `an_instantiation_swapping_same_file_binders_binds_them_at_once` (the frame's clause is bound simultaneously). The schedule's warm check validates a candidate as the warm read does: measured on the unoptimized test profile, it adds 7–20 µs per check only where a candidate exists (one validation of that candidate's recorded facts — 204 to 1,004 facts in single-file chains of 200 and 1,000 functions, up to 605 across 201 modules), 3.5 ms of a 2.6 s re-evaluation of the 201-module chain after an edit, 29 ms of 22 s for the 1,000-function file; with no candidate it costs the lookup alone. |
 
@@ -140,7 +140,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   a local arrow function, are evaluated from the explicit stack too. The
   128-level generic chain needs the depth (3) and stack of a three-level
   one, a 32-module chain the depth (5) of a 4-module one, the 200-level
-  nested-argument, type-position, warm local-arrow and warm argument-form
+  nested-argument (direct and through a local arrow function), type-position, warm local-arrow and warm argument-form
   chains answer on the default test stack, and the 1,000-level
   type-position chain answers. A scheduled evaluation is reusable only
   when its reads are recorded, which takes a live fact tracer, and every
@@ -197,18 +197,6 @@ Recorded plainly so no reader mistakes absence for a pass:
     `witness` answers and so does a new instantiation `second(v:
     boolean)` (tsc: `{ v: boolean; tag: "c"; id: <T>(z: T) => T; }`;
     held by `schedule::a_256_level_chain_returning_a_same_name_function_type_answers`);
-  * a chain whose every edge is a call in a generic call's argument inside
-    a local arrow function (`aN<T>(x: T) { const f = (y: T) =>
-    id(a(N-1)(y)); return f(x); }`) evaluates its uninstantiated levels
-    inline, each beneath the one above it, beside the read of an
-    instantiated callee off its uninstantiated return: the depth rail
-    refuses it from 16 levels, and the default test stack overflows
-    before 200 in an unoptimized build; with that read disabled it
-    answers at 71 units per level (tsc: `{ v: string | number; tag: "c"; }`;
-    held open by the skipped
-    `schedule::a_200_level_nested_argument_chain_in_local_arrows_answers_on_the_default_stack`
-    and `schedule::a_nested_argument_chain_in_local_arrows_costs_the_same_work_per_level`,
-    each to be run alone);
   * a cycle among callee returns is evaluated from its first-discovered
     member through the ordinary path, where the re-entry intercept holds
     each back-edge; its members nest natively beneath that root;
@@ -242,3 +230,178 @@ Recorded plainly so no reader mistakes absence for a pass:
   `schedule::a_1000_level_type_position_chain_answers`). An application
   over a type parameter stays the deferred carrier, as the checker defers
   it (`schedule::a_return_type_in_a_body_resolves_unless_its_check_type_is_generic`).
+
+* **Type syntax lowers from an explicit stack; the relation still recurses
+  per structural level.** `lower_type_expr_with_infer_factory`
+  (`project_semantic_dispatch/lower.rs`) lowers the positions whose child
+  shares the node's scope, binder environment and infer factory — a named
+  reference's arguments (planned through `plan_bare_ref_head`, finished
+  through its owned continuation once every argument is lowered), union
+  and intersection arms, array and tuple elements, template holes, a
+  parenthesised type, a `keyof` operand, an indexed access's object and
+  index, and an object type's property values and index signatures — from
+  an explicit stack of frames, in the order and under the contexts the
+  recursive descent used, so interning, queries and substitutions happen
+  in the same sequence. Each such position recursed natively before, about
+  24 KiB of stack per level in an unoptimized build: an 80-deep
+  `Box<Box<…<1>>>` overflowed the 2 MiB default test stack, and a 400-long
+  `R['v']…` chain the 8 MiB worker stack. Both answer now
+  (`type_syntax_depth_tests.rs` →
+  `an_80_deep_nested_generic_application_reads_on_the_default_stack`, the
+  checker's `1` for 80 member reads and for the application as either
+  side of a relation, and
+  `a_1000_long_indexed_access_chain_lowers_on_the_default_stack`, the
+  checker's `R`). A conditional, mapped, function, `typeof` or import type
+  still costs one native level per nesting there. The carrier-only
+  locator-shape lowering (`lower_locator_shape_node`,
+  `project_semantic_dispatch/locator_shape.rs`), which interns every
+  declaration body's authored shape, lowers the same positions — its
+  reference arguments planned through `plan_locator_ref_head` — a
+  conditional's check, `extends` clause and branches (the clause and the
+  true branch under the binder frames the conditional declares), and an
+  object type's property values and index-signature types from an
+  explicit stack too. A nested object type (`{ v: { v: … } }`) recursed
+  there once per level, about 16 KiB unoptimized; a 400-deep one reads
+  through 400 member accesses on the default test stack now
+  (`a_400_deep_nested_object_type_reads_on_the_default_stack`, the
+  checker's `1`). A conditional chained through its false branches
+  recursed there once per link, about 18 KiB per link unoptimized: a
+  160-link chain overflowed the default test stack. A 320-link chain
+  resolves now (`type_syntax_depth_tests.rs` →
+  `a_320_deep_conditional_chain_resolves_on_the_default_stack`, the
+  checker's `"c319"`, `"none"` and, over 160 links, `"c159"`); the
+  deepest remaining recursion over such a chain is the oxc-AST-to-`TypeExpr`
+  conversion (`verter_type_expr_oxc::lower_ts_type`, on the declaration
+  lowering workers), about 4.6 KiB per link. The relation engine
+  recurses once per structural level, and is bounded as the checker bounds
+  it (`CHECKER_RELATION_DEPTH_LIMIT`, `project_semantic_dispatch/relation.rs`).
+  The relation frames stacked directly on one another are one checker
+  `checkTypeRelatedTo` call; a frame whose operands, unwrapped, are a
+  structured pair is one `recursiveTypeRelatedTo` entry. The 101st entry
+  overflows: the relation is false, every structured relation after it in
+  the chain is false (the checker's `overflow` flag), and nothing computed
+  under it is admitted. Measured on TypeScript 7.0.2 with each probe in its
+  own file: `[B] extends [<B around number>] ? 1 : 2` is `1` over 97–99
+  nested `Box` applications or `{ v: … }` literals and `2` with TS2321
+  over 100, 101, 102 and 500 (the tuple wrapper is the first entry); the
+  lane answers the same (`relation_depth_tests.rs` →
+  `nested_object_types_overflow_at_the_checkers_depth`,
+  `nested_generic_applications_overflow_at_the_checkers_depth`). The
+  checker's `isDeeplyNestedType` stops a recursion earlier: three entries
+  of one recursion identity on both stacks, each read from a newer
+  instantiation, answer `Maybe`, which holds. The lane gives a type
+  alias's applications that identity, so a finite recursive alias over a
+  type literal relates `1` to `string` from its third level, and an
+  infinitely recursive one stops there
+  (`a_recursive_alias_is_deeply_nested_from_its_third_instantiation`,
+  `an_infinitely_recursive_alias_stops_as_deeply_nested`). Two known
+  differences stay open, each a skipped test asserting the checker's
+  answer: an interface or class reference has no recursion identity,
+  because the checker relates two references to one generic interface by
+  its type arguments' variance and this engine does not
+  (`an_infinitely_recursive_interface_relates_by_its_variance`: the lane
+  overflows to `2` where the checker's variance measurement answers
+  `1`); and the checker's cache keeps the failures its overflow produced,
+  so in one file a 99-deep relation after a 100-deep one is `2`, where the
+  lane answers `1`, as the relation does alone — an answer computed under
+  an overflow depends on where its relation began, and the relation memo is
+  shared across requests
+  (`a_relation_after_an_overflowed_one_reads_its_failures`). The native
+  stack one relation uses, measured from the relating thread's start: 1.9
+  MiB for 100 `Box` levels and 1.1 MiB for 100 object levels unoptimized
+  (under the 2 MiB default test stack), 709 KiB and 586 KiB optimized
+  (`opt-level = 3`), flat from 100 to 400 levels — under the 1 MiB stack
+  of `verter_wasm` (wasm32's linker default; no override is configured),
+  the 2 MiB default of the tokio blocking pool, and the 8 MiB of the LSP
+  serve thread, the host CPU pool, the scheduler's I/O and CPU workers and
+  the declaration-lowering workers.
+
+* **A long logical chain applies a quadratic count of guards and
+  evaluates without a native level per operand.** Each operand of `a && b
+  && c …` is evaluated under every earlier operand's guard and each
+  short-circuit edge under their negations, as the checker's flow walk
+  reads every earlier condition for each operand — a count that grows with
+  the square of the chain. The short-circuit edge's union
+  (`apply_guard_union`) reads the earlier parts' negations as one growing
+  prefix whose standing facts are kept one per subject; re-reading the
+  whole prefix for every alternative made the count grow with the cube
+  (the second difference of the count per five operands was 650 at 20 and
+  1,150 at 40 operands; it is now the same at both). The evaluator walks a
+  chain's nested left operands from the innermost one outward
+  (`eval_logical`), so a 300-operand chain answers on a 1 MiB thread
+  (`flow_return_null_policy_tests.rs` →
+  `an_and_chain_applies_a_quadratic_count_of_guards` and
+  `a_300_operand_and_chain_evaluates_on_a_small_stack`, the checker's
+  `"" | 0 | 1 | false | null | undefined`). The slice lowering of the chain
+  (`Lowerer::lower_logical_value`, on the declaration-lowering workers)
+  recursed once per operand, about 21 KiB per operand unoptimized (320
+  operands used 6.9 MB of the 8 MiB worker stack), and each node
+  reclassified its whole left operand as a guard, a count that grows with
+  the square of the chain and a composition with its cube: 2,000 operands
+  took 70 s of lowering. It now walks the chain's left spine from an
+  explicit stack, and each node hands its guard disposition to the node
+  enclosing it, so each operand is classified a bounded number of times
+  (`flow_slice_content_tests.rs` →
+  `an_and_chain_classifies_each_operand_a_bounded_number_of_times`: 200,
+  400 and 600 classifications at 100, 200 and 300 operands; 5,247,
+  20,497 and 45,747 when every node reclassifies). The evaluator's
+  fresh-literal collection and effect walk over a chain walk its spine too,
+  and the evaluation stops at the first operand after the connected
+  demand's work budget trips, instead of evaluating the rest of the chain
+  under a result already refused. A 2,000-operand chain lowers and
+  evaluates on a 1 MiB thread in 8 s unoptimized
+  (`flow_return_null_policy_tests.rs` →
+  `a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack`: the
+  typed `Budget(WorkBudgetExceeded)` refusal, with the guard applications of
+  a 1,000-operand chain; without the early stop, 6.0 million against 1.5
+  million and 90 s). Recursive slice lowering overflows the worker, and a
+  recursive fresh-literal collection or effect walk the 1 MiB thread. The
+  checker answers the chain in about a second
+  (`"" | 0 | 1 | false | null | undefined`); the lane's connected work
+  outgrows the budget from about 420 operands
+  (`a_2000_operand_and_chain_answers_the_checkers_type`, skipped).
+
+* **The scheduler's workers parse on 8 MiB stacks.** The oxc parser, the
+  syntax-tree clone the semantic builder reads (`clone_in`) and the
+  semantic builder recurse once per nesting level and carry no depth guard
+  of their own, and they run on the scheduler worker that loads a file.
+  Those workers (`verter-io-*`, `verter-cpu-*`) ran on the platform default
+  of 2 MiB, where a 700-deep `Box<…<1>…>` (2.0 MiB of `clone_in` on the
+  I/O worker, unoptimized) or a 2,000-operand `&&` chain overflowed a
+  worker and aborted the process. They now reserve 8 MiB
+  (`WORKER_STACK_BYTES`, `verter_scheduler/src/pool.rs`), the stack of the
+  LSP serve thread, the host CPU pool and the declaration-lowering workers;
+  a reservation costs address space, not memory. `type_syntax_depth_tests.rs`
+  → `a_700_deep_nested_generic_application_parses_on_a_scheduler_worker`
+  answers the checker's `"v"` for `keyof D` and `1` for `D extends
+  Box<unknown> ? 1 : 2` (at 2 MiB it overflows `verter-io-0`). The parser
+  itself still refuses nothing: on the 8 MiB I/O worker it overflows at
+  about 2,200 nested type arguments and 5,000 nested parentheses
+  (unoptimized), where TypeScript 7.0.2 answers at 10,000 of either
+  (`"v"` and `1` for the `Box` nesting, `1` for `(((…1…)))`, each in under
+  2 s). A function returning 2,000 nested parentheses still overflows a
+  declaration-lowering worker before the parser's limit.
+
+* **A pair of literal types relates without a query.** Two literal types
+  relate, under every relation kind, exactly when they are one value, so
+  the relation authority decides such a pair before its reentry intercept,
+  memo and cold build (`literal_pair_relation`, depositing the operands'
+  file roots as the cold read would), unless an inference session
+  collects. A chain of `if (x === "k<i>") throw` guards over an
+  `N`-member literal union filters the remaining arms at every guard, as
+  the checker's `filterType` does — about `2N²` relation checks, the
+  checker's own count — and paid a cold relation query for each: 200
+  guards took 4.9 s unoptimized, 800 minutes. Now none of them reaches the
+  structural reducer, 200 guards take 0.33 s, and 800 answer the checker's
+  `"k799"` (`wide_union_relation_tests.rs` →
+  `an_equality_guard_chain_over_a_literal_union_reduces_no_relation`).
+* **The demand slice plans at most 256 return sites.** A function with
+  more `return` statements on its demanded paths is refused before
+  evaluating, with `Budget(WorkBudgetExceeded)`
+  (`FlowSliceBudget::max_return_sites`): 255 `if (x === i) return …`
+  guards and the final return answer, 256 are refused. The work each such
+  guard costs is constant (relation checks `5N + 2`, guard applications
+  `2N` at 50, 100 and 200 guards), so the refusal is the planner's
+  return-site cap, not super-linear work; the skipped
+  `differential_depth_tests.rs` →
+  `an_800_return_if_chain_answers_within_the_work_budget` holds it open.

@@ -11403,6 +11403,233 @@ fn loop_heads_follow_each_references_dependencies() {
     }
 }
 
+const LOOP_FEEDS_SOURCE: &str = r#"
+declare function cond(): boolean;
+export function mutual() { let x: string | number | boolean = 0; let y: string | number | boolean = "a"; while (cond()) { x = y; y = x; } return [x, y] as const; }
+export function mutualLit() { let x: string | number | boolean = 0; let y: string | number | boolean = "a"; while (cond()) { y = x; x = y; x = true; } return [x, y] as const; }
+export function rot3() { let a: string | number | boolean = 0; let b: string | number | boolean = 0; let c: string | number | boolean = 0; while (cond()) { a = b; b = c; c = a; c = "s"; } return [a, b, c] as const; }
+export function rot3b() { let a: string | number | boolean = 0; let b: string | number | boolean = "x"; let c: string | number | boolean = true; while (cond()) { a = b; b = c; c = a; } return [a, b, c] as const; }
+export function feedChain() { let a: string | number | boolean = 0; let b: string | number | boolean = 0; let c: string | number | boolean = 0; while (cond()) { c = b; b = a; a = "s"; } return [a, b, c] as const; }
+"#;
+
+const LOOP_FEEDS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // readonly [string | number, string] under all four
+    (
+        "mutual",
+        "readonly [number | string, string]",
+        "readonly [number | string, string]",
+        "readonly [number | string, string]",
+        "readonly [number | string, string]",
+    ),
+    // readonly [number | true, string | number | true] under all four
+    (
+        "mutualLit",
+        "readonly [number | true, number | string | true]",
+        "readonly [number | true, number | string | true]",
+        "readonly [number | true, number | string | true]",
+        "readonly [number | true, number | string | true]",
+    ),
+    // readonly [string | number, string | number, string | number] under all four
+    (
+        "rot3",
+        "readonly [number | string, number | string, number | string]",
+        "readonly [number | string, number | string, number | string]",
+        "readonly [number | string, number | string, number | string]",
+        "readonly [number | string, number | string, number | string]",
+    ),
+    // readonly [string | number | true, string | true, string | true] under all four
+    (
+        "rot3b",
+        "readonly [number | string | true, string | true, string | true]",
+        "readonly [number | string | true, string | true, string | true]",
+        "readonly [number | string | true, string | true, string | true]",
+        "readonly [number | string | true, string | true, string | true]",
+    ),
+    // readonly [string | number, string | number, string | number] under all four
+    (
+        "feedChain",
+        "readonly [number | string, number | string, number | string]",
+        "readonly [number | string, number | string, number | string]",
+        "readonly [number | string, number | string, number | string]",
+        "readonly [number | string, number | string, number | string]",
+    ),
+];
+
+/// A loop whose locals each take the next one's value
+/// (`v0 = v1; v1 = v2; …; v(n-1) = v0; v(n-1) = "s"`) over `n` locals
+/// declared `string | number`.
+fn rotating_locals(locals: usize) -> String {
+    let mut source =
+        String::from("declare function cond(): boolean;\nexport function rotate() {\n");
+    for local in 0..locals {
+        source.push_str(&format!("  let v{local}: string | number = 0;\n"));
+    }
+    source.push_str("  while (cond()) {\n");
+    for local in 0..locals {
+        source.push_str(&format!("    v{local} = v{};\n", (local + 1) % locals));
+    }
+    source.push_str(&format!(
+        "    v{} = \"s\";\n  }}\n  return v0;\n}}\n",
+        locals - 1
+    ));
+    source
+}
+
+/// A loop types each reference at its head once for the whole head
+/// analysis, as the checker caches a reference's loop-label type: locals
+/// that feed each other take one head pass each and the final pass, never
+/// one per subset of the locals under analysis. Measured on TypeScript
+/// 7.0.2 (`--declaration --emitDeclarationOnly`, all four settings): the
+/// table above, and `rotate` over 4, 6, 8 and 20 rotating locals is
+/// `string | number`.
+#[test]
+fn a_loop_whose_locals_feed_each_other_types_each_head_once() {
+    assert_measured_matrix("loop-feeds.ts", LOOP_FEEDS_SOURCE, LOOP_FEEDS_TABLE);
+    for locals in [4, 6, 8, 20] {
+        let source = rotating_locals(locals);
+        let host = four_policy_host();
+        let path = format!("{STRICT_ROOT}/rotate-{locals}.ts");
+        upsert(&host, &path, &source);
+        let before = super::flow_return::loop_passes_for_tests();
+        assert_eq!(observe(&host, &path, "rotate"), "number | string");
+        assert_eq!(
+            super::flow_return::loop_passes_for_tests() - before,
+            locals + 1,
+            "{locals} rotating locals take one pass per loop head and one final pass"
+        );
+    }
+}
+
+/// `lc`, returning an `&&` chain of `operands` operands cycling through its
+/// five parameters (`a0 && a1 && a2 && a3 && a4 && a0 && …`).
+fn and_chain(operands: usize) -> String {
+    let chain: Vec<String> = (0..operands)
+        .map(|operand| format!("a{}", operand % 5))
+        .collect();
+    format!(
+        "export function lc(a0: string | undefined, a1: number | null, a2: boolean, a3: \"x\" | \"\", a4: 0 | 1) {{ return {}; }}\n",
+        chain.join(" && ")
+    )
+}
+
+/// An `&&` chain applies each operand's guard to the next operands as the
+/// checker's flow walk reads it, once per earlier operand: the guards it
+/// applies grow with the square of its length, never faster (each
+/// operand's short-circuit edge reads the earlier operands' negations as
+/// one growing prefix), and its nested left operands evaluate without a
+/// native level each.
+///
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`)
+/// over 32 operands: `number | "" | false | null | undefined` with
+/// `strictNullChecks`, `number` without it.
+#[test]
+fn an_and_chain_applies_a_quadratic_count_of_guards() {
+    let source = and_chain(32);
+    assert_measured_matrix(
+        "and-chain.ts",
+        &source,
+        &[(
+            "lc",
+            "\"\" | false | null | number | undefined",
+            "number",
+            "\"\" | false | null | number | undefined",
+            "number",
+        )],
+    );
+    let guards = |operands: usize| {
+        let host = four_policy_host();
+        let path = format!("{STRICT_ROOT}/and-chain-{operands}.ts");
+        upsert(&host, &path, &and_chain(operands));
+        let before = super::flow_return::guard_applications_for_tests();
+        let _ = observe(&host, &path, "lc");
+        super::flow_return::guard_applications_for_tests() - before
+    };
+    let second_difference =
+        |operands: usize| guards(operands + 10) + guards(operands) - 2 * guards(operands + 5);
+    assert_eq!(
+        second_difference(20),
+        second_difference(40),
+        "each operand adds the same number of guard applications more than the one before it"
+    );
+}
+
+/// A 300-operand `&&` chain evaluates on a 1 MiB thread: its nested left
+/// operands are walked from the innermost one outward, never a native
+/// level each.
+///
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`):
+/// `"" | 0 | 1 | false | null | undefined` with `strictNullChecks`, `0 | 1`
+/// without it.
+#[test]
+fn a_300_operand_and_chain_evaluates_on_a_small_stack() {
+    let answer = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let host = four_policy_host();
+            let path = format!("{STRICT_ROOT}/and-chain-300.ts");
+            upsert(&host, &path, &and_chain(300));
+            observe(&host, &path, "lc")
+        })
+        .expect("spawn the evaluating thread")
+        .join()
+        .expect("the chain evaluates");
+    assert_eq!(answer, "\"\" | 0 | 1 | false | null | undefined");
+}
+
+/// `and_chain(operands)` observed on a thread with a 1 MiB stack, with the
+/// guards its evaluation applied.
+fn and_chain_on_a_small_stack(operands: usize) -> (String, usize) {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let host = four_policy_host();
+            let path = format!("{STRICT_ROOT}/and-chain-{operands}.ts");
+            upsert(&host, &path, &and_chain(operands));
+            let before = super::flow_return::guard_applications_for_tests();
+            let answer = observe(&host, &path, "lc");
+            (
+                answer,
+                super::flow_return::guard_applications_for_tests() - before,
+            )
+        })
+        .expect("spawn the evaluating thread")
+        .join()
+        .expect("the chain evaluates")
+}
+
+/// A 2,000-operand `&&` chain lowers and evaluates on a 1 MiB thread: the
+/// slice lowering walks its nested left operands from an explicit spine
+/// and classifies each operand's guard once, so neither its stack nor its
+/// work grows with a native level or a re-classification per operand. The
+/// evaluation's connected work outgrows the demand's budget on this
+/// chain, and the lane answers with that typed refusal; the operands past
+/// that point are not evaluated, so the guards it applies are those of a
+/// 1,000-operand chain.
+///
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`,
+/// about one second): `"" | 0 | 1 | false | null | undefined` with
+/// `strictNullChecks`, `0 | 1` without it.
+#[test]
+fn a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack() {
+    let (answer, guards) = and_chain_on_a_small_stack(2000);
+    assert_eq!(answer, "<no value: Failure(Budget(WorkBudgetExceeded))>");
+    let (_, shorter_guards) = and_chain_on_a_small_stack(1000);
+    assert_eq!(
+        guards, shorter_guards,
+        "the evaluation stops where the budget trips"
+    );
+}
+
+/// The checker's answer for the 2,000-operand chain above.
+#[test]
+#[ignore = "the evaluation's connected work outgrows the demand's work budget past about 420 operands"]
+fn a_2000_operand_and_chain_answers_the_checkers_type() {
+    assert_eq!(
+        and_chain_on_a_small_stack(2000).0,
+        "\"\" | 0 | 1 | false | null | undefined"
+    );
+}
+
 const CAPTURE_EXTENT_SOURCE: &str = r#"
 export function memberWriteAfter(p: { y: number } | null) { let o = p; if (o) { const f = () => o.y; o.y = 2; return f; } return null; }
 export function loopExtent(n: number) { let x: string | number = 1; let f = () => 0 as string | number; for (let i = 0; i < n; i++) { x = "s"; if (typeof x === "string") { f = () => x; } } return f; }

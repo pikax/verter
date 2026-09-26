@@ -323,6 +323,53 @@ fn runtime_occurrence_classification_does_not_rescan_hoisted_alias_groups() {
     }
 }
 
+/// How many tests lowering `lc`, returning an `&&` chain of `operands`
+/// operands, classifies as guards.
+fn and_chain_guard_classifications(operands: usize) -> usize {
+    use std::sync::atomic::Ordering;
+    let chain = (0..operands)
+        .map(|operand| format!("a{}", operand % 5))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let source = format!(
+        "function lc(a0: string | undefined, a1: number | null, a2: boolean, a3: \"x\" | \"\", a4: 0 | 1) {{ return {chain}; }}"
+    );
+    let memo = memo_for(&source);
+    let index = memo.function_program_index();
+    let entry = entry_of(&index, "lc");
+    let (selection, skeleton) = selection_for(&memo, entry, &[]);
+    memo.guard_classification_work.store(0, Ordering::Relaxed);
+    memo.flow_slice_content(
+        entry,
+        selection,
+        &skeleton,
+        crate::semantic_query::FlowReturnPolicy {
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
+            ..crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default())
+        },
+    )
+    .expect("slice content must build for an indexed function");
+    memo.guard_classification_work.load(Ordering::Relaxed)
+}
+
+/// Lowering an `&&` chain classifies each operand's guard a bounded number
+/// of times: every node composes the disposition the node inside it
+/// handed outward instead of classifying its whole left operand again, so
+/// the classifications grow linearly with the chain.
+#[test]
+fn an_and_chain_classifies_each_operand_a_bounded_number_of_times() {
+    let classifications = [100, 200, 300].map(and_chain_guard_classifications);
+    assert!(
+        classifications[0] >= 100,
+        "every operand classifies: {classifications:?}"
+    );
+    assert_eq!(
+        classifications[1] - classifications[0],
+        classifications[2] - classifications[1],
+        "each hundred operands add the same classifications: {classifications:?}"
+    );
+}
+
 #[test]
 fn selected_captured_parameters_retrieve_without_repeated_frame_inventory_scans() {
     use std::sync::atomic::Ordering;

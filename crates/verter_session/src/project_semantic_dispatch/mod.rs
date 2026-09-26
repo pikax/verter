@@ -4275,6 +4275,8 @@ mod projected_terminal_surface_tests;
 #[cfg(test)]
 mod projection_stack_safety_tests;
 #[cfg(test)]
+mod relation_depth_tests;
+#[cfg(test)]
 mod relation_operand_tests;
 #[cfg(test)]
 mod signature_relation_tests;
@@ -4289,6 +4291,10 @@ mod truthiness_domain_tests;
 #[cfg(test)]
 mod tuple_length_and_apparent_member_tests;
 #[cfg(test)]
+mod type_syntax_depth_tests;
+#[cfg(test)]
 mod unique_symbol_widening_tests;
 #[cfg(test)]
 mod unread_marker_relation_tests;
+#[cfg(test)]
+mod wide_union_relation_tests;

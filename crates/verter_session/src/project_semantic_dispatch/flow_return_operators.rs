@@ -629,6 +629,13 @@ impl FlowEvaluator<'_, '_> {
     /// the two edges join past the expression exactly as an `if`
     /// statement's arms do. The value is the checker's result type over
     /// the operands' types (`checkBinaryLikeExpression`).
+    ///
+    /// A logical expression nests its left operand (`(a && b) && c`), so a
+    /// chain's left spine is walked from its innermost operand outward:
+    /// each nested node's right operand evaluates here, under that node's
+    /// own guard, and its value takes what [`Self::eval_expr`] would have
+    /// applied to it (its operator widening, then the frame's null
+    /// algebra) — a long chain costs no native stack per operand.
     pub(super) fn eval_logical(
         &mut self,
         operator: SliceLogical,
@@ -637,10 +644,67 @@ impl FlowEvaluator<'_, '_> {
         guard: &SliceGuard,
         right_reachable: Option<bool>,
     ) -> Positional<SemanticNodeId> {
-        let left_type = match self.eval_expr(left) {
+        let mut spine = Vec::new();
+        let mut innermost = left;
+        while let SliceExpr::Logical {
+            operator,
+            left,
+            right,
+            guard,
+            right_reachable,
+            widen,
+            ..
+        } = innermost
+        {
+            spine.push((
+                innermost,
+                *operator,
+                &**right,
+                guard,
+                *right_reachable,
+                *widen,
+            ));
+            innermost = left;
+        }
+        let mut left_type = match self.eval_expr(innermost) {
             Positional::Value(node) => node,
             other => return other,
         };
+        for (node, operator, right, guard, right_reachable, widen) in spine.into_iter().rev() {
+            // Once the connected demand has tripped, the frame closes with
+            // the budget failure whatever the rest of the chain evaluates
+            // to; the operands left are not evaluated.
+            if self.dispatch.connected_demand_tripped() {
+                return Positional::Unmodeled;
+            }
+            let value =
+                match self.eval_logical_step(operator, left_type, right, guard, right_reachable) {
+                    Positional::Value(value) => value,
+                    other => return other,
+                };
+            let value = if widen {
+                let fresh = self.operator_fresh_values(node, value);
+                super::widen_values_within(self.dispatch, value, &fresh, self.nullability)
+            } else {
+                value
+            };
+            left_type = self
+                .dispatch
+                .erase_nullable_members(value, self.nullability);
+        }
+        self.eval_logical_step(operator, left_type, right, guard, right_reachable)
+    }
+
+    /// One logical node over its evaluated left operand (see
+    /// [`Self::eval_logical`]).
+    fn eval_logical_step(
+        &mut self,
+        operator: SliceLogical,
+        left_type: SemanticNodeId,
+        right: &SliceExpr,
+        guard: &SliceGuard,
+        right_reachable: Option<bool>,
+    ) -> Positional<SemanticNodeId> {
         let right_type = match right_reachable {
             // No edge reaches the right operand: the value is the left's.
             Some(false) => return Positional::Value(left_type),
@@ -1020,21 +1084,30 @@ impl FlowEvaluator<'_, '_> {
             }
             _ => {}
         }
-        let SliceExpr::Logical {
+        // A chain nests its left operands: its left spine is walked, and the
+        // operands are visited in the recursion's order — the innermost left
+        // operand, then each right operand from the innermost node out. Each
+        // operand records whether it is the right operand of an `&&`.
+        let mut operands: Vec<(&SliceExpr, bool, bool)> = Vec::new();
+        let mut node = expr;
+        while let SliceExpr::Logical {
             operator,
             left,
             right,
             fresh_operands,
             ..
-        } = expr
-        else {
-            return;
-        };
-        for (is_right, operand, fresh) in [
-            (false, left, fresh_operands.0),
-            (true, right, fresh_operands.1),
-        ] {
-            match operand.as_ref() {
+        } = node
+        {
+            operands.push((right, fresh_operands.1, *operator == SliceLogical::And));
+            if matches!(left.as_ref(), SliceExpr::Logical { .. }) {
+                node = left;
+            } else {
+                operands.push((left, fresh_operands.0, false));
+                break;
+            }
+        }
+        for (operand, fresh, right_of_and) in operands.into_iter().rev() {
+            match operand {
                 SliceExpr::Type(leaf) if fresh => {
                     if let verter_type_expr::TypeExpr::Literal(_) = leaf.ty() {
                         let literal = self.lower_body_type(leaf.ty());
@@ -1043,8 +1116,7 @@ impl FlowEvaluator<'_, '_> {
                         // `b` meets its own regular twin there, and the union keeps
                         // the regular one (`removeRedundantLiteralTypes`), so
                         // `v && 0` is a `0` that does not widen.
-                        let redundant = is_right
-                            && *operator == SliceLogical::And
+                        let redundant = right_of_and
                             && !self.nullability.is_strict()
                             && self.arm_facts(literal).is_some_and(|facts| !facts.truthy);
                         if !redundant {

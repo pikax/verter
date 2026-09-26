@@ -3757,6 +3757,51 @@ fn void_write_assignment<'a>(
 /// value itself, `void` of one, or one in a conditional arm, a sequence
 /// operand, an object literal's member value or an array literal's
 /// element.
+/// The guard disposition of a logical test whose operands classified as
+/// `left` and `right` ([`Lowerer::classify_guard`]).
+fn compose_logical_disposition(
+    operator: LogicalOperator,
+    left: GuardDisposition,
+    right: GuardDisposition,
+) -> GuardDisposition {
+    match operator {
+        // A conjunct / disjunct this half PROVED inert stays
+        // in the tree as an explicit `None` alternative (the
+        // false edge of `a && b` is a disjunction of
+        // negations, so an inert operand blocks the other's
+        // negation there); an UNEXPRESSIBLE operand degrades
+        // the whole test.
+        LogicalOperator::And | LogicalOperator::Or => {
+            if left.is_unexpressible() || right.is_unexpressible() {
+                return GuardDisposition::Unexpressible;
+            }
+            if left.is_no_narrowing() && right.is_no_narrowing() {
+                return GuardDisposition::NoNarrowing;
+            }
+            let composed = if operator == LogicalOperator::And {
+                and_guard(left.into_guard(), right.into_guard())
+            } else {
+                or_guard(left.into_guard(), right.into_guard())
+            };
+            GuardDisposition::modeled(composed)
+        }
+        // `a ?? b` tests nullishness of `a`, but its result
+        // is the OPERAND's value, not a boolean fact over the
+        // arms — a narrow taken from either operand would
+        // apply to the wrong reference, and this half has no
+        // branch/merge composition to prove which survives.
+        // Silence is owed only when NEITHER operand carries a
+        // fact at all.
+        LogicalOperator::Coalesce => {
+            if left.is_no_narrowing() && right.is_no_narrowing() {
+                GuardDisposition::NoNarrowing
+            } else {
+                GuardDisposition::Unexpressible
+            }
+        }
+    }
+}
+
 fn discarded_value_holds_write(expression: &Expression<'_>) -> bool {
     match unwrap_parenthesized(expression) {
         // A logical assignment to a binding writes it on the path its
@@ -3800,9 +3845,19 @@ fn discarded_value_holds_write(expression: &Expression<'_>) -> bool {
         Expression::SequenceExpression(sequence) => {
             sequence.expressions.iter().any(discarded_value_holds_write)
         }
+        // A chain's left spine is walked, not recursed: `||` over its
+        // operands in any order is the same answer.
         Expression::LogicalExpression(logical) => {
-            discarded_value_holds_write(&logical.left)
-                || discarded_value_holds_write(&logical.right)
+            let mut node = &**logical;
+            loop {
+                if discarded_value_holds_write(&node.right) {
+                    return true;
+                }
+                match unwrap_parenthesized(&node.left) {
+                    Expression::LogicalExpression(inner) => node = inner,
+                    _ => return discarded_value_holds_write(&node.left),
+                }
+            }
         }
         Expression::ObjectExpression(object) => object.properties.iter().any(|property| {
             matches!(
@@ -5384,6 +5439,37 @@ pub(crate) mod capture_lookup_probe {
         Scope(ACTIVE.with(|active| active.replace(Some(counter))))
     }
     pub(crate) fn inspect() {
+        ACTIVE.with(|active| {
+            if let Some(counter) = active.borrow().as_ref() {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+    }
+}
+
+/// Counts the tests one slice lowering classifies as guards
+/// ([`Lowerer::classify_guard`]) into the counter its scope installs on
+/// the lowering thread; test-only.
+#[cfg(test)]
+pub(crate) mod guard_classification_probe {
+    use std::cell::RefCell;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    thread_local! {
+        static ACTIVE: RefCell<Option<Arc<AtomicUsize>>> = const { RefCell::new(None) };
+    }
+    pub(crate) struct Scope(Option<Arc<AtomicUsize>>);
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            ACTIVE.with(|active| *active.borrow_mut() = self.0.take());
+        }
+    }
+    pub(crate) fn enter(counter: Arc<AtomicUsize>) -> Scope {
+        Scope(ACTIVE.with(|active| active.replace(Some(counter))))
+    }
+    pub(crate) fn classify() {
         ACTIVE.with(|active| {
             if let Some(counter) = active.borrow().as_ref() {
                 counter.fetch_add(1, Ordering::Relaxed);
@@ -9289,7 +9375,13 @@ impl<'a> Lowerer<'a> {
     /// `GuardNarrowing` gap ahead of the construct: a degraded success,
     /// `ReturnOnly`, never a silently published superset.
     fn lower_guard(&mut self, test: &Expression<'_>) -> SliceGuard {
-        match self.classify_guard(test) {
+        let disposition = self.classify_guard(test);
+        self.guard_of_disposition(disposition)
+    }
+
+    /// The guard [`Self::lower_guard`] lowers a classified test to.
+    fn guard_of_disposition(&mut self, disposition: GuardDisposition) -> SliceGuard {
+        match disposition {
             GuardDisposition::Modeled(guard) => *guard,
             GuardDisposition::NoNarrowing => SliceGuard::None,
             GuardDisposition::Unexpressible => {
@@ -9501,6 +9593,8 @@ impl<'a> Lowerer<'a> {
     /// loop-transparency rule consults, which must classify a test
     /// WITHOUT degrading the enclosing statement.
     fn classify_guard(&mut self, test: &Expression<'_>) -> GuardDisposition {
+        #[cfg(test)]
+        guard_classification_probe::classify();
         // The whole test rides the same reference-transparent wrappers a
         // leaf reference does — parentheses and the postfix non-null
         // assertion ONLY: `(typeof x === "string")!` still establishes
@@ -9517,45 +9611,26 @@ impl<'a> Lowerer<'a> {
             Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
                 self.classify_guard(&unary.argument).negated()
             }
+            // A chain nests its left operands; its left spine is classified
+            // from the innermost operand outward, each node composing its
+            // left operand's disposition with its right one's — the order
+            // the recursion classifies them in, without a native level per
+            // operand.
             Expression::LogicalExpression(logical) => {
-                let left = self.classify_guard(&logical.left);
-                let right = self.classify_guard(&logical.right);
-                match logical.operator {
-                    // A conjunct / disjunct this half PROVED inert stays
-                    // in the tree as an explicit `None` alternative (the
-                    // false edge of `a && b` is a disjunction of
-                    // negations, so an inert operand blocks the other's
-                    // negation there); an UNEXPRESSIBLE operand degrades
-                    // the whole test.
-                    LogicalOperator::And | LogicalOperator::Or => {
-                        if left.is_unexpressible() || right.is_unexpressible() {
-                            return GuardDisposition::Unexpressible;
-                        }
-                        if left.is_no_narrowing() && right.is_no_narrowing() {
-                            return GuardDisposition::NoNarrowing;
-                        }
-                        let composed = if logical.operator == LogicalOperator::And {
-                            and_guard(left.into_guard(), right.into_guard())
-                        } else {
-                            or_guard(left.into_guard(), right.into_guard())
-                        };
-                        GuardDisposition::modeled(composed)
-                    }
-                    // `a ?? b` tests nullishness of `a`, but its result
-                    // is the OPERAND's value, not a boolean fact over the
-                    // arms — a narrow taken from either operand would
-                    // apply to the wrong reference, and this half has no
-                    // branch/merge composition to prove which survives.
-                    // Silence is owed only when NEITHER operand carries a
-                    // fact at all.
-                    LogicalOperator::Coalesce => {
-                        if left.is_no_narrowing() && right.is_no_narrowing() {
-                            GuardDisposition::NoNarrowing
-                        } else {
-                            GuardDisposition::Unexpressible
-                        }
-                    }
+                let mut spine = vec![&**logical];
+                let mut innermost_left = &logical.left;
+                while let Expression::LogicalExpression(inner) =
+                    unwrap_reference_transparent(innermost_left)
+                {
+                    spine.push(inner);
+                    innermost_left = &inner.left;
                 }
+                let mut disposition = self.classify_guard(innermost_left);
+                for node in spine.into_iter().rev() {
+                    let right = self.classify_guard(&node.right);
+                    disposition = compose_logical_disposition(node.operator, disposition, right);
+                }
+                disposition
             }
             Expression::BinaryExpression(binary) => self.classify_binary_guard(binary),
             // A call's narrowing lives in its CALLEE's declared return,
@@ -12089,9 +12164,19 @@ impl<'a> Lowerer<'a> {
                 self.discarded_value_holds_write(&conditional.consequent)
                     || self.discarded_value_holds_write(&conditional.alternate)
             }
+            // A chain's left spine is walked, not recursed (see the free
+            // [`discarded_value_holds_write`]).
             Expression::LogicalExpression(logical) => {
-                self.discarded_value_holds_write(&logical.left)
-                    || self.discarded_value_holds_write(&logical.right)
+                let mut node = &**logical;
+                loop {
+                    if self.discarded_value_holds_write(&node.right) {
+                        return true;
+                    }
+                    match unwrap_parenthesized(&node.left) {
+                        Expression::LogicalExpression(inner) => node = inner,
+                        _ => return self.discarded_value_holds_write(&node.left),
+                    }
+                }
             }
             Expression::SequenceExpression(sequence) => sequence
                 .expressions
@@ -12628,11 +12713,51 @@ impl<'a> Lowerer<'a> {
     /// the left operand, the narrowing its edges establish, and the right
     /// operand lowered under the edge that runs it — a closure created
     /// there captures the guarded reading.
+    ///
+    /// A chain nests its left operands (`a && b && c` is `(a && b) && c`),
+    /// and a left operand that is itself a logical expression (through
+    /// parentheses) is one [`Self::lower_expr`] lowers here in the operand
+    /// mode. The chain's left spine is walked from the outermost node in:
+    /// each node's entry runs on the way down, the innermost left operand
+    /// lowers, and each node completes on the way back out with its left
+    /// operand's value — the recursion's order, without a native level
+    /// per operand.
     fn lower_logical_value(
         &mut self,
         logical: &oxc_ast::ast::LogicalExpression<'_>,
         mode: ExprMode,
     ) -> SliceExpr {
+        let operand_mode = ExprMode::BindingInit {
+            preserve_literal: true,
+        };
+        // Each spine node records whether an `&&` / `||` node encloses it:
+        // that node's guard classifies this one's whole subtree, so this
+        // node hands its disposition outward and the enclosing node reads
+        // it instead of classifying the chain again.
+        let mut spine = vec![(logical, mode, false)];
+        let (innermost, innermost_mode) = loop {
+            let (node, node_mode, enclosed) = spine[spine.len() - 1];
+            self.enter_logical_value(node);
+            match unwrap_parenthesized(&node.left) {
+                Expression::LogicalExpression(inner) => {
+                    let enclosed = enclosed || node.operator != LogicalOperator::Coalesce;
+                    spine.push((inner, operand_mode, enclosed));
+                }
+                _ => break (node, node_mode),
+            }
+        };
+        let mut value = self.lower_expr(&innermost.left, innermost_mode);
+        let mut finished = None;
+        while let Some((node, node_mode, enclosed)) = spine.pop() {
+            (value, finished) =
+                self.finish_logical_value(node, node_mode, value, finished, enclosed);
+        }
+        value
+    }
+
+    /// The part of [`Self::lower_logical_value`] before a node's left
+    /// operand lowers.
+    fn enter_logical_value(&mut self, logical: &oxc_ast::ast::LogicalExpression<'_>) {
         // A left whose truthiness is decided by which of its OWN paths ran
         // (a logical, a conditional) holding a write: the edges out of it
         // carry only the writes of the paths reaching them, which its joined
@@ -12646,7 +12771,22 @@ impl<'a> Lowerer<'a> {
             self.control_test_gap = true;
         }
         self.logical_value_sites.push(logical.span);
-        let left = self.lower_expr(&logical.left, mode);
+    }
+
+    /// The part of [`Self::lower_logical_value`] after a node's left
+    /// operand lowered to `left`. `left_disposition` is the left
+    /// operand's guard disposition when the node below already composed
+    /// it; with `disposition_needed` the node's own disposition comes back
+    /// for the node enclosing it — the same composition
+    /// [`Self::classify_guard`] folds a chain's spine with.
+    fn finish_logical_value(
+        &mut self,
+        logical: &oxc_ast::ast::LogicalExpression<'_>,
+        mode: ExprMode,
+        left: SliceExpr,
+        mut left_disposition: Option<GuardDisposition>,
+        disposition_needed: bool,
+    ) -> (SliceExpr, Option<GuardDisposition>) {
         let operator = match logical.operator {
             LogicalOperator::And => SliceLogical::And,
             LogicalOperator::Or => SliceLogical::Or,
@@ -12659,7 +12799,16 @@ impl<'a> Lowerer<'a> {
         };
         let guard = match operator {
             SliceLogical::Coalesce => self.nullish_guard(&logical.left),
-            SliceLogical::And | SliceLogical::Or => self.lower_guard(&logical.left),
+            SliceLogical::And | SliceLogical::Or => {
+                let disposition = match left_disposition.take() {
+                    Some(disposition) => disposition,
+                    None => self.classify_guard(&logical.left),
+                };
+                if disposition_needed {
+                    left_disposition = Some(disposition.clone());
+                }
+                self.guard_of_disposition(disposition)
+            }
         };
         if self.record_control_position_calls(&logical.left) {
             self.control_test_gap = true;
@@ -12677,7 +12826,17 @@ impl<'a> Lowerer<'a> {
         };
         self.active_guard_bindings.truncate(active_guard_base);
         self.logical_value_sites.pop();
-        SliceExpr::Logical {
+        let disposition = if disposition_needed {
+            let left = match left_disposition {
+                Some(disposition) => disposition,
+                None => self.classify_guard(&logical.left),
+            };
+            let right = self.classify_guard(&logical.right);
+            Some(compose_logical_disposition(logical.operator, left, right))
+        } else {
+            None
+        };
+        let value = SliceExpr::Logical {
             operator,
             left: Box::new(left),
             right: Box::new(right),
@@ -12688,7 +12847,8 @@ impl<'a> Lowerer<'a> {
                 expr_is_bare_literal(&logical.right),
             ),
             widen: false,
-        }
+        };
+        (value, disposition)
     }
 
     /// The effects of a discarded logical expression holding a write,

@@ -296,6 +296,10 @@ pub(crate) struct RelationFrameState {
     /// relation. It follows the member through SCC deferral and is either
     /// completed by the root's batched publish or explicitly aborted.
     pub(crate) inline_flight: Option<InlineMemberFlight>,
+    /// Where this frame sits in its relation chain — the relation frames
+    /// directly above one another, the checker's one `checkTypeRelatedTo`
+    /// call (see [`RelationChainPosition`]).
+    pub(crate) chain: RelationChainPosition,
 }
 
 impl RelationFrameState {
@@ -304,8 +308,42 @@ impl RelationFrameState {
             session_delta: false,
             opened_session: None,
             inline_flight: None,
+            chain: RelationChainPosition::default(),
         }
     }
+}
+
+/// One relation frame's place in its relation chain: the relation frames
+/// stacked directly on one another, which the checker relates in one
+/// `checkTypeRelatedTo` call with one recursion depth, one overflow flag
+/// and one pair of recursion stacks. A frame of another domain between two
+/// relation frames starts a new chain. Transient: it lives on the frame and
+/// is released at pop.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RelationChainPosition {
+    /// Stack index of the chain's first frame.
+    pub(crate) base: usize,
+    /// The chain's structured frames up to and including this one — the
+    /// checker's `sourceDepth` / `targetDepth` after this frame's push.
+    /// A frame counts once its operands, unwrapped, are known to be a
+    /// structured pair (a pair of simple types never reaches
+    /// `recursiveTypeRelatedTo`).
+    pub(crate) depth: u16,
+    /// This frame counted in `depth` — it is an entry of the checker's
+    /// recursion stacks.
+    pub(crate) counted: bool,
+    /// Set on the chain's first frame once a relation in the chain
+    /// overflowed the checker's depth: every structured relation after it
+    /// answers false, as the checker's `overflow` flag makes it.
+    pub(crate) overflowed: bool,
+    /// The checker's `expandingFlags` in force at this frame: bit 1 the
+    /// source side, bit 2 the target side was found deeply nested at this
+    /// frame or one below it in the chain.
+    pub(crate) expanding: u8,
+    /// The recursion identities of this counted frame's source and target
+    /// with the node each was read from (see
+    /// `ProjectSemanticDispatch::relation_recursion_identity`).
+    pub(crate) identities: [Option<(crate::semantic_query::DeclIdentity, SemanticNodeId)>; 2],
 }
 
 /// The flow-return-domain payload of one in-flight frame. The ordered
@@ -2196,6 +2234,12 @@ pub(crate) struct InferenceSession {
     reverse_projection: Option<ReverseProjectionState>,
     /// Immutable fixed bindings retained across staging and commit.
     staged_bindings: Option<Arc<[InferBinding]>>,
+    /// The reentry-stack depth when this session opened. Every frame
+    /// below it was already open and encloses the session — whichever
+    /// frame opened it, a relation root or a call executor — so only a
+    /// frame at or above this depth mutates an outer session when it
+    /// deposits.
+    pub(crate) opened_at_depth: usize,
     /// Session lifecycle.
     pub(crate) state: InferenceSessionState,
 }
@@ -2224,6 +2268,7 @@ impl InferenceSession {
             infos,
             reverse_projection,
             staged_bindings: None,
+            opened_at_depth: 0,
             state: InferenceSessionState::Collecting,
         }
     }
@@ -3050,9 +3095,9 @@ impl CheckerDispatchTransaction {
         reverse_projection: Option<ReverseProjectionState>,
     ) -> SessionId {
         let id = self.alloc_session_id();
-        self.relation
-            .sessions
-            .push(InferenceSession::new(id, setup, reverse_projection));
+        let mut session = InferenceSession::new(id, setup, reverse_projection);
+        session.opened_at_depth = self.reentry().depth();
+        self.relation.sessions.push(session);
         id
     }
 
@@ -3145,14 +3190,6 @@ impl CheckerDispatchTransaction {
             .is_some_and(|policy| policy.top_level_infer_targets.contains(&param_node))
     }
 
-    /// The session the frame at `idx` opened, if any.
-    pub(crate) fn frame_opened_session(&self, idx: usize) -> Option<SessionId> {
-        self.reentry()
-            .frame(idx)
-            .and_then(|frame| frame.relation())
-            .and_then(|state| state.opened_session)
-    }
-
     /// Mark the frame at `idx` as having opened session `session`.
     pub(crate) fn note_opened_session(&mut self, idx: usize, session: SessionId) {
         if let Some(state) = self
@@ -3186,18 +3223,23 @@ impl CheckerDispatchTransaction {
         }
     }
 
-    /// Mark every active non-owner frame when an accepted candidate write
-    /// mutates an outer session.
+    /// Mark every active frame opened inside `active_id`'s lifetime when an
+    /// accepted candidate write mutates that (for them, outer) session.
+    /// The frames below the session's opening depth enclose it: the
+    /// session is local to their subtree — a relation root's own session,
+    /// or a call executor's candidate session under an enclosing relation
+    /// — so a write into it is not a delta to them.
     pub(crate) fn note_candidate_write(&mut self, active_id: Option<SessionId>) {
         let depth = self.reentry().depth();
         if depth == 0 {
             return;
         }
-        let owner = (0..depth).rev().find(|index| {
-            self.frame_opened_session(*index)
-                .is_some_and(|opened| Some(opened) == active_id)
-        });
-        let first_non_owner = owner.map_or(0, |index| index + 1);
+        let first_non_owner = self
+            .relation
+            .sessions
+            .iter()
+            .find(|session| Some(session.id) == active_id)
+            .map_or(0, |session| session.opened_at_depth);
         self.note_session_delta_range(first_non_owner, depth);
     }
 

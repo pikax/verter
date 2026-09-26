@@ -245,3 +245,52 @@ pub(super) fn tuple_labels(source: &str, probe: &str) -> Vec<Option<String>> {
         }
     })
 }
+
+/// [`mismatches`] with every probe read from ONE host, in row order: each
+/// probe is its own function of one probe module, so an answer a row leaves
+/// in the host's shared memo is one the rows after it can read.
+pub(super) fn mismatches_in_one_host(source: &str, rows: &[(&str, &str)]) -> Vec<String> {
+    let host = probe_host(ProbeProject::default());
+    let mut module = format!("{source}\n");
+    for (index, (probe, _)) in rows.iter().enumerate() {
+        module.push_str(&format!(
+            "export function __checker_probe_{index}() {{ \
+                const __probe: {probe} = null as any; \
+                return __probe; \
+            }}\n"
+        ));
+    }
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        PROBE_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(&module),
+        crate::FileLanguage::script_ts(),
+    );
+    rows.iter()
+        .enumerate()
+        .filter_map(|(index, (probe, checker))| {
+            let expected = checker_syntax::parse(checker)
+                .unwrap_or_else(|err| panic!("the checker print `{checker}` must parse: {err}"));
+            let result = flow_return_of(&host, &format!("__checker_probe_{index}"))
+                .unwrap_or_else(|| panic!("the probe `{probe}` produced no flow-return result"));
+            let store_view = host.resolver_store_view_read().into_owned_view();
+            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let host_ctx =
+                crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+            let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+            let node = dispatch
+                .normalize_node_keeping_declaration_refs_for_tests(
+                    result.return_type(),
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                )
+                .into_complete_node()
+                .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
+            (!checker_syntax::matches_node(&dispatch, node, &expected, 0)).then(|| {
+                format!(
+                    "`{probe}`: the checker answers `{checker}`, the lane measured `{}`",
+                    render_node(&dispatch, node, 0)
+                )
+            })
+        })
+        .collect()
+}

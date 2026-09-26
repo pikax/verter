@@ -1157,3 +1157,52 @@ fn value_body_fingerprint_enum_members_take_precedence_over_annotation() {
         "editing a folded member's value MUST change the value body fingerprint"
     );
 }
+
+/// `{ a: number; v: { a: number; v: … { a: number; v: string } } }`,
+/// `depth` objects deep: every object has two members to sort.
+fn two_member_chain(depth: usize) -> TypeExpr {
+    let mut body = prim(PrimitiveName::String);
+    for _ in 0..depth {
+        body = make_object(vec![("a", prim(PrimitiveName::Number)), ("v", body)]);
+    }
+    body
+}
+
+/// The members an object is sorted by are encoded once per member for the
+/// whole computation, so the member encodings of a chain of nested objects
+/// grow linearly past the hash depth budget: the same number per added
+/// level at 100, 150 and 200 levels. Encoding every member afresh at every
+/// enclosing object cost `2^depth` encodings.
+#[test]
+fn nested_objects_encode_each_member_key_once() {
+    let writes = |depth: usize| {
+        let before = MEMBER_WRITES.with(std::cell::Cell::get);
+        let _ = compute_semantic_hash(&two_member_chain(depth), SymbolSpace::Type, &UnresolvedLens);
+        MEMBER_WRITES.with(std::cell::Cell::get) - before
+    };
+    let (at_100, at_150, at_200) = (writes(100), writes(150), writes(200));
+    assert_eq!(
+        at_150 - at_100,
+        at_200 - at_150,
+        "member encodings at 100 / 150 / 200 levels: {at_100} / {at_150} / {at_200}"
+    );
+}
+
+/// Members sort by their keys at every level of a nested chain: the same
+/// chain with each object's members written in the other order hashes to
+/// the same fingerprint (declaration order does not affect the hash), and a
+/// chain differing in its deepest member does not.
+#[test]
+fn nested_members_sort_by_their_keys_at_every_level() {
+    let reversed = |depth: usize| {
+        let mut body = prim(PrimitiveName::String);
+        for _ in 0..depth {
+            body = make_object(vec![("v", body), ("a", prim(PrimitiveName::Number))]);
+        }
+        body
+    };
+    let hash =
+        |body: &TypeExpr| compute_semantic_hash(body, SymbolSpace::Type, &UnresolvedLens).hash;
+    assert_eq!(hash(&two_member_chain(30)), hash(&reversed(30)));
+    assert_ne!(hash(&two_member_chain(30)), hash(&two_member_chain(31)));
+}

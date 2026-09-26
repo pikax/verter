@@ -496,19 +496,9 @@ const BOX_80: &str = r##"interface Box<T> { v: T }
 type D = Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<1>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>;
 "##;
 
-/// `[D] extends [<Box<…> applied 80 times around number>] ? 1 : 2` is `1`. The
-/// lane overflows its stack and aborts the process (the relation to the
-/// identical 80-deep type overflows too; eighty `['v']` reads through `D`
-/// overflowed in one run and answered in others, so they sit at the edge; 72
-/// levels answer in 0.3 s). Run it alone.
-///
-/// What the lane gives:
-/// - `[D] extends
-///   [Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<number>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>]
-///   ? 1 : 2`: the checker answers `1`; the lane the process aborts: `thread
-///   '<unknown>' has overflowed its stack`.
+/// `[D] extends [<Box<…> applied 80 times around number>] ? 1 : 2` is `1`,
+/// related on the default test stack.
 #[test]
-#[ignore = "run alone: relating an 80-deep generic application overflows the stack"]
 fn an_80_deep_nested_generic_application_relates_on_the_default_stack() {
     let matrix = Matrix::new(BOX_80);
     let failures = matrix.types(&[
@@ -522,15 +512,7 @@ const WIDE_UNION_800: &str = r##"type W = "m0" | "m1" | "m2" | "m3" | "m4" | "m5
 "##;
 
 /// `[Exclude<W, "m0">] extends [W] ? 1 : 2` over an 800-member union is `1`.
-/// The lane's time grows about cubically with the union: 100 members 0.9 s, 200
-/// 5.0 s, 400 45.2 s for the four settings; at 800 every setting passes the row
-/// deadline.
-///
-/// What the lane gives:
-/// - `[Exclude<W, "m0">] extends [W] ? 1 : 2`: the checker answers `1`; the
-///   lane took longer than 60s.
 #[test]
-#[ignore = "Exclude over a wide literal union relates in time the checker takes"]
 fn excluding_one_member_of_an_800_member_union_answers() {
     let matrix = Matrix::new(WIDE_UNION_800);
     let failures = matrix.types(&[("[Exclude<W, \"m0\">] extends [W] ? 1 : 2", "1")]);
@@ -1344,13 +1326,8 @@ export function last(x: K) {
 "##;
 
 /// 799 `if (x === "k<i>") throw 0;` guards narrow the 800-member union to
-/// `"k799"`. The lane's time grows super-linearly: 50 guards 0.8 s, 200 13.1 s
-/// for the four settings; at 800 every setting passes the row deadline.
-///
-/// What the lane gives:
-/// - `last`: the checker answers `"k799"`; the lane took longer than 60s.
+/// `"k799"`.
 #[test]
-#[ignore = "a long chain of equality guards narrows in time the checker takes"]
 fn an_800_guard_narrowing_chain_answers() {
     let matrix = Matrix::new(NARROW_CHAIN_800);
     let failures = matrix.returns(&[("last", "\"k799\"")]);
@@ -2164,8 +2141,11 @@ const RETURN_CHAIN_800: &str = r##"export function chain(x: number) {
 "##;
 
 /// A function with 800 `if (x === i) return "r<i>" as const;` statements
-/// returns the union of the 801 literals. The lane fails with
-/// `Budget(WorkBudgetExceeded)` (200 guards answer in 0.4 s).
+/// returns the union of the 801 literals. The lane refuses it with
+/// `Budget(WorkBudgetExceeded)`: the demand slice plans at most 256 return
+/// sites (255 guards and the final return answer; 256 guards are refused
+/// before evaluating). The work each guard costs is constant: the relation
+/// checks and guard applications grow linearly with the guards.
 ///
 /// What the lane gives:
 /// - `chain`: the checker answers `"none" | "r0" | "r1" | "r10" | "r100" |
@@ -2270,7 +2250,7 @@ const RETURN_CHAIN_800: &str = r##"export function chain(x: number) {
 ///   "r90" | "r91" | "r92" | "r93" | "r94" | "r95" | "r96" | "r97" | "r98" |
 ///   "r99"`; the lane produced no value: Failure(Budget(WorkBudgetExceeded)).
 #[test]
-#[ignore = "a function with 800 returning guards infers its return within the work budget"]
+#[ignore = "a function with more return sites than the demand slice plans infers its return"]
 fn an_800_return_if_chain_answers_within_the_work_budget() {
     let matrix = Matrix::new(RETURN_CHAIN_800);
     let failures = matrix.returns(&[
@@ -2283,15 +2263,9 @@ fn an_800_return_if_chain_answers_within_the_work_budget() {
 const CONDITIONAL_CHAIN_160: &str = r##"type Pick1<T> = T extends 0 ? "c0" : T extends 1 ? "c1" : T extends 2 ? "c2" : T extends 3 ? "c3" : T extends 4 ? "c4" : T extends 5 ? "c5" : T extends 6 ? "c6" : T extends 7 ? "c7" : T extends 8 ? "c8" : T extends 9 ? "c9" : T extends 10 ? "c10" : T extends 11 ? "c11" : T extends 12 ? "c12" : T extends 13 ? "c13" : T extends 14 ? "c14" : T extends 15 ? "c15" : T extends 16 ? "c16" : T extends 17 ? "c17" : T extends 18 ? "c18" : T extends 19 ? "c19" : T extends 20 ? "c20" : T extends 21 ? "c21" : T extends 22 ? "c22" : T extends 23 ? "c23" : T extends 24 ? "c24" : T extends 25 ? "c25" : T extends 26 ? "c26" : T extends 27 ? "c27" : T extends 28 ? "c28" : T extends 29 ? "c29" : T extends 30 ? "c30" : T extends 31 ? "c31" : T extends 32 ? "c32" : T extends 33 ? "c33" : T extends 34 ? "c34" : T extends 35 ? "c35" : T extends 36 ? "c36" : T extends 37 ? "c37" : T extends 38 ? "c38" : T extends 39 ? "c39" : T extends 40 ? "c40" : T extends 41 ? "c41" : T extends 42 ? "c42" : T extends 43 ? "c43" : T extends 44 ? "c44" : T extends 45 ? "c45" : T extends 46 ? "c46" : T extends 47 ? "c47" : T extends 48 ? "c48" : T extends 49 ? "c49" : T extends 50 ? "c50" : T extends 51 ? "c51" : T extends 52 ? "c52" : T extends 53 ? "c53" : T extends 54 ? "c54" : T extends 55 ? "c55" : T extends 56 ? "c56" : T extends 57 ? "c57" : T extends 58 ? "c58" : T extends 59 ? "c59" : T extends 60 ? "c60" : T extends 61 ? "c61" : T extends 62 ? "c62" : T extends 63 ? "c63" : T extends 64 ? "c64" : T extends 65 ? "c65" : T extends 66 ? "c66" : T extends 67 ? "c67" : T extends 68 ? "c68" : T extends 69 ? "c69" : T extends 70 ? "c70" : T extends 71 ? "c71" : T extends 72 ? "c72" : T extends 73 ? "c73" : T extends 74 ? "c74" : T extends 75 ? "c75" : T extends 76 ? "c76" : T extends 77 ? "c77" : T extends 78 ? "c78" : T extends 79 ? "c79" : T extends 80 ? "c80" : T extends 81 ? "c81" : T extends 82 ? "c82" : T extends 83 ? "c83" : T extends 84 ? "c84" : T extends 85 ? "c85" : T extends 86 ? "c86" : T extends 87 ? "c87" : T extends 88 ? "c88" : T extends 89 ? "c89" : T extends 90 ? "c90" : T extends 91 ? "c91" : T extends 92 ? "c92" : T extends 93 ? "c93" : T extends 94 ? "c94" : T extends 95 ? "c95" : T extends 96 ? "c96" : T extends 97 ? "c97" : T extends 98 ? "c98" : T extends 99 ? "c99" : T extends 100 ? "c100" : T extends 101 ? "c101" : T extends 102 ? "c102" : T extends 103 ? "c103" : T extends 104 ? "c104" : T extends 105 ? "c105" : T extends 106 ? "c106" : T extends 107 ? "c107" : T extends 108 ? "c108" : T extends 109 ? "c109" : T extends 110 ? "c110" : T extends 111 ? "c111" : T extends 112 ? "c112" : T extends 113 ? "c113" : T extends 114 ? "c114" : T extends 115 ? "c115" : T extends 116 ? "c116" : T extends 117 ? "c117" : T extends 118 ? "c118" : T extends 119 ? "c119" : T extends 120 ? "c120" : T extends 121 ? "c121" : T extends 122 ? "c122" : T extends 123 ? "c123" : T extends 124 ? "c124" : T extends 125 ? "c125" : T extends 126 ? "c126" : T extends 127 ? "c127" : T extends 128 ? "c128" : T extends 129 ? "c129" : T extends 130 ? "c130" : T extends 131 ? "c131" : T extends 132 ? "c132" : T extends 133 ? "c133" : T extends 134 ? "c134" : T extends 135 ? "c135" : T extends 136 ? "c136" : T extends 137 ? "c137" : T extends 138 ? "c138" : T extends 139 ? "c139" : T extends 140 ? "c140" : T extends 141 ? "c141" : T extends 142 ? "c142" : T extends 143 ? "c143" : T extends 144 ? "c144" : T extends 145 ? "c145" : T extends 146 ? "c146" : T extends 147 ? "c147" : T extends 148 ? "c148" : T extends 149 ? "c149" : T extends 150 ? "c150" : T extends 151 ? "c151" : T extends 152 ? "c152" : T extends 153 ? "c153" : T extends 154 ? "c154" : T extends 155 ? "c155" : T extends 156 ? "c156" : T extends 157 ? "c157" : T extends 158 ? "c158" : T extends 159 ? "c159" : "none";
 "##;
 
-/// `Pick1<159>` over 160 nested conditional branches is `"c159"`. The lane
-/// overflows its stack and aborts the process (80 branches answer in 0.2 s; 240
-/// overflow too). Run it alone.
-///
-/// What the lane gives:
-/// - `Pick1<159>`: the checker answers `"c159"`; the lane the process aborts:
-///   `thread '<unknown>' has overflowed its stack`.
+/// `Pick1<159>` over 160 nested conditional branches is `"c159"`, resolved
+/// on the default test stack.
 #[test]
-#[ignore = "run alone: resolving a 160-deep conditional chain overflows the stack"]
 fn a_160_deep_conditional_chain_resolves_on_the_default_stack() {
     let matrix = Matrix::new(CONDITIONAL_CHAIN_160);
     let failures = matrix.types(&[("Pick1<159>", "\"c159\"")]);
@@ -2349,15 +2323,8 @@ export function lv() {
 "##;
 
 /// `while (cond()) { v0 = v1; …; v19 = v0; v19 = "s"; } return v0;` over twenty
-/// `let v<i>: string | number = 0` is `string | number`. The lane's time grows
-/// exponentially with the locals: 5 locals 0.2 s, 10 23.5 s for the four
-/// settings; at 20 every setting passes the row deadline.
-///
-/// What the lane gives:
-/// - `lv`: the checker answers `string | number`; the lane took longer than
-///   60s.
+/// `let v<i>: string | number = 0` is `string | number`.
 #[test]
-#[ignore = "a loop whose locals feed each other reaches its fixed point in time the checker takes"]
 fn a_loop_rotating_twenty_locals_reaches_its_fixed_point() {
     let matrix = Matrix::new(LOOP_LOCALS_20);
     let failures = matrix.returns(&[("lv", "string | number")]);
@@ -2398,17 +2365,8 @@ const AND_CHAIN_320: &str = r##"export function lc(a0: string | undefined, a1: n
 "##;
 
 /// A 320-operand `&&` chain cycling five parameters is `"" | 0 | 1 | false |
-/// null | undefined` (`0 | 1` without `strictNullChecks`). The lane's time
-/// grows quadratically with the operands: 10 0.1 s, 20 0.4 s, 40 1.9 s, 80 8.4
-/// s for the four settings; at 320 every setting passes the row deadline.
-///
-/// What the lane gives:
-/// - `lc`: the checker answers `"" | 0 | 1 | false | null | undefined`
-///   (strict), `0 | 1` (strictNullChecks off), `"" | 0 | 1 | false | null |
-///   undefined` (noImplicitAny off), `0 | 1` (both off); the lane took longer
-///   than 60s.
+/// null | undefined` (`0 | 1` without `strictNullChecks`).
 #[test]
-#[ignore = "a long && chain types in time the checker takes"]
 fn a_320_operand_and_chain_answers() {
     let matrix = Matrix::new(AND_CHAIN_320);
     let failures = matrix.nullness(&[(

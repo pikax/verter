@@ -1962,6 +1962,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         // (4) Instantiation transfer.
         if let Some(result) = self.instantiated_from_uninstantiated(&key) {
+            self.note_transferred_flow_return(&key);
             return FlowReturnStep::Complete(result);
         }
         // (5) Cold compute. Root versus inline is decided by the generic
@@ -7083,9 +7084,20 @@ fn expression_effect_tree(
                     walk(arm, out);
                 }
             }
+            // A chain nests its left operands: its left spine is walked, in
+            // tree order — the innermost left operand, then each right
+            // operand from the innermost node out.
             SliceExpr::Logical { left, right, .. } => {
-                walk(left, out);
-                walk(right, out);
+                let mut rights = vec![&**right];
+                let mut innermost = &**left;
+                while let SliceExpr::Logical { left, right, .. } = innermost {
+                    rights.push(right);
+                    innermost = left;
+                }
+                walk(innermost, out);
+                for right in rights.into_iter().rev() {
+                    walk(right, out);
+                }
             }
             SliceExpr::Sequence { value, .. } => walk(value, out),
             SliceExpr::Satisfies { operand, .. } | SliceExpr::Void { operand, .. } => {
@@ -8758,6 +8770,20 @@ pub(crate) fn loop_passes_for_tests() -> usize {
     LOOP_PASSES.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many guards this thread applied to a narrowing state
+    /// ([`FlowEvaluator::apply_guard_scoped`]), a compound guard and each of
+    /// its parts counted apart; test-only.
+    static GUARD_APPLICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many guards this thread applied so far (test-only).
+#[cfg(test)]
+pub(crate) fn guard_applications_for_tests() -> usize {
+    GUARD_APPLICATIONS.with(std::cell::Cell::get)
+}
+
 /// One pass of a loop body ([`FlowEvaluator::eval_loop_pass`]).
 struct LoopPass {
     contributors: Vec<FlowContribution>,
@@ -8966,6 +8992,45 @@ fn standing_narrowings(
         .into_iter()
         .map(|(_, subject, node)| (subject.clone(), node))
         .collect()
+}
+
+/// Fold a ledger `window` into `standing`, the facts standing one per
+/// subject: a fact about a subject already standing replaces it where it
+/// stands, and a kill drops what it names. Per subject, the newest fact and
+/// the place the subject first stood are those of [`standing_narrowings`]
+/// over the same entries.
+fn fold_standing_narrowings(
+    standing: &mut Vec<(
+        FlowProductSubject,
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )>,
+    window: &[NarrowingLedgerEntry],
+) {
+    for entry in window {
+        match entry {
+            NarrowingLedgerEntry::Established {
+                root,
+                subject,
+                node,
+            } => match standing
+                .iter_mut()
+                .find(|(_, candidate, _)| candidate == subject)
+            {
+                Some(fact) => *fact = (root.clone(), subject.clone(), *node),
+                None => standing.push((root.clone(), subject.clone(), *node)),
+            },
+            NarrowingLedgerEntry::Cleared { root } => {
+                standing.retain(|(candidate, _, _)| candidate != root);
+            }
+            NarrowingLedgerEntry::ClearedBelow { root, path } => {
+                standing.retain(|(candidate, subject, _)| {
+                    candidate != root
+                        || !(subject.path.len() > path.len() && subject.path.starts_with(path))
+                });
+            }
+        }
+    }
 }
 
 /// Parameter initialization also establishes its hoisted declaration aliases.
@@ -12486,14 +12551,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// The loop-head products of `carried[subject]` while the references
     /// `in_analysis` holds are under analysis: the entry state joined with
     /// one pass from the entry state in which every reference of its
-    /// dependency closure outside the analysis reads its own head. Memoized
-    /// on the reference and the analysed references its closure holds.
+    /// dependency closure outside the analysis reads its own head.
+    ///
+    /// Memoized on the reference for the whole head analysis, as the
+    /// checker caches each reference's loop-label type once it has one: a
+    /// reference first typed while others are under analysis keeps that
+    /// type wherever else the analysis reads it. Keyed on the analysed
+    /// references too, a loop whose references feed each other (`v0 = v1;
+    /// v1 = v2; …`) re-typed every reference once per subset of the others
+    /// — twenty such locals never finished.
     fn loop_reference_head(
         &mut self,
         input: LoopHeadInput<'_, '_>,
         subject: usize,
         in_analysis: &mut Vec<usize>,
-        memo: &mut rustc_hash::FxHashMap<(usize, Vec<usize>), FlowProductStore>,
+        memo: &mut rustc_hash::FxHashMap<usize, FlowProductStore>,
     ) -> Result<FlowProductStore, FlowReturnFailure> {
         // A reference entering the loop at its declared type holds it
         // at the head: every antecedent the checker's loop label would
@@ -12503,14 +12575,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return Ok(input.entry.products.clone());
         }
         let closure = &input.dependencies[subject];
-        let mut frozen: Vec<usize> = in_analysis
-            .iter()
-            .copied()
-            .filter(|reference| closure.contains(reference))
-            .collect();
-        frozen.sort_unstable();
-        let key = (subject, frozen);
-        if let Some(known) = memo.get(&key) {
+        if let Some(known) = memo.get(&subject) {
             return Ok(known.clone());
         }
         let mut start = input.entry.clone();
@@ -12545,7 +12610,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             None => input.entry.products.clone(),
         };
-        memo.insert(key, products.clone());
+        memo.insert(subject, products.clone());
         Ok(products)
     }
 
@@ -14239,6 +14304,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         positive: bool,
     ) {
         use crate::flow_slice_content::SliceGuard;
+        #[cfg(test)]
+        GUARD_APPLICATIONS.with(|count| count.set(count.get() + 1));
         let fact = match guard {
             SliceGuard::None => return,
             SliceGuard::Typeof {
@@ -14655,16 +14722,36 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 SemanticNodeId,
             )>,
         > = Vec::with_capacity(parts.len());
+        // Each alternative reads every earlier part the other way, then its
+        // own part. The earlier parts' readings are applied once, as a
+        // prefix that grows by one part per alternative, and the prefix's
+        // standing facts are kept one per subject (the newest, where the
+        // subject first stood — all the union reads), so a chain of `n`
+        // conjuncts costs `n` applications here rather than `n²`.
+        let base = self.narrowing_snapshot();
+        let mut prefix_standing = Vec::new();
         for (index, part) in parts.iter().enumerate() {
-            let mark = self.narrowing_snapshot();
-            for earlier in &parts[..index] {
-                self.apply_guard_scoped(earlier, !positive);
-            }
+            let prefix = self.narrowing_snapshot();
             self.apply_guard_scoped(part, positive);
-            let applied = self.narrowings_since(&mark);
-            self.restore_narrowings(mark);
-            alternatives.push(applied);
+            let mut alternative = prefix_standing.clone();
+            fold_standing_narrowings(
+                &mut alternative,
+                &self.narrowing_writes[prefix.writes.min(self.narrowing_writes.len())..],
+            );
+            alternatives.push(
+                alternative
+                    .into_iter()
+                    .map(|(_, subject, node)| (subject, node))
+                    .collect(),
+            );
+            self.restore_narrowings(prefix);
+            if index + 1 < parts.len() {
+                let extension = self.narrowing_writes.len();
+                self.apply_guard_scoped(part, !positive);
+                fold_standing_narrowings(&mut prefix_standing, &self.narrowing_writes[extension..]);
+            }
         }
+        self.restore_narrowings(base);
         for (subject, node) in self.union_of_alternatives(alternatives) {
             self.push_narrowing(&subject, node);
         }
