@@ -265,8 +265,11 @@ fn foreign_contract_declarations_keep_published_shapes() {
         .find(|line| line.starts_with(&format!("type {USE_CONTRACT}<C> = ")))
         .expect("contract declaration");
     assert!(contract.contains(&format!(
-        "({USE_OPEN_ARGS}<A> extends true ? {USE_CONSTRUCTS}<C, unknown, never, []> : C) : {USE_CALLS}<C, unknown, never, []>;"
+        "__VerterUseTupleRest<C> extends true ? C : C extends abstract new (...args: infer A) => unknown ? ({USE_OPEN_ARGS}<A> extends true ? {USE_CONSTRUCTS}<C, unknown, never, []> : C) : {USE_CALLS}<C, unknown, never, []>;"
     )));
+    assert!(declarations.contains(
+        "type __VerterUseTupleRest<C> = C extends new <T extends any[]>(...args: T) => { readonly args: T } ? true : C extends new <T extends readonly any[]>(...args: T) => { readonly args: T } ? true : false;"
+    ));
     assert!(declarations.contains(&format!(
         "type {USE_OPEN_ARGS}<A> = __VerterUseSame<A, any[]>;"
     )));

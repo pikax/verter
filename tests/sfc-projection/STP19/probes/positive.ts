@@ -58,11 +58,12 @@ type __VerterUseOpenArgs<A> = __VerterUseSame<A, any[]>;
 type __VerterUseSame<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;
 type __VerterUsePeeled<N> = { readonly __verterUsePeeled: N };
 type __VerterUseOrdered<T, Acc> = T extends readonly [infer H, ...infer R] ? __VerterUseOrdered<R, Acc & H> : Acc;
+type __VerterUseTupleRest<C> = C extends new <T extends any[]>(...args: T) => { readonly args: T } ? true : C extends new <T extends readonly any[]>(...args: T) => { readonly args: T } ? true : false;
 type __VerterUseConstruct<A extends readonly unknown[], I> = __VerterUseOpenArgs<A> extends true ? (I extends { readonly $props: infer P } ? new (props: P) => I : new (props: Record<string, never>) => I) : new (...args: A) => I;
 type __VerterUseConstructs<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends abstract new (...args: infer A) => infer I ? (A extends readonly [__VerterUsePeeled<number>] ? __VerterUseOrdered<Out, unknown> : __VerterUseSame<[A, I], Prev> extends true ? __VerterUseOrdered<Out, unknown> : __VerterUseConstructs<C, Seen & { new (...args: A): I; new (...args: [__VerterUsePeeled<Out["length"]>]): never }, [A, I], [__VerterUseConstruct<A, I>, ...Out]>) : C;
 type __VerterUseCall<A> = A extends readonly [infer P, ...infer X] ? new (props: P) => __VerterUseFunctional<P, X extends readonly [infer Y, ...unknown[]] ? Y : unknown> : new (props: Record<string, never>) => __VerterUseFunctional<unknown, unknown>;
 type __VerterUseCalls<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends (...args: infer A) => infer R ? (A extends readonly [__VerterUsePeeled<number>] ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseSame<[A, R], Prev> extends true ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseCalls<C, Seen & { (...args: A): R; (...args: [__VerterUsePeeled<Out["length"]>]): never }, [A, R], [__VerterUseCall<A>, ...Out]>) : unknown;
-type __VerterUseContract<C> = C extends abstract new (...args: infer A) => unknown ? (__VerterUseOpenArgs<A> extends true ? __VerterUseConstructs<C, unknown, never, []> : C) : __VerterUseCalls<C, unknown, never, []>;
+type __VerterUseContract<C> = __VerterUseTupleRest<C> extends true ? C : C extends abstract new (...args: infer A) => unknown ? (__VerterUseOpenArgs<A> extends true ? __VerterUseConstructs<C, unknown, never, []> : C) : __VerterUseCalls<C, unknown, never, []>;
 type __VerterUseTolerant<P, I> = (0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : (0 extends 1 & I ? P : {})) : P) & Record<string, unknown>;
 type __VerterUseFunctional<P, X> = { readonly $props: P; readonly $slots: X extends { slots: infer S } ? S : {}; $emit: X extends { emit: infer E } ? E : never };
 declare function __VerterUseComponent<C, A>(component: C, tolerant: A): __VerterUseContract<C> & A;
@@ -175,8 +176,17 @@ declare const GenericRestOverloads: {
 declare const ReadonlyGenericRest: {
   new <T extends readonly any[]>(...args: T): { readonly $props: { count: number }; readonly args: T };
 };
+declare const GenericRestWithoutProps: {
+  new <T extends any[]>(...args: T): { readonly args: T };
+};
 const directGenericRest: [string, number] = new GenericRest("a", 1).args;
 const adaptedGenericRest: [string, number] = new (__VerterUseComponent(GenericRest, __VerterUseConstructor(GenericRest)))("a", 1).args;
+const directGenericRestProps: [{ count: number }] = new GenericRest({ count: 1 }).args;
+const adaptedGenericRestProps: [{ count: number }] = new (__VerterUseComponent(GenericRest, __VerterUseConstructor(GenericRest)))({ count: 1 }).args;
 const adaptedReadonlyGenericRest: readonly [string] = new (__VerterUseComponent(ReadonlyGenericRest, __VerterUseConstructor(ReadonlyGenericRest)))("a").args;
+const directGenericRestWithoutProps: [{}] = new GenericRestWithoutProps({}).args;
+const adaptedGenericRestWithoutProps: [{}] = new (__VerterUseComponent(GenericRestWithoutProps, __VerterUseConstructor(GenericRestWithoutProps)))({}).args;
 const directGenericRestOverload: "precise" = new GenericRestOverloads({ kind: "precise", n: 1 }).tag;
 const adaptedGenericRestOverload: "precise" = new (__VerterUseComponent(GenericRestOverloads, __VerterUseConstructor(GenericRestOverloads)))({ kind: "precise", n: 1 }).tag;
+const directGenericRestOverloadTuple: [{ kind: string }] = new GenericRestOverloads({ kind: "generic" }).args;
+const adaptedGenericRestOverloadTuple: [{ kind: string }] = new (__VerterUseComponent(GenericRestOverloads, __VerterUseConstructor(GenericRestOverloads)))({ kind: "generic" }).args;
