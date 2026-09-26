@@ -228,41 +228,31 @@ fn an_array_method_callback_return_infers_as_the_checker_infers_it() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `xs.filter((x) => typeof x === "string")` is `string[]`: the arrow's
-/// inferred type predicate `x is string` selects the `filter<S extends T>`
-/// overload. Wrong-but-clean: the lane answers `(string | number)[]`.
-///
-/// What the lane gives:
-/// - `aFilter`: the checker answers `string[]`; the lane measured `(string |
-///   number)[]`.
+/// `xs.filter((x) => typeof x === "string")` is `string[]`: the arrow is
+/// typed under the first overload's contextual signature, its inferred type
+/// predicate `x is string` infers `S` of `filter<S extends T>`, and that
+/// overload applies; a guard callback with an authored predicate selects it
+/// too.
 #[test]
-#[ignore = "filter resolves its guard overload with a callback whose type predicate is inferred"]
-fn wrong_clean_filter_takes_the_callbacks_inferred_type_predicate() {
+fn filter_takes_the_callbacks_type_predicate() {
     let matrix = Matrix::new(ARRAYS).lib(GLOBALS_LIB);
-    let failures = matrix.returns(&[("aFilter", "string[]")]);
+    let failures = matrix.returns(&[("aFilter", "string[]"), ("aFilterGuard", "string[]")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// An explicitly annotated guard callback selects `filter<S extends T>`
-/// (`string[]`) and makes `every` a `this is S[]` predicate that narrows the
+/// A guard callback makes `every` a `this is S[]` predicate that narrows the
 /// receiver (`number[]`); a `filter`/`map`/`join` chain is `string`.
 ///
 /// What the lane gives:
-/// - `aFilterGuard`: the checker answers `string[]`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnrepresentableCallee.
 /// - `aEvery`: the checker answers `number[]`; the lane measured `(string |
 ///   number)[]` degraded by FlowGap(GuardNarrowing).
 /// - `aChain`: the checker answers `string`; the lane measured `<opaque
 ///   UnmodeledPosition>` degraded by UnmodeledPosition.
 #[test]
-#[ignore = "a type-guard callback resolves filter / every to their generic overloads"]
-fn a_guard_callback_resolves_the_generic_overload() {
+#[ignore = "a type-guard callback narrows every's receiver, and a filter chain reads through"]
+fn a_guard_callback_narrows_every_and_a_filter_chain_reads_through() {
     let matrix = Matrix::new(ARRAYS).lib(GLOBALS_LIB);
-    let failures = matrix.returns(&[
-        ("aFilterGuard", "string[]"),
-        ("aEvery", "number[]"),
-        ("aChain", "string"),
-    ]);
+    let failures = matrix.returns(&[("aEvery", "number[]"), ("aChain", "string")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

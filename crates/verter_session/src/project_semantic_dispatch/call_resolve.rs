@@ -1294,16 +1294,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         if failure == ResolveCallFailure::Budget {
                             self.abandon_call_sessions_since(session_watermark);
                         }
-                        // Each of several candidates would type a context-sensitive
-                        // argument under its own contextual type.
-                        let failure = match failure {
-                            ResolveCallFailure::ContextSensitiveInference { .. }
-                                if visible.len() > 1 =>
-                            {
-                                ResolveCallFailure::ContextSensitiveInference { contextual: None }
-                            }
-                            failure => failure,
-                        };
+                        // The first candidate that asks types a context-sensitive
+                        // argument: the checker assigns a function's contextual
+                        // parameter types once, under the first candidate that
+                        // reaches it, and later candidates read them.
                         return CandidateVerdict::Degraded(failure);
                     }
                 }
@@ -1426,6 +1420,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         graph.intern_node(data)
     }
 
+    /// Whether the result of `target`'s call signatures — its return, or
+    /// the type its predicate names, the position the checker infers a
+    /// guard's type parameter from (`value is S`) — mentions one of
+    /// `params`.
     fn contextual_return_mentions(
         &self,
         target: SemanticNodeId,
@@ -1434,13 +1432,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match self.shared_signature_nodes(target, SignatureKind::Call) {
             super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
                 nodes.iter().any(|node| {
-                    let return_type = match self.graph().node_data(*node).as_deref() {
-                        Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
+                    let (return_type, predicate) = match self.graph().node_data(*node).as_deref() {
+                        Some(SemanticNodeData::Signature {
+                            return_type,
+                            predicate,
+                            ..
+                        }) => (*return_type, predicate.and_then(|predicate| predicate.ty)),
                         _ => return false,
                     };
-                    params
-                        .iter()
-                        .any(|param| self.mentions_node(return_type, *param))
+                    params.iter().any(|param| {
+                        self.mentions_node(return_type, *param)
+                            || predicate.is_some_and(|target| self.mentions_node(target, *param))
+                    })
                 })
             }
             super::signature_discovery::SharedSignatureNodes::Incomplete(_) => true,
