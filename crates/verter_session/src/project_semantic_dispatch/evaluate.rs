@@ -1048,6 +1048,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 n = named;
             }
         }
+        // The declaration-keeping mode prints an application's arguments as
+        // the checker prints them.
+        if !resolve_declaration_refs && !completeness.is_partial() {
+            n = self.application_over_printed_arguments(n, context);
+        }
         match completeness {
             ResultCompleteness::Complete => StructuralFactDemandOutcome::Complete(n),
             ResultCompleteness::Partial(reasons) => {
@@ -1393,6 +1398,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => false,
         }
+    }
+
+    /// The application `application` with each argument read as the checker
+    /// prints it ([`Self::resolve_structural_fact_demand`] keeping
+    /// declaration names): the checker instantiates an application's
+    /// arguments as types, resolving the operators they write
+    /// (`Promise<Awaited<T>>` at `T = string` prints `Promise<string>`). An
+    /// argument that does not settle stays as written.
+    fn application_over_printed_arguments(
+        &self,
+        application: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let (base, args) = match self.graph().node_data(application).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                (base.clone(), Arc::clone(args))
+            }
+            _ => return application,
+        };
+        let printed: Vec<SemanticNodeId> = args
+            .iter()
+            .map(
+                |&arg| match self.resolve_structural_fact_demand(arg, context, true, false) {
+                    StructuralFactDemandOutcome::Complete(node) => node,
+                    _ => arg,
+                },
+            )
+            .collect();
+        if printed.as_slice() == args.as_ref() {
+            return application;
+        }
+        self.graph().intern_preserving_scope(
+            application,
+            SemanticNodeData::InstantiationRef {
+                base,
+                args: Arc::from(printed.into_boxed_slice()),
+            },
+        )
     }
 
     /// The application of `identity` the checker prints for `carrier`: its

@@ -461,17 +461,21 @@ fn a_member_of_a_library_generic_instance_reads_in_type_position() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `Promise.resolve("x")` is `Promise<string>`: `Awaited<string>` is `string`.
-/// Wrong-but-clean (unreduced): the lane keeps `Promise<Awaited<string>>`.
-///
-/// What the lane gives:
-/// - `pResolve`: the checker answers `Promise<string>`; the lane measured
-///   `Promise<Awaited<string>>`.
+/// `Promise.resolve("x")` is `Promise<string>`: an application's arguments
+/// print as the types they resolve to, and `Awaited<string>` is `string`
+/// (`Promise<Awaited<string>>` prints `Promise<string>`, `Map<Awaited<Promise<1>>,
+/// keyof { a: 1; b: 2 }>` prints `Map<1, "a" | "b">`).
 #[test]
-#[ignore = "Promise.resolve(value) resolves Awaited<T> for a non-thenable argument"]
-fn wrong_clean_unreduced_promise_resolve_awaits_its_argument() {
+fn promise_resolve_awaits_its_argument() {
     let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
-    let failures = matrix.returns(&[("pResolve", "Promise<string>")]);
+    let mut failures = matrix.returns(&[("pResolve", "Promise<string>")]);
+    failures.extend(matrix.types(&[
+        ("Promise<Awaited<string>>", "Promise<string>"),
+        (
+            "Map<Awaited<Promise<1>>, keyof { a: 1; b: 2 }>",
+            "Map<1, \"a\" | \"b\">",
+        ),
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
