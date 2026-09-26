@@ -416,6 +416,19 @@ Recorded plainly so no reader mistakes absence for a pass:
   with the recursion restored). The declaration-lowering worker's deepest
   stack there is its re-parse of the file (4.0 MiB at 2,000).
 
+* **A call's arguments lower once per enclosing call.** A call nested
+  as an argument (`g(g(…g(1)…))`) lowers again from the enclosing call's
+  frame-lowered arguments (`Lowerer::lower_call_arguments`), and each
+  such lowering recorded its own arguments again
+  (`Lowerer::record_call_arguments`), so the work doubled per level:
+  383, 6,143 and 98,303 expression lowerings at 8, 12 and 16 levels, and
+  256 levels never finished. A call whose arguments are already recorded
+  keeps them; the lowerings grow with the square of the depth
+  (`flow_slice_content_tests.rs` →
+  `nested_calls_lower_their_arguments_once_per_enclosing_call`, the second
+  difference over 8/12/16 equal to that over 12/16/20; it fails with the
+  re-recording restored), and 256 nested calls lower in 0.5 s optimized.
+
 * **A pair of literal types relates without a query.** Two literal types
   relate, under every relation kind, exactly when they are one value, so
   the relation authority decides such a pair before its reentry intercept,

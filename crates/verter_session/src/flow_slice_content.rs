@@ -5464,34 +5464,46 @@ pub(crate) mod capture_lookup_probe {
     }
 }
 
-/// Counts the tests one slice lowering classifies as guards
-/// ([`Lowerer::classify_guard`]) into the counter its scope installs on
-/// the lowering thread; test-only.
+/// Counts one slice lowering's work into the counters its scope installs
+/// on the lowering thread: the tests it classifies as guards
+/// ([`Lowerer::classify_guard`]) and the expressions it lowers
+/// ([`Lowerer::lower_expr`]); test-only.
 #[cfg(test)]
-pub(crate) mod guard_classification_probe {
+pub(crate) mod lowering_probe {
     use std::cell::RefCell;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
-    thread_local! {
-        static ACTIVE: RefCell<Option<Arc<AtomicUsize>>> = const { RefCell::new(None) };
+    #[derive(Debug, Default)]
+    pub(crate) struct LoweringWork {
+        pub(crate) guard_classifications: AtomicUsize,
+        pub(crate) expressions: AtomicUsize,
     }
-    pub(crate) struct Scope(Option<Arc<AtomicUsize>>);
+    thread_local! {
+        static ACTIVE: RefCell<Option<Arc<LoweringWork>>> = const { RefCell::new(None) };
+    }
+    pub(crate) struct Scope(Option<Arc<LoweringWork>>);
     impl Drop for Scope {
         fn drop(&mut self) {
             ACTIVE.with(|active| *active.borrow_mut() = self.0.take());
         }
     }
-    pub(crate) fn enter(counter: Arc<AtomicUsize>) -> Scope {
-        Scope(ACTIVE.with(|active| active.replace(Some(counter))))
+    pub(crate) fn enter(work: Arc<LoweringWork>) -> Scope {
+        Scope(ACTIVE.with(|active| active.replace(Some(work))))
     }
-    pub(crate) fn classify() {
+    fn record(counter: fn(&LoweringWork) -> &AtomicUsize) {
         ACTIVE.with(|active| {
-            if let Some(counter) = active.borrow().as_ref() {
-                counter.fetch_add(1, Ordering::Relaxed);
+            if let Some(work) = active.borrow().as_ref() {
+                counter(work).fetch_add(1, Ordering::Relaxed);
             }
         });
+    }
+    pub(crate) fn classify() {
+        record(|work| &work.guard_classifications);
+    }
+    pub(crate) fn expression() {
+        record(|work| &work.expressions);
     }
 }
 
@@ -9611,7 +9623,7 @@ impl<'a> Lowerer<'a> {
     /// WITHOUT degrading the enclosing statement.
     fn classify_guard(&mut self, test: &Expression<'_>) -> GuardDisposition {
         #[cfg(test)]
-        guard_classification_probe::classify();
+        lowering_probe::classify();
         // The whole test rides the same reference-transparent wrappers a
         // leaf reference does — parentheses and the postfix non-null
         // assertion ONLY: `(typeof x === "string")!` still establishes
@@ -13824,6 +13836,8 @@ impl<'a> Lowerer<'a> {
         // each level is re-entered from this loop, not a native level each.
         let mut expr = expr;
         loop {
+            #[cfg(test)]
+            lowering_probe::expression();
             let mut transparent = None;
             let value = self.lower_expr_level(expr, mode, &mut transparent);
             match transparent {
@@ -15174,6 +15188,13 @@ impl<'a> Lowerer<'a> {
             .iter()
             .any(|argument| argument.as_expression().is_none())
         {
+            return;
+        }
+        // A call lowers again as an argument of the call around it (its
+        // frame-lowered arguments, [`Self::lower_call_arguments`]); the
+        // arguments it recorded the first time are the same, and lowering
+        // them again from every enclosing call doubled the work per level.
+        if self.call_arguments.contains_key(&call.span.into()) {
             return;
         }
         let budget_failure = self.budget_failure;

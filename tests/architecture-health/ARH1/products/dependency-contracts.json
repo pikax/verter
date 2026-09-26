@@ -1358,7 +1358,7 @@
       "snapshot": {
         "pubFn": 22,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 14,
+        "pubCrateFn": 15,
         "pubType": 64,
         "pubCrateMod": 2,
         "inlinePubMod": 0,

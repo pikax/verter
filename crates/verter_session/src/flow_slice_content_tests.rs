@@ -338,7 +338,9 @@ fn and_chain_guard_classifications(operands: usize) -> usize {
     let index = memo.function_program_index();
     let entry = entry_of(&index, "lc");
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
-    memo.guard_classification_work.store(0, Ordering::Relaxed);
+    memo.lowering_work
+        .guard_classifications
+        .store(0, Ordering::Relaxed);
     memo.flow_slice_content(
         entry,
         selection,
@@ -349,7 +351,9 @@ fn and_chain_guard_classifications(operands: usize) -> usize {
         },
     )
     .expect("slice content must build for an indexed function");
-    memo.guard_classification_work.load(Ordering::Relaxed)
+    memo.lowering_work
+        .guard_classifications
+        .load(Ordering::Relaxed)
 }
 
 /// Lowering an `&&` chain classifies each operand's guard a bounded number
@@ -367,6 +371,53 @@ fn an_and_chain_classifies_each_operand_a_bounded_number_of_times() {
         classifications[1] - classifications[0],
         classifications[2] - classifications[1],
         "each hundred operands add the same classifications: {classifications:?}"
+    );
+}
+
+/// How many expressions lowering `pc`, returning `depth` nested calls
+/// `g(g(…g(1)…))` of an unresolved `g`, lowers.
+fn nested_call_lowerings(depth: usize) -> usize {
+    use std::sync::atomic::Ordering;
+    let source = format!(
+        "function pc() {{ return {}1{}; }}",
+        "g(".repeat(depth),
+        ")".repeat(depth)
+    );
+    let memo = memo_for(&source);
+    let index = memo.function_program_index();
+    let entry = entry_of(&index, "pc");
+    let (selection, skeleton) = selection_for(&memo, entry, &[]);
+    memo.lowering_work.expressions.store(0, Ordering::Relaxed);
+    memo.flow_slice_content(
+        entry,
+        selection,
+        &skeleton,
+        crate::semantic_query::FlowReturnPolicy {
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
+            ..crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default())
+        },
+    )
+    .expect("slice content must build for an indexed function");
+    memo.lowering_work.expressions.load(Ordering::Relaxed)
+}
+
+/// A call records the arguments it lowers once: a call nested as an
+/// argument lowers again from the enclosing call's frame-lowered
+/// arguments, and recording its arguments again from there lowered every
+/// level twice, doubling the work per level (256 nested calls never
+/// finished; 383, 6,143 and 98,303 lowerings at 8, 12 and 16 levels). The
+/// lowerings now grow with the square of the depth: the second difference
+/// is constant.
+#[test]
+fn nested_calls_lower_their_arguments_once_per_enclosing_call() {
+    let lowerings = [8, 12, 16].map(nested_call_lowerings);
+    assert_eq!(
+        lowerings[2] + lowerings[0] - 2 * lowerings[1],
+        {
+            let wider = [12, 16, 20].map(nested_call_lowerings);
+            wider[2] + wider[0] - 2 * wider[1]
+        },
+        "the lowerings grow with the square of the depth: {lowerings:?}"
     );
 }
 
