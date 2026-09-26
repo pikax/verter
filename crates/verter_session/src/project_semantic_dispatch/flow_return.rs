@@ -1349,13 +1349,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// call it resolves serves its value instead of a hold on that frame: a
     /// module constant initialized by a call reads as the call's result
     /// inside a body too. A call that leaves an obligation pending is
-    /// provisional and must not warm the reading query: a typed miss.
-    pub(crate) fn evaluate_indexed_value_expression_for_type(
+    /// provisional and must not warm the reading query: a typed miss. The
+    /// value carries its freshness ([`Self::evaluate_indexed_value`]).
+    fn evaluate_indexed_value_for_type(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         expression: &verter_type_expr::IndexedValueExpression,
-    ) -> Option<crate::semantic_query::SemanticNodeId> {
+    ) -> Option<IndexedValue> {
         let pending = || {
             self.dispatch_txn
                 .borrow()
@@ -1364,8 +1365,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .pending_len()
         };
         let before = pending();
-        let node =
-            self.evaluate_indexed_value_expression_node_inner(canonical, owner, expression, false);
+        let node = self.evaluate_indexed_value(canonical, owner, expression, false);
         if pending() != before {
             crate::request_context::mark_request_result_partial();
             return None;
@@ -1491,6 +1491,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
         source: &verter_type_expr::facts::SemanticExpressionSource,
         owner: verter_type_expr::TopLevelOwnerId,
     ) -> Option<crate::semantic_query::SemanticNodeId> {
+        self.semantic_expression_source_value(source, owner)
+            .map(|value| value.node)
+    }
+
+    /// Whether an inferred declaration's expression source is a FRESH
+    /// literal — a call whose result is wholly the fresh literal its
+    /// inference kept ([`Self::evaluate_indexed_value`]): the declared type
+    /// a `let` widens and a `const` read hands on fresh (`const m = f(1)`
+    /// over `f<T>(x: T): T` reads as a fresh `1`).
+    pub(crate) fn semantic_expression_source_is_fresh(
+        &self,
+        source: &verter_type_expr::facts::SemanticExpressionSource,
+        owner: verter_type_expr::TopLevelOwnerId,
+    ) -> bool {
+        self.semantic_expression_source_value(source, owner)
+            .is_some_and(|value| value.fresh)
+    }
+
+    fn semantic_expression_source_value(
+        &self,
+        source: &verter_type_expr::facts::SemanticExpressionSource,
+        owner: verter_type_expr::TopLevelOwnerId,
+    ) -> Option<IndexedValue> {
+        let regular = |node: Option<crate::semantic_query::SemanticNodeId>| {
+            node.map(|node| IndexedValue { node, fresh: false })
+        };
         match source {
             verter_type_expr::facts::SemanticExpressionSource::FunctionReturn(source) => {
                 let canonical = match source {
@@ -1502,13 +1528,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     verter_type_expr::facts::FunctionReturnSource::Absent => return None,
                 };
-                match self.execute_function_return_source(source, canonical) {
-                    FunctionReturnNode::Declared(node) => Some(node.node()),
-                    FunctionReturnNode::Flow(result) => Some(result.return_type()),
-                    FunctionReturnNode::DeclaredMiss
-                    | FunctionReturnNode::NoValue(_)
-                    | FunctionReturnNode::Absent => None,
-                }
+                regular(
+                    match self.execute_function_return_source(source, canonical) {
+                        FunctionReturnNode::Declared(node) => Some(node.node()),
+                        FunctionReturnNode::Flow(result) => Some(result.return_type()),
+                        FunctionReturnNode::DeclaredMiss
+                        | FunctionReturnNode::NoValue(_)
+                        | FunctionReturnNode::Absent => None,
+                    },
+                )
             }
             verter_type_expr::facts::SemanticExpressionSource::ProgramExpression(point) => {
                 let serve = self
@@ -1520,13 +1548,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let record = index.expression(point)?;
                 match &record.source {
                     verter_semantic::analysis::function_program::ProgramExpressionSource::FunctionReturn(source) => {
-                        match self.execute_function_return_source(source, point.canonical_id.as_ref()) {
+                        regular(match self.execute_function_return_source(source, point.canonical_id.as_ref()) {
                             FunctionReturnNode::Declared(node) => Some(node.node()),
                             FunctionReturnNode::Flow(result) => Some(result.return_type()),
                             FunctionReturnNode::DeclaredMiss
                             | FunctionReturnNode::NoValue(_)
                             | FunctionReturnNode::Absent => None,
-                        }
+                        })
                     }
                     verter_semantic::analysis::function_program::ProgramExpressionSource::UnsupportedCall => {
                         crate::request_context::mark_request_result_partial();
@@ -1535,7 +1563,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     verter_semantic::analysis::function_program::ProgramExpressionSource::Value
                     | verter_semantic::analysis::function_program::ProgramExpressionSource::SemanticCall { .. } => {
                         let expression = memo.indexed_program_expression_ir(record)?;
-                        self.evaluate_indexed_value_expression_for_type(
+                        self.evaluate_indexed_value_for_type(
                             point.canonical_id.as_ref(),
                             owner,
                             expression.as_ref(),

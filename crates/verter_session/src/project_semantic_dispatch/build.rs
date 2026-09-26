@@ -1413,6 +1413,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ) {
             if let Some(source) = prepared.type_annotation.expression_source.as_ref() {
                 match self.execute_semantic_expression_source(source, effective_owner) {
+                    // A mutable declaration widens the fresh literal its
+                    // initializer call returns (`let m = f(1)` over `f<T>(x:
+                    // T): T` is `number`).
+                    Some(node)
+                        if matches!(
+                            prepared.kind,
+                            verter_semantic::analysis::type_eval::ValueDeclKind::Let
+                                | verter_semantic::analysis::type_eval::ValueDeclKind::Var
+                        ) && self
+                            .semantic_expression_source_is_fresh(source, effective_owner) =>
+                    {
+                        self.widened_literal(node)
+                    }
                     Some(node) => node,
                     None => {
                         composed_partial = true;
@@ -1911,6 +1924,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
         }
         match &prepared.type_annotation.literal_freshness {
+            // A `const` initialized by a call reads as fresh as the call's
+            // result is (`const m = f(1)` over `f<T>(x: T): T`).
+            DeclaredLiteralFreshness::Regular
+                if prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Const =>
+            {
+                prepared
+                    .type_annotation
+                    .expression_source
+                    .as_ref()
+                    .is_some_and(|source| {
+                        self.semantic_expression_source_is_fresh(source, declaring_owner)
+                    })
+            }
             DeclaredLiteralFreshness::Regular
             | DeclaredLiteralFreshness::WideningStaticMembers(_)
             | DeclaredLiteralFreshness::WideningNullish => false,

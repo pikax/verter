@@ -468,11 +468,18 @@ const mTop = f(f(1));
 let mLet = f(f(1));
 const mArr = g(f(1));
 const mDirect = f(1);
+const mN = n(1);
+const mReg = f(one);
+export const mExp = f(1);
 export function wModule() { return mTop; }
 export function wModuleLet() { return mLet; }
 export function wModuleArray() { return mArr; }
 export function wModuleDirect() { return mDirect; }
 export function wModuleArgument() { return f(mTop); }
+export function wModuleConstrained() { return mN; }
+export function wModuleRegular() { return mReg; }
+export function wModuleExported() { return mExp; }
+export function wModuleTypeof() { const x: typeof mExp = mExp; return x; }
 "##;
 
 /// An unconstrained type parameter inferred from a fresh literal argument is
@@ -546,21 +553,22 @@ fn wrong_clean_a_fresh_union_constituent_of_a_nested_call_widens() {
 /// literal declares that fresh literal: a `let` widens it (`let mLet =
 /// f(f(1))` is `number`), and a read of a `const` is a fresh literal source
 /// that the return widens (`return mDirect` over `const mDirect = f(1)` is
-/// `number`, as `f(mTop)` over `const mTop = f(f(1))` is). Measured on
+/// `number`, as `f(mTop)` over `const mTop = f(f(1))` is), while its type
+/// stays the literal (`typeof mExp` is `1`). A constrained parameter or a
+/// regular argument infers a regular literal no read widens. Measured on
 /// TypeScript 7.0.2 under all four settings.
-///
-/// What the lane gives:
-/// - `wModule`, `wModuleLet`, `wModuleDirect`, `wModuleArgument`: the checker
-///   answers `number`; the lane measured `1`.
 #[test]
-#[ignore = "a module declaration initialized by a fresh-literal call declares the fresh literal"]
-fn wrong_clean_a_module_declaration_of_a_fresh_call_result_widens() {
+fn a_module_declaration_of_a_fresh_call_result_widens() {
     let matrix = Matrix::new(LITERAL_INFERENCE);
     let failures = matrix.returns(&[
         ("wModule", "number"),
         ("wModuleLet", "number"),
         ("wModuleDirect", "number"),
         ("wModuleArgument", "number"),
+        ("wModuleConstrained", "1"),
+        ("wModuleRegular", "1"),
+        ("wModuleExported", "number"),
+        ("wModuleTypeof", "1"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
