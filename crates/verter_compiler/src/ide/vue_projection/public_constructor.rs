@@ -64,6 +64,9 @@
 //! already types as a constructor (`defineComponent`); no generated
 //! constructor replaces it.
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArrayExpressionElement, ArrowFunctionExpression, AwaitExpression, BindingPattern,
@@ -703,6 +706,36 @@ fn quote(text: &str) -> String {
     out
 }
 
+/// Script-block parses performed by [`parse_block`] on this thread.
+#[cfg(test)]
+pub(crate) fn script_block_parses() -> u32 {
+    SCRIPT_BLOCK_PARSES.with(Cell::get)
+}
+
+/// Source reparses performed by [`super::props::ScriptPropFacts`] on this thread.
+#[cfg(test)]
+pub(crate) fn script_absorb_parses() -> u32 {
+    SCRIPT_ABSORB_PARSES.with(Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCRIPT_BLOCK_PARSES: Cell<u32> = const { Cell::new(0) };
+    pub(super) static SCRIPT_ABSORB_PARSES: Cell<u32> = const { Cell::new(0) };
+}
+
+/// The public constructor and the script programs it was read from. The
+/// programs borrow `allocator`; caller/setup facts walk them instead of
+/// parsing the same blocks again.
+pub(crate) struct ParsedPublicConstructor<'a> {
+    /// Owned constructor contract.
+    pub contract: VuePublicConstructorContract,
+    /// Parsed normal script, when one was supplied.
+    pub normal_program: Option<&'a Program<'a>>,
+    /// Parsed setup script, when one was supplied.
+    pub setup_program: Option<&'a Program<'a>>,
+}
+
 /// Derive the public constructor contract of one script pair. `generic` is
 /// the authored `generic` attribute value.
 ///
@@ -716,18 +749,27 @@ pub fn project_public_constructor(
     setup: Option<ScriptBlockInput<'_>>,
     generic: Option<&str>,
 ) -> Result<VuePublicConstructorContract, SetupProjectionRefusal> {
+    let allocator = Allocator::default();
+    project_public_constructor_in(&allocator, normal, setup, generic).map(|parsed| parsed.contract)
+}
+
+pub(crate) fn project_public_constructor_in<'a>(
+    allocator: &'a Allocator,
+    normal: Option<ScriptBlockInput<'_>>,
+    setup: Option<ScriptBlockInput<'_>>,
+    generic: Option<&str>,
+) -> Result<ParsedPublicConstructor<'a>, SetupProjectionRefusal> {
     if let (Some(n), Some(s)) = (&normal, &setup) {
         if n.lang != s.lang {
             return Err(SetupProjectionRefusal::ScriptLangConflict);
         }
     }
-    let allocator = Allocator::default();
-    let binder = project_binder(&allocator, generic)?;
+    let binder = project_binder(allocator, generic)?;
     let normal_program = normal
-        .map(|block| parse_block(&allocator, block, false))
+        .map(|block| parse_block(allocator, block, false))
         .transpose()?;
     let setup_program = setup
-        .map(|block| parse_block(&allocator, block, true))
+        .map(|block| parse_block(allocator, block, true))
         .transpose()?;
 
     let mut contract = VuePublicConstructorContract {
@@ -752,7 +794,11 @@ pub fn project_public_constructor(
         expose_argument: None,
     };
     let (Some(program), Some(block)) = (setup_program, setup) else {
-        return Ok(contract);
+        return Ok(ParsedPublicConstructor {
+            contract,
+            normal_program,
+            setup_program,
+        });
     };
     contract.source = ConstructorSource::ScriptSetup;
 
@@ -821,7 +867,11 @@ pub fn project_public_constructor(
     }
     contract.binder_dependent = dependent;
     contract.instance = instance_projection(&contract.expose, semantic.scoping());
-    Ok(contract)
+    Ok(ParsedPublicConstructor {
+        contract,
+        normal_program,
+        setup_program,
+    })
 }
 
 fn parse_block<'a>(
@@ -831,6 +881,8 @@ fn parse_block<'a>(
 ) -> Result<&'a Program<'a>, SetupProjectionRefusal> {
     let grammar = grammar_of(block.lang)?;
     let content = allocator.alloc_str(block.content);
+    #[cfg(test)]
+    SCRIPT_BLOCK_PARSES.with(|count| count.set(count.get() + 1));
     let parsed = Parser::new(allocator, content, grammar.source_type()).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         return Err(SetupProjectionRefusal::SyntaxErrors { setup });

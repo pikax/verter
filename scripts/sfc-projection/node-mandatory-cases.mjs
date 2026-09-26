@@ -152,6 +152,14 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP19-erasure",
     "STP19-instantiation-alias",
   ]),
+  STP20: Object.freeze([
+    "STP20-default",
+    "STP20-required",
+    "STP20-spread-extra",
+    "STP20-union",
+    "STP20-optional",
+    "STP20-overwritten",
+  ]),
   STS0: Object.freeze([
     "STS0-svelte-inventory",
     "STS0-svelte-abi",
@@ -179,4 +187,5 @@ export const STP16_MANDATORY_CASES = NODE_MANDATORY_CASES.STP16;
 export const STP17_MANDATORY_CASES = NODE_MANDATORY_CASES.STP17;
 export const STP18_MANDATORY_CASES = NODE_MANDATORY_CASES.STP18;
 export const STP19_MANDATORY_CASES = NODE_MANDATORY_CASES.STP19;
+export const STP20_MANDATORY_CASES = NODE_MANDATORY_CASES.STP20;
 export const STS0_MANDATORY_CASES = NODE_MANDATORY_CASES.STS0;

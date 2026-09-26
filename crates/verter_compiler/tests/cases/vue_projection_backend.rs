@@ -1469,3 +1469,38 @@ fn advanced_generic_uses_reads_admitted_carrier_blocks() {
         SetupProjectionRefusal::MissingParse
     );
 }
+
+/// `VueProjectionBackend::props` is the qualification consumer of the
+/// caller/setup contract. The STP20 positive probe pins its witness.
+#[test]
+fn props_reads_the_caller_contract_from_the_admitted_carrier() {
+    use verter_compiler::framework_common::SetupProjectionRefusal;
+
+    const SFC: &str = concat!(
+        "<script setup lang=\"ts\">\n",
+        "const { title = \"fallback\" } = defineProps<{ title: string; count: number; flag?: boolean }>();\n",
+        "</script>\n",
+    );
+    let artifact = registered_artifact("file:///stp20-defaults.vue", SFC);
+    let (_projection, contract) = VueProjectionBackend
+        .props(SFC, &artifact, "file:///stp20-defaults.vue")
+        .expect("projects");
+    assert_eq!(contract.caller_optional_keys, ["title", "flag"]);
+    assert_eq!(contract.setup_defined_keys, ["title", "flag"]);
+    assert_eq!(contract.caller_required_keys, ["count"]);
+    assert_eq!(contract.reactive_default_keys, ["title"]);
+    assert_eq!(contract.boolean_cast_keys, ["flag"]);
+    let probe = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/sfc-projection/STP20/probes/positive.ts"
+    ));
+    assert!(probe
+        .replace("\r\n", "\n")
+        .contains(&contract.witness_types()));
+    assert_eq!(
+        VueProjectionBackend
+            .props("<script></script>", &artifact, "file:///stp20-defaults.vue")
+            .unwrap_err(),
+        SetupProjectionRefusal::MissingParse
+    );
+}

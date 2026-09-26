@@ -368,7 +368,8 @@ fn generic_use_availability_keeps_unavailable_uses_unwitnessed() {
     );
     let rendered = projection.render("");
     assert_eq!(rendered.matches(" = new (").count(), 1);
-    assert_eq!(rendered.matches(WITNESS_PREFIX).count(), 1);
+    // The construction names the witness, and its direct-key check names it again.
+    assert_eq!(rendered.matches(WITNESS_PREFIX).count(), 2);
 }
 
 /// Every authored expression a witness carries — including the type
