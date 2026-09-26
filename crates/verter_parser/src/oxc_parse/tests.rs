@@ -308,3 +308,66 @@ export default defineComponent({
 "#;
     assert!(ts(source) < 40, "{}", ts(source));
 }
+
+/// oxc alone, on an ordinary 8 MiB thread with no containment: 10,000 nested
+/// type arguments.
+fn oxc_parses_10000_nested_type_arguments_on_an_8_mib_thread() -> bool {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let source = format!("type D = {}1{};", "Box<".repeat(10_000), ">".repeat(10_000));
+            let allocator = Allocator::default();
+            let parsed = oxc_parser::Parser::new(&allocator, &source, SourceType::ts()).parse();
+            !parsed.panicked && parsed.errors.is_empty()
+        })
+        .expect("spawn the parsing thread")
+        .join()
+        .expect("the parse returns")
+}
+
+/// The environment variable that makes this test binary run the oxc-only
+/// parse itself ([`oxc_still_overflows_on_10000_nested_type_arguments`]).
+const OXC_CANARY_CHILD: &str = "VERTER_OXC_DEEP_PARSE_CANARY_CHILD";
+
+/// Canary: oxc's parser returns an AST for 10,000 nested type arguments on
+/// an ordinary 8 MiB thread. It does not today — its recursive descent
+/// overflows the thread and aborts the process
+/// (`docs/evidence/signature-kernel/oxc-deep-parse.md`), which is why every
+/// parse goes through [`Parser`]'s stack containment. When it passes, oxc
+/// parses this depth by itself and the containment can be revisited.
+#[test]
+#[ignore = "oxc parser recursion limit; passes once oxc parses this depth"]
+fn oxc_parses_deep_nesting_on_an_ordinary_stack() {
+    assert!(oxc_parses_10000_nested_type_arguments_on_an_8_mib_thread());
+}
+
+/// The same oxc-only parse, run in a child process so its abort is
+/// observed rather than fatal: it still overflows. The day this fails
+/// because the child succeeded, un-ignore
+/// [`oxc_parses_deep_nesting_on_an_ordinary_stack`] and revisit the
+/// containment.
+#[test]
+fn oxc_still_overflows_on_10000_nested_type_arguments() {
+    if std::env::var_os(OXC_CANARY_CHILD).is_some() {
+        oxc_parses_10000_nested_type_arguments_on_an_8_mib_thread();
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            "oxc_parse::tests::oxc_still_overflows_on_10000_nested_type_arguments",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(OXC_CANARY_CHILD, "1")
+        .output()
+        .expect("run the oxc-only parse in a child process");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && stderr.contains("has overflowed its stack"),
+        "oxc now parses 10,000 nested type arguments on an 8 MiB thread \
+         (status {:?}); un-ignore `oxc_parses_deep_nesting_on_an_ordinary_stack` \
+         and revisit the parse containment",
+        output.status
+    );
+}
