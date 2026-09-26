@@ -6782,6 +6782,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// primitive/identity/top/bottom cases inline BEFORE any recursive
     /// structural work. Non-trivial pairs return `Unknown` and fall
     /// through to the structural reducer.
+    /// Whether a `null` / `undefined` source is an inference candidate for
+    /// `target`: a type parameter or `infer` the active session binds.
+    fn null_deposits_into(&self, target: &SemanticNodeData) -> bool {
+        self.relation_session_active()
+            && matches!(
+                target,
+                SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. }
+            )
+    }
+
     pub(super) fn shallow_relation_check(
         &self,
         source: SemanticNodeId,
@@ -6843,9 +6853,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Strict-family behavioral branch (RI-10), mirrored from the
             // structural reducer's arm order: with `strictNullChecks` OFF,
             // `null` / `undefined` are assignable to every remaining target
-            // (`never` already rejected above).
-            (SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined), _)
-                if !self
+            // (`never` already rejected above) — a type parameter an inference
+            // binds still takes them as its candidate.
+            (
+                SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined),
+                target,
+            ) if !self.null_deposits_into(target)
+                && !self
                     .dispatch_txn
                     .borrow()
                     .relation
@@ -8305,6 +8319,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .strict
                 .unwrap_or(StrictFamilyConfig::TS_STRICT);
             if !strict.strict_null_checks
+                && !self.null_deposits_into(&target_data)
                 && matches!(
                     &*source_data,
                     SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)

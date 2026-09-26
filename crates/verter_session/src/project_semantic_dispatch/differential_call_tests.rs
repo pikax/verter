@@ -154,6 +154,10 @@ export function gPartial() { return partialInfer("s"); }
 export function gIdUnionArg(v: string | number) { return id(v); }
 export function gIdNull() { return id(null); }
 export function gIdUndefined() { return id(undefined); }
+declare function nbox<T>(x: T): { v: T };
+export function gBoxNull() { return nbox(null); }
+declare function ntwo<T>(x: T, y: T): T;
+export function gTwoNull() { return ntwo(null, 1); }
 "##;
 
 /// A generic call infers its type arguments from its arguments (widening
@@ -251,23 +255,17 @@ fn wrong_clean_a_callback_return_literal_widens_in_inference() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Without `strictNullChecks` `id(null)` and `id(undefined)` infer the widened
-/// `any`. Wrong-but-clean: the lane answers `unknown`.
-///
-/// What the lane gives:
-/// - `gIdNull`: the checker answers `null` (strict), `any` (strictNullChecks
-///   off), `null` (noImplicitAny off), `any` (both off); the lane measured
-///   `unknown` (strictNullChecks off, both off).
-/// - `gIdUndefined`: the checker answers `undefined` (strict), `any`
-///   (strictNullChecks off), `undefined` (noImplicitAny off), `any` (both off);
-///   the lane measured `unknown` (strictNullChecks off, both off).
+/// Without `strictNullChecks` an inference of `null` or `undefined` widens to
+/// `any` (`getWidenedType` over the covariant inference): `id(null)` and
+/// `id(undefined)` are `any`, and `nbox(null)` is `{ v: any; }`.
 #[test]
-#[ignore = "a null or undefined argument widens to any without strictNullChecks"]
-fn wrong_clean_a_nullish_argument_infers_any_without_strict_null_checks() {
+fn a_nullish_argument_infers_as_the_checker_widens_it() {
     let matrix = Matrix::new(GENERIC_INFERENCE);
     let failures = matrix.nullness(&[
         (Read::Return("gIdNull"), "null", "any"),
         (Read::Return("gIdUndefined"), "undefined", "any"),
+        (Read::Return("gBoxNull"), "{ v: null; }", "{ v: any; }"),
+        (Read::Return("gTwoNull"), "1 | null", "number"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

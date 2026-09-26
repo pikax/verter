@@ -2010,11 +2010,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         for (position, input) in inputs.into_iter().enumerate() {
             let bound = if !input.candidates.is_empty() {
                 match input.variance {
-                    VariancePhase::Covariant => self
-                        .call_common_supertype(&input.candidates)
-                        .unwrap_or_else(|| {
-                            self.relation_combine_candidates(&input.candidates, input.variance)
-                        }),
+                    VariancePhase::Covariant => self.widened_covariant_inference(
+                        self.call_common_supertype(&input.candidates)
+                            .unwrap_or_else(|| {
+                                self.relation_combine_candidates(&input.candidates, input.variance)
+                            }),
+                    ),
                     _ => self.relation_combine_candidates(&input.candidates, input.variance),
                 }
             } else {
@@ -3274,6 +3275,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
             .collect();
         any_widened.then(|| CanonicalTypeSubstitution::new(widened_bindings))
+    }
+
+    /// A covariant inference as the checker widens it (`getWidenedType` in
+    /// `getCovariantInference`): without `strictNullChecks` `null` and
+    /// `undefined` widen to `any`, so `id(null)` is `any`.
+    fn widened_covariant_inference(&self, bound: SemanticNodeId) -> SemanticNodeId {
+        let graph = self.graph();
+        if !self.relation_strict_config().strict_null_checks
+            && matches!(
+                graph.node_data(bound).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        {
+            return graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        }
+        bound
     }
 
     /// A call's covariant inference from several candidates (the checker's
