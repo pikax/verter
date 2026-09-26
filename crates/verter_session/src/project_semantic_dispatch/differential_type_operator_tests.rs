@@ -266,6 +266,7 @@ type NotAny<T> = 0 extends 1 & T ? "any" : "not";
 type Eq<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 type Rev<T extends unknown[]> = T extends [infer H, ...infer R] ? [...Rev<R>, H] : [];
 type InferExt<T> = T extends [infer X extends string] ? X : "nope";
+type Thenish<T> = T extends object & { then(onfulfilled: infer F, ...args: infer _): any } ? F : "none";
 "##;
 
 /// A conditional distributes over a naked union argument (and `never` to
@@ -294,6 +295,23 @@ fn conditional_types_resolve_as_the_checker_resolves_them() {
         ("NotAny<any>", "\"any\""),
         ("NotAny<string>", "\"not\""),
         ("InferExt<['s']>", "\"s\""),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A check that does not relate to an `infer` pattern even with every
+/// `infer` read as `any` takes the false branch, whatever the pattern binds
+/// and however deep: `Unpromise<string>` is `string`, `Thenish<{ a: 1 }>`
+/// (a `then` method over `object & …`) is `"none"`.
+#[test]
+fn a_check_no_inference_relates_takes_the_false_branch() {
+    let matrix = Matrix::new(CONDITIONALS);
+    let failures = matrix.types(&[
+        ("Unpromise<string>", "string"),
+        ("Unpromise<{ a: 1 }>", "{ a: 1; }"),
+        ("Unpromise<number[]>", "number[]"),
+        ("Thenish<string>", "\"none\""),
+        ("Thenish<{ a: 1 }>", "\"none\""),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

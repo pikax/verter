@@ -443,6 +443,15 @@ pub(super) enum ConditionalInferRoute {
     OutOfScope,
 }
 
+/// What [`ProjectSemanticDispatch::infer_scan`] finds under a node: its
+/// `infer` declarations, and whether a nested conditional or mapped type
+/// scopes binders of its own there.
+#[derive(Debug, Default)]
+struct InferScan {
+    infers: Vec<SemanticNodeId>,
+    binder_scope: bool,
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Collect the observed self-roots of a set of input `SemanticNodeId`s.
     ///
@@ -13455,7 +13464,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let route = self.conditional_infer_route(extends);
         if matches!(route, ConditionalInferRoute::OutOfScope) {
-            return (ConditionalBranchSelection::Deferred, None);
+            return (self.permissive_conditional_selection(check, extends), None);
         }
         if matches!(route, ConditionalInferRoute::Bare) {
             // `check extends infer X` binds `X := check` through the
@@ -13498,6 +13507,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (ConditionalBranchSelection::False, None)
             }
             _ => (ConditionalBranchSelection::Deferred, None),
+        }
+    }
+
+    /// The selection over an `extends` pattern whose `infer` declarations
+    /// sit deeper than the relation binds: the false branch when the check
+    /// does not relate to the pattern even with every `infer` read as `any`
+    /// — the checker's definitely-false test over the permissive
+    /// instantiation (`getConditionalType`), which no inference can turn
+    /// true (`string extends { then(cb: (v: infer V) => void): void }` is
+    /// false) — and deferred otherwise. A pattern holding a nested
+    /// conditional or mapped type, whose binders scope their own `infer`
+    /// declarations, stays deferred.
+    fn permissive_conditional_selection(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+    ) -> ConditionalBranchSelection {
+        let scan = self.infer_scan(extends, true);
+        if scan.binder_scope || scan.infers.is_empty() {
+            return ConditionalBranchSelection::Deferred;
+        }
+        let any = self
+            .graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        let permissive = scan.infers.iter().fold(extends, |pattern, infer| {
+            self.substitute_semantic_type_param(pattern, *infer, any)
+        });
+        if self.subtree_contains_infer(permissive) {
+            return ConditionalBranchSelection::Deferred;
+        }
+        match self.execute_relate_pair(check, permissive) {
+            super::dispatch_txn::RelationStep::NotAssignable => ConditionalBranchSelection::False,
+            _ => ConditionalBranchSelection::Deferred,
         }
     }
 
@@ -13670,6 +13712,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// direct positions keeps the conditional deferred rather than
     /// leaking an unbound placeholder into the selected branch.
     pub(super) fn subtree_contains_infer(&self, root: SemanticNodeId) -> bool {
+        !self.infer_scan(root, false).infers.is_empty()
+    }
+
+    /// The `infer` declarations in `root`'s structural subtree (the first
+    /// one alone unless `collect_all`), and whether the subtree holds a
+    /// nested conditional or mapped type, whose own binders scope what lies
+    /// under them ([`Self::subtree_contains_infer`]'s walk).
+    fn infer_scan(&self, root: SemanticNodeId, collect_all: bool) -> InferScan {
+        let mut scan = InferScan::default();
         let graph = self.graph();
         let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
         let mut stack: Vec<SemanticNodeId> = vec![root];
@@ -13681,7 +13732,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 continue;
             };
             match data.as_ref() {
-                SemanticNodeData::Infer { .. } => return true,
+                SemanticNodeData::Infer { .. } => {
+                    scan.infers.push(node);
+                    if !collect_all {
+                        return scan;
+                    }
+                }
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");
@@ -13742,6 +13798,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     pending,
                     ..
                 } => {
+                    scan.binder_scope = true;
                     if let Some(pending) = pending {
                         stack.extend(pending.argument_nodes());
                     }
@@ -13773,6 +13830,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Mapped { source, mapper } => {
+                    scan.binder_scope = true;
                     stack.push(*source);
                     stack.push(mapper.key_space);
                     stack.push(mapper.value_expr);
@@ -13783,7 +13841,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => {}
             }
         }
-        false
+        scan
     }
 
     /// Ordered union reduction — the `ReduceUnion` query builder. Routes
