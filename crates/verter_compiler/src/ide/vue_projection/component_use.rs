@@ -23,9 +23,9 @@
 //!
 //! - The construction is `new (USE_COMPONENT(Comp, USE_CONSTRUCTOR(Comp)))({
 //!   ... })`: the [`ForeignComponentContractAdapter`] hands TypeScript the
-//!   component's own contract (every construct overload, a functional
-//!   component's call signature, an Options API component's published
-//!   props) and then an attribute-tolerant signature, so TypeScript still
+//!   component's adapted contract (subject to the adapter's documented
+//!   generic-overload reflection limits) and then an attribute-tolerant
+//!   signature, so TypeScript still
 //!   infers the component's binder at the construction, checks and
 //!   contextually types every declared key, and keeps literal types, while
 //!   a fallthrough attribute is not an excess-key error (excess-key policy

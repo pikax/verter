@@ -2,8 +2,8 @@
 //!
 //! A component use is checked through one construction of the used
 //! component (see [`super::component_use`]). This module owns what that
-//! construction applies and where it is placed, so every legal published
-//! component shape keeps its exact signature relationship:
+//! construction applies and where it is placed. It preserves published
+//! signature relationships within the reflection limits described below:
 //!
 //! - [`ForeignComponentContractAdapter`] — the construction's callee. It
 //!   hands TypeScript the component's own contract first and an
@@ -27,8 +27,8 @@
 //!     A single call signature goes through higher-order inference, so a
 //!     generic functional component keeps its binder; an overload set is
 //!     rebuilt signature by signature, in declaration order, each overload
-//!     taking exactly its declared props, so every overload stays
-//!     selectable. Generated SFC defaults are never made callable.
+//!     taking exactly its declared props, so every overload the walk reads
+//!     stays selectable. Generated SFC defaults are never made callable.
 //!
 //!   Rebuilding walks the signature list from its end, one signature per
 //!   step, with no signature count: each step intersects the signatures
@@ -81,11 +81,11 @@ pub const USE_COMPONENT: &str = "__VerterUseComponent";
 /// signature, an overloaded callable rebuilt signature by signature, and no
 /// construct signature for anything else.
 pub const USE_CONTRACT: &str = "__VerterUseContract";
-/// Every construct signature of a constructor ending in an open-argument
-/// signature, rebuilt in declaration order.
+/// Readable construct signatures of a constructor ending in an open-argument
+/// signature, rebuilt in declaration order; see the module's generic limit.
 pub const USE_CONSTRUCTS: &str = "__VerterUseConstructs";
-/// Every call signature of an overloaded callable, rebuilt in declaration
-/// order as construct signatures.
+/// Readable call signatures of an overloaded callable, rebuilt in declaration
+/// order as construct signatures; see the module's generic limit.
 pub const USE_CALLS: &str = "__VerterUseCalls";
 /// Props of the attribute-tolerant signature: the declared props (the
 /// published `$props`, or no props, behind an open-argument constructor)

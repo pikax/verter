@@ -22,7 +22,7 @@ Changed symbols: `generic_interop::{ForeignComponentContractAdapter, AdvancedGen
 Adapter shape: `new (__VerterUseComponent(Comp, __VerterUseConstructor(Comp)))({ ... })` is the intersection of the component's exact contract and an attribute-tolerant signature, so TypeScript's own overload resolution picks the first signature that accepts the use:
 
 - a typed constructor is passed through whole (every construct overload, every binder: constraints, defaults, `const`, dependent and variadic parameters), with no fixed overload count;
-- a constructor whose last construct signature is open `new (...args: any[])` (the Options API `defineComponent`, or a hand-written catch-all) is rebuilt signature by signature in declaration order (`__VerterUseConstructs`): each open signature takes the `$props` its instance publishes (no props when it publishes none, with the tolerant fallback over no props) instead of accepting anything, and each earlier precise overload stays selectable ahead of it;
+- a constructor whose last construct signature is open `new (...args: any[])` (the Options API `defineComponent`, or a hand-written catch-all) is rebuilt signature by signature in declaration order (`__VerterUseConstructs`): each open signature takes the `$props` its instance publishes (no props when it publishes none, with the tolerant fallback over no props) instead of accepting anything, and each earlier overload the walk reads stays selectable ahead of it. A generic signature stops the walk; the unread overloads and per-use generic inference are the recorded construct limit below;
 - a functional component with one call signature is consumed through it (props parameter, context `slots` / `emit`) by higher-order inference, so a generic functional component keeps its binder; an overloaded functional component is rebuilt signature by signature in declaration order (`__VerterUseCalls`), each rebuilt overload taking exactly its declared props (no attribute index), so an earlier overload never absorbs the prop that selects a later one; generated SFC defaults are never made callable;
 - the rebuild walks the signature list from its end with no signature count; a signature with its own type parameters has no identical non-generic copy, so the walk cannot pass it. The walk then keeps every signature it read (that generic signature, at its constraints, through the last), never the component's own type, so an open catch-all is never reopened;
 - the tolerant fallback (the last signature's props plus an `unknown` attribute index) accepts undeclared fallthrough attributes; it is never part of a rebuilt overload, and an exact overload always wins over it.
@@ -31,7 +31,46 @@ Every use of a parent is placed in one generic function over the parent's author
 
 Deletion population this node: the fixed single-signature construction adapter of the migrated component-use path (the former `__VerterUseConstructor<P, I>(component: abstract new (props: P) => I)` as the sole callee, which kept only the last construct overload and widened Options API components to `any`). The live Vue route keeps its own helpers until atomic activation and is recorded for STP58's retirement: `instantiateComponent` / `componentConstructor` in `crates/verter_compiler/src/ide/script/type_constructs.rs` and `ide/script/comp_emit.rs`, and `instantiateComponent` in `packages/types/src/components/components.ts`.
 
-Known TypeScript limit (ratified by the architect ruling of 2026-09-25, plan revision 4, and relocated to STP19A): TypeScript's type system reads only the last signature of an overload set and cannot copy a generic signature, so in a rebuilt callable set the call overloads declared ahead of the last-declared generic call signature are not enumerable, and a rebuilt generic call overload is constructed at its constraints (its binder is not inferred per use). Reproduced on both pinned engines with the finding's `(kind: "a")`, `<T>(kind: "g")`, `(kind: "z")` set through the production callee: the adapted construction rejects `kind: "a"` with TS2769 while the direct call accepts it, and `$props.value` of the `kind: "g"` use is `string`, not `"v"`; a generic pair `<T>(kind: "list")`, `<T>(kind: "one")` keeps only `one` at `string`. This node records the limit and does not claim the case; its remedy is the checker-backed callable adaptation owned by STP19A (`STP19A-mix`, `STP19A-generic-pair`), which reflects the complete ordered signature set through the TypeScript checker instead of conditional types. A lone generic call signature keeps its binder through higher-order inference; a typed constructor without an open catch-all is passed through whole and keeps every generic overload; a constructor ending in an open catch-all keeps every construct overload it reads and never reopens the catch-all.
+Known callable limit (relocated to STP19A): conditional inference reads only the last signature of an overload set and cannot make an identical copy of a generic signature, so in a rebuilt callable set the call overloads declared ahead of the last-declared generic call signature are not enumerable, and a rebuilt generic call overload is constructed at its constraints (its binder is not inferred per use). With the `(kind: "a")`, `<T>(kind: "g")`, `(kind: "z")` set through the production callee, the adapted construction rejects `kind: "a"` while the direct call accepts it, and `$props.value` of the `kind: "g"` use is `string`, not `"v"`; a generic pair `<T>(kind: "list")`, `<T>(kind: "one")` keeps only `one` at `string`. This node records the limit and does not claim the case; its remedy is the checker-backed callable adaptation owned by STP19A (`STP19A-mix`, `STP19A-generic-pair`), which reflects the complete ordered signature set through the TypeScript checker instead of conditional types.
+
+Known construct limit (relocated to STP19A): rebuilding a constructor ending in an open catch-all has the same two limits. Construct overloads declared ahead of the last-declared generic construct signature are not enumerable, and the rebuilt generic signature is fixed at its constraints rather than inferred per use. STP19A owns both remedies (`STP19A-construct-mix`, `STP19A-construct-generic`) and the no-reopening requirement (`STP19A-construct-no-reopen`), using TCM3A's ordered `Construct` signature reflection and reification through STP45's snapshot binding. This node keeps every signature read and never substitutes the original open constructor. It does not claim the excluded cases as supported.
+
+The following shape reproduces both construct limits when placed after the production adapter declarations. Check each adapted use separately from the direct controls; the expected failures describe the limitation, not acceptance of the feature:
+
+```ts
+declare const Tri: {
+  new (props: { kind: "p"; width: number }): {
+    readonly $props: { kind: "p"; width: number };
+    readonly tag: "p";
+  };
+  new <T extends string>(props: { kind: "g"; value: T }): {
+    readonly $props: { kind: "g"; value: T };
+    readonly tag: "g";
+  };
+  new (...args: any[]): {
+    readonly $props: { kind: "raw"; raw: string };
+    readonly tag: "raw";
+  };
+};
+
+// Direct controls: the declaration preserves both relationships.
+const directPrecise = new Tri({ kind: "p", width: 1 });
+const preciseTag: "p" = directPrecise.tag;
+const directGeneric = new Tri({ kind: "g", value: "v" });
+const literalValue: "v" = directGeneric.$props.value;
+
+// Known limit: the precise overload ahead of the generic one is absent.
+const adaptedPrecise = new (__VerterUseComponent(Tri, __VerterUseConstructor(Tri)))({ kind: "p", width: 1 });
+
+// Known limit: the rebuilt generic parameter is string, not the inferred "v".
+const adaptedGeneric = new (__VerterUseComponent(Tri, __VerterUseConstructor(Tri)))({ kind: "g", value: "v" });
+const lostLiteral: "v" = adaptedGeneric.$props.value;
+
+// Required rejection: adaptation must keep the open catch-all closed.
+const invalidRaw = new (__VerterUseComponent(Tri, __VerterUseConstructor(Tri)))({ kind: "raw", raw: 42 });
+```
+
+A lone generic call signature keeps its binder through higher-order inference; a typed constructor without an open catch-all is passed through whole and keeps every generic overload. Those supported populations are unchanged. The conditional-type enumerators remain only until STP19A replaces and retires them; this record is not a feature waiver.
 
 Not claimed here (owned elsewhere): an overloaded component's undeclared fallthrough attributes are tolerated only by its last signature (excess-key and attribute obligations are STP20's); listener props of a plain generic functional component whose declaration publishes only a context `emit` are not reconstructed from that `emit` (the dependency's declared props are what the adapter reads); event payload overloads (STP22); slot-scope placement of nested uses (STP24); global/async/recursive component resolution (STP32); composition of setup statements into the checking module (STP58).
 
