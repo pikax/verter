@@ -23582,37 +23582,49 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // fresh literal its inference kept: a fresh literal source, as
             // a bare literal is.
             let mut fresh_call = false;
-            let evaluated = match arguments.get(ordinal) {
-                Some(lowered) => match self.eval_expr(lowered) {
-                    Positional::Value(node) => {
-                        fresh_call = self.is_fresh_call_value(lowered, node);
-                        Some(node)
-                    }
-                    Positional::Hold => return Some(Positional::Hold),
-                    Positional::Unmodeled => None,
-                },
-                None => {
-                    let frame_value = match (&binding, frame_arguments.as_deref()) {
-                        (
-                            FlowIndexedArgumentBinding::NonBindingExpression,
-                            Some(frame_arguments),
-                        ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
-                            let value = self.eval_frame_call_argument(&frame_argument.value)?;
-                            const_view = frame_argument
-                                .const_context
-                                .as_ref()
-                                .and_then(|expr| self.eval_frame_call_argument(expr));
-                            Some(value)
-                        }),
-                        _ => None,
-                    };
-                    frame_value.or_else(|| {
-                        let value =
-                            self.eval_indexed_call_argument(&argument.expression, &binding)?;
-                        fresh_call = value.fresh;
-                        Some(value.node)
-                    })
+            // A function value whose parameters are all annotated is typed
+            // with the call's first pass, its body return read under the
+            // parameter's contextual return type.
+            let function_value = match function_arguments.last().and_then(Option::as_ref) {
+                Some(expr) if !argument.context_sensitive => {
+                    self.eval_function_argument_under_parameter(expr, callee, ordinal)
                 }
+                _ => None,
+            };
+            let evaluated = match (function_value, arguments.get(ordinal)) {
+                (Some(node), _) => Some(node),
+                (None, lowered) => match lowered {
+                    Some(lowered) => match self.eval_expr(lowered) {
+                        Positional::Value(node) => {
+                            fresh_call = self.is_fresh_call_value(lowered, node);
+                            Some(node)
+                        }
+                        Positional::Hold => return Some(Positional::Hold),
+                        Positional::Unmodeled => None,
+                    },
+                    None => {
+                        let frame_value = match (&binding, frame_arguments.as_deref()) {
+                            (
+                                FlowIndexedArgumentBinding::NonBindingExpression,
+                                Some(frame_arguments),
+                            ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
+                                let value = self.eval_frame_call_argument(&frame_argument.value)?;
+                                const_view = frame_argument
+                                    .const_context
+                                    .as_ref()
+                                    .and_then(|expr| self.eval_frame_call_argument(expr));
+                                Some(value)
+                            }),
+                            _ => None,
+                        };
+                        frame_value.or_else(|| {
+                            let value =
+                                self.eval_indexed_call_argument(&argument.expression, &binding)?;
+                            fresh_call = value.fresh;
+                            Some(value.node)
+                        })
+                    }
+                },
             };
             let Some(ty) = evaluated else {
                 // An argument this substrate cannot type leaves

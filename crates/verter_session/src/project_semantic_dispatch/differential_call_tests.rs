@@ -256,26 +256,17 @@ fn a_callback_return_infers_as_the_checker_infers_it() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `fnArg(function () { return 42; })` with `fnArg<R>(f: () => R): R` infers
-/// the widened `number` from the function expression's return (TypeScript
-/// 7.0.2, all four settings alike). Wrong-but-clean: the lane answers
-/// `unknown`.
-///
-/// What the lane gives:
-/// - `gFnExpr`: the checker answers `number`; the lane measured `unknown`.
+/// `fnArg(function () { return 42; })` and `fnArg(() => 42)` with `fnArg<R>(f:
+/// () => R): R` infer the widened `number` from the function's return: a
+/// function value whose parameters are all annotated is typed in the call's
+/// first pass, and its lone fresh literal return widens under a contextual
+/// return type that is no literal context for it (TypeScript 7.0.2, all four
+/// settings alike).
 #[test]
-#[ignore = "a function expression argument infers its type parameter from its return"]
-fn wrong_clean_a_function_expression_return_infers_its_type_parameter() {
+fn a_function_value_return_infers_its_type_parameter_widened() {
     let matrix = Matrix::new(GENERIC_INFERENCE);
-    let failures = matrix.returns(&[("gFnExpr", "number")]);
-    assert!(
-        failures.is_empty(),
-        "{}",
-        failures.join(
-            "
-"
-        )
-    );
+    let failures = matrix.returns(&[("gFnExpr", "number"), ("gFnArg", "number")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// `keys(o)` with `keys<T>(o: T): (keyof T)[]` and `o: { a: string; b: number
@@ -290,19 +281,6 @@ fn wrong_clean_a_function_expression_return_infers_its_type_parameter() {
 fn wrong_clean_a_keyof_of_an_inferred_object_prints_its_keys() {
     let matrix = Matrix::new(GENERIC_INFERENCE);
     let failures = matrix.returns(&[("gKeys", "(\"a\" | \"b\")[]")]);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-/// `fnArg(() => 42)` with `fnArg<R>(f: () => R): R` infers the widened
-/// `number`. Wrong-but-clean: the lane answers `42`.
-///
-/// What the lane gives:
-/// - `gFnArg`: the checker answers `number`; the lane measured `42`.
-#[test]
-#[ignore = "a literal returned by a callback widens when inferred for an unconstrained type parameter"]
-fn wrong_clean_a_callback_return_literal_widens_in_inference() {
-    let matrix = Matrix::new(GENERIC_INFERENCE);
-    let failures = matrix.returns(&[("gFnArg", "number")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -503,7 +481,10 @@ export function wModuleArgument() { return f(mTop); }
 /// literal constraint, a `const` type parameter, an `as const` argument and a
 /// regular literal argument infer the REGULAR literal, which no position
 /// widens; a union of fresh literals is not a unit type, so the return keeps
-/// it (`b ? f(f(1)) : f(2)` is `1 | 2`). Measured on TypeScript 7.0.2 under
+/// it (`b ? f(f(1)) : f(2)` is `1 | 2`). A function value's lone fresh literal
+/// return widens unless its parameter's contextual return type is a literal
+/// context (`run(() => f(f(1)))` over `run<R>(cb: () => R): R` is `number`,
+/// `runN(() => f(f(1)))` over `R extends number` is `1`). Measured on TypeScript 7.0.2 under
 /// all four settings.
 #[test]
 fn a_generic_call_keeps_or_widens_a_literal_as_the_checker_infers_it() {
@@ -535,41 +516,27 @@ fn a_generic_call_keeps_or_widens_a_literal_as_the_checker_infers_it() {
         ("wContextual", "1"),
         ("wContextualReturn", "() => 1"),
         ("wImmediate", "number"),
+        ("wCallbackReturn", "number"),
+        ("wCallbackLiteralReturn", "1"),
         ("wModuleArray", "number[]"),
     ]);
     failures.extend(matrix.nullness(&[(Read::Return("wIntoUnion"), "1 | undefined", "number")]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A callback's fresh literal return infers the type parameter it returns
-/// through, widened unless the parameter's constraint is a literal context
-/// (`run(() => f(f(1)))` over `run<R>(cb: () => R): R` is `number`,
-/// `runN(() => f(f(1)))` over `R extends number` is `1`), and a union a call
-/// returns keeps its fresh literal for a mutable binding to widen (`let x =
-/// f(h(1))` over `h<T>(x: T): T | undefined` is `number | undefined`).
-/// Measured on TypeScript 7.0.2 under all four settings.
+/// A union a call returns keeps its fresh literal for a mutable binding to
+/// widen: `let x = f(h(1))` over `h<T>(x: T): T | undefined` is `number |
+/// undefined`. Measured on TypeScript 7.0.2 under all four settings.
 ///
 /// What the lane gives:
-/// - `wCallbackReturn`: the checker answers `number`; the lane measured
-///   `unknown`.
-/// - `wCallbackLiteralReturn`: the checker answers `1`; the lane measured
-///   `number`.
 /// - `wUnionLet`: the checker answers `number | undefined` (`number` without
 ///   `strictNullChecks`); the lane measured `undefined | 1` with
 ///   `strictNullChecks`.
 #[test]
-#[ignore = "a callback's fresh literal return and a call's fresh union constituent widen as the checker widens them"]
-fn wrong_clean_a_fresh_literal_through_a_callback_return_or_a_union_widens() {
+#[ignore = "a call's fresh union constituent widens in a mutable binding"]
+fn wrong_clean_a_fresh_union_constituent_of_a_nested_call_widens() {
     let matrix = Matrix::new(LITERAL_INFERENCE);
-    let mut failures = matrix.returns(&[
-        ("wCallbackReturn", "number"),
-        ("wCallbackLiteralReturn", "1"),
-    ]);
-    failures.extend(matrix.nullness(&[(
-        Read::Return("wUnionLet"),
-        "number | undefined",
-        "number",
-    )]));
+    let failures = matrix.nullness(&[(Read::Return("wUnionLet"), "number | undefined", "number")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
