@@ -139,6 +139,7 @@ export function gFirstTuple() { return first(gTup); }
 export function gFirstRest() { return first(gTupRest); }
 export function gFirstObjects() { return first([{ a: 1 }, { b: "x" }]); }
 export function gFirstReadonly() { return firstRo([1, 2]); }
+export function gFnExpr() { return fnArg(function () { return 42; }); }
 export function gWrap() { return wrap(true); }
 export function gMap(xs: number[]) { return map(xs, (x) => "" + x); }
 export function gMapObj(xs: number[]) { return map(xs, (x) => ({ x })); }
@@ -239,6 +240,28 @@ fn wrong_clean_a_callback_return_infers_its_type_parameter() {
     let matrix = Matrix::new(GENERIC_INFERENCE);
     let failures = matrix.returns(&[("gMap", "string[]"), ("gMapObj", "{ x: number; }[]")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `fnArg(function () { return 42; })` with `fnArg<R>(f: () => R): R` infers
+/// the widened `number` from the function expression's return (TypeScript
+/// 7.0.2, all four settings alike). Wrong-but-clean: the lane answers
+/// `unknown`.
+///
+/// What the lane gives:
+/// - `gFnExpr`: the checker answers `number`; the lane measured `unknown`.
+#[test]
+#[ignore = "a function expression argument infers its type parameter from its return"]
+fn wrong_clean_a_function_expression_return_infers_its_type_parameter() {
+    let matrix = Matrix::new(GENERIC_INFERENCE);
+    let failures = matrix.returns(&[("gFnExpr", "number")]);
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+"
+        )
+    );
 }
 
 /// `keys(o)` with `keys<T>(o: T): (keyof T)[]` and `o: { a: string; b: number
