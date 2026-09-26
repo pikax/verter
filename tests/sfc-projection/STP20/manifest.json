@@ -1,0 +1,31 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP20",
+  "kind": "implementation",
+  "products": ["PropCheckObligation", "CallerAndSetupPropsContract", "SpreadCertaintyPolicy"],
+  "mandatoryCases": ["STP20-default", "STP20-required", "STP20-spread-extra", "STP20-union", "STP20-optional", "STP20-overwritten"],
+  "probes": {
+    "positive": "tests/sfc-projection/STP20/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP20/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP20/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP20/probes/tsconfig.json",
+    "hoverNeedle": "stp20HoverTarget",
+    "definitionNeedle": "stp20DefinitionTarget",
+    "expectedNegativeCode": 2345,
+    "expectedHoverType": "number",
+    "expectedInstanceType": "ChildInstance"
+  },
+  "cases": [
+    {"id": "STP20-default", "disposition": "accept", "twins": ["defaulted-caller-optional-setup-defined"]},
+    {"id": "STP20-required", "disposition": "reject", "twins": ["missing-required-title"]},
+    {"id": "STP20-spread-extra", "disposition": "reject", "twins": ["known-misspelled-spread-key"]},
+    {"id": "STP20-union", "disposition": "accept", "twins": ["matching-discriminated-pair"]},
+    {"id": "STP20-optional", "disposition": "accept", "twins": ["exact-optional-omitted"]},
+    {"id": "STP20-overwritten", "disposition": "reject", "twins": ["overwritten-spread-value-does-not-satisfy-final-prop"]}
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP20 --engine all --require-all --json",
+  "test": "cargo test -p verter_compiler --lib ide::vue_projection::props",
+  "runtimeCorrectness": true,
+  "notes": "Caller default optionality stays separate from setup-defined values. Finite object spreads validate keys and values against the component props; index-signature domains remain open. Keys definitely overwritten by a later property are excluded from the spread check."
+}

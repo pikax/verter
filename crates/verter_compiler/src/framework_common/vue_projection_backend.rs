@@ -38,6 +38,7 @@ use crate::ide::vue_projection::binder_capture::{capture_binder_plan, BinderCapt
 use crate::ide::vue_projection::binding_views::{project_binding_views, BindingViewsProjection};
 use crate::ide::vue_projection::component_use::project_component_uses;
 use crate::ide::vue_projection::options_api::project_options_pair;
+use crate::ide::vue_projection::props::{caller_and_setup_props, project_props};
 
 /// STP13 named products: the acceptance surface of
 /// [`VueProjectionBackend::options_projection`]. Re-exported here (rather
@@ -57,6 +58,12 @@ pub use crate::ide::vue_projection::attribute_operations::{
     ConsumerChannel, Contribution, EffectiveProperty, MergeRule, OpaqueSpread, RuntimeKey,
     RuntimePropertyKeyPlan, RuntimePropertyWrite, SpreadKind, ValidationObligation, VueAttributeOp,
     VueAttributeSequence, WriteValue,
+};
+/// Prop-check products: caller default optionality, setup-resolved defaults,
+/// and certainty-aware spread obligations. The live Vue route remains owned
+/// by atomic activation.
+pub use crate::ide::vue_projection::props::{
+    CallerAndSetupPropsContract, PropCheckObligation, PropsProjection, SpreadCertaintyPolicy,
 };
 
 /// Component-use products: the acceptance surface of
@@ -267,6 +274,28 @@ impl VueProjectionBackend {
         let plan = self.projection_plan(source, artifact, canonical_id);
         let attributes = project_attribute_operations(&plan, parsed, source);
         Ok(project_component_uses(&plan, &attributes))
+    }
+
+    /// Caller prop/default contracts and strict known-key spread obligations
+    /// for the admitted parse. This product is dormant until atomic Vue
+    /// activation switches the live route.
+    pub fn props(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        canonical_id: &str,
+    ) -> Result<(PropsProjection, CallerAndSetupPropsContract), SetupProjectionRefusal> {
+        let parsed = VueCarrierCompiler
+            .parsed_sfc(artifact)
+            .ok_or(SetupProjectionRefusal::MissingParse)?;
+        if artifact.carrier_source().as_ref() != source {
+            return Err(SetupProjectionRefusal::MissingParse);
+        }
+        let plan = self.projection_plan(source, artifact, canonical_id);
+        let attributes = project_attribute_operations(&plan, parsed, source);
+        let (normal, setup, generic) = self.script_blocks(source, artifact)?;
+        let public = project_public_constructor(normal, setup, generic)?;
+        Ok((project_props(&attributes), caller_and_setup_props(&public)))
     }
 
     /// Live template read/write views for the admitted parse: unwrapped

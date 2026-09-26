@@ -24,7 +24,10 @@ declare function log(value: string): void;
 declare const ids: readonly number[];
 declare let total: number;
 
-declare function __VerterUseConstructor<P, I>(component: abstract new (props: P) => I): new (props: P & Record<string, unknown>) => I;
+declare function __VerterUseConstructor<P, I>(component: abstract new (props: P) => I): new (props: P) => I;
+type __VerterUseComponentProps<C> = C extends abstract new (props: infer P) => unknown ? P : never;
+type __VerterUseKnownSpread<S, P, O extends PropertyKey> = string extends keyof S ? S : Exclude<keyof S, keyof P | O> extends never ? Omit<S, O> extends Partial<Omit<P, O>> ? S : never : never;
+declare function __VerterUseSpread<C, S, O extends PropertyKey>(component: C, spread: S & __VerterUseKnownSpread<S, __VerterUseComponentProps<C>, O>, overwritten: readonly O[]): S;
 type __VerterUseProp<I, K extends PropertyKey> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : unknown) : unknown;
 type __VerterUseListener<I, K extends PropertyKey, F extends PropertyKey = K> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : F extends keyof P ? P[F] : (...args: any[]) => unknown) : (...args: any[]) => unknown;
 type __VerterUseSlotProps<I, K extends PropertyKey> = I extends { readonly $slots: infer S } ? (K extends keyof S ? (NonNullable<S[K]> extends (props: infer A, ...rest: any[]) => any ? A : unknown) : unknown) : unknown;

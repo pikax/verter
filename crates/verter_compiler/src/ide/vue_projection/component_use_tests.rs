@@ -386,7 +386,7 @@ fn component_use_collected_listeners_validate_against_the_specialized_contract()
     );
     let rendered = witness.render();
     assert_eq!(rendered.matches("\"onChange\": ").count(), 1);
-    assert!(!rendered.contains('['));
+    assert!(!rendered.contains("\"onChange\": ["));
     assert!(rendered.contains(&format!(
         "const {b}_check0: __VerterUseListener<typeof {b}, \"onChange\"> = (count);\n",
         b = witness.binding
