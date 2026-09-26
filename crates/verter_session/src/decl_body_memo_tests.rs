@@ -782,8 +782,12 @@ declare module "ext" {
 "#;
 
     let allocator = oxc_allocator::Allocator::default();
-    let parsed =
-        oxc_parser::Parser::new(&allocator, ALL_DECL_KINDS, oxc_span::SourceType::ts()).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(
+        &allocator,
+        ALL_DECL_KINDS,
+        oxc_span::SourceType::ts(),
+    )
+    .parse();
     assert!(!parsed.panicked, "fixture must parse");
     let header_index = verter_semantic::analysis::decl_headers::build_decl_header_index(
         &parsed.program,
@@ -963,7 +967,9 @@ fn raw_surfaces_merge_overload_groups_for_the_demanded_name() {
 fn seeded_memo_for(source: &str) -> DeclBodyMemo {
     let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(source);
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     let header_index = Arc::new(
         verter_semantic::analysis::decl_headers::build_decl_header_index(&parsed.program, source),
     );

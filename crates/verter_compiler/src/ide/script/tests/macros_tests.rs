@@ -38,7 +38,9 @@ fn generated_identifier_facts<'name>(
     let (code, _, type_constructs) = gen_tsx_script_full(source);
     let full = format!("{code}\n{type_constructs}");
     let allocator = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&allocator, &full, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, &full, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
         parsed.errors.is_empty(),
         "generated IDE carrier must remain valid TSX: {:?}\n---\n{full}",
@@ -672,7 +674,9 @@ fn no_script_blocks_has_type_constructs() {
     // OXC validation: code + type_constructs must parse as valid TSX
     let full = format!("{}\n{}", code, type_constructs);
     let val_alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&val_alloc, &full, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&val_alloc, &full, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
         parsed.errors.is_empty(),
         "Full TSX must be valid: {:?}\n---\n{}",
@@ -757,7 +761,9 @@ fn no_script_blocks_with_slot_and_style() {
 
     let full = format!("{}\n{}", code, type_constructs);
     let val_alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&val_alloc, &full, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&val_alloc, &full, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
         parsed.errors.is_empty(),
         "Full TSX must be valid: {:?}\n---\n{}",
@@ -873,7 +879,8 @@ fn script_setup_ts_type_assertion_nested() {
     let carrier = transform.build_string();
     let parse_alloc = oxc_allocator::Allocator::new();
     let parsed =
-        oxc_parser::Parser::new(&parse_alloc, &carrier, oxc_span::SourceType::tsx()).parse();
+        verter_parser::oxc_parse::Parser::new(&parse_alloc, &carrier, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
         parsed.errors.is_empty(),
         "nested assertion rewrite must be valid TSX: {:?}\n{carrier}",

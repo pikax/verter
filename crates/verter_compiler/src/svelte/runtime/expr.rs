@@ -34,9 +34,9 @@ use oxc_ast::ast::{
     VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_ast_visit::{walk, Visit};
-use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use rustc_hash::FxHashMap;
+use verter_parser::oxc_parse::Parser;
 
 use super::ir::BindingId;
 
@@ -942,7 +942,7 @@ pub fn parse_script_module<'a>(
 /// yields `None` (the caller fails open or records a diagnostic).
 ///
 /// This mirrors the SINGLE reparse pattern the IDE scanners use
-/// (`oxc_parser::Parser::new(&alloc, text, SourceType::tsx()).parse()`), so the
+/// (`verter_parser::oxc_parse::Parser::new(&alloc, text, SourceType::tsx()).parse()`), so the
 /// runtime analysis flows through the same grammar-correct front-end rather than
 /// a parallel tokenizer.
 pub fn reparse_module<'a>(alloc: &'a Allocator, text: &str) -> Option<Program<'a>> {

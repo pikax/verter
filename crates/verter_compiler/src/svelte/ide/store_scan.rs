@@ -53,9 +53,9 @@ use oxc_ast::ast::{
     VariableDeclarationKind,
 };
 use oxc_ast_visit::{walk, Visit};
-use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::scope::ScopeFlags;
+use verter_parser::oxc_parse::Parser;
 
 /// The Svelte 5 rune names — a `$`-identifier whose base name (after the single
 /// leading `$`) matches one of these is a RUNE, never a store-subscription. The

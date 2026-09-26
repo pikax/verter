@@ -9,9 +9,9 @@
 //! excluded: authored JSDoc remains its type authority.
 
 use oxc_ast::ast::{BindingPattern, Declaration, Function, Statement};
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashMap;
+use verter_parser::oxc_parse::Parser;
 
 use crate::code_transform::CodeTransform;
 use crate::svelte::parser::{

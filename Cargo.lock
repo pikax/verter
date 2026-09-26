@@ -3453,6 +3453,7 @@ dependencies = [
  "verter_language",
  "verter_lsp",
  "verter_macro_dto",
+ "verter_parser",
  "verter_protocol",
  "verter_scheduler",
  "verter_semantic",
@@ -3975,6 +3976,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "verter_compiler",
+ "verter_parser",
  "verter_session",
 ]
 
@@ -4029,6 +4031,7 @@ dependencies = [
  "verter_audit",
  "verter_debug_assert",
  "verter_language",
+ "verter_parser",
  "verter_scheduler",
  "verter_semantic",
  "verter_span",

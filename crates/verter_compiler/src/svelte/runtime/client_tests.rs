@@ -1032,7 +1032,7 @@ fn compound_assign_never_carries_trailing_true() {
 fn parses_as_js(code: &str) -> bool {
     let alloc = Allocator::default();
     let source_type = oxc_span::SourceType::default().with_module(true);
-    let ret = oxc_parser::Parser::new(&alloc, code, source_type).parse();
+    let ret = verter_parser::oxc_parse::Parser::new(&alloc, code, source_type).parse();
     !ret.panicked && ret.errors.is_empty()
 }
 
@@ -1058,7 +1058,7 @@ fn count_declared_binding(code: &str, name: &str) -> usize {
     }
     let alloc = Allocator::default();
     let source_type = oxc_span::SourceType::default().with_module(true);
-    let ret = oxc_parser::Parser::new(&alloc, code, source_type).parse();
+    let ret = verter_parser::oxc_parse::Parser::new(&alloc, code, source_type).parse();
     let mut counter = Counter { name, count: 0 };
     counter.visit_program(&ret.program);
     counter.count

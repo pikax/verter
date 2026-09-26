@@ -50,17 +50,18 @@ fn an_80_deep_nested_generic_application_reads_on_the_default_stack() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A 700-deep nested generic application parses and lowers on the
-/// scheduler's workers: the parser and the syntax-tree clone recurse once
-/// per argument level on the worker that loads the file.
+/// A 500-deep nested generic application, the deepest the parse admits
+/// (`verter_parser::oxc_parse::SYNTAX_NESTING_LIMIT`), parses and lowers on
+/// the scheduler's workers: the parser and the syntax-tree clone recurse
+/// once per argument level on the worker that loads the file.
 ///
 /// Measured on TypeScript 7.0.2 (all four settings): over `D` with `Box`
-/// applied 700 times, `keyof D` is `"v"` and `D extends Box<unknown> ? 1 :
-/// 2` is `1` (the same at 1,500 and 2,100 levels).
+/// applied 500 times, `keyof D` is `"v"` and `D extends Box<unknown> ? 1 :
+/// 2` is `1` (the same at 700, 1,500 and 2,100 levels).
 #[test]
-fn a_700_deep_nested_generic_application_parses_on_a_scheduler_worker() {
+fn a_500_deep_nested_generic_application_parses_on_a_scheduler_worker() {
     let failures = mismatches(
-        &nested_box(700),
+        &nested_box(500),
         &[
             ("keyof D", "\"v\""),
             ("D extends Box<unknown> ? 1 : 2", "1"),
@@ -69,13 +70,13 @@ fn a_700_deep_nested_generic_application_parses_on_a_scheduler_worker() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A chain of 1,000 indexed accesses lowers on the default test stack.
+/// A chain of 500 indexed accesses lowers on the default test stack.
 ///
 /// Measured on TypeScript 7.0.2 (all four settings): over `interface R {
-/// v: R }`, `R['v']…['v']` (1,000 reads) is `R`.
+/// v: R }`, `R['v']…['v']` (500 and 1,000 reads) is `R`.
 #[test]
-fn a_1000_long_indexed_access_chain_lowers_on_the_default_stack() {
-    let reads = format!("R{}", "['v']".repeat(1000));
+fn a_500_long_indexed_access_chain_lowers_on_the_default_stack() {
+    let reads = format!("R{}", "['v']".repeat(500));
     let failures = mismatches(&nested_box(1), &[(reads.as_str(), "R")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

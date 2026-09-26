@@ -16,7 +16,7 @@ use crate::parser::types::RootNodeScript;
 use crate::utils::oxc::vue::{parse_script, ScriptMode, ScriptParseResult};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Program;
-use oxc_parser::Parser;
+use verter_parser::oxc_parse::Parser;
 
 use super::process::source_type_from_lang;
 

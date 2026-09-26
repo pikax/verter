@@ -33,11 +33,11 @@ use oxc_ast::ast::{
     Statement,
 };
 use oxc_ast_visit::{walk, Visit};
-use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder, SymbolFlags};
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::scope::ScopeFlags;
 use rustc_hash::FxHashSet;
+use verter_parser::oxc_parse::Parser;
 
 use crate::cursor::ScriptLanguage;
 use crate::utils::oxc::vue::parse_generic;

@@ -60,11 +60,11 @@ use oxc_ast::ast::{
     TSTypeQueryExprName, TSTypeReference,
 };
 use oxc_ast_visit::{walk, Visit};
-use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeFlags;
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_parser::oxc_parse::Parser;
 
 use super::script_setup::{
     binder_product_from, grammar_of, macro_positions, range, value_bindings,

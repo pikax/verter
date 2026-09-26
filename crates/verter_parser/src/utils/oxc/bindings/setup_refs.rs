@@ -600,8 +600,8 @@ fn collect_statement_binding_names<'a>(stmt: &Statement<'a>, out: &mut Vec<&'a s
 
 #[cfg(test)]
 mod tests {
+    use crate::oxc_parse::Parser;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
 
     use super::*;

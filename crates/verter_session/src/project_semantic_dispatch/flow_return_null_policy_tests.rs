@@ -11597,55 +11597,178 @@ fn and_chain_on_a_small_stack(operands: usize) -> (String, usize) {
         .expect("the chain evaluates")
 }
 
-/// A 2,000-operand `&&` chain lowers and evaluates on a 1 MiB thread: the
-/// slice lowering walks its nested left operands from an explicit spine
-/// and classifies each operand's guard once, so neither its stack nor its
-/// work grows with a native level or a re-classification per operand. The
-/// evaluation's connected work outgrows the demand's budget on this
-/// chain, and the lane answers with that typed refusal; the operands past
-/// that point are not evaluated, so the guards it applies are those of a
-/// 1,000-operand chain.
+/// A 500-operand `&&` chain, the longest the parse admits
+/// (`verter_parser::oxc_parse::SYNTAX_NESTING_LIMIT`), lowers and
+/// evaluates on a 1 MiB thread: the slice lowering walks its nested left
+/// operands from an explicit spine and classifies each operand's guard
+/// once, so neither its stack nor its work grows with a native level or a
+/// re-classification per operand. The evaluation's connected work outgrows
+/// the demand's budget on this chain, and the lane answers with that typed
+/// refusal; the operands past that point are not evaluated, so the guards
+/// it applies are those of a 460-operand chain.
 ///
-/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`,
-/// about one second): `"" | 0 | 1 | false | null | undefined` with
-/// `strictNullChecks`, `0 | 1` without it.
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`):
+/// `"" | 0 | 1 | false | null | undefined` with `strictNullChecks`, `0 | 1`
+/// without it, at 500 and at 2,000 operands.
 #[test]
-fn a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack() {
-    let (answer, guards) = and_chain_on_a_small_stack(2000);
+fn a_500_operand_and_chain_lowers_and_evaluates_on_a_small_stack() {
+    let (answer, guards) = and_chain_on_a_small_stack(500);
     assert_eq!(answer, "<no value: Failure(Budget(WorkBudgetExceeded))>");
-    let (_, shorter_guards) = and_chain_on_a_small_stack(1000);
+    let (_, shorter_guards) = and_chain_on_a_small_stack(460);
     assert_eq!(
         guards, shorter_guards,
         "the evaluation stops where the budget trips"
     );
 }
 
-/// A return nested in 2,000 parentheses lowers on the declaration-lowering
+/// A 10,000-operand chain nests past the limit: the parse refuses the
+/// file with a typed syntax error and an empty program before anything
+/// recurses over it, and the lane answers that the function is missing,
+/// on a 1 MiB thread. TypeScript 7.0.2 answers the checker's type.
+#[test]
+fn a_10000_operand_and_chain_is_refused_before_it_is_parsed() {
+    assert_eq!(
+        and_chain_on_a_small_stack(10_000).0,
+        "<no value: Failure(Missing)>"
+    );
+}
+
+/// A return nested in 500 parentheses lowers on the declaration-lowering
 /// worker: each parenthesis is re-entered from the lowering's loop, not a
-/// native level each (about 15 KiB per level unoptimized, which overflowed
-/// the 8 MiB worker from about 550).
+/// native level each (about 15 KiB per level unoptimized).
 ///
 /// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`):
-/// `number` with and without `strictNullChecks`.
+/// `number` with and without `strictNullChecks`, at 500 and at 2,000
+/// parentheses.
 #[test]
-fn a_return_in_2000_parentheses_lowers_on_the_worker_stack() {
+fn a_return_in_500_parentheses_lowers_on_the_worker_stack() {
     let host = four_policy_host();
-    let path = format!("{STRICT_ROOT}/parens-2000.ts");
-    let source = format!(
-        "export function pf() {{ return {}1{}; }}\n",
-        "(".repeat(2000),
-        ")".repeat(2000)
-    );
-    upsert(&host, &path, &source);
+    let path = format!("{STRICT_ROOT}/parens-500.ts");
+    upsert(&host, &path, &parenthesised_return(500));
     assert_eq!(observe(&host, &path, "pf"), "number");
 }
 
-/// The checker's answer for the 2,000-operand chain above.
+/// `pf`, returning `1` inside `depth` parentheses.
+fn parenthesised_return(depth: usize) -> String {
+    format!(
+        "export function pf() {{ return {}1{}; }}\n",
+        "(".repeat(depth),
+        ")".repeat(depth)
+    )
+}
+
+/// A return nested in 10,000 parentheses is refused before it is parsed,
+/// on a 1 MiB thread; TypeScript 7.0.2 answers `number` (also at 50,000
+/// and 200,000).
+#[test]
+fn a_return_in_10000_parentheses_is_refused_before_it_is_parsed() {
+    let answer = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let host = four_policy_host();
+            let path = format!("{STRICT_ROOT}/parens-10000.ts");
+            upsert(&host, &path, &parenthesised_return(10_000));
+            observe(&host, &path, "pf")
+        })
+        .expect("spawn the evaluating thread")
+        .join()
+        .expect("the refusal answers");
+    assert_eq!(answer, "<no value: Failure(Missing)>");
+}
+
+/// Every way syntax nests, 10,000 levels deep in a returned value or its
+/// annotation, is refused before it is parsed, on a 1 MiB thread: the
+/// parser, the syntax-tree clone and the walks over the tree recurse once
+/// per level, and every one of these forms but the member chain was
+/// measured overflowing the 8 MiB I/O worker at 10,000 before the parse
+/// refused it. TypeScript 7.0.2 answers eighteen of them at 10,000 (with
+/// TS2563 for the conditional chain's function body) and was still running
+/// on the object literal after 15 minutes.
+#[test]
+fn every_form_nested_10000_deep_is_refused_on_a_small_stack() {
+    let levels = 10_000;
+    let wrap =
+        |open: &str, close: &str| format!("{}1{}", open.repeat(levels), close.repeat(levels));
+    let returning =
+        |value: String| format!("export function pf(b: boolean) {{ return {value}; }}\n");
+    let annotated = |ty: String| format!("export function pf(): {ty} {{ return null as any; }}\n");
+    let sources = [
+        ("parentheses", returning(wrap("(", ")"))),
+        ("logical not", returning(format!("{}1", "!".repeat(levels)))),
+        ("negation", returning(format!("{}1", "- ".repeat(levels)))),
+        (
+            "conditional",
+            returning(format!("{}2", "b ? 1 : ".repeat(levels))),
+        ),
+        ("addition", returning(vec!["1"; levels].join(" + "))),
+        ("bitwise or", returning(vec!["1"; levels].join(" | "))),
+        ("array", returning(wrap("[", "]"))),
+        ("object", returning(wrap("{ v: ", " }"))),
+        ("call", returning(wrap("Number(", ")"))),
+        ("arrow", returning(format!("{}1", "() => ".repeat(levels)))),
+        ("template", returning(wrap("`${", "}`"))),
+        (
+            "member",
+            returning(format!("b{}", ".valueOf()".repeat(levels))),
+        ),
+        (
+            "block",
+            format!(
+                "export function pf() {{ {}return 1;{} }}\n",
+                "{ ".repeat(levels),
+                " }".repeat(levels)
+            ),
+        ),
+        (
+            "generic",
+            format!(
+                "interface Box<T> {{ v: T }}\n{}",
+                annotated(wrap("Box<", ">"))
+            ),
+        ),
+        (
+            "keyof",
+            annotated(format!("{}{{ v: 1 }}", "keyof ".repeat(levels))),
+        ),
+        ("tuple", annotated(wrap("[", "]"))),
+        ("object type", annotated(wrap("{ v: ", " }"))),
+        (
+            "function type",
+            annotated(format!("{}1", "() => ".repeat(levels))),
+        ),
+        (
+            "conditional type",
+            annotated(format!("{}4", "1 extends 2 ? 3 : ".repeat(levels))),
+        ),
+    ];
+    let answers = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let host = four_policy_host();
+            sources
+                .iter()
+                .enumerate()
+                .map(|(index, (form, source))| {
+                    let path = format!("{STRICT_ROOT}/deep-{index}.ts");
+                    upsert(&host, &path, source);
+                    (*form, observe(&host, &path, "pf"))
+                })
+                .collect::<Vec<_>>()
+        })
+        .expect("spawn the evaluating thread")
+        .join()
+        .expect("every refusal answers");
+    for (form, answer) in answers {
+        assert_eq!(answer, "<no value: Failure(Missing)>", "{form}");
+    }
+}
+
+/// The checker's answer for the 500-operand chain above.
 #[test]
 #[ignore = "the evaluation's connected work outgrows the demand's work budget past about 420 operands"]
-fn a_2000_operand_and_chain_answers_the_checkers_type() {
+fn a_500_operand_and_chain_answers_the_checkers_type() {
     assert_eq!(
-        and_chain_on_a_small_stack(2000).0,
+        and_chain_on_a_small_stack(500).0,
         "\"\" | 0 | 1 | false | null | undefined"
     );
 }

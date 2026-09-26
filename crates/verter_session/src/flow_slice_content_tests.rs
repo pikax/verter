@@ -448,7 +448,9 @@ fn selected_annotation_descent_inspects_logarithmic_siblings() {
         ));
     }
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, &source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, &source, oxc_span::SourceType::ts())
+            .parse();
     assert!(parsed.errors.is_empty());
     let reads = Cell::new(0);
     let siblings: Vec<_> = parsed

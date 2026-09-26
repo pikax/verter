@@ -3,8 +3,8 @@ use super::decl_dependencies::{
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Statement, TSType};
-use oxc_parser::Parser;
 use oxc_span::SourceType;
+use verter_parser::oxc_parse::Parser;
 use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 fn parse(source: &str) -> oxc_parser::ParserReturn<'_> {

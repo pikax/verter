@@ -6,10 +6,10 @@
 //! The slot content is wrapped as arrow function parameters and parsed:
 //! `{ foo, bar }` → `({ foo, bar })=>{}`
 
+use crate::oxc_parse::Parser;
 use oxc_allocator::{Allocator, StringBuilder};
 use oxc_ast::ast::{Expression, FormalParameters};
 use oxc_diagnostics::OxcDiagnostic;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 

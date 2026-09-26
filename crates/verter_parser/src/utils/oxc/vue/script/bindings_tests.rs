@@ -1,7 +1,7 @@
 use super::*;
+use crate::oxc_parse::Parser;
 use crate::types::BindingType;
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 
 /// @ai-generated — Helper: parse source, extract bindings, return (name, BindingType) pairs.
