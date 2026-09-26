@@ -54,7 +54,7 @@ declare function defineProps<P>(): Readonly<P>;
 type IsAny<X> = 0 extends 1 & X ? true : false;
 type IsExactlyUnknown<X> = IsAny<X> extends true ? false : unknown extends X ? true : false;
 
-type __VerterUseOpenArgs<A> = A extends readonly any[] ? (number extends A["length"] ? (0 extends 1 & A[number] ? true : false) : false) : false;
+type __VerterUseOpenArgs<A> = __VerterUseSame<A, any[]>;
 type __VerterUseSame<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;
 type __VerterUsePeeled<N> = { readonly __verterUsePeeled: N };
 type __VerterUseOrdered<T, Acc> = T extends readonly [infer H, ...infer R] ? __VerterUseOrdered<R, Acc & H> : Acc;
@@ -145,3 +145,18 @@ const __VerterUse_9b18a6441c8960f4 = new (__VerterUseComponent(Mix, __VerterUseC
 
 export type Instance = InstanceType<typeof pickers.RowPicker>;
 export const stp19DefinitionTarget: typeof Picker = Picker;
+
+// A rest whose element is `any` is not Vue's bare `...args: any[]` catch-all
+// when it retains a required prefix. It must keep the constructor whole.
+declare const RestNotOpen: {
+  new <T extends string>(props: { value: T }): { readonly $props: { value: T }; readonly tag: T };
+  new (label: string, ...rest: any[]): { readonly $props: { kind: "rest" }; readonly tag: "rest" };
+};
+type RestNotOpenArgsAreClosed = __VerterUseOpenArgs<[label: string, ...rest: any[]]>;
+const restNotOpenArgsAreClosed: RestNotOpenArgsAreClosed = false;
+const directRestNotOpen: "v" = new RestNotOpen({ value: "v" }).tag;
+const adaptedRestNotOpen: "v" = new (__VerterUseComponent(RestNotOpen, __VerterUseConstructor(RestNotOpen)))({ value: "v" }).tag;
+// @ts-expect-error positional-rest overloads do not accept a props object.
+new RestNotOpen({ kind: "rest" });
+// @ts-expect-error the adapter must not turn a required-prefix rest into props.
+new (__VerterUseComponent(RestNotOpen, __VerterUseConstructor(RestNotOpen)))({ kind: "rest" });

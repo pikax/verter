@@ -29,7 +29,7 @@ import type { Row } from "./aliases";
 
 declare function defineProps<P>(): Readonly<P>;
 
-type __VerterUseOpenArgs<A> = A extends readonly any[] ? (number extends A["length"] ? (0 extends 1 & A[number] ? true : false) : false) : false;
+type __VerterUseOpenArgs<A> = __VerterUseSame<A, any[]>;
 type __VerterUseSame<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;
 type __VerterUsePeeled<N> = { readonly __verterUsePeeled: N };
 type __VerterUseOrdered<T, Acc> = T extends readonly [infer H, ...infer R] ? __VerterUseOrdered<R, Acc & H> : Acc;

@@ -267,6 +267,9 @@ fn foreign_contract_declarations_keep_published_shapes() {
     assert!(contract.contains(&format!(
         "({USE_OPEN_ARGS}<A> extends true ? {USE_CONSTRUCTS}<C, unknown, never, []> : C) : {USE_CALLS}<C, unknown, never, []>;"
     )));
+    assert!(declarations.contains(&format!(
+        "type {USE_OPEN_ARGS}<A> = __VerterUseSame<A, any[]>;"
+    )));
     assert!(declarations.contains(
         "(I extends { readonly $props: infer P } ? new (props: P) => I : new (props: Record<string, never>) => I)"
     ));
@@ -288,6 +291,7 @@ fn foreign_contract_declarations_keep_published_shapes() {
         assert!(!result.is_empty());
         let without_any_probe = result
             .replace("readonly any[]", "")
+            .replace("any[]", "")
             .replace("0 extends 1 & ", "");
         assert!(
             !without_any_probe.contains("any"),
