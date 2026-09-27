@@ -5850,6 +5850,8 @@ fn infer_expression_type_ctx_with_read_root(
         Expression::BinaryExpression(binary) if binary_operator_is_comparison(binary.operator) => {
             Ok(TypeExpr::Primitive(PrimitiveName::Boolean))
         }
+        // `#field in object` is an `in` test: `boolean`.
+        Expression::PrivateInExpression(_) => Ok(TypeExpr::Primitive(PrimitiveName::Boolean)),
         // `!operand`, and `a && b` / `a || b`, over `boolean` operands are
         // `boolean`. Any other operand keeps the unmodeled fallback: the
         // result then depends on the operand's truthiness facts (`!` over an

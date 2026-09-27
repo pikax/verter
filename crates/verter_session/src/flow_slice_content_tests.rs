@@ -3434,10 +3434,10 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
     }
 
     // The private-name BRAND check selects the subject's union arms by
-    // whether the class installed the field — the same selection the
-    // string-key `in` makes, and equally uncarried here. It only exists
-    // inside a class body, so it takes a member entry rather than the
-    // table's top-level function.
+    // whether the class declaring the field installed it: the `instanceof`
+    // selection over that class, which a top-level class resolved by name
+    // carries. It only exists inside a class body, so it takes a member
+    // entry rather than the table's top-level function.
     let memo = memo_for(
         "export {};\n\
          class C {\n\
@@ -3458,8 +3458,18 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
         .expect("the class member slice content must build");
     assert_eq!(
         guard_gap_count(&brand),
-        1,
-        "a private-name brand check takes the typed gap: {brand:?}"
+        0,
+        "a private-name brand check over a top-level class is carried: {brand:?}"
+    );
+    assert!(
+        matches!(
+            brand.body.statements.first(),
+            Some(SliceStatement::If {
+                guard: SliceGuard::Instanceof { ctor, negated: false, .. },
+                ..
+            }) if ctor.as_ref() == "C"
+        ),
+        "a private-name brand check narrows as instanceof of its class: {brand:?}"
     );
 }
 

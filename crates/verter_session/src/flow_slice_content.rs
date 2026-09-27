@@ -10417,10 +10417,26 @@ impl<'a> Lowerer<'a> {
             // class installed the field, exactly as the string-key form
             // does. This vocabulary carries only a string key, so a
             // subject reaching a modeled slot degrades.
+            // The brand's class is the one the private name is declared
+            // in; a top-level class this half resolves by name narrows as
+            // `instanceof` of that class does (`getNarrowedType` with
+            // derivation checked, both edges).
             Expression::PrivateInExpression(private_in) => {
-                match self.narrow_destination_of(&private_in.right) {
-                    NarrowDestination::Absent => GuardDisposition::NoNarrowing,
-                    _ => GuardDisposition::Unexpressible,
+                match (
+                    self.narrow_subject_of(&private_in.right),
+                    self.private_brand_class(private_in),
+                ) {
+                    (Some(subject), Some(class)) => {
+                        GuardDisposition::modeled(SliceGuard::Instanceof {
+                            subject,
+                            ctor: class,
+                            negated: false,
+                        })
+                    }
+                    _ => match self.narrow_destination_of(&private_in.right) {
+                        NarrowDestination::Absent => GuardDisposition::NoNarrowing,
+                        _ => GuardDisposition::Unexpressible,
+                    },
                 }
             }
             other => self.classify_truthiness_guard(other),
@@ -11923,6 +11939,89 @@ impl<'a> Lowerer<'a> {
     /// Every same-file top-level `class` DECLARATION with `name`, in
     /// source order, across the direct, `export class`, and `export
     /// default class` spellings.
+    /// The name of the class a `#field in object` test brands by: the
+    /// same-file top-level class, alone of its name, that encloses the test
+    /// and declares the private name, with no class nested between them
+    /// declaring it again. `None` when the module scope does not own the
+    /// name or no such class is proved.
+    fn private_brand_class(
+        &self,
+        private_in: &oxc_ast::ast::PrivateInExpression<'_>,
+    ) -> Option<Arc<str>> {
+        use oxc_ast::ast::{ClassElement, PropertyKey};
+        if !self.module_scope || self.namespace_owned {
+            return None;
+        }
+        let field = private_in.left.name.as_str();
+        let declares = |class: &oxc_ast::ast::Class<'_>| {
+            class.body.body.iter().any(|element| {
+                let key = match element {
+                    ClassElement::MethodDefinition(method) => &method.key,
+                    ClassElement::PropertyDefinition(property) => &property.key,
+                    ClassElement::AccessorProperty(accessor) => &accessor.key,
+                    _ => return false,
+                };
+                matches!(key, PropertyKey::PrivateIdentifier(name) if name.name.as_str() == field)
+            })
+        };
+        let span = private_in.span;
+        let class = self.program.body.iter().find_map(|statement| {
+            let class = match statement {
+                Statement::ClassDeclaration(class) => &**class,
+                Statement::ExportDeclaration(export) => match &export.declaration {
+                    oxc_ast::ast::Declaration::ClassDeclaration(class) => &**class,
+                    _ => return None,
+                },
+                Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                    oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(class) => &**class,
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            (class.span.start <= span.start && span.end <= class.span.end).then_some(class)
+        })?;
+        let name = class.id.as_ref()?.name.as_str();
+        if !declares(class) || self.same_file_class_declarations(name).len() != 1 {
+            return None;
+        }
+        /// Whether a class nested in the brand class, around the test,
+        /// declares the private name again.
+        struct Redeclared<'s> {
+            field: &'s str,
+            span: oxc_span::Span,
+            outer: oxc_span::Span,
+            found: bool,
+        }
+        impl<'a> Visit<'a> for Redeclared<'_> {
+            fn visit_class(&mut self, class: &oxc_ast::ast::Class<'a>) {
+                if class.span != self.outer
+                    && class.span.start <= self.span.start
+                    && self.span.end <= class.span.end
+                    && class.body.body.iter().any(|element| {
+                        let key = match element {
+                            ClassElement::MethodDefinition(method) => &method.key,
+                            ClassElement::PropertyDefinition(property) => &property.key,
+                            ClassElement::AccessorProperty(accessor) => &accessor.key,
+                            _ => return false,
+                        };
+                        matches!(key, PropertyKey::PrivateIdentifier(name) if name.name.as_str() == self.field)
+                    })
+                {
+                    self.found = true;
+                }
+                walk::walk_class(self, class);
+            }
+        }
+        let mut redeclared = Redeclared {
+            field,
+            span,
+            outer: class.span,
+            found: false,
+        };
+        redeclared.visit_class(class);
+        (!redeclared.found).then(|| Arc::from(name))
+    }
+
     fn same_file_class_declarations(&self, name: &str) -> Vec<&oxc_ast::ast::Class<'_>> {
         self.program
             .body

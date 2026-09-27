@@ -739,3 +739,27 @@ fn a_falsy_boolean_narrows_as_the_checker_narrows_it() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Classes whose private names brand their instances.
+const PRIVATE_BRANDS: &str = r##"
+class PB { #b = 1; static is(x: PB | { z: 1 }) { if (#b in x) return x; throw 0; } static isElse(x: PB | { z: 1 }) { if (#b in x) throw 0; return x; } static isObj(o: object) { return #b in o; } }
+class PS extends PB { s = 1; }
+class PQ { #q = 1; static sub(x: PS | { z: 1 }) { if (#q in x) return x; throw 0; } }
+"##;
+
+/// `#field in x` narrows `x` as `x instanceof` the class declaring the
+/// private name does: an arm of the class family survives the true edge
+/// and leaves the false one, and with no related arm the subject is
+/// intersected with the class. A returned test infers no predicate over
+/// `object` (its false edge excludes nothing), so it is `boolean`.
+#[test]
+fn a_private_name_in_test_narrows_by_its_class() {
+    let matrix = Matrix::new(PRIVATE_BRANDS);
+    let failures = matrix.types(&[
+        ("ReturnType<typeof PB.is>", "PB"),
+        ("ReturnType<typeof PB.isElse>", "{ z: 1; }"),
+        ("ReturnType<typeof PB.isObj>", "boolean"),
+        ("ReturnType<typeof PQ.sub>", "(PS | { z: 1; }) & PQ"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

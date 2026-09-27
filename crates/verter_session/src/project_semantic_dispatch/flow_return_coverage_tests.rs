@@ -2278,25 +2278,14 @@ fn super_method_call_over_generic_base_fails_closed_not_uninstantiated() {
     }
 }
 
-/// CANARY — a `PrivateInExpression` (`#x in o`) in return position is
-/// `boolean`.
+/// A `PrivateInExpression` (`#x in o`) in return position is `boolean`: the
+/// test narrows `o` as `o instanceof LeafPrivIn` would, and over `object`
+/// its false edge excludes nothing, so no predicate is inferred.
 ///
-/// Oracle: `ReturnType<typeof LeafPrivIn.has>` is `boolean`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed
-///   left: Value { ty: Primitive(Any), degradation: None, candidates: 1 }
-///  right: Value { ty: Primitive(Boolean), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: `flow_slice_content::lower_leaf` — `PrivateInExpression`
-/// is in the leaf fall-through set with no `in`-operator rule. Member
-/// ordinal 1 is the static `has`; ordinal 0 is the `#x` field, which
-/// correctly misses because a field is not a callable member.
+/// Oracle: `ReturnType<typeof LeafPrivIn.has>` is `boolean`. Member ordinal
+/// 1 is the static `has`; ordinal 0 is the `#x` field, which misses because
+/// a field is not a callable member.
 #[test]
-#[ignore = "PrivateInExpression has no leaf rule: the `in` test evaluates to `any` and is admitted warm"]
 fn private_in_expression_return_is_boolean() {
     let host = ts_host();
     assert_eq!(
