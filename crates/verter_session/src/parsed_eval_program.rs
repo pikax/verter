@@ -49,6 +49,10 @@ self_cell::self_cell!(
 pub(crate) struct ParsedEvalProgram {
     cell: Rc<ParsedEvalProgramCell>,
     functions: OnceCell<IndexedProgramFunctionsCell>,
+    /// The program's nesting scan, shared by every walk stack over it
+    /// (each nested function's skeleton and slice content), computed at
+    /// most once and dropped with the program.
+    nesting: OnceCell<verter_semantic::analysis::walk_stack::Nesting>,
     /// The parse produced RECOVERABLE errors (`ParserReturn::errors` was
     /// non-empty). An error-recovered AST can silently DROP real code, so
     /// provers of non-usage (e.g. macro-usage liveness) must fail open when
@@ -91,6 +95,7 @@ impl ParsedEvalProgram {
         (!panicked).then_some(Self {
             cell: Rc::new(cell),
             functions: OnceCell::new(),
+            nesting: OnceCell::new(),
             had_errors,
         })
     }
@@ -131,6 +136,14 @@ impl ParsedEvalProgram {
 
     /// Execute a pure lowerer against one exact retained function address.
     /// The higher-ranked callback returns only owned output, never an arena borrow.
+    /// The containment of walks over this program, sharing its one scan.
+    pub(crate) fn walk_stack(&self) -> verter_semantic::analysis::walk_stack::ProgramWalkStack<'_> {
+        verter_semantic::analysis::walk_stack::ProgramWalkStack::sharing(
+            self.borrow_dependent(),
+            &self.nesting,
+        )
+    }
+
     pub(crate) fn with_indexed_function<R>(
         &self,
         entry: &FunctionProgramEntry,

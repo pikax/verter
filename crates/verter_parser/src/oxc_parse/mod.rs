@@ -54,6 +54,8 @@ const PARSE_STACK_BASE_BYTES: usize = 512 * 1024;
 /// An upper bound of how deeply `source`'s syntax tree nests (see
 /// [`nesting`]).
 pub fn syntax_nesting(source: &str, source_type: SourceType) -> Nesting {
+    #[cfg(test)]
+    scan_probe::scanned(source.len());
     match nesting::scan(source, source_type, u32::MAX) {
         Ok(nesting) => nesting,
         Err(_) => unreachable!("no nesting exceeds an unbounded limit"),
@@ -143,17 +145,74 @@ pub fn with_span_stack<R>(source_text: &str, span: Span, walk: impl FnOnce() -> 
 /// can need, scanned at most once however many nodes walk. Where
 /// [`with_node_stack`] would rescan a node nested in a node already
 /// scanned, this scans the program once.
+///
+/// A program walked by many separate walk stacks (each nested function's
+/// body lowered on its own) shares one scan through a cell its owner keeps
+/// ([`Self::sharing`]): scanning the program again for every nested
+/// function made the walks' containment cost the square of the nesting.
 pub struct ProgramWalkStack<'p> {
     program: &'p Program<'p>,
-    nesting: std::cell::OnceCell<Nesting>,
+    nesting: ProgramNesting<'p>,
+    /// Whether the walks run inside [`Self::within`]'s containment, sized
+    /// for the whole program, which bounds a walk of any node in it.
+    inside: std::cell::Cell<bool>,
+}
+
+/// Where a [`ProgramWalkStack`] keeps its program's scan.
+enum ProgramNesting<'p> {
+    Owned(std::cell::OnceCell<Nesting>),
+    Shared(&'p std::cell::OnceCell<Nesting>),
 }
 
 impl<'p> ProgramWalkStack<'p> {
     pub fn new(program: &'p Program<'p>) -> Self {
         Self {
             program,
-            nesting: std::cell::OnceCell::new(),
+            nesting: ProgramNesting::Owned(std::cell::OnceCell::new()),
+            inside: std::cell::Cell::new(false),
         }
+    }
+
+    /// The containment of walks over `program`, its scan kept in `nesting`
+    /// (owned with the program, so every walk stack over it scans it at
+    /// most once).
+    pub fn sharing(program: &'p Program<'p>, nesting: &'p std::cell::OnceCell<Nesting>) -> Self {
+        Self {
+            program,
+            nesting: ProgramNesting::Shared(nesting),
+            inside: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Run `work` on `owner`, whose walks of nodes of the program run under
+    /// the containment `stack` reads from it, on the stack the whole
+    /// program can need: every walk inside it runs in place, where each
+    /// would otherwise take a stack segment sized for the program of its
+    /// own.
+    pub fn within<T, R>(
+        owner: &mut T,
+        stack: impl Fn(&T) -> &ProgramWalkStack<'_>,
+        work: impl FnOnce(&mut T) -> R,
+    ) -> R {
+        let walks = stack(owner);
+        if walks.inside.get() {
+            return work(owner);
+        }
+        let nesting = walks.program_nesting();
+        with_nesting_stack(nesting, move || {
+            stack(owner).inside.set(true);
+            let result = work(owner);
+            stack(owner).inside.set(false);
+            result
+        })
+    }
+
+    fn program_nesting(&self) -> Nesting {
+        let cell = match &self.nesting {
+            ProgramNesting::Owned(cell) => cell,
+            ProgramNesting::Shared(cell) => *cell,
+        };
+        *cell.get_or_init(|| syntax_nesting(self.program.source_text, self.program.source_type))
     }
 
     /// The program whose nodes walk under this containment.
@@ -164,16 +223,81 @@ impl<'p> ProgramWalkStack<'p> {
     /// Run `walk`, a walk of oxc's over the node at `span`, with the stack
     /// it can need.
     pub fn with_node_stack<R>(&self, span: Span, walk: impl FnOnce() -> R) -> R {
+        if self.inside.get() {
+            return walk();
+        }
         let by_length = (span.size() as usize)
             .saturating_mul(PARSE_STACK_BYTES_PER_LEVEL)
             .saturating_add(PARSE_STACK_BASE_BYTES);
         if stacker::remaining_stack().is_some_and(|remaining| remaining >= by_length) {
             return walk();
         }
-        let nesting = *self
-            .nesting
-            .get_or_init(|| syntax_nesting(self.program.source_text, self.program.source_type));
-        with_nesting_stack(nesting, walk)
+        with_nesting_stack(self.program_nesting(), walk)
+    }
+}
+
+/// [`with_span_stack`] for a walk of the node at `span` in `source_text`
+/// that does not enter the bodies at `nested` (spans in the same text, the
+/// bodies of the functions nested in the node): the stack is sized from the
+/// node's text with each of those bodies taken out, so a function's walk
+/// costs its own syntax only, not every function nested inside it.
+pub fn with_own_syntax_stack<R>(
+    source_text: &str,
+    span: Span,
+    nested: impl IntoIterator<Item = Span>,
+    walk: impl FnOnce() -> R,
+) -> R {
+    match own_syntax_text(source_text, span, nested) {
+        Some(own) => with_source_stack(&own, walk),
+        None => with_source_stack(source_text, walk),
+    }
+}
+
+/// The text of the node at `span` with each body at `nested` taken out
+/// (see [`with_own_syntax_stack`]); `None` when the span lies outside
+/// the text.
+fn own_syntax_text(
+    source_text: &str,
+    span: Span,
+    nested: impl IntoIterator<Item = Span>,
+) -> Option<String> {
+    let text = source_text.get(span.start as usize..span.end as usize)?;
+    let mut nested: Vec<Span> = nested
+        .into_iter()
+        .filter(|inner| {
+            inner.start >= span.start && inner.end <= span.end && inner.start < inner.end
+        })
+        .collect();
+    nested.sort_by_key(|inner| inner.start);
+    // Each body taken out leaves one token (`0`), the syntax around it
+    // unchanged.
+    let mut own = String::with_capacity(text.len());
+    let mut at = span.start;
+    for inner in nested {
+        if inner.start < at {
+            continue;
+        }
+        own.push_str(&source_text[at as usize..inner.start as usize]);
+        own.push('0');
+        at = inner.end;
+    }
+    own.push_str(&source_text[at as usize..span.end as usize]);
+    Some(own)
+}
+
+/// Counts the bytes [`syntax_nesting`] scans on this thread; test-only.
+#[cfg(test)]
+pub(crate) mod scan_probe {
+    use std::cell::Cell;
+    thread_local! {
+        static SCANNED: Cell<usize> = const { Cell::new(0) };
+    }
+    pub(crate) fn scanned(bytes: usize) {
+        SCANNED.with(|count| count.set(count.get() + bytes));
+    }
+    /// The bytes scanned since the last call.
+    pub(crate) fn take() -> usize {
+        SCANNED.with(|count| count.replace(0))
     }
 }
 

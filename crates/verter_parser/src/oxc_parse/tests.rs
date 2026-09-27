@@ -438,13 +438,14 @@ const WALK_ENTRIES: [&str; 5] = [
 ];
 
 /// The containments a walk of oxc's runs under.
-const CONTAINMENTS: [&str; 6] = [
+const CONTAINMENTS: [&str; 7] = [
     "with_program_stack",
     "with_node_stack",
     "with_ast_stack",
     "with_source_stack",
     "with_span_stack",
     "with_nesting_stack",
+    "with_own_syntax_stack",
 ];
 
 /// `source` with its comments, strings and character literals blanked
@@ -724,4 +725,84 @@ fn no_crate_walks_oxc_syntax_around_the_containment() {
         bypasses.len(),
         bypasses.join("\n")
     );
+}
+
+/// Walk stacks sharing one program's cell scan the program once between
+/// them, however many long nodes they walk.
+#[test]
+fn walk_stacks_sharing_a_program_scan_it_once() {
+    let scanned = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let source = format!("export const v = {}1;", "() => ".repeat(2_000));
+            let allocator = oxc_allocator::Allocator::default();
+            let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
+            let cell = std::cell::OnceCell::new();
+            super::scan_probe::take();
+            for _ in 0..3 {
+                let walks = super::ProgramWalkStack::sharing(&parsed.program, &cell);
+                walks.with_node_stack(parsed.program.span, || ());
+            }
+            super::scan_probe::take()
+        })
+        .expect("spawn the walking thread")
+        .join()
+        .expect("the walks return");
+    assert_eq!(
+        scanned,
+        format!("export const v = {}1;", "() => ".repeat(2_000)).len()
+    );
+}
+
+/// Inside [`super::ProgramWalkStack::within`], a walk of any node of the
+/// program runs on the stack the containment grew once, never on a
+/// segment of its own.
+#[test]
+fn walks_within_a_program_containment_run_in_place() {
+    struct Owner<'p> {
+        walks: super::ProgramWalkStack<'p>,
+    }
+    let in_place = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let source = format!("export const v = {}1;", "() => ".repeat(2_000));
+            let allocator = oxc_allocator::Allocator::default();
+            let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
+            let mut owner = Owner {
+                walks: super::ProgramWalkStack::new(&parsed.program),
+            };
+            super::ProgramWalkStack::within(
+                &mut owner,
+                |owner| &owner.walks,
+                |owner| {
+                    let outer = stacker::remaining_stack().expect("the stack is known");
+                    let inner = owner
+                        .walks
+                        .with_node_stack(parsed.program.span, stacker::remaining_stack)
+                        .expect("the stack is known");
+                    // The same segment: the walk ran a few frames deeper.
+                    outer >= inner && outer - inner < 64 * 1024
+                },
+            )
+        })
+        .expect("spawn the walking thread")
+        .join()
+        .expect("the walks return");
+    assert!(in_place);
+}
+
+/// A function's own syntax is its text with each nested body taken out.
+#[test]
+fn own_syntax_takes_the_nested_bodies_out() {
+    let source = "f(() => { a(); }, function g() { return 1; })";
+    let body = |text: &str| {
+        let start = source.find(text).unwrap() as u32;
+        oxc_span::Span::new(start, start + text.len() as u32)
+    };
+    let own = super::own_syntax_text(
+        source,
+        oxc_span::Span::new(0, source.len() as u32),
+        [body("{ return 1; }"), body("{ a(); }")],
+    );
+    assert_eq!(own.as_deref(), Some("f(() => 0, function g() 0)"));
 }

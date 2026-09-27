@@ -1286,6 +1286,7 @@ impl DeclBodyMemo {
                     crate::flow_slice_content::build_flow_slice_content(
                         crate::flow_slice_content::FlowSliceSource {
                             program: p.borrow_dependent(),
+                            walks: p.walk_stack(),
                             resolved,
                         },
                         p.source_str(),
@@ -1438,12 +1439,13 @@ impl DeclBodyMemo {
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
-        let _index = self.function_program_index();
+        let index = self.function_program_index();
+        let nested_bodies = crate::flow_slice_content::nested_function_bodies(&index, entry);
         let entry = entry.clone();
         let Some(skeleton) = service.run_leased(&self.key, move |program| {
             program.and_then(|p| {
                 use verter_semantic::analysis::flow::{
-                    build_indexed_function_body_skeleton, FunctionBodySource,
+                    build_indexed_function_body_skeleton_in, FunctionBodySource,
                 };
                 use verter_semantic::analysis::function_program::FunctionNode;
                 p.with_indexed_function(&entry, |resolved, entry| {
@@ -1457,9 +1459,10 @@ impl DeclBodyMemo {
                         }
                         FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
                     };
-                    Some(build_indexed_function_body_skeleton(
+                    Some(build_indexed_function_body_skeleton_in(
                         &source,
                         p.source_str(),
+                        &nested_bodies,
                         entry,
                     ))
                 })

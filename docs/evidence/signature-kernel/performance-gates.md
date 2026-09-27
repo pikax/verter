@@ -781,6 +781,26 @@ Recorded plainly so no reader mistakes absence for a pass:
   10,000 nested type arguments (`1`) and returns the typed budget failure
   of a 10,000-deep `keyof` chain.
 
+* **A function's walks are contained by its own syntax, on one scan of its
+  program.** Every walk of a function's syntax sized its stack from the
+  node's text: a nested function's text holds every function nested in
+  it, so each one's containment scanned that text again (the skeleton
+  builder's walk, the slice lowering's pattern walk) or took a stack
+  segment sized for the whole program (the function index's discovery
+  walks, each growing a new segment), and a program walked by many walk
+  stacks scanned itself once per stack. A 3,000-deep nest of arrow
+  functions scanned 19.7 MB and grew 14,300 stack segments, costing
+  4.2 s and the square of the depth. Now a parsed program keeps its one
+  scan for every walk stack over it (`ProgramWalkStack::sharing`), the
+  function index's discovery runs inside one containment sized for the
+  program (`ProgramWalkStack::within`), inside which every walk runs in
+  place, and a walk that never enters a nested function's body (the
+  skeleton builder, the pattern collector) is sized from the function's
+  text with those bodies taken out (`with_own_syntax_stack`).
+  `verter_parser`'s `oxc_parse/tests.rs` → `walk_stacks_sharing_a_program_scan_it_once`,
+  `walks_within_a_program_containment_run_in_place` and
+  `own_syntax_takes_the_nested_bodies_out`.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the

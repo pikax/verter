@@ -3316,6 +3316,8 @@ fn empty_completion_of(node: &FunctionNode<'_>, entry: &FunctionProgramEntry) ->
 /// One function borrowed from its exact retained parse address table.
 pub(crate) struct FlowSliceSource<'a> {
     pub program: &'a Program<'a>,
+    /// The containment of walks over `program`, sharing its one scan.
+    pub walks: verter_semantic::analysis::walk_stack::ProgramWalkStack<'a>,
     pub resolved: ResolvedFunctionNode<'a>,
 }
 
@@ -3495,7 +3497,11 @@ pub(crate) fn build_flow_slice_content(
     context: Option<&NestedFlowContext>,
     policy: crate::semantic_query::FlowReturnPolicy,
 ) -> Option<SliceContent> {
-    let FlowSliceSource { program, resolved } = retained;
+    let FlowSliceSource {
+        program,
+        walks,
+        resolved,
+    } = retained;
     let nullability = policy.nullability;
     let module_scope = carrier_module || program_has_module_syntax(program);
     // Whether the served function is NAMESPACE-OWNED: its locator descends
@@ -3650,7 +3656,10 @@ pub(crate) fn build_flow_slice_content(
                 .into(),
             parameter_names: Arc::new(signature_parameter_bindings(skeleton, anchor)),
             modelled_patterns: Arc::new(modelled_pattern_bindings(
-                program,
+                program.source_text,
+                &nested_function_bodies(index, entry),
+                anchor,
+                node_span(&node).end,
                 &node.params().items,
                 body,
                 &bindings,
@@ -3733,7 +3742,7 @@ pub(crate) fn build_flow_slice_content(
         control: Arc::clone(&entry.control),
         direct_calls: &entry.direct_calls,
         program,
-        walks: verter_semantic::analysis::walk_stack::ProgramWalkStack::new(program),
+        walks,
         module_scope,
         namespace_owned,
         namespace_scopes: &namespace_scopes,
@@ -4347,7 +4356,10 @@ fn param_pattern_is_flat(pattern: &BindingPattern<'_>) -> bool {
 /// statement declarators' and its `for…of` / `for…in` elements', never a
 /// nested function's or class's.
 fn modelled_pattern_bindings(
-    program: &Program<'_>,
+    source_text: &str,
+    nested_bodies: &[verter_span::Span],
+    function_start: u32,
+    function_end: u32,
     params: &oxc_allocator::Vec<'_, oxc_ast::ast::FormalParameter<'_>>,
     body: verter_semantic::analysis::function_program::FunctionBodyRef<'_>,
     bindings: &verter_semantic::analysis::flow::FlowBindingMap,
@@ -4413,17 +4425,39 @@ fn modelled_pattern_bindings(
             }
         }
     }
-    for statement in body.statements() {
-        verter_semantic::analysis::walk_stack::with_node_stack(program, statement.span(), || {
-            collector.visit_statement(statement)
-        });
-    }
-    if let Some(expression) = body.expression() {
-        verter_semantic::analysis::walk_stack::with_node_stack(program, expression.span(), || {
-            collector.visit_expression(expression)
-        });
-    }
+    // The collector never enters a nested function, so its stack is sized
+    // from the function's own syntax.
+    let nested = nested_bodies
+        .iter()
+        .map(|body| oxc_span::Span::new(body.start, body.end));
+    verter_semantic::analysis::walk_stack::with_own_syntax_stack(
+        source_text,
+        oxc_span::Span::new(function_start, function_end),
+        nested,
+        || {
+            for statement in body.statements() {
+                collector.visit_statement(statement);
+            }
+            if let Some(expression) = body.expression() {
+                collector.visit_expression(expression);
+            }
+        },
+    );
     collector.out
+}
+
+/// The bodies of the functions nested directly in `entry`'s function,
+/// which a walk of the function's own syntax never enters.
+pub(crate) fn nested_function_bodies(
+    index: &verter_semantic::analysis::function_program::FunctionProgramIndex,
+    entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+) -> Vec<verter_span::Span> {
+    entry
+        .nested_captures
+        .iter()
+        .filter_map(|child| index.get(&child.function))
+        .map(|child| child.entry().body_span)
+        .collect()
 }
 
 /// The binding-identifier spans one pattern declares.

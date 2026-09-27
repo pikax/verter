@@ -1278,18 +1278,22 @@ fn build_function_program_index_impl<'ast>(
         next_nested_ordinal: 0,
     };
     let mut overload_tracker = OverloadTracker::default();
-    for (contributor_index, stmt) in program.body.iter().enumerate() {
-        discover_statement(
-            stmt,
-            contributor_index,
-            None,
-            &mut overload_tracker,
-            &mut ctx,
-        );
-    }
+    // Discovery walks every function of the program, each walk sized for
+    // what it walks: they all run inside one containment sized for the
+    // program, which a walk of any node in it cannot exceed, rather than
+    // each taking a stack segment of its own.
     let mut classes = ClassSyntaxCollector::default();
-    ctx.walks
-        .with_node_stack(program.span, || classes.visit_program(program));
+    verter_parser::oxc_parse::ProgramWalkStack::within(
+        &mut ctx,
+        |ctx| &ctx.walks,
+        |ctx| {
+            for (contributor_index, stmt) in program.body.iter().enumerate() {
+                discover_statement(stmt, contributor_index, None, &mut overload_tracker, ctx);
+            }
+            ctx.walks
+                .with_node_stack(program.span, || classes.visit_program(program));
+        },
+    );
     resolve_captures(&mut ctx.entries);
     resolve_nested_capture_reads(&mut ctx.entries);
     resolve_call_site_targets(&mut ctx.entries);
