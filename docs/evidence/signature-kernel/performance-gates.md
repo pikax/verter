@@ -535,11 +535,11 @@ Recorded plainly so no reader mistakes absence for a pass:
   default of 2 MiB). Each runs under `verter_parser::oxc_parse`'s
   containment, on a stack segment sized from the source when the worker's
   own stack is short (`oxc-deep-parse.md`), so the workers need no larger
-  stack of their own. The script analysis's own recursions over the
-  program (the module-reference collector, the binding extractors) run
-  under the same containment: a module constant of 10,000 nested calls
-  overflowed a 2 MiB I/O worker in the collector and now returns
-  (`deep_input_tests.rs` →
+  stack of their own. The script analysis's own passes over the program
+  (the module-reference collector, the await, string, macro and binding
+  walks) run from explicit stacks on the worker's own stack, outside any
+  region: a module constant of 10,000 nested calls overflowed a 2 MiB I/O
+  worker in the collector and now returns (`deep_input_tests.rs` →
   `module_calls_nested_10000_deep_return_on_production_stacks`).
   `type_syntax_depth_tests.rs` →
   `a_700_deep_nested_generic_application_parses_on_a_scheduler_worker`

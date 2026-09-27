@@ -252,31 +252,44 @@ script too.
 ### Operations without a typed incompleteness
 
 The parse and the lease return `StackUnavailable`, but the host's
-products have no state that carries it. A refused parse's empty program
-reaches the session's snapshot builders, which publish the empty file's
-analysis: through the shipped module, a script past the profile yields
-`bindings: []` and the template's `no-undef-properties` warning for the
-binding it declares, semantic facts read off a program the source is
-not. The smallest missing authority is an operational-incompleteness state
-on the parse snapshot (`ParseSnapshot` / `ScriptAnalysisSnapshot`) that
-every consumer of it honours, set where a parse or a lease is refused. Its
-producers are the non-SFC source stage (`parse_non_sfc_snapshot`, from
-`host_executor::execute_source`, whose `StageError` could carry it), the
-carrier snapshot (`carrier_snapshot_from_eval_source`, from the carrier
-registration's framework parse in `verter_compiler`), the evaluation
-environment (`host_manage/eval_env.rs`), the overlay materializer
-(`host_manage/overlay_materialize.rs`), and the evaluation program's own
-parse (`parsed_eval_program`); the compiler's compile and projection
-entries (Vue script setup, options API, public constructor, binding
-views, template data, the Svelte runtime and IDE scans, `tsc` script and
-module specifiers) each parse and walk on their own. The walk roots under
-them are the 117 containment calls across `verter_compiler` (Vue
-projection, Svelte runtime and IDE, `tsc`), `verter_semantic` (script
-analysis, function program index, flow skeletons, type evaluation),
-`verter_session` (flow slice content, the evaluation program) and
-`verter_parser` (setup references, Svelte rune detection). Until those
-producers carry the state, the leases have no boundary to report to, and
-a walk's failed reservation ends the process.
+products have no state that carries it. A refused parse's program is
+empty and marked fatal, and the snapshot builders publish the empty
+file's analysis for it: through the shipped module, a script past the
+profile yields `bindings: []` and the template's `no-undef-properties`
+warning for the binding it declares, semantic facts read off a program
+the source is not.
+
+The smallest missing authority is an operational-incompleteness state on
+the parse product (`ParseSnapshot`, and `ScriptAnalysisSnapshot` through
+it) that every consumer honours, set where a parse or a lease is
+refused. Its producers, each parsing a script and publishing what it
+reads:
+
+- the scheduler's source stage (`host_executor::execute_source`): the
+  non-SFC lane (`parse::parse_non_sfc_snapshot`) and the carrier lane
+  (`parse::carrier_snapshot_from_eval_source` → `build_vue_script_outputs`
+  / `build_svelte_snapshot_from_eval_source`), whose `StageError` could
+  carry it as a new `StageErrorKind`;
+- the analysis read's scheduler-missed lane
+  (`host_manage/analysis_io.rs` →
+  `build_snapshot_and_template_inputs_from_source`), which rebuilds a
+  snapshot from source when the source stage published none;
+- the evaluation environment (`host_manage/eval_env.rs`), the overlay
+  materializer (`host_manage/overlay_materialize.rs`) and the evaluation
+  program's own parse (`parsed_eval_program`, read by type evaluation);
+- the compiler's compile and projection entries, which parse and walk the
+  script on their own: Vue script setup, options API, public constructor,
+  binding views and template data; the Svelte runtime, IDE and semantic
+  comment scans; `tsc` script and module specifiers.
+
+Its consumers are every reader of the published analysis: 100 reads of
+`script_analysis` across 28 production files (the analysis FFI, lint,
+component meta, IDE projection, codegen, type evaluation), besides each
+compiler entry's own use of its program. The walk roots under the
+producers are the 117 containment calls across `verter_compiler`,
+`verter_semantic`, `verter_session` and `verter_parser`. Until the
+producers carry the state and the consumers honour it, the leases have no
+boundary to report to, and a walk's failed reservation ends the process.
 
 ### Hand-written recursions over oxc syntax
 
@@ -284,21 +297,33 @@ The containment guard finds walks of oxc's (`Visit`, `walk_*`,
 `clone_in`, the semantic builder); it does not find Verter's own
 functions that recurse over oxc syntax, which spend native stack per
 level just the same and belong on explicit work stacks, not stack
-regions. A census of functions over oxc AST types that call themselves
-directly counts 173 (61 in `verter_semantic`, 38 in `verter_parser`, 37
-in `verter_session`, 35 in `verter_compiler`, 2 in `verter_lsp`); mutual
-recursion is not counted. Some are bounded by a depth of their own, some
-run inside a walk's containment and so on a region, and some ran on the
-thread's stack: the module-reference collector overflowed a 2 MiB
-scheduler worker at 10,000 nested calls, and the dynamic event-name walks
-a 1 MiB thread. Those two now walk from explicit stacks. The script
-analysis still runs under its program's containment, because its await,
-return, reactivity and macro scans and binding extractors recurse per
-level (`find_await_offset` overflows a 1 MiB thread at 10,000 nested
-calls without it); taking the analysis off its region means moving each
-to an explicit stack. `hand_written_recursions_over_oxc_syntax_do_not_grow`
-holds the census: a new self-recursive function over oxc syntax fails
-it.
+regions: a stack region contains oxc's own recursion only.
+
+The script analysis is one such consumer, and it runs on the calling
+thread's stack, outside any region. Every pass of it that input nesting
+reaches walks from an explicit stack: the module-reference collector, the
+await scan, the string evaluator, the nested-macro scan, the binding
+leaves of a destructuring pattern, the macro type references, the macro
+call walk and the macro type-argument role walk.
+`build_tests.rs` →
+`every_deeply_nested_script_is_analyzed_on_a_small_stack` analyzes 34
+forms 10,000 deep on a 1 MiB thread (calls, parentheses, arrays,
+objects, conditionals, operator and member chains, awaits, templates,
+arrows, `ref` / `computed`, `defineProps` / `defineEmits` values and
+types, `withDefaults`, destructuring, returns, blocks, `if`s, classes),
+each in a child process; restoring any pass's recursion overflows the
+forms that reach it. The dynamic event-name walks of the Vue projection
+walk from explicit stacks too.
+
+A census of the functions over oxc AST types that call themselves
+directly counts 163 left (51 in `verter_semantic`, 38 in `verter_parser`,
+37 in `verter_session`, 35 in `verter_compiler`, 2 in `verter_lsp`);
+mutual recursion is not counted. Some are bounded by a depth of their
+own, and some run inside a walk's containment. They are tracked, not
+converted: `hand_written_recursions_over_oxc_syntax_do_not_grow` fails on
+a new self-recursive function over oxc syntax (listed in
+`oxc_parse/hand_written_recursions.txt`), pointing it to an explicit
+stack, and on a listed one that no longer recurses.
 
 ## Canary
 
