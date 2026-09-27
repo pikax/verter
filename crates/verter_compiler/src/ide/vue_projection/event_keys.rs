@@ -5,6 +5,11 @@
 //! bound prop such as `:on-save` from being treated as `@save`, while still
 //! letting every spelling of a real listener share its consumer set.
 
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{Expression, TSLiteral, TSType};
+use oxc_parser::Parser;
+use oxc_span::{GetSpan, SourceType};
+
 use crate::framework_common::projection_plan::{
     AdmittedExpressionId, ComponentUseId, PlanSnapshotId, ProjectionPlan,
 };
@@ -20,9 +25,12 @@ pub enum EventName {
     Static(String),
     /// A dynamic argument. Finite string-literal candidates are retained so
     /// every possible listener can be checked by a later TypeScript consumer.
+    /// `open` means a non-literal branch remains, so those candidates are
+    /// definite names inside an open domain rather than a closed union.
     Dynamic {
         expression: AdmittedExpressionId,
         candidates: Vec<String>,
+        open: bool,
     },
 }
 
@@ -31,8 +39,11 @@ pub enum EventName {
 pub enum ListenerKey {
     /// A known runtime property key.
     Static(String),
-    /// Keys derived from a finite dynamic event-name union.
+    /// Keys derived from a closed finite dynamic event-name union.
     Finite(Vec<String>),
+    /// Definite literal keys plus the open dynamic domain. A non-literal
+    /// branch is still a possible listener, so it is not dropped.
+    FiniteOpen(Vec<String>),
     /// An open dynamic key.
     Dynamic,
 }
@@ -66,7 +77,7 @@ pub enum ListenerConsumer {
         expression: Option<AdmittedExpressionId>,
     },
     /// A compiler-synthesized model update listener.
-    ModelUpdate { op_index: u32, event: String },
+    ModelUpdate { op_index: u32, event: EventName },
 }
 
 /// Every author/synthesis route that can feed one listener property key.
@@ -74,7 +85,7 @@ pub enum ListenerConsumer {
 pub struct ListenerConsumerSet {
     /// Logical component use.
     pub use_id: ComponentUseId,
-    /// Static runtime key, or `None` for the open `v-on` object domain.
+    /// Static runtime key, or `None` for the shared open listener domain.
     pub key: Option<String>,
     /// All consumers in authored order. No collision is silently discarded.
     pub consumers: Vec<ListenerConsumer>,
@@ -128,6 +139,7 @@ pub fn project_event_transport(
         };
         for op in &sequence.operations {
             match op.syntax {
+                AttributeSyntax::Static => {}
                 AttributeSyntax::On => {
                     let Some(event) = event_name(
                         plan,
@@ -137,7 +149,7 @@ pub fn project_event_transport(
                         complete = false;
                         continue;
                     };
-                    let listener_key = listener_key_for(op.index, key_plan, &event);
+                    let listener_key = listener_key_for(op.index, key_plan, &event, &op.modifiers);
                     aliases.push(EventAliasRelation {
                         use_id: sequence.use_id.clone(),
                         op_index: op.index,
@@ -166,7 +178,11 @@ pub fn project_event_transport(
                     },
                 ),
                 AttributeSyntax::Model => {
-                    let event = model_event(op.argument_spelling.as_deref());
+                    let event = model_event_name(
+                        plan,
+                        op.argument_spelling.as_deref(),
+                        op.dynamic_argument.as_ref(),
+                    );
                     let listener_key = key_plan
                         .writes
                         .iter()
@@ -175,13 +191,13 @@ pub fn project_event_transport(
                         })
                         .map(|write| match &write.key {
                             RuntimeKey::Static(key) => ListenerKey::Static(key.clone()),
-                            RuntimeKey::Dynamic => ListenerKey::Dynamic,
+                            RuntimeKey::Dynamic => dynamic_listener_key(&event, &op.modifiers),
                         })
-                        .unwrap_or(ListenerKey::Dynamic);
+                        .unwrap_or_else(|| dynamic_listener_key(&event, &op.modifiers));
                     aliases.push(EventAliasRelation {
                         use_id: sequence.use_id.clone(),
                         op_index: op.index,
-                        event: EventName::Static(event.clone()),
+                        event: event.clone(),
                         listener_key: listener_key.clone(),
                         modifiers: op.modifiers.clone(),
                         synthesized: true,
@@ -222,6 +238,9 @@ fn event_name(
                 .expression(id)
                 .map(|expression| literal_union(&expression.spelling))
                 .unwrap_or_default(),
+            open: plan
+                .expression(id)
+                .is_none_or(|expression| dynamic_domain_open(&expression.spelling)),
         }),
         (None, None) => None,
     }
@@ -231,6 +250,7 @@ fn listener_key_for(
     op_index: u32,
     key_plan: &crate::ide::vue_projection::attribute_operations::RuntimePropertyKeyPlan,
     event: &EventName,
+    modifiers: &[String],
 ) -> ListenerKey {
     if let Some(write) = key_plan
         .writes
@@ -239,20 +259,61 @@ fn listener_key_for(
     {
         return match &write.key {
             RuntimeKey::Static(key) => ListenerKey::Static(key.clone()),
-            RuntimeKey::Dynamic => match event {
-                EventName::Dynamic { candidates, .. } if !candidates.is_empty() => {
-                    ListenerKey::Finite(
-                        candidates
-                            .iter()
-                            .map(|candidate| handler_key(candidate))
-                            .collect(),
-                    )
-                }
-                _ => ListenerKey::Dynamic,
-            },
+            RuntimeKey::Dynamic => dynamic_listener_key(event, modifiers),
         };
     }
-    ListenerKey::Dynamic
+    dynamic_listener_key(event, modifiers)
+}
+
+fn dynamic_listener_key(event: &EventName, modifiers: &[String]) -> ListenerKey {
+    let EventName::Dynamic {
+        candidates, open, ..
+    } = event
+    else {
+        return ListenerKey::Dynamic;
+    };
+    if candidates.is_empty() {
+        return if *open {
+            ListenerKey::Dynamic
+        } else {
+            ListenerKey::Finite(Vec::new())
+        };
+    }
+    let mut keys = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let key = super::attribute_operations::handler_key(candidate, modifiers);
+        if !keys.iter().any(|existing| existing == &key) {
+            keys.push(key);
+        }
+    }
+    if *open {
+        ListenerKey::FiniteOpen(keys)
+    } else {
+        ListenerKey::Finite(keys)
+    }
+}
+
+fn model_event_name(
+    plan: &ProjectionPlan,
+    argument: Option<&str>,
+    dynamic: Option<&AdmittedExpressionId>,
+) -> EventName {
+    if let Some(id) = dynamic {
+        let spelling = plan
+            .expression(id)
+            .map(|expression| expression.spelling.as_str())
+            .unwrap_or("");
+        let candidates = literal_union(spelling)
+            .into_iter()
+            .map(|candidate| format!("update:{}", camelize(&candidate)))
+            .collect();
+        return EventName::Dynamic {
+            expression: id.clone(),
+            candidates,
+            open: dynamic_domain_open(spelling),
+        };
+    }
+    EventName::Static(model_event(argument))
 }
 
 fn model_event(argument: Option<&str>) -> String {
@@ -262,12 +323,6 @@ fn model_event(argument: Option<&str>) -> String {
     }
 }
 
-fn handler_key(event: &str) -> String {
-    let mut key = String::with_capacity(event.len() + 2);
-    crate::template::code_gen::vdom::props::format_event_handler_key_into(&mut key, event);
-    key
-}
-
 fn add_listener(
     listeners: &mut Vec<ListenerConsumerSet>,
     use_id: ComponentUseId,
@@ -275,23 +330,7 @@ fn add_listener(
     consumer: ListenerConsumer,
 ) {
     match key {
-        ListenerKey::Static(key) => {
-            let index = listeners
-                .iter()
-                .position(|set| set.use_id == use_id && set.key.as_deref() == Some(&key));
-            let index = index.unwrap_or_else(|| {
-                listeners.push(ListenerConsumerSet {
-                    use_id,
-                    key: Some(key),
-                    consumers: Vec::new(),
-                    collision: false,
-                });
-                listeners.len() - 1
-            });
-            let set = &mut listeners[index];
-            set.consumers.push(consumer);
-            set.collision = set.consumers.len() > 1;
-        }
+        ListenerKey::Static(key) => push_consumer(listeners, use_id, Some(key), consumer),
         ListenerKey::Finite(keys) => {
             for key in keys {
                 add_listener(
@@ -302,13 +341,112 @@ fn add_listener(
                 );
             }
         }
-        ListenerKey::Dynamic => listeners.push(ListenerConsumerSet {
-            use_id,
-            key: None,
-            consumers: vec![consumer],
-            collision: false,
-        }),
+        ListenerKey::FiniteOpen(keys) => {
+            for key in keys {
+                add_listener(
+                    listeners,
+                    use_id.clone(),
+                    ListenerKey::Static(key),
+                    consumer.clone(),
+                );
+            }
+            add_listener(listeners, use_id, ListenerKey::Dynamic, consumer);
+        }
+        ListenerKey::Dynamic => push_consumer(listeners, use_id, None, consumer),
     }
+}
+
+fn push_consumer(
+    listeners: &mut Vec<ListenerConsumerSet>,
+    use_id: ComponentUseId,
+    key: Option<String>,
+    consumer: ListenerConsumer,
+) {
+    let index = listeners
+        .iter()
+        .position(|set| set.use_id == use_id && set.key == key);
+    let index = index.unwrap_or_else(|| {
+        listeners.push(ListenerConsumerSet {
+            use_id,
+            key,
+            consumers: Vec::new(),
+            collision: false,
+        });
+        listeners.len() - 1
+    });
+    let set = &mut listeners[index];
+    set.consumers.push(consumer);
+    set.collision = set.consumers.len() > 1;
+}
+
+/// Whether a dynamic event expression still has a non-literal branch.
+/// A closed result is a string literal, a conditional whose branches are
+/// closed, or an assertion/satisfies whose type is a finite string-literal
+/// union. Anything else leaves the listener domain open.
+fn dynamic_domain_open(expression: &str) -> bool {
+    let expression = expression.trim();
+    if expression.is_empty() {
+        return true;
+    }
+    let allocator = Allocator::default();
+    let Ok(parsed) = Parser::new(&allocator, expression, SourceType::ts()).parse_expression()
+    else {
+        return true;
+    };
+    let span = parsed.span();
+    if span.start != 0 || span.end as usize != expression.len() {
+        return true;
+    }
+    !event_name_branches_closed(&parsed)
+}
+
+fn event_name_branches_closed(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::StringLiteral(_) => true,
+        Expression::ParenthesizedExpression(inner) => event_name_branches_closed(&inner.expression),
+        Expression::TSNonNullExpression(inner) => event_name_branches_closed(&inner.expression),
+        Expression::TSAsExpression(inner) => {
+            asserted_name_closed(&inner.expression, &inner.type_annotation)
+        }
+        Expression::TSSatisfiesExpression(inner) => {
+            asserted_name_closed(&inner.expression, &inner.type_annotation)
+        }
+        Expression::TSTypeAssertion(inner) => {
+            asserted_name_closed(&inner.expression, &inner.type_annotation)
+        }
+        Expression::ConditionalExpression(inner) => {
+            event_name_branches_closed(&inner.consequent)
+                && event_name_branches_closed(&inner.alternate)
+        }
+        _ => false,
+    }
+}
+
+fn asserted_name_closed(expression: &Expression<'_>, ty: &TSType<'_>) -> bool {
+    if ty.is_const_type_reference() {
+        event_name_branches_closed(expression)
+    } else {
+        finite_string_union(ty)
+    }
+}
+
+fn finite_string_union(ty: &TSType<'_>) -> bool {
+    fn walk(ty: &TSType<'_>, depth: u32) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        match ty {
+            TSType::TSParenthesizedType(inner) => walk(&inner.type_annotation, depth + 1),
+            TSType::TSLiteralType(literal) => {
+                matches!(&literal.literal, TSLiteral::StringLiteral(_))
+            }
+            TSType::TSUnionType(union) => {
+                !union.types.is_empty() && union.types.iter().all(|member| walk(member, depth + 1))
+            }
+            _ => false,
+        }
+    }
+    walk(ty, 0)
 }
 
 /// Extract the finite string values in a dynamic event-name union. This is

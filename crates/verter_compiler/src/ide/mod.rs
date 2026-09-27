@@ -388,8 +388,23 @@ pub(crate) fn get_directive_name<'a>(prop: &NodeProp, source: &'a str) -> &'a st
 /// - `update:modelValue` → `onUpdate:modelValue`
 /// - `custom-event` → `onCustomEvent`
 pub(crate) fn event_to_jsx_name(event_name: &str) -> String {
+    if let Some(rest) = event_name.strip_prefix("update:") {
+        return format!("onUpdate:{}", rest);
+    }
+
+    // Prepend "on" and capitalize first letter, preserving the rest as-is.
+    // Hyphens are NOT removed — kebab-case events stay kebab-case.
+    // Names with hyphens (e.g. "onCustom-event") are not valid JSX identifiers
+    // and will be emitted using spread syntax by the caller.
     let mut result = String::with_capacity(event_name.len() + 2);
-    crate::template::code_gen::vdom::props::format_event_handler_key_into(&mut result, event_name);
+    result.push_str("on");
+    let mut chars = event_name.chars();
+    if let Some(first) = chars.next() {
+        for upper in first.to_uppercase() {
+            result.push(upper);
+        }
+        result.extend(chars);
+    }
     result
 }
 

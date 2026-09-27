@@ -1354,7 +1354,8 @@ mod tests {
 
     #[test]
     fn event_to_jsx_kebab() {
-        assert_eq!(event_to_jsx_name("custom-event"), "onCustomEvent");
+        // Kebab-case events should preserve hyphens (not camelize)
+        assert_eq!(event_to_jsx_name("custom-event"), "onCustom-event");
     }
 
     #[test]
@@ -1366,7 +1367,8 @@ mod tests {
 
     #[test]
     fn event_to_jsx_multi_segment_kebab() {
-        assert_eq!(event_to_jsx_name("my-custom-event"), "onMyCustomEvent");
+        // Multi-segment kebab should also preserve hyphens
+        assert_eq!(event_to_jsx_name("my-custom-event"), "onMy-custom-event");
     }
 
     #[test]

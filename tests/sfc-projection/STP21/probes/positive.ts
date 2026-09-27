@@ -15,9 +15,18 @@ export const modified: Instance["$props"] = {
   onSaveOnceCapturePassive: (value) => void value,
 };
 
-// STP21-dynamic-name: each finite dynamic candidate keeps its own contract.
+// STP21-dynamic-name: each finite dynamic candidate must satisfy the
+// component's declared listener contract. A primitive or the other
+// candidate's payload is not assignable.
 declare const dynamic: "save-item" | "cancel";
-export const dynamicHandlers: Record<typeof dynamic, unknown> = {
+type DynamicListener<Name extends typeof dynamic> = Name extends "save-item"
+  ? NonNullable<Instance["$props"]["onSaveItem"]>
+  : Name extends "cancel"
+    ? NonNullable<Instance["$props"]["onCancel"]>
+    : never;
+export const dynamicHandlers: {
+  [Name in typeof dynamic]: DynamicListener<Name>;
+} = {
   "save-item": save,
   cancel: (value: boolean): void => void value,
 };

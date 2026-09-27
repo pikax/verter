@@ -26,9 +26,7 @@ const RUST_CASES = Object.freeze({
   "STP21-model-key": [
     "event_transport_preserves_model_modifiers_dynamic_unions_and_listener_objects",
   ],
-  "STP21-static-handler": [
-    "event_transport_keeps_event_identity_separate_from_listener_key_aliases",
-  ],
+  "STP21-static-handler": ["event_transport_excludes_static_on_save_text"],
   "STP21-modifier": [
     "event_transport_preserves_model_modifiers_dynamic_unions_and_listener_objects",
   ],
@@ -44,6 +42,12 @@ const TWINS = Object.freeze([
     "AttributeSyntax::On => {",
     "AttributeSyntax::On | AttributeSyntax::Bind => {",
     RUST_CASES["STP21-event-alias"],
+  ],
+  [
+    "STP21-static-handler",
+    "AttributeSyntax::Static => {}",
+    'AttributeSyntax::Static => { if op.raw_spelling.starts_with("on") && op.raw_spelling.len() > 2 { add_listener(&mut listeners, sequence.use_id.clone(), ListenerKey::Static(op.raw_spelling.clone()), ListenerConsumer::Directive { op_index: op.index, event: EventName::Static(op.raw_spelling.clone()) }); } }',
+    RUST_CASES["STP21-static-handler"],
   ],
   [
     "STP21-model-key",
