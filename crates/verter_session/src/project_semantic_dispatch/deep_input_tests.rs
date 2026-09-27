@@ -635,3 +635,72 @@ fn a_nest_derives_its_source_parse_identity_a_fixed_number_of_times() {
     };
     assert_eq!(derivations(20), derivations(200));
 }
+
+/// Template literal types nested 10,000 deep. TypeScript 7.0.2: `"1"`,
+/// under every setting.
+#[test]
+#[ignore = "a template literal type nested in a template literal type evaluates a query a native level per nesting"]
+fn template_literal_types_nested_10000_deep_answer_on_production_stacks() {
+    let source = format!("type D = {};\n", wrap(DEPTH, "`${", "}`"));
+    assert_eq!(
+        mismatches_on_a_small_stack(source, "D", "\"1\""),
+        Vec::<String>::new()
+    );
+}
+
+/// Mapped types nested 10,000 deep. TypeScript 7.0.2: `"a"`, under every
+/// setting.
+#[test]
+#[ignore = "a mapped type nested in a mapped type lowers its locator shape a native level per nesting"]
+fn mapped_types_nested_10000_deep_answer_on_production_stacks() {
+    let source = format!("type D = {};\n", wrap(DEPTH, "{ [K in \"a\"]: ", " }"));
+    assert_eq!(
+        mismatches_on_a_small_stack(source, "keyof D", "\"a\""),
+        Vec::<String>::new()
+    );
+}
+
+/// Namespaces nested 10,000 deep, read through a 10,000-segment qualified
+/// name. TypeScript 7.0.2: `1`, under every setting.
+#[test]
+#[ignore = "a namespace nested in a namespace indexes its declaration headers a native level per nesting"]
+fn namespaces_nested_10000_deep_answer_on_production_stacks() {
+    let source = format!(
+        "namespace A {{ {}export type V = 1;{}\ntype D = {}V;\n",
+        "export namespace A { ".repeat(DEPTH - 1),
+        " }".repeat(DEPTH),
+        "A.".repeat(DEPTH)
+    );
+    assert_eq!(
+        mismatches_on_a_small_stack(source, "D", "1"),
+        Vec::<String>::new()
+    );
+}
+
+/// A statement wrapped in 10,000 labels. TypeScript 7.0.2: `number`, under
+/// every setting.
+#[test]
+#[ignore = "a label chain's parse snapshot is copied a native level per label beyond the parse containment"]
+fn label_chains_10000_deep_answer_on_production_stacks() {
+    let labels: String = (0..DEPTH).map(|label| format!("l{label}: ")).collect();
+    let source = format!("export function pf() {{ {labels}return 1; }}\n");
+    assert_eq!(
+        mismatches_on_a_small_stack(source, RETURN, "number"),
+        Vec::<String>::new()
+    );
+}
+
+/// An `else if` chain 10,000 long. TypeScript 7.0.2: `1 | 2` (reporting
+/// TS2563, body too large for control-flow analysis), under every setting.
+#[test]
+#[ignore = "an else-if chain's parse snapshot is copied a native level per arm beyond the parse containment"]
+fn else_if_chains_10000_long_answer_on_production_stacks() {
+    let source = format!(
+        "export function pf(b: boolean) {{ {}return 2; }}\n",
+        "if (b) return 1; else ".repeat(DEPTH)
+    );
+    assert_eq!(
+        mismatches_on_a_small_stack(source, RETURN, "1 | 2"),
+        Vec::<String>::new()
+    );
+}
