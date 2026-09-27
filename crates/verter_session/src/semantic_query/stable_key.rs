@@ -1704,6 +1704,26 @@ pub fn sort_union_members_by_stable_key(
     }
 }
 
+/// Order a union's members as [`sort_union_members_by_stable_key`] does and
+/// drop each member whose key equals its neighbour's (the key-equality
+/// collapse [`provably_equal`] licenses), keying every member once.
+pub fn sort_and_collapse_union_members(
+    graph: &SemanticGraphStore,
+    members: &mut Vec<SemanticNodeId>,
+) {
+    let mut keyed: Vec<(StableKey, SemanticNodeId)> = members
+        .iter()
+        .map(|&id| (stable_key_for_node(graph, id), id))
+        .collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    if graph.union_order_reversed() {
+        keyed.reverse();
+    }
+    keyed.dedup_by(|a, b| a.0 == b.0);
+    members.clear();
+    members.extend(keyed.into_iter().map(|(_, id)| id));
+}
+
 /// Lazy `SemanticUnionMembers` view. A resident valid view is not re-sorted.
 /// Views live in the store whose arena the union's id indexes.
 pub fn semantic_union_members(
