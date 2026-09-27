@@ -41,7 +41,9 @@ pub fn collect_type_dependency_paths(ts_type: &TSType<'_>) -> BTreeSet<TypeDepen
 #[must_use]
 pub fn collect_type_dependency_facts(ts_type: &TSType<'_>) -> TypeDependencyFacts {
     let mut out = TypeDependencyFacts::default();
-    collector_for(&mut out).visit_type(ts_type, StructuralDependencyContext::Root);
+    let mut collector = collector_for(&mut out);
+    collector.visit_type(ts_type, StructuralDependencyContext::Root);
+    collector.drain();
     out
 }
 
@@ -59,6 +61,7 @@ pub fn collect_type_alias_dependency_facts(
     if let Some(parameters) = &declaration.type_parameters {
         collector.visit_type_parameters_for_carrier(parameters);
     }
+    collector.drain();
     out
 }
 
@@ -73,6 +76,7 @@ pub fn collect_interface_dependency_facts(
     if let Some(parameters) = &declaration.type_parameters {
         collector.visit_type_parameters_for_carrier(parameters);
     }
+    collector.drain();
     out
 }
 
@@ -80,11 +84,15 @@ pub fn collect_interface_dependency_facts(
 #[must_use]
 pub fn collect_class_dependency_facts(declaration: &Class<'_>) -> TypeDependencyFacts {
     let mut out = TypeDependencyFacts::default();
-    collector_for(&mut out).visit_class(declaration);
+    let mut collector = collector_for(&mut out);
+    collector.visit_class(declaration);
+    collector.drain();
     out
 }
 
-fn collector_for(facts: &mut TypeDependencyFacts) -> TypeDependencyCollector<'_> {
+fn collector_for<'a, 'r, 'x>(
+    facts: &'a mut TypeDependencyFacts,
+) -> TypeDependencyCollector<'a, 'r, 'x> {
     TypeDependencyCollector::new(
         &mut facts.dependency_paths,
         &mut facts.structural_dependency_paths,
@@ -103,27 +111,26 @@ enum StructuralDependencyContext {
     CarrierOnly,
 }
 
+/// A qualified name's segments, walked from its last segment down its left
+/// spine (a name however long costs no native level).
 fn dependency_path_from_type_name(name: &TSTypeName<'_>) -> Option<TypeDependencyPathFact> {
-    fn append(name: &TSTypeName<'_>, segments: &mut Vec<String>) -> bool {
+    let mut segments = Vec::new();
+    let mut name = name;
+    loop {
         match name {
             TSTypeName::IdentifierReference(identifier) => {
                 segments.push(identifier.name.to_string());
-                true
+                break;
             }
             TSTypeName::QualifiedName(qualified) => {
-                if !append(&qualified.left, segments) {
-                    return false;
-                }
                 segments.push(qualified.right.name.to_string());
-                true
+                name = &qualified.left;
             }
-            TSTypeName::ThisExpression(_) => false,
+            TSTypeName::ThisExpression(_) => return None,
         }
     }
-    let mut segments = Vec::new();
-    append(name, &mut segments)
-        .then(|| TypeDependencyPathFact::from_segments(segments))
-        .flatten()
+    segments.reverse();
+    TypeDependencyPathFact::from_segments(segments)
 }
 
 fn dependency_path_from_query_name(
@@ -143,27 +150,26 @@ fn dependency_path_from_query_name(
     }
 }
 
+/// A static member chain's segments, walked from its last member down its
+/// object spine (a chain however long costs no native level).
 fn dependency_path_from_expression(expression: &Expression<'_>) -> Option<TypeDependencyPathFact> {
-    fn append(expression: &Expression<'_>, segments: &mut Vec<String>) -> bool {
+    let mut segments = Vec::new();
+    let mut expression = expression;
+    loop {
         match expression {
             Expression::Identifier(identifier) => {
                 segments.push(identifier.name.to_string());
-                true
+                break;
             }
             Expression::StaticMemberExpression(member) => {
-                if !append(&member.object, segments) {
-                    return false;
-                }
                 segments.push(member.property.name.to_string());
-                true
+                expression = &member.object;
             }
-            _ => false,
+            _ => return None,
         }
     }
-    let mut segments = Vec::new();
-    append(expression, &mut segments)
-        .then(|| TypeDependencyPathFact::from_segments(segments))
-        .flatten()
+    segments.reverse();
+    TypeDependencyPathFact::from_segments(segments)
 }
 
 fn dependency_path_from_property_key(key: &PropertyKey<'_>) -> Option<TypeDependencyPathFact> {
@@ -184,7 +190,12 @@ fn dependency_path_from_property_key(key: &PropertyKey<'_>) -> Option<TypeDepend
     }
 }
 
-struct TypeDependencyCollector<'a> {
+/// A type nests without bound (an argument of an argument, a member of a
+/// member), so the collector visits the types it reaches from `pending`,
+/// an explicit stack, rather than a native level per nested type: every
+/// visit only records and pushes, and [`Self::drain`] runs them.
+struct TypeDependencyCollector<'a, 'r, 'x> {
+    pending: Vec<(&'r TSType<'x>, StructuralDependencyContext)>,
     full: &'a mut BTreeSet<TypeDependencyPathFact>,
     structural: &'a mut BTreeSet<TypeDependencyPathFact>,
     declaration_carrier: &'a mut BTreeSet<TypeDependencyPathFact>,
@@ -193,7 +204,7 @@ struct TypeDependencyCollector<'a> {
     unsupported_value_positions: &'a mut BTreeSet<UnsupportedValuePositionKind>,
 }
 
-impl<'a> TypeDependencyCollector<'a> {
+impl<'a, 'r, 'x> TypeDependencyCollector<'a, 'r, 'x> {
     fn new(
         full: &'a mut BTreeSet<TypeDependencyPathFact>,
         structural: &'a mut BTreeSet<TypeDependencyPathFact>,
@@ -203,6 +214,7 @@ impl<'a> TypeDependencyCollector<'a> {
         unsupported_value_positions: &'a mut BTreeSet<UnsupportedValuePositionKind>,
     ) -> Self {
         Self {
+            pending: Vec::new(),
             full,
             structural,
             declaration_carrier,
@@ -245,7 +257,10 @@ impl<'a> TypeDependencyCollector<'a> {
         self.record(fact, path_context);
     }
 
-    fn visit_type_parameters_for_carrier(&mut self, parameters: &TSTypeParameterDeclaration<'_>) {
+    fn visit_type_parameters_for_carrier(
+        &mut self,
+        parameters: &'r TSTypeParameterDeclaration<'x>,
+    ) {
         for parameter in &parameters.params {
             if let Some(constraint) = &parameter.constraint {
                 self.visit_type(constraint, StructuralDependencyContext::CarrierOnly);
@@ -284,7 +299,7 @@ impl<'a> TypeDependencyCollector<'a> {
 
     fn visit_parameters(
         &mut self,
-        parameters: &FormalParameters<'_>,
+        parameters: &'r FormalParameters<'x>,
         context: StructuralDependencyContext,
     ) {
         // Component-meta only needs callable parameter surfaces for
@@ -304,7 +319,7 @@ impl<'a> TypeDependencyCollector<'a> {
         }
     }
 
-    fn visit_this_parameter(&mut self, parameter: Option<&TSThisParameter<'_>>) {
+    fn visit_this_parameter(&mut self, parameter: Option<&'r TSThisParameter<'x>>) {
         if let Some(annotation) = parameter.and_then(|parameter| parameter.type_annotation.as_ref())
         {
             self.visit_type(
@@ -314,14 +329,14 @@ impl<'a> TypeDependencyCollector<'a> {
         }
     }
 
-    fn visit_index_parameter(&mut self, parameter: &TSIndexSignatureName<'_>) {
+    fn visit_index_parameter(&mut self, parameter: &'r TSIndexSignatureName<'x>) {
         self.visit_type(
             &parameter.type_annotation.type_annotation,
             StructuralDependencyContext::CarrierOnly,
         );
     }
 
-    fn visit_signatures(&mut self, members: &[TSSignature<'_>], carrier_only: bool) {
+    fn visit_signatures(&mut self, members: &'r [TSSignature<'x>], carrier_only: bool) {
         let leaf_context = if carrier_only {
             StructuralDependencyContext::CarrierOnly
         } else {
@@ -398,7 +413,19 @@ impl<'a> TypeDependencyCollector<'a> {
         }
     }
 
-    fn visit_type(&mut self, ts_type: &TSType<'_>, context: StructuralDependencyContext) {
+    /// Visit `ts_type` once [`Self::drain`] runs.
+    fn visit_type(&mut self, ts_type: &'r TSType<'x>, context: StructuralDependencyContext) {
+        self.pending.push((ts_type, context));
+    }
+
+    /// Visit every pending type, and every type those visits reach.
+    fn drain(&mut self) {
+        while let Some((ts_type, context)) = self.pending.pop() {
+            self.visit_type_now(ts_type, context);
+        }
+    }
+
+    fn visit_type_now(&mut self, ts_type: &'r TSType<'x>, context: StructuralDependencyContext) {
         match ts_type {
             TSType::TSTypeReference(reference) => {
                 self.record(
@@ -578,8 +605,8 @@ impl<'a> TypeDependencyCollector<'a> {
 
     fn visit_interface(
         &mut self,
-        members: &[TSSignature<'_>],
-        heritage: &[TSInterfaceHeritage<'_>],
+        members: &'r [TSSignature<'x>],
+        heritage: &'r [TSInterfaceHeritage<'x>],
     ) {
         for base in heritage {
             self.record_type_name_path(&base.type_name, StructuralDependencyContext::Root);
@@ -592,7 +619,7 @@ impl<'a> TypeDependencyCollector<'a> {
         self.visit_signatures(members, false);
     }
 
-    fn visit_class(&mut self, class: &Class<'_>) {
+    fn visit_class(&mut self, class: &'r Class<'x>) {
         if let Some(parameters) = &class.type_parameters {
             self.visit_type_parameters_for_carrier(parameters);
         }

@@ -168,3 +168,71 @@ fn exported_declaration_ast_shape_remains_supported_by_wrapper_callers() {
         .iter()
         .any(|path| path.legacy_dotted_name() == "Base"));
 }
+
+/// The parsed program, handed to the thread that collects its facts.
+struct Handed<'p, 'a>(&'p oxc_ast::ast::Program<'a>);
+
+// SAFETY: the parsing thread blocks on the collecting thread's join while
+// the collecting thread holds the program, so one thread touches it at a
+// time.
+unsafe impl Send for Handed<'_, '_> {}
+
+/// Types nested 10,000 deep (type arguments, function types, object type
+/// members and conditional branches) collect their dependency facts on a
+/// 1 MiB thread: the collector visits nested types from an explicit stack.
+#[test]
+fn types_nested_10000_deep_collect_on_a_small_stack() {
+    let depth = 10_000;
+    let wrap =
+        |open: &str, close: &str| format!("{}Leaf{}", open.repeat(depth), close.repeat(depth));
+    let sources = [
+        ("arguments", format!("type D = {};", wrap("Box<", ">"))),
+        (
+            "functions",
+            format!("type D = {}Leaf;", "(x: Leaf) => ".repeat(depth)),
+        ),
+        ("objects", format!("type D = {};", wrap("{ v: ", " }"))),
+        (
+            "conditionals",
+            format!(
+                "type D = {}Leaf;",
+                "Leaf extends Box ? Leaf : ".repeat(depth)
+            ),
+        ),
+    ];
+    for (form, source) in sources {
+        let paths = std::thread::Builder::new()
+            .stack_size(1 << 30)
+            .spawn(move || {
+                let allocator = Allocator::default();
+                let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
+                assert!(!parsed.fatal_error, "fixture must parse");
+                let handed = Handed(&parsed.program);
+                std::thread::scope(|scope| {
+                    std::thread::Builder::new()
+                        .stack_size(1 << 20)
+                        .spawn_scoped(scope, move || {
+                            let handed = handed;
+                            let Statement::TSTypeAliasDeclaration(alias) = &handed.0.body[0] else {
+                                panic!("type alias");
+                            };
+                            collect_type_dependency_paths(&alias.type_annotation)
+                                .into_iter()
+                                .map(|path| path.legacy_dotted_name())
+                                .collect::<Vec<_>>()
+                        })
+                        .expect("spawn the collecting thread")
+                        .join()
+                        .expect("the facts collect")
+                })
+            })
+            .expect("spawn the parsing thread")
+            .join()
+            .expect("the parse returns");
+        let expected: &[&str] = match form {
+            "arguments" | "conditionals" => &["Box", "Leaf"],
+            _ => &["Leaf"],
+        };
+        assert_eq!(paths, expected, "{form}");
+    }
+}

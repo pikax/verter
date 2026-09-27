@@ -577,6 +577,20 @@ Recorded plainly so no reader mistakes absence for a pass:
   or the `!` classification overflows the worker, and restoring the
   derived drop overflows the test thread.
 
+* **Type dependency facts collect from an explicit stack.** The collector
+  of an authored type's dependency paths (`verter_type_expr_oxc`'s
+  `dependency_facts`) recursed once per nested type: 8.3 MB on the
+  declaration-lowering worker for a 10,000-deep `Box<…>` argument chain,
+  unoptimized, past its 8 MiB. Every visit now records its own paths and
+  pushes the types it reaches onto a stack that one loop drains (the facts
+  are sets, so the order they are found in is immaterial), and a qualified
+  name's or a member chain's segments are read from a loop down its left
+  spine. `dependency_facts_tests.rs` →
+  `types_nested_10000_deep_collect_on_a_small_stack` collects type
+  arguments, function types, object type members and conditional branches
+  nested 10,000 deep on a 1 MiB thread; visiting each nested type in place
+  overflows it.
+
 * **Nested callables index from an explicit stack, on shared locators.**
   The function index discovered a callable nested in a callable's body by
   recursing through its entry build, 13.9 MB for 10,000 nested arrows
