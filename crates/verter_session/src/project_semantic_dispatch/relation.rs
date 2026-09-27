@@ -7673,7 +7673,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `inferFromMatchingTypes`): the source members identical to a member
     /// of the target that is not the variable — or string and number
     /// literals whose base is one (`isTypeOrBaseIdenticalTo`) — are
-    /// removed, and what remains is inferred to the variable as ONE union
+    /// removed, `boolean` on either side being its two literals, as the
+    /// checker's union holds it, and what remains is inferred to the variable as ONE union
     /// candidate (`string | number | undefined` against `T | undefined`
     /// infers `T` as `string | number`). When every member matched, the
     /// whole source is a lower-priority inference to the variable
@@ -7702,10 +7703,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let [parameter] = parameters.as_slice() else {
             return None;
         };
-        let matched = |member: SemanticNodeId| {
+        // `boolean` is the union `false | true` to the checker.
+        let boolean_literals = |members: &[SemanticNodeId]| -> Vec<SemanticNodeId> {
+            members
+                .iter()
+                .flat_map(|member| match graph.node_data(*member).as_deref() {
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => [false, true]
+                        .map(|value| {
+                            graph.intern_node(SemanticNodeData::Literal(LiteralValue::Boolean(
+                                value,
+                            )))
+                        })
+                        .to_vec(),
+                    _ => vec![*member],
+                })
+                .collect()
+        };
+        let fixed = boolean_literals(&fixed);
+        let source_members = boolean_literals(source);
+        // Identity is the scope-insensitive structural comparator the
+        // canonical algebra decides constituent identity with; a comparison
+        // it cannot finish leaves the members to relate one by one.
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let mut budget = super::canonical_algebra::COMPARE_WORK_BUDGET;
+        let mut undecided = false;
+        let mut identical = |member: SemanticNodeId, target: SemanticNodeId| {
+            match super::canonical_algebra::compare_structural(
+                graph,
+                member,
+                target,
+                &mut evidence,
+                &mut budget,
+            ) {
+                super::canonical_algebra::StructuralIdentity::Equal => true,
+                super::canonical_algebra::StructuralIdentity::Distinct => false,
+                super::canonical_algebra::StructuralIdentity::Incomplete => {
+                    undecided = true;
+                    false
+                }
+            }
+        };
+        let mut matched = |member: SemanticNodeId| {
             fixed.iter().any(|target| {
-                *target == member
-                    || self.structurally_identical_closed(member, *target)
+                identical(member, *target)
                     || matches!(
                         (
                             graph.node_data(*target).as_deref(),
@@ -7721,11 +7761,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     )
             })
         };
-        let unmatched: Vec<SemanticNodeId> = source
+        let unmatched: Vec<SemanticNodeId> = source_members
             .iter()
             .copied()
             .filter(|member| !matched(*member))
             .collect();
+        if undecided {
+            return None;
+        }
         Some(match unmatched.as_slice() {
             [] => NakedUnionInference::Matched {
                 source: match source {
@@ -7760,59 +7803,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             RelationResult::Unknown
         }
-    }
-
-    /// Whether two object-like types with no type parameter anywhere in
-    /// them are identical — each a subtype of the other, which for such
-    /// types is the checker's identity (`isTypeIdenticalTo` over two object
-    /// literal types written at different positions).
-    fn structurally_identical_closed(&self, a: SemanticNodeId, b: SemanticNodeId) -> bool {
-        let graph = self.graph();
-        let object_like = |node: SemanticNodeId| {
-            matches!(
-                graph.node_data(node).as_deref(),
-                Some(
-                    SemanticNodeData::Object(_)
-                        | SemanticNodeData::Array { .. }
-                        | SemanticNodeData::Tuple { .. }
-                )
-            )
-        };
-        let closed = |root: SemanticNodeId| {
-            let mut visited: rustc_hash::FxHashSet<SemanticNodeId> =
-                rustc_hash::FxHashSet::default();
-            let mut stack = vec![root];
-            while let Some(node) = stack.pop() {
-                if !visited.insert(node) {
-                    continue;
-                }
-                let Some(data) = graph.node_data(node) else {
-                    return false;
-                };
-                if matches!(
-                    &*data,
-                    SemanticNodeData::TypeParam { .. }
-                        | SemanticNodeData::Infer { .. }
-                        | SemanticNodeData::InferRef { .. }
-                ) {
-                    return false;
-                }
-                let _ = data.for_each_child(|child| stack.push(child));
-            }
-            true
-        };
-        object_like(a)
-            && object_like(b)
-            && closed(a)
-            && closed(b)
-            && matches!(
-                self.execute_relate_pair_kind(a, b, crate::semantic_query::RelationKind::Subtype),
-                super::dispatch_txn::RelationStep::Assignable { .. }
-            )
-            && matches!(
-                self.execute_relate_pair_kind(b, a, crate::semantic_query::RelationKind::Subtype),
-                super::dispatch_txn::RelationStep::Assignable { .. }
-            )
     }
 
     /// A source against a union target: some member takes it whole, or an

@@ -854,3 +854,22 @@ fn a_method_parameter_stays_bivariant_in_the_overload_subtype_pass() {
     let failures = matrix.returns(&[("oMethod", "\"wide\""), ("oProperty", "\"fallback\"")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// An argument member matches a fixed member of the union parameter only by
+/// the checker's identity: `{ a: any }` is not `{ a: unknown }` (`uAny` is
+/// `1 | { a: any; }`), and `boolean` on either side is its two literals
+/// (`true | 1` against `T | boolean` infers `1`, `boolean | 1` against `T |
+/// true` infers `1 | false`). Measured on TypeScript 7.0.2, alike under all
+/// four settings.
+#[test]
+fn a_union_argument_matches_a_fixed_member_by_the_checkers_identity() {
+    let matrix = Matrix::new(OVERLOADS_AND_UNION_MEMBERS);
+    let failures = matrix.returns(&[
+        ("uAny", "1 | { a: any; }"),
+        ("uUnknown", "1"),
+        ("uTrue", "1"),
+        ("uBoolean", "1"),
+        ("uFalse", "1 | false"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
