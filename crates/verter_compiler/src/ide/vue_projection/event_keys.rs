@@ -232,16 +232,20 @@ fn event_name(
 ) -> Option<EventName> {
     match (static_name, dynamic) {
         (Some(name), _) => Some(EventName::Static(name.to_string())),
-        (None, Some(id)) => Some(EventName::Dynamic {
-            expression: id.clone(),
-            candidates: plan
+        (None, Some(id)) => {
+            let facts = plan
                 .expression(id)
-                .map(|expression| literal_union(&expression.spelling))
-                .unwrap_or_default(),
-            open: plan
-                .expression(id)
-                .is_none_or(|expression| dynamic_domain_open(&expression.spelling)),
-        }),
+                .map(|expression| dynamic_name_facts(&expression.spelling))
+                .unwrap_or(DynamicNameFacts {
+                    candidates: Vec::new(),
+                    open: true,
+                });
+            Some(EventName::Dynamic {
+                expression: id.clone(),
+                candidates: facts.candidates,
+                open: facts.open,
+            })
+        }
         (None, None) => None,
     }
 }
@@ -303,14 +307,16 @@ fn model_event_name(
             .expression(id)
             .map(|expression| expression.spelling.as_str())
             .unwrap_or("");
-        let candidates = literal_union(spelling)
+        let facts = dynamic_name_facts(spelling);
+        let candidates = facts
+            .candidates
             .into_iter()
             .map(|candidate| format!("update:{}", camelize(&candidate)))
             .collect();
         return EventName::Dynamic {
             expression: id.clone(),
             candidates,
-            open: dynamic_domain_open(spelling),
+            open: facts.open,
         };
     }
     EventName::Static(model_event(argument))
@@ -379,25 +385,83 @@ fn push_consumer(
     set.collision = set.consumers.len() > 1;
 }
 
-/// Whether a dynamic event expression still has a non-literal branch.
-/// A closed result is a string literal, a conditional whose branches are
-/// closed, or an assertion/satisfies whose type is a finite string-literal
-/// union. Anything else leaves the listener domain open.
-fn dynamic_domain_open(expression: &str) -> bool {
+struct DynamicNameFacts {
+    candidates: Vec<String>,
+    open: bool,
+}
+
+/// Finite event-name literals, and whether a non-literal branch remains.
+///
+/// Candidates come from evaluated branches and from a finite string-literal
+/// assertion. Conditions, call arguments, property names and comments are
+/// not event names. One parse feeds both answers.
+fn dynamic_name_facts(expression: &str) -> DynamicNameFacts {
     let expression = expression.trim();
     if expression.is_empty() {
-        return true;
+        return DynamicNameFacts {
+            candidates: Vec::new(),
+            open: true,
+        };
     }
     let allocator = Allocator::default();
     let Ok(parsed) = Parser::new(&allocator, expression, SourceType::ts()).parse_expression()
     else {
-        return true;
+        return DynamicNameFacts {
+            candidates: Vec::new(),
+            open: true,
+        };
     };
     let span = parsed.span();
-    if span.start != 0 || span.end as usize != expression.len() {
-        return true;
+    if !uncovered_is_trivia(expression, span.start, span.end) {
+        return DynamicNameFacts {
+            candidates: Vec::new(),
+            open: true,
+        };
     }
-    !event_name_branches_closed(&parsed)
+    let mut candidates = Vec::new();
+    collect_event_literals(&parsed, &mut candidates);
+    DynamicNameFacts {
+        open: !event_name_branches_closed(&parsed),
+        candidates,
+    }
+}
+
+/// Source outside the parsed expression is trivia when it is whitespace,
+/// semicolons, or comments. Anything else means the parse did not cover
+/// the dynamic name.
+fn uncovered_is_trivia(source: &str, start: u32, end: u32) -> bool {
+    let bytes = source.as_bytes();
+    let start = start as usize;
+    let end = end as usize;
+    if start > end || end > bytes.len() {
+        return false;
+    }
+    is_trivia(&bytes[..start]) && is_trivia(&bytes[end..])
+}
+
+fn is_trivia(mut bytes: &[u8]) -> bool {
+    while !bytes.is_empty() {
+        if bytes[0].is_ascii_whitespace() || bytes[0] == b';' {
+            bytes = &bytes[1..];
+            continue;
+        }
+        if bytes.starts_with(b"//") {
+            bytes = match bytes.iter().position(|byte| *byte == b'\n') {
+                Some(index) => &bytes[index + 1..],
+                None => &[],
+            };
+            continue;
+        }
+        if let Some(rest) = bytes.strip_prefix(b"/*") {
+            let Some(index) = rest.windows(2).position(|pair| pair == b"*/") else {
+                return false;
+            };
+            bytes = &rest[index + 2..];
+            continue;
+        }
+        return false;
+    }
+    true
 }
 
 fn event_name_branches_closed(expression: &Expression<'_>) -> bool {
@@ -449,37 +513,94 @@ fn finite_string_union(ty: &TSType<'_>) -> bool {
     walk(ty, 0)
 }
 
-/// Extract the finite string values in a dynamic event-name union. This is
-/// intentionally conservative: any non-literal branch leaves the dynamic
-/// domain open while retaining the literals that are definitely present.
-fn literal_union(expression: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let bytes = expression.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let quote = bytes[i];
-        if quote != b'\'' && quote != b'"' {
-            i += 1;
-            continue;
+fn push_event_name(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|candidate| candidate == value) {
+        values.push(value.to_string());
+    }
+}
+
+/// String literals that are possible values of the dynamic event name.
+/// A non-literal branch contributes nothing here; `dynamic_name_facts`
+/// still marks that domain open.
+fn collect_event_literals(expression: &Expression<'_>, values: &mut Vec<String>) {
+    match expression {
+        Expression::StringLiteral(literal) => push_event_name(values, literal.value.as_str()),
+        Expression::ParenthesizedExpression(inner) => {
+            collect_event_literals(&inner.expression, values);
         }
-        let start = i + 1;
-        i += 1;
-        let mut escaped = false;
-        while i < bytes.len() {
-            if !escaped && bytes[i] == quote {
-                let value = &expression[start..i];
-                if !values.iter().any(|candidate| candidate == value) {
-                    values.push(value.to_string());
+        Expression::TSNonNullExpression(inner) => {
+            collect_event_literals(&inner.expression, values);
+        }
+        Expression::TSAsExpression(inner) => {
+            collect_asserted_literals(&inner.expression, &inner.type_annotation, values);
+        }
+        Expression::TSSatisfiesExpression(inner) => {
+            collect_asserted_literals(&inner.expression, &inner.type_annotation, values);
+        }
+        Expression::TSTypeAssertion(inner) => {
+            collect_asserted_literals(&inner.expression, &inner.type_annotation, values);
+        }
+        Expression::ConditionalExpression(inner) => {
+            collect_event_literals(&inner.consequent, values);
+            collect_event_literals(&inner.alternate, values);
+        }
+        _ => {}
+    }
+}
+
+fn collect_asserted_literals(
+    expression: &Expression<'_>,
+    ty: &TSType<'_>,
+    values: &mut Vec<String>,
+) {
+    if ty.is_const_type_reference() {
+        collect_event_literals(expression, values);
+    } else if finite_string_union(ty) {
+        collect_type_literals(ty, values);
+    } else {
+        collect_event_literals(expression, values);
+    }
+}
+
+fn collect_type_literals(ty: &TSType<'_>, values: &mut Vec<String>) {
+    fn walk(ty: &TSType<'_>, values: &mut Vec<String>, depth: u32) {
+        if depth > 8 {
+            return;
+        }
+        match ty {
+            TSType::TSParenthesizedType(inner) => walk(&inner.type_annotation, values, depth + 1),
+            TSType::TSLiteralType(literal) => {
+                if let TSLiteral::StringLiteral(string) = &literal.literal {
+                    push_event_name(values, string.value.as_str());
                 }
-                i += 1;
-                break;
             }
-            escaped = !escaped && bytes[i] == b'\\';
-            if bytes[i] != b'\\' {
-                escaped = false;
+            TSType::TSUnionType(union) => {
+                for member in &union.types {
+                    walk(member, values, depth + 1);
+                }
             }
-            i += 1;
+            _ => {}
         }
     }
-    values
+    walk(ty, values, 0);
+}
+
+#[cfg(test)]
+mod spelling_tests {
+    use super::dynamic_name_facts;
+
+    #[test]
+    fn comment_apostrophe_is_not_an_event_candidate() {
+        let block = dynamic_name_facts("/* user's choice */ cond ? 'save' : 'cancel'");
+        assert!(!block.open);
+        assert_eq!(block.candidates, ["save", "cancel"]);
+
+        let line = dynamic_name_facts("cond ? 'save' : 'cancel' // user's choice");
+        assert!(!line.open);
+        assert_eq!(line.candidates, ["save", "cancel"]);
+
+        let quoted = dynamic_name_facts("mode === \"edit\" ? \"save\" : \"create\"");
+        assert!(!quoted.open);
+        assert_eq!(quoted.candidates, ["save", "create"]);
+    }
 }

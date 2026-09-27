@@ -213,6 +213,98 @@ fn event_transport_keeps_non_literal_branches_in_the_open_domain() {
 }
 
 #[test]
+fn event_transport_dynamic_candidates_skip_conditions_arguments_and_keys() {
+    let closed =
+        project("<Foo @[mode === 'edit' ? 'save' : 'create']=\"handle\" @edit=\"onEdit\" />");
+    assert!(closed.complete);
+    assert!(closed.aliases.iter().any(|alias| matches!(
+        &alias.event,
+        EventName::Dynamic { candidates, open, .. }
+            if candidates == &["save".to_string(), "create".to_string()] && !*open
+    )));
+    assert!(closed.aliases.iter().any(|alias| matches!(
+        &alias.listener_key,
+        ListenerKey::Finite(keys)
+            if keys == &["onSave".to_string(), "onCreate".to_string()]
+    )));
+    let edit = closed
+        .listeners
+        .iter()
+        .find(|set| set.key.as_deref() == Some("onEdit"))
+        .expect("authored @edit listener");
+    assert_eq!(edit.consumers.len(), 1);
+    assert!(!edit.collision);
+
+    let open = project("<Foo @[mode === 'save' ? otherEvent : fallbackEvent]=\"h\" />");
+    assert!(open.complete);
+    assert!(open.aliases.iter().any(|alias| matches!(
+        &alias.event,
+        EventName::Dynamic { candidates, open, .. } if candidates.is_empty() && *open
+    )));
+    assert!(open
+        .listeners
+        .iter()
+        .all(|set| set.key.as_deref() != Some("onSave")));
+    assert!(open.listeners.iter().any(|set| set.key.is_none()));
+
+    let call = project("<Foo @[pick('edit', 'save')]=\"h\" />");
+    assert!(call.complete);
+    assert!(call.aliases.iter().any(|alias| matches!(
+        &alias.event,
+        EventName::Dynamic { candidates, open, .. } if candidates.is_empty() && *open
+    )));
+    assert!(call.listeners.iter().all(|set| {
+        set.key.as_deref() != Some("onEdit") && set.key.as_deref() != Some("onSave")
+    }));
+
+    let member = project("<Foo @[cond ? obj['edit'] : 'save']=\"h\" />");
+    assert!(member.complete);
+    assert!(member.aliases.iter().any(|alias| matches!(
+        &alias.event,
+        EventName::Dynamic { candidates, open, .. }
+            if candidates == &["save".to_string()] && *open
+    )));
+    assert!(member
+        .listeners
+        .iter()
+        .all(|set| set.key.as_deref() != Some("onEdit")));
+
+    let model = project("<Foo v-model:[mode === 'edit' ? 'title' : 'name']=\"value\" />");
+    assert!(model.complete);
+    assert!(model.aliases.iter().any(|alias| matches!(
+        &alias.event,
+        EventName::Dynamic { candidates, open, .. }
+            if candidates == &["update:title".to_string(), "update:name".to_string()] && !*open
+    )));
+    assert!(model
+        .listeners
+        .iter()
+        .all(|set| set.key.as_deref() != Some("onUpdate:edit")));
+}
+
+#[test]
+fn event_transport_finite_dynamic_modifiers_keep_authored_order() {
+    let capture_once = project("<Foo @[('save' as 'save' | 'cancel')].capture.once=\"h\" />");
+    assert!(capture_once.complete);
+    assert!(capture_once.aliases.iter().any(|alias| {
+        alias.modifiers == ["capture", "once"]
+            && alias.listener_key
+                == ListenerKey::Finite(vec![
+                    "onSaveCaptureOnce".into(),
+                    "onCancelCaptureOnce".into(),
+                ])
+    }));
+    let once_capture = project("<Foo @[('save' as 'save' | 'cancel')].once.capture=\"h\" />");
+    assert!(once_capture.aliases.iter().any(|alias| {
+        alias.listener_key
+            == ListenerKey::Finite(vec![
+                "onSaveOnceCapture".into(),
+                "onCancelOnceCapture".into(),
+            ])
+    }));
+}
+
+#[test]
 fn event_transport_keeps_modifiers_on_finite_dynamic_listener_keys() {
     let projection = project("<Foo @[('save' as 'save' | 'cancel')].once=\"h\" />");
     assert!(projection.complete);
