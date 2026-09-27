@@ -12,7 +12,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -29,7 +29,6 @@ import {
   composeLaneGates,
   formatGithubOutput,
   isCiInert,
-  main,
   ownedFilesFromFilterOutputs,
 } from "./ci-impact.mjs";
 import { buildWorkspaceIndex } from "./lib/crate-graph.mjs";
@@ -354,47 +353,6 @@ test("ownedFilesFromFilterOutputs unions every filter's file list except the cat
   assert.throws(() => ownedFilesFromFilterOutputs({ x_files: "not json" }), /not a JSON file list/);
 });
 
-test("main reads a large change's filter outputs from a file, never the environment", () => {
-  // 600 changed files, each owned by every filter: past the kernel's 128 KiB
-  // per-string limit an environment variable could carry.
-  const files = Array.from({ length: 600 }, (_, i) => `crates/c${i}/src/a-long-module-name-${i}.rs`);
-  const outputs = { any: "true", any_files: JSON.stringify(files) };
-  const filters = new Set(Object.values(LANE_GATES).flatMap((spec) => spec.filters ?? []));
-  for (const filter of filters) {
-    outputs[filter] = "true";
-    outputs[`${filter}_files`] = JSON.stringify(files);
-  }
-  const text = JSON.stringify(outputs);
-  assert.ok(text.length > 128 * 1024, `fixture is ${text.length} bytes`);
-  const dir = mkdtempSync(join(tmpdir(), "ci-impact-"));
-  const outputsPath = join(dir, "filter-outputs.json");
-  const githubOutput = join(dir, "github-output");
-  writeFileSync(outputsPath, text);
-  writeFileSync(githubOutput, "");
-  const code = main(
-    [
-      "--filter-outputs",
-      outputsPath,
-      "--metadata",
-      join(dir, "no-metadata.json"),
-      "--github-output",
-      githubOutput,
-    ],
-    {},
-    dir,
-  );
-  assert.equal(code, 0);
-  const lines = readFileSync(githubOutput, "utf8").trim().split("\n");
-  assert.ok(lines.includes("gate_rust=true"), lines.join("\n"));
-  assert.ok(lines.includes("impact_full=true"), lines.join("\n"));
-});
-
-test("the lane-gate step hands the filter outputs over in a file", () => {
-  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  assert.ok(!/CI_IMPACT_(FILTER_OUTPUTS|CHANGED_FILES)_JSON:/.test(workflow));
-  assert.match(workflow, /ci-impact\.mjs --filter-outputs /);
-});
-
 test("formatGithubOutput emits one gate line per gate plus the fallback flag", () => {
   const lines = formatGithubOutput({ rust: "true", wasm: "false" }, { full: true });
   assert.deepEqual(lines, ["gate_rust=true", "gate_wasm=false", "impact_full=true"]);
@@ -459,5 +417,70 @@ test("every declared lane root is a crate in this workspace", () => {
     for (const root of roots) {
       assert.ok(names.has(root), `lane ${lane} root ${root} is not a crate under crates/`);
     }
+  }
+});
+
+test("the CLI reads arbitrarily large filter outputs from a file, not the environment", () => {
+  // The CI step hands the classifier `toJSON(steps.filter.outputs)` through a
+  // file: on a large diff the `<filter>_files` lists exceed Linux's 128 KiB
+  // cap on one environment string and bash cannot even be started.
+  const rootCrates = [...new Set(Object.values(LANE_ROOTS).flat())];
+  const pkgs = rootCrates.map((name) => ({ name, dir: `crates/${name}` }));
+  const laneMetadata = fixtureMetadata(pkgs);
+
+  const ownedTs = Array.from(
+    { length: 6000 },
+    (_, i) => `packages/some-long-package-name/src/generated/module-${i}.ts`,
+  );
+  const changedFiles = ["crates/verter_wasm/src/lib.rs", ...ownedTs];
+  const filterOutputs = { any: "true", any_files: JSON.stringify(changedFiles) };
+  for (const spec of Object.values(LANE_GATES)) {
+    for (const filter of spec.filters ?? []) {
+      filterOutputs[filter] = "false";
+      filterOutputs[`${filter}_files`] = "[]";
+    }
+  }
+  filterOutputs.js = "true";
+  filterOutputs.js_files = JSON.stringify(ownedTs);
+  filterOutputs.rust = "true";
+  filterOutputs.rust_files = JSON.stringify(["crates/verter_wasm/src/lib.rs"]);
+
+  const dir = mkdtempSync(join(tmpdir(), "ci-impact-"));
+  try {
+    const outputsPath = join(dir, "filter-outputs.json");
+    const metadataPath = join(dir, "metadata.json");
+    const githubOutput = join(dir, "github-output");
+    writeFileSync(outputsPath, JSON.stringify(filterOutputs, null, 2));
+    writeFileSync(metadataPath, JSON.stringify(laneMetadata));
+    assert.ok(statSync(outputsPath).size > 256 * 1024, "the fixture must exceed the env cap");
+
+    const env = { ...process.env };
+    delete env.CI_IMPACT_CHANGED_FILES_JSON;
+    delete env.CI_IMPACT_FILTER_OUTPUTS_JSON;
+    const run = spawnSync(
+      process.execPath,
+      [
+        join(SCRIPT_DIR, "ci-impact.mjs"),
+        "--filter-outputs",
+        outputsPath,
+        "--metadata",
+        metadataPath,
+        "--github-output",
+        githubOutput,
+      ],
+      { encoding: "utf8", cwd: REPO_ROOT, env },
+    );
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /6001 changed file\(s\) classified/);
+
+    const impact = classifyCiImpact(changedFiles, laneMetadata, LANE_ROOTS, {
+      ownedFiles: ownedFilesFromFilterOutputs(filterOutputs),
+    });
+    assert.equal(impact.full, false, "the owned files must not force the fallback");
+    assert.equal(impact.lanes.wasm, true);
+    const expected = formatGithubOutput(composeLaneGates(filterOutputs, impact), impact);
+    assert.deepEqual(readFileSync(githubOutput, "utf8").trimEnd().split("\n"), expected);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
