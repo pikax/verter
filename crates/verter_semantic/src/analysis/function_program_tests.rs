@@ -1737,17 +1737,13 @@ fn nested_function_hashes_fold_each_function_once() {
 /// extension.
 #[test]
 fn descents_carry_their_hash_and_namespace_steps() {
-    use std::hash::{BuildHasher, Hash, Hasher};
+    use std::hash::BuildHasher;
     let build = |first: FunctionDescentStep| {
         (0..10_000u32).fold(FunctionDescent::new().then(first), |descent, ordinal| {
             descent.then(FunctionDescentStep::NestedCallable { ordinal })
         })
     };
-    let hash = |descent: &FunctionDescent| {
-        let mut hasher = rustc_hash::FxBuildHasher.build_hasher();
-        descent.hash(&mut hasher);
-        hasher.finish()
-    };
+    let hash = |descent: &FunctionDescent| rustc_hash::FxBuildHasher.hash_one(descent);
     let namespaced = build(FunctionDescentStep::NamespaceMember {
         statement_ordinal: 0,
     });
