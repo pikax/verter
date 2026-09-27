@@ -571,8 +571,9 @@ fn arrows_initializing_declarators_nested_10000_deep_answer_on_production_stacks
 #[test]
 fn destructuring_patterns_nested_10000_deep_answer_on_production_stacks() {
     let source = format!(
-        "export function pf(x: any) {{ const {} = x; return v; }}\n",
-        format!("{}v{}", "{ v: ".repeat(DEPTH), " }".repeat(DEPTH))
+        "export function pf(x: any) {{ const {}v{} = x; return v; }}\n",
+        "{ v: ".repeat(DEPTH),
+        " }".repeat(DEPTH)
     );
     assert_eq!(
         mismatches_on_a_small_stack(source, "0 extends (1 & ReturnType<typeof pf>) ? 1 : 2", "1"),

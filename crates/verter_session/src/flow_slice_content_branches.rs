@@ -422,7 +422,7 @@ impl<'a> Lowerer<'a> {
     ) -> LowerStep<'s, 'x> {
         let switch = state.switch;
         let Some(case) = switch.cases.get(state.cases.len()) else {
-            return self.finish_switch_lowering(state, acc);
+            return self.finish_switch_lowering(*state, acc);
         };
         if let Some(test) = case.test.as_ref() {
             state.unprovable_switch_effect |= self.record_control_position_calls(test);
@@ -509,7 +509,7 @@ impl<'a> Lowerer<'a> {
 
     fn finish_switch_lowering<'s, 'x>(
         &mut self,
-        state: Box<SwitchLower<'s, 'x>>,
+        state: SwitchLower<'s, 'x>,
         acc: LowerAcc<'_>,
     ) -> LowerStep<'s, 'x> {
         let SwitchLower {
@@ -519,7 +519,7 @@ impl<'a> Lowerer<'a> {
             active_guard_base,
             cases,
             ..
-        } = *state;
+        } = state;
         self.active_guard_bindings.truncate(active_guard_base);
         self.break_targets.pop();
         self.break_target_followed_by_return.pop();

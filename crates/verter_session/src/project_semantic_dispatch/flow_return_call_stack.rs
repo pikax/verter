@@ -138,7 +138,7 @@ pub(super) struct FinishRoute {
 /// Where a call's executor route suspends at a function-value argument.
 pub(super) enum RouteAt<'e> {
     /// Typing its arguments.
-    Typing(ResolveCallFrame<'e>),
+    Typing(Box<ResolveCallFrame<'e>>),
     /// Retyping a context-sensitive argument.
     Finishing(Box<FinishRoute>),
 }
@@ -274,7 +274,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         match at {
             RouteAt::Typing(mut route) => {
                 route.delivered_function = Some(typed);
-                self.advance_resolve_call(route, None)
+                self.advance_resolve_call(*route, None)
             }
             RouteAt::Finishing(finish) => self.retype_resolve_call(finish, Some(typed)),
         }
@@ -582,7 +582,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 };
                             if let Some(request) = request {
                                 return ResolveCallProgress::Function(Box::new(RouteFunction {
-                                    at: RouteAt::Typing(route),
+                                    at: RouteAt::Typing(Box::new(route)),
                                     request,
                                 }));
                             }
@@ -788,30 +788,36 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             finish.step = Positional::Value(self.dispatch.execute_resolve_call(finish.key.clone()));
             finish.rounds += 1;
         }
-        while finish.rounds < finish.args.len() {
-            let Some((position, contextual)) = Self::contextual_argument_request(&finish.step)
-            else {
-                break;
-            };
-            let Some(Some(expr)) = finish.function_arguments.get(position).cloned() else {
-                break;
-            };
-            if !matches!(expr, SliceExpr::NestedFunctionValue { gap: None, .. }) {
-                break;
+        match self.next_retyped_argument(&finish) {
+            Some((position, request)) => {
+                finish.position = position;
+                ResolveCallProgress::Function(Box::new(RouteFunction {
+                    at: RouteAt::Finishing(finish),
+                    request,
+                }))
             }
-            let Some(signature) = self.contextual_signature(contextual) else {
-                break;
-            };
-            let Some(request) = self.function_argument_request(&expr, Some(signature)) else {
-                break;
-            };
-            finish.position = position;
-            return ResolveCallProgress::Function(Box::new(RouteFunction {
-                at: RouteAt::Finishing(finish),
-                request,
-            }));
+            None => ResolveCallProgress::Done(Self::settle_retyped_call(*finish)),
         }
-        ResolveCallProgress::Done(Self::settle_retyped_call(*finish))
+    }
+
+    /// The context-sensitive argument the executor's last step names for
+    /// retyping, while a round is left: its position, and the request to
+    /// type it under the contextual type the step hands back.
+    fn next_retyped_argument(
+        &mut self,
+        finish: &FinishRoute,
+    ) -> Option<(usize, FunctionArgumentRequest)> {
+        if finish.rounds >= finish.args.len() {
+            return None;
+        }
+        let (position, contextual) = Self::contextual_argument_request(&finish.step)?;
+        let expr = finish.function_arguments.get(position).cloned().flatten()?;
+        if !matches!(expr, SliceExpr::NestedFunctionValue { gap: None, .. }) {
+            return None;
+        }
+        let signature = self.contextual_signature(contextual)?;
+        let request = self.function_argument_request(&expr, Some(signature))?;
+        Some((position, request))
     }
 
     /// The executor's step for a call once no argument is retyped again.

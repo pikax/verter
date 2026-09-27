@@ -53,17 +53,20 @@ pub(super) struct IfEval<'r> {
     entry_writes: FlowWriteObservation,
     narrow_mark: NarrowingSnapshot,
     bases: ScopeBases,
-    /// The consequent's end, once it is evaluated: its products, whether
-    /// it falls through, and its narrowings.
-    consequent: Option<(
-        FlowProductStore,
-        bool,
-        Vec<(
-            crate::flow_slice_content::SliceNarrowSubject,
-            SemanticNodeId,
-        )>,
-    )>,
+    /// The consequent's end, once it is evaluated.
+    consequent: Option<ArmEnd>,
 }
+
+/// One `if` arm's end: its products, whether it falls through, and its
+/// narrowings.
+type ArmEnd = (
+    FlowProductStore,
+    bool,
+    Vec<(
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )>,
+);
 
 /// A `switch` between its clauses.
 pub(super) struct SwitchEval<'r> {
@@ -232,14 +235,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn finish_if<'r>(
         &mut self,
         mut eval: Box<IfEval<'r>>,
-        (alternate_products, alternate_falls, alternate_narrowings): (
-            FlowProductStore,
-            bool,
-            Vec<(
-                crate::flow_slice_content::SliceNarrowSubject,
-                SemanticNodeId,
-            )>,
-        ),
+        (alternate_products, alternate_falls, alternate_narrowings): ArmEnd,
     ) -> BranchStep<'r> {
         let (consequent_products, consequent_falls, consequent_narrowings) = eval
             .consequent
@@ -367,7 +363,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Enter a `switch`'s next live clause, or finish the statement.
     fn switch_next_clause<'r>(&mut self, mut eval: Box<SwitchEval<'r>>) -> BranchStep<'r> {
         let discriminant = eval.discriminant;
-        while let Some(case) = eval.cases.get(eval.next) {
+        if let Some(case) = eval.cases.get(eval.next) {
             eval.next += 1;
             // The dispatch component of this clause's start.
             let mut dispatch = eval.entry.clone();
