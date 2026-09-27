@@ -50,6 +50,7 @@ import {
   STP18_MANDATORY_CASES,
   STP19_MANDATORY_CASES,
   STP20_MANDATORY_CASES,
+  STP21_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
 } from "./node-mandatory-cases.mjs";
 
@@ -74,6 +75,7 @@ export {
   STP18_MANDATORY_CASES,
   STP19_MANDATORY_CASES,
   STP20_MANDATORY_CASES,
+  STP21_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
 };
 
@@ -2130,6 +2132,11 @@ export async function verifyNode(options) {
     errors.push(...stp19.errors);
   }
 
+  if (nodeId === "STP21") {
+    const stp21 = await evaluateStp21Node({ repoRoot });
+    errors.push(...stp21.errors);
+  }
+
   if (nodeId === "STS0") {
     const sts0 = await evaluateSts0Node({ repoRoot, skipProbes: options.skipProbes });
     errors.push(...sts0.errors);
@@ -2355,6 +2362,14 @@ async function evaluateStp19Node({ repoRoot, resolvedEngines, skipProbes }) {
     skipProbes,
   });
   return { errors: stp19.errors };
+}
+
+async function evaluateStp21Node({ repoRoot }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP21/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  return protocol.evaluateStp21({ repoRoot });
 }
 
 async function evaluateSts0Node({ repoRoot, skipProbes }) {
