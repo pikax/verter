@@ -577,3 +577,28 @@ fn utility_types_and_string_mappings_resolve_as_the_checker_resolves_them() {
     )]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A `${number}` placeholder takes a numeric string only when its value is
+/// a finite double: `"1e999"`, `"2e308"` and `"1.7976931348623159e308"`
+/// overflow, `"1e308"` and `"1.7976931348623157e308"` do not. Measured on
+/// TypeScript 7.0.2, alike under all four settings.
+#[test]
+fn a_number_placeholder_refuses_an_overflowing_numeric_string() {
+    let matrix = Matrix::new("export {};");
+    let failures = matrix.types(&[
+        ("\"1e999\" extends `${number}` ? 1 : 2", "2"),
+        ("\"-1e999\" extends `${number}` ? 1 : 2", "2"),
+        ("\"2e308\" extends `${number}` ? 1 : 2", "2"),
+        (
+            "\"1.7976931348623159e308\" extends `${number}` ? 1 : 2",
+            "2",
+        ),
+        ("\"1e308\" extends `${number}` ? 1 : 2", "1"),
+        (
+            "\"1.7976931348623157e308\" extends `${number}` ? 1 : 2",
+            "1",
+        ),
+        ("\"0x1\" extends `${number}` ? 1 : 2", "1"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
