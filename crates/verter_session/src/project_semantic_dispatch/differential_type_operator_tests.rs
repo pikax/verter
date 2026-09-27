@@ -415,6 +415,30 @@ fn wrong_clean_an_infer_constraint_filters_the_candidate() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// `infer` placeholders beside a fixed member of a union pattern.
+const INFER_IN_A_UNION: &str = r##"
+type UA<T> = T extends { a: infer X | string } ? X : "none";
+"##;
+
+/// A source member the pattern's fixed `string` matches (by identity or by
+/// its base) infers nothing to the placeholder beside it: `number | string`
+/// infers `number`, `"x" | 1 | true` infers `1 | true`. A source every
+/// member of which matches infers the whole source, below any direct
+/// inference: `string` alone is `string` and `"x"` alone `"x"`. Measured
+/// on TypeScript 7.0.2, alike under all four settings.
+#[test]
+fn an_infer_placeholder_beside_a_fixed_union_member_takes_the_unmatched_members() {
+    let matrix = Matrix::new(INFER_IN_A_UNION);
+    let failures = matrix.types(&[
+        ("UA<{ a: number | string }>", "number"),
+        ("UA<{ a: string }>", "string"),
+        ("UA<{ a: \"x\" }>", "\"x\""),
+        ("UA<{ a: number }>", "number"),
+        ("UA<{ a: \"x\" | 1 | true }>", "1 | true"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A function with optional and rest parameters, an overloaded function, a
 /// class and a promise.
 const UTILITIES: &str = r##"

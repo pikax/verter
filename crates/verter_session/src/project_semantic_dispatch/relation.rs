@@ -167,6 +167,20 @@ fn inference_occurrence_for_position(
     }
 }
 
+/// What the members of a source infer to a union target's one naked type
+/// variable (`inferToMultipleTypes`).
+enum NakedUnionInference {
+    /// The unmatched members, related to the variable (the inference and
+    /// the relation of those members at once).
+    Relate(SemanticNodeId, SemanticNodeId),
+    /// Every member matched a fixed target member: the whole source is a
+    /// lower-priority inference to the variable.
+    Matched {
+        source: SemanticNodeId,
+        parameter: SemanticNodeId,
+    },
+}
+
 /// The shape of an in-scope conditional-`infer` pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InferPatternShape {
@@ -7653,38 +7667,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .then_some(PairStep::Assignable)
     }
 
-    /// The inference a union `source` makes against a union `target` that
-    /// holds exactly one type parameter (the checker's `inferToMultipleTypes`
-    /// with one naked type variable, after `inferFromMatchingTypes`): the
-    /// source members identical to a member of the target that is not the
-    /// parameter — or string and number literals whose base is one
-    /// (`isTypeOrBaseIdenticalTo`) — are removed, and what remains is
-    /// inferred to the parameter as ONE union candidate (`string | number |
-    /// undefined` against `T | undefined` infers `T` as `string | number`);
-    /// when every member matched, the whole source is. `None` when no
-    /// inference session collects or the target is no such union, and the
+    /// The inference the members of `source` make against a union `target`
+    /// holding exactly one type variable the collecting session infers (the
+    /// checker's `inferToMultipleTypes` with one naked type variable, after
+    /// `inferFromMatchingTypes`): the source members identical to a member
+    /// of the target that is not the variable — or string and number
+    /// literals whose base is one (`isTypeOrBaseIdenticalTo`) — are
+    /// removed, and what remains is inferred to the variable as ONE union
+    /// candidate (`string | number | undefined` against `T | undefined`
+    /// infers `T` as `string | number`). When every member matched, the
+    /// whole source is a lower-priority inference to the variable
+    /// ([`NakedUnionInference::Matched`]). `None` when no inference session
+    /// collects or the target is no such union — a type parameter the
+    /// session does not infer is a fixed member like any other — and the
     /// members then relate one by one.
     #[inline(never)]
     fn union_source_inferred_to_naked_parameter(
         &self,
         source: &[SemanticNodeId],
         target: SemanticNodeId,
-    ) -> Option<(SemanticNodeId, SemanticNodeId)> {
-        self.dispatch_txn.borrow().active_session()?;
+    ) -> Option<NakedUnionInference> {
         let graph = self.graph();
         let target_members: Vec<SemanticNodeId> = match graph.node_data(target).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
             _ => return None,
         };
-        let is_type_parameter = |node: SemanticNodeId| {
-            matches!(
-                graph.node_data(node).as_deref(),
-                Some(SemanticNodeData::TypeParam { .. })
-            )
+        let (parameters, fixed): (Vec<SemanticNodeId>, Vec<SemanticNodeId>) = {
+            let txn = self.dispatch_txn.borrow();
+            let session = txn.active_session()?;
+            target_members
+                .into_iter()
+                .partition(|member| session.infers(*member))
         };
-        let (parameters, fixed): (Vec<SemanticNodeId>, Vec<SemanticNodeId>) = target_members
-            .into_iter()
-            .partition(|member| is_type_parameter(*member));
         let [parameter] = parameters.as_slice() else {
             return None;
         };
@@ -7712,12 +7726,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .copied()
             .filter(|member| !matched(*member))
             .collect();
-        let inferred = match unmatched.as_slice() {
-            [] => self.intern_normalized_union_or_intersection(source, true),
-            [single] => *single,
-            _ => self.intern_normalized_union_or_intersection(&unmatched, true),
+        Some(match unmatched.as_slice() {
+            [] => NakedUnionInference::Matched {
+                source: match source {
+                    [single] => *single,
+                    _ => self.intern_normalized_union_or_intersection(source, true),
+                },
+                parameter: *parameter,
+            },
+            [single] => NakedUnionInference::Relate(*single, *parameter),
+            _ => NakedUnionInference::Relate(
+                self.intern_normalized_union_or_intersection(&unmatched, true),
+                *parameter,
+            ),
+        })
+    }
+
+    /// A matched source's lower-priority inference to the target's naked
+    /// type variable: every member already relates to the fixed member it
+    /// matched, so the relation holds once the session takes the candidate.
+    fn matched_union_inference(
+        &self,
+        source: SemanticNodeId,
+        parameter: SemanticNodeId,
+        bindings: &[InferBinding],
+    ) -> RelationResult {
+        let occurrence = InferenceOccurrence {
+            priority: InferenceCandidatePriority::MatchedUnionRemainder,
+            ..self.relation_current_occurrence()
         };
-        Some((inferred, *parameter))
+        if self.relation_deposit(parameter, source, occurrence) {
+            assignable(bindings)
+        } else {
+            RelationResult::Unknown
+        }
     }
 
     /// Whether two object-like types with no type parameter anywhere in
@@ -8915,11 +8957,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let members = members.members_arc();
             drop(source_data);
             drop(target_data);
-            if let Some((inferred, parameter)) =
-                self.union_source_inferred_to_naked_parameter(&members, target)
-            {
-                work.push(RelateWork::Eval(inferred, parameter));
-                return;
+            match self.union_source_inferred_to_naked_parameter(&members, target) {
+                Some(NakedUnionInference::Relate(inferred, parameter)) => {
+                    work.push(RelateWork::Eval(inferred, parameter));
+                    return;
+                }
+                Some(NakedUnionInference::Matched { source, parameter }) => {
+                    results.push(self.matched_union_inference(source, parameter, bindings));
+                    return;
+                }
+                None => {}
             }
             distribute_and(work, results, &members, RelateWork::Arm, |m| (*m, target));
             return;
@@ -8948,6 +8995,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let members = members.members_arc();
             drop(source_data);
             drop(target_data);
+            // A source a fixed member matches infers nothing directly to the
+            // target's naked type variable: only the lower-priority whole.
+            if let Some(NakedUnionInference::Matched { source, parameter }) =
+                self.union_source_inferred_to_naked_parameter(&[source], target)
+            {
+                results.push(self.matched_union_inference(source, parameter, bindings));
+                return;
+            }
             results.push(self.relate_to_union_target(source, &members, bindings));
             return;
         }

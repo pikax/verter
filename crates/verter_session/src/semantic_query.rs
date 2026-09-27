@@ -7579,6 +7579,11 @@ pub enum InferenceCandidatePriority {
     /// Ordinary argument-position inference.
     #[default]
     Argument,
+    /// The whole source of an inference to a union target holding one
+    /// naked type variable, when a fixed target member matched every source
+    /// member (the checker's `InferencePriority.NakedTypeVariable`): kept
+    /// only when no direct inference reaches the variable.
+    MatchedUnionRemainder,
     /// A complete reverse-homomorphic mapped candidate.
     HomomorphicMapped,
     /// A reverse-homomorphic candidate with one or more unrecovered
@@ -7594,9 +7599,10 @@ pub enum InferenceCandidatePriority {
 #[must_use]
 pub const fn inference_candidate_precedence(priority: InferenceCandidatePriority) -> u8 {
     match priority {
-        InferenceCandidatePriority::NakedTypeParameter => 4,
-        InferenceCandidatePriority::ReturnType => 3,
-        InferenceCandidatePriority::Argument => 2,
+        InferenceCandidatePriority::NakedTypeParameter => 5,
+        InferenceCandidatePriority::ReturnType => 4,
+        InferenceCandidatePriority::Argument => 3,
+        InferenceCandidatePriority::MatchedUnionRemainder => 2,
         InferenceCandidatePriority::HomomorphicMapped => 1,
         InferenceCandidatePriority::PartialHomomorphicMapped => 0,
     }
