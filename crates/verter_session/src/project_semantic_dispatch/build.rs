@@ -11565,7 +11565,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::MapperKind::Computed => {
                 let over_container =
                     self.substitute_semantic_type_param(mapper.value_expr, source, container);
-                self.substitute_semantic_type_param(over_container, mapper.parameter_node, key)
+                let instantiated =
+                    self.substitute_semantic_type_param(over_container, mapper.parameter_node, key);
+                // The instantiated template reduces the operators its
+                // instantiation closed wherever they sit (`{ v: T[K] }`
+                // over `[1, 2]` at `"0"` is `{ v: 1 }`).
+                self.reduce_instantiated_operators(instantiated)
             }
         };
         let value = self
@@ -12541,6 +12546,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let substituted =
             self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
+        // The selected value reduces the operators its key closes
+        // wherever they sit (`() => T[K]` over `{ a: 1 }` at `"a"` is
+        // `() => 1`).
+        let substituted = self.reduce_instantiated_operators(substituted);
         let evaluated = self
             .evaluate_deferred_semantic_node_with_context(substituted, context)
             .into_active_query_build_node(self);

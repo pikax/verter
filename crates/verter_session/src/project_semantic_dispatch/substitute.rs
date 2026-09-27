@@ -208,7 +208,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// name (`keyof I`), as the checker keeps the operator it reduced for
     /// display; an operator whose operands hold a type parameter, and one
     /// whose evaluation does not complete, stay as they are. The walk
-    /// reads arrays, tuples, object member values and unions.
+    /// reads arrays, tuples, object member values, unions and a signature's
+    /// parameter types and declared return.
     pub(super) fn reduce_instantiated_operators(&self, node: SemanticNodeId) -> SemanticNodeId {
         let graph = self.graph();
         // Post-order over the structure: a node is rebuilt once every part
@@ -235,6 +236,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .map(|member| member.value)
                     .collect(),
                 SemanticNodeData::Union(members) => members.iter().copied().collect(),
+                // A signature's parameter types, then its declared return.
+                SemanticNodeData::Signature {
+                    params,
+                    return_type,
+                    return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(_),
+                    ..
+                } => params
+                    .iter()
+                    .map(|param| param.ty)
+                    .chain(std::iter::once(*return_type))
+                    .collect(),
                 _ => Vec::new(),
             };
             if !parts_done {
@@ -306,6 +318,43 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let members: Vec<SemanticNodeId> =
                         parts.iter().map(|part| reduced_part(*part)).collect();
                     self.intern_normalized_union_or_intersection(&members, true)
+                }
+                SemanticNodeData::Signature {
+                    kind,
+                    params,
+                    type_parameters,
+                    occurrence,
+                    signature_span,
+                    return_type_span,
+                    predicate,
+                    is_abstract,
+                    ..
+                } => {
+                    let params: Vec<FunctionParam> = params
+                        .iter()
+                        .map(|param| FunctionParam {
+                            ty: reduced_part(param.ty),
+                            ..param.clone()
+                        })
+                        .collect();
+                    let return_type = reduced_part(parts[parts.len() - 1]);
+                    graph.intern_preserving_scope(
+                        current,
+                        SemanticNodeData::Signature {
+                            kind: *kind,
+                            params: Arc::from(params.into_boxed_slice()),
+                            return_type,
+                            type_parameters: Arc::clone(type_parameters),
+                            occurrence: occurrence.clone(),
+                            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(
+                                return_type,
+                            ),
+                            signature_span: *signature_span,
+                            return_type_span: *return_type_span,
+                            predicate: *predicate,
+                            is_abstract: *is_abstract,
+                        },
+                    )
                 }
                 _ => current,
             };

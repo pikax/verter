@@ -155,13 +155,9 @@ fn mapped_types_read_as_the_checker_reads_them() {
 }
 
 /// `Getters<{ a: 1 }>['getA']` with `[K in keyof T as \`get${Capitalize<string
-/// & K>}\`]: () => T[K]` is `() => 1`.
-///
-/// What the lane gives:
-/// - `Getters<{ a: 1 }>['getA']`: the checker answers `() => 1`; the lane
-///   measured `() => <unreduced indexed access>`.
+/// & K>}\`]: () => T[K]` is `() => 1`: the selected member's value reduces
+/// the indexed access its key closes.
 #[test]
-#[ignore = "a mapped type remapping keys through a template reads each remapped member's value"]
 fn a_key_remapped_mapped_type_reads_its_remapped_members() {
     let matrix = Matrix::new(MAPPED);
     let failures = matrix.types(&[("Getters<{ a: 1 }>['getA']", "() => 1")]);
@@ -196,15 +192,7 @@ fn a_homomorphic_mapped_type_maps_arrays_and_tuples() {
 
 /// `Boxed<[1, 2]>` is `[{ v: 1; }, { v: 2; }]` and `Boxed<string[]>` is `{ v:
 /// string; }[]`: each element's member value is the source element's type.
-///
-/// What the lane gives:
-/// - `Boxed<[1, 2]>`: the checker answers `[{ v: 1; }, { v: 2; }]`; the lane
-///   measured `[{ v: <unreduced indexed access>; }, { v: <unreduced indexed
-///   access>; }]`.
-/// - `Boxed<string[]>`: the checker answers `{ v: string; }[]`; the lane
-///   measured `{ v: <unreduced indexed access>; }[]`.
 #[test]
-#[ignore = "a homomorphic mapped type over an array or tuple reads each element's member value"]
 fn a_homomorphic_mapped_type_over_a_tuple_reads_its_element_values() {
     let matrix = Matrix::new(MAPPED);
     let failures = matrix.types(&[
