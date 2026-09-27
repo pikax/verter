@@ -1081,3 +1081,147 @@ fn reduced_union_arms(graph: &SemanticGraphStore, a: SemanticNodeId, b: Semantic
     );
     union_arms(graph, union.node).len()
 }
+
+/// One generic call signature `<T …>(x: T) => T` over a shared bound-free
+/// binder, with the declaration's own bounds, constness and return carrier.
+fn generic_signature(
+    graph: &SemanticGraphStore,
+    binder: SemanticNodeId,
+    constraint: Option<SemanticNodeId>,
+    default: Option<SemanticNodeId>,
+    is_const: bool,
+    return_carrier: Option<crate::semantic_query::SignatureReturnCarrier>,
+) -> SemanticNodeId {
+    use crate::semantic_query::{
+        FunctionParam, SignatureKind, SignatureReturnCarrier, TypeParamDecl,
+    };
+    graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from([FunctionParam::synthetic(
+            Some(Arc::from("x")),
+            binder,
+            false,
+            false,
+        )]),
+        return_type: binder,
+        type_parameters: Arc::from([TypeParamDecl {
+            name: Arc::from("T"),
+            param: binder,
+            constraint,
+            default,
+            is_const,
+        }]),
+        occurrence: None,
+        return_carrier: return_carrier.unwrap_or(SignatureReturnCarrier::Declared(binder)),
+        signature_span: None,
+        return_type_span: None,
+        predicate: None,
+        is_abstract: false,
+    })
+}
+
+/// A bound-free binder shared by every generic signature in a test.
+fn bound_free_binder(graph: &SemanticGraphStore) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    })
+}
+
+/// Callable keys carry each binder declaration's constraint, default and
+/// constness, and a signature's return carrier: `(<T extends string>(x: T)
+/// => T) | (<T extends number>(x: T) => T)` over one bound-free binder keeps
+/// two keys. The union reducer's comparator rejects every such pair, and a
+/// key-equality collapse after it must never merge what it rejected, in
+/// either input order.
+#[test]
+fn callable_keys_carry_binder_bounds_constness_and_return_carrier() {
+    use crate::semantic_query::SignatureReturnCarrier;
+    use verter_type_expr::facts::FunctionReturnSource;
+    let graph = SemanticGraphStore::new();
+    let binder = bound_free_binder(&graph);
+    let string = prim(&graph, PrimitiveKind::String);
+    let number = prim(&graph, PrimitiveKind::Number);
+    let base = generic_signature(&graph, binder, Some(string), None, false, None);
+    let variants = [
+        generic_signature(&graph, binder, Some(number), None, false, None),
+        generic_signature(&graph, binder, None, None, false, None),
+        generic_signature(&graph, binder, Some(string), Some(string), false, None),
+        generic_signature(&graph, binder, Some(string), None, true, None),
+        generic_signature(
+            &graph,
+            binder,
+            Some(string),
+            None,
+            false,
+            Some(SignatureReturnCarrier::Function(
+                FunctionReturnSource::Absent,
+            )),
+        ),
+    ];
+    for variant in variants {
+        assert_eq!(
+            structural_identity(&graph, base, variant),
+            StructuralIdentity::Distinct,
+            "premise: the comparator rejects the pair"
+        );
+        for (first, second) in [(base, variant), (variant, base)] {
+            assert_eq!(
+                reduced_union_arms(&graph, first, second),
+                2,
+                "a key-equality collapse never merges a pair the comparator rejected"
+            );
+        }
+        assert!(
+            stable_key_for_node(&graph, base) != stable_key_for_node(&graph, variant),
+            "signatures that differ in a binder bound, constness or return carrier key apart"
+        );
+    }
+}
+
+/// A deferred callable's binder declarations key their bounds and constness
+/// exactly as a signature's do.
+#[test]
+fn deferred_callable_keys_carry_binder_bounds_and_constness() {
+    use crate::semantic_query::{
+        DeferredCallable, FunctionParam, SignatureKind, SignatureReturnCarrier, TypeParamDecl,
+    };
+    use verter_type_expr::facts::FunctionReturnSource;
+    let graph = SemanticGraphStore::new();
+    let binder = bound_free_binder(&graph);
+    let string = prim(&graph, PrimitiveKind::String);
+    let number = prim(&graph, PrimitiveKind::Number);
+    let deferred = |constraint, default, is_const| {
+        let key = graph.intern_node(SemanticNodeData::DeferredCallable(
+            DeferredCallable::from_parts_for_tests(
+                SignatureKind::Call,
+                Arc::from([FunctionParam::synthetic(None, binder, false, false)]),
+                Arc::from([TypeParamDecl {
+                    name: Arc::from("T"),
+                    param: binder,
+                    constraint,
+                    default,
+                    is_const,
+                }]),
+                function_occurrence("f", 0),
+                SignatureReturnCarrier::Function(FunctionReturnSource::Absent),
+            ),
+        ));
+        stable_key_for_node(&graph, key)
+    };
+    let base = deferred(Some(string), None, false);
+    for variant in [
+        deferred(Some(number), None, false),
+        deferred(None, None, false),
+        deferred(Some(string), Some(string), false),
+        deferred(Some(string), None, true),
+    ] {
+        assert!(
+            base != variant,
+            "deferred callables that differ in a binder bound or constness key apart"
+        );
+    }
+}

@@ -143,6 +143,8 @@ discovery order, and they are registered here rather than changed silently:
 | `SyntheticBinding` | the binding id's `Debug` form | scope, surface role, slot, bound name, and the bound value's key |
 | `Signature` occurrence, `TypeOfNominal` identity, numeric and unique-symbol property keys | `Debug` forms | explicit anchor, owner, name, path and ordinal fields; a numeric key as its integer |
 | `TypeParam` mapped binder | the `<mapper-param>` sentinel name and the registry ordinal, handed out in discovery order | the binding mapping's identity (a 128-bit digest over its exact source, value, name-type and modifier structure) as the declaration name; the ordinal is not encoded |
+| `Signature` and `DeferredCallable` binder declarations | each declaration's name and binder only | the name, the binder, the constraint and default (presence and keys) and the `const` modifier |
+| `Signature` return carrier | not encoded | a trailing section, present only when the carrier is not the declared return type itself |
 
 Every other encoding, and with it every existing union order over those
 variants, is byte-identical.

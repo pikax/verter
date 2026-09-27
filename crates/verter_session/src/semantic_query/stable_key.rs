@@ -737,7 +737,7 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             return_type,
             type_parameters,
             occurrence,
-            return_carrier: _,
+            return_carrier,
             signature_span: _,
             return_type_span: _,
             predicate,
@@ -779,6 +779,15 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
                         enc.child(ty);
                     }
                 }
+            }
+            // The return carrier is a trailing section too, present only
+            // when it is not the declared return type itself: the common
+            // signature keeps its key bytes, and the section's leading tag
+            // (never a predicate subject tag) keeps the two sections apart.
+            if !matches!(return_carrier, SignatureReturnCarrier::Declared(node) if node == return_type)
+            {
+                enc.u8(3);
+                encode_return_carrier(&mut enc, return_carrier);
             }
         }
         SemanticNodeData::Object(surface) => {
@@ -956,12 +965,25 @@ fn encode_params(enc: &mut Recipe, params: &[FunctionParam]) {
     }
 }
 
-/// A signature's own binder declarations, in order.
+/// A signature's own binder declarations, in order: each one's name and
+/// binder, then its constraint and default (their presence and their keys)
+/// and its `const` modifier. A declaration's bounds live here, not on its
+/// binder node, which a signature lowering interns bound-free.
 fn encode_type_parameters(enc: &mut Recipe, type_parameters: &[TypeParamDecl]) {
     enc.u16(type_parameters.len() as u16);
     for tp in type_parameters {
         enc.str(&tp.name);
         enc.child(tp.param);
+        for bound in [tp.constraint, tp.default] {
+            match bound {
+                None => enc.u8(0),
+                Some(bound) => {
+                    enc.u8(1);
+                    enc.child(bound);
+                }
+            }
+        }
+        enc.bool(tp.is_const);
     }
 }
 
