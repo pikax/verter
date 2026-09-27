@@ -589,3 +589,39 @@ fn stable_key_equality_order_and_hash_agree_on_every_pair() {
         }
     }
 }
+
+/// An intrinsic application keys its op by the op's frozen, append-only
+/// stable tag, the one tag authority for compiler intrinsics. Every op is
+/// listed, each keeps its pinned tag, and no two ops share a key.
+#[test]
+fn intrinsic_applications_key_by_the_frozen_op_tag() {
+    use verter_type_expr::CompilerIntrinsicTypeOp;
+    // Exhaustive: a new op fails to compile here until it states its
+    // pinned tag, and it joins `every_op`, which `ALL` must cover.
+    let pinned = |op: CompilerIntrinsicTypeOp| match op {
+        CompilerIntrinsicTypeOp::Awaited => 0u8,
+    };
+    let every_op = [CompilerIntrinsicTypeOp::Awaited];
+    assert!(
+        every_op
+            .iter()
+            .all(|op| CompilerIntrinsicTypeOp::ALL.contains(op)),
+        "`ALL` lists every op"
+    );
+    let graph = SemanticGraphStore::new();
+    let operand = prim(&graph, PrimitiveKind::String);
+    let mut keys: Vec<StableKey> = Vec::new();
+    for op in CompilerIntrinsicTypeOp::ALL {
+        assert_eq!(op.stable_hash_tag(), pinned(*op), "{op:?} keeps its tag");
+        let node = graph.intern_node(
+            SemanticNodeData::intrinsic_application(*op, Arc::from(vec![operand; op.arity()]))
+                .expect("a well-formed application"),
+        );
+        let key = stable_key_for_node(&graph, node);
+        // Version, the synthetic category, the intrinsic-application
+        // sub-tag, then the op tag.
+        assert_eq!(&key.exact()[..4], &[1, 6, 21, pinned(*op)], "{op:?}");
+        assert!(!keys.contains(&key), "{op:?} shares a key with another op");
+        keys.push(key);
+    }
+}

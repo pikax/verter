@@ -15,7 +15,6 @@ use crate::semantic_query::{
     SemanticNodeId, SignatureKind, SurfaceEntry, SurfaceMember,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
-use verter_type_expr::CompilerIntrinsicTypeOp;
 
 use super::semantic_context::{
     project_order_domain, project_union_order, OrderDomainId, SemanticContext, SemanticContextId,
@@ -482,7 +481,9 @@ fn encode_data(data: &SemanticNodeData) -> Recipe {
         }
         SemanticNodeData::IntrinsicApplication { op, args } => {
             enc.header(category::SYNTHETIC, subtag::INTRINSIC_APP);
-            enc.u8(intrinsic_op_tag(*op));
+            // The frozen, append-only op tag: never a derived discriminant or a
+            // spelling.
+            enc.u8(op.stable_hash_tag());
             enc.u16(args.len() as u16);
             for arg in args.iter() {
                 enc.child(*arg);
@@ -1037,17 +1038,6 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
         }
         _ => {}
     }
-}
-
-fn intrinsic_op_tag(op: CompilerIntrinsicTypeOp) -> u8 {
-    // Stable ordinal from Debug spelling so adding an op cannot silently
-    // reuse a previous tag without a schema bump.
-    let name = format!("{op:?}");
-    let mut h = 1u8;
-    for b in name.bytes() {
-        h = h.wrapping_add(b).wrapping_mul(31);
-    }
-    h
 }
 
 /// Sort `members` by `VerterStableV1`. Equal keys stay in input order
