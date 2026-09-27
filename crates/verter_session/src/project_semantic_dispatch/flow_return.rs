@@ -24278,6 +24278,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if call_sigs.len() + construct_sigs.len() > 1 {
             return true;
         }
+        // A union callee's one signature is the union signature the shared
+        // list synthesizes (`getUnionSignatures`), which no authored
+        // declaration holds: the executor reads it.
+        let synthesized = call_sigs.len() + construct_sigs.len() == 1;
+        let resolved = self.dispatch.resolve_signature_source_carrier(
+            node,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        );
+        if synthesized
+            && matches!(
+                self.dispatch.graph().node_data(resolved).as_deref(),
+                Some(SemanticNodeData::Union(_))
+            )
+        {
+            return true;
+        }
         let supplies_evidence =
             site.supplies_parameter_ordinal(0) || site.has_explicit_type_arguments();
         if !supplies_evidence {

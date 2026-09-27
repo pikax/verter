@@ -37,6 +37,9 @@ declare function ovCb(f: (x: string, y: number) => void): "cb2";
 interface Ov2 { (a: string): 1; (a: boolean): 2 }
 declare const ov2: Ov2;
 declare const ovUnion: ((a: string) => "L") | ((a: string) => "R");
+declare const ovUnionOpt: ((a: string) => "L") | ((a: string, b?: number) => "R");
+declare const ovUnionObj: ((a: { x: 1 }) => "L") | ((a: { y: 2 }) => "R");
+declare const ovUnion3: (() => 1) | (() => 2) | (() => 3);
 export function oStr() { return ov("s"); }
 export function oNum() { return ov(1); }
 export function oUnion(v: string | number) { return ov(v); }
@@ -55,6 +58,9 @@ export function oGenStr() { return ovGen("k"); }
 export function oGenNum() { return ovGen(2); }
 export function oInterface() { return ov2(true); }
 export function oUnionCallee() { return ovUnion("a"); }
+export function oUnionOpt() { return ovUnionOpt("a"); }
+export function oUnionObj() { return ovUnionObj({ x: 1, y: 2 }); }
+export function oUnion3() { return ovUnion3(); }
 export function oSpread(t: [string]) { return ovArity(...t); }
 "##;
 
@@ -88,16 +94,18 @@ fn overloads_resolve_as_the_checker_resolves_them() {
 }
 
 /// A callee typed `((a: string) => "L") | ((a: string) => "R")` has the union
-/// signature (`getUnionSignatures`), so the call returns `"L" | "R"`.
-///
-/// What the lane gives:
-/// - `oUnionCallee`: the checker answers `"L" | "R"`; the lane measured
-///   `<opaque UnmodeledPosition>` degraded by UnrepresentableCallee.
+/// signature (`getUnionSignatures`), so the call returns `"L" | "R"`; an
+/// optional extra parameter, object parameters (intersected) and a
+/// parameterless union alike.
 #[test]
-#[ignore = "a call through a union of compatible signatures returns the union of their results"]
 fn a_call_through_a_union_of_signatures_unions_the_results() {
     let matrix = Matrix::new(OVERLOADS);
-    let failures = matrix.returns(&[("oUnionCallee", "\"L\" | \"R\"")]);
+    let failures = matrix.returns(&[
+        ("oUnionCallee", "\"L\" | \"R\""),
+        ("oUnionOpt", "\"L\" | \"R\""),
+        ("oUnionObj", "\"L\" | \"R\""),
+        ("oUnion3", "1 | 2 | 3"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
