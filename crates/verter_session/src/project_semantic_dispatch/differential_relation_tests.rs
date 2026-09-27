@@ -703,6 +703,58 @@ fn a_generic_signature_relates_by_instantiating_it() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A generic source signature's type parameters fix as a call's do: the
+/// common supertype of their candidates (`string` and `number` have
+/// none, so the first wins and `b: number` then fails), a literal read
+/// from a type kept as it is, an uninferred parameter its default else
+/// `unknown`, and an inference its constraint refuses the constraint (`U`
+/// inferred `2` against `T` fixed `1` is `1`, which `x: 2` then
+/// fails). Measured on TypeScript 7.0.2, alike under all
+/// four settings.
+#[test]
+fn a_generic_signature_fixes_its_inferences_as_a_call_does() {
+    let matrix = Matrix::new(GENERICS);
+    let failures = matrix.types(&[
+        (
+            "[<T = 1, U extends T = T>(x: U) => void] extends [(x: 2) => void] ? 1 : 2",
+            "2",
+        ),
+        (
+            "[<T = 2, U extends T = T>(x: U) => void] extends [(x: 2) => void] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[<T, U extends T = T>(x: U) => void] extends [(x: 2) => void] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[<T>(a: T, b: T) => T] extends [(a: string, b: number) => string | number] ? 1 : 2",
+            "2",
+        ),
+        (
+            "[<T extends number>(x: T) => T] extends [(x: string) => number] ? 1 : 2",
+            "2",
+        ),
+        (
+            "[<T extends number>(x: T) => T] extends [(x: 1) => number] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[<T>(a: T) => T[]] extends [(a: \"x\") => \"x\"[]] ? 1 : 2",
+            "1",
+        ),
+        ("[<T extends 1>() => T] extends [() => 2] ? 1 : 2", "2"),
+    ]);
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+"
+        )
+    );
+}
+
 /// A non-generic source is not below a generic target: the target's type
 /// parameters stay type parameters no concrete type is assignable to.
 ///
