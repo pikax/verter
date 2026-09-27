@@ -264,6 +264,9 @@ export function sSplit(s: string) { return s.split(","); }
 export function sIndex(s: string) { return s[0]; }
 export function sUpper(s: "ab") { return s.toUpperCase(); }
 export function sLitLen() { return "abc".length; }
+export function sLitUpper() { return "ab".toUpperCase(); }
+export function nLitFixed() { return (1).toFixed(2); }
+export function bLitValue() { return true.valueOf(); }
 export function sStringCall() { return String(1); }
 export function sStringNew() { return new String("x"); }
 export function sFromCharCode() { return String.fromCharCode(65); }
@@ -304,16 +307,17 @@ fn wrapper_members_resolve_as_the_checker_resolves_them() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `"abc".length` is `number`.
-///
-/// What the lane gives:
-/// - `sLitLen`: the checker answers `number`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by FlowGap(UnmodeledExpression).
+/// `"abc".length` is `number`: a member read or call on a primitive literal
+/// resolves through its apparent type (`String`, `Number`, `Boolean`).
 #[test]
-#[ignore = "a member read on a string literal expression resolves through String"]
 fn a_member_read_of_a_literal_expression_resolves() {
     let matrix = Matrix::new(STRINGS_AND_FUNCTIONS).lib(GLOBALS_LIB);
-    let failures = matrix.returns(&[("sLitLen", "number")]);
+    let failures = matrix.returns(&[
+        ("sLitLen", "number"),
+        ("sLitUpper", "string"),
+        ("nLitFixed", "string"),
+        ("bLitValue", "boolean"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

@@ -4553,11 +4553,17 @@ fn member_target_chain<'a>(
 }
 
 /// Whether a member access's object is a flow VALUE with no reference
-/// behind it: a `new` expression or an object literal, or a static member
-/// chain rooted at one.
+/// behind it: a `new` expression, an object literal, a primitive literal
+/// (read through its apparent type), or a static member chain rooted at
+/// one.
 fn value_rooted_member_object(object: &Expression<'_>) -> bool {
     match unwrap_parenthesized(object) {
-        Expression::NewExpression(_) | Expression::ObjectExpression(_) => true,
+        Expression::NewExpression(_)
+        | Expression::ObjectExpression(_)
+        | Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::BigIntLiteral(_) => true,
         Expression::StaticMemberExpression(member) => value_rooted_member_object(&member.object),
         _ => false,
     }
@@ -10089,7 +10095,7 @@ impl<'a> Lowerer<'a> {
             | Expression::NumericLiteral(_)
             | Expression::StringLiteral(_)
             | Expression::NullLiteral(_)
-            | Expression::BigIntLiteral(_) => false,
+            | Expression::BigIntLiteral(_) => true,
             Expression::Identifier(identifier) => {
                 !matches!(
                     self.classify_occurrence(identifier.span),
