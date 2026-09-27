@@ -138,6 +138,12 @@ impl core::fmt::Debug for SpecializationKey {
     }
 }
 
+impl SpecializationKey {
+    pub(crate) fn digest_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+}
+
 /// An authored value as the transaction renders it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemberValue {
