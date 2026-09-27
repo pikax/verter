@@ -126,7 +126,7 @@ use crate::semantic_query::{
     AuthoredPropertyKey, DeclIdentity, FunctionParam, HotTypeRef, IndexKey, IndexSignature,
     MacroOwnBodyStamp, MapperKey, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind,
     QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SignatureKind,
-    SurfaceEntry, SurfaceMember, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
+    SurfaceEntry, SurfaceMember, TupleElement, TypeParamDecl, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -513,10 +513,7 @@ fn lower_node(
         // key's `value_node` ordinal is value-side provenance carried
         // alongside, NOT folded into identity.
         TypeExpr::SyntheticSlotBinding(key) => Ok(graph.intern_node_with_scope(
-            SemanticNodeData::SyntheticBinding {
-                id: SyntheticBindingId::from_carrier_key(key),
-                value_node: key.value_node,
-            },
+            SemanticNodeData::synthetic_binding(key, graph.node_count()),
             scope.clone(),
         )),
 

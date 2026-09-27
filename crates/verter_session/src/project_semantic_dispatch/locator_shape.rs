@@ -76,8 +76,7 @@ use crate::semantic_query::{
     DeclIdentity, FunctionParam, HashValue, IndexKey, IndexSignature, MacroOwnBodyStamp, MapperKey,
     MapperKind, MergeRoleStamp, NodeScopeId, OptionalityMod, PrimitiveKind, QueryError,
     QueryResult, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SurfaceEntry, SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl,
-    ValueRootKey,
+    SurfaceEntry, SurfaceMember, SurfaceView, TupleElement, TypeParamDecl, ValueRootKey,
 };
 
 /// The anchor declaration's prepared source, held so its
@@ -1659,10 +1658,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 scope.clone(),
             ),
             TypeExpr::SyntheticSlotBinding(key) => graph.intern_node_with_scope(
-                SemanticNodeData::SyntheticBinding {
-                    id: SyntheticBindingId::from_carrier_key(key),
-                    value_node: key.value_node,
-                },
+                SemanticNodeData::synthetic_binding(key, graph.node_count()),
                 scope.clone(),
             ),
             // `typeof value.path<args>` stays the deferred TypeOf carrier —

@@ -728,7 +728,6 @@
         "crateInternal": [
           "build_toolchain_fingerprint",
           "cache_runtime",
-          "file_artifact_store",
           "flow_completion_inventory",
           "flow_return_audit",
           "flow_slice_content",
@@ -1012,7 +1011,7 @@
       "snapshot": {
         "pubFn": 179,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 47,
+        "pubCrateFn": 48,
         "pubType": 202,
         "pubCrateMod": 2,
         "inlinePubMod": 15,

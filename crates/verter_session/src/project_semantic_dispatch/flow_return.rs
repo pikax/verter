@@ -3493,6 +3493,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // from the SAME provenance mint the carrier and the evaluation
             // outcome bear — never a cache-candidate axis.
             input_basis: verter_identity::identity::InputBasisId::from_canonical(&provenance),
+            ancestry: super::flow_solve::FlowInputAncestry::default(),
             resources,
             additional_requirements: Arc::from([]),
         };
@@ -5070,14 +5071,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // a constant. A serving artifact whose exact parse identity cannot
         // be recomputed fails closed: no content-addressed key may name a
         // source it cannot verify.
-        let Some(source_key) = crate::file_artifact_store::FileArtifactKey::for_source_identity(
-            Arc::from(canonical),
-            indexed.whole_hash,
-            indexed.raw_source.as_ref(),
-            indexed.file_language.clone(),
-            indexed.framework_parse.as_deref(),
-            indexed.parse_env_hash,
-        ) else {
+        let Some(parse_key) = indexed.source_parse_key() else {
             return Err(FlowSliceDemandSiteError {
                 failure: FlowReturnFailure::Unresolved,
                 self_roots,
@@ -5090,8 +5084,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             flow_body_stable_hash: entry.flow_body_stable_hash,
             flow_body_exact_hash,
             parse_env_hash: key.context.parse_env_hash,
-            parse_key: source_key.parse_key,
-            file_language: source_key.file_language_id,
+            parse_key,
+            file_language: indexed.file_language.clone(),
             build_toolchain_fingerprint:
                 crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
         };
@@ -5524,6 +5518,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     input_basis: verter_identity::identity::InputBasisId::from_canonical(
                         &provenance,
                     ),
+                    ancestry: super::flow_solve::FlowInputAncestry::default(),
                     resources: super::flow_solve::FlowResourcePolicy::default(),
                     additional_requirements: Arc::from([]),
                 };
@@ -5668,6 +5663,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             inferred_predicate: None,
             checker_diagnostics: Vec::new(),
             declared_reads: false,
+            dead_writes: false,
+            dead_written: rustc_hash::FxHashSet::default(),
+            dead_written_log: Vec::new(),
             receiver: None,
         };
         let holds;
@@ -7478,188 +7476,226 @@ fn loop_carried_subjects(
             }
         }
     }
+    // The region's statements, patterns and expressions walk from an
+    // explicit stack in the order a recursive walk visits them (each
+    // item's parts pushed last first): a region or pattern nested in
+    // another costs no native level.
+    //
     // A destructuring pattern: a declaration's bindings (`kind`) are
     // declared afresh, except a `var`'s, which the pattern writes as an
     // assignment pattern (`kind` `None`) writes its targets; its
     // defaults and computed keys evaluate on the way.
-    fn walk_pattern(
-        pattern: &crate::flow_slice_content::SlicePattern,
-        kind: Option<crate::flow_slice_content::SliceBindingKind>,
+    enum Walk<'r> {
+        Region(&'r SliceRegion),
+        Pattern(
+            &'r crate::flow_slice_content::SlicePattern,
+            Option<crate::flow_slice_content::SliceBindingKind>,
+        ),
+        Expression(&'r SliceExpr),
+        Written(FlowProductSubject),
+        Declared(FlowProductSubject),
+    }
+    fn walk(
+        first: Walk<'_>,
         written: &mut Vec<FlowProductSubject>,
         declared: &mut Vec<FlowProductSubject>,
     ) {
         use crate::flow_slice_content::{SliceBindingKind, SlicePattern, SlicePatternKey};
-        let declares = matches!(kind, Some(kind) if kind != SliceBindingKind::Var);
-        let bind = |binding,
-                    written: &mut Vec<FlowProductSubject>,
-                    declared: &mut Vec<FlowProductSubject>| {
-            if declares {
-                declared.push(FlowProductSubject::Local(binding));
-            } else {
-                written.push(FlowProductSubject::Local(binding));
+        let mut stack = vec![first];
+        let mut parts: Vec<Walk<'_>> = Vec::new();
+        while let Some(item) = stack.pop() {
+            match item {
+                Walk::Expression(expr) => expression(expr, written),
+                Walk::Written(subject) => written.push(subject),
+                Walk::Declared(subject) => declared.push(subject),
+                Walk::Pattern(pattern, kind) => {
+                    let declares = matches!(kind, Some(kind) if kind != SliceBindingKind::Var);
+                    let bind = |binding| {
+                        if declares {
+                            Walk::Declared(FlowProductSubject::Local(binding))
+                        } else {
+                            Walk::Written(FlowProductSubject::Local(binding))
+                        }
+                    };
+                    match pattern {
+                        SlicePattern::Binding { binding, .. } => parts.push(bind(*binding)),
+                        SlicePattern::Target { target, .. } => {
+                            parts.push(Walk::Written(narrow_root_subject(&target.root)))
+                        }
+                        SlicePattern::Object { properties, rest } => {
+                            for (key, element) in properties.iter() {
+                                if let SlicePatternKey::Computed(value) = key {
+                                    parts.push(Walk::Expression(value));
+                                }
+                                if let Some(default) = element.default.as_ref() {
+                                    parts.push(Walk::Expression(default));
+                                }
+                                parts.push(Walk::Pattern(&element.pattern, kind));
+                            }
+                            if let Some((rest, _)) = rest {
+                                parts.push(bind(*rest));
+                            }
+                        }
+                        SlicePattern::Array { elements, rest } => {
+                            for element in elements.iter().flatten() {
+                                if let Some(default) = element.default.as_ref() {
+                                    parts.push(Walk::Expression(default));
+                                }
+                                parts.push(Walk::Pattern(&element.pattern, kind));
+                            }
+                            if let Some((rest, _)) = rest {
+                                parts.push(bind(*rest));
+                            }
+                        }
+                    }
+                }
+                Walk::Region(region) => {
+                    for statement in region.statements.iter() {
+                        match statement {
+                            SliceStatement::Return { argument, .. }
+                            | SliceStatement::Yield { argument, .. } => {
+                                if let Some(argument) = argument {
+                                    parts.push(Walk::Expression(argument));
+                                }
+                            }
+                            SliceStatement::If {
+                                consequent,
+                                alternate,
+                                ..
+                            } => {
+                                parts.push(Walk::Region(consequent));
+                                if let Some(alternate) = alternate {
+                                    parts.push(Walk::Region(alternate));
+                                }
+                            }
+                            SliceStatement::Assignment { target, value, .. } => {
+                                parts.push(Walk::Expression(value));
+                                parts.push(Walk::Written(narrow_root_subject(&target.root)));
+                            }
+                            SliceStatement::CompoundAssignment { target, .. } => {
+                                parts.push(Walk::Written(narrow_root_subject(&target.root)));
+                            }
+                            // A member write narrows a member path of its root: the
+                            // root's head carries that path's narrowing joined with the
+                            // back edges.
+                            SliceStatement::MemberWrite { target, write, .. } => {
+                                if let crate::flow_slice_content::SliceMemberWrite::Assign {
+                                    value,
+                                    ..
+                                } = write
+                                {
+                                    parts.push(Walk::Expression(value));
+                                }
+                                parts.push(Walk::Written(narrow_root_subject(&target.root)));
+                            }
+                            SliceStatement::DestructureAssign { pattern, value, .. } => {
+                                parts.push(Walk::Expression(value));
+                                parts.push(Walk::Pattern(pattern, None));
+                            }
+                            SliceStatement::Destructure {
+                                pattern,
+                                kind,
+                                init,
+                                ..
+                            } => {
+                                if let Some(init) = init {
+                                    parts.push(Walk::Expression(init));
+                                }
+                                parts.push(Walk::Pattern(pattern, Some(*kind)));
+                            }
+                            SliceStatement::EvolvingArray(operation) => {
+                                for operand in operation.operands() {
+                                    parts.push(Walk::Expression(operand));
+                                }
+                                parts.push(Walk::Written(operation.binding.clone()));
+                            }
+                            SliceStatement::Binding {
+                                binding,
+                                init,
+                                kind,
+                                ..
+                            } => {
+                                if let Some(init) = init {
+                                    parts.push(Walk::Expression(init));
+                                }
+                                // A `var` is function-scoped: its declarator writes the
+                                // one binding every iteration and the code after the
+                                // loop share.
+                                if *kind == SliceBindingKind::Var {
+                                    parts.push(Walk::Written(FlowProductSubject::Local(*binding)));
+                                } else {
+                                    parts.push(Walk::Declared(FlowProductSubject::Local(*binding)));
+                                }
+                            }
+                            SliceStatement::Block(body) => parts.push(Walk::Region(body)),
+                            SliceStatement::Labeled { body, .. } => parts.push(Walk::Region(body)),
+                            SliceStatement::Loop(inner) => {
+                                parts.push(Walk::Region(&inner.init));
+                                if let Some(element) = inner.element.as_ref() {
+                                    parts.push(Walk::Expression(&element.iterable));
+                                    if let Some(bound) = element.binding.as_ref() {
+                                        parts.push(Walk::Declared(FlowProductSubject::Local(
+                                            bound.binding,
+                                        )));
+                                    }
+                                    if let Some((element_pattern, kind)) = element.pattern.as_ref()
+                                    {
+                                        parts.push(Walk::Pattern(element_pattern, Some(*kind)));
+                                    }
+                                }
+                                parts.push(Walk::Region(&inner.test_effects));
+                                parts.push(Walk::Region(&inner.body));
+                                parts.push(Walk::Region(&inner.update));
+                            }
+                            SliceStatement::Switch { cases, .. } => {
+                                for case in cases.iter() {
+                                    parts.push(Walk::Region(&case.region));
+                                }
+                            }
+                            SliceStatement::Try {
+                                block,
+                                catch,
+                                finally,
+                                ..
+                            } => {
+                                parts.push(Walk::Region(block));
+                                if let Some(catch) = catch {
+                                    parts.push(Walk::Region(&catch.region));
+                                }
+                                if let Some(finally) = finally {
+                                    parts.push(Walk::Region(finally));
+                                }
+                            }
+                            // Unreachable statements reach no live state.
+                            SliceStatement::Gap(_)
+                            | SliceStatement::Assertion { .. }
+                            | SliceStatement::CallEffect { .. }
+                            | SliceStatement::CalleeEffect { .. }
+                            | SliceStatement::Break { .. }
+                            | SliceStatement::Continue { .. }
+                            | SliceStatement::Unreachable(_)
+                            | SliceStatement::Throw
+                            | SliceStatement::ThrowPoint
+                            | SliceStatement::TransparentLoop
+                            | SliceStatement::DivergentLoop
+                            | SliceStatement::Unsupported(_) => {}
+                        }
+                    }
+                }
             }
+            stack.extend(parts.drain(..).rev());
+        }
+    }
+    let walk_pattern = |pattern,
+                        kind,
+                        written: &mut Vec<FlowProductSubject>,
+                        declared: &mut Vec<FlowProductSubject>| {
+        walk(Walk::Pattern(pattern, kind), written, declared)
+    };
+    let walk_region =
+        |region, written: &mut Vec<FlowProductSubject>, declared: &mut Vec<FlowProductSubject>| {
+            walk(Walk::Region(region), written, declared)
         };
-        match pattern {
-            SlicePattern::Binding { binding, .. } => bind(*binding, written, declared),
-            SlicePattern::Target { target, .. } => written.push(narrow_root_subject(&target.root)),
-            SlicePattern::Object { properties, rest } => {
-                for (key, element) in properties.iter() {
-                    if let SlicePatternKey::Computed(value) = key {
-                        expression(value, written);
-                    }
-                    if let Some(default) = element.default.as_ref() {
-                        expression(default, written);
-                    }
-                    walk_pattern(&element.pattern, kind, written, declared);
-                }
-                if let Some((rest, _)) = rest {
-                    bind(*rest, written, declared);
-                }
-            }
-            SlicePattern::Array { elements, rest } => {
-                for element in elements.iter().flatten() {
-                    if let Some(default) = element.default.as_ref() {
-                        expression(default, written);
-                    }
-                    walk_pattern(&element.pattern, kind, written, declared);
-                }
-                if let Some((rest, _)) = rest {
-                    bind(*rest, written, declared);
-                }
-            }
-        }
-    }
-    fn walk_region(
-        region: &SliceRegion,
-        written: &mut Vec<FlowProductSubject>,
-        declared: &mut Vec<FlowProductSubject>,
-    ) {
-        for statement in region.statements.iter() {
-            match statement {
-                SliceStatement::Return { argument, .. }
-                | SliceStatement::Yield { argument, .. } => {
-                    if let Some(argument) = argument {
-                        expression(argument, written);
-                    }
-                }
-                SliceStatement::If {
-                    consequent,
-                    alternate,
-                    ..
-                } => {
-                    walk_region(consequent, written, declared);
-                    if let Some(alternate) = alternate {
-                        walk_region(alternate, written, declared);
-                    }
-                }
-                SliceStatement::Assignment { target, value, .. } => {
-                    expression(value, written);
-                    written.push(narrow_root_subject(&target.root));
-                }
-                SliceStatement::CompoundAssignment { target, .. } => {
-                    written.push(narrow_root_subject(&target.root));
-                }
-                // A member write narrows a member path of its root: the
-                // root's head carries that path's narrowing joined with the
-                // back edges.
-                SliceStatement::MemberWrite { target, write, .. } => {
-                    if let crate::flow_slice_content::SliceMemberWrite::Assign { value, .. } = write
-                    {
-                        expression(value, written);
-                    }
-                    written.push(narrow_root_subject(&target.root));
-                }
-                SliceStatement::DestructureAssign { pattern, value, .. } => {
-                    expression(value, written);
-                    walk_pattern(pattern, None, written, declared);
-                }
-                SliceStatement::Destructure {
-                    pattern,
-                    kind,
-                    init,
-                    ..
-                } => {
-                    if let Some(init) = init {
-                        expression(init, written);
-                    }
-                    walk_pattern(pattern, Some(*kind), written, declared);
-                }
-                SliceStatement::EvolvingArray(operation) => {
-                    for operand in operation.operands() {
-                        expression(operand, written);
-                    }
-                    written.push(operation.binding.clone());
-                }
-                SliceStatement::Binding {
-                    binding,
-                    init,
-                    kind,
-                    ..
-                } => {
-                    if let Some(init) = init {
-                        expression(init, written);
-                    }
-                    // A `var` is function-scoped: its declarator writes the
-                    // one binding every iteration and the code after the
-                    // loop share.
-                    if *kind == crate::flow_slice_content::SliceBindingKind::Var {
-                        written.push(FlowProductSubject::Local(*binding));
-                    } else {
-                        declared.push(FlowProductSubject::Local(*binding));
-                    }
-                }
-                SliceStatement::Block(body) => walk_region(body, written, declared),
-                SliceStatement::Labeled { body, .. } => walk_region(body, written, declared),
-                SliceStatement::Loop(inner) => {
-                    walk_region(&inner.init, written, declared);
-                    if let Some(element) = inner.element.as_ref() {
-                        expression(&element.iterable, written);
-                        if let Some(bound) = element.binding.as_ref() {
-                            declared.push(FlowProductSubject::Local(bound.binding));
-                        }
-                        if let Some((element_pattern, kind)) = element.pattern.as_ref() {
-                            walk_pattern(element_pattern, Some(*kind), written, declared);
-                        }
-                    }
-                    walk_region(&inner.test_effects, written, declared);
-                    walk_region(&inner.body, written, declared);
-                    walk_region(&inner.update, written, declared);
-                }
-                SliceStatement::Switch { cases, .. } => {
-                    for case in cases.iter() {
-                        walk_region(&case.region, written, declared);
-                    }
-                }
-                SliceStatement::Try {
-                    block,
-                    catch,
-                    finally,
-                    ..
-                } => {
-                    walk_region(block, written, declared);
-                    if let Some(catch) = catch {
-                        walk_region(&catch.region, written, declared);
-                    }
-                    if let Some(finally) = finally {
-                        walk_region(finally, written, declared);
-                    }
-                }
-                // Unreachable statements reach no live state.
-                SliceStatement::Gap(_)
-                | SliceStatement::Assertion { .. }
-                | SliceStatement::CallEffect { .. }
-                | SliceStatement::CalleeEffect { .. }
-                | SliceStatement::Break { .. }
-                | SliceStatement::Continue { .. }
-                | SliceStatement::Unreachable(_)
-                | SliceStatement::Throw
-                | SliceStatement::ThrowPoint
-                | SliceStatement::TransparentLoop
-                | SliceStatement::DivergentLoop
-                | SliceStatement::Unsupported(_) => {}
-            }
-        }
-    }
     let mut written = Vec::new();
     let mut declared = Vec::new();
     if let Some(bound) = lowered
@@ -8350,16 +8386,19 @@ impl super::flow_products::FlowSemanticAlgebra for ObservedFlowAlgebra<'_> {
 
 /// The child observation includes its actual parameter and selected capture
 /// inputs. The demand's separate graph/query basis owns binding identities.
+/// The parent is named by its digest; its whole basis rides the demand's
+/// ancestry ([`super::flow_solve::FlowInputAncestry`]), which keeps the
+/// identity exact without a copy of the parent's bytes at every level.
 struct NestedFlowInputBasis<'a> {
-    parent: &'a verter_identity::identity::InputBasisId,
+    parent: verter_identity::encoding::CanonicalDigest,
     parameters: &'a [SemanticNodeId],
     captures: &'a [Vec<u8>],
 }
 
 impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
-    const DOMAIN_TAG: &'static str = "verter.session.flow.nested_inputs.v1";
+    const DOMAIN_TAG: &'static str = "verter.session.flow.nested_inputs.v2";
     fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
-        e.field_bytes(1, self.parent.canonical_bytes());
+        e.field_bytes(1, self.parent.as_bytes());
         for parameter in self.parameters {
             e.field_u64(2, parameter.0);
         }
@@ -8372,14 +8411,17 @@ impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
 #[path = "flow_return_class.rs"]
 mod class_expression;
 
+#[path = "flow_return_branches.rs"]
+mod branches;
 #[path = "flow_return_call_stack.rs"]
 mod call_stack;
 #[path = "flow_return_nested.rs"]
 mod nested;
+use branches::{BranchStep, DeadPath, Entered};
 use nested::{NestedChildParts, NestedDemand, NestedSignatureStep};
 #[path = "flow_return_operators.rs"]
 mod operators;
-use call_stack::{CallArgumentWait, CallDrive, CallInFlight, CallStep};
+use call_stack::{CallArgumentWait, CallDrive, CallFunctionWait, CallInFlight, CallStep};
 
 #[path = "flow_return_call_effects.rs"]
 mod call_effects;
@@ -8418,14 +8460,7 @@ struct FlowEvaluator<'d, 'b> {
     /// to read it again: the checker's return-type resolution stack
     /// (`pushTypeResolution`), shared by every nested evaluator of one
     /// root evaluation.
-    resolving_functions: std::rc::Rc<
-        std::cell::RefCell<
-            Vec<(
-                verter_semantic::analysis::function_program::FunctionProgramKey,
-                bool,
-            )>,
-        >,
-    >,
+    resolving_functions: std::rc::Rc<std::cell::RefCell<nested::ResolvingFunctions>>,
     canonical: &'d str,
     owner: verter_type_expr::TopLevelOwnerId,
     /// The `null` / `undefined` algebra of the function's own project
@@ -8691,6 +8726,18 @@ struct FlowEvaluator<'d, 'b> {
     /// declaration is its own flow container, so no narrowing of the
     /// enclosing frame reaches it (measured on 7.0.2).
     declared_reads: bool,
+    /// Whether a write leaves its reference read at its declared type — on
+    /// while statements past a dead path evaluate (the checker answers an
+    /// assignment on an unreachable flow node with the reference's
+    /// declared type).
+    dead_writes: bool,
+    /// The references written on the open dead paths (see
+    /// [`Self::dead_writes`]). Each dead path removes the ones written
+    /// since it opened when it closes ([`DeadPath`]).
+    dead_written: rustc_hash::FxHashSet<FlowProductSubject>,
+    /// [`Self::dead_written`]'s entries in first-write order: the log a
+    /// closing dead path truncates.
+    dead_written_log: Vec<FlowProductSubject>,
     /// The class-expression instance `this` reads while the class's members
     /// evaluate (see [`class_expression::ClassReceiver`]).
     receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
@@ -8914,7 +8961,7 @@ struct EvolvingPart {
 #[cfg(test)]
 thread_local! {
     /// How many loop-body passes this thread evaluated
-    /// ([`FlowEvaluator::eval_loop_pass`]); test-only.
+    /// ([`FlowEvaluator::begin_loop_pass`]); test-only.
     static LOOP_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -8938,7 +8985,7 @@ pub(crate) fn guard_applications_for_tests() -> usize {
     GUARD_APPLICATIONS.with(std::cell::Cell::get)
 }
 
-/// One pass of a loop body ([`FlowEvaluator::eval_loop_pass`]).
+/// One pass of a loop body ([`FlowEvaluator::begin_loop_pass`]).
 struct LoopPass {
     contributors: Vec<FlowContribution>,
     /// The state re-entering the head: the body's end and every
@@ -8948,23 +8995,6 @@ struct LoopPass {
     test_edge: Option<FlowLayerState>,
     /// Where the pass's own `break` exits start on the exit stack.
     break_base: usize,
-}
-
-/// What every per-reference loop-head analysis of one loop shares
-/// ([`FlowEvaluator::loop_reference_head`]).
-#[derive(Clone, Copy)]
-struct LoopHeadInput<'l, 'e> {
-    lowered: &'l crate::flow_slice_content::SliceLoop,
-    element: Option<(
-        &'l crate::flow_slice_content::SliceLoopElement,
-        SemanticNodeId,
-    )>,
-    entry: &'e FlowLayerState,
-    /// The references the loop writes ([`loop_carried_subjects`]).
-    carried: &'e [FlowProductSubject],
-    /// Each carried reference's dependency closure, as indices into
-    /// `carried`.
-    dependencies: &'e [Vec<usize>],
 }
 
 /// The evaluator's side outputs at the start of a loop evaluation
@@ -9429,6 +9459,11 @@ enum Waiting<'e> {
         widen: bool,
     },
     NonNull,
+    /// An `await`: the operand unwrapped through the lib `Awaited`.
+    Awaited,
+    /// A sequence waiting on its value operand, with the assertion that
+    /// applies after it.
+    Sequence(&'e Option<crate::flow_slice_content::SliceAssertion>),
     Arithmetic {
         operator: crate::flow_slice_content::SliceArithmetic,
         operands: &'e [crate::flow_slice_content::SliceExpr],
@@ -9453,6 +9488,18 @@ enum Waiting<'e> {
     /// A call waiting on a lowered argument its executor route
     /// asked for ([`call_stack`]).
     CallArgument(Box<CallArgumentWait<'e>>),
+    /// A call waiting on the signature of a function-value argument its
+    /// executor route types ([`call_stack`]).
+    CallFunction(Box<CallFunctionWait<'e>>),
+    /// A class expression waiting on the child it asked for last.
+    Class(Box<class_expression::ClassEvalFrame<'e>>),
+}
+
+/// What a resumed call takes next on an expression run.
+enum ResumedCall {
+    Value(Positional<SemanticNodeId>),
+    Descend,
+    Nested(NestedDemand),
 }
 
 /// [`FlowEvaluator::run_expr`]'s explicit stack: the forms waiting on a
@@ -9472,11 +9519,11 @@ impl<'e> ExprRun<'e> {
 }
 
 /// What an expression run needs next.
-enum ExprProgress<'e> {
+enum ExprProgress {
     /// Nothing: the expression's value.
     Done(Positional<SemanticNodeId>),
     /// The value of a nested function value (see `flow_return_nested`).
-    Nested(NestedDemand<'e>),
+    Nested(NestedDemand),
 }
 
 /// The frames around a nested function's evaluator, innermost first. A
@@ -9539,10 +9586,36 @@ struct RegionEvalFrame<'r> {
     next: usize,
     contributors: Vec<FlowContribution>,
     path_alive: bool,
-    block_bases: Option<(usize, usize, usize, usize)>,
+    /// The statement suspended at the region it entered (a block, a
+    /// branch statement's arm, clause or body).
+    entered: Option<Entered<'r>>,
     /// The return statement suspended at a nested function value in its
     /// argument.
-    pending_return: Option<Box<PendingReturn<'r>>>,
+    pending: Option<Pending<'r>>,
+    /// The dead path the region's statements past a path only the
+    /// evaluator proves dead evaluate on (an exhaustive `switch`, a call
+    /// to a `never`-returning function the lowering does not see): the
+    /// checker aggregates every return there. It closes with the region.
+    dead_tail: Option<Box<DeadPath>>,
+}
+
+/// A statement suspended at a nested function value in its expression.
+enum Pending<'r> {
+    Return(Box<PendingReturn<'r>>),
+    Binding(Box<PendingBinding<'r>>),
+}
+
+/// A declarator whose initializer's evaluation is suspended at a nested
+/// function value: what its binding is made from once the initializer has a
+/// value.
+struct PendingBinding<'r> {
+    binding: verter_semantic::analysis::flow::SkeletonBindingId,
+    kind: crate::flow_slice_content::SliceBindingKind,
+    init: &'r crate::flow_slice_content::SliceExpr,
+    freshness: &'r crate::flow_slice_content::SliceFreshness,
+    auto_typed: bool,
+    widening_nullish_init: bool,
+    run: ExprRun<'r>,
 }
 
 /// A return statement whose argument's evaluation is suspended at a nested
@@ -9562,7 +9635,7 @@ struct PendingReturn<'r> {
 /// value of a nested function value, or nothing — its outcome.
 enum RegionEvalStep<'r> {
     EnterBlock(&'r crate::flow_slice_content::SliceRegion),
-    Nested(NestedDemand<'r>),
+    Nested(NestedDemand),
     Done((Result<Vec<FlowContribution>, FlowReturnFailure>, bool)),
 }
 
@@ -9581,9 +9654,9 @@ struct RegionRun<'r> {
 }
 
 /// What a region run needs next.
-enum RegionProgress<'r> {
+enum RegionProgress {
     Done((Result<Vec<FlowContribution>, FlowReturnFailure>, bool)),
-    Nested(NestedDemand<'r>),
+    Nested(NestedDemand),
 }
 
 /// An array literal's evaluation in progress, stepped by
@@ -9633,6 +9706,12 @@ struct ObjectEvalFrame<'e> {
     /// literal completes or fails closed.
     enclosing_receiver: Option<Option<std::rc::Rc<class_expression::ClassReceiver>>>,
     deferred: Vec<(usize, &'e crate::flow_slice_content::SliceObjectMember)>,
+    /// The next deferred method or accessor to evaluate.
+    deferred_next: usize,
+    /// The deferred members that read a member not evaluated yet, to
+    /// evaluate once more after the rest, and the next of them.
+    again: Vec<(usize, &'e crate::flow_slice_content::SliceObjectMember)>,
+    again_next: usize,
     next: usize,
     awaiting: ObjectEvalAwait<'e>,
 }
@@ -9657,6 +9736,15 @@ enum ObjectEvalAwait<'e> {
     Unwidened {
         surface_member: Box<crate::semantic_query::SurfaceMember>,
         value: SemanticNodeId,
+    },
+    /// A deferred method's or accessor's value, evaluated against the
+    /// literal (`again` once it read a member not evaluated yet).
+    Method {
+        position: usize,
+        member: &'e crate::flow_slice_content::SliceObjectMember,
+        degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+        holds_before: usize,
+        again: bool,
     },
 }
 
@@ -9881,6 +9969,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             receiver,
             enclosing_receiver: Some(enclosing_receiver),
             deferred: Vec::new(),
+            deferred_next: 0,
+            again: Vec::new(),
+            again_next: 0,
             next: 0,
             awaiting: ObjectEvalAwait::Nothing,
         }
@@ -9953,6 +10044,33 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         Positional::Hold | Positional::Unmodeled => value,
                     };
                     self.object_eval_push_member(frame, *surface_member, unwidened);
+                }
+                ObjectEvalAwait::Method {
+                    position,
+                    member,
+                    degradation,
+                    holds_before,
+                    again,
+                } => {
+                    let value = self.settle_composite_part(outcome, holds_before);
+                    let receiver = std::rc::Rc::clone(
+                        frame
+                            .receiver
+                            .as_ref()
+                            .expect("a literal with deferred members has a receiver"),
+                    );
+                    if !again && receiver.forward_read.get() {
+                        self.degradation = degradation;
+                        frame.again.push((position, member));
+                    } else {
+                        frame.surface_members[position].value = value;
+                        frame.unwidened_members[position].value = value;
+                        receiver
+                            .members
+                            .borrow_mut()
+                            .push(frame.surface_members[position].clone());
+                    }
+                    return self.object_eval_methods(frame);
                 }
             }
         }
@@ -10070,6 +10188,37 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     return ObjectEvalStep::Descend(member_value);
                 }
             }
+        }
+        self.object_eval_methods(frame)
+    }
+
+    /// An object literal whose data members all evaluated: its methods and
+    /// accessors evaluate against it, each a child of the literal's step,
+    /// and one that read a member not evaluated yet once more after the
+    /// rest; then its surface is built.
+    fn object_eval_methods<'e>(&mut self, frame: &mut ObjectEvalFrame<'e>) -> ObjectEvalStep<'e> {
+        if frame.receiver.is_some() {
+            let (next, again) = if let Some(&next) = frame.deferred.get(frame.deferred_next) {
+                frame.deferred_next += 1;
+                if let Some(receiver) = frame.receiver.as_ref() {
+                    receiver.forward_read.set(false);
+                }
+                (next, false)
+            } else if let Some(&next) = frame.again.get(frame.again_next) {
+                frame.again_next += 1;
+                (next, true)
+            } else {
+                return ObjectEvalStep::Done(self.object_eval_finish(frame));
+            };
+            let (position, member) = next;
+            frame.awaiting = ObjectEvalAwait::Method {
+                position,
+                member,
+                degradation: self.degradation,
+                holds_before: self.holds.len(),
+                again,
+            };
+            return ObjectEvalStep::Descend(&member.value);
         }
         ObjectEvalStep::Done(self.object_eval_finish(frame))
     }
@@ -10234,8 +10383,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         ObjectEvalStep::Done(Positional::Unmodeled)
     }
 
-    /// An object literal whose members all evaluated: its methods and
-    /// accessors evaluated against it, and its surface built.
+    /// An object literal whose members, methods and accessors all
+    /// evaluated: its surface built.
     fn object_eval_finish(
         &mut self,
         frame: &mut ObjectEvalFrame<'_>,
@@ -10253,39 +10402,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .enclosing_receiver
             .take()
             .expect("the literal's enclosing receiver");
-        let deferred = std::mem::take(&mut frame.deferred);
-        if let Some(receiver) = receiver.as_ref() {
-            let mut again = Vec::new();
-            for (position, member) in deferred {
-                receiver.forward_read.set(false);
-                let degradation = self.degradation;
-                let holds_before = self.holds.len();
-                let outcome = self.eval_expr(&member.value);
-                let value = self.settle_composite_part(outcome, holds_before);
-                if receiver.forward_read.get() {
-                    self.degradation = degradation;
-                    again.push((position, member));
-                    continue;
-                }
-                surface_members[position].value = value;
-                unwidened_members[position].value = value;
-                receiver
-                    .members
-                    .borrow_mut()
-                    .push(surface_members[position].clone());
-            }
-            for (position, member) in again {
-                let holds_before = self.holds.len();
-                let outcome = self.eval_expr(&member.value);
-                let value = self.settle_composite_part(outcome, holds_before);
-                surface_members[position].value = value;
-                unwidened_members[position].value = value;
-                receiver
-                    .members
-                    .borrow_mut()
-                    .push(surface_members[position].clone());
-            }
-        }
         // A member whose value holds the literal's own `this` (a method
         // returning `this`) names the literal's type recursively: the
         // literal is then its own identity, whose reads bind that `this` to
@@ -12132,6 +12248,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         degraded: bool,
         definition: Option<verter_semantic::analysis::flow::flow_graph::FlowNodeId>,
     ) {
+        self.record_dead_write(binding);
         self.products.bind_at(
             binding,
             DefiniteAssignmentProduct::assigned()
@@ -12628,6 +12745,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         widening_nullish: bool,
         fresh_literal: bool,
     ) -> SemanticNodeId {
+        if target.path.is_empty() {
+            let subject = match &target.root {
+                crate::flow_slice_content::SliceNarrowRoot::Param { binding, .. } => {
+                    FlowProductSubject::Local(*binding)
+                }
+                crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+                    binding.clone()
+                }
+            };
+            self.record_dead_write(&subject);
+        }
         // A failed RHS carries the explicit unmodelled-position marker. It
         // cannot select a declared constituent; preserving the marker keeps
         // the positional failure visible to every downstream consumer.
@@ -12962,70 +13090,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// Evaluate statements no path reaches for the returns and yields the
-    /// checker still aggregates from them
-    /// ([`crate::flow_slice_content::SliceStatement::Unreachable`]): every
-    /// reference reads its declared type there (the checker answers an
-    /// unreachable flow node with the declared type), and nothing the
-    /// region does — its writes, narrows, jumps and edges — reaches the
-    /// live state.
+    /// checker still aggregates from them (a loop body behind a literal
+    /// `false` test): every reference reads its declared type there (the
+    /// checker answers an unreachable flow node with the declared type),
+    /// and nothing the region does — its writes, narrows, jumps and edges
+    /// — reaches the live state ([`DeadPath`]).
     fn eval_unreachable_region(
         &mut self,
         region: &crate::flow_slice_content::SliceRegion,
     ) -> Result<Vec<FlowContribution>, FlowReturnFailure> {
-        let state = self.layer_state();
-        let narrow_mark = self.narrowing_snapshot();
-        let break_base = self.break_exits.len();
-        let return_base = self.return_edges.len();
-        let throw_base = self.throw_points.len();
-        let shadow_base = self.scope_shadows.len();
-        let enclosing = std::mem::replace(&mut self.declared_reads, true);
+        let dead = self.open_dead_path(true);
         let (result, _) = self.eval_region(region);
-        self.declared_reads = enclosing;
-        self.break_exits.truncate(break_base);
-        self.return_edges.truncate(return_base);
-        self.throw_points.truncate(throw_base);
-        self.scope_shadows.truncate(shadow_base);
-        self.restore_narrowings(narrow_mark);
-        self.restore_layer_state(state);
+        self.close_dead_path(dead);
         result
-    }
-
-    /// Evaluate one loop ([`SliceLoop`]) the way the checker's loop label
-    /// types each reference.
-    ///
-    /// The state at the loop head joins the state entering the loop with
-    /// every back edge — the body's end and each `continue`, after the
-    /// `for` update (and, for `do…while`, under the test's positive
-    /// reading) — exactly the antecedents the checker's loop label joins,
-    /// per reference ([`Self::loop_head_state`]). The body is then
-    /// evaluated once from that head, and only that pass is kept: its
-    /// returns, yields, breaks, throw points and call evidence are the
-    /// loop's, and every pass the heads took is discarded (a degradation
-    /// any pass recorded stays). The loop exits from the head under the
-    /// test's negated reading (from every head for a `for…of` / `for…in`,
-    /// which may run out of elements; from none for a `for` with no test
-    /// or a literal `true` one), from the back edge under the negated
-    /// reading for a `do…while`, and at each `break` of the final pass.
-    /// Returns the final pass's contributions and whether the loop
-    /// completes.
-    ///
-    /// An inferred binding the loop declares that the checker cannot type
-    /// without its own type binds `any` for the loop's whole evaluation
-    /// ([`Self::circular_loop_bindings`]).
-    fn eval_loop(
-        &mut self,
-        lowered: &crate::flow_slice_content::SliceLoop,
-    ) -> (Result<Vec<FlowContribution>, FlowReturnFailure>, bool) {
-        let circular: Vec<SkeletonBindingId> = self
-            .circular_loop_bindings(lowered)
-            .into_iter()
-            .filter(|binding| self.circular_inferred.insert(*binding))
-            .collect();
-        let outcome = self.eval_loop_from_head(lowered);
-        for binding in circular {
-            self.circular_inferred.remove(&binding);
-        }
-        outcome
     }
 
     /// The inferred bindings `lowered` declares that the checker cannot
@@ -13111,121 +13188,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// [`Self::eval_loop`]'s head, final pass, exits and scope close.
-    fn eval_loop_from_head(
-        &mut self,
-        lowered: &crate::flow_slice_content::SliceLoop,
-    ) -> (Result<Vec<FlowContribution>, FlowReturnFailure>, bool) {
-        use crate::flow_slice_content::SliceLoopTest;
-        let shadow_base = self.scope_shadows.len();
-        let break_base = self.break_exits.len();
-        let return_base = self.return_edges.len();
-        let throw_base = self.throw_points.len();
-        let mut contributors: Vec<FlowContribution> = Vec::new();
-        let (init_result, _) = self.eval_region(&lowered.init);
-        match init_result {
-            Ok(init_contributors) => contributors.extend(init_contributors),
-            Err(failure) => return (Err(failure), false),
-        }
-        let element = lowered
-            .element
-            .as_ref()
-            .and_then(|element| self.loop_element_node(element));
-        let entry = self.layer_state();
-        let head = match self.loop_head_state(lowered, element, &entry) {
-            Ok(head) => head,
-            Err(failure) => return (Err(failure), false),
-        };
-        let pass = match self.eval_loop_pass(lowered, &head, element) {
-            Ok(pass) => pass,
-            Err(failure) => return (Err(failure), false),
-        };
-        contributors.extend(pass.contributors);
-        // The exits: the test's (or the exhausted iteration's) edge, and
-        // every `break` of the converged pass that targets this loop.
-        let mut exits: Vec<FlowLayerState> = Vec::new();
-        match &lowered.test {
-            SliceLoopTest::Before { guard, constant } => {
-                if *constant != Some(true) {
-                    let tested = pass.test_edge.as_ref().unwrap_or(&head);
-                    exits.push(self.guarded_state(tested, guard, false));
-                }
-            }
-            SliceLoopTest::After { guard, constant } => {
-                if let (Some(back), false) = (&pass.test_edge, *constant == Some(true)) {
-                    exits.push(self.guarded_state(back, guard, false));
-                }
-            }
-            SliceLoopTest::Never => {}
-            SliceLoopTest::Exhausted => exits.push(head.clone()),
-        }
-        exits.extend(self.drain_break_exits(pass.break_base, None));
-        // The loop's own scope (a `for` initializer's declarations)
-        // closes over every state that leaves it.
-        let shadows =
-            self.split_scope_shadows_close_exits(shadow_base, break_base, return_base, throw_base);
-        for exit in &mut exits {
-            Self::close_lexical_scope(exit, &shadows);
-        }
-        if exits.is_empty() {
-            self.restore_layer_state(entry);
-            return (Ok(contributors), false);
-        }
-        // The exits leave from the converged head (or its back edge): a
-        // binding the head already holds conditionally stays conditional.
-        let joined = self.join_continuations(&exits, &head.products, &entry.write_observation);
-        let written = joined.products.writes_since(&entry.write_observation);
-        self.restore_layer_state(joined);
-        for subject in written {
-            if let Some(root) = self.narrow_root_of(&subject) {
-                self.narrowing_writes
-                    .push(NarrowingLedgerEntry::Cleared { root });
-            }
-        }
-        (Ok(contributors), true)
-    }
-
-    /// The state at a loop's head, typed per reference as the checker's
-    /// loop label types it (`getTypeAtFlowLoopLabel`). A reference the loop
-    /// writes ([`loop_carried_subjects`]) holds its entry state joined with
-    /// ONE pass of the loop, in which it reads its entry type — a loop
-    /// label under analysis answers with the types it has so far — and
-    /// every other written reference its value depends on
-    /// ([`SliceLoop::writes`]) reads its own head type, analysed with this
-    /// one under analysis too ([`Self::loop_reference_head`]). A
-    /// reference the loop does not write holds its entry state. tsc 7.0.2:
-    /// `a.push(a)` in a loop over `const a = []; a.push(1)` is
-    /// `(number | number[])[]`, and `a.push(v); v = w; w = "s"` reaches
-    /// `w`'s `string` in `a`.
-    fn loop_head_state(
-        &mut self,
-        lowered: &crate::flow_slice_content::SliceLoop,
-        element: Option<(&crate::flow_slice_content::SliceLoopElement, SemanticNodeId)>,
-        entry: &FlowLayerState,
-    ) -> Result<FlowLayerState, FlowReturnFailure> {
-        let carried = loop_carried_subjects(lowered);
-        let dependencies = self.loop_reference_dependencies(lowered, &carried);
-        let mut memo = rustc_hash::FxHashMap::default();
-        let mut head = entry.clone();
-        for subject in 0..carried.len() {
-            let products = self.loop_reference_head(
-                LoopHeadInput {
-                    lowered,
-                    element,
-                    entry,
-                    carried: &carried,
-                    dependencies: &dependencies,
-                },
-                subject,
-                &mut Vec::new(),
-                &mut memo,
-            )?;
-            head.products
-                .restore_reaching_from(&carried[subject], &products, None, true);
-        }
-        Ok(head)
-    }
-
     /// For each reference in `carried`, the others its loop-head type
     /// depends on: every carried reference a value written to it reads,
     /// transitively. A reference no recorded write retypes depends on
@@ -13279,72 +13241,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .collect()
     }
 
-    /// The loop-head products of `carried[subject]` while the references
-    /// `in_analysis` holds are under analysis: the entry state joined with
-    /// one pass from the entry state in which every reference of its
-    /// dependency closure outside the analysis reads its own head.
-    ///
-    /// Memoized on the reference for the whole head analysis, as the
-    /// checker caches each reference's loop-label type once it has one: a
-    /// reference first typed while others are under analysis keeps that
-    /// type wherever else the analysis reads it. Keyed on the analysed
-    /// references too, a loop whose references feed each other (`v0 = v1;
-    /// v1 = v2; …`) re-typed every reference once per subset of the others
-    /// — twenty such locals never finished.
-    fn loop_reference_head(
-        &mut self,
-        input: LoopHeadInput<'_, '_>,
-        subject: usize,
-        in_analysis: &mut Vec<usize>,
-        memo: &mut rustc_hash::FxHashMap<usize, FlowProductStore>,
-    ) -> Result<FlowProductStore, FlowReturnFailure> {
-        // A reference entering the loop at its declared type holds it
-        // at the head: every antecedent the checker's loop label would
-        // join is a subtype of it (`let i = 0 as 0 | 1; while (i < n)
-        // i++` leaves `i` `0 | 1`).
-        if self.loop_entry_holds_declared(&input.carried[subject]) {
-            return Ok(input.entry.products.clone());
-        }
-        let closure = &input.dependencies[subject];
-        if let Some(known) = memo.get(&subject) {
-            return Ok(known.clone());
-        }
-        let mut start = input.entry.clone();
-        in_analysis.push(subject);
-        for &other in closure {
-            if in_analysis.contains(&other) {
-                continue;
-            }
-            let head = match self.loop_reference_head(input, other, in_analysis, memo) {
-                Ok(head) => head,
-                Err(failure) => {
-                    in_analysis.pop();
-                    return Err(failure);
-                }
-            };
-            start
-                .products
-                .restore_reaching_from(&input.carried[other], &head, None, true);
-        }
-        in_analysis.pop();
-        let mark = self.loop_pass_mark();
-        let pass = self.eval_loop_pass(input.lowered, &start, input.element)?;
-        self.rewind_loop_pass(&mark);
-        let products = match pass.back {
-            Some(back) => {
-                self.join_continuations(
-                    &[input.entry.clone(), back],
-                    &input.entry.products,
-                    &input.entry.write_observation,
-                )
-                .products
-            }
-            None => input.entry.products.clone(),
-        };
-        memo.insert(subject, products.clone());
-        Ok(products)
-    }
-
     /// Whether `subject` holds exactly its declared type where the state
     /// is read: a parameter or a local with a declared type, reaching it
     /// unwritten or written with that very type, and under no narrowing.
@@ -13380,105 +13276,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             Some(reaching) => reaching == declared,
             None => parameter_declared.is_some(),
         }
-    }
-
-    /// One pass of a loop body from `head`: the head's test (its writes,
-    /// and a throw point when it calls), the element binding, the body
-    /// under the test's positive reading, and the back edge — the body's
-    /// end joined with every `continue` of this loop, run through the
-    /// `for` update.
-    fn eval_loop_pass(
-        &mut self,
-        lowered: &crate::flow_slice_content::SliceLoop,
-        head: &FlowLayerState,
-        element: Option<(&crate::flow_slice_content::SliceLoopElement, SemanticNodeId)>,
-    ) -> Result<LoopPass, FlowReturnFailure> {
-        use crate::flow_slice_content::SliceLoopTest;
-        #[cfg(test)]
-        LOOP_PASSES.with(|count| count.set(count.get() + 1));
-        let break_base = self.break_exits.len();
-        let return_base = self.return_edges.len();
-        let throw_base = self.throw_points.len();
-        let shadow_base = self.scope_shadows.len();
-        let narrow_mark = self.narrowing_snapshot();
-        self.restore_layer_state(head.clone());
-        let mut tested = None;
-        if let SliceLoopTest::Before { guard, constant } = &lowered.test {
-            if lowered.test_throws {
-                self.capture_throw_point();
-            }
-            self.eval_region(&lowered.test_effects).0?;
-            tested = Some(self.layer_state());
-            // A literal `false` test never enters the body: no path
-            // reaches it, and it contributes as unreachable code does.
-            if *constant == Some(false) {
-                self.restore_narrowings(narrow_mark);
-                let contributors = self.eval_unreachable_region(&lowered.body)?;
-                return Ok(LoopPass {
-                    contributors,
-                    back: None,
-                    test_edge: tested,
-                    break_base,
-                });
-            }
-            self.apply_guard_scoped(guard, true);
-        }
-        if let Some((element, node)) = element {
-            if let Some(element) = element.binding.as_ref() {
-                let subject = FlowProductSubject::Local(element.binding);
-                if element.kind != crate::flow_slice_content::SliceBindingKind::Var {
-                    self.record_scope_shadow(&subject);
-                }
-                self.set_declared_local(&subject, element.kind, Some(node));
-                self.bind_local(&subject, element.kind, node, None, false);
-            } else if let Some((pattern, kind)) = element.pattern.as_ref() {
-                self.bind_loop_pattern(pattern, node, *kind);
-            }
-        }
-        let (result, body_falls) = self.eval_region(&lowered.body);
-        let contributors = result?;
-        let shadows =
-            self.split_scope_shadows_close_exits(shadow_base, break_base, return_base, throw_base);
-        let mut back_inputs = self.drain_continue_exits(break_base, &lowered.labels);
-        if body_falls {
-            let mut end = self.layer_state();
-            Self::close_lexical_scope(&mut end, &shadows);
-            back_inputs.push(end);
-        }
-        let back = if back_inputs.is_empty() {
-            None
-        } else {
-            let joined =
-                self.join_continuations(&back_inputs, &head.products, &head.write_observation);
-            self.restore_layer_state(joined);
-            let (update_result, _) = self.eval_region(&lowered.update);
-            update_result?;
-            Some(self.layer_state())
-        };
-        self.restore_narrowings(narrow_mark);
-        // A `do…while` tests after the body: the back edge re-enters only
-        // under the positive reading, and the loop exits from the same
-        // state under the negated one.
-        let (back, test_edge) = match (&lowered.test, back) {
-            (SliceLoopTest::After { guard, constant }, Some(back)) => {
-                self.restore_layer_state(back);
-                if lowered.test_throws {
-                    self.capture_throw_point();
-                }
-                self.eval_region(&lowered.test_effects).0?;
-                let back = self.layer_state();
-                let reentry =
-                    (*constant != Some(false)).then(|| self.guarded_state(&back, guard, true));
-                (reentry, Some(back))
-            }
-            (_, back) => (back, tested),
-        };
-        Ok(LoopPass {
-            contributors,
-            back,
-            test_edge,
-            break_base,
-        })
     }
 
     /// `state` under one reading of a loop test: the guard applied to a
@@ -13971,122 +13768,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let flagged = joined.products.assignment(&subject).with_single_path(true);
             joined.products.set_assignment(&subject, flagged);
         }
-    }
-
-    /// Evaluate one clause region of a `try` statement in its own block
-    /// scope, starting from `start`: lexical bindings declared inside do
-    /// not escape (the catch parameter included); function-scoped `var`
-    /// and parameter writes do — and so do WRITES to bindings that
-    /// predate the clause (the clause runs on the paths that reach it, so
-    /// its writes to outer bindings are reaching definitions past it).
-    /// Returns the clause's return contributions, the end-of-clause state
-    /// (parameter writes completed, block scope closed), and the writes
-    /// the clause performed on bindings surviving the block-scope close.
-    /// Outer writes retain their receipts, while declarations owned by the
-    /// closed scope cannot be replayed into the following continuation.
-    ///
-    /// `collect_throws` turns throw-point collection on for the clause:
-    /// on for the try block (a following `catch` / `finally` is entered
-    /// from every throw point) and for the catch clause when a `finally`
-    /// follows it. The snapshots the clause collects are scope-closed
-    /// with it, so a clause-internal declaration never leaks into a
-    /// clause-entry join.
-    #[allow(clippy::type_complexity)]
-    fn eval_try_clause(
-        &mut self,
-        start: &FlowLayerState,
-        region: &crate::flow_slice_content::SliceRegion,
-        catch_param: Option<(
-            SkeletonBindingId,
-            Option<&crate::flow_slice_content::GatedType>,
-        )>,
-        collect_throws: bool,
-    ) -> Result<(Vec<FlowContribution>, FlowLayerState, FlowClauseWrites), FlowReturnFailure> {
-        let write_observation = self.products.observe_writes();
-        self.restore_layer_state(start.clone());
-        let shadow_base = self.scope_shadows.len();
-        let throw_base = self.throw_points.len();
-        let break_base = self.break_exits.len();
-        let return_base = self.return_edges.len();
-        let saved_collect = self.collect_throw_points;
-        self.collect_throw_points = collect_throws;
-        if let Some((param, declared)) = catch_param.filter(|(param, _)| {
-            self.products
-                .contains_subject(&FlowProductSubject::Local(*param))
-        }) {
-            let subject = FlowProductSubject::Local(param);
-            self.record_scope_shadow(&subject);
-            // The catch variable's declared type is its annotation (`any`
-            // or `unknown`), else `unknown` under the project's
-            // `useUnknownInCatchVariables` and `any` without it; an
-            // assignment to it narrows nothing (a declared type that is
-            // not a union).
-            let declared = match declared {
-                Some(declared)
-                    if !declared
-                        .shadowed()
-                        .iter()
-                        .any(|name| self.owner_scope_answers_name(name)) =>
-                {
-                    self.lower_body_type(declared.ty())
-                }
-                Some(_) => super::flow_return_callee::unmodeled_position_marker(self.dispatch),
-                None => self
-                    .dispatch
-                    .graph()
-                    .intern_node(SemanticNodeData::Primitive(
-                        if self.use_unknown_in_catch_variables {
-                            PrimitiveKind::Unknown
-                        } else {
-                            PrimitiveKind::Any
-                        },
-                    )),
-            };
-            self.set_declared_local(
-                &subject,
-                crate::flow_slice_content::SliceBindingKind::Let,
-                Some(declared),
-            );
-            self.bind_local(
-                &subject,
-                crate::flow_slice_content::SliceBindingKind::Let,
-                declared,
-                None,
-                false,
-            );
-        }
-        let (result, _) = self.eval_region(region);
-        self.collect_throw_points = saved_collect;
-        let contributions = result?;
-        let mut end = self.layer_state();
-        // The scope close replays on every state the clause's evaluation
-        // produced: the end state, the throw points, and the pending
-        // break exits that crossed the clause's scope.
-        let shadows =
-            self.split_scope_shadows_close_exits(shadow_base, break_base, return_base, throw_base);
-        Self::close_lexical_scope(&mut end, &shadows);
-        let executed = self.written_between(&write_observation, &end);
-        // Preserve the clause-refusal contract without confusing it with
-        // execution evidence. Only written subjects need a type comparison.
-        let type_changes = FlowClauseTypeChanges(
-            executed
-                .0
-                .iter()
-                .filter(|subject| {
-                    start.products.reaching(subject) != end.products.reaching(subject)
-                })
-                .cloned()
-                .collect(),
-        );
-        self.restore_layer_state(end.clone());
-        Ok((
-            contributions,
-            end,
-            FlowClauseWrites {
-                executed,
-                type_changes,
-            },
-        ))
     }
 
     /// READ one local across the two scope layers — the ONLY way to take
@@ -15271,114 +14952,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             GuardNarrowing::Unchanged => {}
         }
-    }
-
-    /// Evaluate one `if`: its contributions and whether it completes.
-    ///
-    /// Bindings are block-scoped: each arm evaluates under its own local
-    /// scope, and the consequent reads the test's POSITIVE narrow, the
-    /// alternate its NEGATED one. A WHOLE-BINDING WRITE inside an arm
-    /// escapes through the branch JOIN, never the raw arm value: after the
-    /// `if`, a rebound binding holds the union of its arm value and the
-    /// value it had on the paths that never took that arm (tsc's own join
-    /// of reaching definitions). An arm whose path TERMINATES (return /
-    /// throw / break) does not reach the join at all: its writes leave
-    /// with it, and the SURVIVING edge carries the other reading's guard
-    /// facts — the negated reading when the consequent terminated, the
-    /// positive one when the alternate did (the checker's own rule for
-    /// `if (guard) exit; …`). The lexical layer restores; the
-    /// function-scoped `var` layer (and parameter writes) join by the same
-    /// rule. A reference both continuing arms narrowed reads the union of
-    /// its per-arm narrows past the `if`.
-    fn eval_if(
-        &mut self,
-        guard: &crate::flow_slice_content::SliceGuard,
-        consequent: &crate::flow_slice_content::SliceRegion,
-        alternate: Option<&crate::flow_slice_content::SliceRegion>,
-    ) -> Result<(Vec<FlowContribution>, bool), FlowReturnFailure> {
-        let mut contributors: Vec<FlowContribution> = Vec::new();
-        let entry_products = self.products.clone();
-        let entry_writes = self.products.observe_writes();
-        let narrow_mark = self.narrowing_snapshot();
-        let shadow_base = self.scope_shadows.len();
-        let break_base = self.break_exits.len();
-        let return_base = self.return_edges.len();
-        let throw_base = self.throw_points.len();
-        self.apply_guard_scoped(guard, true);
-        let (consequent_result, consequent_falls) = self.eval_region(consequent);
-        // Close the arm's lexical scope BEFORE snapshotting its
-        // contribution to the post-if join, and replay the same
-        // close on every abrupt edge that crossed the arm.
-        let shadows =
-            self.split_scope_shadows_close_exits(shadow_base, break_base, return_base, throw_base);
-        let mut consequent_state = self.layer_state();
-        Self::close_lexical_scope(&mut consequent_state, &shadows);
-        let consequent_products = consequent_state.products;
-        let consequent_narrowings = self.narrowings_since(&narrow_mark);
-        self.restore_narrowings(narrow_mark.clone());
-        self.restore_arm_entry(&entry_products);
-        let consequent_contributors = match consequent_result {
-            Ok(contributors) => contributors,
-            Err(failure) => {
-                return Err(failure);
-            }
-        };
-        contributors.extend(consequent_contributors);
-        let (alternate_products, alternate_falls, alternate_narrowings) =
-            if let Some(alternate) = alternate {
-                let shadow_base = self.scope_shadows.len();
-                let break_base = self.break_exits.len();
-                let return_base = self.return_edges.len();
-                let throw_base = self.throw_points.len();
-                self.apply_guard_scoped(guard, false);
-                let (alternate_result, alternate_falls) = self.eval_region(alternate);
-                let shadows = self.split_scope_shadows_close_exits(
-                    shadow_base,
-                    break_base,
-                    return_base,
-                    throw_base,
-                );
-                let mut alternate_state = self.layer_state();
-                Self::close_lexical_scope(&mut alternate_state, &shadows);
-                let alternate_products = alternate_state.products;
-                let alternate_narrowings = self.narrowings_since(&narrow_mark);
-                self.restore_narrowings(narrow_mark.clone());
-                self.restore_arm_entry(&entry_products);
-                let alternate_contributors = match alternate_result {
-                    Ok(contributors) => contributors,
-                    Err(failure) => {
-                        return Err(failure);
-                    }
-                };
-                contributors.extend(alternate_contributors);
-                (alternate_products, alternate_falls, alternate_narrowings)
-            } else {
-                // The implicit alternate is a real false-edge
-                // predecessor, with no authored body or writes.
-                self.apply_guard_scoped(guard, false);
-                let products = self.products.clone();
-                let narrowings = self.narrowings_since(&narrow_mark);
-                self.restore_narrowings(narrow_mark.clone());
-                (products, true, narrowings)
-            };
-        self.restore_arm_entry(&entry_products);
-        self.join_arm_writes(
-            &consequent_products,
-            consequent_falls,
-            &alternate_products,
-            alternate_falls,
-            &entry_products,
-            &entry_writes,
-        );
-        // The checker's join of the two arms: a reference both continuing
-        // arms narrowed reads the union of its per-arm narrowed types.
-        if consequent_falls && alternate_falls {
-            self.join_arm_narrowings(vec![consequent_narrowings, alternate_narrowings]);
-        }
-        // A single continuing predecessor already carries its final
-        // facts. Reapplying its original test here would revive a guard
-        // invalidated by a later arm write.
-        Ok((contributors, consequent_falls || alternate_falls))
     }
 
     /// Land the union of the per-arm narrows of every reference each
@@ -20207,7 +19780,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         run: &mut RegionRun<'r>,
         mut delivered: Option<RegionDelivery>,
-    ) -> RegionProgress<'r> {
+    ) -> RegionProgress {
         loop {
             let frame = run.frames.last_mut().expect("the region being evaluated");
             match self.eval_region_statements(frame, delivered.take()) {
@@ -20216,7 +19789,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     run.frames.push(child);
                 }
                 RegionEvalStep::Nested(demand) => return RegionProgress::Nested(demand),
-                RegionEvalStep::Done(outcome) => {
+                RegionEvalStep::Done(mut outcome) => {
+                    // Statements past a path the evaluator proved dead
+                    // evaluated on a dead path: the region does not
+                    // complete, and the live walk it saved comes back.
+                    if let Some(dead) = run.frames.last_mut().and_then(|f| f.dead_tail.take()) {
+                        self.close_dead_path(*dead);
+                        outcome.1 = false;
+                    }
                     match &outcome.0 {
                         Ok(_) => {
                             self.executed_walk.regions_completed =
@@ -20246,8 +19826,144 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             next: 0,
             contributors: Vec::new(),
             path_alive: true,
-            block_bases: None,
-            pending_return: None,
+            entered: None,
+            pending: None,
+            dead_tail: None,
+        }
+    }
+
+    /// Bind an unannotated declarator's local to its initializer's value,
+    /// `outcome`.
+    #[allow(clippy::too_many_arguments)]
+    fn bind_initialized_local(
+        &mut self,
+        binding: verter_semantic::analysis::flow::SkeletonBindingId,
+        kind: crate::flow_slice_content::SliceBindingKind,
+        init: &crate::flow_slice_content::SliceExpr,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+        auto_typed: bool,
+        widening_nullish_init: bool,
+        outcome: Positional<SemanticNodeId>,
+    ) {
+        match outcome {
+            Positional::Value(node) => {
+                let membership = self.binding_init_membership(kind, init, node, freshness);
+                // An unannotated declaration always widens a
+                // `unique symbol` another declaration created
+                // (`widenTypeForVariableLikeDeclaration`):
+                // `const l = u` is `symbol`. A union holding
+                // one keeps it.
+                let node = if is_unique_symbol_node(self.dispatch.graph(), node) {
+                    self.dispatch
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol))
+                } else {
+                    node
+                };
+                match kind {
+                    crate::flow_slice_content::SliceBindingKind::Const => {
+                        self.bind_local(
+                            &FlowProductSubject::Local(binding),
+                            kind,
+                            node,
+                            membership,
+                            false,
+                        );
+                    }
+                    // A MUTABLE declaration widens its
+                    // fresh provenance AT the declaration
+                    // (`let a = idInf(1)` is `number`),
+                    // exactly as a bare literal
+                    // initializer already lowered widened.
+                    crate::flow_slice_content::SliceBindingKind::Let
+                    | crate::flow_slice_content::SliceBindingKind::Var => {
+                        let widened = match &membership {
+                            Some(WideningMembership::All) => {
+                                widen_fresh_read_node(self.dispatch, node, self.nullability)
+                            }
+                            Some(WideningMembership::Partial(values)) => {
+                                widen_values_within(self.dispatch, node, values, self.nullability)
+                            }
+                            None => node,
+                        };
+                        if !auto_typed {
+                            self.record_inferred_declared(binding, kind, widened);
+                        }
+                        // The widened initializer is the
+                        // binding's DECLARED type, and the
+                        // checker reads a union-typed
+                        // binding assignment-reduced by the
+                        // value written to it. Widening a
+                        // plain literal yields exactly the
+                        // constituents the value reduces
+                        // to; widening an enum member's
+                        // literal yields its enum, a union
+                        // the member reduces back to (`let
+                        // x = E.A` holds `E.A`, typed `E`).
+                        // A UNION declared type reduces
+                        // every later assignment to the
+                        // constituents the value can be
+                        // (`getAssignmentReducedType`: `x
+                        // = 1` over `let x = 0 as 0 | 1 |
+                        // 2` is `1`).
+                        let node = match self.dispatch.union_arms_of(widened) {
+                            Some(arms) if widened != node && self.carries_enum_literal(node) => {
+                                self.set_declared_local(
+                                    &FlowProductSubject::Local(binding),
+                                    kind,
+                                    Some(widened),
+                                );
+                                self.assignment_reduced_union(widened, &arms, node)
+                            }
+                            Some(_) if !auto_typed => {
+                                self.set_declared_local(
+                                    &FlowProductSubject::Local(binding),
+                                    kind,
+                                    Some(widened),
+                                );
+                                widened
+                            }
+                            _ => widened,
+                        };
+                        // An auto-typed variable's bare
+                        // `null` / `undefined` initializer
+                        // is the checker's widening
+                        // nullable value.
+                        self.bind_local_value(
+                            &FlowProductSubject::Local(binding),
+                            kind,
+                            node,
+                            None,
+                            false,
+                            auto_typed && widening_nullish_init,
+                        );
+                    }
+                }
+            }
+            Positional::Hold => {}
+            // An UNMODELLED initializer binds the typed
+            // marker — never a fabricated `any`, which is
+            // indistinguishable from an authored one at
+            // every downstream gate. The declaration
+            // itself is not a return contribution, so the
+            // degradation is recorded only where the
+            // binding is OBSERVED (`read_local` folds the
+            // `FailedBindingInitializer` membership); an
+            // unobserved unmodelled binding degrades
+            // nothing.
+            Positional::Unmodeled => {
+                let marker = super::flow_return_callee::unmodeled_position_marker(self.dispatch);
+                if !auto_typed {
+                    self.record_inferred_declared(binding, kind, marker);
+                }
+                self.bind_local(
+                    &FlowProductSubject::Local(binding),
+                    kind,
+                    marker,
+                    None,
+                    true,
+                );
+            }
         }
     }
 
@@ -20268,13 +19984,47 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // ANDed with this — the override only ever narrows downward.
         let mut path_alive = frame.path_alive;
         if let Some(RegionDelivery::Nested(node)) = delivered {
-            let mut pending = frame
-                .pending_return
+            let mut pending = match frame
+                .pending
                 .take()
-                .expect("the return the region is suspended at");
+                .expect("the statement the region is suspended at")
+            {
+                Pending::Return(pending) => pending,
+                Pending::Binding(mut pending) => {
+                    match self.run_expr(&mut pending.run, Some(Positional::Value(node)), true) {
+                        ExprProgress::Nested(demand) => {
+                            frame.pending = Some(Pending::Binding(pending));
+                            frame.contributors = contributors;
+                            frame.path_alive = path_alive;
+                            return RegionEvalStep::Nested(demand);
+                        }
+                        ExprProgress::Done(outcome) => {
+                            let PendingBinding {
+                                binding,
+                                kind,
+                                init,
+                                freshness,
+                                auto_typed,
+                                widening_nullish_init,
+                                ..
+                            } = *pending;
+                            self.bind_initialized_local(
+                                binding,
+                                kind,
+                                init,
+                                freshness,
+                                auto_typed,
+                                widening_nullish_init,
+                                outcome,
+                            );
+                        }
+                    }
+                    return self.eval_region_statements_from(frame, contributors, path_alive);
+                }
+            };
             match self.run_expr(&mut pending.run, Some(Positional::Value(node)), true) {
                 ExprProgress::Nested(demand) => {
-                    frame.pending_return = Some(pending);
+                    frame.pending = Some(Pending::Return(pending));
                     frame.contributors = contributors;
                     frame.path_alive = path_alive;
                     return RegionEvalStep::Nested(demand);
@@ -20306,11 +20056,55 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     self.capture_return_edge();
                 }
             }
-        } else if let Some(RegionDelivery::Block((result, block_falls))) = delivered {
-            let (shadow_base, break_base, return_base, throw_base) = frame
-                .block_bases
+        } else if let Some(RegionDelivery::Block(outcome)) = delivered {
+            let entered = frame
+                .entered
                 .take()
-                .expect("the block the region is suspended at");
+                .expect("the statement the region is suspended at");
+            let (shadow_base, break_base, return_base, throw_base) = match entered {
+                Entered::Block(bases) => bases,
+                Entered::Unreachable(dead) => {
+                    self.close_dead_path(*dead);
+                    match outcome.0 {
+                        Ok(unreachable_contributors) => {
+                            contributors.extend(unreachable_contributors)
+                        }
+                        Err(failure) => {
+                            return RegionEvalStep::Done((
+                                Err(failure),
+                                region
+                                    .can_fall_through
+                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                            ))
+                        }
+                    }
+                    return self.eval_region_statements_from(frame, contributors, false);
+                }
+                entered => {
+                    match self.resume_entered(entered, outcome) {
+                        BranchStep::Enter(entered, next) => {
+                            frame.entered = Some(entered);
+                            frame.contributors = contributors;
+                            frame.path_alive = path_alive;
+                            return RegionEvalStep::EnterBlock(next);
+                        }
+                        BranchStep::Done(Ok((statement_contributors, falls))) => {
+                            contributors.extend(statement_contributors);
+                            path_alive = falls;
+                        }
+                        BranchStep::Done(Err(failure)) => {
+                            return RegionEvalStep::Done((
+                                Err(failure),
+                                region
+                                    .can_fall_through
+                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                            ))
+                        }
+                    }
+                    return self.eval_region_statements_from(frame, contributors, path_alive);
+                }
+            };
+            let (result, block_falls) = outcome;
             let block_contributors = match result {
                 Ok(contributors) => contributors,
                 Err(failure) => {
@@ -20334,29 +20128,34 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.restore_layer_state(end);
             path_alive = block_falls;
         }
+        self.eval_region_statements_from(frame, contributors, path_alive)
+    }
+
+    /// The statement walk of [`Self::eval_region_statements`] from the
+    /// frame's next statement.
+    fn eval_region_statements_from<'r>(
+        &mut self,
+        frame: &mut RegionEvalFrame<'r>,
+        mut contributors: Vec<FlowContribution>,
+        mut path_alive: bool,
+    ) -> RegionEvalStep<'r> {
+        let region = frame.region;
         while let Some(statement) = region.statements.get(frame.next) {
             frame.next += 1;
-            if !path_alive {
-                // Statements no path reaches: the checker still aggregates
-                // their returns and yields.
-                if let crate::flow_slice_content::SliceStatement::Unreachable(unreachable) =
-                    statement
-                {
-                    match self.eval_unreachable_region(unreachable) {
-                        Ok(unreachable_contributors) => {
-                            contributors.extend(unreachable_contributors)
-                        }
-                        Err(failure) => {
-                            return RegionEvalStep::Done((
-                                Err(failure),
-                                region
-                                    .can_fall_through
-                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                            ))
-                        }
-                    }
-                }
-                break;
+            // Statements no path reaches: the checker still aggregates their
+            // returns and yields. The lowering drops the ones past a path it
+            // proves dead into a trailing unreachable region (entered below);
+            // the ones past a path only the evaluator proves dead evaluate on
+            // the region's dead tail, each reference reading the state the
+            // dead path left.
+            if !path_alive
+                && !matches!(
+                    statement,
+                    crate::flow_slice_content::SliceStatement::Unreachable(_)
+                )
+                && frame.dead_tail.is_none()
+            {
+                frame.dead_tail = Some(Box::new(self.open_dead_path(false)));
             }
             self.executed_walk.statements_executed =
                 self.executed_walk.statements_executed.saturating_add(1);
@@ -20567,8 +20366,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                             match self.run_expr(&mut run, None, true) {
                                                 ExprProgress::Done(outcome) => outcome,
                                                 ExprProgress::Nested(demand) => {
-                                                    frame.pending_return =
-                                                        Some(Box::new(PendingReturn {
+                                                    frame.pending = Some(Pending::Return(
+                                                        Box::new(PendingReturn {
                                                             expr,
                                                             freshness,
                                                             predicate_test,
@@ -20576,7 +20375,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                                             fresh_literal,
                                                             holds_before,
                                                             run,
-                                                        }));
+                                                        }),
+                                                    ));
                                                     frame.contributors = contributors;
                                                     frame.path_alive = path_alive;
                                                     return RegionEvalStep::Nested(demand);
@@ -20611,16 +20411,40 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     self.capture_return_edge();
                 }
+                // A branch statement's regions evaluate next, from the
+                // caller's stack; this region resumes past the statement once
+                // the statement finishes (`flow_return_branches`).
                 crate::flow_slice_content::SliceStatement::If {
                     guard,
                     consequent,
                     alternate,
-                } => match self.eval_if(guard, consequent, alternate.as_deref()) {
-                    Ok((arm_contributors, falls)) => {
-                        contributors.extend(arm_contributors);
+                } => {
+                    let BranchStep::Enter(entered, next) =
+                        self.begin_if(guard, consequent, alternate.as_deref())
+                    else {
+                        unreachable!("an if enters its consequent")
+                    };
+                    frame.entered = Some(entered);
+                    frame.contributors = contributors;
+                    frame.path_alive = path_alive;
+                    return RegionEvalStep::EnterBlock(next);
+                }
+                crate::flow_slice_content::SliceStatement::Switch {
+                    discriminant,
+                    cases,
+                    has_default,
+                } => match self.begin_switch(discriminant, cases, *has_default) {
+                    BranchStep::Enter(entered, next) => {
+                        frame.entered = Some(entered);
+                        frame.contributors = contributors;
+                        frame.path_alive = path_alive;
+                        return RegionEvalStep::EnterBlock(next);
+                    }
+                    BranchStep::Done(Ok((statement_contributors, falls))) => {
+                        contributors.extend(statement_contributors);
                         path_alive = falls;
                     }
-                    Err(failure) => {
+                    BranchStep::Done(Err(failure)) => {
                         return RegionEvalStep::Done((
                             Err(failure),
                             region
@@ -20629,329 +20453,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         ))
                     }
                 },
-                crate::flow_slice_content::SliceStatement::Switch {
-                    discriminant,
-                    cases,
-                    has_default,
-                } => {
-                    // tsc's switch flow: a case clause is entered by the
-                    // dispatch edge (the state at the switch) AND, for
-                    // every clause after the first, by the previous
-                    // clause's fall-through edge — so each clause starts
-                    // from the JOIN of those two states. Each component
-                    // carries its OWN reading of the discriminant, baked
-                    // into the reaching-definition layer before the join:
-                    // the dispatch edge into a clause tested positive for
-                    // the clause's test (the default clause's edge is the
-                    // discriminant minus every test), and the fall-through
-                    // edge out of a clause carries that clause's narrow
-                    // with it — so a fall-through-joined start unions the
-                    // chain's tests, exactly the checker's flow. (The
-                    // narrowing OVERLAY cannot carry this: the join
-                    // intersects it, and the two edges' facts differ.)
-                    // The state past the switch joins every path that
-                    // leaves it normally: the state AT each `break`
-                    // (never the end state of the clause the break sits
-                    // in — a write after the break is not on the break's
-                    // edge), falling off the last clause, and the
-                    // no-matching-case path when no `default` exists AND
-                    // the tests do not cover the discriminant's every
-                    // arm. The clauses share ONE block scope, exactly as
-                    // the authored switch body does.
-                    let entry = self.layer_state();
-                    let break_base = self.break_exits.len();
-                    let return_base = self.return_edges.len();
-                    let throw_base = self.throw_points.len();
-                    let shadow_base = self.scope_shadows.len();
-                    // The remainder the DEFAULT edge subtracts is built
-                    // from the CARRIED relations only. An unrecognized
-                    // clause contributes nothing to it, which leaves the
-                    // remainder a SUPERSET of the true default set — the
-                    // sound direction — and never lets that clause's own
-                    // values disappear from another clause's edge.
-                    let tests: Vec<crate::flow_slice_content::SliceGuardLiteral> = cases
-                        .iter()
-                        .filter_map(|case| match &case.test {
-                            crate::flow_slice_content::SliceSwitchTest::Literal(literal) => {
-                                Some(literal.clone())
-                            }
-                            crate::flow_slice_content::SliceSwitchTest::Default
-                            | crate::flow_slice_content::SliceSwitchTest::Guard(_)
-                            | crate::flow_slice_content::SliceSwitchTest::Unmodeled => None,
-                        })
-                        .collect();
-                    // The clauses whose relation is a guard (`switch (typeof
-                    // x)`, `switch (true)`): the default edge and the
-                    // no-matching-case path apply every one negated.
-                    let guards: Vec<&crate::flow_slice_content::SliceGuard> = cases
-                        .iter()
-                        .filter_map(|case| match &case.test {
-                            crate::flow_slice_content::SliceSwitchTest::Guard(guard) => {
-                                Some(&**guard)
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    // Exhaustiveness is a resolver question: the lowering
-                    // knows only `has_default`, so the no-matching-case
-                    // path dies here, where the discriminant's arms and
-                    // the tests can be related.
-                    // A DECLINED remainder probe (an unlowerable test, a
-                    // projection miss, an undecided relation) leaves the
-                    // no-matching-case path live over arms the checker may
-                    // prove covered — a superset, so it degrades: the
-                    // liveness verdict is then unproven, never clean.
-                    let covered = !has_default
-                        && discriminant.as_ref().is_some_and(|subject| {
-                            match self.switch_discriminant_remainder(subject, &tests) {
-                                Some((remainder, _)) => remainder.is_empty(),
-                                None => {
-                                    self.record_degradation(FlowReturnDegradation::FlowGap(
-                                        crate::semantic_query::FlowGap::GuardNarrowing,
-                                    ));
-                                    false
-                                }
-                            }
-                        });
-                    // A destructured element aliasing a narrowing is carried
-                    // by guards only: its switch takes the typed gap.
-                    if let Some(subject) = discriminant {
-                        self.degrade_unaliased_test(subject);
-                    }
-                    let mut chain_end: Option<FlowLayerState> = None;
-                    let mut last_end: Option<FlowLayerState> = None;
-                    let mut last_falls = false;
-                    let mut guards_before = 0;
-                    for case in cases.iter() {
-                        // The dispatch component of this clause's start.
-                        let mut dispatch = entry.clone();
-                        match &case.test {
-                            // The clause's own guard, beneath every earlier
-                            // clause's guard negated (`narrowTypeBySwitchOnTrue`;
-                            // the `typeof` tests are disjoint, so the negations
-                            // change nothing there).
-                            crate::flow_slice_content::SliceSwitchTest::Guard(guard) => {
-                                let applied: Vec<(&crate::flow_slice_content::SliceGuard, bool)> =
-                                    guards[..guards_before]
-                                        .iter()
-                                        .map(|earlier| (*earlier, false))
-                                        .chain(std::iter::once((&**guard, true)))
-                                        .collect();
-                                dispatch = self.guarded_switch_state(&entry, &applied).0;
-                                guards_before += 1;
-                            }
-                            crate::flow_slice_content::SliceSwitchTest::Default
-                                if !guards.is_empty() =>
-                            {
-                                let applied: Vec<(&crate::flow_slice_content::SliceGuard, bool)> =
-                                    guards.iter().map(|guard| (*guard, false)).collect();
-                                // Reachable even when the guards leave the
-                                // reference `never`: the clause is typed
-                                // through it.
-                                dispatch = self.guarded_switch_state(&entry, &applied).0;
-                            }
-                            _ => {}
-                        }
-                        if let Some(subject) = discriminant {
-                            self.restore_layer_state(entry.clone());
-                            match &case.test {
-                                // An unrecognized relation: the clause is
-                                // reachable for discriminant values this
-                                // half cannot enumerate, so its dispatch
-                                // edge carries NO narrow. It must never
-                                // take the DEFAULT edge — the remainder is
-                                // not this clause's reaching set, and
-                                // baking it in would publish a type the
-                                // clause was never proven to see.
-                                crate::flow_slice_content::SliceSwitchTest::Unmodeled
-                                | crate::flow_slice_content::SliceSwitchTest::Guard(_) => {}
-                                // The dispatch edge: the discriminant IS
-                                // this test.
-                                // A test no discriminant arm matches bakes
-                                // the subject's `never` narrow instead of
-                                // killing the dispatch edge: the checker
-                                // keeps the clause's contributors typed
-                                // through the `never` subject (measured:
-                                // `switch (x) { case "b": return 1 }` over
-                                // `x: "a"` still contributes `1`).
-                                crate::flow_slice_content::SliceSwitchTest::Literal(test) => {
-                                    match self.narrow_eq_literal(
-                                        subject,
-                                        test,
-                                        false,
-                                        LiteralComparison::SwitchCase,
-                                    ) {
-                                        GuardNarrowing::Narrowed(fact_subject, node) => {
-                                            self.bake_narrow_into_state(
-                                                &mut dispatch,
-                                                &fact_subject,
-                                                node,
-                                            );
-                                        }
-                                        GuardNarrowing::Unchanged => {}
-                                    }
-                                }
-                                // The default clause's dispatch edge: the
-                                // discriminant minus every carried test.
-                                crate::flow_slice_content::SliceSwitchTest::Default => {
-                                    if let Some((remainder, total)) =
-                                        self.switch_discriminant_remainder(subject, &tests)
-                                    {
-                                        if remainder.len() < total {
-                                            // Every arm covered leaves the
-                                            // clause reachable with the
-                                            // reference `never`: its
-                                            // contributors are typed through
-                                            // it, as the checker keeps them.
-                                            let node = if remainder.is_empty() {
-                                                self.dispatch.graph().intern_node(
-                                                    SemanticNodeData::Primitive(
-                                                        PrimitiveKind::Never,
-                                                    ),
-                                                )
-                                            } else {
-                                                self.union(&remainder)
-                                            };
-                                            // The remainder's arms are the
-                                            // PARENT reference's, so the
-                                            // fact lands there — the root
-                                            // for a shallow discriminant,
-                                            // the enclosing reference for
-                                            // a nested one.
-                                            let parent_subject =
-                                                crate::flow_slice_content::SliceNarrowSubject {
-                                                    root: subject.root.clone(),
-                                                    path: Arc::from(
-                                                        subject.path[..subject
-                                                            .path
-                                                            .len()
-                                                            .saturating_sub(1)]
-                                                            .to_vec()
-                                                            .into_boxed_slice(),
-                                                    ),
-                                                };
-                                            self.bake_narrow_into_state(
-                                                &mut dispatch,
-                                                &parent_subject,
-                                                node,
-                                            );
-                                        }
-                                    } else {
-                                        // A DECLINED probe leaves this
-                                        // edge carrying the WHOLE
-                                        // discriminant where the checker
-                                        // subtracts the matched cases — a
-                                        // superset, so it degrades rather
-                                        // than publishing clean.
-                                        self.record_degradation(FlowReturnDegradation::FlowGap(
-                                            crate::semantic_query::FlowGap::GuardNarrowing,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        let start = match &chain_end {
-                            None => dispatch,
-                            Some(end) => {
-                                let mut start =
-                                    self.join_states(&[&dispatch, end], &entry.write_observation);
-                                // A `var` the fall-through edge first
-                                // defines has no reaching definition on the
-                                // dispatch edge: flag it so a read fails
-                                // closed instead of publishing the
-                                // fall-through arm's value clean.
-                                self.flag_fallthrough_only_bindings(&mut start, &entry);
-                                start
-                            }
-                        };
-                        self.restore_layer_state(start);
-                        let (case_result, _) = self.eval_region(&case.region);
-                        match case_result {
-                            Ok(case_contributors) => contributors.extend(case_contributors),
-                            Err(failure) => {
-                                return RegionEvalStep::Done((
-                                    Err(failure),
-                                    region
-                                        .can_fall_through
-                                        .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                                ))
-                            }
-                        }
-                        let end = self.layer_state();
-                        // Only a clause whose path FALLS THROUGH passes its
-                        // end state to the next clause's start: a `break` /
-                        // `return` / `throw` exits the switch, and joining
-                        // that state into the next case would publish the
-                        // exited path's writes where the checker has the
-                        // dispatch edge's values.
-                        chain_end = case
-                            .region
-                            .can_fall_through
-                            .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
-                            .then_some(end.clone());
-                        last_falls = case
-                            .region
-                            .can_fall_through
-                            .reaches_end(CompletionDischarge::EvaluatorRegionWalk);
-                        last_end = Some(end);
-                    }
-                    let mut exit_states: Vec<FlowLayerState> = Vec::new();
-                    if !has_default && !covered {
-                        if guards.is_empty() {
-                            exit_states.push(entry.clone());
-                        } else {
-                            // The no-matching-case path sees every guard
-                            // negated, and is dead when that leaves the
-                            // tested reference nothing (`isExhaustiveSwitchStatement`).
-                            let applied: Vec<(&crate::flow_slice_content::SliceGuard, bool)> =
-                                guards.iter().map(|guard| (*guard, false)).collect();
-                            let (state, dead) = self.guarded_switch_state(&entry, &applied);
-                            if !dead {
-                                exit_states.push(state);
-                            }
-                        }
-                    }
-                    // Lexical bindings declared inside a clause are scoped
-                    // to the switch body: the close replays on every state
-                    // the clauses produced — each pending break exit
-                    // included — BEFORE the join, so a shadowed or
-                    // clause-declared binding cannot be unioned into the
-                    // post-switch state, and the clauses' writes to
-                    // bindings that PREDATE the switch survive.
-                    let shadows = self.split_scope_shadows_close_exits(
-                        shadow_base,
-                        break_base,
-                        return_base,
-                        throw_base,
-                    );
-                    // The `break` exits, with the state each captured at
-                    // its own point (scope-closed above, like every state
-                    // that crossed the switch body's scope).
-                    exit_states.extend(self.drain_break_exits(break_base, None));
-                    if last_falls {
-                        if let Some(mut end) = last_end {
-                            Self::close_lexical_scope(&mut end, &shadows);
-                            exit_states.push(end);
-                        }
-                    }
-                    let reaches = !exit_states.is_empty();
-                    let mut joined = match exit_states.split_first() {
-                        Some(_) => {
-                            let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> =
-                                exit_states.iter().collect();
-                            self.join_states(&incoming, &entry.write_observation)
-                        }
-                        // No path leaves the switch normally: the
-                        // post-switch state is unreachable; restore the
-                        // entry to keep the layers sane.
-                        None => entry.clone(),
-                    };
-                    if reaches {
-                        self.flag_conditionally_defined_bindings(&mut joined, &exit_states);
-                    }
-                    self.restore_layer_state(joined);
-                    path_alive = reaches;
-                }
                 crate::flow_slice_content::SliceStatement::Try {
                     block,
                     catch,
@@ -20959,393 +20460,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     pending_break_contributes_undefined,
                     pending_break_following_return_targets,
                 } => {
-                    // The catch / finally clauses are entered from ANY
-                    // throw point of the try block, so they start from the
-                    // JOIN of the try's ENTRY state with the state
-                    // captured at each call / `throw` inside the block:
-                    // the checker enters the catch from every one of
-                    // those points, so a write between two throw points
-                    // is exactly as visible to the clause as the checker
-                    // has it. Every try-internal write is additionally
-                    // flagged (an ELIDED call is a throw point this model
-                    // never captures — the flag is the fail-closed net),
-                    // and the overlay carries none of the try's narrow
-                    // facts (tsgo: a `catch` / `finally` body reads the
-                    // pre-try type, never the narrowed one). Past the
-                    // statement, a clause-established narrow survives ONLY
-                    // when no `catch` exists — the abrupt paths then leave
-                    // the frame, so the normal-completion path's facts
-                    // hold (tsgo narrows there) — minus any the finally
-                    // clause's own writes killed. Return inference
-                    // aggregates every authored return contribution,
-                    // including a try return whose runtime completion is
-                    // overridden by an abrupt finally.
-                    let entry = self.layer_state();
-                    let break_base = self.break_exits.len();
-                    let return_base = self.return_edges.len();
-                    let throw_base = self.throw_points.len();
-                    let mut own: Vec<FlowContribution> = Vec::new();
-                    let mut exit_states: Vec<FlowLayerState> = Vec::new();
-                    let (try_contributors, try_end, try_writes) =
-                        match self.eval_try_clause(&entry, block, None, true) {
-                            Ok(clause) => clause,
-                            Err(failure) => {
-                                return RegionEvalStep::Done((
-                                    Err(failure),
-                                    region
-                                        .can_fall_through
-                                        .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                                ))
-                            }
-                        };
-                    own.extend(try_contributors);
-                    let try_narrowings = narrowing_facts_of(&try_end.products);
-                    if block
-                        .can_fall_through
-                        .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
-                    {
-                        exit_states.push(try_end);
-                    }
-                    // The try block's throw points. A catch consumes them
-                    // into its entry join; with no catch the throw paths
-                    // leave the frame (through the finally), so they stay
-                    // on the stack for an OUTER try's catch to consume.
-                    let block_throws: Vec<FlowLayerState> = if catch.is_some() {
-                        self.throw_points.split_off(throw_base)
-                    } else {
-                        self.throw_points[throw_base..].to_vec()
+                    let BranchStep::Enter(entered, next) = self.begin_try(
+                        block,
+                        catch.as_deref(),
+                        finally.as_deref(),
+                        *pending_break_contributes_undefined,
+                        pending_break_following_return_targets,
+                    ) else {
+                        unreachable!("a try enters its block")
                     };
-                    let mut catch_writes = None;
-                    if let Some(catch) = catch {
-                        let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> =
-                            std::iter::once(&entry).chain(block_throws.iter()).collect();
-                        let mut catch_start = self.join_states(&incoming, &entry.write_observation);
-                        self.flag_clause_type_changes(&mut catch_start, &try_writes.type_changes);
-                        let (catch_contributors, catch_end, written) = match self.eval_try_clause(
-                            &catch_start,
-                            &catch.region,
-                            catch
-                                .binding
-                                .map(|binding| (binding, catch.declared.as_ref())),
-                            finally.is_some(),
-                        ) {
-                            Ok(clause) => clause,
-                            Err(failure) => {
-                                return RegionEvalStep::Done((
-                                    Err(failure),
-                                    region
-                                        .can_fall_through
-                                        .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                                ))
-                            }
-                        };
-                        own.extend(catch_contributors);
-                        catch_writes = Some(written);
-                        if catch
-                            .region
-                            .can_fall_through
-                            .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
-                        {
-                            exit_states.push(catch_end);
-                        }
-                    }
-                    // The pre-finally state joins every NORMAL completion
-                    // of the try/catch. With none, no state reaches past
-                    // the try — the entry stands in only to keep the
-                    // finally clause's own evaluation well-formed. The
-                    // clause writes stay flagged through it: the finally
-                    // (and the post-statement path) runs on the throw paths
-                    // too.
-                    let mut pre_finally = match exit_states.split_first() {
-                        Some(_) => {
-                            let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> =
-                                exit_states.iter().collect();
-                            self.join_states(&incoming, &entry.write_observation)
-                        }
-                        None => entry.clone(),
-                    };
-                    self.flag_clause_type_changes(&mut pre_finally, &try_writes.type_changes);
-                    if let Some(catch_writes) = &catch_writes {
-                        self.flag_clause_type_changes(&mut pre_finally, &catch_writes.type_changes);
-                    }
-                    if !exit_states.is_empty() {
-                        self.flag_conditionally_defined_bindings(&mut pre_finally, &exit_states);
-                    }
-                    match finally {
-                        Some(finally) => {
-                            // The finally BODY runs on every completion:
-                            // its start joins the normal completions with
-                            // the try's ENTRY (a throw can precede every
-                            // try-internal write — the checker reads the
-                            // pre-try value inside the finally too), every
-                            // throw point of the clauses, and every
-                            // pending abrupt edge's pre-state (`break` and
-                            // `return` both cross the finally before their
-                            // completion proceeds). Its overlay is
-                            // the ENTRY's, whatever the clauses
-                            // established (tsgo: a narrow from the try
-                            // does not apply inside the finally). The
-                            // dual does NOT hold: the finally's own
-                            // writes never merge into a pending abrupt
-                            // edge's continuation — the edge keeps the
-                            // value its point captured (tsgo, measured).
-                            // And the state PAST the statement is not the
-                            // finally body's wide start either: only the
-                            // normal completions reach it, plus the
-                            // finally's own writes.
-                            // Normal and abrupt completions are original inputs to
-                            // this merge, never binary union prefixes. Clause-local
-                            // narrows do not enter finally on normal completions.
-                            let mut normal_inputs = exit_states.clone();
-                            normal_inputs.push(entry.clone());
-                            for state in &mut normal_inputs {
-                                self.restore_clause_entry_narrowings(&entry, &mut state.products);
-                                self.flag_clause_type_changes(state, &try_writes.type_changes);
-                                if let Some(written) = &catch_writes {
-                                    self.flag_clause_type_changes(state, &written.type_changes);
-                                }
-                            }
-                            let clause_throws = self.throw_points[throw_base..].to_vec();
-                            let pending_exits: Vec<FlowLayerState> = self.break_exits[break_base..]
-                                .iter()
-                                .map(|exit| exit.state.clone())
-                                .collect();
-                            let pending_returns = self.return_edges[return_base..].to_vec();
-                            let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> = normal_inputs
-                                .iter()
-                                // Without a catch, block throws are already in
-                                // clause_throws; each actual predecessor enters once.
-                                .chain(block_throws.iter().filter(|_| catch.is_some()))
-                                .chain(clause_throws.iter())
-                                .chain(pending_exits.iter())
-                                .chain(pending_returns.iter())
-                                .collect();
-                            let finally_start =
-                                self.join_states(&incoming, &entry.write_observation);
-                            let finally_break_base = self.break_exits.len();
-                            let finally_return_base = self.return_edges.len();
-                            let (finally_contributors, finally_end, finally_writes) =
-                                match self.eval_try_clause(&finally_start, finally, None, false) {
-                                    Ok(clause) => clause,
-                                    Err(failure) => {
-                                        return RegionEvalStep::Done((
-                                            Err(failure),
-                                            region.can_fall_through.reaches_end(
-                                                CompletionDischarge::EvaluatorRegionWalk,
-                                            ),
-                                        ))
-                                    }
-                                };
-                            // The post-statement state: the normal
-                            // completions (pre_finally, with its flags and
-                            // the entry's overlay) plus exactly the
-                            // finally's own writes.
-                            let mut post = pre_finally.clone();
-                            self.restore_clause_entry_narrowings(&entry, &mut post.products);
-                            for subject in &finally_writes.executed.0 {
-                                post.products
-                                    .apply_executed_write_from(subject, &finally_end.products);
-                                self.narrowing_writes.push(NarrowingLedgerEntry::Cleared {
-                                    root: self.canonical_runtime_subject(subject),
-                                });
-                            }
-                            self.restore_layer_state(post);
-                            if catch.is_none() {
-                                // No catch: the abrupt paths leave the
-                                // frame, so past the statement the
-                                // normal-completion path's narrow facts
-                                // hold again — re-establish the try's,
-                                // minus any the finally's own writes
-                                // killed — and the clause-write flags lose
-                                // their reason: no path past the statement
-                                // can have skipped those writes.
-                                let mut killed = rustc_hash::FxHashSet::default();
-                                for subject in &finally_writes.executed.0 {
-                                    if let Some(root) = self.narrow_root_of(subject) {
-                                        if let Some(identity) = self.products.identity(&root) {
-                                            #[cfg(test)]
-                                            self.dispatch
-                                                .ctx
-                                                .host_for_fact_tracer_install()
-                                                .flow_fault_injection
-                                                .finally_identity_work
-                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            killed.insert(identity);
-                                        }
-                                    }
-                                }
-                                // A fact EQUAL to one the entry carried is
-                                // re-established like any other. The try
-                                // PROVED it on the only path that reaches
-                                // here, and whether the entering overlay
-                                // happened to hold the same fact says
-                                // nothing about that: when the clause also
-                                // WROTE the binding, the restore dropped the
-                                // entering fact as stale and this proof is
-                                // the only thing standing. (The same reason
-                                // `standing_narrowings` counts a
-                                // re-establishment over the write ledger
-                                // instead of diffing the overlay: a state
-                                // diff cannot tell a proof from an
-                                // untouched position.) One product write per
-                                // root, and none for a root whose restored
-                                // product already holds the try's facts.
-                                let mut restored = try_narrowings
-                                    .iter()
-                                    .filter(|fact| !killed.contains(&fact.binding))
-                                    .peekable();
-                                let mut facts: Vec<FlowNarrowingFact> = Vec::new();
-                                while let Some(first) = restored.next() {
-                                    facts.clear();
-                                    facts.push(first.clone());
-                                    while let Some(next) =
-                                        restored.next_if(|next| next.binding == first.binding)
-                                    {
-                                        facts.push(next.clone());
-                                    }
-                                    let subject = self
-                                        .bindings
-                                        .local(&first.binding)
-                                        .map(FlowProductSubject::Local)
-                                        .unwrap_or_else(|| {
-                                            FlowProductSubject::Captured(first.binding.clone())
-                                        });
-                                    reestablish_narrowings(&mut self.products, &subject, &facts);
-                                }
-                                for subject in &try_writes.type_changes.0 {
-                                    if entry.products.assignment(subject).single_path() {
-                                        continue;
-                                    }
-                                    let cleared =
-                                        self.products.assignment(subject).with_single_path(false);
-                                    self.products.set_assignment(subject, cleared);
-                                }
-                            }
-                            // The checker aggregates authored returns even
-                            // when an abrupt finally overrides an earlier
-                            // completion at runtime.
-                            own.extend(finally_contributors);
-                            if !finally
-                                .can_fall_through
-                                .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
-                            {
-                                if *pending_break_contributes_undefined
-                                    && finally_break_base > break_base
-                                {
-                                    self.observations.observe_implicit_undefined();
-                                }
-                                // Control edges remain runtime-honest: an
-                                // abrupt finally replaces pending try/catch
-                                // returns with its own return edges before an
-                                // OUTER finally is entered.
-                                let finally_returns =
-                                    self.return_edges.split_off(finally_return_base);
-                                self.return_edges.truncate(return_base);
-                                self.return_edges.extend(finally_returns);
-                                let retained_pending_breaks: Vec<FlowBreakExit> = self.break_exits
-                                    [break_base..finally_break_base]
-                                    .iter()
-                                    .filter(|exit| {
-                                        !exit.continues
-                                            && exit.target.as_ref().is_some_and(|target| {
-                                                pending_break_following_return_targets
-                                                    .contains(target)
-                                            })
-                                    })
-                                    .cloned()
-                                    .collect();
-                                let finally_breaks = self.break_exits.split_off(finally_break_base);
-                                self.break_exits.truncate(break_base);
-                                self.break_exits.extend(retained_pending_breaks);
-                                self.break_exits.extend(finally_breaks);
-                            }
-                            path_alive = !exit_states.is_empty()
-                                && finally
-                                    .can_fall_through
-                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk);
-                        }
-                        None => {
-                            // A catch clause exists (a bare `try` is
-                            // syntactically impossible without either
-                            // clause): its antecedent joins the flow past
-                            // the statement, so no clause-established
-                            // narrow survives — even when the catch itself
-                            // returns (tsgo, measured).
-                            self.restore_clause_entry_narrowings(&entry, &mut pre_finally.products);
-                            self.restore_layer_state(pre_finally);
-                            path_alive = !exit_states.is_empty();
-                        }
-                    }
-                    contributors.extend(own);
+                    frame.entered = Some(entered);
+                    frame.contributors = contributors;
+                    frame.path_alive = path_alive;
+                    return RegionEvalStep::EnterBlock(next);
                 }
                 crate::flow_slice_content::SliceStatement::Labeled { label, body } => {
-                    // The edge past the label joins every path that
-                    // reaches it: the body's own fall-through end AND the
-                    // state captured at each `break` naming the label —
-                    // never the pre-statement layers (a write inside the
-                    // body IS a reaching definition) and never the body's
-                    // end state alone (a break before it carries a state
-                    // of its own). The narrowing overlay rides each edge
-                    // state, so the join's intersection is exactly "a fact
-                    // holds past the label only when every path into it
-                    // established it".
-                    let entry = self.layer_state();
-                    let break_base = self.break_exits.len();
-                    let return_base = self.return_edges.len();
-                    let throw_base = self.throw_points.len();
-                    let shadow_base = self.scope_shadows.len();
-                    let (result, body_falls) = self.eval_region(body);
-                    let body_contributors = match result {
-                        Ok(contributors) => contributors,
-                        Err(failure) => {
-                            return RegionEvalStep::Done((
-                                Err(failure),
-                                region
-                                    .can_fall_through
-                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                            ))
-                        }
+                    let BranchStep::Enter(entered, next) = self.begin_labeled(label, body) else {
+                        unreachable!("a labeled statement enters its body")
                     };
-                    contributors.extend(body_contributors);
-                    let mut end = self.layer_state();
-                    // The body's scope close replays on every state the
-                    // body produced — each pending break exit included —
-                    // BEFORE the join, so a shadowed or body-declared
-                    // binding cannot be unioned into the post-statement
-                    // state.
-                    let shadows = self.split_scope_shadows_close_exits(
-                        shadow_base,
-                        break_base,
-                        return_base,
-                        throw_base,
-                    );
-                    let mut exits: Vec<FlowLayerState> =
-                        self.drain_break_exits(break_base, Some(label));
-                    Self::close_lexical_scope(&mut end, &shadows);
-                    if body_falls {
-                        exits.push(end);
-                    }
-                    let reaches = !exits.is_empty();
-                    let mut joined = match exits.split_first() {
-                        Some(_) => {
-                            let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> =
-                                exits.iter().collect();
-                            self.join_states(&incoming, &entry.write_observation)
-                        }
-                        // No path leaves the body: the post-statement
-                        // state is unreachable; restore the entry to keep
-                        // the layers sane.
-                        None => entry.clone(),
-                    };
-                    if reaches {
-                        // A `var` the body first defines has no reaching
-                        // definition on an edge that skips the definition
-                        // (a break before it): flag it, exactly like the
-                        // switch's own exit join does.
-                        self.flag_conditionally_defined_bindings(&mut joined, &exits);
-                    }
-                    self.restore_layer_state(joined);
-                    path_alive = reaches;
+                    frame.entered = Some(entered);
+                    frame.contributors = contributors;
+                    frame.path_alive = path_alive;
+                    return RegionEvalStep::EnterBlock(next);
                 }
                 crate::flow_slice_content::SliceStatement::Block(block) => {
                     // Bindings are block-scoped: a `const` inside a block
@@ -21360,12 +20496,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // The block's region evaluates next, from the caller's
                     // stack; this region resumes past the statement with its
                     // outcome, closing the block's scope then.
-                    frame.block_bases = Some((
+                    frame.entered = Some(Entered::Block((
                         self.scope_shadows.len(),
                         self.break_exits.len(),
                         self.return_edges.len(),
                         self.throw_points.len(),
-                    ));
+                    )));
                     frame.contributors = contributors;
                     frame.path_alive = path_alive;
                     return RegionEvalStep::EnterBlock(block);
@@ -21395,38 +20531,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     path_alive = false;
                 }
                 // The lowering places an unreachable region only after a
-                // statement that ends the path; the evaluator's own path can
-                // only have died earlier, so this arm reads it the same way.
+                // statement that ends the path. Its region evaluates next,
+                // from the caller's stack, on a dead path whose references
+                // read their declared types (the checker answers an
+                // unreachable flow node with the declared type); this region
+                // resumes past it with the path dead.
                 crate::flow_slice_content::SliceStatement::Unreachable(unreachable) => {
-                    match self.eval_unreachable_region(unreachable) {
-                        Ok(unreachable_contributors) => {
-                            contributors.extend(unreachable_contributors)
-                        }
-                        Err(failure) => {
-                            return RegionEvalStep::Done((
-                                Err(failure),
-                                region
-                                    .can_fall_through
-                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                            ))
-                        }
-                    }
-                    path_alive = false;
+                    let dead = self.open_dead_path(true);
+                    frame.entered = Some(Entered::Unreachable(Box::new(dead)));
+                    frame.contributors = contributors;
+                    frame.path_alive = false;
+                    return RegionEvalStep::EnterBlock(unreachable);
                 }
                 crate::flow_slice_content::SliceStatement::Loop(lowered) => {
-                    let (result, completes) = self.eval_loop(lowered);
-                    match result {
-                        Ok(loop_contributors) => contributors.extend(loop_contributors),
-                        Err(failure) => {
-                            return RegionEvalStep::Done((
-                                Err(failure),
-                                region
-                                    .can_fall_through
-                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                            ))
-                        }
-                    }
-                    path_alive = completes;
+                    let BranchStep::Enter(entered, next) = self.begin_loop(lowered) else {
+                        unreachable!("a loop enters its init")
+                    };
+                    frame.entered = Some(entered);
+                    frame.contributors = contributors;
+                    frame.path_alive = path_alive;
+                    return RegionEvalStep::EnterBlock(next);
                 }
                 // A compound write (`x += v;`, `i++;`): the target
                 // holds the base type of the literal type it held before
@@ -21907,140 +21031,40 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             );
                             continue;
                         }
-                        match self.eval_expr(init) {
-                            Positional::Value(node) => {
-                                let membership =
-                                    self.binding_init_membership(*kind, init, node, freshness);
-                                // An unannotated declaration always widens a
-                                // `unique symbol` another declaration created
-                                // (`widenTypeForVariableLikeDeclaration`):
-                                // `const l = u` is `symbol`. A union holding
-                                // one keeps it.
-                                let node =
-                                    if is_unique_symbol_node(self.dispatch.graph(), node) {
-                                        self.dispatch.graph().intern_node(
-                                            SemanticNodeData::Primitive(PrimitiveKind::Symbol),
-                                        )
-                                    } else {
-                                        node
-                                    };
-                                match kind {
-                                    crate::flow_slice_content::SliceBindingKind::Const => {
-                                        self.bind_local(
-                                            &FlowProductSubject::Local(*binding),
-                                            *kind,
-                                            node,
-                                            membership,
-                                            false,
-                                        );
-                                    }
-                                    // A MUTABLE declaration widens its
-                                    // fresh provenance AT the declaration
-                                    // (`let a = idInf(1)` is `number`),
-                                    // exactly as a bare literal
-                                    // initializer already lowered widened.
-                                    crate::flow_slice_content::SliceBindingKind::Let
-                                    | crate::flow_slice_content::SliceBindingKind::Var => {
-                                        let widened = match &membership {
-                                            Some(WideningMembership::All) => widen_fresh_read_node(
-                                                self.dispatch,
-                                                node,
-                                                self.nullability,
-                                            ),
-                                            Some(WideningMembership::Partial(values)) => {
-                                                widen_values_within(
-                                                    self.dispatch,
-                                                    node,
-                                                    values,
-                                                    self.nullability,
-                                                )
-                                            }
-                                            None => node,
-                                        };
-                                        if !auto_typed {
-                                            self.record_inferred_declared(*binding, *kind, widened);
-                                        }
-                                        // The widened initializer is the
-                                        // binding's DECLARED type, and the
-                                        // checker reads a union-typed
-                                        // binding assignment-reduced by the
-                                        // value written to it. Widening a
-                                        // plain literal yields exactly the
-                                        // constituents the value reduces
-                                        // to; widening an enum member's
-                                        // literal yields its enum, a union
-                                        // the member reduces back to (`let
-                                        // x = E.A` holds `E.A`, typed `E`).
-                                        // A UNION declared type reduces
-                                        // every later assignment to the
-                                        // constituents the value can be
-                                        // (`getAssignmentReducedType`: `x
-                                        // = 1` over `let x = 0 as 0 | 1 |
-                                        // 2` is `1`).
-                                        let node = match self.dispatch.union_arms_of(widened) {
-                                            Some(arms)
-                                                if widened != node
-                                                    && self.carries_enum_literal(node) =>
-                                            {
-                                                self.set_declared_local(
-                                                    &FlowProductSubject::Local(*binding),
-                                                    *kind,
-                                                    Some(widened),
-                                                );
-                                                self.assignment_reduced_union(widened, &arms, node)
-                                            }
-                                            Some(_) if !auto_typed => {
-                                                self.set_declared_local(
-                                                    &FlowProductSubject::Local(*binding),
-                                                    *kind,
-                                                    Some(widened),
-                                                );
-                                                widened
-                                            }
-                                            _ => widened,
-                                        };
-                                        // An auto-typed variable's bare
-                                        // `null` / `undefined` initializer
-                                        // is the checker's widening
-                                        // nullable value.
-                                        self.bind_local_value(
-                                            &FlowProductSubject::Local(*binding),
-                                            *kind,
-                                            node,
-                                            None,
-                                            false,
-                                            auto_typed && widening_nullish_init,
-                                        );
-                                    }
+                        let outcome = {
+                            let mut run = ExprRun::new(init);
+                            match self.run_expr(&mut run, None, true) {
+                                ExprProgress::Done(outcome) => outcome,
+                                // The initializer's nested function value
+                                // evaluates from the caller's stack; the
+                                // binding is made once the initializer has
+                                // its value.
+                                ExprProgress::Nested(demand) => {
+                                    frame.pending =
+                                        Some(Pending::Binding(Box::new(PendingBinding {
+                                            binding: *binding,
+                                            kind: *kind,
+                                            init,
+                                            freshness,
+                                            auto_typed,
+                                            widening_nullish_init,
+                                            run,
+                                        })));
+                                    frame.contributors = contributors;
+                                    frame.path_alive = path_alive;
+                                    return RegionEvalStep::Nested(demand);
                                 }
                             }
-                            Positional::Hold => {}
-                            // An UNMODELLED initializer binds the typed
-                            // marker — never a fabricated `any`, which is
-                            // indistinguishable from an authored one at
-                            // every downstream gate. The declaration
-                            // itself is not a return contribution, so the
-                            // degradation is recorded only where the
-                            // binding is OBSERVED (`read_local` folds the
-                            // `FailedBindingInitializer` membership); an
-                            // unobserved unmodelled binding degrades
-                            // nothing.
-                            Positional::Unmodeled => {
-                                let marker = super::flow_return_callee::unmodeled_position_marker(
-                                    self.dispatch,
-                                );
-                                if !auto_typed {
-                                    self.record_inferred_declared(*binding, *kind, marker);
-                                }
-                                self.bind_local(
-                                    &FlowProductSubject::Local(*binding),
-                                    *kind,
-                                    marker,
-                                    None,
-                                    true,
-                                );
-                            }
-                        }
+                        };
+                        self.bind_initialized_local(
+                            *binding,
+                            *kind,
+                            init,
+                            freshness,
+                            auto_typed,
+                            widening_nullish_init,
+                            outcome,
+                        );
                     }
                 }
                 crate::flow_slice_content::SliceStatement::Assignment {
@@ -22872,11 +21896,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
             input_basis: verter_identity::identity::InputBasisId::from_canonical(
                 &NestedFlowInputBasis {
-                    parent: &self.execution_selection.basis().input_basis,
+                    parent: self.execution_selection.basis().input_basis.digest(),
                     parameters: &params,
                     captures: &capture_basis,
                 },
             ),
+            ancestry: self
+                .execution_selection
+                .basis()
+                .ancestry
+                .with(self.execution_selection.basis().input_basis.clone()),
             resources: self.execution_selection.resources(),
             additional_requirements: Arc::from([]),
         };
@@ -23143,7 +22172,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         run: &mut ExprRun<'e>,
         mut delivered: Option<Positional<SemanticNodeId>>,
         suspend: bool,
-    ) -> ExprProgress<'e> {
+    ) -> ExprProgress {
         use crate::flow_slice_content::SliceExpr;
         // An operator form's operands (a `!`, a non-null assertion, an
         // arithmetic operator's operands) and a conditional's branches
@@ -23166,6 +22195,34 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         run.waiting.push(Waiting::NonNull);
                         run.waiting.push(Waiting::Erase);
                         run.current = operand;
+                        continue;
+                    }
+                    SliceExpr::Class(class) => {
+                        let mut frame = self.class_eval_frame(class);
+                        let step = self.class_eval_step(&mut frame, None);
+                        match self.class_step_on_run(run, frame, step, suspend) {
+                            ResumedCall::Value(value) => value,
+                            ResumedCall::Descend => continue,
+                            ResumedCall::Nested(demand) => return ExprProgress::Nested(demand),
+                        }
+                    }
+                    SliceExpr::Awaited { operand } => {
+                        run.waiting.push(Waiting::Awaited);
+                        run.waiting.push(Waiting::Erase);
+                        run.current = operand;
+                        continue;
+                    }
+                    SliceExpr::Sequence {
+                        before,
+                        value,
+                        after,
+                    } => {
+                        for effect in before.iter() {
+                            self.apply_entered_effect(effect);
+                        }
+                        run.waiting.push(Waiting::Sequence(after));
+                        run.waiting.push(Waiting::Erase);
+                        run.current = value;
                         continue;
                     }
                     SliceExpr::Arithmetic { operator, operands } if !operands.is_empty() => {
@@ -23240,28 +22297,25 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 run.waiting.push(Waiting::Erase);
                                 continue;
                             }
+                            CallStep::Function(mut wait) => {
+                                let demand = wait.take_demand();
+                                run.waiting.push(Waiting::CallFunction(wait));
+                                if suspend {
+                                    return ExprProgress::Nested(demand);
+                                }
+                                Positional::Value(self.eval_nested_demand(demand))
+                            }
                         }
                     }
                     // A nested function value suspends the run when the caller
                     // evaluates nested bodies from its own stack.
-                    SliceExpr::NestedFunctionValue {
-                        function,
-                        context,
-                        has_declared_return,
-                        gap,
-                        declared_evolving_captures,
-                        extended_captures,
-                    } if suspend => {
+                    SliceExpr::NestedFunctionValue { .. } if suspend => {
+                        let (demand, gap) =
+                            NestedDemand::of(current, None).expect("a nested function value");
                         if let Some(gap) = gap {
-                            self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
+                            self.record_degradation(FlowReturnDegradation::FlowGap(gap));
                         }
-                        return ExprProgress::Nested(NestedDemand {
-                            function,
-                            context,
-                            has_declared_return: *has_declared_return,
-                            extended_captures,
-                            declared_evolving_captures,
-                        });
+                        return ExprProgress::Nested(demand);
                     }
                     other => self.eval_expr_unerased(other),
                 },
@@ -23285,6 +22339,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         };
                     }
                     Some(Waiting::NonNull) => value = self.finish_non_null(value),
+                    Some(Waiting::Awaited) => {
+                        value = match value {
+                            Positional::Value(node) => {
+                                match self.dispatch.awaited_normalize_for_flow(node) {
+                                    Some(awaited) => Positional::Value(awaited),
+                                    None => Positional::Unmodeled,
+                                }
+                            }
+                            other => other,
+                        };
+                    }
+                    Some(Waiting::Sequence(after)) => {
+                        if let Some(assertion) = after {
+                            self.apply_assertion(&assertion.subject, assertion.target.as_ref());
+                        }
+                    }
                     Some(Waiting::Arithmetic {
                         operator,
                         operands,
@@ -23364,35 +22434,100 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     }
                     Some(Waiting::CallOperand(flight)) => {
-                        match self.resume_call_operand(*flight, value) {
-                            CallStep::Done(done) => value = done,
-                            CallStep::Argument(wait) => {
-                                run.current = wait.lowered;
-                                run.waiting.push(Waiting::CallArgument(wait));
-                                run.waiting.push(Waiting::Erase);
-                                break;
-                            }
-                            CallStep::Operand(..) => {
-                                unreachable!("a call evaluates its operand once")
-                            }
+                        let step = self.resume_call_operand(*flight, value);
+                        match self.resumed_call_step(run, step, suspend) {
+                            ResumedCall::Value(done) => value = done,
+                            ResumedCall::Descend => break,
+                            ResumedCall::Nested(demand) => return ExprProgress::Nested(demand),
                         }
                     }
                     Some(Waiting::CallArgument(wait)) => {
-                        match self.resume_call_argument(*wait, value) {
-                            CallStep::Done(done) => value = done,
-                            CallStep::Argument(wait) => {
-                                run.current = wait.lowered;
-                                run.waiting.push(Waiting::CallArgument(wait));
-                                run.waiting.push(Waiting::Erase);
-                                break;
-                            }
-                            CallStep::Operand(..) => {
-                                unreachable!("a call evaluates its operand once")
-                            }
+                        let step = self.resume_call_argument(*wait, value);
+                        match self.resumed_call_step(run, step, suspend) {
+                            ResumedCall::Value(done) => value = done,
+                            ResumedCall::Descend => break,
+                            ResumedCall::Nested(demand) => return ExprProgress::Nested(demand),
+                        }
+                    }
+                    Some(Waiting::Class(mut frame)) => {
+                        let step = self.class_eval_step(&mut frame, Some(value));
+                        match self.class_step_on_run(run, *frame, step, suspend) {
+                            ResumedCall::Value(done) => value = done,
+                            ResumedCall::Descend => break,
+                            ResumedCall::Nested(demand) => return ExprProgress::Nested(demand),
+                        }
+                    }
+                    Some(Waiting::CallFunction(wait)) => {
+                        let step = self.resume_call_function(*wait, value);
+                        match self.resumed_call_step(run, step, suspend) {
+                            ResumedCall::Value(done) => value = done,
+                            ResumedCall::Descend => break,
+                            ResumedCall::Nested(demand) => return ExprProgress::Nested(demand),
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Take a class expression's next step on `run`: its value, a child to
+    /// descend into (pushed as `run`'s current), or a member function to
+    /// suspend at (evaluated in place, and the class stepped on, without
+    /// `suspend`).
+    fn class_step_on_run<'e>(
+        &mut self,
+        run: &mut ExprRun<'e>,
+        mut frame: class_expression::ClassEvalFrame<'e>,
+        mut step: class_expression::ClassStep<'e>,
+        suspend: bool,
+    ) -> ResumedCall {
+        loop {
+            match step {
+                class_expression::ClassStep::Done(value) => return ResumedCall::Value(value),
+                class_expression::ClassStep::Descend(child) => {
+                    run.waiting.push(Waiting::Class(Box::new(frame)));
+                    run.waiting.push(Waiting::Erase);
+                    run.current = child;
+                    return ResumedCall::Descend;
+                }
+                class_expression::ClassStep::Nested(demand) if suspend => {
+                    run.waiting.push(Waiting::Class(Box::new(frame)));
+                    return ResumedCall::Nested(demand);
+                }
+                class_expression::ClassStep::Nested(demand) => {
+                    let signature = self.eval_nested_demand(demand);
+                    step = self.class_eval_step(&mut frame, Some(Positional::Value(signature)));
+                }
+            }
+        }
+    }
+
+    /// Take a resumed call's next step on `run`: its value, a child to
+    /// descend into (pushed as `run`'s current), or a function-value
+    /// argument to suspend at (evaluated in place without `suspend`).
+    fn resumed_call_step<'e>(
+        &mut self,
+        run: &mut ExprRun<'e>,
+        step: CallStep<'e>,
+        suspend: bool,
+    ) -> ResumedCall {
+        match step {
+            CallStep::Done(done) => ResumedCall::Value(done),
+            CallStep::Argument(wait) => {
+                run.current = wait.lowered;
+                run.waiting.push(Waiting::CallArgument(wait));
+                run.waiting.push(Waiting::Erase);
+                ResumedCall::Descend
+            }
+            CallStep::Function(mut wait) => {
+                let demand = wait.take_demand();
+                run.waiting.push(Waiting::CallFunction(wait));
+                if suspend {
+                    return ResumedCall::Nested(demand);
+                }
+                ResumedCall::Value(Positional::Value(self.eval_nested_demand(demand)))
+            }
+            CallStep::Operand(..) => unreachable!("a call evaluates its operand once"),
         }
     }
 
@@ -23474,7 +22609,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // frame's arity. That is a fact about this REFERENCE, not
             // about the body around it.
             crate::flow_slice_content::SliceExpr::Param { ordinal, binding } => {
-                if self.declared_reads {
+                if self.reads_declared(&FlowProductSubject::Local(*binding)) {
                     return match self.params.get(*ordinal as usize).copied() {
                         Some(node) => Positional::Value(node),
                         None => Positional::Unmodeled,
@@ -23672,7 +22807,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // parameter is still the reaching value.
                 // A declared read answers an annotated binding's annotation
                 // and an unannotated one's reaching value, never a narrow.
-                if self.declared_reads {
+                if self.reads_declared(binding) {
                     if let Some(node) = self.declared_local_read(binding) {
                         return Positional::Value(node);
                     }
@@ -23764,27 +22899,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     other => other,
                 }
             }
-            crate::flow_slice_content::SliceExpr::NestedFunctionValue {
-                function,
-                context,
-                has_declared_return,
-                gap,
-                declared_evolving_captures,
-                extended_captures,
-            } => {
+            crate::flow_slice_content::SliceExpr::NestedFunctionValue { .. } => {
+                let (demand, gap) = NestedDemand::of(expr, None).expect("a nested function value");
                 if let Some(gap) = gap {
-                    self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
+                    self.record_degradation(FlowReturnDegradation::FlowGap(gap));
                 }
-                let outer_env = self.binder_env;
-                Positional::Value(self.eval_nested_function(
-                    function,
-                    context,
-                    *has_declared_return,
-                    outer_env,
-                    extended_captures,
-                    declared_evolving_captures,
-                    None,
-                ))
+                Positional::Value(self.eval_nested_demand(demand))
             }
             crate::flow_slice_content::SliceExpr::Class(class) => self.eval_class_value(class),
             crate::flow_slice_content::SliceExpr::This(this) => self.eval_this(this),
@@ -24291,6 +23411,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 call_stack::ResolveCallProgress::Argument(route, lowered) => {
                     let value = self.eval_expr(lowered);
                     progress = self.deliver_resolve_call_argument(route, lowered, value);
+                }
+                call_stack::ResolveCallProgress::Function(function) => {
+                    let call_stack::RouteFunction { at, request } = *function;
+                    let node = self.eval_nested_demand(request.demand);
+                    progress = self.deliver_resolve_call_function(
+                        at,
+                        request.mark,
+                        Positional::Value(node),
+                    );
                 }
             }
         }
@@ -25430,5 +24559,84 @@ mod narrowing_ledger_tests {
         let window = [NarrowingLedgerEntry::Cleared { root: param(0) }];
         assert!(standing_narrowings(&window).is_empty());
         assert!(standing_narrowings(&[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod nested_input_basis_tests {
+    use super::super::flow_solve::FlowInputAncestry;
+    use super::NestedFlowInputBasis;
+    use crate::semantic_query::SemanticNodeId;
+    use verter_identity::encoding::CanonicalDigest;
+    use verter_identity::identity::InputBasisId;
+
+    /// The bases of a nest `levels` levels deep, innermost last, and the
+    /// ancestry of the innermost.
+    fn nest(root: &[u8], levels: usize) -> (Vec<InputBasisId>, FlowInputAncestry) {
+        let mut bases = Vec::with_capacity(levels);
+        let mut ancestry = FlowInputAncestry::default();
+        let mut parent = CanonicalDigest::of_bytes(root);
+        for level in 0..levels {
+            let basis = InputBasisId::from_canonical(&NestedFlowInputBasis {
+                parent,
+                parameters: &[SemanticNodeId(level as u64)],
+                captures: &[],
+            });
+            if let Some(previous) = bases.last() {
+                ancestry = ancestry.with(InputBasisId::clone(previous));
+            }
+            parent = basis.digest();
+            bases.push(basis);
+        }
+        (bases, ancestry)
+    }
+
+    /// A nested evaluation's basis names its parent by digest, so its
+    /// canonical bytes are as long 1,000 levels down as one level down
+    /// (embedding the parent's bytes grew them with the nest: the square of
+    /// the nesting across it).
+    #[test]
+    fn a_nested_basis_is_one_size_at_every_level() {
+        let (bases, _) = nest(b"root", 1_000);
+        let first = bases[0].canonical_bytes().len();
+        assert!(bases
+            .iter()
+            .all(|basis| basis.canonical_bytes().len() == first));
+    }
+
+    /// The parent's whole basis rides the demand's ancestry: two ancestries
+    /// built apart are equal level by level, and one whose nest differs
+    /// above the parent is not.
+    #[test]
+    fn an_ancestry_compares_every_enclosing_basis() {
+        let (_, left) = nest(b"root", 50);
+        let (_, same) = nest(b"root", 50);
+        let (_, other_root) = nest(b"other", 50);
+        let (_, shorter) = nest(b"root", 49);
+        assert!(left == same);
+        assert!(left != other_root);
+        assert!(left != shorter);
+    }
+
+    /// An ancestry is as long as its nest and drops from a loop: 100,000
+    /// levels release on a 64 KiB thread.
+    #[test]
+    fn a_deep_ancestry_drops_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(64 << 10)
+            .spawn(|| {
+                let basis = InputBasisId::from_canonical(&NestedFlowInputBasis {
+                    parent: CanonicalDigest::of_bytes(b"root"),
+                    parameters: &[],
+                    captures: &[],
+                });
+                let ancestry = (0..100_000).fold(FlowInputAncestry::default(), |ancestry, _| {
+                    ancestry.with(InputBasisId::clone(&basis))
+                });
+                drop(ancestry);
+            })
+            .expect("spawn the dropping thread")
+            .join()
+            .expect("the ancestry drops");
     }
 }

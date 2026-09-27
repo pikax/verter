@@ -1281,6 +1281,7 @@ pub(crate) mod flow_obligation_state {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct DischargeEvidence {
         input_basis: InputBasisId, result_contract: ResultContractId,
+        ancestry: crate::project_semantic_dispatch::flow_solve::FlowInputAncestry,
         dependencies: Arc<[FlowObligationId]>, suboperations: Arc<[FlowSuboperationEvidence]>,
     }
     /// The runtime-OBSERVED convergence of one solve: the policy the
@@ -1861,6 +1862,7 @@ pub(crate) mod flow_obligation_state {
             }
             let evidence = DischargeEvidence {
                 input_basis: basis.input_basis, result_contract: basis.result_contract,
+                ancestry: basis.ancestry,
                 dependencies, suboperations,
             };
             let demand = &mut self.flow_demands[index];

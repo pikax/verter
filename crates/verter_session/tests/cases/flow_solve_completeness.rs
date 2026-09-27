@@ -163,6 +163,7 @@ fn registered_result_contract() -> ResultContractId {
 /// payload carries the demand, and the key carries the contract.
 fn base_request() -> FlowDemandRequest {
     FlowDemandRequest {
+        ancestry: Default::default(),
         query: flow_return_query(0),
         input_basis: test_input_basis(1),
         resources: FlowResourcePolicy::default(),

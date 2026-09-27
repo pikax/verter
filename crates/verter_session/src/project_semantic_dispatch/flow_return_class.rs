@@ -31,6 +31,72 @@ pub(super) struct ClassReceiver {
     pub(super) forward_read: std::cell::Cell<bool>,
 }
 
+/// A class expression's evaluation in progress, stepped by
+/// [`FlowEvaluator::class_eval_step`]: its environment and base, its
+/// receiver, the member order, and the child it waits on.
+pub(super) struct ClassEvalFrame<'e> {
+    class: &'e SliceClass,
+    class_env: Option<Arc<FlowBinderEnv>>,
+    base: Option<ClassBase>,
+    receiver: Option<std::rc::Rc<ClassReceiver>>,
+    /// The frame's receiver before the class's, given back when the class
+    /// completes.
+    enclosing_receiver: Option<Option<std::rc::Rc<ClassReceiver>>>,
+    order: Vec<usize>,
+    next: usize,
+    again: Vec<usize>,
+    again_next: usize,
+    values: Vec<Option<SemanticNodeId>>,
+    awaiting: ClassAwait<'e>,
+}
+
+/// The child a [`ClassEvalFrame`] waits on.
+enum ClassAwait<'e> {
+    Start,
+    Nothing,
+    Heritage {
+        holds_before: usize,
+    },
+    /// Member `index`'s value, the frame's degradation before it, and
+    /// whether it is the second evaluation of a function that read ahead.
+    Member {
+        index: usize,
+        degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+        again: bool,
+        value: MemberAwait<'e>,
+    },
+}
+
+/// What a member's awaited child is.
+enum MemberAwait<'e> {
+    Initializer {
+        holds_before: usize,
+        declared_reads: bool,
+        widen: bool,
+        expr: &'e SliceExpr,
+    },
+    Method,
+    Getter,
+}
+
+/// What a class expression's evaluation needs next.
+pub(super) enum ClassStep<'e> {
+    /// This expression's value.
+    Descend(&'e SliceExpr),
+    /// This member function's signature.
+    Nested(super::nested::NestedDemand),
+    /// Nothing: the class's value.
+    Done(Positional<SemanticNodeId>),
+}
+
+/// Whether a member's value is a function evaluated after the others.
+fn is_class_function(value: &SliceClassMemberValue) -> bool {
+    matches!(
+        value,
+        SliceClassMemberValue::Method(_) | SliceClassMemberValue::Getter(_)
+    )
+}
+
 /// What a class expression's `extends` value provides to the class.
 struct ClassBase {
     /// The parameters of each accepted base construct signature, in order —
@@ -135,45 +201,289 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// unmodelled position; a member whose type is not modelled keeps its
     /// key over the typed marker.
     pub(super) fn eval_class_value(&mut self, class: &SliceClass) -> Positional<SemanticNodeId> {
-        let graph = self.dispatch.graph();
-        // The class's OWN type parameters bind throughout its body, composed
-        // over the frame's environment.
+        // [`Self::eval_expr`] steps a class from its own stack; here the same
+        // steps run with each child evaluated in place.
+        let mut frame = self.class_eval_frame(class);
+        let mut delivered = None;
+        loop {
+            match self.class_eval_step(&mut frame, delivered.take()) {
+                ClassStep::Done(value) => return value,
+                ClassStep::Descend(child) => delivered = Some(self.eval_expr(child)),
+                ClassStep::Nested(demand) => {
+                    delivered = Some(Positional::Value(self.eval_nested_demand(demand)))
+                }
+            }
+        }
+    }
+
+    /// A class expression's evaluation, begun: the class's OWN type
+    /// parameters bind throughout its body, composed over the frame's
+    /// environment.
+    pub(super) fn class_eval_frame<'e>(&mut self, class: &'e SliceClass) -> ClassEvalFrame<'e> {
         let class_env = (!class.type_parameters.is_empty()).then(|| {
-            self.dispatch.flow_binder_env(
+            Arc::new(self.dispatch.flow_binder_env(
                 self.canonical,
                 self.owner,
                 &class.type_parameters,
                 Some(self.binder_env),
                 Some(class.offset),
-            )
+            ))
         });
-        let frame_env = self.binder_env;
-        let env: &FlowBinderEnv = class_env.as_ref().unwrap_or(frame_env);
-        let base = match &class.heritage {
-            None => None,
-            Some(heritage) => {
+        ClassEvalFrame {
+            class,
+            class_env,
+            base: None,
+            receiver: None,
+            enclosing_receiver: None,
+            order: Vec::new(),
+            next: 0,
+            again: Vec::new(),
+            again_next: 0,
+            values: vec![None; class.members.len()],
+            awaiting: ClassAwait::Start,
+        }
+    }
+
+    /// Step a class expression's evaluation until it needs its `extends`
+    /// value, a member initializer's value or a member function's signature
+    /// (whose body evaluates from the stack of evaluators), or is done, with
+    /// the child it asked for last `delivered`.
+    ///
+    /// Instance members run against the class's receiver: the non-function
+    /// members first, then the functions, so a member body reads a sibling
+    /// through `this`; a function that read a declared sibling not evaluated
+    /// yet is evaluated again once every other member has been.
+    pub(super) fn class_eval_step<'e>(
+        &mut self,
+        frame: &mut ClassEvalFrame<'e>,
+        delivered: Option<Positional<SemanticNodeId>>,
+    ) -> ClassStep<'e> {
+        let class = frame.class;
+        match std::mem::replace(&mut frame.awaiting, ClassAwait::Nothing) {
+            ClassAwait::Start => match &class.heritage {
                 // A hold inside the `extends` value is not this class's
                 // value: the class cannot be composed over a provisional base.
-                let holds_before = self.holds.len();
-                let outcome = self.eval_expr(&heritage.base);
+                Some(heritage) => {
+                    frame.awaiting = ClassAwait::Heritage {
+                        holds_before: self.holds.len(),
+                    };
+                    return ClassStep::Descend(&heritage.base);
+                }
+                None => self.class_begin_members(frame),
+            },
+            ClassAwait::Heritage { holds_before } => {
+                let heritage = class.heritage.as_ref().expect("the class's heritage");
                 self.holds.truncate(holds_before);
-                let Positional::Value(constructor) = outcome else {
-                    return Positional::Unmodeled;
+                let Some(Positional::Value(constructor)) = delivered else {
+                    return ClassStep::Done(Positional::Unmodeled);
                 };
+                let frame_env = self.binder_env;
+                let env: &FlowBinderEnv = frame.class_env.as_deref().unwrap_or(frame_env);
                 let mut type_arguments = Vec::with_capacity(heritage.type_arguments.len());
                 for argument in heritage.type_arguments.iter() {
                     if signature_answer_is_frame_shadowed(self.dispatch, env, argument) {
-                        return Positional::Unmodeled;
+                        return ClassStep::Done(Positional::Unmodeled);
                     }
                     type_arguments.push(self.lower_type_in(env, argument.ty()));
                 }
                 match self.class_base(constructor, &type_arguments) {
-                    Some(base) => Some(base),
-                    None => return Positional::Unmodeled,
+                    Some(base) => frame.base = Some(base),
+                    None => return ClassStep::Done(Positional::Unmodeled),
                 }
+                self.class_begin_members(frame);
             }
-        };
-        let values = self.eval_class_member_values(class, env, base.as_ref());
+            ClassAwait::Member {
+                index,
+                degradation,
+                again,
+                value,
+            } => {
+                let outcome = delivered.expect("the member's outcome");
+                let node = match value {
+                    MemberAwait::Initializer {
+                        holds_before,
+                        declared_reads,
+                        widen,
+                        expr,
+                    } => {
+                        let node = self.settle_composite_part(outcome, holds_before);
+                        self.declared_reads = declared_reads;
+                        if widen {
+                            self.widen_value_position_read(expr, node)
+                        } else {
+                            node
+                        }
+                    }
+                    MemberAwait::Method => match outcome {
+                        Positional::Value(signature) => signature,
+                        Positional::Hold | Positional::Unmodeled => self.unmodeled_position(),
+                    },
+                    MemberAwait::Getter => {
+                        let return_type = match outcome {
+                            Positional::Value(signature) => {
+                                match self.dispatch.graph().node_data(signature).as_deref() {
+                                    Some(SemanticNodeData::Signature { return_type, .. }) => {
+                                        Some(*return_type)
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            Positional::Hold | Positional::Unmodeled => None,
+                        };
+                        match return_type {
+                            Some(return_type) => return_type,
+                            None => self.unmodeled_position(),
+                        }
+                    }
+                };
+                self.class_member_valued(frame, index, degradation, again, node);
+            }
+            ClassAwait::Nothing => unreachable!("an outcome delivered to no request"),
+        }
+        self.class_next_member(frame)
+    }
+
+    /// Open the class's receiver and order its members.
+    fn class_begin_members(&mut self, frame: &mut ClassEvalFrame<'_>) {
+        let class = frame.class;
+        let receiver = std::rc::Rc::new(ClassReceiver {
+            binder: self
+                .dispatch
+                .this_binder(self.canonical, self.owner, &class.name, None),
+            members: std::cell::RefCell::new(Vec::new()),
+            declared: class
+                .members
+                .iter()
+                .filter(|member| !member.is_static)
+                .filter_map(|member| match &member.key {
+                    SliceObjectKey::Static(name) => Some(Arc::clone(name)),
+                    SliceObjectKey::Computed { .. } => None,
+                })
+                .collect(),
+            base: frame.base.as_ref().and_then(|base| base.instance),
+            forward_read: std::cell::Cell::new(false),
+        });
+        frame.enclosing_receiver = Some(self.receiver.replace(receiver.clone()));
+        frame.receiver = Some(receiver);
+        frame.order = (0..class.members.len())
+            .filter(|index| !is_class_function(&class.members[*index].value))
+            .chain(
+                (0..class.members.len())
+                    .filter(|index| is_class_function(&class.members[*index].value)),
+            )
+            .collect();
+    }
+
+    /// Record one member's evaluated value, or queue a function that read a
+    /// declared sibling not evaluated yet to evaluate again.
+    fn class_member_valued(
+        &mut self,
+        frame: &mut ClassEvalFrame<'_>,
+        index: usize,
+        degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+        again: bool,
+        value: SemanticNodeId,
+    ) {
+        let member = &frame.class.members[index];
+        let receiver = frame.receiver.clone().expect("the class's receiver");
+        if !again && receiver.forward_read.get() && is_class_function(&member.value) {
+            self.degradation = degradation;
+            frame.again.push(index);
+            return;
+        }
+        self.record_receiver_member(&receiver, member, value);
+        frame.values[index] = Some(value);
+    }
+
+    /// Evaluate the class's next member, or finish the class.
+    fn class_next_member<'e>(&mut self, frame: &mut ClassEvalFrame<'e>) -> ClassStep<'e> {
+        let class = frame.class;
+        loop {
+            let (index, again) = if let Some(&index) = frame.order.get(frame.next) {
+                frame.next += 1;
+                if let Some(receiver) = frame.receiver.as_ref() {
+                    receiver.forward_read.set(false);
+                }
+                (index, false)
+            } else if let Some(&index) = frame.again.get(frame.again_next) {
+                frame.again_next += 1;
+                (index, true)
+            } else {
+                self.receiver = frame
+                    .enclosing_receiver
+                    .take()
+                    .expect("the class's enclosing receiver");
+                return ClassStep::Done(self.finish_class_value(frame));
+            };
+            let degradation = self.degradation;
+            let frame_env = self.binder_env;
+            let value = match &class.members[index].value {
+                SliceClassMemberValue::Declared(ty) => {
+                    let env: &FlowBinderEnv = frame.class_env.as_deref().unwrap_or(frame_env);
+                    self.lower_gated_in(env, ty)
+                }
+                SliceClassMemberValue::Initializer { value, widen } => {
+                    frame.awaiting = ClassAwait::Member {
+                        index,
+                        degradation,
+                        again,
+                        value: MemberAwait::Initializer {
+                            holds_before: self.holds.len(),
+                            declared_reads: std::mem::replace(&mut self.declared_reads, true),
+                            widen: *widen,
+                            expr: value,
+                        },
+                    };
+                    return ClassStep::Descend(value);
+                }
+                SliceClassMemberValue::Method(function)
+                | SliceClassMemberValue::Getter(function) => {
+                    let getter =
+                        matches!(class.members[index].value, SliceClassMemberValue::Getter(_));
+                    // A member's nested function value, evaluated under the
+                    // class's binder environment.
+                    match super::nested::NestedDemand::of(function, None) {
+                        Some((mut demand, gap)) => {
+                            if let Some(gap) = gap {
+                                self.record_degradation(
+                                    crate::semantic_query::FlowReturnDegradation::FlowGap(gap),
+                                );
+                            }
+                            demand.outer_env = frame.class_env.clone();
+                            frame.awaiting = ClassAwait::Member {
+                                index,
+                                degradation,
+                                again,
+                                value: if getter {
+                                    MemberAwait::Getter
+                                } else {
+                                    MemberAwait::Method
+                                },
+                            };
+                            return ClassStep::Nested(demand);
+                        }
+                        None => self.unmodeled_position(),
+                    }
+                }
+                SliceClassMemberValue::Unmodeled => self.unmodeled_position(),
+            };
+            self.class_member_valued(frame, index, degradation, again, value);
+        }
+    }
+
+    /// A class whose members all evaluated: its keys, sides, identity,
+    /// construct signatures and constructor type composed.
+    fn finish_class_value(&mut self, frame: &mut ClassEvalFrame<'_>) -> Positional<SemanticNodeId> {
+        let class = frame.class;
+        let class_env = frame.class_env.take();
+        let base = frame.base.take();
+        let values: Vec<SemanticNodeId> = std::mem::take(&mut frame.values)
+            .into_iter()
+            .map(|value| value.expect("every member evaluated"))
+            .collect();
+        let graph = self.dispatch.graph();
+        let frame_env = self.binder_env;
+        let env: &FlowBinderEnv = class_env.as_deref().unwrap_or(frame_env);
         let mut instance_side = MemberSide::default();
         let mut static_side = MemberSide::default();
         for (member, value) in class.members.iter().zip(values) {
@@ -401,76 +711,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         })
     }
 
-    /// One class member's type.
-    /// Every member's value, in declaration order. Instance members run
-    /// against the class's receiver: the non-function members first, then
-    /// the functions, so a member body reads a sibling through `this`; a
-    /// function that read a declared sibling not evaluated yet is evaluated
-    /// again once every other member has been.
-    fn eval_class_member_values(
-        &mut self,
-        class: &SliceClass,
-        env: &FlowBinderEnv,
-        base: Option<&ClassBase>,
-    ) -> Vec<SemanticNodeId> {
-        let receiver = std::rc::Rc::new(ClassReceiver {
-            binder: self
-                .dispatch
-                .this_binder(self.canonical, self.owner, &class.name, None),
-            members: std::cell::RefCell::new(Vec::new()),
-            declared: class
-                .members
-                .iter()
-                .filter(|member| !member.is_static)
-                .filter_map(|member| match &member.key {
-                    SliceObjectKey::Static(name) => Some(Arc::clone(name)),
-                    SliceObjectKey::Computed { .. } => None,
-                })
-                .collect(),
-            base: base.and_then(|base| base.instance),
-            forward_read: std::cell::Cell::new(false),
-        });
-        let enclosing = self.receiver.replace(receiver.clone());
-        let is_function = |value: &SliceClassMemberValue| {
-            matches!(
-                value,
-                SliceClassMemberValue::Method(_) | SliceClassMemberValue::Getter(_)
-            )
-        };
-        let order: Vec<usize> = (0..class.members.len())
-            .filter(|index| !is_function(&class.members[*index].value))
-            .chain(
-                (0..class.members.len()).filter(|index| is_function(&class.members[*index].value)),
-            )
-            .collect();
-        let mut values: Vec<Option<SemanticNodeId>> = vec![None; class.members.len()];
-        let mut again = Vec::new();
-        for index in order {
-            let member = &class.members[index];
-            receiver.forward_read.set(false);
-            let degradation = self.degradation;
-            let value = self.eval_class_member_value(&member.value, env);
-            if receiver.forward_read.get() && is_function(&member.value) {
-                self.degradation = degradation;
-                again.push(index);
-                continue;
-            }
-            self.record_receiver_member(&receiver, member, value);
-            values[index] = Some(value);
-        }
-        for index in again {
-            let member = &class.members[index];
-            let value = self.eval_class_member_value(&member.value, env);
-            self.record_receiver_member(&receiver, member, value);
-            values[index] = Some(value);
-        }
-        self.receiver = enclosing;
-        values
-            .into_iter()
-            .map(|value| value.expect("every member evaluated"))
-            .collect()
-    }
-
     /// Record an evaluated, statically named instance member on the
     /// class's receiver.
     fn record_receiver_member(
@@ -499,77 +739,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
             merge_role: crate::semantic_query::MergeRoleStamp::default(),
         });
-    }
-
-    fn eval_class_member_value(
-        &mut self,
-        value: &SliceClassMemberValue,
-        env: &FlowBinderEnv,
-    ) -> SemanticNodeId {
-        match value {
-            SliceClassMemberValue::Declared(ty) => self.lower_gated_in(env, ty),
-            SliceClassMemberValue::Initializer { value, widen } => {
-                let enclosing = std::mem::replace(&mut self.declared_reads, true);
-                let holds_before = self.holds.len();
-                let outcome = self.eval_expr(value);
-                let node = self.settle_composite_part(outcome, holds_before);
-                self.declared_reads = enclosing;
-                if *widen {
-                    self.widen_value_position_read(value, node)
-                } else {
-                    node
-                }
-            }
-            SliceClassMemberValue::Method(function) => self
-                .eval_class_function(function, env)
-                .unwrap_or_else(|| self.unmodeled_position()),
-            SliceClassMemberValue::Getter(function) => {
-                let signature = self.eval_class_function(function, env);
-                match signature.and_then(|signature| {
-                    match self.dispatch.graph().node_data(signature).as_deref() {
-                        Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
-                        _ => None,
-                    }
-                }) {
-                    Some(return_type) => return_type,
-                    None => self.unmodeled_position(),
-                }
-            }
-            SliceClassMemberValue::Unmodeled => self.unmodeled_position(),
-        }
-    }
-
-    /// A class member's nested function value, evaluated under the class's
-    /// binder environment: its signature node, or `None` for a form that
-    /// is not a nested function value.
-    fn eval_class_function(
-        &mut self,
-        function: &SliceExpr,
-        env: &FlowBinderEnv,
-    ) -> Option<SemanticNodeId> {
-        let SliceExpr::NestedFunctionValue {
-            function,
-            context,
-            has_declared_return,
-            gap,
-            declared_evolving_captures,
-            extended_captures,
-        } = function
-        else {
-            return None;
-        };
-        if let Some(gap) = gap {
-            self.record_degradation(crate::semantic_query::FlowReturnDegradation::FlowGap(*gap));
-        }
-        Some(self.eval_nested_function(
-            function,
-            context,
-            *has_declared_return,
-            env,
-            extended_captures,
-            declared_evolving_captures,
-            None,
-        ))
     }
 
     /// Lower one gated member-position type under `env`: the typed marker

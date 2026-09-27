@@ -858,20 +858,126 @@ Recorded plainly so no reader mistakes absence for a pass:
   region run, and when that completes the evaluator is popped, the
   signature composed on its parent and the parent's region resumed with
   it. What a nested evaluator borrows (its parameters, binder
-  environment and slice content) is owned by the drive's arena and
-  released when the evaluator is popped, and the frames around it are a
-  shared chain, so no evaluator borrows a native frame of the one
-  around it and the native stack a nest takes no longer depends on its
-  depth. A nested function value elsewhere (an initializer, a call's
-  argument) is prepared, driven and finished where it sits, its returns
-  driven from the stack again. `deep_input_tests.rs` →
-  `arrows_nested_10000_deep_answer_on_production_stacks` answers
-  TypeScript 7.0.2's `1` for `ReturnType<typeof pf> extends Function ?
-  1 : 2` over 10,000 nested arrows on a 1 MiB caller, in about 21 s
-  unoptimized; evaluating the return's nested function in place
-  overflows it. The work per nested function still grows with the
-  nest's depth where a nested evaluation's input basis keeps its
-  parent's full canonical bytes (collision-safe identity equality).
+  environment and slice content) is kept by the drive's store until the
+  drive returns or unwinds (a safe
+  append-only chain: every reference into it is checked by the borrow
+  checker, with no release protocol), and the frames around it are a
+  shared chain, so no evaluator borrows a native frame of the one around
+  it and the native stack a nest takes no longer depends on its depth.
+  `deep_input_tests.rs` → `arrows_nested_10000_deep_answer_on_production_stacks`
+  answers TypeScript 7.0.2's `1` for `ReturnType<typeof pf> extends
+  Function ? 1 : 2` over 10,000 nested arrows on a 1 MiB caller;
+  evaluating the return's nested function in place overflows it.
+  `flow_return_nested.rs` → `nested_store_tests` hold the store's
+  release: every item once, when the store drops or a panic unwinds
+  through it, and a million items on a 64 KiB thread.
+
+* **Every position suspends at a nested function value.** A statement
+  or a call reaching a nested function value suspends the same way a
+  return does, so the function's body evaluates from the stack of
+  evaluators wherever it sits: a declarator's initializer (the binding is
+  made when the run resumes), a callback whose callee's parameter types it
+  and a context-sensitive argument the executor retypes (the call's route
+  suspends at the argument, `flow_return_call_stack.rs`), an object
+  literal's methods and accessors (children of the literal's own step,
+  after its data members, again after a sibling read ahead), and a class
+  expression's members (`flow_return_class.rs`: its `extends` value,
+  initializers and member functions are children of the class's step).
+  `await` and a comma sequence's value operand evaluate from the
+  expression stack too. `deep_input_tests.rs` answers TypeScript 7.0.2 at
+  10,000 levels on a 1 MiB caller for callbacks (`number`; through a
+  generic callee they answer at 400 levels and return their typed
+  work-budget failure at 10,000),
+  immediately invoked arrows and function expressions (`number`), object
+  methods and class methods (`1` for `extends object` / `extends
+  Function`), arrows initializing a declarator (`1`) and 10,000
+  `await`s (`Promise<number>`). Evaluating in place instead — a
+  declarator's initializer, a generic call's callback, a class's member
+  function, an object's method — overflows each.
+
+* **Branch statements evaluate as frames of their region's run.** An
+  `if`'s arms, a `switch`'s clauses, a labeled statement's body, a
+  `try`'s clauses and a loop's init, test, body and update are regions
+  the region run evaluates as its own frames (`flow_return_branches.rs`),
+  the statement resuming with each region's outcome; a loop's per-reference
+  head analysis runs from an explicit stack of the references under
+  analysis. A function returned from inside any of them is therefore
+  evaluated from the stack of evaluators too:
+  `arrows_returned_from_branches_nested_10000_deep_answer_on_production_stacks`
+  answers `1` for arrows returned from a block, an `if` arm, a `switch`
+  clause and a labeled statement, 10,000 deep (TypeScript 7.0.2 answers
+  `1` too, reporting TS2563 — body too large for control-flow analysis —
+  on the `if` and `switch` nests), and evaluating the `if` in place
+  overflows it.
+
+* **Compound statements lower as frames of their region's lowering.**
+  The demand-slice lowering takes an `if`'s arms, a labeled statement's
+  body, a `switch`'s clauses, a `try`'s clauses, a loop's body and the
+  statements after a terminal one as frames of `lower_region`'s stack
+  (`flow_slice_content_branches.rs`). Guard classification, `await`
+  lowering, destructuring-pattern lowering and a loop body's exit search
+  run from explicit stacks, and the evaluator binds a pattern, registers
+  its correlated elements and walks a loop's carried references from
+  explicit stacks. A pattern element and a capture scope chain drop from a
+  loop. `branch_and_loop_statements_nested_10000_deep_return_on_production_stacks`
+  returns on a 1 MiB caller for `if`, `switch`, `try`, `while`,
+  `for` and `do` statements nested 10,000 deep (their demand slices
+  exceed the plan budget), and
+  `destructuring_patterns_nested_10000_deep_answer_on_production_stacks`
+  answers `1` (`any` elements) for a 10,000-deep pattern; each form
+  overflowed a 1 MiB caller at 1,000 to 2,000 levels before, and dropping
+  a pattern element recursively overflows the latter.
+
+* **Code no path reaches evaluates as frames of the run too.** The
+  checker aggregates every `return` in a body, those past a path it proves
+  dead included. A region the lowering drops past a terminal statement is
+  entered as a frame of the run on a dead path (`DeadPath` in
+  `flow_return_branches.rs`: the live state, narrowings, edges and read
+  mode saved on entry and restored on exit), its references reading their
+  declared types. Statements past a path only the evaluator proves dead
+  (an exhaustive `switch` whose clauses all exit) are no longer skipped:
+  they evaluate on the region's dead tail, reading the no-matching-case
+  edge (the discriminant `never`, every other reference as it reached the
+  `switch`), and a write there leaves its reference its declared type.
+  `differential_flow_tests.rs` →
+  `returns_past_a_path_the_checker_proves_dead_contribute` holds 22 rows
+  measured on TypeScript 7.0.2 under the four settings (`"end" | 1 | 2`
+  past an exhaustive `switch`, where the lane answered `2 | 1`);
+  skipping the tail, reading the `switch` entry state instead of the
+  no-matching-case edge and dropping the dead-write record each fail it.
+  `unreachable_code_nested_10000_deep_returns_on_production_stacks` and
+  `code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks`
+  return the plan's typed budget failure at 10,000 levels on a 1 MiB
+  caller and answer `number` under the 256-return-site budget; evaluating
+  the unreachable region in place overflows the former.
+
+* **A nest's per-function work does not read the nest around it.** Four
+  paths repeated work proportional to the nest for every nested function,
+  each measured by sampling a 1,000–8,000-level nest of immediately
+  invoked arrows:
+  - the own-frame `return` / `yield` finders walked every function
+    nested in the body they search (they stop at a nested frame);
+  - capture resolution built each function's whole enclosing chain and
+    re-walked it for its nesting depth (`function_program.rs` walks the
+    chain only as far as a name needs, and derives each depth from its
+    parent's);
+  - every nested function's content-addressed key hashed the whole source
+    for its parse identity (`IndexedReady::source_parse_key` derives it
+    once per artifact:
+    `a_nest_derives_its_source_parse_identity_a_fixed_number_of_times`,
+    which the per-call derivation fails);
+  - the return-type resolution stack was scanned for re-entry per nested
+    function (it keeps each function's first position).
+  A nested evaluation's input basis named its parent by the parent's
+  whole canonical bytes, so each level's basis was as long as the nest
+  above it. It names the parent by digest, and the demand carries the
+  enclosing bases as a shared chain compared level by level, so the
+  identity stays exact without copying (`flow_return.rs` →
+  `nested_input_basis_tests`). 1,000 / 2,000 / 4,000 / 8,000 nested
+  immediately invoked arrows take 0.96 / 1.9 / 5.1 / 17.4 s unoptimized
+  (1.6 / 5.2 / 19.2 s at 1,000 / 2,000 / 4,000 before); the remaining
+  growth is each level's own flow-slice demand (plan, content and graph
+  per function), not a scan of the nest.
 
 * **Binding usages collect from an explicit stack.** The script
   analysis's usage collector (`build.rs`'s `collect_usages_in_statement`

@@ -424,72 +424,6 @@ fn structures_differing_below_256_levels_keep_distinct_keys_and_one_order() {
     }
 }
 
-/// An array node whose element is `next`, an id the store has not minted yet.
-fn array_of(graph: &SemanticGraphStore, next: u64) -> SemanticNodeId {
-    graph.intern_node(SemanticNodeData::Array {
-        element: SemanticNodeId(next),
-        readonly: false,
-    })
-}
-
-/// A true cycle — a node reaching itself, directly or through another node
-/// — terminates at a back-reference to its open frame's level, so its key
-/// is finite and the same in stores where the cycle sits at other ids.
-#[test]
-fn true_cycles_terminate_at_level_back_references() {
-    let cycles = |padding: usize| {
-        let graph = SemanticGraphStore::new();
-        for index in 0..padding {
-            let _ = lit_str(&graph, &format!("padding-{index}"));
-        }
-        let own = graph.node_count() as u64;
-        let self_cycle = array_of(&graph, own);
-        assert_eq!(
-            self_cycle,
-            SemanticNodeId(own),
-            "the fixture needs a self edge"
-        );
-        let first = graph.node_count() as u64;
-        let head = array_of(&graph, first + 1);
-        let tail = graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from([crate::semantic_query::TupleElement {
-                label: None,
-                value: SemanticNodeId(first),
-                optional: false,
-                rest: false,
-            }]),
-            readonly: false,
-        });
-        assert_eq!(
-            (head, tail),
-            (SemanticNodeId(first), SemanticNodeId(first + 1)),
-            "the fixture needs a two-node cycle"
-        );
-        [
-            stable_key_for_node(&graph, self_cycle),
-            stable_key_for_node(&graph, head),
-            stable_key_for_node(&graph, tail),
-        ]
-    };
-    let near = cycles(0);
-    let far = cycles(17);
-    assert!(
-        near == far,
-        "a cycle's key does not depend on where its nodes sit"
-    );
-    // The self cycle is an array whose element is a back-reference to the
-    // root frame, level 0.
-    let back_reference = [1u8, 7, 1, 0, 0, 0, 0];
-    let mut expected = vec![1u8, 6, 3, 0];
-    expected.extend_from_slice(&(back_reference.len() as u32).to_le_bytes());
-    expected.extend_from_slice(&back_reference);
-    assert_eq!(near[0].exact(), expected.as_slice());
-    assert!(
-        near[1] != near[2],
-        "each entry point of a cycle keys its own shape"
-    );
-}
-
 /// Ten thousand levels encode completely on a 1 MiB thread: the encoder
 /// keeps its frames on the heap, so depth never reaches the native stack.
 #[test]
@@ -1579,26 +1513,117 @@ fn mapped_binder_names_do_not_depend_on_arena_ordinals() {
     assert_eq!(slot_binding_mapper_name(0), slot_binding_mapper_name(1));
 }
 
-/// The classification work of one key: frames opened and ancestor pairs
-/// copied into placements.
-fn classification_work(graph: &SemanticGraphStore, node: SemanticNodeId) -> (u64, u64) {
-    use crate::semantic_query::stable_key::CLASSIFICATION_WORK;
-    CLASSIFICATION_WORK.with(|work| work.set((0, 0)));
-    let _ = stable_key_for_node(graph, node);
-    CLASSIFICATION_WORK.with(std::cell::Cell::get)
+/// The arena is acyclic by contract: a payload naming a child the arena
+/// could still allocate — its own id, or any later one — interns as the
+/// typed `ForeignSemanticOperand` refusal, never as the payload, so no
+/// cycle can form. A child from the never-allocated range dangles (and keys
+/// as an absent child) without being refused.
+#[test]
+fn a_forward_child_fails_closed_at_interning() {
+    use crate::semantic_query::QueryError;
+    let graph = SemanticGraphStore::new();
+    let array_of = |element: u64| {
+        graph.intern_node(SemanticNodeData::Array {
+            element: SemanticNodeId(element),
+            readonly: false,
+        })
+    };
+    let own = graph.node_count() as u64;
+    for element in [own, own + 5] {
+        let node = array_of(element);
+        assert!(
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::ForeignSemanticOperand))
+            ),
+            "a forward child ({element}, arena at {own}) fails closed"
+        );
+    }
+    let number = prim(&graph, PrimitiveKind::Number);
+    let backward = array_of(number.0);
+    assert!(
+        matches!(
+            graph.node_data(backward).as_deref(),
+            Some(SemanticNodeData::Array { element, .. }) if *element == number
+        ),
+        "a child the arena holds interns as written"
+    );
+    let dangling = array_of(u64::MAX);
+    assert!(
+        matches!(
+            graph.node_data(dangling).as_deref(),
+            Some(SemanticNodeData::Array { .. })
+        ),
+        "a never-allocated child dangles"
+    );
+    assert!(
+        stable_key_for_node(&graph, dangling)
+            == stable_key_for_node(&graph, array_of(u64::MAX - 1)),
+        "a dangling child keys as an absent one"
+    );
 }
 
-/// A strongly connected diamond chain: `A(i) = [B(i), C(i)]`,
-/// `B(i) = A(i + 1)[]`, `C(i) = readonly A(i + 1)[]`, and `A(n) = A(0)[]`.
-/// Returns `A(0)` and the node count.
-fn diamond_ring(graph: &SemanticGraphStore, diamonds: usize) -> (SemanticNodeId, usize) {
-    let base = graph.node_count() as u64;
-    let first = SemanticNodeId(base + 3 * diamonds as u64);
-    let mut next = graph.intern_node(SemanticNodeData::Array {
-        element: first,
-        readonly: false,
-    });
-    for _ in 0..diamonds {
+/// A synthetic slot binding whose backing value is a node the arena could
+/// still allocate is a forward reference: its constructor answers the typed
+/// `StaleSemanticOperand` refusal, a not-yet-known type that never publishes
+/// as a clean answer. A never-allocated ordinal dangles like any absent child.
+#[test]
+fn a_synthetic_binding_over_a_future_node_fails_closed() {
+    use crate::semantic_query::QueryError;
+    use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind};
+    let graph = SemanticGraphStore::new();
+    let backing = prim(&graph, PrimitiveKind::Number);
+    let key = |value_node: u64| SyntheticCarrierKey {
+        scope_canonical_id: Arc::from("/c.vue"),
+        surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
+        slot_name: Some(Arc::from("default")),
+        binding_name: Arc::from("item"),
+        value_node,
+    };
+    let count = graph.node_count();
+    for value_node in [count as u64, count as u64 + 5] {
+        let data = SemanticNodeData::synthetic_binding(&key(value_node), count);
+        assert!(
+            matches!(
+                data,
+                SemanticNodeData::Opaque(QueryError::StaleSemanticOperand)
+            ),
+            "backing value {value_node} past the arena ({count}) fails closed"
+        );
+        assert!(
+            data.means_type_is_not_yet_known(),
+            "the refusal is degraded"
+        );
+    }
+    assert!(
+        matches!(
+            SemanticNodeData::synthetic_binding(&key(backing.0), count),
+            SemanticNodeData::SyntheticBinding { value_node, .. } if value_node == backing.0
+        ),
+        "a backing value the arena holds builds the carrier"
+    );
+    assert!(
+        matches!(
+            SemanticNodeData::synthetic_binding(&key(u64::MAX), count),
+            SemanticNodeData::SyntheticBinding {
+                value_node: u64::MAX,
+                ..
+            }
+        ),
+        "a never-allocated backing value dangles, and its consumers' seed gate refuses it"
+    );
+}
+
+/// Every node is classified once: a chain of diamonds (`A(i) = [B(i),
+/// C(i)]`, `B(i) = A(i + 1)[]`, `C(i) = readonly A(i + 1)[]`) reaches each
+/// `A` twice, and its key stays linear in the chain.
+#[test]
+fn classification_visits_each_node_once() {
+    use crate::semantic_query::stable_key::CLASSIFICATION_FRAMES;
+    const DIAMONDS: usize = 5_000;
+    let graph = SemanticGraphStore::new();
+    let mut next = prim(&graph, PrimitiveKind::Number);
+    for _ in 0..DIAMONDS {
         let b = graph.intern_node(SemanticNodeData::Array {
             element: next,
             readonly: false,
@@ -1618,44 +1643,14 @@ fn diamond_ring(graph: &SemanticGraphStore, diamonds: usize) -> (SemanticNodeId,
             readonly: false,
         });
     }
-    assert_eq!(next, first, "the fixture closes the ring at A(0)");
-    (first, 3 * diamonds + 1)
-}
-
-/// A ring of `length` arrays: each node's element is the next, the last's
-/// the first.
-fn array_ring(graph: &SemanticGraphStore, length: usize) -> SemanticNodeId {
-    let base = graph.node_count() as u64;
-    let first = SemanticNodeId(base + length as u64 - 1);
-    let mut next = first;
-    for _ in 0..length {
-        let node = graph.intern_node(SemanticNodeData::Array {
-            element: next,
-            readonly: false,
-        });
-        next = node;
-    }
-    assert_eq!(next, first, "the fixture closes the ring");
-    first
-}
-
-/// Classifying a strongly connected component is linear in its size:
-/// reconverging paths inside it are not enumerated, and a long ring copies
-/// no ancestor path per node.
-#[test]
-#[ignore = "cyclic stable-key classification enumerates the paths inside a strongly connected component"]
-fn cyclic_classification_is_linear_in_the_component() {
-    let graph = SemanticGraphStore::new();
-    let (diamond, nodes) = diamond_ring(&graph, 14);
-    let (frames, _) = classification_work(&graph, diamond);
+    let nodes = 3 * DIAMONDS as u64 + 1;
+    CLASSIFICATION_FRAMES.with(|frames| frames.set(0));
+    let key = stable_key_for_node(&graph, next);
+    let frames = CLASSIFICATION_FRAMES.with(std::cell::Cell::get);
+    assert_eq!(frames, nodes, "each of the {nodes} nodes opens one frame");
     assert!(
-        frames <= 4 * nodes as u64,
-        "a {nodes}-node diamond ring opens {frames} classification frames"
-    );
-    let ring = array_ring(&graph, 10_000);
-    let (frames, copied) = classification_work(&graph, ring);
-    assert!(
-        frames <= 4 * 10_000 && copied <= 4 * 10_000,
-        "a 10000-node ring opens {frames} frames and copies {copied} ancestor pairs"
+        key.exact().len() <= 1024 * DIAMONDS,
+        "{DIAMONDS} diamonds key in {} bytes",
+        key.exact().len()
     );
 }

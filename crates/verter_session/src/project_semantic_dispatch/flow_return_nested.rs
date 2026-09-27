@@ -12,29 +12,122 @@
 //! pushed and its body run; when the body completes, the evaluator is popped,
 //! the signature composed on the parent ([`FlowEvaluator::finish_nested`]),
 //! and the parent's region resumes with it. The data a nested evaluator
-//! borrows (its parameters, binder environment and slice content) is owned
-//! by the drive's [`NestedArena`], and the frames around it are a shared
+//! borrows (its parameters, binder environment and slice content) is kept
+//! by the drive's [`NestedStore`], and the frames around it are a shared
 //! chain, so no evaluator borrows from a native frame of the one around it.
 //!
-//! A nested function value in any other position (a call's argument, a
-//! variable's initializer) is prepared, driven and finished in place
-//! ([`FlowEvaluator::eval_nested_function`]); a return inside it is driven
+//! A statement suspends the same way at a nested function value in its
+//! declarator's initializer, and a call at a function argument its route
+//! types (`flow_return_call_stack`). A nested function value evaluated
+//! outside a region's statements is prepared, driven and finished in place
+//! ([`FlowEvaluator::eval_nested_demand`]); a body inside it is driven
 //! from the stack again.
 
-use std::cell::RefCell;
+use std::cell::{Cell, OnceCell};
 use std::sync::Arc;
 
 use super::contextual::ContextualSignature;
 use super::*;
 
-/// A nested function value demanded where an evaluator suspends.
-pub(super) struct NestedDemand<'e> {
-    pub(super) function: &'e verter_semantic::analysis::function_program::FunctionProgramKey,
-    pub(super) context: &'e Arc<crate::flow_slice_content::NestedFlowContext>,
+/// A nested function value demanded where an evaluator suspends: what it
+/// is prepared from, owned, so the demand outlives the expression it was
+/// read from.
+pub(super) struct NestedDemand {
+    pub(super) function: verter_semantic::analysis::function_program::FunctionProgramKey,
+    pub(super) context: Arc<crate::flow_slice_content::NestedFlowContext>,
     pub(super) has_declared_return: bool,
-    pub(super) extended_captures: &'e [SkeletonBindingId],
+    pub(super) extended_captures: Arc<[SkeletonBindingId]>,
     pub(super) declared_evolving_captures:
-        &'e [verter_semantic::analysis::function_program::FlowBindingIdentity],
+        Arc<[verter_semantic::analysis::function_program::FlowBindingIdentity]>,
+    /// The contextual signature it is checked under, if any.
+    pub(super) contextual: Option<ContextualSignature>,
+    /// The binder environment the function sits in when it is not the
+    /// evaluator's own (a class member's is its class's).
+    pub(super) outer_env: Option<Arc<FlowBinderEnv>>,
+}
+
+impl NestedDemand {
+    /// The demand of `expr` when it is a nested function value, and the
+    /// flow gap its lowering recorded.
+    pub(super) fn of(
+        expr: &crate::flow_slice_content::SliceExpr,
+        contextual: Option<ContextualSignature>,
+    ) -> Option<(Self, Option<crate::semantic_query::FlowGap>)> {
+        let crate::flow_slice_content::SliceExpr::NestedFunctionValue {
+            function,
+            context,
+            has_declared_return,
+            gap,
+            declared_evolving_captures,
+            extended_captures,
+        } = expr
+        else {
+            return None;
+        };
+        Some((
+            Self {
+                function: function.clone(),
+                context: Arc::clone(context),
+                has_declared_return: *has_declared_return,
+                extended_captures: Arc::clone(extended_captures),
+                declared_evolving_captures: Arc::clone(declared_evolving_captures),
+                contextual,
+                outer_env: None,
+            },
+            *gap,
+        ))
+    }
+}
+
+/// The checker's return-type resolution stack (`pushTypeResolution`):
+/// the nested function values whose returns are being evaluated, the
+/// outermost first, each flagged once a return it depends on is found to
+/// read it again, and each function's first position on it, so a re-entry
+/// is found without scanning the stack (a scan per nested function cost
+/// the square of the nesting).
+#[derive(Default)]
+pub(super) struct ResolvingFunctions {
+    stack: Vec<(
+        verter_semantic::analysis::function_program::FunctionProgramKey,
+        bool,
+    )>,
+    first: rustc_hash::FxHashMap<
+        verter_semantic::analysis::function_program::FunctionProgramKey,
+        usize,
+    >,
+}
+
+impl ResolvingFunctions {
+    /// The first position of `function` on the stack.
+    fn position(
+        &self,
+        function: &verter_semantic::analysis::function_program::FunctionProgramKey,
+    ) -> Option<usize> {
+        self.first.get(function).copied()
+    }
+
+    /// Flag every function from `position` up: each reads the re-entered
+    /// one's return while it is being resolved.
+    fn mark_circular_from(&mut self, position: usize) {
+        for (_, circular) in self.stack[position..].iter_mut() {
+            *circular = true;
+        }
+    }
+
+    fn push(&mut self, function: verter_semantic::analysis::function_program::FunctionProgramKey) {
+        let position = self.stack.len();
+        self.first.entry(function.clone()).or_insert(position);
+        self.stack.push((function, false));
+    }
+
+    /// Take the innermost function off, with whether it was flagged.
+    fn pop(&mut self) -> Option<bool> {
+        let (function, circular) = self.stack.pop()?;
+        if self.first.get(&function) == Some(&self.stack.len()) {
+            self.first.remove(&function);
+        }
+        Some(circular)
+    }
 }
 
 /// What a nested function's own evaluator borrows, owned by the drive.
@@ -44,43 +137,73 @@ pub(super) struct NestedOwned {
     binder_env: FlowBinderEnv,
 }
 
-/// The owned data of the nested evaluators a drive runs, each released as
-/// soon as its evaluator is popped. Allocation hands out a reference that
-/// stays valid while the item lives: every item is boxed, so the items
-/// vector growing never moves one, and an item is only released (the last
-/// one, after the evaluator borrowing it has been dropped) by
-/// [`NestedArena::release_last`].
-pub(super) struct NestedArena<T> {
-    items: RefCell<Vec<Box<T>>>,
+/// What a drive's nested evaluators borrow, kept until the drive ends.
+/// Each item is appended behind the last and is never moved or dropped
+/// before the store is, so a reference to it lives exactly as long as the
+/// store's borrow: the borrow checker, not a release protocol, keeps every
+/// evaluator borrowing an item from outliving it, on every path out of
+/// the drive (a panic unwinding through it included).
+///
+/// Owner and lifetime: the drive that creates it
+/// ([`FlowEvaluator::eval_region`], [`FlowEvaluator::eval_nested_demand_in`]),
+/// on its own stack frame; every item is released when that call returns
+/// or unwinds, each once.
+pub(super) struct NestedStore<'a, T = NestedOwned> {
+    first: OnceCell<Box<NestedLink<T>>>,
+    last: Cell<Option<&'a NestedLink<T>>>,
+    #[cfg(test)]
+    kept: Cell<usize>,
 }
 
-impl<T> NestedArena<T> {
+/// One kept item and the items kept after it.
+struct NestedLink<T> {
+    owned: T,
+    next: OnceCell<Box<NestedLink<T>>>,
+}
+
+/// The links after this one drop from this loop, each taken off in turn:
+/// dropping them link inside link would take a native level per item.
+impl<T> Drop for NestedLink<T> {
+    fn drop(&mut self) {
+        let mut next = self.next.take();
+        while let Some(mut link) = next {
+            next = link.next.take();
+        }
+    }
+}
+
+impl<'a, T> NestedStore<'a, T> {
     pub(super) fn new() -> Self {
         Self {
-            items: RefCell::new(Vec::new()),
+            first: OnceCell::new(),
+            last: Cell::new(None),
+            #[cfg(test)]
+            kept: Cell::new(0),
         }
     }
 
-    /// Store `value`; its slot is the one [`Self::release_last`] releases.
-    fn alloc(&self, value: T) -> (&T, usize) {
-        let boxed = Box::new(value);
-        let item: *const T = &*boxed;
-        let mut items = self.items.borrow_mut();
-        items.push(boxed);
-        let slot = items.len() - 1;
-        // SAFETY: the box's heap allocation never moves (the vector only
-        // moves the `Box` pointer), and it is dropped only by
-        // `release_last` — called once the one evaluator borrowing it has
-        // been dropped — or with the arena, which outlives every borrow.
-        (unsafe { &*item }, slot)
+    /// Keep `owned` until the store drops.
+    fn keep(&'a self, owned: T) -> &'a T {
+        let cell = match self.last.get() {
+            Some(link) => &link.next,
+            None => &self.first,
+        };
+        let link: &'a NestedLink<T> = cell.get_or_init(|| {
+            Box::new(NestedLink {
+                owned,
+                next: OnceCell::new(),
+            })
+        });
+        self.last.set(Some(link));
+        #[cfg(test)]
+        self.kept.set(self.kept.get() + 1);
+        &link.owned
     }
 
-    /// Release the last item, the one at `slot`, whose borrowers have all
-    /// been dropped.
-    fn release_last(&self, slot: usize) {
-        let mut items = self.items.borrow_mut();
-        assert_eq!(items.len(), slot + 1, "nested items release in stack order");
-        items.pop();
+    /// How many items the store keeps.
+    #[cfg(test)]
+    pub(super) fn kept(&self) -> usize {
+        self.kept.get()
     }
 }
 
@@ -89,7 +212,6 @@ pub(super) struct NestedActivation<'d, 'a> {
     evaluator: Box<FlowEvaluator<'d, 'a>>,
     run: RegionRun<'a>,
     owned: &'a NestedOwned,
-    slot: usize,
     finish: NestedFinish,
 }
 
@@ -156,9 +278,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         region: &crate::flow_slice_content::SliceRegion,
     ) -> (Result<Vec<FlowContribution>, FlowReturnFailure>, bool) {
-        let arena = NestedArena::new();
+        let store = NestedStore::new();
         let run = self.start_region_run(region);
-        match self.drive(&arena, Some(run), Vec::new()) {
+        match self.drive(&store, Some(run), Vec::new()) {
             DriveEnd::Region(outcome) => outcome,
             DriveEnd::Nested(_) => unreachable!("a region drive ends with its region"),
         }
@@ -179,29 +301,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     ///
     /// It is prepared on this evaluator, its body driven from the stack, and
     /// its signature composed here.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn eval_nested_function(
+    pub(super) fn eval_nested_demand(&mut self, demand: NestedDemand) -> SemanticNodeId {
+        let own_env = demand.outer_env.clone();
+        let frame_env = self.binder_env;
+        self.eval_nested_demand_in(demand, own_env.as_deref().unwrap_or(frame_env))
+    }
+
+    /// [`Self::eval_nested_demand`] under `outer_env`, the binder
+    /// environment the function sits in (a class member's is its class's).
+    pub(super) fn eval_nested_demand_in(
         &mut self,
-        function: &verter_semantic::analysis::function_program::FunctionProgramKey,
-        context: &Arc<crate::flow_slice_content::NestedFlowContext>,
-        has_declared_return: bool,
+        demand: NestedDemand,
         outer_env: &FlowBinderEnv,
-        extended_captures: &[SkeletonBindingId],
-        declared_evolving_captures: &[verter_semantic::analysis::function_program::FlowBindingIdentity],
-        contextual: Option<&ContextualSignature>,
     ) -> SemanticNodeId {
-        let arena = NestedArena::new();
-        let demand = NestedDemand {
-            function,
-            context,
-            has_declared_return,
-            extended_captures,
-            declared_evolving_captures,
-        };
-        let prepared = self.prepare_nested(demand, outer_env, contextual.cloned(), &arena);
+        let store = NestedStore::new();
+        let prepared = self.prepare_nested(demand, outer_env, &store);
         let node = match prepared {
             NestedPrepared::Value(node) => node,
-            NestedPrepared::Child(child) => match self.drive(&arena, None, vec![*child]) {
+            NestedPrepared::Child(child) => match self.drive(&store, None, vec![*child]) {
                 DriveEnd::Nested(node) => node,
                 DriveEnd::Region(_) => unreachable!("a nested drive ends with its function"),
             },
@@ -214,7 +331,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// bottom nested function is composed on this evaluator.
     fn drive<'r, 'a>(
         &mut self,
-        arena: &'a NestedArena<NestedOwned>,
+        store: &'a NestedStore<'a>,
         mut root: Option<RegionRun<'r>>,
         mut stack: Vec<NestedActivation<'d, 'a>>,
     ) -> DriveEnd
@@ -228,17 +345,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let prepared = match stack.last_mut() {
                 Some(top) => match top.evaluator.run_region(&mut top.run, delivered.take()) {
                     RegionProgress::Nested(demand) => {
-                        let outer_env = top.evaluator.binder_env;
-                        Some(top.evaluator.prepare_nested(demand, outer_env, None, arena))
+                        let own_env = demand.outer_env.clone();
+                        let outer_env = own_env.as_deref().unwrap_or(top.evaluator.binder_env);
+                        Some(top.evaluator.prepare_nested(demand, outer_env, store))
                     }
                     RegionProgress::Done(outcome) => {
                         let finished = stack.pop().expect("the evaluator on top");
                         let node = match stack.last_mut() {
-                            Some(parent) => {
-                                parent.evaluator.finish_nested(finished, outcome, arena)
-                            }
+                            Some(parent) => parent.evaluator.finish_nested(finished, outcome),
                             None => {
-                                let node = self.finish_nested(finished, outcome, arena);
+                                let node = self.finish_nested(finished, outcome);
                                 if root.is_none() {
                                     return DriveEnd::Nested(node);
                                 }
@@ -255,8 +371,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         .expect("a drive with no nested evaluator runs its root");
                     match self.run_region(run, delivered.take()) {
                         RegionProgress::Nested(demand) => {
-                            let outer_env = self.binder_env;
-                            Some(self.prepare_nested(demand, outer_env, None, arena))
+                            let own_env = demand.outer_env.clone();
+                            let frame_env = self.binder_env;
+                            let outer_env = own_env.as_deref().unwrap_or(frame_env);
+                            Some(self.prepare_nested(demand, outer_env, store))
                         }
                         RegionProgress::Done(outcome) => return DriveEnd::Region(outcome),
                     }
@@ -272,13 +390,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
     /// Prepare a nested function value on this evaluator: its slice content
     /// and signature up to its body's evaluation, and the body's own
-    /// evaluator, whose borrowed data `arena` owns.
+    /// evaluator, whose borrowed data `store` keeps.
     pub(super) fn prepare_nested<'a>(
         &mut self,
-        demand: NestedDemand<'_>,
+        demand: NestedDemand,
         outer_env: &FlowBinderEnv,
-        contextual: Option<ContextualSignature>,
-        arena: &'a NestedArena<NestedOwned>,
+        store: &'a NestedStore<'a>,
     ) -> NestedPrepared<'d, 'a>
     where
         'b: 'a,
@@ -289,7 +406,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             has_declared_return,
             extended_captures,
             declared_evolving_captures,
+            contextual,
+            outer_env: _,
         } = demand;
+        let function = &function;
+        let context = &context;
+        let extended_captures: &[SkeletonBindingId] = &extended_captures;
+        let declared_evolving_captures: &[verter_semantic::analysis::function_program::FlowBindingIdentity] =
+            &declared_evolving_captures;
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
                 canonical_id: Arc::from(self.canonical),
@@ -374,21 +498,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // circular return: every return from the re-entered one inward is
         // `any` (`getReturnTypeOfSignature` when `popTypeResolution`
         // fails). A declared return is never resolved from the body.
-        let reentered = self
-            .resolving_functions
-            .borrow()
-            .iter()
-            .position(|(resolving, _)| resolving == function);
+        let reentered = self.resolving_functions.borrow().position(function);
         if let Some(position) = reentered {
-            for (_, circular) in self.resolving_functions.borrow_mut()[position..].iter_mut() {
-                *circular = true;
-            }
+            self.resolving_functions
+                .borrow_mut()
+                .mark_circular_from(position);
         }
         let circular = reentered.is_some() && content.declared_return.is_none();
         if !circular {
-            self.resolving_functions
-                .borrow_mut()
-                .push((function.clone(), false));
+            self.resolving_functions.borrow_mut().push(function.clone());
         }
         let step = self.nested_signature_prefix(
             &content.params,
@@ -437,7 +555,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.binder_env,
             self.products.clone(),
         );
-        let (owned, slot) = arena.alloc(NestedOwned {
+        let owned = store.keep(NestedOwned {
             content,
             params,
             binder_env,
@@ -502,6 +620,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             inferred_predicate: None,
             checker_diagnostics: Vec::new(),
             declared_reads: false,
+            dead_writes: false,
+            dead_written: rustc_hash::FxHashSet::default(),
+            dead_written_log: Vec::new(),
             // A class expression member (or an arrow it creates) runs
             // against the receiver the class binds.
             receiver: matches!(
@@ -518,7 +639,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             evaluator,
             run,
             owned,
-            slot,
             finish: NestedFinish {
                 circular,
                 declared_return_none,
@@ -531,17 +651,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
     /// Compose a nested function's signature on this evaluator (its parent)
     /// from its body's evaluation, `outcome`, and release its evaluator.
-    fn finish_nested<'a>(
+    fn finish_nested(
         &mut self,
-        activation: NestedActivation<'d, 'a>,
+        activation: NestedActivation<'d, '_>,
         outcome: (Result<Vec<FlowContribution>, FlowReturnFailure>, bool),
-        arena: &'a NestedArena<NestedOwned>,
     ) -> SemanticNodeId {
         let NestedActivation {
             evaluator: mut nested_evaluator,
             run,
             owned,
-            slot,
             finish,
         } = activation;
         drop(run);
@@ -780,7 +898,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             })
         };
         drop(nested_evaluator);
-        arena.release_last(slot);
         self.nested_function_postlude(circular, declared_return_none, signature)
     }
 
@@ -793,15 +910,104 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         declared_return_none: bool,
         signature: SemanticNodeId,
     ) -> SemanticNodeId {
-        let found_circular = !circular
-            && self
-                .resolving_functions
-                .borrow_mut()
-                .pop()
-                .is_some_and(|(_, circular)| circular);
+        let found_circular =
+            !circular && self.resolving_functions.borrow_mut().pop().unwrap_or(false);
         if found_circular && declared_return_none {
             return self.signature_returning_any(signature);
         }
         signature
+    }
+}
+
+#[cfg(test)]
+mod nested_store_tests {
+    use super::NestedStore;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// An item that records its own release in `released`.
+    struct Tracked {
+        id: usize,
+        released: Rc<RefCell<Vec<usize>>>,
+    }
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.released.borrow_mut().push(self.id);
+        }
+    }
+
+    fn tracked(id: usize, released: &Rc<RefCell<Vec<usize>>>) -> Tracked {
+        Tracked {
+            id,
+            released: Rc::clone(released),
+        }
+    }
+
+    /// Every kept item stays readable through the reference `keep` handed
+    /// out while later items are kept, and is released once when the store
+    /// drops.
+    #[test]
+    fn a_store_keeps_every_item_until_it_drops_and_releases_each_once() {
+        let released = Rc::new(RefCell::new(Vec::new()));
+        {
+            let store = NestedStore::new();
+            let first = store.keep(tracked(0, &released));
+            let kept: Vec<&Tracked> = (1..100)
+                .map(|id| store.keep(tracked(id, &released)))
+                .collect();
+            assert_eq!(first.id, 0);
+            assert!(kept
+                .iter()
+                .enumerate()
+                .all(|(index, item)| item.id == index + 1));
+            assert_eq!(store.kept(), 100);
+            assert!(released.borrow().is_empty());
+        }
+        let mut released = released.borrow().clone();
+        released.sort_unstable();
+        assert_eq!(released, (0..100).collect::<Vec<_>>());
+    }
+
+    /// A panic while items are kept and borrowed unwinds through the store,
+    /// which releases every item once.
+    #[test]
+    fn a_panic_holding_kept_items_releases_each_once_on_unwind() {
+        let released = Rc::new(RefCell::new(Vec::new()));
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let store = NestedStore::new();
+            let items: Vec<&Tracked> = (0..10)
+                .map(|id| store.keep(tracked(id, &released)))
+                .collect();
+            assert_eq!(items.len(), 10);
+            panic!("unwinding with {} kept items", store.kept());
+        }));
+        assert!(caught.is_err());
+        let mut released = released.borrow().clone();
+        released.sort_unstable();
+        assert_eq!(released, (0..10).collect::<Vec<_>>());
+    }
+
+    /// The items drop from a loop: a store keeping 1,000,000 items (one per
+    /// nested function of a drive) releases them on a 64 KiB thread.
+    #[test]
+    fn a_million_kept_items_release_on_a_small_stack() {
+        let released = std::thread::Builder::new()
+            .stack_size(64 << 10)
+            .spawn(|| {
+                let released = Rc::new(RefCell::new(Vec::new()));
+                {
+                    let store = NestedStore::new();
+                    for id in 0..1_000_000 {
+                        store.keep(tracked(id, &released));
+                    }
+                }
+                let count = released.borrow().len();
+                count
+            })
+            .expect("spawn the releasing thread")
+            .join()
+            .expect("the store releases its items");
+        assert_eq!(released, 1_000_000);
     }
 }
