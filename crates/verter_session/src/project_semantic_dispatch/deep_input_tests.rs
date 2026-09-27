@@ -662,9 +662,9 @@ fn mapped_types_nested_10000_deep_answer_on_production_stacks() {
 }
 
 /// Namespaces nested 10,000 deep, read through a 10,000-segment qualified
-/// name. TypeScript 7.0.2: `1`, under every setting.
+/// name: every walk registering a namespace's members descends the nest
+/// from an explicit stack. TypeScript 7.0.2: `1`, under every setting.
 #[test]
-#[ignore = "a namespace nested in a namespace indexes its declaration headers a native level per nesting"]
 fn namespaces_nested_10000_deep_answer_on_production_stacks() {
     let source = format!(
         "namespace A {{ {}export type V = 1;{}\ntype D = {}V;\n",

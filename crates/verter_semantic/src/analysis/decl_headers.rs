@@ -40,6 +40,8 @@ use crate::analysis::top_level_owners::{DeclMap, TopLevelOwnerTable, TopLevelSta
 use crate::analysis::type_eval::{AugmentationScopeKind, TypeDeclKind, ValueDeclKind};
 use verter_parser::utils::oxc::script::route_inventory::statements_have_export_declarations;
 
+use crate::analysis::namespace_walk::{walk_namespaces, NamespaceVisitor, Nesting, QualifiedPath};
+
 #[path = "decl_headers_augmentation.rs"]
 mod augmentation;
 use augmentation::index_augmentation_block;
@@ -106,49 +108,97 @@ pub struct NamespaceBlockRecord {
     pub instantiated: bool,
 }
 
-/// Whether a namespace body is instantiated ([`NamespaceBlockRecord::instantiated`]).
-pub(crate) fn module_body_instantiated(body: &TSNamespaceDeclarationBody<'_>) -> bool {
-    match body {
-        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
-            module_body_instantiated(&inner.body)
+/// The block a namespace body declares, past a dotted name's segments
+/// (`namespace A.B.C { … }`).
+fn namespace_block<'s, 'a>(mut body: &'s TSNamespaceDeclarationBody<'a>) -> &'s TSModuleBlock<'a> {
+    loop {
+        match body {
+            TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => body = &inner.body,
+            TSNamespaceDeclarationBody::TSModuleBlock(block) => return block,
         }
-        TSNamespaceDeclarationBody::TSModuleBlock(block) => module_block_instantiated(block),
     }
 }
 
 /// Whether a module block is instantiated ([`NamespaceBlockRecord::instantiated`]).
+/// A namespace nested in the block costs no native level: the blocks still
+/// to search are an explicit stack.
 pub(crate) fn module_block_instantiated(block: &TSModuleBlock<'_>) -> bool {
-    block.body.iter().any(statement_instantiates)
+    let mut pending = vec![block.body.iter()];
+    while let Some(statements) = pending.last_mut() {
+        match statements.next() {
+            None => {
+                pending.pop();
+            }
+            Some(statement) => match statement_instantiates(statement) {
+                Instantiates::Yes => return true,
+                Instantiates::No => {}
+                Instantiates::Block(block) => pending.push(block.body.iter()),
+            },
+        }
+    }
+    false
 }
 
-/// Whether an external module declaration (`declare module "x"`) is
-/// instantiated: a bodiless one is not.
-fn external_module_instantiated(module: &TSExternalModuleDeclaration<'_>) -> bool {
-    module
-        .body
-        .as_ref()
-        .is_some_and(|block| module_block_instantiated(block))
+/// Whether one statement makes its block instantiated, or the nested
+/// block that decides it.
+enum Instantiates<'s, 'a> {
+    Yes,
+    No,
+    /// A nested namespace or module: instantiated when its block is.
+    Block(&'s TSModuleBlock<'a>),
 }
 
-fn statement_instantiates(statement: &Statement<'_>) -> bool {
+/// An external module declaration (`declare module "x"`) is instantiated
+/// when its block is: a bodiless one is not.
+fn external_module_instantiates<'s, 'a>(
+    module: &'s TSExternalModuleDeclaration<'a>,
+) -> Instantiates<'s, 'a> {
+    match module.body.as_ref() {
+        Some(block) => Instantiates::Block(block),
+        None => Instantiates::No,
+    }
+}
+
+fn statement_instantiates<'s, 'a>(statement: &'s Statement<'a>) -> Instantiates<'s, 'a> {
+    let yes = |instantiated: bool| {
+        if instantiated {
+            Instantiates::Yes
+        } else {
+            Instantiates::No
+        }
+    };
     match statement {
-        Statement::TSInterfaceDeclaration(_) | Statement::TSTypeAliasDeclaration(_) => false,
-        Statement::TSEnumDeclaration(enum_decl) => !enum_decl.r#const,
-        Statement::TSNamespaceDeclaration(module) => module_body_instantiated(&module.body),
-        Statement::TSExternalModuleDeclaration(module) => external_module_instantiated(module),
+        Statement::TSInterfaceDeclaration(_) | Statement::TSTypeAliasDeclaration(_) => yes(false),
+        Statement::TSEnumDeclaration(enum_decl) => yes(!enum_decl.r#const),
+        Statement::TSNamespaceDeclaration(module) => {
+            Instantiates::Block(namespace_block(&module.body))
+        }
+        Statement::TSExternalModuleDeclaration(module) => external_module_instantiates(module),
         Statement::ExportDeclaration(export) => match &export.declaration {
             Declaration::TSInterfaceDeclaration(_) | Declaration::TSTypeAliasDeclaration(_) => {
-                false
+                yes(false)
             }
-            Declaration::TSEnumDeclaration(enum_decl) => !enum_decl.r#const,
-            Declaration::TSNamespaceDeclaration(module) => module_body_instantiated(&module.body),
+            Declaration::TSEnumDeclaration(enum_decl) => yes(!enum_decl.r#const),
+            Declaration::TSNamespaceDeclaration(module) => {
+                Instantiates::Block(namespace_block(&module.body))
+            }
             Declaration::TSExternalModuleDeclaration(module) => {
-                external_module_instantiated(module)
+                external_module_instantiates(module)
             }
-            _ => true,
+            _ => yes(true),
         },
-        Statement::ExportNamedDeclaration(_) | Statement::ExportFromDeclaration(_) => false,
-        _ => true,
+        Statement::ExportNamedDeclaration(_) | Statement::ExportFromDeclaration(_) => yes(false),
+        _ => yes(true),
+    }
+}
+
+/// Whether one statement of a namespace body makes the body instantiated,
+/// the namespaces nested in it aside (their own walk answers for them).
+fn statement_instantiates_here(statement: &Statement<'_>) -> bool {
+    match statement_instantiates(statement) {
+        Instantiates::Yes => true,
+        Instantiates::No => false,
+        Instantiates::Block(block) => module_block_instantiated(block),
     }
 }
 
@@ -1032,7 +1082,9 @@ fn index_external_module_declaration(
     }
 }
 
-/// The identifier-named half of [`index_external_module_declaration`].
+/// The identifier-named half of [`index_external_module_declaration`]: the
+/// namespace and every namespace nested in it, walked from an explicit
+/// stack ([`walk_namespaces`]).
 fn index_module_declaration(
     decl: &TSNamespaceDeclaration<'_>,
     ctx: HeaderStatementContext<'_>,
@@ -1040,40 +1092,102 @@ fn index_module_declaration(
     prefix: Option<&str>,
     ambient: bool,
 ) {
-    let module_name = match prefix {
-        Some(prefix) => format!("{prefix}.{}", decl.id.name),
-        None => decl.id.name.to_string(),
-    };
-    let body = &decl.body;
-    let ambient = ambient || decl.declare;
+    walk_namespaces(
+        decl,
+        &mut HeaderNamespaces {
+            ctx,
+            index,
+            path: QualifiedPath::under(prefix),
+            ambient,
+        },
+    );
+}
 
-    // Record the namespace BLOCK itself (EMPTY blocks included — a
-    // block with zero members is still a named lexical scope). Recorded
-    // at block entry so the scope inventory is complete even when no
-    // member registers.
-    index.namespace_blocks.push(NamespaceBlockRecord {
-        owner: ctx.anchor.owner,
-        qualified_name: module_name.clone(),
-        span: decl.span.into(),
-        instantiated: module_body_instantiated(body),
-    });
+/// [`index_module_declaration`]'s walk.
+struct HeaderNamespaces<'i, 'c> {
+    ctx: HeaderStatementContext<'c>,
+    index: &'i mut DeclHeaderIndex,
+    /// The qualified name of the namespace being walked.
+    path: QualifiedPath,
+    /// Whether the root namespace is in an ambient context.
+    ambient: bool,
+}
 
-    match body {
-        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
-            index_module_declaration(inner, ctx, index, Some(module_name.as_str()), ambient);
+/// One namespace being indexed.
+struct HeaderNamespace {
+    /// Its block's record in [`DeclHeaderIndex::namespace_blocks`].
+    record: usize,
+    /// The qualified path's length before it was entered.
+    enclosing: usize,
+    ambient: bool,
+    implicit_export: bool,
+    /// Whether what it declares so far instantiates it.
+    instantiated: bool,
+}
+
+impl<'s, 'a> NamespaceVisitor<'s, 'a> for HeaderNamespaces<'_, '_> {
+    type Frame = HeaderNamespace;
+
+    /// Record the namespace BLOCK itself (EMPTY blocks included — a block
+    /// with zero members is still a named lexical scope) at block entry, so
+    /// the scope inventory is complete even when no member registers. Its
+    /// instantiation is settled when it is left.
+    fn enter(
+        &mut self,
+        decl: &'s TSNamespaceDeclaration<'a>,
+        parent: Option<&HeaderNamespace>,
+        nesting: Nesting,
+    ) -> HeaderNamespace {
+        let ambient = parent.map_or(self.ambient, |parent| parent.ambient);
+        let enclosing = self.path.enter(decl.id.name.as_str());
+        // A namespace a non-exporting body declares without `export` is
+        // private to it.
+        if nesting == (Nesting::Statement { exported: false })
+            && parent.is_some_and(|parent| !parent.implicit_export)
+        {
+            self.index
+                .namespace_private_members
+                .insert(self.ctx.key(self.path.name()));
         }
-        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
-            let implicit_export = ambient && !statements_have_export_declarations(&block.body);
-            for stmt in &block.body {
-                index_namespaced_statement(
-                    stmt,
-                    ctx,
-                    index,
-                    module_name.as_str(),
-                    ambient,
-                    implicit_export,
-                );
+        let ambient = ambient || decl.declare;
+        let record = self.index.namespace_blocks.len();
+        self.index.namespace_blocks.push(NamespaceBlockRecord {
+            owner: self.ctx.anchor.owner,
+            qualified_name: self.path.name().to_owned(),
+            span: decl.span.into(),
+            instantiated: false,
+        });
+        let implicit_export = match &decl.body {
+            TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => false,
+            TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+                ambient && !statements_have_export_declarations(&block.body)
             }
+        };
+        HeaderNamespace {
+            record,
+            enclosing,
+            ambient,
+            implicit_export,
+            instantiated: false,
+        }
+    }
+
+    fn statement(&mut self, frame: &mut HeaderNamespace, statement: &'s Statement<'a>) {
+        frame.instantiated |= statement_instantiates_here(statement);
+        index_namespaced_statement(
+            statement,
+            self.ctx,
+            self.index,
+            self.path.name(),
+            frame.implicit_export,
+        );
+    }
+
+    fn exit(&mut self, frame: HeaderNamespace, parent: Option<&mut HeaderNamespace>) {
+        self.path.leave(frame.enclosing);
+        self.index.namespace_blocks[frame.record].instantiated = frame.instantiated;
+        if let Some(parent) = parent {
+            parent.instantiated |= frame.instantiated;
         }
     }
 }
@@ -1092,7 +1206,6 @@ fn index_namespaced_statement(
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
-    ambient: bool,
     implicit_export: bool,
 ) {
     match stmt {
@@ -1126,14 +1239,9 @@ fn index_namespaced_statement(
                 index.namespace_private_members.insert(ctx.key(&name));
             }
         }
-        Statement::TSNamespaceDeclaration(module) => {
-            if !implicit_export {
-                index
-                    .namespace_private_members
-                    .insert(ctx.key(&format!("{namespace}.{}", module.id.name)));
-            }
-            index_module_declaration(module, ctx, index, Some(namespace), ambient);
-        }
+        // A nested namespace is a frame of [`index_module_declaration`]'s
+        // walk.
+        Statement::TSNamespaceDeclaration(_) => {}
         Statement::TSExternalModuleDeclaration(module) => {
             index_external_module_declaration(module, ctx, index);
         }
@@ -1143,7 +1251,7 @@ fn index_namespaced_statement(
         // registers a qualified value member.
         Statement::ExportDeclaration(export) => {
             let decl = &export.declaration;
-            index_namespaced_declaration(decl, ctx, index, namespace, ambient);
+            index_namespaced_declaration(decl, ctx, index, namespace);
         }
         Statement::VariableDeclaration(var_decl) if implicit_export => {
             for decl in &var_decl.declarations {
@@ -1168,7 +1276,6 @@ fn index_namespaced_declaration(
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
-    ambient: bool,
 ) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
@@ -1185,9 +1292,9 @@ fn index_namespaced_declaration(
                 index_named_class(class, &name, ctx, index);
             }
         }
-        Declaration::TSNamespaceDeclaration(module) => {
-            index_module_declaration(module, ctx, index, Some(namespace), ambient);
-        }
+        // A nested namespace is a frame of [`index_module_declaration`]'s
+        // walk.
+        Declaration::TSNamespaceDeclaration(_) => {}
         Declaration::TSExternalModuleDeclaration(module) => {
             index_external_module_declaration(module, ctx, index);
         }
