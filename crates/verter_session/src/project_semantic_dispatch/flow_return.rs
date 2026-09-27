@@ -8984,6 +8984,20 @@ pub(crate) fn guard_applications_for_tests() -> usize {
     GUARD_APPLICATIONS.with(std::cell::Cell::get)
 }
 
+/// What one loop pass produced on the evaluator's side outputs beyond its
+/// [`LoopPassMark`], set aside when the pass's head was taken so a later
+/// pass from the same state can put it back instead of running again.
+struct LoopPassTail {
+    yields: Vec<YieldContribution>,
+    holds: Vec<HeldCallee>,
+    fresh_calls: Vec<FreshCallReturn>,
+    call_evidence: Vec<FlowCallEvidence>,
+    heritage_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    break_exits: Vec<FlowBreakExit>,
+    return_edges: Vec<FlowLayerState>,
+    throw_points: Vec<FlowLayerState>,
+}
+
 /// One pass of a loop body ([`FlowEvaluator::begin_loop_pass`]).
 struct LoopPass {
     contributors: Vec<FlowContribution>,
@@ -13349,16 +13363,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Discard what an unconverged pass produced beyond `mark`.
-    fn rewind_loop_pass(&mut self, mark: &LoopPassMark) {
-        self.yield_contributions.truncate(mark.yields);
-        self.holds.truncate(mark.holds);
-        self.call_fresh_literal_returns.truncate(mark.fresh_calls);
-        self.call_evidence.truncate(mark.call_evidence);
-        self.heritage_self_roots.truncate(mark.heritage_self_roots);
-        self.break_exits.truncate(mark.break_exits);
-        self.return_edges.truncate(mark.return_edges);
-        self.throw_points.truncate(mark.throw_points);
+    /// Set aside what a head-analysis pass produced beyond `mark`: the
+    /// side outputs rewind to the mark, and a later pass from the same state
+    /// puts the tail back ([`Self::replay_loop_pass`]).
+    fn set_aside_loop_pass(&mut self, mark: &LoopPassMark) -> LoopPassTail {
+        LoopPassTail {
+            yields: self.yield_contributions.split_off(mark.yields),
+            holds: self.holds.split_off(mark.holds),
+            fresh_calls: self.call_fresh_literal_returns.split_off(mark.fresh_calls),
+            call_evidence: self.call_evidence.split_off(mark.call_evidence),
+            heritage_self_roots: self.heritage_self_roots.split_off(mark.heritage_self_roots),
+            break_exits: self.break_exits.split_off(mark.break_exits),
+            return_edges: self.return_edges.split_off(mark.return_edges),
+            throw_points: self.throw_points.split_off(mark.throw_points),
+        }
+    }
+
+    /// Put back what a pass set aside ([`Self::set_aside_loop_pass`]).
+    fn replay_loop_pass(&mut self, tail: LoopPassTail) {
+        self.yield_contributions.extend(tail.yields);
+        self.holds.extend(tail.holds);
+        self.call_fresh_literal_returns.extend(tail.fresh_calls);
+        self.call_evidence.extend(tail.call_evidence);
+        self.heritage_self_roots.extend(tail.heritage_self_roots);
+        self.break_exits.extend(tail.break_exits);
+        self.return_edges.extend(tail.return_edges);
+        self.throw_points.extend(tail.throw_points);
     }
 
     /// Merge exactly the paths that continue past a conditional. A missing

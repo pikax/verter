@@ -835,3 +835,43 @@ fn dead_loops_nested_10000_deep_return_on_production_stacks() {
         );
     }
 }
+
+/// Loops nested `depth` deep, the innermost writing `body` over `let x: 0 |
+/// 1 = 0` (and `y`, alike).
+fn nested_loops(depth: usize, body: &str, result: &str) -> String {
+    format!(
+        "export function pf(b: boolean) {{ let x: 0 | 1 = 0; let y: 0 | 1 = 0; {}{body}{} return {result}; }}\n",
+        "while (b) { ".repeat(depth),
+        " }".repeat(depth)
+    )
+}
+
+/// Nested loops take work polynomial in their depth: a loop pass from a
+/// state an earlier pass of the loop started from is that pass, so the
+/// nested loops of a pass whose head did not change are not evaluated
+/// again (each loop's body ran once per pass of every loop around it, `2 ^
+/// depth` times). TypeScript 7.0.2, 20 deep, under every setting: `0` for
+/// `x = 0`, `readonly [0, 0]` for `x = 0; y = 0`, `0 | 1` for `x = 1`.
+#[test]
+fn nested_loops_take_passes_polynomial_in_their_depth() {
+    for (body, result, answer) in [
+        ("x = 0;", "x", "0"),
+        ("x = 0; y = 0;", "[x, y] as const", "readonly [0, 0]"),
+        ("x = 1;", "x", "0 | 1"),
+    ] {
+        let passes = |depth: usize| {
+            let before = super::flow_return::loop_passes_for_tests();
+            assert_eq!(
+                mismatches(&nested_loops(depth, body, result), &[(RETURN, answer)]),
+                Vec::<String>::new(),
+                "{body}"
+            );
+            super::flow_return::loop_passes_for_tests() - before
+        };
+        let (shallow, deep) = (passes(10), passes(20));
+        assert!(
+            deep <= 5 * shallow,
+            "`{body}` 20 deep took {deep} passes against {shallow} 10 deep"
+        );
+    }
+}

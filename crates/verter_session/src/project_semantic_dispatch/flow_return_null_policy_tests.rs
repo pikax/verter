@@ -11380,8 +11380,10 @@ const LOOP_HEADS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
 /// references under analysis its value can read: the head of a reference
 /// no other one feeds takes one pass, and a chain `x = y; y = z; z = "s"`
 /// takes one pass per link — `x` reaches `z`'s `"s"` two iterations away
-/// (`string | number | true | null`). Twelve independent counters take
-/// twelve head passes and the final pass, never a pass per subset of them.
+/// (`string | number | true | null`). A pass is a function of the state it
+/// starts from, so references whose passes start from one state share one
+/// pass: twelve independent counters take one head pass and the final
+/// pass, never a pass per subset of them.
 #[test]
 fn loop_heads_follow_each_references_dependencies() {
     assert_measured_matrix("loop-heads.ts", LOOP_HEADS_SOURCE, LOOP_HEADS_TABLE);
@@ -11389,8 +11391,8 @@ fn loop_heads_follow_each_references_dependencies() {
     let path = format!("{STRICT_ROOT}/loop-heads.ts");
     upsert(&host, &path, LOOP_HEADS_SOURCE);
     for (symbol, passes) in [
-        ("independentCounters", 13),
-        ("independentWrites", 13),
+        ("independentCounters", 2),
+        ("independentWrites", 2),
         ("chain", 4),
     ] {
         let before = super::flow_return::loop_passes_for_tests();
@@ -11398,7 +11400,7 @@ fn loop_heads_follow_each_references_dependencies() {
         assert_eq!(
             super::flow_return::loop_passes_for_tests() - before,
             passes,
-            "`{symbol}` evaluates one pass per loop head and one final pass"
+            "`{symbol}` evaluates one pass per distinct loop-head start and one final pass"
         );
     }
 }
