@@ -11567,3 +11567,70 @@ fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() 
         );
     });
 }
+
+/// A warm flow-return query takes the semantic memo's host-wide `entries`
+/// lock once, and the count does not change when other callers query
+/// unrelated functions of the same host at the same time. A warm read
+/// snapshots its slot under the lock and validates outside it; when the
+/// candidate it validated is already the slot's freshest, there is no
+/// LRU move to make, so it does not take the lock again. Taking it a
+/// second time on every hit made each warm query two turns on one lock
+/// that every concurrent read of every family shares.
+#[test]
+fn a_warm_flow_return_query_takes_the_memo_lock_once_at_any_caller_count() {
+    use crate::capture_token::ENTRIES_MUTEX_ACQUISITIONS;
+
+    const FUNCTIONS: [&str; 4] = [
+        "subCallReturn",
+        "subCallAfterLoop",
+        "subLoopReturn",
+        "subSwitchReturn",
+    ];
+    let host = make_host();
+    let identity = |name: &str| verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(name),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    let query = |name: &str| {
+        host.get_flow_return_type_with_audit(
+            &identity(name),
+            crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        )
+    };
+    for name in FUNCTIONS {
+        assert!(query(name).as_result().is_ok(), "{name} answers cold");
+    }
+    // Per caller: the memo-lock acquisitions of one warm query of its own
+    // function, measured by a capture token on the caller's thread.
+    let acquisitions = |callers: usize| -> Vec<u64> {
+        let start = std::sync::Barrier::new(callers);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..callers)
+                .map(|caller| {
+                    let (start, query) = (&start, &query);
+                    scope.spawn(move || {
+                        start.wait();
+                        let name = FUNCTIONS[caller % FUNCTIONS.len()];
+                        let guard = crate::capture_token::CaptureToken::start_for_query("warm");
+                        let answered = query(name).as_result().is_ok();
+                        let snapshot = guard.end();
+                        assert!(answered, "{name} answers warm");
+                        snapshot.counter(ENTRIES_MUTEX_ACQUISITIONS)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("caller"))
+                .collect()
+        })
+    };
+    assert_eq!(acquisitions(1), vec![1], "one caller");
+    assert_eq!(acquisitions(4), vec![1; 4], "four callers");
+}

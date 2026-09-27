@@ -267,14 +267,14 @@ impl Corpus {
         files
     }
 
-    fn witnesses_of(&self, i: usize) -> Vec<(String, String)> {
+    fn witnesses_of(&self, i: usize) -> Vec<Witness> {
         self.kinds
             .iter()
-            .map(|kind| (Self::module_path(i), format!("witness{kind}{i}")))
+            .map(|kind| witness(&Self::module_path(i), &format!("witness{kind}{i}")))
             .collect()
     }
 
-    fn all_witnesses(&self) -> Vec<(String, String)> {
+    fn all_witnesses(&self) -> Vec<Witness> {
         (0..self.modules)
             .flat_map(|i| self.witnesses_of(i))
             .collect()
@@ -300,12 +300,18 @@ fn host_with_workers(cpu_threads: Option<usize>) -> Arc<VerterHost> {
 }
 
 fn upsert(host: &VerterHost, canonical: &str, source: &str) {
+    upsert_shared(host, canonical, Arc::from(source));
+}
+
+/// [`upsert`] of a source already shared, so a timed caller clones a
+/// reference instead of copying the text.
+fn upsert_shared(host: &VerterHost, canonical: &str, source: Arc<str>) {
     // The update summary is not a measured output; only success matters.
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: Some(canonical.to_owned()),
             input_id: canonical.to_owned(),
-            source: Arc::from(source),
+            source,
             file_language: verter_session::LanguageRegistry::global()
                 .classify_static(canonical)
                 .static_resolution(),
@@ -343,8 +349,12 @@ fn census_json(census: Census) -> serde_json::Value {
     })
 }
 
-fn query(host: &VerterHost, canonical: &str, symbol: &str) -> Census {
-    let identity = FlowFunctionReturnIdentity {
+/// A witness: the flow-return identity of one witness function, built once
+/// before any timing so a measured query allocates no identity.
+type Witness = FlowFunctionReturnIdentity;
+
+fn witness(canonical: &str, symbol: &str) -> Witness {
+    FlowFunctionReturnIdentity {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(canonical),
             owner: TopLevelOwnerId::ordinary_file(),
@@ -353,9 +363,17 @@ fn query(host: &VerterHost, canonical: &str, symbol: &str) -> Census {
         },
         function_part: FunctionPartIdentity::DeclarationBody,
         overload_ordinal: 0,
-    };
+    }
+}
+
+/// `canonical#symbol`, the key an outcome is recorded under.
+fn witness_key(witness: &Witness) -> String {
+    format!("{}#{}", witness.anchor.canonical_id, witness.anchor.symbol)
+}
+
+fn query(host: &VerterHost, witness: &Witness) -> Census {
     let carrier =
-        host.get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
+        host.get_flow_return_type_with_audit(witness, ReturnProjectionDemand::whole_return());
     match carrier.as_result() {
         Ok(result) if result.degradation().is_none() => Census {
             complete: 1,
@@ -372,10 +390,10 @@ fn query(host: &VerterHost, canonical: &str, symbol: &str) -> Census {
     }
 }
 
-fn query_all(host: &VerterHost, witnesses: &[(String, String)]) -> Census {
+fn query_all(host: &VerterHost, witnesses: &[Witness]) -> Census {
     let mut census = Census::default();
-    for (canonical, symbol) in witnesses {
-        census.add(query(host, canonical, symbol));
+    for witness in witnesses {
+        census.add(query(host, witness));
     }
     census
 }
@@ -392,19 +410,9 @@ fn query_all(host: &VerterHost, witnesses: &[(String, String)]) -> Census {
 /// other order is kept. A node kind this renderer does not spell prints as
 /// its variant name, so an arm answering with a different kind still
 /// differs.
-fn outcome(host: &VerterHost, canonical: &str, symbol: &str) -> String {
-    let identity = FlowFunctionReturnIdentity {
-        anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
-            owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
-            space: LocatorSymbolSpace::Value,
-        },
-        function_part: FunctionPartIdentity::DeclarationBody,
-        overload_ordinal: 0,
-    };
+fn outcome(host: &VerterHost, witness: &Witness) -> String {
     let carrier =
-        host.get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
+        host.get_flow_return_type_with_audit(witness, ReturnProjectionDemand::whole_return());
     match carrier.as_result() {
         Ok(result) => {
             let graph = host.project_type_store().semantic_graph();
@@ -547,15 +555,15 @@ fn render_type(
 
 /// One outcome state: its name, the edit (canonical, source) applied to
 /// the loaded corpus, and the witnesses re-queried in it.
-type OutcomeState<'a> = (&'a str, Option<(&'a str, &'a str)>, Vec<(String, String)>);
+type OutcomeState<'a> = (&'a str, Option<(&'a str, &'a str)>, Vec<Witness>);
 
 /// The outcome of every witness in `witnesses`, keyed `canonical#symbol`.
-fn outcomes(host: &VerterHost, witnesses: &[(String, String)]) -> serde_json::Value {
+fn outcomes(host: &VerterHost, witnesses: &[Witness]) -> serde_json::Value {
     let mut by_witness = serde_json::Map::new();
-    for (canonical, symbol) in witnesses {
+    for witness in witnesses {
         by_witness.insert(
-            format!("{canonical}#{symbol}"),
-            serde_json::json!(outcome(host, canonical, symbol)),
+            witness_key(witness),
+            serde_json::json!(outcome(host, witness)),
         );
     }
     serde_json::Value::Object(by_witness)
@@ -638,7 +646,7 @@ fn edit_workload(
     host: &VerterHost,
     canonical: &str,
     versions: [&str; 2],
-    readers: &[(String, String)],
+    readers: &[Witness],
     samples: usize,
 ) -> Workload {
     query_all(host, readers);
@@ -911,9 +919,9 @@ fn concurrent_queries(
         |caller, host: &VerterHost, latencies| {
             let offset = caller * witnesses.len() / callers;
             for k in 0..per_caller {
-                let (canonical, symbol) = &witnesses[(offset + k) % witnesses.len()];
+                let witness = &witnesses[(offset + k) % witnesses.len()];
                 let started = Instant::now();
-                query(host, canonical, symbol);
+                query(host, witness);
                 latencies.push(started.elapsed().as_nanos() as u64);
             }
         },
@@ -1004,6 +1012,16 @@ fn scheduler_scaling(corpus: &Corpus, workers: usize, samples: usize) -> serde_j
 /// The two shared inputs every module imports are loaded untimed with the
 /// fresh host; the sample is the rest of the check.
 fn full_check(corpus: &Corpus, workers: usize, samples: usize) -> serde_json::Value {
+    // Every file's path, source and witnesses, built before timing.
+    let files: Vec<(String, Arc<str>, Vec<Witness>)> = (0..corpus.modules)
+        .map(|i| {
+            (
+                Corpus::module_path(i),
+                Arc::from(corpus.module(i, false)),
+                corpus.witnesses_of(i),
+            )
+        })
+        .collect();
     let run = run_callers(
         workers,
         samples,
@@ -1015,9 +1033,9 @@ fn full_check(corpus: &Corpus, workers: usize, samples: usize) -> serde_json::Va
             host
         },
         |caller, host: &VerterHost, _| {
-            for i in (caller..corpus.modules).step_by(workers) {
-                upsert(host, &Corpus::module_path(i), &corpus.module(i, false));
-                query_all(host, &corpus.witnesses_of(i));
+            for (path, source, witnesses) in files.iter().skip(caller).step_by(workers) {
+                upsert_shared(host, path, Arc::clone(source));
+                query_all(host, witnesses);
             }
         },
     );
@@ -1286,8 +1304,8 @@ fn run() {
         let mut total = Census::default();
         let mut by_witness = serde_json::Map::new();
         for &kind in &corpus.kinds {
-            let of_kind: Vec<(String, String)> = (0..corpus.modules)
-                .map(|i| (Corpus::module_path(i), format!("witness{kind}{i}")))
+            let of_kind: Vec<Witness> = (0..corpus.modules)
+                .map(|i| witness(&Corpus::module_path(i), &format!("witness{kind}{i}")))
                 .collect();
             let census = query_all(&host, &of_kind);
             total.add(census);
@@ -1304,9 +1322,9 @@ fn run() {
         let module0 = corpus.module(0, true);
         let shared = Corpus::shared(true);
         let augmentation = Corpus::augmentation(true);
-        let global_readers: Vec<(String, String)> = (0..corpus.modules)
+        let global_readers: Vec<Witness> = (0..corpus.modules)
             .filter(|_| corpus.kinds.contains(&"Global"))
-            .map(|i| (Corpus::module_path(i), format!("witnessGlobal{i}")))
+            .map(|i| witness(&Corpus::module_path(i), &format!("witnessGlobal{i}")))
             .collect();
         let states: [OutcomeState<'_>; 4] = [
             ("original", None, corpus.all_witnesses()),
@@ -1368,9 +1386,9 @@ fn run() {
     let augmentation = [Corpus::augmentation(false), Corpus::augmentation(true)];
     // The augmentation's readers are the Global witnesses — none when that
     // kind is excluded, and the workload then times the edit alone.
-    let global_readers: Vec<(String, String)> = (0..corpus.modules)
+    let global_readers: Vec<Witness> = (0..corpus.modules)
         .filter(|_| corpus.kinds.contains(&"Global"))
-        .map(|i| (Corpus::module_path(i), format!("witnessGlobal{i}")))
+        .map(|i| witness(&Corpus::module_path(i), &format!("witnessGlobal{i}")))
         .collect();
     workloads.push(edit_workload(
         "augmentation_edit",

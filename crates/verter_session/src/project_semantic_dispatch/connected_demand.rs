@@ -52,6 +52,7 @@ impl<'a> DemandCancellation<'a> {
     }
 
     /// Cheap cancellation checkpoint, consulted at every charge boundary.
+    #[cfg_attr(feature = "test-support", track_caller)]
     fn is_cancelled(&self) -> bool {
         self.ctx.is_cancelled()
     }

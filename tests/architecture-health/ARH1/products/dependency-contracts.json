@@ -234,6 +234,7 @@
           "crates/verter_session/src/u6_flow_expect_tests.rs",
           "crates/verter_session/src/u6_flow_shape_corpus_tests.rs",
           "crates/verter_session/examples/signature_kernel_bench.rs",
+          "crates/verter_session/examples/signature_kernel_contention_probe.rs",
           "crates/verter_session/tests/cases/component_meta_audit_corpus/chunk_harness.rs",
           "crates/verter_session/tests/cases/corpus_audit_layout.rs",
           "crates/verter_session/tests/cases/exposed_binding_regression.rs",
@@ -697,7 +698,7 @@
       "snapshot": {
         "pubFn": 0,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 18,
+        "pubCrateFn": 19,
         "pubType": 0,
         "pubCrateMod": 1,
         "inlinePubMod": 0,

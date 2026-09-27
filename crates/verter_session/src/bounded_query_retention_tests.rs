@@ -619,3 +619,37 @@ fn candidate_map_concurrent_admit_no_ghost_budget_record() {
     // The global cap stays honoured.
     assert!(map.live_count() <= map.global_cap(), "global cap honoured");
 }
+
+/// An admission into a full ledger whose oldest record is its victim
+/// removes that record alone: the trim's removal step touches only the
+/// victims, not every retained record. The semantic memo records each
+/// family admission under its host-wide entries lock, so a removal pass
+/// over the whole ledger (4096 records by default) on every admission
+/// made concurrent cold publishes of unrelated families queue on it. A
+/// trim that must skip an exempt record still removes exactly the
+/// victims it selected, from the middle.
+#[test]
+fn a_full_ledger_admission_touches_only_its_victims() {
+    let visits = || TRIM_VISITS.with(std::cell::Cell::get);
+    let budget: GlobalRetentionBudget<u32> = GlobalRetentionBudget::new(1000);
+    for key in 0..1000 {
+        assert!(budget.record_admission(u64::from(key), key).is_empty());
+    }
+    let before = visits();
+    let victims = budget.record_admission(1000, 1000);
+    assert_eq!(victims, vec![(0, 0)], "the oldest record is the victim");
+    assert_eq!(visits() - before, 1, "the removal touched only the victim");
+    assert_eq!(budget.tracked_len(), 1000);
+
+    // Exempting the two oldest keys makes the third the victim: removed
+    // from the middle, every other record kept in order.
+    let victims = budget.record_admissions_exempt([(1001, 1001)], &|key| *key <= 2);
+    assert_eq!(victims, vec![(3, 3)]);
+    assert_eq!(budget.tracked_len(), 1000);
+    let victims = budget.record_admission(1002, 1002);
+    assert_eq!(
+        victims,
+        vec![(1, 1)],
+        "FIFO order resumes at the oldest record"
+    );
+}
