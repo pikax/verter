@@ -125,8 +125,8 @@ the arena already holds (ids below its own) or never-allocated sentinels (ids
 from 2^62 up). A payload naming a child the arena could still allocate is a
 forward reference, the only way to close a cycle, and interns as the typed
 `Opaque(ForeignSemanticOperand)` refusal; a synthetic slot binding over a
-backing value the arena does not hold is the typed `StaleSemanticOperand`
-refusal. A real TypeScript recursive type never needs a structural cycle: it
+backing value the arena could still allocate is the typed
+`StaleSemanticOperand` refusal. A real TypeScript recursive type never needs a structural cycle: it
 recurses through declaration and alias references
 (`a_resolved_workload_arena_is_a_dag` pins the arena of a resolved workload).
 

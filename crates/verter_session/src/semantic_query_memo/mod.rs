@@ -66,7 +66,6 @@ mod signature_epoch;
 mod union_views;
 mod unresolved_reach;
 
-#[cfg(test)]
 pub(crate) use arena::UNALLOCATABLE_ID_FLOOR;
 pub(crate) use inflight::InlineMemberFlight;
 pub(crate) use scc_publish::{

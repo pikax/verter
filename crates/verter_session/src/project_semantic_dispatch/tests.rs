@@ -29400,10 +29400,12 @@ fn missing_node_data_evaluates_partial_not_laundered_complete() {
         crate::semantic_query::ProjectionMode::Expanded,
     );
 
-    // A valid interned node fixes a small arena bound; an id far beyond it is
-    // guaranteed unallocated, so `node_data` returns `None`.
-    let real = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let missing = crate::semantic_query::SemanticNodeId(real.0 + 1_000_000);
+    // An id in the never-allocated range has no arena data, and an
+    // acyclic arena lets a payload name it (a child the arena could still
+    // allocate would be a forward reference and refuse instead).
+    let missing = crate::semantic_query::SemanticNodeId(
+        crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR + 1_000_000,
+    );
     assert!(
         graph.node_data(missing).is_none(),
         "FIXTURE INVALID: the seeded id must have no arena data"
@@ -29495,11 +29497,13 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
     let t0 = graph.intern_node(SemanticNodeData::DeclRef {
         identity: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from("T0")),
     });
-    let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    // MISSING: an `Alias` to an unallocated id — the evaluator reaches absent
-    // arena data through the hop and reports MISSING_SEMANTIC_NODE_DATA.
+    // MISSING: an `Alias` to a never-allocated id — the evaluator reaches
+    // absent arena data through the hop and reports
+    // MISSING_SEMANTIC_NODE_DATA.
     let aliased_missing = graph.intern_node(SemanticNodeData::Alias(
-        crate::semantic_query::SemanticNodeId(leaf.0 + 5_000_000),
+        crate::semantic_query::SemanticNodeId(
+            crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR + 5_000_000,
+        ),
     ));
 
     let run = |subject: crate::semantic_query::SemanticNodeId,

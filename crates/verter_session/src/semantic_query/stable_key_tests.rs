@@ -1563,10 +1563,10 @@ fn a_forward_child_fails_closed_at_interning() {
     );
 }
 
-/// A synthetic slot binding whose backing value is not a node the graph
-/// already holds is a stale or foreign seed: its constructor answers the
-/// typed `StaleSemanticOperand` refusal, a not-yet-known type that never
-/// publishes as a clean answer, and never a forward reference.
+/// A synthetic slot binding whose backing value is a node the arena could
+/// still allocate is a forward reference: its constructor answers the typed
+/// `StaleSemanticOperand` refusal, a not-yet-known type that never publishes
+/// as a clean answer. A never-allocated ordinal dangles like any absent child.
 #[test]
 fn a_synthetic_binding_over_a_future_node_fails_closed() {
     use crate::semantic_query::QueryError;
@@ -1581,7 +1581,7 @@ fn a_synthetic_binding_over_a_future_node_fails_closed() {
         value_node,
     };
     let count = graph.node_count();
-    for value_node in [count as u64, u64::MAX] {
+    for value_node in [count as u64, count as u64 + 5] {
         let data = SemanticNodeData::synthetic_binding(&key(value_node), count);
         assert!(
             matches!(
@@ -1601,6 +1601,16 @@ fn a_synthetic_binding_over_a_future_node_fails_closed() {
             SemanticNodeData::SyntheticBinding { value_node, .. } if value_node == backing.0
         ),
         "a backing value the arena holds builds the carrier"
+    );
+    assert!(
+        matches!(
+            SemanticNodeData::synthetic_binding(&key(u64::MAX), count),
+            SemanticNodeData::SyntheticBinding {
+                value_node: u64::MAX,
+                ..
+            }
+        ),
+        "a never-allocated backing value dangles, and its consumers' seed gate refuses it"
     );
 }
 

@@ -336,6 +336,12 @@ fn materialize_constructor_type_preserves_ctor_ness() {
 #[test]
 fn materialize_synthetic_binding_round_trips_with_value_node() {
     let host = VerterHost::new_standalone(Default::default());
+    // The backing value is a node the arena holds: a carrier over a node it
+    // could still allocate is a forward reference and refuses.
+    let backing = host
+        .project_type_store()
+        .semantic_graph()
+        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let id = SyntheticBindingId {
         scope_canonical_id: Arc::from("/Comp.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
@@ -344,7 +350,10 @@ fn materialize_synthetic_binding_round_trips_with_value_node() {
     };
     let expr = materialize(
         &host,
-        SemanticNodeData::SyntheticBinding { id, value_node: 42 },
+        SemanticNodeData::SyntheticBinding {
+            id,
+            value_node: backing.0,
+        },
     );
     match &expr {
         TypeExpr::SyntheticSlotBinding(key) => {
@@ -357,7 +366,7 @@ fn materialize_synthetic_binding_round_trips_with_value_node() {
             ));
             // The value-side provenance ordinal is re-attached at the compat
             // boundary.
-            assert_eq!(key.value_node, 42);
+            assert_eq!(key.value_node, backing.0);
         }
         other => panic!("expected SyntheticSlotBinding, got {other:?}"),
     }

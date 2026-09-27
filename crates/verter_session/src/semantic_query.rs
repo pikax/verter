@@ -9858,16 +9858,21 @@ pub enum SemanticNodeData {
 impl SemanticNodeData {
     /// The ONE constructor for [`Self::SyntheticBinding`]: the carrier for
     /// `key`, or the typed [`QueryError::StaleSemanticOperand`] refusal when
-    /// the carrier's backing value is not a node the graph already holds
-    /// (an ordinal at or past `node_count`, a stale or foreign seed). The
-    /// arena is acyclic by contract, so such a forward reference never
-    /// enters it, and a refusal never publishes a clean answer.
+    /// the carrier's backing value is a node the arena could still allocate
+    /// (an ordinal at or past `node_count`, below
+    /// [`UNALLOCATABLE_ID_FLOOR`](crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR)):
+    /// the arena is acyclic by contract, so such a forward reference never
+    /// enters it, and the refusal is a not-yet-known type, never a clean
+    /// answer. A never-allocated ordinal dangles like any absent child, and
+    /// the seed consumers' same-generation gate refuses it.
     #[must_use]
     pub(crate) fn synthetic_binding(
         key: &verter_type_expr::SyntheticCarrierKey,
         node_count: usize,
     ) -> Self {
-        if key.value_node >= node_count as u64 {
+        if (node_count as u64..crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR)
+            .contains(&key.value_node)
+        {
             return Self::Opaque(QueryError::StaleSemanticOperand);
         }
         Self::SyntheticBinding {
