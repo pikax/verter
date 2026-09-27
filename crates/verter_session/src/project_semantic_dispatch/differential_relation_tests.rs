@@ -669,29 +669,15 @@ fn generic_applications_relate_by_their_arguments() {
 
 /// A generic source signature is instantiated in the context of the target
 /// signature (`instantiateSignatureInContextOf`) before its parameters and
-/// return relate; a non-generic source is not below a generic target.
-///
-/// What the lane gives:
-/// - `[typeof idf] extends [(x: string) => string] ? 1 : 2`: the checker
-///   answers `1`; the lane measured `<unreduced conditional>`.
-/// - `[typeof idf] extends [<U>(x: U) => U] ? 1 : 2`: the checker answers `1`;
-///   the lane measured `<unreduced conditional>`.
-/// - `[(x: string) => string] extends [typeof idf] ? 1 : 2`: the checker
-///   answers `2`; the lane measured `<unreduced conditional>`.
-/// - `[<T>(x: T) => T[]] extends [(x: number) => number[]] ? 1 : 2`: the
-///   checker answers `1`; the lane measured `<unreduced conditional>`.
-/// - `[<T>(x: T) => T[]] extends [(x: number) => string[]] ? 1 : 2`: the
-///   checker answers `2`; the lane measured `<unreduced conditional>`.
-/// - `[<T extends string>(x: T) => T] extends [(x: number) => number] ? 1 : 2`:
-///   the checker answers `2`; the lane measured `<unreduced conditional>`.
+/// return relate: each type parameter takes what the target's parameter
+/// types give it, else what the target's return gives it, and a binding
+/// its constraint refuses is the constraint.
 #[test]
-#[ignore = "a generic signature relates to a signature by instantiating its type parameters"]
 fn a_generic_signature_relates_by_instantiating_it() {
     let matrix = Matrix::new(GENERICS);
     let failures = matrix.types(&[
         ("[typeof idf] extends [(x: string) => string] ? 1 : 2", "1"),
         ("[typeof idf] extends [<U>(x: U) => U] ? 1 : 2", "1"),
-        ("[(x: string) => string] extends [typeof idf] ? 1 : 2", "2"),
         (
             "[<T>(x: T) => T[]] extends [(x: number) => number[]] ? 1 : 2",
             "1",
@@ -704,7 +690,30 @@ fn a_generic_signature_relates_by_instantiating_it() {
             "[<T extends string>(x: T) => T] extends [(x: number) => number] ? 1 : 2",
             "2",
         ),
+        ("[<T>() => T] extends [() => string] ? 1 : 2", "1"),
+        (
+            "[<T>(x: T) => void] extends [(x: number) => void] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[<T extends number>() => T] extends [() => string] ? 1 : 2",
+            "2",
+        ),
     ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A non-generic source is not below a generic target: the target's type
+/// parameters stay type parameters no concrete type is assignable to.
+///
+/// What the lane gives:
+/// - `[(x: string) => string] extends [typeof idf] ? 1 : 2`: the checker
+///   answers `2`; the lane measured `<unreduced conditional>`.
+#[test]
+#[ignore = "a relation to a generic target signature's own type parameters decides"]
+fn a_concrete_signature_is_not_below_a_generic_target() {
+    let matrix = Matrix::new(GENERICS);
+    let failures = matrix.types(&[("[(x: string) => string] extends [typeof idf] ? 1 : 2", "2")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

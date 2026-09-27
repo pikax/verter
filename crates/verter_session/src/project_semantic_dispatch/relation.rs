@@ -9112,6 +9112,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
             drop(source_data);
             drop(target_data);
+            // A generic source relates as it is instantiated in the
+            // target's context (`compareSignaturesRelated`); a relation
+            // under an inference session, or of comparability (which
+            // erases generics), keeps the source as it is.
+            if self.current_relation_kind() != RelationKind::Comparable
+                && !self.relation_session_active()
+            {
+                if let Some(instantiated) =
+                    self.instantiate_signature_in_context_of(source, target, kind)
+                {
+                    work.push(RelateWork::Eval(instantiated, target));
+                    return;
+                }
+            }
             results.push(self.relate_function(
                 source,
                 source_result,

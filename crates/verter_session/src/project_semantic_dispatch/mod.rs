@@ -198,6 +198,7 @@ mod semantic_operand_tests;
 pub(crate) mod semantic_source;
 mod semantic_source_compose;
 pub(crate) mod semantic_source_leaf_facts;
+mod signature_instantiation;
 pub(crate) mod substitute;
 pub(crate) mod symbol_identity;
 pub(crate) mod template_class_facts;
