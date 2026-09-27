@@ -149,7 +149,7 @@ discovery order, and they are registered here rather than changed silently:
 | `Signature` occurrence, `TypeOfNominal` identity, numeric and unique-symbol property keys | `Debug` forms | explicit anchor, owner, name, path and ordinal fields; a numeric key as its integer |
 | `TypeParam` mapped binder | the `<mapper-param>` sentinel name and the registry ordinal, handed out in discovery order | the binding mapping's identity (a 128-bit digest over its exact source, value, name-type and modifier structure) as the declaration name; the ordinal is not encoded |
 | `Signature` and `DeferredCallable` binder declarations | each declaration's name and binder only | the name, the binder, the constraint and default (presence and keys) and the `const` modifier |
-| `Signature` return carrier | not encoded | a trailing section, present only when the carrier is not the declared return type itself |
+| `Signature` return carrier | not encoded | a trailing section, present only when the carrier is not structurally the declared return type (decided on the two children's classes, never on node identity) |
 | Repeated subtree longer than 256 bytes | written in full at every occurrence, doubling per level of sharing | written once; each later occurrence is a `RECURSIVE` sub-tag 3 reference numbering shared subtrees in the order they finish being written |
 
 Every other encoding, and with it every existing union order over those

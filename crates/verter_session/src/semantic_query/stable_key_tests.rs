@@ -1483,3 +1483,59 @@ fn union_reducer_keeps_homomorphic_and_concrete_mappings_apart() {
         }
     }
 }
+
+/// `() => number` whose return carrier names the declared return type,
+/// given as `carrier`.
+fn nullary_signature(
+    graph: &SemanticGraphStore,
+    return_type: SemanticNodeId,
+    carrier: SemanticNodeId,
+) -> SemanticNodeId {
+    use crate::semantic_query::{SignatureKind, SignatureReturnCarrier};
+    graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from(Vec::new()),
+        return_type,
+        type_parameters: Arc::from(Vec::new()),
+        occurrence: None,
+        return_carrier: SignatureReturnCarrier::Declared(carrier),
+        signature_span: None,
+        return_type_span: None,
+        predicate: None,
+        is_abstract: false,
+    })
+}
+
+/// A signature's key depends on its return carrier's structure, never on
+/// whether the carrier is the same node as the return type or an equal
+/// node interned apart.
+#[test]
+fn a_return_carrier_keys_by_structure_not_node_sharing() {
+    let graph = SemanticGraphStore::new();
+    let number = prim(&graph, PrimitiveKind::Number);
+    let number_elsewhere = graph.intern_node_with_scope(
+        SemanticNodeData::Primitive(PrimitiveKind::Number),
+        crate::semantic_query::NodeScopeId::File {
+            canonical_id: Arc::from("/elsewhere.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: [6u8; 16],
+            local_scope: None,
+        },
+    );
+    assert_ne!(
+        number, number_elsewhere,
+        "premise: two nodes of one structure"
+    );
+    let shared = nullary_signature(&graph, number, number);
+    let apart = nullary_signature(&graph, number, number_elsewhere);
+    assert!(
+        stable_key_for_node(&graph, shared) == stable_key_for_node(&graph, apart),
+        "one return carrier structure keys alike however it is shared"
+    );
+    let string = prim(&graph, PrimitiveKind::String);
+    assert!(
+        stable_key_for_node(&graph, shared)
+            != stable_key_for_node(&graph, nullary_signature(&graph, number, string)),
+        "a carrier of another structure keys apart"
+    );
+}
