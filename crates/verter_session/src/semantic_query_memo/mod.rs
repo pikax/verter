@@ -396,12 +396,7 @@ pub struct SemanticGraphStore {
     /// The `VerterStableV1` member view of each union built in this store's
     /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
     /// contract with a payload-retiring holder: `union_views.rs`.
-    union_views: Mutex<
-        FxHashMap<
-            crate::semantic_query::semantic_context::SemanticUnionMembersKey,
-            Arc<[SemanticNodeId]>,
-        >,
-    >,
+    union_views: Mutex<union_views::UnionViews>,
     /// Test-only: order union members by DESCENDING stable key. Reversing the
     /// one union order in a fresh store — an isolated cache namespace, its
     /// views and memo entries included — is the §5.8 counterfactual that
