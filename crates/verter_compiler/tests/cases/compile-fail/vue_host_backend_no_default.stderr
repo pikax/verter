@@ -3,8 +3,3 @@ error[E0599]: no associated function or constant named `default` found for struc
   |
 8 |     VueHostIntegrationBackend::default()
   |                                ^^^^^^^ associated function or constant not found in `VueHostIntegrationBackend`
-  |
-help: there is a method `default_color` with a similar name
-  |
-8 |     VueHostIntegrationBackend::default_color()
-  |                                       ++++++
