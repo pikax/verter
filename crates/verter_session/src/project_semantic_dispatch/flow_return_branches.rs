@@ -1322,12 +1322,17 @@ struct PassEval {
     tested: Option<FlowLayerState>,
     contributors: Vec<FlowContribution>,
     phase: PassPhase,
+    /// The dead path a body no path enters is evaluated on
+    /// ([`PassPhase::DeadBody`]), restored when the body is.
+    dead: Option<Box<DeadPath>>,
 }
 
 #[derive(Clone, Copy)]
 enum PassPhase {
     TestBefore,
     Body,
+    /// A body behind a literal `false` test, which no path enters.
+    DeadBody,
     Update,
     TestAfter,
 }
@@ -1621,6 +1626,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             tested: None,
             contributors: Vec::new(),
             phase: PassPhase::TestBefore,
+            dead: None,
             head,
         };
         self.restore_layer_state(pass.head.clone());
@@ -1682,19 +1688,25 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 pass.tested = Some(self.layer_state());
                 // A literal `false` test never enters the body: no path
                 // reaches it, and it contributes as unreachable code does.
+                // The body evaluates next, a frame of the run, on a dead
+                // path the pass restores when it is done.
                 if *constant == Some(false) {
-                    self.restore_narrowings(pass.narrow_mark);
-                    return PassStep::Done(self.eval_unreachable_region(&lowered.body).map(
-                        |contributors| LoopPass {
-                            contributors,
-                            back: None,
-                            test_edge: pass.tested,
-                            break_base: pass.break_base,
-                        },
-                    ));
+                    self.restore_narrowings(pass.narrow_mark.clone());
+                    pass.dead = Some(Box::new(self.open_dead_path(true)));
+                    pass.phase = PassPhase::DeadBody;
+                    return PassStep::Enter(pass, &lowered.body);
                 }
                 self.apply_guard_scoped(guard, true);
                 self.enter_loop_body(lowered, element, pass)
+            }
+            PassPhase::DeadBody => {
+                self.close_dead_path(*pass.dead.take().expect("the dead body's path"));
+                PassStep::Done(result.map(|contributors| LoopPass {
+                    contributors,
+                    back: None,
+                    test_edge: pass.tested,
+                    break_base: pass.break_base,
+                }))
             }
             PassPhase::Body => {
                 let contributors = match result {

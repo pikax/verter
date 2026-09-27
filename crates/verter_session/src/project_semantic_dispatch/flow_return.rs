@@ -13088,22 +13088,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Evaluate statements no path reaches for the returns and yields the
-    /// checker still aggregates from them (a loop body behind a literal
-    /// `false` test): every reference reads its declared type there (the
-    /// checker answers an unreachable flow node with the declared type),
-    /// and nothing the region does — its writes, narrows, jumps and edges
-    /// — reaches the live state ([`DeadPath`]).
-    fn eval_unreachable_region(
-        &mut self,
-        region: &crate::flow_slice_content::SliceRegion,
-    ) -> Result<Vec<FlowContribution>, FlowReturnFailure> {
-        let dead = self.open_dead_path(true);
-        let (result, _) = self.eval_region(region);
-        self.close_dead_path(dead);
-        result
-    }
-
     /// The inferred bindings `lowered` declares that the checker cannot
     /// type without their own type. The checker types an inferred binding
     /// from its initializer; reading a binding there reads its flow type,

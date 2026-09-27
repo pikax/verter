@@ -602,6 +602,8 @@ export function sTwice(x: "a" | "b") { switch (x) { case "a": return 1; case "b"
 export function nCall(y: string) { fail(); return y; }
 export function nCallConst(y: string) { fail(); const z = "zz"; return z; }
 export function nCallAssign(y: string | number) { fail(); y = "q"; return y; }
+export function dWhile(x: string | number) { if (typeof x === "string") { while (false) { return x; } } return 2; }
+export function dFor(x: string | number) { if (typeof x === "string") { for (; false; ) { return x; } } return true; }
 declare const o: { fail(): never };
 export function nNarrowed(y: string | number) { if (typeof y === "string") { fail(); return y; } return true; }
 export function nMethodNarrowed(y: string | number) { if (typeof y === "string") { o.fail(); return y; } return true; }
@@ -638,6 +640,8 @@ fn returns_past_a_path_the_checker_proves_dead_contribute() {
         ("nCall", "string"),
         ("nCallConst", "string"),
         ("nCallAssign", "string | number"),
+        ("dWhile", "string | number"),
+        ("dFor", "string | number | true"),
         ("nNarrowed", "string | number | true"),
         ("nLocal", "string | number"),
         ("nNarrowLet", "string | number"),

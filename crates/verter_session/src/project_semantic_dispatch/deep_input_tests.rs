@@ -808,3 +808,30 @@ fn a_mapped_type_nest_lowers_in_linear_work() {
         "a ten-times-deeper nest copied {deep_copied} binder frames against {shallow_copied}"
     );
 }
+
+/// A dead loop nest the flow-slice plan budget admits.
+const DEAD_LOOPS_UNDER_THE_PLAN_BUDGET: usize = 1_000;
+
+/// Loops behind a literal `false` test nested deep: each dead body
+/// evaluates as a frame of the run, on a dead path its pass restores. 10,000
+/// deep the demand slice exceeds the plan budget (the return is its typed
+/// budget failure); under it TypeScript 7.0.2 answers `1 | 2`, under every
+/// setting.
+#[test]
+fn dead_loops_nested_10000_deep_return_on_production_stacks() {
+    for open in ["while (false) { ", "for (; false; ) { "] {
+        let source = |depth: usize| {
+            format!(
+                "export function pf() {{ {}return 1;{} return 2; }}\n",
+                open.repeat(depth),
+                " }".repeat(depth)
+            )
+        };
+        assert!(!returns_on_a_small_stack(source(DEPTH)), "{open}");
+        assert_eq!(
+            mismatches_on_a_small_stack(source(DEAD_LOOPS_UNDER_THE_PLAN_BUDGET), RETURN, "1 | 2"),
+            Vec::<String>::new(),
+            "{open}"
+        );
+    }
+}
