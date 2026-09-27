@@ -28,6 +28,11 @@ export function wConstBig() { const n = 10n; return n; }
 export function wConstNeg() { const n = -1; return n; }
 export function wLet() { let a = 1; return a; }
 export function wLetUnion() { let a = cond() ? 1 : "s"; return a; }
+export function dpArrow(cb = () => 7) { return cb; }
+export function dpArrowConst(cb = () => 7 as const) { return cb; }
+export function dpArrowStr(cb = () => "s") { return cb; }
+export function dpArrowNeg(cb = () => -1) { return cb; }
+export function dpArrowUnion(cb = () => (cond() ? 1 : 2)) { return cb; }
 export function wConstUnion() { const a = cond() ? 1 : "s"; return a; }
 export function wReturnLit() { return "lit"; }
 export function wReturnTwoLits(c: boolean) { if (c) return "a"; return "b"; }
@@ -323,5 +328,23 @@ fn a_returned_enum_object_reads_as_typeof_the_enum() {
         ),
     ]);
     failures.extend(matrix.returns(&[("eReverse", "string")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A default parameter initialized by an expression-bodied arrow declares the
+/// arrow's return widened as a function's own return is: `cb = () => 7` is
+/// `() => number`, a `const` assertion keeps `() => 7`, and a union of
+/// literals is not a unit type, so `() => cond() ? 1 : 2` keeps `() => 1 | 2`
+/// (TypeScript 7.0.2, all four settings alike).
+#[test]
+fn a_default_parameter_arrow_declares_its_widened_return() {
+    let matrix = Matrix::new(WIDENING);
+    let failures = matrix.returns(&[
+        ("dpArrow", "() => number"),
+        ("dpArrowConst", "() => 7"),
+        ("dpArrowStr", "() => string"),
+        ("dpArrowNeg", "() => number"),
+        ("dpArrowUnion", "() => 1 | 2"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

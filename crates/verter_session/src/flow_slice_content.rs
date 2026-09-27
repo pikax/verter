@@ -5628,6 +5628,65 @@ fn parameter_list_shadowed(
 /// forward-reference resolution, so recording them here is what makes
 /// the answer fail CLOSED instead of publishing an unrelated
 /// module-scope symbol's type cleanly and warm.
+/// A default initializer's type when it is an expression-bodied arrow
+/// without a return annotation whose body is a bare literal: the checker
+/// infers that arrow's return from its body and widens the lone fresh
+/// literal there (`getWidenedLiteralLikeTypeForContextualReturnTypeIfNeeded`
+/// with no contextual return), so `cb = () => 7` declares `() => number`.
+/// Every other initializer keeps the type `ty` it was inferred with.
+fn widen_arrow_fresh_literal_return(initializer: &Expression<'_>, ty: TypeExpr) -> TypeExpr {
+    let Expression::ArrowFunctionExpression(arrow) = unwrap_parenthesized(initializer) else {
+        return ty;
+    };
+    let body_is_fresh_literal = arrow.expression
+        && arrow.return_type.is_none()
+        && arrow.body.statements.first().is_some_and(|statement| {
+            matches!(
+                statement,
+                Statement::ExpressionStatement(expression)
+                    if is_fresh_literal_expression(&expression.expression)
+            )
+        });
+    if !body_is_fresh_literal {
+        return ty;
+    }
+    match &ty {
+        TypeExpr::Function(function) => {
+            let mut function = (**function).clone();
+            function.return_type = function.return_type.map(|return_type| {
+                Arc::new(
+                    verter_semantic::analysis::type_eval_build::widen_shallow_literal(
+                        (*return_type).clone(),
+                    ),
+                )
+            });
+            TypeExpr::Function(Arc::new(function))
+        }
+        _ => ty,
+    }
+}
+
+/// Whether `expression` is a bare literal — a FRESH literal type: a string,
+/// numeric, boolean or bigint literal, a negated numeric literal, or a
+/// template without substitutions.
+fn is_fresh_literal_expression(expression: &Expression<'_>) -> bool {
+    match unwrap_parenthesized(expression) {
+        Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::BigIntLiteral(_) => true,
+        Expression::TemplateLiteral(template) => template.expressions.is_empty(),
+        Expression::UnaryExpression(unary) => {
+            unary.operator == UnaryOperator::UnaryNegation
+                && matches!(
+                    unwrap_parenthesized(&unary.argument),
+                    Expression::NumericLiteral(_) | Expression::BigIntLiteral(_)
+                )
+        }
+        _ => false,
+    }
+}
+
 fn lower_params(
     params: &FormalParameters<'_>,
     source: &str,
@@ -5702,11 +5761,14 @@ fn lower_params(
                 ),
                 (None, Some(initializer)) => (
                     scope.gate_param_default(
-                        infer_declaration_expression_type(
+                        widen_arrow_fresh_literal_return(
                             initializer,
-                            source,
-                            TopLevelLiteralPolicy::Widen,
-                        )?,
+                            infer_declaration_expression_type(
+                                initializer,
+                                source,
+                                TopLevelLiteralPolicy::Widen,
+                            )?,
+                        ),
                         initializer,
                         binders,
                         &parameter_bindings,

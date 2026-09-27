@@ -3798,28 +3798,13 @@ fn a_returned_arrows_fresh_literal_widens_at_its_own_return_position() {
     );
 }
 
-/// CANARY — a DEFAULT-PARAMETER arrow's fresh literal widens too.
+/// A DEFAULT-PARAMETER arrow's fresh literal widens too.
 ///
 /// Oracle: `ReturnType<typeof geoDefaultParamArrow>` is `() => number`
-/// for `function geoDefaultParamArrow(cb = () => 7) { return cb; }`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: the default-parameter arrow's fresh literal must widen
-///   left: Literal(Number(7.0))
-///  right: Primitive(Number)
-/// ```
-///
-/// Owning layer: the return-position widening rule. The IDENTICAL arrow
-/// widens correctly when it is RETURNED
-/// (`a_returned_arrows_fresh_literal_widens_at_its_own_return_position`
-/// passes) but not when it is a parameter DEFAULT — so the widening is
-/// applied on the returned-value path only, and the default-initialiser
-/// path that feeds the parameter's inferred type is missed. Admitted
-/// WARM.
+/// for `function geoDefaultParamArrow(cb = () => 7) { return cb; }`: the
+/// parameter declares the arrow's return widened, as the arrow's own return
+/// inference widens it.
 #[test]
-#[ignore = "a default-parameter arrow's fresh literal is not widened: the parameter's inferred type keeps `() => 7` where the language says `() => number`"]
 fn a_default_parameter_arrows_fresh_literal_widens_too() {
     let host = ts_host();
     let ty = value_of(&host, GEO, "geoDefaultParamArrow");
