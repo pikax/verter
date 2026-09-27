@@ -752,3 +752,69 @@ fn a_declared_argument_type_infers_by_its_name() {
     failures.extend(matrix.nullness(&[(Read::Return("b8"), "I | undefined", "I")]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Calls whose argument meets a union parameter holding one type variable.
+const NAKED_UNION_INFERENCE: &str = r##"
+declare function g<T>(a: T | string, b: T): T;
+export function u1(s: string) { return g(s, 1); }
+export function u2(s: "a" | "b") { return g(s, 1); }
+export function u5(s: "a" | "b") { return g(s, s); }
+export function u6(s: string) { return g(s, s); }
+declare function h<T>(a: T | string): T;
+export function h1(s: "a" | "b") { return h(s); }
+export function h2(s: string | number) { return h(s); }
+export function h3(s: string) { return h(s); }
+declare class Box<U> { put<T>(x: T, y: U | string): T; put(x: unknown, y: unknown): "second"; }
+export function outer4<U>(b: Box<U>) { const v = "a" as "a" | "b"; return b.put(1, v); }
+declare class Box2<U> { put<T>(x: T, y: U | string): T; }
+export function outer5<U>(b: Box2<U>) { const v = "a" as "a" | "b"; return b.put(1, v); }
+"##;
+
+/// An argument every member of which a fixed member of the union parameter
+/// matches (`string` against `T | string`, `"a" | "b"` by its base) infers
+/// the parameter's type variable only below a direct inference, so `b: T`
+/// decides it (`number`), and alone it still does (`h1`, `h3`); the
+/// unmatched members infer it directly (`h2`). A type parameter of an
+/// enclosing declaration is no inference target of the call: `U | string`
+/// takes `"a" | "b"` through its `string` member.
+/// Measured on TypeScript 7.0.2, alike under all four settings.
+#[test]
+fn an_argument_a_fixed_union_member_matches_infers_below_a_direct_inference() {
+    let matrix = Matrix::new(NAKED_UNION_INFERENCE);
+    let failures = matrix.returns(&[
+        ("u1", "number"),
+        ("u2", "number"),
+        ("u5", "\"a\" | \"b\""),
+        ("u6", "string"),
+        ("h1", "\"a\" | \"b\""),
+        ("h2", "number"),
+        ("h3", "string"),
+        ("outer4", "number"),
+        ("outer5", "number"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Declared returns whose union holds an operator the instantiation closes.
+const NULLABLE_INSTANTIATED_OPERATORS: &str = r##"
+declare function g<T>(x: T): keyof { a: 1 } | T;
+export function r1() { return g<undefined>(undefined); }
+export function r2() { return g<null>(null); }
+declare function h<T>(x: T): { v: { a: 1 }["a"] | T };
+export function r3() { return h<null>(null); }
+"##;
+
+/// A union rebuilt around a reduced operator keeps the settings' `null` /
+/// `undefined` algebra: `keyof { a: 1 } | T` at `T := undefined` is `"a" |
+/// undefined` with `strictNullChecks` and `"a"` without it. Measured on
+/// TypeScript 7.0.2.
+#[test]
+fn a_union_rebuilt_around_a_reduced_operator_keeps_the_nullability_algebra() {
+    let matrix = Matrix::new(NULLABLE_INSTANTIATED_OPERATORS);
+    let failures = matrix.nullness(&[
+        (Read::Return("r1"), "\"a\" | undefined", "\"a\""),
+        (Read::Return("r2"), "\"a\" | null", "\"a\""),
+        (Read::Return("r3"), "{ v: 1 | null; }", "{ v: 1; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -9,18 +9,19 @@ use super::dispatch_txn::{InferenceInfoSetup, InferenceSessionSetup, RelationSte
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     ConstParamPolicy, ContextualInferenceMode, InferenceCandidatePriority, InferencePassKind,
-    NoInferMask, PrimitiveKind, SemanticNodeData, SemanticNodeId, SignatureKind,
-    SignatureReturnCarrier, TypeParamDecl, VariancePhase,
+    NoInferMask, SemanticNodeData, SemanticNodeId, SignatureKind, SignatureReturnCarrier,
+    TypeParamDecl, VariancePhase,
 };
 
 impl ProjectSemanticDispatch<'_> {
     /// `source` instantiated in the context of `target` when `source` is a
     /// generic signature `target` does not share its type parameters with:
-    /// each type parameter takes the combined candidates the target's
-    /// parameter types give the source's parameter types, else those the
-    /// target's return gives the source's return, else `unknown`, and a
-    /// binding its constraint does not accept is the constraint. `None`
-    /// when `source` is no such signature or an inference does not settle.
+    /// each type parameter fixes, as a call's does, from the candidates the
+    /// target's parameter types give the source's parameter types, else
+    /// those the target's return gives the source's return, else its
+    /// default, else `unknown`, and an inference its constraint does not
+    /// accept is the constraint. `None` when `source` is no such signature
+    /// or an inference does not settle.
     pub(super) fn instantiate_signature_in_context_of(
         &self,
         source: SemanticNodeId,
@@ -58,47 +59,66 @@ impl ProjectSemanticDispatch<'_> {
             .iter()
             .map(|&(source_param, target_param)| (target_param, source_param))
             .collect();
-        let from_params = self.infer_signature_bindings(&source_tps, &pairs)?;
-        let mut bindings: Vec<Option<SemanticNodeId>> = from_params;
-        if bindings.iter().any(Option::is_none) {
-            let from_return =
-                self.infer_signature_bindings(&source_tps, &[(target_return, source_return)])?;
-            for (binding, returned) in bindings.iter_mut().zip(from_return) {
-                if binding.is_none() {
-                    *binding = returned;
+        // Candidates from the parameters first; a type parameter they leave
+        // uninferred takes the return's (the checker's lower-priority
+        // return-type inference).
+        let mut inputs = self.signature_inference_inputs(&source_tps, &pairs)?;
+        if inputs.iter().any(|input| input.candidates.is_empty()) {
+            let returned =
+                self.signature_inference_inputs(&source_tps, &[(target_return, source_return)])?;
+            for (input, returned) in inputs.iter_mut().zip(returned) {
+                if input.candidates.is_empty() {
+                    input.candidates = returned.candidates;
+                    input.variance = returned.variance;
                 }
             }
         }
-        let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
-        let mut instantiated = source;
-        let mut substituted: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
-        for (decl, binding) in source_tps.iter().zip(bindings) {
-            let mut bound = binding.unwrap_or(unknown);
-            if let Some(constraint) = decl.constraint {
-                let constraint = substituted.iter().fold(constraint, |node, (param, arg)| {
-                    self.substitute_semantic_type_param(node, *param, *arg)
-                });
-                match self.execute_relate_pair(bound, constraint) {
-                    RelationStep::Assignable { .. } => {}
-                    RelationStep::NotAssignable => bound = constraint,
-                    _ => return None,
+        // The one inference fixation a call takes: the common supertype of
+        // the candidates, widened, else the default, else `unknown`.
+        let (fixed, uninferred) = self
+            .fix_inference_inputs(inputs, &source_tps, |this, from, to| {
+                Ok(settled_relation(this.execute_relate_pair(from, to)))
+            })
+            .ok()?;
+        let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(
+            fixed
+                .iter()
+                .map(|binding| (binding.param, binding.bound))
+                .collect(),
+        );
+        // An inference its constraint refuses is the constraint
+        // (`getInferredType`); an uninferred parameter's fixation already
+        // settled its default against the constraint.
+        let mut clamped = Vec::with_capacity(fixed.len());
+        for (position, (decl, binding)) in source_tps.iter().zip(&fixed).enumerate() {
+            let mut bound = binding.bound;
+            if let Some(constraint) = decl.constraint.filter(|_| !uninferred.contains(&position)) {
+                let constraint = self.substitute_canonical(constraint, &substitution);
+                if !settled_relation(self.execute_relate_pair(bound, constraint))? {
+                    bound = constraint;
                 }
             }
-            substituted.push((decl.param, bound));
-            instantiated = self.substitute_semantic_type_param(instantiated, decl.param, bound);
+            clamped.push((decl.param, bound));
         }
-        Some(self.signature_without_type_parameters(instantiated))
+        // The signature sheds its own clause before its positions take the
+        // bindings: substituted through the clause, a parameter whose bound
+        // names an earlier one would re-intern as another binder, and its
+        // occurrences would no longer take their own binding.
+        let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(clamped);
+        Some(self.substitute_canonical(
+            self.signature_without_type_parameters(source),
+            &substitution,
+        ))
     }
 
-    /// Each of `type_parameters`' combined candidates from relating every
-    /// `(from, into)` pair under one collecting session, `None` for a type
-    /// parameter no pair infers; `None` overall when a relation does not
-    /// settle.
-    fn infer_signature_bindings(
+    /// The fixation inputs of `type_parameters` after relating every
+    /// `(from, into)` pair under one collecting session; `None` when a
+    /// relation does not settle.
+    fn signature_inference_inputs(
         &self,
         type_parameters: &[TypeParamDecl],
         pairs: &[(SemanticNodeId, SemanticNodeId)],
-    ) -> Option<Vec<Option<SemanticNodeId>>> {
+    ) -> Option<Vec<super::dispatch_txn::FixationInput>> {
         let infer_params: Arc<[InferenceInfoSetup]> = type_parameters
             .iter()
             .map(|decl| {
@@ -123,16 +143,9 @@ impl ProjectSemanticDispatch<'_> {
             .dispatch_txn
             .borrow_mut()
             .push_collecting_session(setup, None);
-        let mut settled = true;
-        for &(from, into) in pairs {
-            match self.execute_relate_pair(from, into) {
-                RelationStep::Assignable { .. } | RelationStep::NotAssignable => {}
-                _ => {
-                    settled = false;
-                    break;
-                }
-            }
-        }
+        let settled = pairs
+            .iter()
+            .all(|&(from, into)| settled_relation(self.execute_relate_pair(from, into)).is_some());
         let inputs = {
             let txn = self.dispatch_txn.borrow();
             txn.relation
@@ -154,16 +167,7 @@ impl ProjectSemanticDispatch<'_> {
         if !settled {
             return None;
         }
-        Some(
-            inputs?
-                .into_iter()
-                .map(|input| {
-                    (!input.candidates.is_empty()).then(|| {
-                        self.relation_combine_candidates(&input.candidates, input.variance)
-                    })
-                })
-                .collect(),
-        )
+        inputs
     }
 
     /// `signature` declaring no type parameters: an instantiated generic
@@ -208,5 +212,14 @@ impl ProjectSemanticDispatch<'_> {
                 is_abstract: *is_abstract,
             },
         )
+    }
+}
+
+/// A decided relation's verdict; `None` for one that does not settle.
+fn settled_relation(step: RelationStep) -> Option<bool> {
+    match step {
+        RelationStep::Assignable { .. } => Some(true),
+        RelationStep::NotAssignable => Some(false),
+        _ => None,
     }
 }

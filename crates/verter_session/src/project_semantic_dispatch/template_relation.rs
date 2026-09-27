@@ -57,6 +57,41 @@ impl ProjectSemanticDispatch<'_> {
         (!undecided).then_some(true)
     }
 
+    /// `target`, a template literal pattern holding `infer` placeholders,
+    /// with each placeholder read as `string` — the widest slice one
+    /// takes. `None` when `target` holds no `infer` placeholder.
+    pub(super) fn template_infer_pattern_over_string(
+        &self,
+        target: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let (quasis, expressions) = match graph.node_data(target).as_deref() {
+            Some(SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            }) => (quasis.clone(), expressions.clone()),
+            _ => return None,
+        };
+        let is_infer = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Infer { .. })
+            )
+        };
+        if !expressions.iter().any(|hole| is_infer(*hole)) {
+            return None;
+        }
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let holes: Vec<SemanticNodeId> = expressions
+            .iter()
+            .map(|hole| if is_infer(*hole) { string } else { *hole })
+            .collect();
+        Some(graph.intern_node(SemanticNodeData::TemplateLiteral {
+            quasis,
+            expressions: holes.into(),
+        }))
+    }
+
     /// The slice a string literal or settled template `source` gives each
     /// hole of `target`, a template literal pattern holding `infer`
     /// placeholders (`inferTypesFromTemplateLiteralType`), paired with its

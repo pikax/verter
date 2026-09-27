@@ -246,6 +246,54 @@ fn a_const_spread_copies_its_properties_readonly() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Spreads of sources declaring methods and accessors.
+const METHOD_SPREADS: &str = r##"
+declare const o: { a: 1; m(): void };
+declare const q: { get g(): 1; readonly h: 2 };
+export function sMethodConst() { return { ...o } as const; }
+export function sMethod() { return { ...o }; }
+export function sAccessorConst() { return { ...q } as const; }
+const s = { get g() { return 1 as const; }, h: 2 as const };
+export function sGetterConst() { return { ...s } as const; }
+"##;
+
+/// A const-context spread copies a method as a readonly property of its
+/// function type, `{ readonly a: 1; readonly m: () => void; }`. Measured
+/// on TypeScript 7.0.2, alike under all four settings.
+#[test]
+fn a_const_spread_copies_a_method_as_a_readonly_property() {
+    let matrix = Matrix::new(METHOD_SPREADS);
+    let failures =
+        matrix.returns(&[("sMethodConst", "{ readonly a: 1; readonly m: () => void; }")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A plain spread keeps a method a method, `{ a: 1; m(): void; }`
+/// (measured on TypeScript 7.0.2, alike under all four settings).
+///
+/// What the lane gives: `{ a: 1; m: () => void; }`, clean.
+#[test]
+#[ignore = "a spread keeps a copied method a method"]
+fn wrong_clean_a_spread_keeps_a_method() {
+    let matrix = Matrix::new(METHOD_SPREADS);
+    let failures = matrix.returns(&[("sMethod", "{ a: 1; m(): void; }")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A const-context spread copies a getter as a readonly property of its
+/// type, `{ readonly g: 1; readonly h: 2; }` (measured on TypeScript 7.0.2,
+/// alike under all four settings).
+///
+/// What the lane gives: `{ readonly g: () => 1; readonly h: 2; }`, clean: a
+/// type literal's `get g(): 1` reaches the surface as a method.
+#[test]
+#[ignore = "a type literal's accessor reaches the surface as an accessor"]
+fn wrong_clean_a_const_spread_copies_an_accessor_as_a_readonly_property() {
+    let matrix = Matrix::new(METHOD_SPREADS);
+    let failures = matrix.returns(&[("sAccessorConst", "{ readonly g: 1; readonly h: 2; }")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Numeric, string, const, ambient and single-member enums.
 const ENUMS: &str = r##"
 enum Color { Red, Green = 5, Blue }
@@ -364,4 +412,25 @@ fn a_default_parameter_arrow_declares_its_widened_return() {
         ("dpArrowUnion", "() => 1 | 2"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A const-context spread of an object literal's getter, whose copy the
+/// checker makes a readonly property of the getter's type (`{ readonly g:
+/// 1; readonly h: 2; }`, measured on TypeScript 7.0.2, alike under all four
+/// settings), degrades rather than copying the accessor's signature.
+#[test]
+fn a_const_spread_of_an_accessor_is_never_read_as_its_signature() {
+    let matrix = Matrix::new(METHOD_SPREADS);
+    let rows = [(
+        Read::Return("sGetterConst"),
+        vec!["{ readonly g: 1; readonly h: 2; }"; 4],
+    )];
+    let wrong: Vec<String> = matrix
+        .verdicts(&rows)
+        .into_iter()
+        .flatten()
+        .filter(|verdict| !verdict.matched && verdict.class != "GAP")
+        .map(|verdict| verdict.lane)
+        .collect();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
