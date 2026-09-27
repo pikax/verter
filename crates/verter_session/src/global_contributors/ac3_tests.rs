@@ -289,6 +289,10 @@ fn source_has_ambient_contribution_matches_declare_module_and_global() {
     assert!(!source_has_ambient_contribution(
         "// declare module \"nope\" { }\nexport const x = 1;\n"
     ));
+    // A byte-order mark opens no token.
+    assert!(source_has_ambient_contribution(
+        "\u{FEFF}declare module \"m\" { const v: 1; }\n"
+    ));
 }
 
 #[test]
@@ -319,6 +323,16 @@ fn ordinary_script_file_scope_globals_index_before_population_lookup() {
         // A `var` in a nested block hoists to the top level.
         "if (ok) { var nested = 1; }\n",
         "for (var i = 0; i < 1; i++) {}\n",
+        // Every opening of a file-scope declaration keeps a script in: a
+        // decorator, a byte-order mark, a comment before `declare`, a type
+        // alias and the legacy `module` keyword.
+        "@dec class C { x = 1 }\n",
+        "@dec()\nabstract class A {}\n",
+        "\u{FEFF}class Bom {}\n",
+        "/* c */ declare class Dc {}\n",
+        "type TT = { q: 1 };\n",
+        "declare type DT = { r: 2 };\n",
+        "module Mo { export type MT = 3; }\n",
     ] {
         assert!(
             source_may_have_file_scope_global_contribution(source),
@@ -330,6 +344,7 @@ fn ordinary_script_file_scope_globals_index_before_population_lookup() {
         "constant(1);\n",
         "x.var = 1;\n",
         "export {};\nvar sv = 1;\n",
+        "declare module \"m\" { const v: 1; }\n",
     ] {
         assert!(
             !source_may_have_file_scope_global_contribution(source),

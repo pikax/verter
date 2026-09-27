@@ -6481,7 +6481,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ContributorOrigin::DeclareGlobal => {
                             entry.module_kind == FileModuleKind::Module
                         }
-                        ContributorOrigin::FileScopeInterface => true,
+                        ContributorOrigin::FileScopeInterface
+                        | ContributorOrigin::FileScopeType => true,
                         ContributorOrigin::FileScopeNamespace
                         | ContributorOrigin::FileScopeValue
                         | ContributorOrigin::ModuleAugmentation => false,
@@ -6580,6 +6581,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ContributorOrigin::FileScopeValue => true,
                     ContributorOrigin::FileScopeInterface
                     | ContributorOrigin::FileScopeNamespace
+                    | ContributorOrigin::FileScopeType
                     | ContributorOrigin::ModuleAugmentation => false,
                 };
             if !declares {
