@@ -1364,3 +1364,55 @@ fn ten_thousand_shared_levels_encode_linearly_on_a_one_mebibyte_thread() {
         "{DEPTH} shared levels key in {bytes} bytes"
     );
 }
+
+/// `(x: <param>) => 0` with no authored occurrence, whose parameter is or is
+/// not written as a literal type.
+fn literal_param_signature(
+    graph: &SemanticGraphStore,
+    param: SemanticNodeId,
+    declared_literal: bool,
+) -> SemanticNodeId {
+    use crate::semantic_query::{FunctionParam, SignatureKind, SignatureReturnCarrier};
+    let zero = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(0.0)));
+    graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from([FunctionParam {
+            declared_literal,
+            ..FunctionParam::synthetic(Some(Arc::from("x")), param, false, false)
+        }]),
+        return_type: zero,
+        type_parameters: Arc::from(Vec::new()),
+        occurrence: None,
+        return_carrier: SignatureReturnCarrier::Declared(zero),
+        signature_span: None,
+        return_type_span: None,
+        predicate: None,
+        is_abstract: false,
+    })
+}
+
+/// A parameter written as a literal type makes a signature specialized
+/// (overload priority reads it), so `((x: "a") => 0) | ((x: T) => 0)` with
+/// `T = "a"` keeps both signatures whichever arrives first.
+#[test]
+fn union_reducer_keeps_a_literal_specialized_signature_apart() {
+    let graph = SemanticGraphStore::new();
+    let a = lit_str(&graph, "a");
+    let written_literal = literal_param_signature(&graph, a, true);
+    let instantiated = literal_param_signature(&graph, a, false);
+    assert_eq!(
+        structural_identity(&graph, written_literal, instantiated),
+        StructuralIdentity::Distinct,
+        "the comparator tells a literal-declared parameter apart"
+    );
+    for (first, second) in [
+        (written_literal, instantiated),
+        (instantiated, written_literal),
+    ] {
+        assert_eq!(
+            reduced_union_arms(&graph, first, second),
+            2,
+            "both signatures survive in either input order"
+        );
+    }
+}
