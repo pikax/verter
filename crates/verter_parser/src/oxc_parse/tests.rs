@@ -1597,7 +1597,315 @@ fn a_parse_without_its_stack_returns_the_typed_diagnostic() {
         super::StackUnavailable { needed: 1 << 40 },
     );
     assert!(unparsed.program.body.is_empty());
+    assert!(unparsed.fatal_error, "the program is not the source's");
     assert_eq!(unparsed.diagnostics.len(), 1);
     let diagnostic = unparsed.diagnostics.errors().next().expect("one error");
     assert!(super::is_stack_unavailable(diagnostic), "{diagnostic:?}");
+}
+
+/// Run `work` on a fresh 1 MiB thread, its reservation count and fault
+/// injection its own.
+fn on_a_small_thread<R: Send + 'static>(work: impl FnOnce() -> R + Send + 'static) -> R {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(work)
+        .expect("spawn the thread")
+        .join()
+        .expect("the work returns")
+}
+
+/// A source 10,000 parentheses deep: its parse and walks need a region.
+fn deep_source() -> String {
+    format!(
+        "export const v = {}1{};",
+        "(".repeat(10_000),
+        ")".repeat(10_000)
+    )
+}
+
+/// A parse whose region cannot be reserved returns the typed diagnostic in
+/// place of the program, marked fatal, and the thread goes on: the same
+/// parse retried, and a shallow one, parse.
+#[test]
+fn a_parse_whose_region_cannot_be_reserved_is_typed_and_a_retry_parses() {
+    let (refused, retried, shallow) = on_a_small_thread(|| {
+        let source = deep_source();
+        let allocator = Allocator::default();
+        super::faults::fail_next_reservations(1);
+        let refused = Parser::new(&allocator, &source, SourceType::ts()).parse();
+        let refused = (
+            refused.fatal_error,
+            refused.program.body.len(),
+            refused
+                .diagnostics
+                .errors()
+                .all(super::is_stack_unavailable),
+            refused.diagnostics.len(),
+        );
+        let retried = Parser::new(&allocator, &source, SourceType::ts()).parse();
+        let shallow = Parser::new(&allocator, "export const v = (1);", SourceType::ts()).parse();
+        (
+            refused,
+            (retried.program.body.len(), retried.diagnostics.len()),
+            (shallow.program.body.len(), shallow.diagnostics.len()),
+        )
+    });
+    assert_eq!(refused, (true, 0, true, 1));
+    assert_eq!(retried, (1, 0));
+    assert_eq!(shallow, (1, 0));
+}
+
+/// A walk-stack lease whose region cannot be reserved is the operation's
+/// typed failure, and the operation's walks never start; the lease
+/// retried runs them.
+#[test]
+fn a_walk_stack_lease_that_cannot_be_reserved_starts_no_walk() {
+    use oxc_allocator::CloneIn;
+    let (refused, started, retried) = on_a_small_thread(|| {
+        let source = deep_source();
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
+        let program = &parsed.program;
+        let clones = Allocator::default();
+        let started = std::cell::Cell::new(false);
+        super::faults::fail_next_reservations(1);
+        let refused = super::with_program_walk_stack_lease(program, || {
+            started.set(true);
+            super::with_program_stack(program, || program.clone_in(&clones).body.len())
+        });
+        let retried = super::with_program_walk_stack_lease(program, || {
+            super::with_program_stack(program, || program.clone_in(&clones).body.len())
+        });
+        (refused.is_err(), started.get(), retried)
+    });
+    assert!(refused, "the lease is refused");
+    assert!(!started, "no walk starts under a refused lease");
+    assert_eq!(retried, Ok(1));
+}
+
+/// Every walk inside a walk-stack lease, of the whole program, of its
+/// statement, by its text, and nested under another, runs on the lease's
+/// region: the operation reserves once. Without the lease each reserves a
+/// region of its own.
+#[test]
+fn walks_inside_a_walk_stack_lease_reserve_nothing_more() {
+    use oxc_allocator::CloneIn;
+    use oxc_ast_visit::Visit;
+    use oxc_span::GetSpan;
+    #[derive(Default)]
+    struct Count(usize);
+    impl<'a> Visit<'a> for Count {
+        fn enter_node(&mut self, _kind: oxc_ast::AstKind<'a>) {
+            self.0 += 1;
+        }
+    }
+    let walks = |leased: bool| {
+        on_a_small_thread(move || {
+            let source = deep_source();
+            let allocator = Allocator::default();
+            let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
+            let program = &parsed.program;
+            let statement = &program.body[0];
+            let clones = Allocator::default();
+            let work = || {
+                let cloned =
+                    super::with_program_stack(program, || program.clone_in(&clones).body.len());
+                let mut whole = Count::default();
+                super::with_program_stack(program, || whole.visit_program(program));
+                let mut nested = Count::default();
+                super::with_node_stack(program, statement.span(), || {
+                    super::with_span_stack(&source, statement.span(), || {
+                        nested.visit_statement(statement)
+                    })
+                });
+                let node_walks = super::ProgramWalkStack::new(program);
+                let mut node = Count::default();
+                node_walks.with_node_stack(statement.span(), || node.visit_statement(statement));
+                (cloned, whole.0 > 10_000, nested.0 == node.0)
+            };
+            super::faults::take_reservations();
+            let walked = if leased {
+                super::with_program_walk_stack_lease(program, work).expect("the lease")
+            } else {
+                work()
+            };
+            (walked, super::faults::take_reservations())
+        })
+    };
+    assert_eq!(walks(true), ((1, true, true), 1));
+    let (walked, reserved) = walks(false);
+    assert_eq!(walked, (1, true, true));
+    assert!(reserved > 1, "{reserved}");
+}
+
+/// A walk that panics on the lease's region, and an operation that panics
+/// out of its lease, leave the thread on its own stack with its enclosing
+/// lease: the next walks run as before, and a lease ended by a panic
+/// covers nothing after it.
+#[test]
+fn a_panic_on_a_lease_region_restores_the_enclosing_stack_and_lease() {
+    use oxc_allocator::CloneIn;
+    let outcome = on_a_small_thread(|| {
+        let source = deep_source();
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
+        let program = &parsed.program;
+        let clones = Allocator::default();
+        let before = super::stack::remaining();
+        let inside = super::with_program_walk_stack_lease(program, || {
+            let lease_before = super::stack::remaining();
+            let walk = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::with_program_stack(program, || -> usize { panic!("the walk fails") })
+            }));
+            let restored = super::stack::remaining() == lease_before;
+            super::faults::take_reservations();
+            let again = super::with_program_stack(program, || program.clone_in(&clones).body.len());
+            (
+                walk.is_err(),
+                restored,
+                again,
+                super::faults::take_reservations(),
+            )
+        })
+        .expect("the lease");
+        let escaped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::with_program_walk_stack_lease(program, || -> usize {
+                panic!("the operation fails")
+            })
+        }));
+        let needed = super::parse_stack_bytes(&source, SourceType::ts());
+        (
+            inside,
+            escaped.is_err(),
+            super::stack::lease_covers(needed),
+            super::stack::remaining() == before,
+        )
+    });
+    assert_eq!(outcome, ((true, true, 1, 0), true, false, true));
+}
+
+/// The V8 engine-stack profile parses a source whose scan bound is its
+/// nesting and refuses one level more, typed, before oxc runs.
+#[test]
+fn the_engine_stack_profile_admits_its_nesting_and_refuses_one_more() {
+    let profile = super::V8_DEFAULT_STACK_PROFILE;
+    let limit = profile.nesting();
+    let nest = |depth: usize| format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+    assert_eq!(ts(&nest(limit)), limit as u32);
+    let parsed = |depth: usize| {
+        let source = nest(depth);
+        on_a_small_thread(move || {
+            let ran = std::cell::Cell::new(false);
+            let result =
+                super::parse_with_stack_under(Some(profile), &source, SourceType::ts(), || {
+                    ran.set(true)
+                });
+            (result.is_ok(), ran.get())
+        })
+    };
+    assert_eq!(parsed(limit - 1), (true, true));
+    assert_eq!(parsed(limit), (true, true));
+    assert_eq!(parsed(limit + 1), (false, false));
+    assert_eq!(parsed(limit * 100), (false, false));
+}
+
+/// A host whose stack grows carries no engine-stack profile: it refuses no
+/// depth.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_host_whose_stack_grows_refuses_no_depth() {
+    assert_eq!(super::HOST_ENGINE_STACK_PROFILE, None);
+    let parsed = on_a_small_thread(|| {
+        let source = format!("{}1{}", "[".repeat(200_000), "]".repeat(200_000));
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
+        (parsed.program.body.len(), parsed.diagnostics.len())
+    });
+    assert_eq!(parsed, (1, 0));
+}
+
+/// The V8 engine-stack profile was measured against the `oxc_parser`
+/// locked for the workspace: a different oxc spends a different stack per
+/// level, and the profile is re-measured
+/// (`docs/evidence/signature-kernel/oxc-deep-parse.md`, "WebAssembly")
+/// before its version moves.
+#[test]
+fn the_engine_stack_profile_was_measured_against_the_locked_oxc() {
+    let lock = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
+    let lock = std::fs::read_to_string(lock).expect("read the workspace's Cargo.lock");
+    let locked = lock
+        .split("[[package]]")
+        .find(|package| package.contains("\nname = \"oxc_parser\"\n"))
+        .and_then(|package| {
+            package
+                .lines()
+                .find_map(|line| line.strip_prefix("version = \""))
+                .map(|version| version.trim_end_matches('"').to_string())
+        })
+        .expect("oxc_parser is locked");
+    assert_eq!(
+        locked,
+        super::V8_DEFAULT_STACK_PROFILE.oxc_version,
+        "oxc_parser moved to {locked}: re-measure the engine-stack profile's per-level cost \
+         (`oxc_deep_parse_wasi.mjs` and the wasm bisection in oxc-deep-parse.md) and update \
+         `V8_DEFAULT_STACK_PROFILE`"
+    );
+}
+
+/// Run `work` under `bytes` more of stack in use, spent a frame at a time.
+fn with_stack_spent<R>(bytes: usize, work: impl FnOnce() -> R) -> R {
+    fn spend(bytes: usize, work: &mut dyn FnMut()) {
+        let frame = [0u8; 64 * 1024];
+        std::hint::black_box(&frame);
+        if bytes <= frame.len() {
+            work();
+        } else {
+            spend(bytes - frame.len(), work);
+        }
+    }
+    let mut work = Some(work);
+    let mut result = None;
+    spend(bytes, &mut || {
+        result = Some((work.take().expect("runs once"))())
+    });
+    result.expect("the work ran")
+}
+
+/// A walk the lease covers, reached deep on a region reserved past the
+/// lease while work on the lease's region waits under it, runs on a region
+/// of its own: the lease's region is never re-entered under its own
+/// suspended work.
+#[test]
+fn a_covered_walk_under_a_region_past_the_lease_does_not_reenter_the_lease() {
+    use oxc_allocator::CloneIn;
+    let (walked, reserved) = on_a_small_thread(|| {
+        let leased_source = deep_source();
+        let deeper_source = format!(
+            "export const w = {}1{};",
+            "(".repeat(11_000),
+            ")".repeat(11_000)
+        );
+        let allocator = Allocator::default();
+        let leased = Parser::new(&allocator, &leased_source, SourceType::ts()).parse();
+        let deeper = Parser::new(&allocator, &deeper_source, SourceType::ts()).parse();
+        let (leased, deeper) = (&leased.program, &deeper.program);
+        let clones = Allocator::default();
+        super::faults::take_reservations();
+        let walked = super::with_program_walk_stack_lease(leased, || {
+            // On the lease's region, a walk of a deeper program reserves a
+            // region of its own; deep on that one, a walk of the leased
+            // program has less left than it needs.
+            super::with_program_stack(leased, || {
+                super::with_program_stack(deeper, || {
+                    with_stack_spent(24 << 20, || {
+                        super::with_program_stack(leased, || leased.clone_in(&clones).body.len())
+                    }) + deeper.clone_in(&clones).body.len()
+                })
+            })
+        })
+        .expect("the lease");
+        (walked, super::faults::take_reservations())
+    });
+    assert_eq!(walked, 2);
+    assert_eq!(reserved, 3, "the lease, the deeper walk, the walk under it");
 }
