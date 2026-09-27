@@ -7,8 +7,8 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, TSLiteral, TSType};
-use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
+use verter_parser::oxc_parse::Parser;
 
 use crate::framework_common::projection_plan::{
     AdmittedExpressionId, ComponentUseId, PlanSnapshotId, ProjectionPlan,
