@@ -678,15 +678,44 @@ fn namespaces_nested_10000_deep_answer_on_production_stacks() {
     );
 }
 
+fn label_chain(depth: usize) -> String {
+    let labels: String = (0..depth).map(|label| format!("l{label}: ")).collect();
+    format!("export function pf() {{ {labels}return 1; }}\n")
+}
+
+fn else_if_chain(length: usize) -> String {
+    format!(
+        "export function pf(b: boolean) {{ {}return 2; }}\n",
+        "if (b) return 1; else ".repeat(length)
+    )
+}
+
 /// A statement wrapped in 10,000 labels. TypeScript 7.0.2: `number`, under
 /// every setting.
 #[test]
-#[ignore = "a label chain's parse snapshot is copied a native level per label beyond the parse containment"]
+#[ignore = "the flow-slice plan budget admits no demand slice of 10,000 nested labels"]
 fn label_chains_10000_deep_answer_on_production_stacks() {
-    let labels: String = (0..DEPTH).map(|label| format!("l{label}: ")).collect();
-    let source = format!("export function pf() {{ {labels}return 1; }}\n");
     assert_eq!(
-        mismatches_on_a_small_stack(source, RETURN, "number"),
+        mismatches_on_a_small_stack(label_chain(DEPTH), RETURN, "number"),
+        Vec::<String>::new()
+    );
+}
+
+/// A statement wrapped in 10,000 labels returns on the production stacks:
+/// the parse, and the copy of its program the binding index makes, run on
+/// the stack the scan bounds (a braceless label nests its statement a level
+/// under it), and the return is the plan's typed budget failure.
+#[test]
+fn label_chains_10000_deep_return_on_production_stacks() {
+    assert!(!returns_on_a_small_stack(label_chain(DEPTH)));
+}
+
+/// A statement wrapped in 4,000 labels, which the flow-slice plan budget
+/// admits. TypeScript 7.0.2: `number`, under every setting.
+#[test]
+fn label_chains_4000_deep_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(label_chain(4_000), RETURN, "number"),
         Vec::<String>::new()
     );
 }
@@ -694,14 +723,30 @@ fn label_chains_10000_deep_answer_on_production_stacks() {
 /// An `else if` chain 10,000 long. TypeScript 7.0.2: `1 | 2` (reporting
 /// TS2563, body too large for control-flow analysis), under every setting.
 #[test]
-#[ignore = "an else-if chain's parse snapshot is copied a native level per arm beyond the parse containment"]
+#[ignore = "the flow-slice plan's return-site budget admits no 10,001 return sites"]
 fn else_if_chains_10000_long_answer_on_production_stacks() {
-    let source = format!(
-        "export function pf(b: boolean) {{ {}return 2; }}\n",
-        "if (b) return 1; else ".repeat(DEPTH)
-    );
     assert_eq!(
-        mismatches_on_a_small_stack(source, RETURN, "1 | 2"),
+        mismatches_on_a_small_stack(else_if_chain(DEPTH), RETURN, "1 | 2"),
+        Vec::<String>::new()
+    );
+}
+
+/// An `else if` chain 10,000 long returns on the production stacks: the
+/// parse, and the copy of its program the binding index makes, run on the
+/// stack the scan bounds (an `else` continues its `if` past the `;` ending
+/// the `if`'s body), and the return is the plan's typed budget failure.
+#[test]
+fn else_if_chains_10000_long_return_on_production_stacks() {
+    assert!(!returns_on_a_small_stack(else_if_chain(DEPTH)));
+}
+
+/// An `else if` chain 250 long, whose return sites the flow-slice plan's
+/// return-site budget admits. TypeScript 7.0.2: `1 | 2`, under every
+/// setting.
+#[test]
+fn else_if_chains_250_long_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(else_if_chain(250), RETURN, "1 | 2"),
         Vec::<String>::new()
     );
 }
