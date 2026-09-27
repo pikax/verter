@@ -739,3 +739,39 @@ export function s1() { return S1.s; }
         }
     }
 }
+
+/// Receivers whose class or interface inherits the fresh-declared member.
+const READONLY_HERITAGE: &str = "\
+class K { readonly r = 1; }
+class K2 extends K { }
+class K3 extends K { override readonly r: 1 = 1; }
+class K4 extends K2 { }
+interface IK extends K { }
+interface IK2 extends K { readonly r: 1 }
+export function inh(k: K2) { return k.r; }
+export function inh2(k: K4) { return k.r; }
+export function over(k: K3) { return k.r; }
+export function iface(k: IK) { return k.r; }
+export function iface2(k: IK2) { return k.r; }
+";
+
+/// The member's declaration decides its freshness: a receiver that inherits
+/// the fresh-declared `readonly r = 1` from a base class or through an
+/// interface's `extends` widens its read as the base's own receiver does,
+/// and a nearer declaration of the member (an annotated override) declares
+/// the regular literal. Measured on TypeScript 7.0.2, alike on the four
+/// `strictNullChecks` × `noImplicitAny` settings.
+#[test]
+fn a_readonly_literal_member_widens_through_the_declaration_it_inherits() {
+    let failures = mismatches(
+        READONLY_HERITAGE,
+        &[
+            ("ReturnType<typeof inh>", "number"),
+            ("ReturnType<typeof inh2>", "number"),
+            ("ReturnType<typeof over>", "1"),
+            ("ReturnType<typeof iface>", "number"),
+            ("ReturnType<typeof iface2>", "1"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

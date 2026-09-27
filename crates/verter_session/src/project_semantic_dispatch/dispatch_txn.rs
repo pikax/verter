@@ -2564,6 +2564,11 @@ impl InferenceSession {
         self.fresh_literal_deposits.contains(&(param_node, literal))
     }
 
+    /// Whether this session infers `param_node`.
+    pub(crate) fn infers(&self, param_node: SemanticNodeId) -> bool {
+        self.infos.iter().any(|info| info.param_node == param_node)
+    }
+
     pub(crate) fn call_const_policy(&self, param_node: SemanticNodeId) -> Option<ConstParamPolicy> {
         (self.context_key().pass_kind == InferencePassKind::CallApplicability)
             .then(|| {

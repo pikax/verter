@@ -7164,9 +7164,12 @@ fn slice_expr_reads_frame(expr: &crate::flow_slice_content::SliceExpr) -> bool {
         }),
         SliceExpr::Union { arms, .. } => arms.iter().any(slice_expr_reads_frame),
         SliceExpr::ConstTemplate { holes, .. } => holes.iter().any(slice_expr_reads_frame),
-        SliceExpr::Satisfies { operand, .. }
-        | SliceExpr::Void { operand, .. }
-        | SliceExpr::Awaited { operand } => slice_expr_reads_frame(operand),
+        SliceExpr::Satisfies { operand, .. } | SliceExpr::Awaited { operand } => {
+            slice_expr_reads_frame(operand)
+        }
+        SliceExpr::Void { operand, value } => {
+            slice_expr_reads_frame(operand) || slice_expr_reads_frame(value)
+        }
         SliceExpr::OptionalAnyChain { root } | SliceExpr::OptionalMember { root, .. } => {
             slice_expr_reads_frame(root)
         }
@@ -7257,8 +7260,12 @@ fn expression_effect_tree(
                 children.push(right);
             }
             SliceExpr::Sequence { value, .. } => children.push(value),
-            SliceExpr::Satisfies { operand, .. } | SliceExpr::Void { operand, .. } => {
-                children.push(operand)
+            SliceExpr::Satisfies { operand, .. } => children.push(operand),
+            // A `void` or a comma sequence evaluates its operand, then its
+            // value.
+            SliceExpr::Void { operand, value } => {
+                children.push(operand);
+                children.push(value);
             }
             SliceExpr::Arithmetic { operands, .. } => children.extend(operands.iter()),
             SliceExpr::ConstTemplate { holes, .. } => children.extend(holes.iter()),
@@ -10298,9 +10305,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// An object literal failing closed: its receiver given back, and the
     /// literal the unmodelled position.
     /// A const-context spread's source properties, each `readonly`
-    /// (`getSpreadType` under `inConstContext`). `None` for a source that
-    /// is no object surface of properties alone, which keeps the spread
-    /// behind the typed expression gap.
+    /// (`getSpreadType` under `inConstContext`): a method is copied as a
+    /// readonly property of its function type (`getSpreadSymbol` mints a
+    /// property for it). `None` for a source that is no object surface of
+    /// properties and methods alone, an accessor among them, which keeps the
+    /// spread behind the typed expression gap.
     fn readonly_spread_members(
         &mut self,
         operand: SemanticNodeId,
@@ -10313,7 +10322,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             Some(SemanticNodeData::Object(surface))
                 if surface.index_signatures.is_empty()
                     && surface.call_signatures.is_empty()
-                    && surface.construct_signatures.is_empty() =>
+                    && surface.construct_signatures.is_empty()
+                    && surface.positive_members().iter().all(|member| {
+                        matches!(
+                            member.method_kind,
+                            None | Some(verter_type_expr::ObjectMethodKind::Method)
+                        )
+                    }) =>
             {
                 surface.clone()
             }
@@ -10330,6 +10345,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .iter()
                 .map(|member| crate::semantic_query::SurfaceMember {
                     readonly: true,
+                    method_kind: None,
+                    has_implementation_body: false,
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::SpreadTainted,
                     ..member.clone()
                 })
@@ -22074,7 +22091,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             site,
             ReturnOrigin::OwnerScopeDeclared,
         ) {
-            SignatureCall::Value(value) => Positional::Value(value),
+            SignatureCall::Value(value) => {
+                self.absorb_body_degradation(function_node);
+                Positional::Value(value)
+            }
             SignatureCall::NotCallable | SignatureCall::ClauseUnavailable => {
                 self.degraded_unrepresentable_callee()
             }
@@ -23427,6 +23447,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     self.record_checker_diagnostic(*diagnostic);
                 }
                 if let crate::semantic_query::ResolvedCallResult::Selected {
+                    selected_signature,
+                    ..
+                } = &result
+                {
+                    self.absorb_body_degradation(*selected_signature);
+                }
+                if let crate::semantic_query::ResolvedCallResult::Selected {
                     return_type,
                     fresh_literal_returns,
                     ..
@@ -23470,6 +23497,30 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 crate::semantic_query::ResolveCallFailure::Undecidable
                 | crate::semantic_query::ResolveCallFailure::Budget,
             ) => None,
+        }
+    }
+
+    /// A degraded callee value degrades every consumer of that value: the
+    /// called signature's body-derived return, when its evaluation closed
+    /// degraded, carries its typed reason into this frame, as a direct call
+    /// of a function declaration does. A return still in flight (a hold)
+    /// or with no value adds nothing here.
+    fn absorb_body_degradation(&mut self, signature: SemanticNodeId) {
+        let identity = match self.dispatch.graph().node_data(signature).as_deref() {
+            Some(SemanticNodeData::Signature {
+                return_carrier:
+                    crate::semantic_query::SignatureReturnCarrier::Function(
+                        verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                    ),
+                ..
+            }) => identity.clone(),
+            _ => return,
+        };
+        let key = self.dispatch.flow_return_key_for(&identity);
+        if let FlowReturnStep::Complete(callee) = self.dispatch.execute_flow_return(key) {
+            if let Some(degradation) = callee.degradation() {
+                self.record_degradation(degradation);
+            }
         }
     }
 
@@ -23542,7 +23593,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     site,
                     ReturnOrigin::ClauseScoped,
                 ) {
-                    SignatureCall::Value(value) => Positional::Value(value),
+                    SignatureCall::Value(value) => {
+                        self.absorb_body_degradation(signature);
+                        Positional::Value(value)
+                    }
                     // An IIFE whose composed signature is not callable,
                     // whose return position missed, or whose clause could
                     // not be recovered: the CALL has no modelled value.
@@ -23919,7 +23973,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     site,
                     ReturnOrigin::ClauseScoped,
                 ) {
-                    SignatureCall::Value(value) => Positional::Value(value),
+                    SignatureCall::Value(value) => {
+                        self.absorb_body_degradation(node);
+                        Positional::Value(value)
+                    }
                     // The binding's signature has no transferable return:
                     // its return position missed, or a needed clause
                     // default could not be recovered. Positional.

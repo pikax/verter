@@ -385,6 +385,27 @@ fn infer_in_a_template_literal_pattern_resolves() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Template literal patterns over sources that are no string literal.
+const TEMPLATE_PATTERN_SOURCES: &str = r##"
+type T10<S> = S extends `a${infer H}` ? H : "none";
+type T12<S> = S extends `${infer H}-${number}` ? H : "none";
+"##;
+
+/// A source the pattern cannot slice takes the false branch when it is not
+/// below the pattern even with each placeholder read as `string`: `string`
+/// and `number` against `a${infer H}`, `boolean` against `${infer H}-${number}`.
+/// Measured on TypeScript 7.0.2, alike under all four settings.
+#[test]
+fn a_source_no_placeholder_reading_fits_takes_the_false_branch() {
+    let matrix = Matrix::new(TEMPLATE_PATTERN_SOURCES);
+    let failures = matrix.types(&[
+        ("T10<string>", "\"none\""),
+        ("T10<number>", "\"none\""),
+        ("T12<boolean>", "\"none\""),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// `(<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ?
 /// true : false` is `true` for `1, 1` and `false` for `1, number`.
 ///
@@ -412,6 +433,30 @@ fn the_generic_signature_identity_check_resolves() {
 fn wrong_clean_an_infer_constraint_filters_the_candidate() {
     let matrix = Matrix::new(CONDITIONALS);
     let failures = matrix.types(&[("InferExt<[1]>", "\"nope\"")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `infer` placeholders beside a fixed member of a union pattern.
+const INFER_IN_A_UNION: &str = r##"
+type UA<T> = T extends { a: infer X | string } ? X : "none";
+"##;
+
+/// A source member the pattern's fixed `string` matches (by identity or by
+/// its base) infers nothing to the placeholder beside it: `number | string`
+/// infers `number`, `"x" | 1 | true` infers `1 | true`. A source every
+/// member of which matches infers the whole source, below any direct
+/// inference: `string` alone is `string` and `"x"` alone `"x"`. Measured
+/// on TypeScript 7.0.2, alike under all four settings.
+#[test]
+fn an_infer_placeholder_beside_a_fixed_union_member_takes_the_unmatched_members() {
+    let matrix = Matrix::new(INFER_IN_A_UNION);
+    let failures = matrix.types(&[
+        ("UA<{ a: number | string }>", "number"),
+        ("UA<{ a: string }>", "string"),
+        ("UA<{ a: \"x\" }>", "\"x\""),
+        ("UA<{ a: number }>", "number"),
+        ("UA<{ a: \"x\" | 1 | true }>", "1 | true"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
