@@ -63,8 +63,8 @@ const TWINS = Object.freeze([
   ],
   [
     "STP21-dynamic-name",
-    ".map(|expression| literal_union(&expression.spelling))",
-    ".map(|_| Vec::new())",
+    ".map(|expression| dynamic_name_facts(&expression.spelling))",
+    ".map(|_| DynamicNameFacts { candidates: Vec::new(), open: true })",
     RUST_CASES["STP21-dynamic-name"],
   ],
   [
