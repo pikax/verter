@@ -17,6 +17,7 @@ impl CanonicalEncode for Basis {
 }
 fn request(basis: u8) -> FlowDemandRequest {
     FlowDemandRequest {
+        ancestry: Default::default(),
         query: SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
             function: FlowFunctionSlotIdentity {
                 declaration_slot: ResolvedDeclSlotIdentity::value_slot(
