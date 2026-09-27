@@ -1746,7 +1746,7 @@ enum CallArgumentsStep<'e, 'x> {
     /// The argument to lower, with the frame waiting on it.
     Descend(Box<CallArgumentsFrame<'e, 'x>>, &'e Expression<'x>),
     /// The call carrier with its arguments attached.
-    Done(SliceExpr),
+    Done(Box<SliceExpr>),
 }
 
 /// The side channels a lowering can reach (the budget failure, the
@@ -14302,7 +14302,7 @@ impl<'a> Lowerer<'a> {
     /// arguments, each of which lowered this call's own arguments again.
     /// The arguments a call lowered are kept by its span, mode and
     /// whole-value position, so a call's arguments lower once per position
-    /// and a nest of calls lowers in time linear in its depth. A lowering
+    /// and a nest of calls lowers in time linear in its size. A lowering
     /// that reached a side channel is not kept: lowering it again reaches
     /// the side channel again.
     fn call_arguments_frame<'e, 'x>(
@@ -14312,7 +14312,7 @@ impl<'a> Lowerer<'a> {
         mode: ExprMode,
     ) -> CallArgumentsStep<'e, 'x> {
         if call_arguments_slot(&mut lowered).is_none() {
-            return CallArgumentsStep::Done(lowered);
+            return CallArgumentsStep::Done(Box::new(lowered));
         }
         let key = (
             call.span,
@@ -14328,7 +14328,7 @@ impl<'a> Lowerer<'a> {
             if let Some(slot) = call_arguments_slot(&mut lowered) {
                 *slot = arguments;
             }
-            return CallArgumentsStep::Done(lowered);
+            return CallArgumentsStep::Done(Box::new(lowered));
         }
         let frame = CallArgumentsFrame {
             lowered,
@@ -14376,7 +14376,7 @@ impl<'a> Lowerer<'a> {
         if let Some(slot) = call_arguments_slot(&mut lowered) {
             *slot = arguments;
         }
-        CallArgumentsStep::Done(lowered)
+        CallArgumentsStep::Done(Box::new(lowered))
     }
 
     /// The side channels a lowering can reach, as they stand now.
@@ -14494,7 +14494,7 @@ impl<'a> Lowerer<'a> {
                     tasks.push(Task::CallArguments(frame));
                     tasks.push(Task::Lower(child, mode));
                 }
-                CallArgumentsStep::Done(value) => values.push(value),
+                CallArgumentsStep::Done(value) => values.push(*value),
             }
         }
         /// Push the argument a call's whole-value recording asks for next.

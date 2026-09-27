@@ -151,11 +151,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Continue a call with its callee operand's value.
     pub(super) fn resume_call_operand<'e>(
         &mut self,
-        mut flight: Box<CallInFlight<'e>>,
+        mut flight: CallInFlight<'e>,
         value: Positional<SemanticNodeId>,
     ) -> CallStep<'e> {
         flight.drive.operand = Some(value);
-        self.drive_call(*flight)
+        self.drive_call(flight)
     }
 
     /// Continue a call with the value of the lowered argument its executor
@@ -279,9 +279,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         {
             return Some(answer.clone());
         }
-        if arguments.iter().next().is_none() {
-            return None;
-        }
+        arguments.iter().next()?;
         drive.demand = Some(callee);
         // A placeholder the value computation returns at once; the stack
         // discards it and takes the route.

@@ -23357,7 +23357,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     }
                     Some(Waiting::CallOperand(flight)) => {
-                        match self.resume_call_operand(flight, value) {
+                        match self.resume_call_operand(*flight, value) {
                             CallStep::Done(done) => value = done,
                             CallStep::Argument(wait) => {
                                 current = wait.lowered;
