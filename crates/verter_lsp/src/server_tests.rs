@@ -14919,10 +14919,10 @@ async fn script_member_access_completion_returns_number_members() {
             verter_parser::oxc_parse::Parser::new(&alloc, &ide.code, oxc_span::SourceType::tsx())
                 .parse();
         assert!(
-            parsed.errors.is_empty(),
+            parsed.diagnostics.is_empty(),
             "the LSP must ship VALID TSX for `a.`, got {:?}\n--- TSX ---\n{}",
             parsed
-                .errors
+                .diagnostics
                 .iter()
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>(),

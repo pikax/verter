@@ -14,6 +14,7 @@
 //! parts.
 
 pub mod bindings;
+pub mod export_parts;
 pub mod raw_surface;
 pub mod route_inventory;
 

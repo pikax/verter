@@ -2571,3 +2571,50 @@ fn discrimination_accumulator_merges_same_target_routes() {
         RouteDemand::pick(["a", "b"])
     );
 }
+
+/// A declaration body nested 10,000 deep produces its route facts on a
+/// 1 MiB thread: a `keyof` chain (the whole-route walk), an object type
+/// whose every member holds the next (the member-path seed enumeration and
+/// the type-reference enumeration) and a parenthesized intersection chain
+/// (the direct-object descent) walk from explicit stacks.
+#[test]
+fn bodies_nested_10000_deep_produce_route_facts_on_a_small_stack() {
+    let depth = 10_000;
+    let leaf = || TypeExpr::Ref {
+        name: Arc::from("Leaf"),
+        type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+    };
+    let keyofs = (0..depth).fold(leaf(), |inner, _| TypeExpr::KeyOf(Arc::new(inner)));
+    let objects = (0..depth).fold(leaf(), |inner, _| obj(vec![("v", inner)]));
+    let parenthesized = (0..depth).fold(obj(Vec::new()), |inner, _| {
+        TypeExpr::Parenthesized(Arc::new(TypeExpr::Intersection(Arc::from(
+            vec![inner].into_boxed_slice(),
+        ))))
+    });
+    let facts = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let file = MockFile::default().decl("Leaf", TypeExpr::Primitive(PrimitiveName::String));
+            [keyofs, objects, parenthesized]
+                .into_iter()
+                .map(|body| {
+                    let facts =
+                        super::produce_shallow_route_facts(std::slice::from_ref(&body), &file);
+                    (
+                        facts.whole_route_edges.len(),
+                        facts.member_path_seed_edges.len(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .expect("spawn the producing thread")
+        .join()
+        .expect("the facts produce");
+    assert_eq!(facts[0], (1, 0), "keyof chain");
+    assert_eq!(facts[2], (0, 0), "parenthesized intersections");
+    assert_eq!(
+        facts[1].1,
+        depth + 1,
+        "a seed edge for every member path of the object nest"
+    );
+}

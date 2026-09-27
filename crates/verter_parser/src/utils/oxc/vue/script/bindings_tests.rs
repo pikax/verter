@@ -8,7 +8,11 @@ use oxc_span::SourceType;
 fn classify(source: &str) -> Vec<(String, BindingType)> {
     let alloc = Allocator::default();
     let ret = Parser::new(&alloc, source, SourceType::tsx()).parse();
-    assert!(ret.errors.is_empty(), "Parse errors: {:?}", ret.errors);
+    assert!(
+        ret.diagnostics.is_empty(),
+        "Parse errors: {:?}",
+        ret.diagnostics
+    );
     let ctx = ScriptParseContext::new(0, source.as_bytes());
     let entries = extract_bindings(&ret.program, &ctx);
     entries

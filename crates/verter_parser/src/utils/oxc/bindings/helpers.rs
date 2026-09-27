@@ -1014,7 +1014,7 @@ mod tests {
         );
 
         let mut liveness = FxHashSet::default();
-        collect_expression_free_ref_spans(&expr, &ignored, &mut liveness);
+        collect_expression_free_ref_spans(&expr, source, &ignored, &mut liveness);
         assert_eq!(
             liveness.len(),
             1,
@@ -1035,7 +1035,7 @@ mod tests {
         ignored.insert(b"item" as &[u8]);
 
         let mut liveness = FxHashSet::default();
-        collect_expression_free_ref_spans(&expr, &ignored, &mut liveness);
+        collect_expression_free_ref_spans(&expr, source, &ignored, &mut liveness);
         let names: Vec<&str> = liveness.iter().map(|s| s.slice(source)).collect();
         assert!(names.contains(&"Date"), "global re-included for liveness");
         assert!(!names.contains(&"item"), "scope local stays excluded");
@@ -1056,7 +1056,7 @@ mod tests {
         let ignored = FxHashSet::default();
 
         let mut liveness = FxHashSet::default();
-        collect_expression_free_ref_spans(&expr, &ignored, &mut liveness);
+        collect_expression_free_ref_spans(&expr, source, &ignored, &mut liveness);
         let names: Vec<&str> = liveness.iter().map(|s| s.slice(source)).collect();
         assert!(names.contains(&"rows"), "bare call-receiver root recorded");
         assert!(
@@ -1087,7 +1087,7 @@ mod tests {
         let pattern = &arrow.params.items[0].pattern;
 
         let mut names = FxHashSet::default();
-        collect_pattern_default_free_ref_names(pattern, &mut names);
+        collect_pattern_default_free_ref_names(pattern, source, &mut names);
         assert!(names.contains("list"), "default-value receiver recorded");
         assert!(
             names.contains("fmt"),

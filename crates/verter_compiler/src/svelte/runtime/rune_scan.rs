@@ -562,20 +562,14 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
 
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
         self.scopes.push(arrow_scope_names(it));
-        if it.r#expression {
-            // A CONCISE (expression-bodied) arrow: OXC models the body as ONE
-            // synthetic `ExpressionStatement`, but it is an EXPRESSION position —
-            // official rejects a user-effect call there
+        if let Some(expression) = it.get_expression() {
+            // A CONCISE (expression-bodied) arrow: its body is an EXPRESSION
+            // position — official rejects a user-effect call there
             // (`effect_invalid_placement`). Visit the params and the body
-            // EXPRESSION directly so the statement admission below never fires
-            // on the synthetic statement (the same bypass the emission-grade
-            // occurrence collector uses).
+            // EXPRESSION directly (the same shape the emission-grade occurrence
+            // collector uses).
             self.visit_formal_parameters(&it.params);
-            if let [Statement::ExpressionStatement(stmt)] = it.body.statements.as_slice() {
-                self.visit_expression(&stmt.expression);
-            } else {
-                self.visit_function_body(&it.body);
-            }
+            self.visit_expression(expression);
         } else {
             walk::walk_arrow_function_expression(self, it);
         }

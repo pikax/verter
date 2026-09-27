@@ -5580,6 +5580,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             collect_throw_points: false,
             scope_shadows: Vec::new(),
             call_evidence: Vec::new(),
+            call_drive: None,
             expression_write_nodes: rustc_hash::FxHashMap::default(),
             capture_write_lookahead: rustc_hash::FxHashMap::default(),
             executed_walk: ExecutedSliceWalk::default(),
@@ -6886,138 +6887,148 @@ fn collect_assignment_spans(
     out: &mut rustc_hash::FxHashSet<verter_semantic::analysis::flow::FrameSpan>,
     include_expression_writes: bool,
 ) {
-    for statement in region.statements.iter() {
-        match statement {
-            crate::flow_slice_content::SliceStatement::Assignment { span, value, .. } => {
-                out.insert(*span);
-                if include_expression_writes {
-                    collect_expression_write_spans(value, out);
-                }
-            }
-            crate::flow_slice_content::SliceStatement::EvolvingArray(operation) => {
-                // The evaluator applies every operation it lowers: a
-                // `push` or element write adds to the element type, a
-                // reset starts a new evolving array.
-                out.insert(operation.span);
-                if include_expression_writes {
-                    for operand in operation.operands() {
-                        collect_expression_write_spans(operand, out);
-                    }
-                }
-            }
-            crate::flow_slice_content::SliceStatement::If {
-                consequent,
-                alternate,
-                ..
-            } => {
-                collect_assignment_spans(consequent, out, include_expression_writes);
-                if let Some(alternate) = alternate {
-                    collect_assignment_spans(alternate, out, include_expression_writes);
-                }
-            }
-            crate::flow_slice_content::SliceStatement::Block(block) => {
-                collect_assignment_spans(block, out, include_expression_writes);
-            }
-            crate::flow_slice_content::SliceStatement::Switch { cases, .. } => {
-                for case in cases.iter() {
-                    collect_assignment_spans(&case.region, out, include_expression_writes);
-                }
-            }
-            crate::flow_slice_content::SliceStatement::Try {
-                block,
-                catch,
-                finally,
-                ..
-            } => {
-                collect_assignment_spans(block, out, include_expression_writes);
-                if let Some(catch) = catch {
-                    collect_assignment_spans(&catch.region, out, include_expression_writes);
-                }
-                if let Some(finally) = finally {
-                    collect_assignment_spans(finally, out, include_expression_writes);
-                }
-            }
-            crate::flow_slice_content::SliceStatement::Labeled { body, .. } => {
-                collect_assignment_spans(body, out, include_expression_writes);
-            }
-            crate::flow_slice_content::SliceStatement::Loop(lowered) => {
-                collect_assignment_spans(&lowered.init, out, include_expression_writes);
-                collect_assignment_spans(&lowered.test_effects, out, include_expression_writes);
-                collect_assignment_spans(&lowered.body, out, include_expression_writes);
-                collect_assignment_spans(&lowered.update, out, include_expression_writes);
-                if let Some(element) = lowered.element.as_ref() {
-                    if let Some(bound) = element.binding.as_ref() {
-                        out.insert(bound.span);
-                    }
-                    if let Some((pattern, _)) = element.pattern.as_ref() {
-                        out.extend(pattern.bindings().into_iter().filter_map(|(_, span)| span));
-                    }
+    // The spans are a set, so the regions nested in a region (a block, an
+    // `if`'s arms, a loop's parts) are walked from an explicit stack in any
+    // order: a region nested however deep costs no native level.
+    let mut pending = vec![region];
+    while let Some(region) = pending.pop() {
+        for statement in region.statements.iter() {
+            match statement {
+                crate::flow_slice_content::SliceStatement::Assignment { span, value, .. } => {
+                    out.insert(*span);
                     if include_expression_writes {
-                        collect_expression_write_spans(&element.iterable, out);
+                        collect_expression_write_spans(value, out);
                     }
                 }
-            }
-            crate::flow_slice_content::SliceStatement::CompoundAssignment { span, .. } => {
-                out.insert(*span);
-            }
-            crate::flow_slice_content::SliceStatement::Destructure { init, .. } => {
-                if include_expression_writes {
-                    if let Some(init) = init {
-                        collect_expression_write_spans(init, out);
+                crate::flow_slice_content::SliceStatement::EvolvingArray(operation) => {
+                    // The evaluator applies every operation it lowers: a
+                    // `push` or element write adds to the element type, a
+                    // reset starts a new evolving array.
+                    out.insert(operation.span);
+                    if include_expression_writes {
+                        for operand in operation.operands() {
+                            collect_expression_write_spans(operand, out);
+                        }
                     }
                 }
-            }
-            crate::flow_slice_content::SliceStatement::DestructureAssign {
-                pattern, value, ..
-            } => {
-                out.extend(pattern.target_spans());
-                if include_expression_writes {
-                    collect_expression_write_spans(value, out);
-                }
-            }
-            crate::flow_slice_content::SliceStatement::MemberWrite { span, write, .. } => {
-                out.insert(*span);
-                if let (true, crate::flow_slice_content::SliceMemberWrite::Assign { value, .. }) =
-                    (include_expression_writes, write)
-                {
-                    collect_expression_write_spans(value, out);
-                }
-            }
-            crate::flow_slice_content::SliceStatement::Unreachable(unreachable) => {
-                collect_assignment_spans(unreachable, out, include_expression_writes);
-            }
-            crate::flow_slice_content::SliceStatement::Return { argument, .. } => {
-                if include_expression_writes {
-                    if let Some(argument) = argument {
-                        collect_expression_write_spans(argument, out);
+                crate::flow_slice_content::SliceStatement::If {
+                    consequent,
+                    alternate,
+                    ..
+                } => {
+                    pending.push(consequent);
+                    if let Some(alternate) = alternate {
+                        pending.push(alternate);
                     }
                 }
-            }
-            crate::flow_slice_content::SliceStatement::Yield { argument, .. } => {
-                if include_expression_writes {
-                    if let Some(argument) = argument {
-                        collect_expression_write_spans(argument, out);
+                crate::flow_slice_content::SliceStatement::Block(block) => {
+                    pending.push(block);
+                }
+                crate::flow_slice_content::SliceStatement::Switch { cases, .. } => {
+                    for case in cases.iter() {
+                        pending.push(&case.region);
                     }
                 }
-            }
-            crate::flow_slice_content::SliceStatement::Binding { init, .. } => {
-                if include_expression_writes {
-                    if let Some(init) = init {
-                        collect_expression_write_spans(init, out);
+                crate::flow_slice_content::SliceStatement::Try {
+                    block,
+                    catch,
+                    finally,
+                    ..
+                } => {
+                    pending.push(block);
+                    if let Some(catch) = catch {
+                        pending.push(&catch.region);
+                    }
+                    if let Some(finally) = finally {
+                        pending.push(finally);
                     }
                 }
+                crate::flow_slice_content::SliceStatement::Labeled { body, .. } => {
+                    pending.push(body);
+                }
+                crate::flow_slice_content::SliceStatement::Loop(lowered) => {
+                    pending.push(&lowered.init);
+                    pending.push(&lowered.test_effects);
+                    pending.push(&lowered.body);
+                    pending.push(&lowered.update);
+                    if let Some(element) = lowered.element.as_ref() {
+                        if let Some(bound) = element.binding.as_ref() {
+                            out.insert(bound.span);
+                        }
+                        if let Some((pattern, _)) = element.pattern.as_ref() {
+                            out.extend(pattern.bindings().into_iter().filter_map(|(_, span)| span));
+                        }
+                        if include_expression_writes {
+                            collect_expression_write_spans(&element.iterable, out);
+                        }
+                    }
+                }
+                crate::flow_slice_content::SliceStatement::CompoundAssignment { span, .. } => {
+                    out.insert(*span);
+                }
+                crate::flow_slice_content::SliceStatement::Destructure { init, .. } => {
+                    if include_expression_writes {
+                        if let Some(init) = init {
+                            collect_expression_write_spans(init, out);
+                        }
+                    }
+                }
+                crate::flow_slice_content::SliceStatement::DestructureAssign {
+                    pattern,
+                    value,
+                    ..
+                } => {
+                    out.extend(pattern.target_spans());
+                    if include_expression_writes {
+                        collect_expression_write_spans(value, out);
+                    }
+                }
+                crate::flow_slice_content::SliceStatement::MemberWrite { span, write, .. } => {
+                    out.insert(*span);
+                    if let (
+                        true,
+                        crate::flow_slice_content::SliceMemberWrite::Assign { value, .. },
+                    ) = (include_expression_writes, write)
+                    {
+                        collect_expression_write_spans(value, out);
+                    }
+                }
+                crate::flow_slice_content::SliceStatement::Unreachable(unreachable) => {
+                    pending.push(unreachable);
+                }
+                crate::flow_slice_content::SliceStatement::Return { argument, .. } => {
+                    if include_expression_writes {
+                        if let Some(argument) = argument {
+                            collect_expression_write_spans(argument, out);
+                        }
+                    }
+                }
+                crate::flow_slice_content::SliceStatement::Yield { argument, .. } => {
+                    if include_expression_writes {
+                        if let Some(argument) = argument {
+                            collect_expression_write_spans(argument, out);
+                        }
+                    }
+                }
+                crate::flow_slice_content::SliceStatement::Binding { init, .. } => {
+                    if include_expression_writes {
+                        if let Some(init) = init {
+                            collect_expression_write_spans(init, out);
+                        }
+                    }
+                }
+                crate::flow_slice_content::SliceStatement::Gap(_)
+                | crate::flow_slice_content::SliceStatement::Assertion { .. }
+                | crate::flow_slice_content::SliceStatement::CallEffect { .. }
+                | crate::flow_slice_content::SliceStatement::CalleeEffect { .. }
+                | crate::flow_slice_content::SliceStatement::Break { .. }
+                | crate::flow_slice_content::SliceStatement::Continue { .. }
+                | crate::flow_slice_content::SliceStatement::Throw
+                | crate::flow_slice_content::SliceStatement::ThrowPoint
+                | crate::flow_slice_content::SliceStatement::TransparentLoop
+                | crate::flow_slice_content::SliceStatement::DivergentLoop
+                | crate::flow_slice_content::SliceStatement::Unsupported(_) => {}
             }
-            crate::flow_slice_content::SliceStatement::Gap(_)
-            | crate::flow_slice_content::SliceStatement::Assertion { .. }
-            | crate::flow_slice_content::SliceStatement::CallEffect { .. }
-            | crate::flow_slice_content::SliceStatement::CalleeEffect { .. }
-            | crate::flow_slice_content::SliceStatement::Break { .. }
-            | crate::flow_slice_content::SliceStatement::Continue { .. }
-            | crate::flow_slice_content::SliceStatement::Throw
-            | crate::flow_slice_content::SliceStatement::ThrowPoint
-            | crate::flow_slice_content::SliceStatement::TransparentLoop
-            | crate::flow_slice_content::SliceStatement::DivergentLoop
-            | crate::flow_slice_content::SliceStatement::Unsupported(_) => {}
         }
     }
 }
@@ -7109,6 +7120,15 @@ fn expression_changes_reaching_values(expr: &crate::flow_slice_content::SliceExp
     !expression_effect_tree(expr, |_| true).is_empty()
 }
 
+/// Whether a two-armed branch join's arms change a reaching value, which
+/// the join then evaluates as a branching flow
+/// ([`FlowEvaluator::eval_branching_union`]).
+fn union_branches_change_reaching_values(arms: &[crate::flow_slice_content::SliceExpr]) -> bool {
+    matches!(arms, [consequent, alternate]
+        if expression_changes_reaching_values(consequent)
+            || expression_changes_reaching_values(alternate))
+}
+
 /// The whole-binding writes of an expression tree and the EVOLVING-array
 /// operations `keep` admits, in tree order.
 fn expression_effect_tree(
@@ -7116,34 +7136,33 @@ fn expression_effect_tree(
     keep: fn(&crate::flow_slice_content::SliceEvolvingOperation) -> bool,
 ) -> Vec<&crate::flow_slice_content::SliceExpr> {
     use crate::flow_slice_content::{
-        SliceArrayElement, SliceCall, SliceEvolvingOperation, SliceExpr, SliceObjectEntry,
-        SliceObjectKey,
+        SliceArrayElement, SliceCall, SliceExpr, SliceObjectEntry, SliceObjectKey,
     };
+    // The tree is walked from an explicit stack of the expressions still to
+    // visit, each node's children pushed last-first so they pop in tree
+    // order: a nest however deep costs no native level.
     let mut out = Vec::new();
-    fn walk<'e>(
-        expr: &'e SliceExpr,
-        keep: fn(&SliceEvolvingOperation) -> bool,
-        out: &mut Vec<&'e SliceExpr>,
-    ) {
-        let walk = |expr: &'e SliceExpr, out: &mut Vec<&'e SliceExpr>| walk(expr, keep, out);
+    let mut pending: Vec<&SliceExpr> = vec![expr];
+    let mut children: Vec<&SliceExpr> = Vec::new();
+    while let Some(expr) = pending.pop() {
         match expr {
             SliceExpr::Assignment { value, .. } => {
                 out.push(expr);
-                walk(value, out);
+                children.push(value);
             }
-            SliceExpr::FrameShadowed { inner, .. } => walk(inner, out),
-            SliceExpr::OptionalAnyChain { root } => walk(root, out),
+            SliceExpr::FrameShadowed { inner, .. } => children.push(inner),
+            SliceExpr::OptionalAnyChain { root } => children.push(root),
             SliceExpr::Object { entries, .. } => {
                 for entry in entries.iter() {
                     match entry {
-                        SliceObjectEntry::Spread { source } => walk(source, out),
+                        SliceObjectEntry::Spread { source } => children.push(source),
                         SliceObjectEntry::Member(member) => {
                             if let SliceObjectKey::Computed { value, .. } = &member.key {
-                                walk(value, out);
+                                children.push(value);
                             }
-                            walk(&member.value, out);
+                            children.push(&member.value);
                             if let Some(assignment_value) = member.assignment_value.as_ref() {
-                                walk(assignment_value, out);
+                                children.push(assignment_value);
                             }
                         }
                     }
@@ -7152,79 +7171,52 @@ fn expression_effect_tree(
             SliceExpr::Array { elements, .. } => {
                 for element in elements.iter() {
                     match element {
-                        SliceArrayElement::Value { value, .. } => walk(value, out),
-                        SliceArrayElement::Spread { source } => walk(source, out),
+                        SliceArrayElement::Value { value, .. } => children.push(value),
+                        SliceArrayElement::Spread { source } => children.push(source),
                         SliceArrayElement::Elision => {}
                     }
                 }
             }
-            SliceExpr::Union { arms, .. } => {
-                for arm in arms.iter() {
-                    walk(arm, out);
-                }
-            }
-            // A chain nests its left operands: its left spine is walked, in
-            // tree order — the innermost left operand, then each right
-            // operand from the innermost node out.
+            SliceExpr::Union { arms, .. } => children.extend(arms.iter()),
             SliceExpr::Logical { left, right, .. } => {
-                let mut rights = vec![&**right];
-                let mut innermost = &**left;
-                while let SliceExpr::Logical { left, right, .. } = innermost {
-                    rights.push(right);
-                    innermost = left;
-                }
-                walk(innermost, out);
-                for right in rights.into_iter().rev() {
-                    walk(right, out);
-                }
+                children.push(left);
+                children.push(right);
             }
-            SliceExpr::Sequence { value, .. } => walk(value, out),
+            SliceExpr::Sequence { value, .. } => children.push(value),
             SliceExpr::Satisfies { operand, .. } | SliceExpr::Void { operand, .. } => {
-                walk(operand, out)
+                children.push(operand)
             }
-            SliceExpr::Arithmetic { operands, .. } => {
-                for operand in operands.iter() {
-                    walk(operand, out);
-                }
-            }
-            SliceExpr::ConstTemplate { holes, .. } => {
-                for hole in holes.iter() {
-                    walk(hole, out);
-                }
-            }
+            SliceExpr::Arithmetic { operands, .. } => children.extend(operands.iter()),
+            SliceExpr::ConstTemplate { holes, .. } => children.extend(holes.iter()),
             SliceExpr::ElementAccess { object, index, .. } => {
-                walk(object, out);
-                walk(index, out);
+                children.push(object);
+                children.push(index);
             }
             SliceExpr::Update { .. } => out.push(expr),
-            SliceExpr::NonNull { operand } => walk(operand, out),
-            SliceExpr::Not { operand, .. } => walk(operand, out),
-            SliceExpr::MemberOf { object, .. } => walk(object, out),
+            SliceExpr::NonNull { operand } => children.push(operand),
+            SliceExpr::Not { operand, .. } => children.push(operand),
+            SliceExpr::MemberOf { object, .. } => children.push(object),
             SliceExpr::Call(call, _, arguments) => {
                 match call {
-                    SliceCall::Nested(function_value) => walk(function_value, out),
+                    SliceCall::Nested(function_value) => children.push(function_value),
                     SliceCall::Construct(callee) | SliceCall::TaggedTemplate(callee) => {
-                        walk(callee, out)
+                        children.push(callee)
                     }
-                    SliceCall::OnValue { object, .. } => walk(object, out),
+                    SliceCall::OnValue { object, .. } => children.push(object),
                     _ => {}
                 }
-                for argument in arguments.iter() {
-                    walk(argument, out);
-                }
+                children.extend(arguments.iter());
             }
             SliceExpr::EvolvingArray(operation) => {
                 if keep(operation) {
                     out.push(expr);
                 }
-                for operand in operation.operands() {
-                    walk(operand, out);
-                }
+                children.extend(operation.operands());
             }
             _ => {}
         }
+        pending.extend(children.drain(..).rev());
     }
-    walk(expr, keep, &mut out);
     out
 }
 
@@ -8293,8 +8285,11 @@ impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
 #[path = "flow_return_class.rs"]
 mod class_expression;
 
+#[path = "flow_return_call_stack.rs"]
+mod call_stack;
 #[path = "flow_return_operators.rs"]
 mod operators;
+use call_stack::{CallArgumentWait, CallDrive, CallInFlight, CallStep};
 
 #[path = "flow_return_call_effects.rs"]
 mod call_effects;
@@ -8554,6 +8549,10 @@ struct FlowEvaluator<'d, 'b> {
     /// nothing, so its obligations stay unclaimed and the demand
     /// finalizes unproven.
     call_evidence: Vec<FlowCallEvidence>,
+    /// The drive of the call whose value computes from
+    /// [`FlowEvaluator::eval_expr`]'s stack
+    /// ([`call_stack`]); `None` outside one.
+    call_drive: Option<CallDrive>,
     /// Expression-position write application (the R2 source-order rule):
     /// the pre-scanned right-hand-side verdicts of the CURRENT statement's
     /// [`SliceExpr::Assignment`] writes, keyed by the write's frame span.
@@ -9336,6 +9335,104 @@ enum Positional<T> {
 
 /// The outcome of stripping the nullish (`null` / `undefined`) arms of
 /// one optional-member link's base union.
+/// A region's evaluation in progress (see [`FlowEvaluator::eval_region`]):
+/// the contributions and path liveness so far, the next statement, and the
+/// scope bases of the block statement it is suspended at.
+struct RegionEvalFrame<'r> {
+    region: &'r crate::flow_slice_content::SliceRegion,
+    next: usize,
+    contributors: Vec<FlowContribution>,
+    path_alive: bool,
+    block_bases: Option<(usize, usize, usize, usize)>,
+}
+
+/// What a region's evaluation needs next: a block's region evaluated, or
+/// nothing — its outcome.
+enum RegionEvalStep<'r> {
+    EnterBlock(&'r crate::flow_slice_content::SliceRegion),
+    Done((Result<Vec<FlowContribution>, FlowReturnFailure>, bool)),
+}
+
+/// An array literal's evaluation in progress, stepped by
+/// [`FlowEvaluator::array_eval_step`]: the element join (or tuple) built so
+/// far and the next element.
+struct ArrayEvalFrame<'e> {
+    elements: &'e [crate::flow_slice_content::SliceArrayElement],
+    const_asserted: bool,
+    contextual: Option<SemanticNodeId>,
+    tupled: bool,
+    /// `(reduction operand, widening_nullish)` per element position of
+    /// the join.
+    parts: Vec<(ReductionArm, bool)>,
+    /// The tuple element lists, as published and unwidened, when tupled.
+    tuple: Vec<crate::semantic_query::TupleElement>,
+    tuple_view: Vec<crate::semantic_query::TupleElement>,
+    spread_seen: bool,
+    next: usize,
+    /// The holds before the element the literal waits on.
+    holds_before: usize,
+}
+
+/// What an array literal's evaluation needs next.
+enum ArrayEvalStep<'e> {
+    /// The value of this element (or spread source).
+    Descend(&'e crate::flow_slice_content::SliceExpr),
+    /// Nothing: the literal's value.
+    Done(Positional<SemanticNodeId>),
+}
+
+/// An object literal's evaluation in progress, stepped by
+/// [`FlowEvaluator::object_eval_step`]: what [`FlowEvaluator::eval_object_literal`]
+/// keeps across its members, the next entry, and the child it waits on.
+struct ObjectEvalFrame<'e> {
+    entries: &'e [crate::flow_slice_content::SliceObjectEntry],
+    offset: u32,
+    assignment_fresh: bool,
+    contextual: Option<SemanticNodeId>,
+    surface_members: Vec<crate::semantic_query::SurfaceMember>,
+    unwidened_members: Vec<crate::semantic_query::SurfaceMember>,
+    unwidened_differs: bool,
+    effects: Vec<crate::semantic_query::ObjectConstructionEffect>,
+    spread_seen: bool,
+    late_bound: class_expression::ComputedIndexKinds,
+    receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
+    /// The frame's receiver before the literal's, given back when the
+    /// literal completes or fails closed.
+    enclosing_receiver: Option<Option<std::rc::Rc<class_expression::ClassReceiver>>>,
+    deferred: Vec<(usize, &'e crate::flow_slice_content::SliceObjectMember)>,
+    next: usize,
+    awaiting: ObjectEvalAwait<'e>,
+}
+
+/// The child an [`ObjectEvalFrame`] waits on, with what its entry keeps
+/// meanwhile.
+enum ObjectEvalAwait<'e> {
+    Nothing,
+    /// A spread's source.
+    Spread {
+        holds_before: usize,
+    },
+    /// A data member's value.
+    Value {
+        member: &'e crate::flow_slice_content::SliceObjectMember,
+        member_value: &'e crate::flow_slice_content::SliceExpr,
+        holds_before: usize,
+        widens_unique_symbols: bool,
+    },
+    /// A data member's unwidened view, beside the member.
+    Unwidened {
+        surface_member: Box<crate::semantic_query::SurfaceMember>,
+        value: SemanticNodeId,
+    },
+}
+
+/// What an [`ObjectEvalFrame`] needs next: a child evaluated, or nothing
+/// — its outcome.
+enum ObjectEvalStep<'e> {
+    Descend(&'e crate::flow_slice_content::SliceExpr),
+    Done(Positional<SemanticNodeId>),
+}
+
 enum NullishStrip {
     /// No nullish arm was present — the base is non-nullable, so the
     /// link adds nothing and keeps the base node itself.
@@ -9473,14 +9570,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         assignment_fresh: bool,
         contextual: Option<SemanticNodeId>,
     ) -> Positional<SemanticNodeId> {
-        let mut surface_members = Vec::with_capacity(entries.len());
-        // The same members with every widening nullable value UNWIDENED
-        // (`Self::unwidened_views`), when any member differs.
-        let mut unwidened_members = Vec::with_capacity(entries.len());
-        let mut unwidened_differs = false;
-        let mut effects: Vec<crate::semantic_query::ObjectConstructionEffect> = Vec::new();
-        let mut spread_seen = false;
-        let mut late_bound = class_expression::ComputedIndexKinds::default();
+        // [`Self::eval_expr`] steps an object literal from its own stack;
+        // here the same steps run with each child evaluated in place.
+        let mut frame = self.object_eval_frame(entries, offset, assignment_fresh, contextual);
+        let mut delivered = None;
+        loop {
+            match self.object_eval_step(&mut frame, delivered.take()) {
+                ObjectEvalStep::Done(value) => return value,
+                ObjectEvalStep::Descend(child) => delivered = Some(self.eval_expr(child)),
+            }
+        }
+    }
+
+    /// An object literal's evaluation, begun: its receiver (a literal whose
+    /// entries are all members is one its methods and accessors read
+    /// through `this`) made the frame's until the literal completes.
+    fn object_eval_frame<'e>(
+        &mut self,
+        entries: &'e [crate::flow_slice_content::SliceObjectEntry],
+        offset: u32,
+        assignment_fresh: bool,
+        contextual: Option<SemanticNodeId>,
+    ) -> ObjectEvalFrame<'e> {
         // A literal's methods and accessors run against the object it
         // builds: their bodies read its other members through `this`, so
         // they evaluate after every other member (and once more after a
@@ -9522,24 +9633,97 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 })
             });
         let enclosing_receiver = std::mem::replace(&mut self.receiver, receiver.clone());
-        let deferred_member = |entry: &crate::flow_slice_content::SliceObjectEntry| match entry {
-            crate::flow_slice_content::SliceObjectEntry::Member(member) => {
-                member.method_kind.is_some()
+        ObjectEvalFrame {
+            entries,
+            offset,
+            assignment_fresh,
+            contextual,
+            surface_members: Vec::with_capacity(entries.len()),
+            unwidened_members: Vec::with_capacity(entries.len()),
+            unwidened_differs: false,
+            effects: Vec::new(),
+            spread_seen: false,
+            late_bound: class_expression::ComputedIndexKinds::default(),
+            receiver,
+            enclosing_receiver: Some(enclosing_receiver),
+            deferred: Vec::new(),
+            next: 0,
+            awaiting: ObjectEvalAwait::Nothing,
+        }
+    }
+
+    /// Step an object literal's evaluation until it needs a child evaluated
+    /// (a spread source, a member value or a member's unwidened view) or is
+    /// done, with the child it asked for last `delivered`.
+    fn object_eval_step<'e>(
+        &mut self,
+        frame: &mut ObjectEvalFrame<'e>,
+        delivered: Option<Positional<SemanticNodeId>>,
+    ) -> ObjectEvalStep<'e> {
+        if let Some(outcome) = delivered {
+            match std::mem::replace(&mut frame.awaiting, ObjectEvalAwait::Nothing) {
+                ObjectEvalAwait::Nothing => unreachable!("an outcome delivered to no request"),
+                ObjectEvalAwait::Spread { holds_before } => {
+                    self.holds.truncate(holds_before);
+                    let Positional::Value(operand) = outcome else {
+                        return self.object_eval_abandon(frame);
+                    };
+                    frame.spread_seen = true;
+                    frame.effects.extend(frame.surface_members.drain(..).map(
+                        |member: crate::semantic_query::SurfaceMember| {
+                            super::object_spread_program_lowering::direct_effect_from_member(
+                                &member,
+                            )
+                        },
+                    ));
+                    frame
+                        .effects
+                        .push(crate::semantic_query::ObjectConstructionEffect::Spread(
+                            operand,
+                        ));
+                }
+                ObjectEvalAwait::Value {
+                    member,
+                    member_value,
+                    holds_before,
+                    widens_unique_symbols,
+                } => {
+                    if let Some(step) = self.object_eval_member_valued(
+                        frame,
+                        member,
+                        member_value,
+                        holds_before,
+                        widens_unique_symbols,
+                        outcome,
+                    ) {
+                        return step;
+                    }
+                }
+                ObjectEvalAwait::Unwidened {
+                    surface_member,
+                    value,
+                } => {
+                    let unwidened = match outcome {
+                        Positional::Value(node) => node,
+                        Positional::Hold | Positional::Unmodeled => value,
+                    };
+                    self.object_eval_push_member(frame, *surface_member, unwidened);
+                }
+            }
+        }
+        while let Some(entry) = frame.entries.get(frame.next) {
+            frame.next += 1;
+            if let (Some(_), crate::flow_slice_content::SliceObjectEntry::Member(member)) =
+                (frame.receiver.as_ref(), entry)
+            {
+                let deferred = member.method_kind.is_some()
                     && matches!(
                         member.key,
                         crate::flow_slice_content::SliceObjectKey::Static(_)
-                    )
-            }
-            _ => false,
-        };
-        let mut deferred: Vec<(usize, &crate::flow_slice_content::SliceObjectMember)> = Vec::new();
-        for entry in entries.iter() {
-            if let (Some(_), crate::flow_slice_content::SliceObjectEntry::Member(member)) =
-                (receiver.as_ref(), entry)
-            {
-                if deferred_member(entry) {
+                    );
+                if deferred {
                     // Placeholder at the member's position, filled below.
-                    deferred.push((surface_members.len(), member));
+                    frame.deferred.push((frame.surface_members.len(), member));
                     let key = match &member.key {
                         crate::flow_slice_content::SliceObjectKey::Static(name) => {
                             crate::semantic_query::AuthoredPropertyKey::string(name.as_ref())
@@ -9563,8 +9747,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             crate::semantic_query::MacroOwnBodyStamp::default(),
                         merge_role: crate::semantic_query::MergeRoleStamp::default(),
                     };
-                    unwidened_members.push(placeholder.clone());
-                    surface_members.push(placeholder);
+                    frame.unwidened_members.push(placeholder.clone());
+                    frame.surface_members.push(placeholder);
                     continue;
                 }
             }
@@ -9585,25 +9769,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // (`settle_composite_part`): the callee's return is
                     // not this object's value. It cannot become a marker
                     // member either, so it fails the literal closed.
-                    let holds_before = self.holds.len();
-                    let outcome = self.eval_expr(source);
-                    self.holds.truncate(holds_before);
-                    let Positional::Value(operand) = outcome else {
-                        self.receiver = enclosing_receiver;
-                        return Positional::Unmodeled;
+                    frame.awaiting = ObjectEvalAwait::Spread {
+                        holds_before: self.holds.len(),
                     };
-                    spread_seen = true;
-                    effects.extend(surface_members.drain(..).map(
-                        |member: crate::semantic_query::SurfaceMember| {
-                            super::object_spread_program_lowering::direct_effect_from_member(
-                                &member,
-                            )
-                        },
-                    ));
-                    effects.push(crate::semantic_query::ObjectConstructionEffect::Spread(
-                        operand,
-                    ));
-                    continue;
+                    return ObjectEvalStep::Descend(source);
                 }
                 crate::flow_slice_content::SliceObjectEntry::Member(member) => member,
             };
@@ -9613,12 +9782,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // undecided (recursive object construction is beyond the
             // direct same-slot hold the return sites model).
             let holds_before = self.holds.len();
-            let member_value = if assignment_fresh {
+            let member_value = if frame.assignment_fresh {
                 member.assignment_value.as_ref().unwrap_or(&member.value)
             } else {
                 &member.value
             };
-            let member_context = match (&member.key, contextual) {
+            let member_context = match (&member.key, frame.contextual) {
                 (crate::flow_slice_content::SliceObjectKey::Static(name), Some(contextual)) => {
                     self.contextual_property_type(contextual, name)
                 }
@@ -9627,82 +9796,168 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // A mutable member with no contextual type widens a `unique
             // symbol` value to `symbol`.
             let widens_unique_symbols = member_context.is_none() && !member.readonly;
-            let outcome = match member_context {
-                Some(member_context) if !assignment_fresh => self.eval_in_context(
-                    &member.value,
-                    member.assignment_value.as_ref(),
-                    member_context,
-                ),
-                _ => self.eval_expr(member_value),
-            };
-            let value = self.settle_composite_part(outcome, holds_before);
-            // Selective object widening (BL02-class): a member read of a
-            // WIDENING-literal local widens to its primitive at the
-            // mutable member position (`const b = 1; return { b }`
-            // publishes `b: number`), while `as const` / annotated
-            // literal locals stay pinned. Direct literal members already
-            // widened (or stayed pinned under a const assertion) at IR
-            // lowering.
-            let value = self.widen_value_position_read(member_value, value);
-            let value = if widens_unique_symbols {
-                widen_unique_symbols(self.dispatch, value, self.nullability)
-            } else {
-                value
-            };
-            // A non-static key is its own evaluated position. It names
-            // the member when it settles to a LITERAL (or a unique
-            // symbol); a key of any other property-key type is
-            // LATE-BOUND: it names no member and contributes to the
-            // literal's implicit index signature of its kind
-            // (`getObjectLiteralIndexInfo`). A key that settles to
-            // nothing leaves the surface's key SET unknown — the same
-            // fail-closed verdict a spread source this frame cannot
-            // evaluate takes. With a spread the literal is a construction
-            // program, which carries no index signature: a late-bound key
-            // there fails closed too.
-            let key = match self.eval_object_member_key(&member.key) {
-                class_expression::MemberKey::Named(key) => key,
-                class_expression::MemberKey::Index(kind) if !spread_seen => {
-                    late_bound.record(kind, member.readonly, value);
-                    continue;
+            match member_context {
+                Some(member_context) if !frame.assignment_fresh => {
+                    let outcome = self.eval_in_context(
+                        &member.value,
+                        member.assignment_value.as_ref(),
+                        member_context,
+                    );
+                    if let Some(step) = self.object_eval_member_valued(
+                        frame,
+                        member,
+                        member_value,
+                        holds_before,
+                        widens_unique_symbols,
+                        outcome,
+                    ) {
+                        return step;
+                    }
                 }
-                class_expression::MemberKey::None => continue,
-                class_expression::MemberKey::Index(_) | class_expression::MemberKey::Unmodeled => {
-                    self.receiver = enclosing_receiver;
-                    return Positional::Unmodeled;
+                _ => {
+                    frame.awaiting = ObjectEvalAwait::Value {
+                        member,
+                        member_value,
+                        holds_before,
+                        widens_unique_symbols,
+                    };
+                    return ObjectEvalStep::Descend(member_value);
                 }
-            };
-            let unwidened = match &member.unwidened {
-                Some(expr) => match self.eval_expr(expr) {
-                    Positional::Value(node) => node,
-                    Positional::Hold | Positional::Unmodeled => value,
-                },
-                None => self.literal_view(member_value, value).unwrap_or(value),
-            };
-            unwidened_differs |= unwidened != value;
-            let surface_member = crate::semantic_query::SurfaceMember {
-                key,
-                value,
-                optional: false,
-                readonly: member.readonly,
-                method_kind: member.method_kind,
-                has_implementation_body: member.method_kind.is_some(),
-                visibility: verter_type_expr::MemberVisibility::Public,
-                excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
-                spans: member.spans,
-                declaration_origin: Some(Arc::from(self.canonical)),
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
-                merge_role: crate::semantic_query::MergeRoleStamp::default(),
-            };
-            unwidened_members.push(crate::semantic_query::SurfaceMember {
+            }
+        }
+        ObjectEvalStep::Done(self.object_eval_finish(frame))
+    }
+
+    /// One data member of an object literal over its value's outcome: its
+    /// key and its unwidened view read, and the member pushed — or the step
+    /// the literal takes: the unwidened view to evaluate, or the literal
+    /// failing closed on a key it cannot name.
+    fn object_eval_member_valued<'e>(
+        &mut self,
+        frame: &mut ObjectEvalFrame<'e>,
+        member: &'e crate::flow_slice_content::SliceObjectMember,
+        member_value: &'e crate::flow_slice_content::SliceExpr,
+        holds_before: usize,
+        widens_unique_symbols: bool,
+        outcome: Positional<SemanticNodeId>,
+    ) -> Option<ObjectEvalStep<'e>> {
+        let value = self.settle_composite_part(outcome, holds_before);
+        // Selective object widening (BL02-class): a member read of a
+        // WIDENING-literal local widens to its primitive at the
+        // mutable member position (`const b = 1; return { b }`
+        // publishes `b: number`), while `as const` / annotated
+        // literal locals stay pinned. Direct literal members already
+        // widened (or stayed pinned under a const assertion) at IR
+        // lowering.
+        let value = self.widen_value_position_read(member_value, value);
+        let value = if widens_unique_symbols {
+            widen_unique_symbols(self.dispatch, value, self.nullability)
+        } else {
+            value
+        };
+        // A non-static key is its own evaluated position. It names
+        // the member when it settles to a LITERAL (or a unique
+        // symbol); a key of any other property-key type is
+        // LATE-BOUND: it names no member and contributes to the
+        // literal's implicit index signature of its kind
+        // (`getObjectLiteralIndexInfo`). A key that settles to
+        // nothing leaves the surface's key SET unknown — the same
+        // fail-closed verdict a spread source this frame cannot
+        // evaluate takes. With a spread the literal is a construction
+        // program, which carries no index signature: a late-bound key
+        // there fails closed too.
+        let key = match self.eval_object_member_key(&member.key) {
+            class_expression::MemberKey::Named(key) => key,
+            class_expression::MemberKey::Index(kind) if !frame.spread_seen => {
+                frame.late_bound.record(kind, member.readonly, value);
+                return None;
+            }
+            class_expression::MemberKey::None => return None,
+            class_expression::MemberKey::Index(_) | class_expression::MemberKey::Unmodeled => {
+                return Some(self.object_eval_abandon(frame));
+            }
+        };
+        let surface_member = crate::semantic_query::SurfaceMember {
+            key,
+            value,
+            optional: false,
+            readonly: member.readonly,
+            method_kind: member.method_kind,
+            has_implementation_body: member.method_kind.is_some(),
+            visibility: verter_type_expr::MemberVisibility::Public,
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
+            spans: member.spans,
+            declaration_origin: Some(Arc::from(self.canonical)),
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
+            merge_role: crate::semantic_query::MergeRoleStamp::default(),
+        };
+        match &member.unwidened {
+            Some(expr) => {
+                frame.awaiting = ObjectEvalAwait::Unwidened {
+                    surface_member: Box::new(surface_member),
+                    value,
+                };
+                Some(ObjectEvalStep::Descend(expr))
+            }
+            None => {
+                let unwidened = self.literal_view(member_value, value).unwrap_or(value);
+                self.object_eval_push_member(frame, surface_member, unwidened);
+                None
+            }
+        }
+    }
+
+    /// Push one evaluated data member of an object literal beside its
+    /// unwidened view.
+    fn object_eval_push_member(
+        &mut self,
+        frame: &mut ObjectEvalFrame<'_>,
+        surface_member: crate::semantic_query::SurfaceMember,
+        unwidened: SemanticNodeId,
+    ) {
+        frame.unwidened_differs |= unwidened != surface_member.value;
+        frame
+            .unwidened_members
+            .push(crate::semantic_query::SurfaceMember {
                 value: unwidened,
                 ..surface_member.clone()
             });
-            if let Some(receiver) = receiver.as_ref() {
-                receiver.members.borrow_mut().push(surface_member.clone());
-            }
-            surface_members.push(surface_member);
+        if let Some(receiver) = frame.receiver.as_ref() {
+            receiver.members.borrow_mut().push(surface_member.clone());
         }
+        frame.surface_members.push(surface_member);
+    }
+
+    /// An object literal failing closed: its receiver given back, and the
+    /// literal the unmodelled position.
+    fn object_eval_abandon<'e>(&mut self, frame: &mut ObjectEvalFrame<'e>) -> ObjectEvalStep<'e> {
+        self.receiver = frame
+            .enclosing_receiver
+            .take()
+            .expect("the literal's enclosing receiver");
+        ObjectEvalStep::Done(Positional::Unmodeled)
+    }
+
+    /// An object literal whose members all evaluated: its methods and
+    /// accessors evaluated against it, and its surface built.
+    fn object_eval_finish(
+        &mut self,
+        frame: &mut ObjectEvalFrame<'_>,
+    ) -> Positional<SemanticNodeId> {
+        let entries = frame.entries;
+        let offset = frame.offset;
+        let mut surface_members = std::mem::take(&mut frame.surface_members);
+        let mut unwidened_members = std::mem::take(&mut frame.unwidened_members);
+        let unwidened_differs = frame.unwidened_differs;
+        let mut effects = std::mem::take(&mut frame.effects);
+        let spread_seen = frame.spread_seen;
+        let late_bound = std::mem::take(&mut frame.late_bound);
+        let receiver = frame.receiver.take();
+        let enclosing_receiver = frame
+            .enclosing_receiver
+            .take()
+            .expect("the literal's enclosing receiver");
+        let deferred = std::mem::take(&mut frame.deferred);
         if let Some(receiver) = receiver.as_ref() {
             let mut again = Vec::new();
             for (position, member) in deferred {
@@ -10278,49 +10533,89 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         const_asserted: bool,
         contextual: Option<SemanticNodeId>,
     ) -> Positional<SemanticNodeId> {
-        use crate::flow_slice_content::SliceArrayElement;
-        let graph = self.dispatch.graph();
-        let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-        let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
-        // `(reduction operand, widening_nullish)` per element position of
-        // the join, or the tuple element lists (as published and
-        // unwidened) under `as const`.
-        let mut parts: Vec<(ReductionArm, bool)> = Vec::with_capacity(elements.len());
-        let mut tuple: Vec<crate::semantic_query::TupleElement> = Vec::new();
-        let mut tuple_view: Vec<crate::semantic_query::TupleElement> = Vec::new();
+        // Each element evaluates in the order the literal lists them; a
+        // nested literal steps from [`Self::eval_expr`]'s stack
+        // ([`ArrayEvalFrame`]).
+        let mut frame = self.array_eval_frame(elements, const_asserted, contextual);
+        let mut delivered = None;
+        loop {
+            match self.array_eval_step(&mut frame, delivered.take()) {
+                ArrayEvalStep::Done(value) => return value,
+                ArrayEvalStep::Descend(child) => delivered = Some(self.eval_expr(child)),
+            }
+        }
+    }
+
+    /// An array literal's evaluation, before its first element.
+    fn array_eval_frame<'e>(
+        &mut self,
+        elements: &'e [crate::flow_slice_content::SliceArrayElement],
+        const_asserted: bool,
+        contextual: Option<SemanticNodeId>,
+    ) -> ArrayEvalFrame<'e> {
         // A tuple context builds the tuple of the element values: the
         // `as const` path with mutable elements.
         let tuple_context = !const_asserted
             && contextual.is_some_and(|contextual| self.is_tuple_context(contextual));
-        let tupled = const_asserted || tuple_context;
-        let mut spread_seen = false;
-        for (position, element) in elements.iter().enumerate() {
+        ArrayEvalFrame {
+            elements,
+            const_asserted,
+            contextual,
+            tupled: const_asserted || tuple_context,
+            parts: Vec::with_capacity(elements.len()),
+            tuple: Vec::new(),
+            tuple_view: Vec::new(),
+            spread_seen: false,
+            next: 0,
+            holds_before: 0,
+        }
+    }
+
+    /// Continue an array literal with `delivered`, the value of the element
+    /// it asked for last: the next element whose value evaluates from the
+    /// caller's stack, or the literal's value. An element typed under a
+    /// contextual element type evaluates in place.
+    fn array_eval_step<'e>(
+        &mut self,
+        frame: &mut ArrayEvalFrame<'e>,
+        mut delivered: Option<Positional<SemanticNodeId>>,
+    ) -> ArrayEvalStep<'e> {
+        use crate::flow_slice_content::SliceArrayElement;
+        let graph = self.dispatch.graph();
+        let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+        while let Some(element) = frame.elements.get(frame.next) {
+            let position = frame.next;
             match element {
                 SliceArrayElement::Value {
                     value,
                     freshness,
                     pre_widening,
                 } => {
-                    let element_context = contextual.and_then(|contextual| {
-                        self.contextual_element_type(contextual, position, spread_seen)
+                    let element_context = frame.contextual.and_then(|contextual| {
+                        self.contextual_element_type(contextual, position, frame.spread_seen)
                     });
-                    let holds_before = self.holds.len();
-                    let outcome = match element_context {
-                        Some(element_context) => {
+                    let outcome = match (delivered.take(), element_context) {
+                        (Some(outcome), _) => outcome,
+                        (None, Some(element_context)) => {
+                            frame.holds_before = self.holds.len();
                             self.eval_in_context(value, pre_widening.as_deref(), element_context)
                         }
-                        None => self.eval_expr(value),
+                        (None, None) => {
+                            frame.holds_before = self.holds.len();
+                            return ArrayEvalStep::Descend(value);
+                        }
                     };
-                    let node = self.settle_composite_part(outcome, holds_before);
+                    let node = self.settle_composite_part(outcome, frame.holds_before);
                     let widening_nullish = self.widening_nullish_value(value, freshness);
-                    if tupled {
+                    if frame.tupled {
                         let element = crate::semantic_query::TupleElement {
                             label: None,
                             value: if widening_nullish { any } else { node },
                             optional: false,
                             rest: false,
                         };
-                        tuple_view.push(crate::semantic_query::TupleElement {
+                        frame.tuple_view.push(crate::semantic_query::TupleElement {
                             value: if widening_nullish {
                                 node
                             } else {
@@ -10328,9 +10623,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             },
                             ..element.clone()
                         });
-                        tuple.push(element);
+                        frame.tuple.push(element);
                     } else if widening_nullish {
-                        parts.push((ReductionArm::plain(node), true));
+                        frame.parts.push((ReductionArm::plain(node), true));
                     } else {
                         let read = self.widen_value_position_read(value, node);
                         let read = if element_context.is_none() {
@@ -10338,11 +10633,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         } else {
                             read
                         };
-                        parts.push((self.reduction_arm(value, read), false));
+                        frame.parts.push((self.reduction_arm(value, read), false));
                     }
                 }
                 SliceArrayElement::Elision => {
-                    if tupled {
+                    if frame.tupled {
                         let element = crate::semantic_query::TupleElement {
                             label: None,
                             value: if self.nullability.is_strict() {
@@ -10353,24 +10648,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             optional: false,
                             rest: false,
                         };
-                        tuple_view.push(crate::semantic_query::TupleElement {
+                        frame.tuple_view.push(crate::semantic_query::TupleElement {
                             value: undefined,
                             ..element.clone()
                         });
-                        tuple.push(element);
+                        frame.tuple.push(element);
                     } else {
-                        parts.push((ReductionArm::plain(undefined), true));
+                        frame.parts.push((ReductionArm::plain(undefined), true));
                     }
                 }
                 SliceArrayElement::Spread { source } => {
-                    spread_seen = true;
-                    let holds_before = self.holds.len();
-                    let outcome = self.eval_expr(source);
-                    self.holds.truncate(holds_before);
-                    let Positional::Value(source) = outcome else {
-                        return Positional::Unmodeled;
+                    frame.spread_seen = true;
+                    let Some(outcome) = delivered.take() else {
+                        frame.holds_before = self.holds.len();
+                        return ArrayEvalStep::Descend(source);
                     };
-                    if tupled {
+                    self.holds.truncate(frame.holds_before);
+                    let Positional::Value(source) = outcome else {
+                        return ArrayEvalStep::Done(Positional::Unmodeled);
+                    };
+                    if frame.tupled {
                         // A tuple source splices its elements in, labels
                         // and optionality kept; an optional one reads
                         // `| undefined` under `strictNullChecks` (the
@@ -10384,8 +10681,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     optional: false,
                                     rest: true,
                                 };
-                                tuple_view.push(element.clone());
-                                tuple.push(element);
+                                frame.tuple_view.push(element.clone());
+                                frame.tuple.push(element);
                             }
                             Some(SemanticNodeData::Tuple { elements, .. }) => {
                                 for element in elements.iter() {
@@ -10393,25 +10690,40 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     if element.optional && self.nullability.is_strict() {
                                         element.value = self.union(&[element.value, undefined]);
                                     }
-                                    tuple_view.push(element.clone());
-                                    tuple.push(element);
+                                    frame.tuple_view.push(element.clone());
+                                    frame.tuple.push(element);
                                 }
                             }
-                            _ => return Positional::Unmodeled,
+                            _ => return ArrayEvalStep::Done(Positional::Unmodeled),
                         }
+                        frame.next += 1;
                         continue;
                     }
                     let Some(spread) = self.spread_element_types(source) else {
-                        return Positional::Unmodeled;
+                        return ArrayEvalStep::Done(Positional::Unmodeled);
                     };
-                    parts.extend(
+                    frame.parts.extend(
                         spread
                             .into_iter()
                             .map(|node| (ReductionArm::plain(node), false)),
                     );
                 }
             }
+            frame.next += 1;
         }
+        ArrayEvalStep::Done(self.array_eval_finish(frame))
+    }
+
+    /// An array literal's value once every element has evaluated.
+    fn array_eval_finish(&mut self, frame: &mut ArrayEvalFrame<'_>) -> Positional<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+        let const_asserted = frame.const_asserted;
+        let tupled = frame.tupled;
+        let tuple = std::mem::take(&mut frame.tuple);
+        let tuple_view = std::mem::take(&mut frame.tuple_view);
+        let mut parts = std::mem::take(&mut frame.parts);
         if tupled {
             let intern_tuple = |elements: &[crate::semantic_query::TupleElement]| match self
                 .dispatch
@@ -11739,26 +12051,72 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         freshness: &crate::flow_slice_content::SliceFreshness,
         parts: &mut Vec<EvolvingPart>,
     ) {
-        if let crate::flow_slice_content::SliceExpr::Union { arms, guard } = expr {
-            match freshness {
-                crate::flow_slice_content::SliceFreshness::PerArm(facts)
-                    if facts.len() == arms.len() =>
-                {
-                    for (index, (arm, fact)) in arms.iter().zip(facts.iter()).enumerate() {
-                        let mark = self.narrowing_snapshot();
-                        self.apply_guard_scoped(guard, index == 0);
-                        self.collect_evolving_parts(arm, fact, parts);
-                        self.restore_narrowings(mark);
+        use crate::flow_slice_content::{SliceExpr, SliceFreshness, SliceGuard};
+        // A ternary nested in a ternary's arm costs no native level: the
+        // arms are visited from an explicit stack, each entered under its
+        // guard reading and left at its own narrowing mark, in order.
+        enum Work<'e> {
+            Visit(&'e SliceExpr, &'e SliceFreshness),
+            EnterArm {
+                guard: &'e SliceGuard,
+                positive: bool,
+                arm: &'e SliceExpr,
+                fact: &'e SliceFreshness,
+            },
+            Leave(NarrowingSnapshot),
+        }
+        let mut work = vec![Work::Visit(expr, freshness)];
+        while let Some(item) = work.pop() {
+            match item {
+                Work::Visit(expr, freshness) => {
+                    if let SliceExpr::Union { arms, guard } = expr {
+                        match freshness {
+                            SliceFreshness::PerArm(facts) if facts.len() == arms.len() => {
+                                let entered = arms.iter().zip(facts.iter()).enumerate().map(
+                                    |(index, (arm, fact))| Work::EnterArm {
+                                        guard,
+                                        positive: index == 0,
+                                        arm,
+                                        fact,
+                                    },
+                                );
+                                let entered: Vec<Work<'_>> = entered.collect();
+                                work.extend(entered.into_iter().rev());
+                                continue;
+                            }
+                            _ => {
+                                self.record_degradation(FlowReturnDegradation::FlowGap(
+                                    crate::semantic_query::FlowGap::UnmodeledExpression,
+                                ));
+                            }
+                        }
                     }
-                    return;
+                    self.collect_evolving_part(expr, freshness, parts);
                 }
-                _ => {
-                    self.record_degradation(FlowReturnDegradation::FlowGap(
-                        crate::semantic_query::FlowGap::UnmodeledExpression,
-                    ));
+                Work::EnterArm {
+                    guard,
+                    positive,
+                    arm,
+                    fact,
+                } => {
+                    let mark = self.narrowing_snapshot();
+                    self.apply_guard_scoped(guard, positive);
+                    work.push(Work::Leave(mark));
+                    work.push(Work::Visit(arm, fact));
                 }
+                Work::Leave(mark) => self.restore_narrowings(mark),
             }
         }
+    }
+
+    /// One part of [`Self::collect_evolving_parts`]: a position that is no
+    /// ternary of per-arm freshness, evaluated.
+    fn collect_evolving_part(
+        &mut self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+        parts: &mut Vec<EvolvingPart>,
+    ) {
         let holds_before = self.holds.len();
         let outcome = self.eval_expr(expr);
         let node = self.settle_composite_part(outcome, holds_before);
@@ -19537,33 +19895,99 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         region: &crate::flow_slice_content::SliceRegion,
     ) -> (Result<Vec<FlowContribution>, FlowReturnFailure>, bool) {
-        self.executed_walk.regions_entered = self.executed_walk.regions_entered.saturating_add(1);
-        let outcome = self.eval_region_statements(region);
-        match &outcome.0 {
-            Ok(_) => {
-                self.executed_walk.regions_completed =
-                    self.executed_walk.regions_completed.saturating_add(1);
+        // A block nested in a block costs no native level: each region
+        // being evaluated is a frame of an explicit stack, and a block
+        // statement suspends its region's frame until the block's own
+        // region is evaluated.
+        let mut frames = vec![self.region_eval_frame(region)];
+        let mut delivered = None;
+        loop {
+            let frame = frames.last_mut().expect("the region being evaluated");
+            match self.eval_region_statements(frame, delivered.take()) {
+                RegionEvalStep::EnterBlock(block) => {
+                    let child = self.region_eval_frame(block);
+                    frames.push(child);
+                }
+                RegionEvalStep::Done(outcome) => {
+                    match &outcome.0 {
+                        Ok(_) => {
+                            self.executed_walk.regions_completed =
+                                self.executed_walk.regions_completed.saturating_add(1);
+                        }
+                        Err(_) => self.executed_walk.aborted = true,
+                    }
+                    frames.pop();
+                    if frames.is_empty() {
+                        return outcome;
+                    }
+                    delivered = Some(outcome);
+                }
             }
-            Err(_) => self.executed_walk.aborted = true,
         }
-        outcome
+    }
+
+    /// A region's evaluation, entered (the recording shell counts every
+    /// entry and exit).
+    fn region_eval_frame<'r>(
+        &mut self,
+        region: &'r crate::flow_slice_content::SliceRegion,
+    ) -> RegionEvalFrame<'r> {
+        self.executed_walk.regions_entered = self.executed_walk.regions_entered.saturating_add(1);
+        RegionEvalFrame {
+            region,
+            next: 0,
+            contributors: Vec::new(),
+            path_alive: true,
+            block_bases: None,
+        }
     }
 
     /// The statement walk of [`Self::eval_region`] (the recording shell
     /// wraps every entry and exit).
-    fn eval_region_statements(
+    fn eval_region_statements<'r>(
         &mut self,
-        region: &crate::flow_slice_content::SliceRegion,
-    ) -> (Result<Vec<FlowContribution>, FlowReturnFailure>, bool) {
-        let mut contributors: Vec<FlowContribution> = Vec::new();
+        frame: &mut RegionEvalFrame<'r>,
+        delivered: Option<(Result<Vec<FlowContribution>, FlowReturnFailure>, bool)>,
+    ) -> RegionEvalStep<'r> {
+        let region = frame.region;
+        let mut contributors = std::mem::take(&mut frame.contributors);
         // The evaluator's own path liveness, refined past the lowering's
         // reachability where only the resolver can see a path die (an
         // exhaustive switch's no-matching-case path). A terminal statement
         // ends the path: statements after it are unreachable and never
         // evaluate. The returned fall-through is the lowering's flag
         // ANDed with this — the override only ever narrows downward.
-        let mut path_alive = true;
-        for statement in region.statements.iter() {
+        let mut path_alive = frame.path_alive;
+        if let Some((result, block_falls)) = delivered {
+            let (shadow_base, break_base, return_base, throw_base) = frame
+                .block_bases
+                .take()
+                .expect("the block the region is suspended at");
+            let block_contributors = match result {
+                Ok(contributors) => contributors,
+                Err(failure) => {
+                    return RegionEvalStep::Done((
+                        Err(failure),
+                        region
+                            .can_fall_through
+                            .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                    ))
+                }
+            };
+            contributors.extend(block_contributors);
+            let mut end = self.layer_state();
+            let shadows = self.split_scope_shadows_close_exits(
+                shadow_base,
+                break_base,
+                return_base,
+                throw_base,
+            );
+            Self::close_lexical_scope(&mut end, &shadows);
+            self.restore_layer_state(end);
+            path_alive = block_falls;
+        }
+        while let Some(statement) = region.statements.get(frame.next) {
+            frame.next += 1;
             if !path_alive {
                 // Statements no path reaches: the checker still aggregates
                 // their returns and yields.
@@ -19575,12 +19999,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             contributors.extend(unreachable_contributors)
                         }
                         Err(failure) => {
-                            return (
+                            return RegionEvalStep::Done((
                                 Err(failure),
                                 region
                                     .can_fall_through
                                     .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                            )
+                            ))
                         }
                     }
                 }
@@ -19696,12 +20120,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             }),
                             Ok(None) => {}
                             Err(failure) => {
-                                return (
+                                return RegionEvalStep::Done((
                                     Err(failure),
                                     region
                                         .can_fall_through
                                         .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                                )
+                                ))
                             }
                         }
                         self.capture_return_edge();
@@ -19848,12 +20272,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         path_alive = falls;
                     }
                     Err(failure) => {
-                        return (
+                        return RegionEvalStep::Done((
                             Err(failure),
                             region
                                 .can_fall_through
                                 .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                        )
+                        ))
                     }
                 },
                 crate::flow_slice_content::SliceStatement::Switch {
@@ -20096,12 +20520,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         match case_result {
                             Ok(case_contributors) => contributors.extend(case_contributors),
                             Err(failure) => {
-                                return (
+                                return RegionEvalStep::Done((
                                     Err(failure),
                                     region
                                         .can_fall_through
                                         .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                                )
+                                ))
                             }
                         }
                         let end = self.layer_state();
@@ -20217,12 +20641,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         match self.eval_try_clause(&entry, block, None, true) {
                             Ok(clause) => clause,
                             Err(failure) => {
-                                return (
+                                return RegionEvalStep::Done((
                                     Err(failure),
                                     region
                                         .can_fall_through
                                         .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                                )
+                                ))
                             }
                         };
                     own.extend(try_contributors);
@@ -20258,12 +20682,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         ) {
                             Ok(clause) => clause,
                             Err(failure) => {
-                                return (
+                                return RegionEvalStep::Done((
                                     Err(failure),
                                     region
                                         .can_fall_through
                                         .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                                )
+                                ))
                             }
                         };
                         own.extend(catch_contributors);
@@ -20355,12 +20779,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 match self.eval_try_clause(&finally_start, finally, None, false) {
                                     Ok(clause) => clause,
                                     Err(failure) => {
-                                        return (
+                                        return RegionEvalStep::Done((
                                             Err(failure),
                                             region.can_fall_through.reaches_end(
                                                 CompletionDischarge::EvaluatorRegionWalk,
                                             ),
-                                        )
+                                        ))
                                     }
                                 };
                             // The post-statement state: the normal
@@ -20525,12 +20949,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let body_contributors = match result {
                         Ok(contributors) => contributors,
                         Err(failure) => {
-                            return (
+                            return RegionEvalStep::Done((
                                 Err(failure),
                                 region
                                     .can_fall_through
                                     .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                            )
+                            ))
                         }
                     };
                     contributors.extend(body_contributors);
@@ -20584,33 +21008,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // pending break exit the block's evaluation captured,
                     // since an exit rides its captured bindings across the
                     // block's boundary.
-                    let shadow_base = self.scope_shadows.len();
-                    let break_base = self.break_exits.len();
-                    let return_base = self.return_edges.len();
-                    let throw_base = self.throw_points.len();
-                    let (result, block_falls) = self.eval_region(block);
-                    let block_contributors = match result {
-                        Ok(contributors) => contributors,
-                        Err(failure) => {
-                            return (
-                                Err(failure),
-                                region
-                                    .can_fall_through
-                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                            )
-                        }
-                    };
-                    contributors.extend(block_contributors);
-                    let mut end = self.layer_state();
-                    let shadows = self.split_scope_shadows_close_exits(
-                        shadow_base,
-                        break_base,
-                        return_base,
-                        throw_base,
-                    );
-                    Self::close_lexical_scope(&mut end, &shadows);
-                    self.restore_layer_state(end);
-                    path_alive = block_falls;
+                    // The block's region evaluates next, from the caller's
+                    // stack; this region resumes past the statement with its
+                    // outcome, closing the block's scope then.
+                    frame.block_bases = Some((
+                        self.scope_shadows.len(),
+                        self.break_exits.len(),
+                        self.return_edges.len(),
+                        self.throw_points.len(),
+                    ));
+                    frame.contributors = contributors;
+                    frame.path_alive = path_alive;
+                    return RegionEvalStep::EnterBlock(block);
                 }
                 crate::flow_slice_content::SliceStatement::Break { target } => {
                     // The edge past the absorbing construct is THIS state:
@@ -20645,12 +21054,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             contributors.extend(unreachable_contributors)
                         }
                         Err(failure) => {
-                            return (
+                            return RegionEvalStep::Done((
                                 Err(failure),
                                 region
                                     .can_fall_through
                                     .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                            )
+                            ))
                         }
                     }
                     path_alive = false;
@@ -20660,12 +21069,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     match result {
                         Ok(loop_contributors) => contributors.extend(loop_contributors),
                         Err(failure) => {
-                            return (
+                            return RegionEvalStep::Done((
                                 Err(failure),
                                 region
                                     .can_fall_through
                                     .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                            )
+                            ))
                         }
                     }
                     path_alive = completes;
@@ -20858,7 +21267,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // holds the marker, every sibling statement
                             // keeps evaluating, and a body that never
                             // reads this binding still publishes its
-                            // return (degraded, never warm).
+                            // return RegionEvalStep::Done((degraded, never warm)).
                             let marker = self.unmodeled_position();
                             self.set_declared_local(
                                 &FlowProductSubject::Local(*binding),
@@ -21396,7 +21805,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     path_alive = false;
                 }
                 crate::flow_slice_content::SliceStatement::Unsupported(kind) => {
-                    return (
+                    return RegionEvalStep::Done((
                         Err(FlowReturnFailure::Unsupported(match kind {
                             crate::flow_slice_content::SliceUnsupported::Loop => {
                                 FlowReturnUnsupported::Loop
@@ -21417,17 +21826,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         region
                             .can_fall_through
                             .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                    );
+                    ));
                 }
             }
         }
-        (
+        RegionEvalStep::Done((
             Ok(contributors),
             region
                 .can_fall_through
                 .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
                 && path_alive,
-        )
+        ))
     }
 
     /// Seed the authored type authority of selected `var` declarations before
@@ -21437,12 +21846,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// frame gate is unresolved stays source-ordered so an unreachable or
     /// unobserved declaration cannot degrade the frame merely by existing.
     fn seed_hoisted_var_declarations(&mut self, region: &crate::flow_slice_content::SliceRegion) {
-        use crate::flow_slice_content::{SliceBindingKind, SliceStatement};
-        for statement in region.statements.iter() {
-            match statement {
+        use crate::flow_slice_content::{SliceBindingKind, SliceRegion, SliceStatement};
+        // The regions a region nests (a block, an `if`'s arms, a loop's
+        // parts) are walked from an explicit stack of statement cursors, in
+        // source order: a region nested however deep costs no native level.
+        let mut cursors = vec![region.statements.iter()];
+        while let Some(cursor) = cursors.last_mut() {
+            let Some(statement) = cursor.next() else {
+                cursors.pop();
+                continue;
+            };
+            // The regions this statement nests, in source order.
+            let nested: Vec<&SliceRegion> = match statement {
                 SliceStatement::Binding {
                     binding,
-                    name,
                     kind: SliceBindingKind::Var,
                     declared: Some(declared),
                     ..
@@ -21457,51 +21874,39 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         SliceBindingKind::Var,
                         Some(node),
                     );
+                    Vec::new()
                 }
                 SliceStatement::If {
                     consequent,
                     alternate,
                     ..
-                } => {
-                    self.seed_hoisted_var_declarations(consequent);
-                    if let Some(alternate) = alternate.as_deref() {
-                        self.seed_hoisted_var_declarations(alternate);
-                    }
-                }
-                SliceStatement::Block(body) => {
-                    self.seed_hoisted_var_declarations(body);
-                }
-                SliceStatement::Labeled { body, .. } => {
-                    self.seed_hoisted_var_declarations(body);
-                }
-                SliceStatement::Loop(lowered) => {
-                    self.seed_hoisted_var_declarations(&lowered.init);
-                    self.seed_hoisted_var_declarations(&lowered.body);
-                }
-                SliceStatement::Unreachable(unreachable) => {
-                    self.seed_hoisted_var_declarations(unreachable);
-                }
+                } => std::iter::once(&**consequent)
+                    .chain(alternate.as_deref())
+                    .collect(),
+                SliceStatement::Block(body) => vec![body],
+                SliceStatement::Labeled { body, .. } => vec![body],
+                SliceStatement::Loop(lowered) => vec![&lowered.init, &lowered.body],
+                SliceStatement::Unreachable(unreachable) => vec![unreachable],
                 SliceStatement::Switch { cases, .. } => {
-                    for case in cases.iter() {
-                        self.seed_hoisted_var_declarations(&case.region);
-                    }
+                    cases.iter().map(|case| &case.region).collect()
                 }
                 SliceStatement::Try {
                     block,
                     catch,
                     finally,
                     ..
-                } => {
-                    self.seed_hoisted_var_declarations(block);
-                    if let Some(catch) = catch.as_deref() {
-                        self.seed_hoisted_var_declarations(&catch.region);
-                    }
-                    if let Some(finally) = finally.as_deref() {
-                        self.seed_hoisted_var_declarations(finally);
-                    }
-                }
-                _ => {}
-            }
+                } => std::iter::once(&**block)
+                    .chain(catch.as_deref().map(|catch| &catch.region))
+                    .chain(finally.as_deref())
+                    .collect(),
+                _ => Vec::new(),
+            };
+            cursors.extend(
+                nested
+                    .into_iter()
+                    .rev()
+                    .map(|region| region.statements.iter()),
+            );
         }
     }
 
@@ -22381,6 +22786,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 collect_throw_points: false,
                 scope_shadows: Vec::new(),
                 call_evidence: Vec::new(),
+                call_drive: None,
                 expression_write_nodes: rustc_hash::FxHashMap::default(),
                 capture_write_lookahead: rustc_hash::FxHashMap::default(),
                 executed_walk: ExecutedSliceWalk::default(),
@@ -22773,11 +23179,263 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         expr: &crate::flow_slice_content::SliceExpr,
     ) -> Positional<SemanticNodeId> {
-        match self.eval_expr_unerased(expr) {
-            Positional::Value(node) => {
-                Positional::Value(self.dispatch.erase_nullable_members(node, self.nullability))
+        use crate::flow_slice_content::{SliceArithmetic, SliceExpr};
+        // An operator form's operands (a `!`, a non-null assertion, an
+        // arithmetic operator's operands) and a conditional's branches
+        // evaluate from an explicit stack of the forms waiting on them, each
+        // one's value erased as its own [`Self::eval_expr`] would erase it:
+        // an operand nested in an operand costs no native level. Every other
+        // form evaluates through [`Self::eval_expr_unerased`].
+        enum Waiting<'e> {
+            Erase,
+            Not {
+                widen: bool,
+            },
+            NonNull,
+            Arithmetic {
+                operator: SliceArithmetic,
+                operands: &'e [SliceExpr],
+                types: Vec<SemanticNodeId>,
+            },
+            /// An object literal waiting on the child it asked for last.
+            Object(Box<ObjectEvalFrame<'e>>),
+            /// A branch join (see [`FlowEvaluator::eval_expr_unerased`]'s
+            /// `Union` arm) whose arm `reduction_arms.len()` evaluates
+            /// under its guard's overlay, taken off at `mark`.
+            Union {
+                arms: &'e [SliceExpr],
+                guard: &'e crate::flow_slice_content::SliceGuard,
+                reduction_arms: Vec<ReductionArm>,
+                holds_before: usize,
+                mark: NarrowingSnapshot,
+            },
+            /// An array literal waiting on the element it asked for last.
+            Array(Box<ArrayEvalFrame<'e>>),
+            /// A call waiting on its callee operand ([`call_stack`]).
+            CallOperand(Box<CallInFlight<'e>>),
+            /// A call waiting on a lowered argument its executor route
+            /// asked for ([`call_stack`]).
+            CallArgument(Box<CallArgumentWait<'e>>),
+        }
+        let mut waiting = vec![Waiting::Erase];
+        let mut current = expr;
+        loop {
+            let mut value = match current {
+                SliceExpr::Not { operand, widen } => {
+                    waiting.push(Waiting::Not { widen: *widen });
+                    waiting.push(Waiting::Erase);
+                    current = operand;
+                    continue;
+                }
+                SliceExpr::NonNull { operand } => {
+                    waiting.push(Waiting::NonNull);
+                    waiting.push(Waiting::Erase);
+                    current = operand;
+                    continue;
+                }
+                SliceExpr::Arithmetic { operator, operands } if !operands.is_empty() => {
+                    waiting.push(Waiting::Arithmetic {
+                        operator: *operator,
+                        operands,
+                        types: Vec::with_capacity(operands.len()),
+                    });
+                    waiting.push(Waiting::Erase);
+                    current = &operands[0];
+                    continue;
+                }
+                SliceExpr::Union { arms, guard }
+                    if !arms.is_empty() && !union_branches_change_reaching_values(arms) =>
+                {
+                    let holds_before = self.holds.len();
+                    let mark = self.narrowing_snapshot();
+                    self.apply_guard_scoped(guard, true);
+                    waiting.push(Waiting::Union {
+                        arms,
+                        guard,
+                        reduction_arms: Vec::with_capacity(arms.len()),
+                        holds_before,
+                        mark,
+                    });
+                    waiting.push(Waiting::Erase);
+                    current = &arms[0];
+                    continue;
+                }
+                SliceExpr::Object { entries, offset } => {
+                    let mut frame = self.object_eval_frame(entries, *offset, false, None);
+                    match self.object_eval_step(&mut frame, None) {
+                        ObjectEvalStep::Done(value) => value,
+                        ObjectEvalStep::Descend(child) => {
+                            waiting.push(Waiting::Object(Box::new(frame)));
+                            waiting.push(Waiting::Erase);
+                            current = child;
+                            continue;
+                        }
+                    }
+                }
+                SliceExpr::Array {
+                    elements,
+                    const_asserted,
+                } => {
+                    let mut frame = self.array_eval_frame(elements, *const_asserted, None);
+                    match self.array_eval_step(&mut frame, None) {
+                        ArrayEvalStep::Done(value) => value,
+                        ArrayEvalStep::Descend(child) => {
+                            waiting.push(Waiting::Array(Box::new(frame)));
+                            waiting.push(Waiting::Erase);
+                            current = child;
+                            continue;
+                        }
+                    }
+                }
+                // EVERY call form, through the ONE call sink, from this
+                // stack: its callee operand and the lowered arguments its
+                // executor route types evaluate here ([`call_stack`]).
+                SliceExpr::Call(call, site, arguments) => {
+                    match self.begin_call(call, *site, arguments) {
+                        CallStep::Done(value) => value,
+                        CallStep::Operand(flight, operand) => {
+                            waiting.push(Waiting::CallOperand(flight));
+                            waiting.push(Waiting::Erase);
+                            current = operand;
+                            continue;
+                        }
+                        CallStep::Argument(wait) => {
+                            current = wait.lowered;
+                            waiting.push(Waiting::CallArgument(wait));
+                            waiting.push(Waiting::Erase);
+                            continue;
+                        }
+                    }
+                }
+                other => self.eval_expr_unerased(other),
+            };
+            loop {
+                match waiting.pop() {
+                    None => return value,
+                    Some(Waiting::Erase) => {
+                        if let Positional::Value(node) = value {
+                            value = Positional::Value(
+                                self.dispatch.erase_nullable_members(node, self.nullability),
+                            );
+                        }
+                    }
+                    Some(Waiting::Not { widen }) => {
+                        value = match self.finish_not(value) {
+                            Positional::Value(node) if widen => {
+                                Positional::Value(widen_literal_node(self.dispatch, node))
+                            }
+                            other => other,
+                        };
+                    }
+                    Some(Waiting::NonNull) => value = self.finish_non_null(value),
+                    Some(Waiting::Arithmetic {
+                        operator,
+                        operands,
+                        mut types,
+                    }) => {
+                        // An operand that holds or is unmodeled ends the
+                        // operator there, as the operands after it never
+                        // evaluate.
+                        let Positional::Value(node) = value else {
+                            continue;
+                        };
+                        types.push(node);
+                        if let Some(next) = operands.get(types.len()) {
+                            waiting.push(Waiting::Arithmetic {
+                                operator,
+                                operands,
+                                types,
+                            });
+                            waiting.push(Waiting::Erase);
+                            current = next;
+                            break;
+                        }
+                        value = self.finish_arithmetic(operator, &types);
+                    }
+                    Some(Waiting::Object(mut frame)) => {
+                        match self.object_eval_step(&mut frame, Some(value)) {
+                            ObjectEvalStep::Done(done) => value = done,
+                            ObjectEvalStep::Descend(child) => {
+                                waiting.push(Waiting::Object(frame));
+                                waiting.push(Waiting::Erase);
+                                current = child;
+                                break;
+                            }
+                        }
+                    }
+                    Some(Waiting::Union {
+                        arms,
+                        guard,
+                        mut reduction_arms,
+                        holds_before,
+                        mark,
+                    }) => {
+                        self.restore_narrowings(mark);
+                        let index = reduction_arms.len();
+                        let node = self.settle_composite_part(value, holds_before);
+                        reduction_arms.push(self.reduction_arm(&arms[index], node));
+                        if let Some(next) = arms.get(index + 1) {
+                            let holds_before = self.holds.len();
+                            let mark = self.narrowing_snapshot();
+                            self.apply_guard_scoped(guard, false);
+                            waiting.push(Waiting::Union {
+                                arms,
+                                guard,
+                                reduction_arms,
+                                holds_before,
+                                mark,
+                            });
+                            waiting.push(Waiting::Erase);
+                            current = next;
+                            break;
+                        }
+                        let (node, view) = self.reduced_union(reduction_arms);
+                        if view != node {
+                            self.unwidened_views.insert(node, view);
+                        }
+                        value = Positional::Value(node);
+                    }
+                    Some(Waiting::Array(mut frame)) => {
+                        match self.array_eval_step(&mut frame, Some(value)) {
+                            ArrayEvalStep::Done(done) => value = done,
+                            ArrayEvalStep::Descend(child) => {
+                                waiting.push(Waiting::Array(frame));
+                                waiting.push(Waiting::Erase);
+                                current = child;
+                                break;
+                            }
+                        }
+                    }
+                    Some(Waiting::CallOperand(flight)) => {
+                        match self.resume_call_operand(*flight, value) {
+                            CallStep::Done(done) => value = done,
+                            CallStep::Argument(wait) => {
+                                current = wait.lowered;
+                                waiting.push(Waiting::CallArgument(wait));
+                                waiting.push(Waiting::Erase);
+                                break;
+                            }
+                            CallStep::Operand(..) => {
+                                unreachable!("a call evaluates its operand once")
+                            }
+                        }
+                    }
+                    Some(Waiting::CallArgument(wait)) => {
+                        match self.resume_call_argument(*wait, value) {
+                            CallStep::Done(done) => value = done,
+                            CallStep::Argument(wait) => {
+                                current = wait.lowered;
+                                waiting.push(Waiting::CallArgument(wait));
+                                waiting.push(Waiting::Erase);
+                                break;
+                            }
+                            CallStep::Operand(..) => {
+                                unreachable!("a call evaluates its operand once")
+                            }
+                        }
+                    }
+                }
             }
-            other => other,
         }
     }
 
@@ -23338,9 +23996,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // applies, arm-scoped.
             crate::flow_slice_content::SliceExpr::Union { arms, guard } => {
                 if let [consequent, alternate] = &arms[..] {
-                    if expression_changes_reaching_values(consequent)
-                        || expression_changes_reaching_values(alternate)
-                    {
+                    if union_branches_change_reaching_values(arms) {
                         return self.eval_branching_union(consequent, alternate, guard);
                     }
                 }
@@ -23653,237 +24309,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         site: crate::flow_slice_content::SliceCallSite,
         arguments: &crate::flow_slice_content::SliceCallArguments,
     ) -> Option<Positional<super::call_resolve::ResolveCallStep>> {
-        let serve = self
-            .dispatch
-            .ctx
-            .ensure_indexed_ready_serve(self.canonical)?;
-        let memo = serve.indexed.shallow_state.decl_bodies();
-        let indexed = memo.indexed_call_expression_at(site.span())?;
-        let call = &indexed.call;
-        let frame_arguments = self.call_arguments.get(&site.span()).cloned();
-        let mut args = Vec::with_capacity(call.args.len());
-        // Each function-value argument's frame lowering, typed again under
-        // its contextual signature when the executor asks for it.
-        let mut function_arguments: Vec<Option<crate::flow_slice_content::SliceExpr>> =
-            Vec::with_capacity(call.args.len());
-        for (ordinal, argument) in call.args.iter().enumerate() {
-            let root = indexed.argument_roots.get(ordinal)?;
-            let binding = self.indexed_argument_binding(*root);
-            // An argument that is itself a call, or a member read,
-            // evaluates through this frame's carriers, against the frame's
-            // bindings: a hold on its callee holds this call too. Any other
-            // argument that is no bare binding read is a value THIS frame
-            // computes (`c ? a : b`, `twin(c)`, `[twin(c)]`): its frame
-            // lowering reads the frame's own bindings, which the indexed
-            // program resolves in owner scope and cannot.
-            // A literal argument this frame computes is also evaluated in its
-            // const context: the value a `const` type parameter it is passed
-            // to infers from.
-            function_arguments.push(
-                arguments
-                    .get(ordinal)
-                    .or_else(|| {
-                        frame_arguments
-                            .as_deref()
-                            .and_then(|frame| frame.get(ordinal))
-                            .map(|frame| &frame.value)
-                    })
-                    .filter(|expr| {
-                        matches!(
-                            expr,
-                            crate::flow_slice_content::SliceExpr::NestedFunctionValue { .. }
-                        )
-                    })
-                    .cloned(),
-            );
-            let mut const_view = None;
-            // Whether the argument is a call whose result is wholly the
-            // fresh literal its inference kept: a fresh literal source, as
-            // a bare literal is.
-            let mut fresh_call = false;
-            // A function value whose parameters are all annotated is typed
-            // with the call's first pass, its body return read under the
-            // parameter's contextual return type.
-            let function_value = match function_arguments.last().and_then(Option::as_ref) {
-                Some(expr) if !argument.context_sensitive => {
-                    self.eval_function_argument_under_parameter(expr, callee, ordinal)
+        // The route types its arguments one at a time
+        // ([`call_stack`]); a lowered one evaluates here.
+        let mut progress = self.start_resolve_call(callee, site, arguments);
+        loop {
+            match progress {
+                call_stack::ResolveCallProgress::Done(step) => return step,
+                call_stack::ResolveCallProgress::Argument(route, lowered) => {
+                    let value = self.eval_expr(lowered);
+                    progress = self.deliver_resolve_call_argument(route, lowered, value);
                 }
-                _ => None,
-            };
-            let evaluated = match (function_value, arguments.get(ordinal)) {
-                (Some(node), _) => Some(node),
-                (None, lowered) => match lowered {
-                    Some(lowered) => match self.eval_expr(lowered) {
-                        Positional::Value(node) => {
-                            fresh_call = self.is_fresh_call_value(lowered, node);
-                            Some(node)
-                        }
-                        Positional::Hold => return Some(Positional::Hold),
-                        Positional::Unmodeled => None,
-                    },
-                    None => {
-                        let frame_value = match (&binding, frame_arguments.as_deref()) {
-                            (
-                                FlowIndexedArgumentBinding::NonBindingExpression,
-                                Some(frame_arguments),
-                            ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
-                                let value = self.eval_frame_call_argument(&frame_argument.value)?;
-                                const_view = frame_argument
-                                    .const_context
-                                    .as_ref()
-                                    .and_then(|expr| self.eval_frame_call_argument(expr));
-                                Some(value)
-                            }),
-                            _ => None,
-                        };
-                        frame_value.or_else(|| {
-                            let value =
-                                self.eval_indexed_call_argument(&argument.expression, &binding)?;
-                            fresh_call = value.fresh;
-                            Some(value.node)
-                        })
-                    }
-                },
-            };
-            let Some(ty) = evaluated else {
-                // An argument this substrate cannot type leaves
-                // applicability without its evidence: the executor
-                // refuses as surely, and degrading here is the same
-                // typed marker with one less hop.
-                return None;
-            };
-            // A read of a WIDENING-literal `const` is a FRESH literal
-            // source exactly as a bare literal argument is (the checker
-            // widens `wrap(a)` for `const a = "x"` identically to
-            // `wrap("x")`); the indexed lowering classifies every
-            // reference as pinned because only this frame knows the
-            // binding's widening membership.
-            let reads_widening_local = match &binding {
-                FlowIndexedArgumentBinding::ValueRead(binding) => self.widening_of(binding),
-                // A value declared outside the frame (`const c = 1` read as
-                // `c`) widens by its declared type.
-                FlowIndexedArgumentBinding::Free => match &argument.expression {
-                    verter_type_expr::IndexedValueExpression::Value(
-                        verter_type_expr::TypeExpr::TypeOf(value),
-                    ) => {
-                        value.type_args.is_empty()
-                            && !self.top_level_literal_nodes(ty).is_empty()
-                            && self.dispatch.value_read_widens(
-                                self.canonical,
-                                self.owner,
-                                &value.path,
-                            )
-                    }
-                    _ => false,
-                },
-                _ => false,
-            };
-            args.push(crate::semantic_query::CallArgKey::Eager {
-                ty,
-                spread: argument.spread,
-                context_sensitive: argument.context_sensitive,
-                const_view,
-                literal_mode: indexed_argument_literal_mode(
-                    argument.literal_mode,
-                    reads_widening_local || fresh_call,
-                ),
-            });
-        }
-        let mut explicit_type_args = Vec::with_capacity(call.explicit_type_args.len());
-        for argument in call.explicit_type_args.iter() {
-            let node = self.dispatch.lower_type_expr_in_owner_scope_with_mode(
-                self.canonical,
-                self.owner,
-                argument,
-                crate::semantic_query::ProjectionMode::Navigate,
-            )?;
-            explicit_type_args.push(node);
-        }
-        // A member call's receiver rides the key: `.call` / `.apply`
-        // rebase and `this`-typed methods read it — the same indexed
-        // lowering the callee came from, evaluated in the same scope.
-        let receiver = match call.receiver.as_deref() {
-            Some(receiver) => {
-                let root = indexed.receiver_root?;
-                let receiver_binding = self.indexed_argument_binding(root);
-                Some(
-                    self.eval_indexed_call_argument(receiver, &receiver_binding)?
-                        .node,
-                )
             }
-            None => None,
-        };
-        let mut key = crate::semantic_query::ResolveCallKey {
-            point: crate::semantic_query::ProgramPointId {
-                canonical_id: Arc::from(self.canonical),
-                offset: call.point,
-            },
-            callee,
-            kind: match call.kind {
-                verter_type_expr::IndexedValueCallKind::Call => {
-                    crate::semantic_query::CallKind::Call
-                }
-                verter_type_expr::IndexedValueCallKind::Construct => {
-                    crate::semantic_query::CallKind::Construct
-                }
-            },
-            receiver,
-            args: Arc::from(args.clone().into_boxed_slice()),
-            explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
-            flow: crate::semantic_query::FlowNarrowingKey::empty(),
-            context: self.dispatch.resolve_call_context_for(self.canonical),
-        };
-        let mut step = Positional::Value(self.dispatch.execute_resolve_call(key.clone()));
-        // The checker's second inference pass: a context-sensitive argument
-        // the executor names is typed under the contextual type it hands
-        // back, and the call is asked again with that argument's type. Each
-        // round types one argument that no round types again.
-        let mut retyped = false;
-        // bounded-loop: at most one round per argument — each round retypes one context-sensitive argument, which is no longer context-sensitive after it.
-        for _ in 0..args.len() {
-            let Some((position, contextual)) = Self::contextual_argument_request(&step) else {
-                break;
-            };
-            let Some(Some(expr)) = function_arguments.get(position).cloned() else {
-                break;
-            };
-            let Some(ty) = self.eval_function_argument_in_context(&expr, contextual) else {
-                break;
-            };
-            let Some(crate::semantic_query::CallArgKey::Eager { spread, .. }) = args.get(position)
-            else {
-                break;
-            };
-            retyped = true;
-            args[position] = crate::semantic_query::CallArgKey::Eager {
-                ty,
-                spread: *spread,
-                context_sensitive: false,
-                const_view: None,
-                literal_mode: crate::semantic_query::ArgumentLiteralMode::Literal,
-            };
-            function_arguments[position] = None;
-            key.args = Arc::from(args.clone().into_boxed_slice());
-            step = Positional::Value(self.dispatch.execute_resolve_call(key.clone()));
         }
-        // A call asked again after a retyped argument that still does not
-        // decide answers no uninferred parameter's fallback either.
-        if retyped
-            && matches!(
-                step,
-                Positional::Value(super::call_resolve::ResolveCallStep::Degraded(
-                    crate::semantic_query::ResolveCallFailure::Undecidable
-                        | crate::semantic_query::ResolveCallFailure::Budget
-                ))
-            )
-        {
-            step = Positional::Value(super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::ContextSensitiveInference {
-                    contextual: None,
-                },
-            ));
-        }
-        Some(step)
     }
 
     /// The call-executor route of one authored call or `new` expression:
@@ -23904,7 +24341,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         site: crate::flow_slice_content::SliceCallSite,
         arguments: &crate::flow_slice_content::SliceCallArguments,
     ) -> Option<Positional<CallValue>> {
-        let step = match self.resolve_call_step(callee, site, arguments) {
+        if let Some(answer) = self.driven_call_route(callee, site, arguments) {
+            return answer;
+        }
+        let step = self.resolve_call_step(callee, site, arguments);
+        self.fold_resolve_call_step(step, site)
+    }
+
+    /// Fold a call's executor route `step` into the frame's vocabulary
+    /// ([`Self::eval_call_via_resolve_call`]).
+    fn fold_resolve_call_step(
+        &mut self,
+        step: Option<Positional<super::call_resolve::ResolveCallStep>>,
+        site: crate::flow_slice_content::SliceCallSite,
+    ) -> Option<Positional<CallValue>> {
+        let step = match step {
             Some(Positional::Value(step)) => step,
             Some(Positional::Hold) => return Some(Positional::Hold),
             Some(Positional::Unmodeled) | None => {
@@ -23988,23 +24439,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         site: crate::flow_slice_content::SliceCallSite,
         arguments: &crate::flow_slice_content::SliceCallArguments,
     ) -> Positional<CallValue> {
-        let undecided_before = self.dispatch.dispatch_txn.borrow().call.undecided_relations;
-        let degradation_before = self.degradation;
+        let mark = self.call_evidence_mark();
         let value = self.eval_call_value(call, site, arguments);
-        // A call whose evaluation minted the frame's FIRST degradation
-        // did not decide its occurrence (an already-degraded frame never
-        // seals, so evidence accuracy past the first degradation cannot
-        // affect admission).
-        let newly_degraded = degradation_before.is_none() && self.degradation.is_some();
-        if !matches!(value, Positional::Unmodeled) && !newly_degraded {
-            let relations_decided =
-                self.dispatch.dispatch_txn.borrow().call.undecided_relations == undecided_before;
-            self.call_evidence.push(FlowCallEvidence {
-                span: site.span(),
-                relations_decided,
-            });
-        }
-        value
+        self.finish_call_evidence(site, mark, value)
     }
 
     /// The call sink's value computation ([`Self::eval_call`] records the
@@ -24032,7 +24469,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // resolved-callee route applies has to apply here, and it
                 // does, because both routes take their value from the ONE
                 // signature reader.
-                let signature = match self.eval_expr(function) {
+                let signature = match self.call_operand_value(function, site) {
                     Positional::Value(signature) => signature,
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
@@ -24592,7 +25029,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // `this.m()`: the member of the receiver's value, called
                 // through the executor that reads its receiver-bound
                 // signatures, else the lone signature read.
-                let receiver = match self.eval_expr(receiver) {
+                let receiver = match self.call_operand_value(receiver, site) {
                     Positional::Value(node) => node,
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
@@ -24636,7 +25073,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // callee, resolved through the executor (receiver included)
                 // exactly like a frame-rooted member callee, else through
                 // the one call sink.
-                let object = match self.eval_expr(object) {
+                let object = match self.call_operand_value(object, site) {
                     Positional::Value(node) => node,
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
@@ -24665,7 +25102,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // choice, argument inference and explicit type arguments
                 // included). There is no lone-signature read to fall back
                 // to, so an undecided executor degrades the position.
-                let constructor = match self.eval_expr(constructor) {
+                let constructor = match self.call_operand_value(constructor, site) {
                     Positional::Value(node) => node,
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
@@ -24680,7 +25117,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // routes an ordinary call over a resolved callee takes: an
                 // overloaded or inference-bearing tag resolves through the
                 // executor, a lone signature through the one call sink.
-                let tag = match self.eval_expr(tag) {
+                let tag = match self.call_operand_value(tag, site) {
                     Positional::Value(node) => node,
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
@@ -24872,7 +25309,10 @@ mod narrowing_ledger_tests {
         };
         let source = verter_semantic::analysis::flow::FunctionBodySource::from_function(function)
             .expect("body");
-        let skeleton = verter_semantic::analysis::flow::build_function_body_skeleton(&source);
+        let skeleton = verter_semantic::analysis::flow::build_function_body_skeleton(
+            &source,
+            parsed.program.source_text,
+        );
         let name = skeleton
             .name_id(&format!("p{ordinal}"))
             .expect("parameter name");

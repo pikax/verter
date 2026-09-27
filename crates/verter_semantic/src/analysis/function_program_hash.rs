@@ -23,8 +23,24 @@ const HASH_SALT: &[u8] = b"verter-flow-body-stable-hash:v1";
 const HASH_SEP: u8 = 0;
 
 pub(super) fn hash_function_body(
+    walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
     source: &str,
-    statements: &[Statement<'_>],
+    body: crate::analysis::function_program::FunctionBodyRef<'_>,
+    params: &[FunctionParamRecord],
+    function_start: u32,
+    node: crate::analysis::function_program::FunctionNode<'_>,
+) -> Hash16 {
+    // Folding walks the whole function: its signature's types, its
+    // parameters' initializers and its body.
+    walks.with_node_stack(node.span(), || {
+        fold_function_body(source, body, params, function_start, node)
+    })
+}
+
+/// [`hash_function_body`] on the stack the function's walks need.
+fn fold_function_body(
+    source: &str,
+    body: crate::analysis::function_program::FunctionBodyRef<'_>,
     params: &[FunctionParamRecord],
     function_start: u32,
     node: crate::analysis::function_program::FunctionNode<'_>,
@@ -50,7 +66,7 @@ pub(super) fn hash_function_body(
         }
         crate::analysis::function_program::FunctionNode::Arrow(arrow) => {
             visitor.fold_u8(u8::from(arrow.r#async));
-            visitor.fold_u8(u8::from(arrow.expression));
+            visitor.fold_u8(u8::from(arrow.is_expression()));
             visitor.fold_ts_type_annotation(arrow.return_type.as_ref());
             visitor.fold_ts_type_parameters(arrow.type_parameters.as_ref());
         }
@@ -95,8 +111,11 @@ pub(super) fn hash_function_body(
     // Type-affecting JSDoc payloads (@param / @returns / @return / @type):
     // folded as payload text; descriptions and other tags are cosmetic.
     visitor.fold_type_affecting_jsdoc(source, function_start);
-    for stmt in statements {
+    for stmt in body.statements() {
         visitor.visit_statement(stmt);
+    }
+    if let Some(expression) = body.expression() {
+        visitor.visit_expression_body(expression);
     }
     hash_16(&visitor.buf)
 }
@@ -114,6 +133,13 @@ struct HashVisitor {
 }
 
 impl HashVisitor {
+    /// An arrow's expression body, hashed as the one expression statement
+    /// oxc's AST carried it as before 0.151.
+    fn visit_expression_body(&mut self, expression: &Expression<'_>) {
+        self.tag(0x16);
+        self.visit_expression(expression);
+    }
+
     fn tag(&mut self, tag: u8) {
         self.buf.push(tag);
         self.buf.push(HASH_SEP);
@@ -351,13 +377,17 @@ impl<'a> Visit<'a> for HashVisitor {
             Statement::TSTypeAliasDeclaration(_) => 0x25,
             Statement::TSInterfaceDeclaration(_) => 0x26,
             Statement::TSEnumDeclaration(_) => 0x27,
-            Statement::TSModuleDeclaration(_) => 0x28,
+            Statement::TSExternalModuleDeclaration(_) | Statement::TSNamespaceDeclaration(_) => {
+                0x28
+            }
             Statement::TSGlobalDeclaration(_) => 0x29,
             Statement::TSImportEqualsDeclaration(_) => 0x2A,
             Statement::ImportDeclaration(_) => 0x2B,
             Statement::ExportAllDeclaration(_) => 0x2C,
             Statement::ExportDefaultDeclaration(_) => 0x2D,
-            Statement::ExportNamedDeclaration(_) => 0x2E,
+            Statement::ExportDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_) => 0x2E,
             Statement::TSExportAssignment(_) => 0x2F,
             Statement::TSNamespaceExportDeclaration(_) => 0x30,
         };
@@ -375,7 +405,7 @@ impl<'a> Visit<'a> for HashVisitor {
             Expression::StringLiteral(_) => 0x45,
             Expression::TemplateLiteral(_) => 0x46,
             Expression::Identifier(_) => 0x47,
-            Expression::MetaProperty(_) => 0x48,
+            Expression::ImportMeta(_) | Expression::NewTarget(_) => 0x48,
             Expression::Super(_) => 0x49,
             Expression::ArrayExpression(_) => 0x4A,
             Expression::ArrowFunctionExpression(_) => 0x4B,
@@ -541,6 +571,13 @@ impl<'a> Visit<'a> for HashVisitor {
         self.push_scope();
         walk::walk_arrow_function_expression(self, it);
         self.pop_scope();
+    }
+
+    fn visit_arrow_function_body(&mut self, it: &oxc_ast::ast::ArrowFunctionBody<'a>) {
+        match it.as_expression() {
+            Some(expression) => self.visit_expression_body(expression),
+            None => walk::walk_arrow_function_body(self, it),
+        }
     }
 
     fn visit_block_statement(&mut self, it: &oxc_ast::ast::BlockStatement<'a>) {

@@ -510,6 +510,12 @@ enum LocatorFrame<'e, 'r> {
         binders: LocatorBinders<'r>,
         stage: LocatorConditionalStage,
     },
+    /// A call or construct signature waiting for a parameter's type, its
+    /// declared return or its predicate target.
+    Function {
+        function: Box<LocatorFunction<'e, 'r>>,
+        awaiting: LocatorFunctionAwait,
+    },
     /// An object in its member loop at member `next`.
     Object {
         object: &'e verter_type_expr::ObjectExpr,
@@ -518,6 +524,34 @@ enum LocatorFrame<'e, 'r> {
         binders: LocatorBinders<'r>,
         awaiting: LocatorObjectAwait<'e>,
     },
+}
+
+/// A call or construct signature as its lowering builds it: the type
+/// parameters it declares, the binder stack its positions lower under (the
+/// entry's, extended with its own type parameters' frame), and the
+/// parameters and return lowered so far.
+struct LocatorFunction<'e, 'r> {
+    func: &'e FunctionExpr,
+    kind: crate::semantic_query::SignatureKind,
+    type_parameters: Vec<TypeParamDecl>,
+    binders: LocatorBinders<'r>,
+    params: Vec<FunctionParam>,
+    returned: Option<LocatorFunctionReturn>,
+}
+
+/// A signature's lowered return: its type, its carrier, and the predicate a
+/// body-derived return infers beside it.
+struct LocatorFunctionReturn {
+    return_type: SemanticNodeId,
+    carrier: crate::semantic_query::SignatureReturnCarrier,
+    inferred_predicate: Option<crate::semantic_query::SignaturePredicate>,
+}
+
+/// The position of a signature whose type is being lowered.
+enum LocatorFunctionAwait {
+    Param,
+    Return,
+    PredicateTarget,
 }
 
 /// An object's surface as its member loop builds it.
@@ -792,6 +826,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 },
             },
+            // -- Call / construct signatures — one `Signature` carrier
+            //    whose `kind` preserves the spelling. --
+            TypeExpr::Function(func) => self.start_locator_function(
+                entry,
+                func,
+                crate::semantic_query::SignatureKind::Call,
+                binders,
+                frames,
+            ),
+            TypeExpr::ConstructorType(func) => self.start_locator_function(
+                entry,
+                func,
+                crate::semantic_query::SignatureKind::Construct,
+                binders,
+                frames,
+            ),
             // -- Object surface: ROLE-FREE member stamps --
             // A spread-bearing object lowers as a leaf, through its ordered
             // spread program.
@@ -936,6 +986,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let graph = self.graph();
         let scope = entry.scope;
         match frame {
+            LocatorFrame::Function {
+                mut function,
+                awaiting,
+            } => match awaiting {
+                LocatorFunctionAwait::Param => {
+                    let param = &function.func.parameters[function.params.len()];
+                    function.params.push(FunctionParam {
+                        name: param.name.as_deref().map(Arc::<str>::from),
+                        ty: value,
+                        optional: param.optional,
+                        rest: param.rest,
+                        span: param.span,
+                        declared_literal: crate::semantic_query::declares_literal_type(&param.ty),
+                    });
+                    self.advance_locator_function(entry, function, frames)
+                }
+                LocatorFunctionAwait::Return => {
+                    function.returned = Some(LocatorFunctionReturn {
+                        return_type: value,
+                        carrier: crate::semantic_query::SignatureReturnCarrier::Declared(value),
+                        inferred_predicate: None,
+                    });
+                    self.advance_locator_function(entry, function, frames)
+                }
+                LocatorFunctionAwait::PredicateTarget => {
+                    LocatorStep::Value(self.finish_locator_function(entry, *function, Some(value)))
+                }
+            },
             LocatorFrame::Composite {
                 arms,
                 union,
@@ -1502,19 +1580,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
 
-            // -- Call / construct signatures — one `Signature` carrier
-            //    whose `kind` preserves the spelling. --
-            TypeExpr::Function(func) => self.lower_locator_shape_function(
-                func,
-                ctx,
-                crate::semantic_query::SignatureKind::Call,
-            ),
-            TypeExpr::ConstructorType(func) => self.lower_locator_shape_function(
-                func,
-                ctx,
-                crate::semantic_query::SignatureKind::Construct,
-            ),
-
             // -- Declared type parameters stay SHELLS --
             TypeExpr::TypeParameter(param) => {
                 match ctx.lookup_binder(&param.name) {
@@ -1726,6 +1791,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | TypeExpr::IndexedAccess { .. }
             | TypeExpr::Conditional { .. }
             | TypeExpr::IntrinsicApplication { .. }
+            | TypeExpr::Function(_)
+            | TypeExpr::ConstructorType(_)
             | TypeExpr::Ref { .. } => self.lower_locator_shape_node(expr, ctx),
         }
     }
@@ -1796,13 +1863,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// sees prior own siblings with self / later shadow-forbidden). An
     /// absent return annotation mirrors the shared `Opaque(Miss)`
     /// placeholder.
-    fn lower_locator_shape_function(
+    ///
+    /// A signature nests without bound (`() => () => …`), so once its
+    /// type parameters bind, its parameters, return and predicate target
+    /// lower from the explicit stack ([`LocatorFrame::Function`]).
+    fn start_locator_function<'e, 'r>(
         &self,
-        func: &FunctionExpr,
-        ctx: &ShapeLowerCtx<'_>,
+        entry: &ShapeLowerCtx<'r>,
+        func: &'e FunctionExpr,
         kind: crate::semantic_query::SignatureKind,
-    ) -> SemanticNodeId {
-        let graph = self.graph();
+        binders: LocatorBinders<'r>,
+        frames: &mut Vec<LocatorFrame<'e, 'r>>,
+    ) -> LocatorStep<'e, 'r> {
+        let ctx = entry.with_binders(binders.frames());
         let scope = ctx.scope;
         let specs: Vec<TypeParamBinderSpec> = func
             .type_parameters
@@ -1860,140 +1933,200 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
             .collect();
 
-        let inner_storage;
-        let inner_ctx = if func.type_parameters.is_empty() {
-            *ctx
+        let binders = if func.type_parameters.is_empty() {
+            binders
         } else {
-            let mut frames: Vec<LocatorBinderFrame> = ctx.binders.to_vec();
-            frames.push(own_frame);
-            inner_storage = frames;
-            ctx.with_binders(&inner_storage)
+            binders.extended(own_frame)
         };
+        let function = LocatorFunction {
+            func,
+            kind,
+            type_parameters,
+            binders,
+            params: Vec::with_capacity(func.parameters.len()),
+            returned: None,
+        };
+        self.advance_locator_function(entry, Box::new(function), frames)
+    }
 
-        let params: Vec<FunctionParam> = func
-            .parameters
-            .iter()
-            .map(|p| FunctionParam {
-                name: p.name.as_deref().map(Arc::<str>::from),
-                ty: self.lower_locator_shape_node(&p.ty, &inner_ctx),
-                optional: p.optional,
-                rest: p.rest,
-                span: p.span,
-                declared_literal: crate::semantic_query::declares_literal_type(&p.ty),
-            })
-            .collect();
+    /// Continue a signature's lowering: its next parameter's type, then its
+    /// return (a declared one from the explicit stack, a body-derived one
+    /// from the whole-function producer), then its predicate target, each
+    /// under the signature's own binders.
+    fn advance_locator_function<'e, 'r>(
+        &self,
+        entry: &ShapeLowerCtx<'r>,
+        mut function: Box<LocatorFunction<'e, 'r>>,
+        frames: &mut Vec<LocatorFrame<'e, 'r>>,
+    ) -> LocatorStep<'e, 'r> {
+        let func = function.func;
+        if let Some(param) = func.parameters.get(function.params.len()) {
+            let binders = function.binders.clone();
+            frames.push(LocatorFrame::Function {
+                function,
+                awaiting: LocatorFunctionAwait::Param,
+            });
+            return LocatorStep::Descend(&param.ty, binders);
+        }
+        if function.returned.is_none() {
+            match (&func.flow_return, func.return_type.as_deref()) {
+                (Some(identity), _) => {
+                    let ctx = entry.with_binders(function.binders.frames());
+                    function.returned =
+                        Some(self.locator_function_flow_return(func, identity, &ctx));
+                }
+                (None, Some(ret)) => {
+                    let binders = function.binders.clone();
+                    frames.push(LocatorFrame::Function {
+                        function,
+                        awaiting: LocatorFunctionAwait::Return,
+                    });
+                    return LocatorStep::Descend(ret, binders);
+                }
+                (None, None) => function.returned = Some(self.absent_locator_function_return()),
+            }
+        }
+        // The predicate target is a fixed authored shape under the
+        // signature's own binders, exactly like the return.
+        if let Some(target) = func
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref())
+        {
+            let binders = function.binders.clone();
+            frames.push(LocatorFrame::Function {
+                function,
+                awaiting: LocatorFunctionAwait::PredicateTarget,
+            });
+            return LocatorStep::Descend(target, binders);
+        }
+        LocatorStep::Value(self.finish_locator_function(entry, *function, None))
+    }
+
+    /// A signature with no return to lower.
+    fn absent_locator_function_return(&self) -> LocatorFunctionReturn {
+        let return_type = self
+            .graph()
+            .intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+        LocatorFunctionReturn {
+            return_type,
+            carrier: crate::semantic_query::SignatureReturnCarrier::Function(
+                verter_type_expr::facts::FunctionReturnSource::Absent,
+            ),
+            inferred_predicate: None,
+        }
+    }
+
+    /// A body-derived return, demanded from the whole-function producer
+    /// through the sealed helper: the extractor marked the served position
+    /// with the declaration name; canonical / owner fill from THIS lowering
+    /// scope (the defining file's). The carrier records the SAME served
+    /// position. `inner_ctx` is the signature's own binder stack.
+    fn locator_function_flow_return(
+        &self,
+        func: &FunctionExpr,
+        identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+        inner_ctx: &ShapeLowerCtx<'_>,
+    ) -> LocatorFunctionReturn {
+        let graph = self.graph();
+        let ctx = inner_ctx;
         // A body-derived return carries the predicate the checker infers
         // from the body beside it.
         let mut inferred_predicate = None;
-        let (return_type, return_carrier) = match &func.flow_return {
-            // A body-derived return is demanded from the whole-function
-            // producer through the sealed helper: the extractor marked the
-            // served position with the declaration name; canonical / owner
-            // fill from THIS lowering scope (the defining file's). The
-            // carrier records the SAME served position.
-            Some(identity) => {
-                let mut identity = identity.as_ref().clone();
-                let scope_canonical = match ctx.scope {
-                    NodeScopeId::File {
-                        canonical_id,
-                        owner,
-                        ..
-                    } => {
-                        identity.anchor.canonical_id = Arc::clone(canonical_id);
-                        identity.anchor.owner = *owner;
-                        Some(Arc::clone(canonical_id))
+        let mut identity = identity.clone();
+        let scope_canonical = match ctx.scope {
+            NodeScopeId::File {
+                canonical_id,
+                owner,
+                ..
+            } => {
+                identity.anchor.canonical_id = Arc::clone(canonical_id);
+                identity.anchor.owner = *owner;
+                Some(Arc::clone(canonical_id))
+            }
+            _ => None,
+        };
+        match scope_canonical {
+            Some(scope_canonical) => {
+                let carrier = crate::semantic_query::SignatureReturnCarrier::Function(
+                    verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                );
+                let return_type = match self.execute_function_return_source(
+                    &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                    scope_canonical.as_ref(),
+                ) {
+                    super::flow_return::FunctionReturnNode::Flow(result) => {
+                        inferred_predicate = result.inferred_predicate();
+                        result.return_type()
                     }
+                    _ => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                };
+                // An enclosing parameter the body reads rebinds to
+                // this lowering's binder for it, so the receiver's
+                // instantiation reaches the return (see
+                // `rebind_flow_return_binders`).
+                // The signature's own parameters stay the flow
+                // lane's: the call resolver instantiates them
+                // through the body-derived carrier.
+                let own = |name: &str| func.type_parameters.iter().any(|tp| tp.name == name);
+                let bind = |name: &str| match inner_ctx.lookup_binder(name) {
+                    Some(BinderSlot::Usable(binder)) if !own(name) => Some(binder),
                     _ => None,
                 };
-                match scope_canonical {
-                    Some(scope_canonical) => {
-                        let carrier = crate::semantic_query::SignatureReturnCarrier::Function(
-                            verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
-                        );
-                        let return_type = match self.execute_function_return_source(
-                            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-                            scope_canonical.as_ref(),
-                        ) {
-                            super::flow_return::FunctionReturnNode::Flow(result) => {
-                                inferred_predicate = result.inferred_predicate();
-                                result.return_type()
-                            }
-                            _ => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-                        };
-                        // An enclosing parameter the body reads rebinds to
-                        // this lowering's binder for it, so the receiver's
-                        // instantiation reaches the return (see
-                        // `rebind_flow_return_binders`).
-                        // The signature's own parameters stay the flow
-                        // lane's: the call resolver instantiates them
-                        // through the body-derived carrier.
-                        let own =
-                            |name: &str| func.type_parameters.iter().any(|tp| tp.name == name);
-                        let bind = |name: &str| match inner_ctx.lookup_binder(name) {
-                            Some(BinderSlot::Usable(binder)) if !own(name) => Some(binder),
-                            _ => None,
-                        };
-                        let rebound = self.rebind_flow_return_binders(
-                            return_type,
-                            scope_canonical.as_ref(),
-                            bind,
-                        );
-                        if rebound == return_type {
-                            (return_type, carrier)
-                        } else {
-                            inferred_predicate = inferred_predicate.map(|predicate| {
-                                predicate.map_type(|target| {
-                                    self.rebind_flow_return_binders(
-                                        target,
-                                        scope_canonical.as_ref(),
-                                        bind,
-                                    )
-                                })
-                            });
-                            (
-                                rebound,
-                                crate::semantic_query::SignatureReturnCarrier::Declared(rebound),
-                            )
-                        }
+                let rebound =
+                    self.rebind_flow_return_binders(return_type, scope_canonical.as_ref(), bind);
+                if rebound == return_type {
+                    LocatorFunctionReturn {
+                        return_type,
+                        carrier,
+                        inferred_predicate,
                     }
-                    None => (
-                        graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-                        crate::semantic_query::SignatureReturnCarrier::Function(
-                            verter_type_expr::facts::FunctionReturnSource::Absent,
-                        ),
-                    ),
+                } else {
+                    inferred_predicate = inferred_predicate.map(|predicate| {
+                        predicate.map_type(|target| {
+                            self.rebind_flow_return_binders(target, scope_canonical.as_ref(), bind)
+                        })
+                    });
+                    LocatorFunctionReturn {
+                        return_type: rebound,
+                        carrier: crate::semantic_query::SignatureReturnCarrier::Declared(rebound),
+                        inferred_predicate,
+                    }
                 }
             }
-            None => match func.return_type.as_deref() {
-                Some(ret) => {
-                    let return_type = self.lower_locator_shape_node(ret, &inner_ctx);
-                    (
-                        return_type,
-                        crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
-                    )
-                }
-                None => (
-                    graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-                    crate::semantic_query::SignatureReturnCarrier::Function(
-                        verter_type_expr::facts::FunctionReturnSource::Absent,
-                    ),
-                ),
-            },
-        };
-        // The predicate target is a fixed authored shape under the
-        // signature's own binders, exactly like the return.
+            None => self.absent_locator_function_return(),
+        }
+    }
+
+    /// Intern a signature whose positions have all lowered; `target` is
+    /// its authored predicate's lowered target type.
+    fn finish_locator_function(
+        &self,
+        entry: &ShapeLowerCtx<'_>,
+        function: LocatorFunction<'_, '_>,
+        target: Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        let LocatorFunction {
+            func,
+            kind,
+            type_parameters,
+            params,
+            returned,
+            ..
+        } = function;
+        let LocatorFunctionReturn {
+            return_type,
+            carrier: return_carrier,
+            inferred_predicate,
+        } = returned.unwrap_or_else(|| self.absent_locator_function_return());
         let predicate = func
             .predicate
             .as_deref()
             .and_then(|predicate| {
-                let target = predicate
-                    .ty
-                    .as_deref()
-                    .map(|target| self.lower_locator_shape_node(target, &inner_ctx));
                 crate::semantic_query::SignaturePredicate::resolve(predicate, &params, target)
             })
             .or(inferred_predicate);
-        graph.intern_node_with_scope(
+        self.graph().intern_node_with_scope(
             SemanticNodeData::Signature {
                 kind,
                 params: Arc::from(params.into_boxed_slice()),
@@ -2009,7 +2142,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 predicate,
                 is_abstract: func.is_abstract,
             },
-            scope.clone(),
+            entry.scope.clone(),
         )
     }
 

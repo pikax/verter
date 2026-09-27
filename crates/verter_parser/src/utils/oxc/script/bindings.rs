@@ -105,7 +105,11 @@ mod tests {
     fn parse_and<R>(source: &str, f: impl FnOnce(&oxc_ast::ast::Program<'_>, &str) -> R) -> R {
         let alloc = Allocator::default();
         let ret = Parser::new(&alloc, source, SourceType::tsx()).parse();
-        assert!(ret.errors.is_empty(), "parse errors: {:?}", ret.errors);
+        assert!(
+            ret.diagnostics.is_empty(),
+            "parse errors: {:?}",
+            ret.diagnostics
+        );
         f(&ret.program, source)
     }
 

@@ -37,7 +37,7 @@ pub(super) fn script_body_fails_to_parse(body: &str, grammar: ScriptBodyGrammar)
     };
     let parsed =
         verter_parser::oxc_parse::Parser::new(&alloc, alloc.alloc_str(body), source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return true;
     }
     if matches!(grammar, ScriptBodyGrammar::Js) && has_assert_import_attribute(&parsed.program) {
@@ -99,12 +99,12 @@ fn top_level_binding_redeclaration(program: &Program) -> bool {
             // `export <decl>` binds the same names the bare declaration binds
             // (specifier-only `export { a }` / `export … from` re-exports bind no NEW
             // local; TS-only inner declarations bind no value).
-            Statement::ExportNamedDeclaration(export) => match &export.declaration {
-                Some(Declaration::VariableDeclaration(decl)) => {
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::VariableDeclaration(decl) => {
                     bind_variable_declaration(&mut bound, decl)
                 }
-                Some(Declaration::FunctionDeclaration(func)) => bind_function(&mut bound, func),
-                Some(Declaration::ClassDeclaration(class)) => bind_class(&mut bound, class),
+                Declaration::FunctionDeclaration(func) => bind_function(&mut bound, func),
+                Declaration::ClassDeclaration(class) => bind_class(&mut bound, class),
                 _ => false,
             },
             // A NAMED `export default function x() {}` / `class x {}` binds `x`; an

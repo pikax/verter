@@ -401,24 +401,37 @@ fn nested_call_lowerings(depth: usize) -> usize {
     memo.lowering_work.expressions.load(Ordering::Relaxed)
 }
 
-/// A call records the arguments it lowers once: a call nested as an
-/// argument lowers again from the enclosing call's frame-lowered
-/// arguments, and recording its arguments again from there lowered every
-/// level twice, doubling the work per level (256 nested calls never
-/// finished; 383, 6,143 and 98,303 lowerings at 8, 12 and 16 levels). The
-/// lowerings now grow with the square of the depth: the second difference
-/// is constant.
+/// A call records the arguments it lowers once, and lowers its
+/// frame-lowered arguments once per position. A call nested as an argument
+/// lowers again from the enclosing call's frame-lowered arguments:
+/// recording its arguments again from there doubled the work per level
+/// (256 nested calls never finished), and lowering its frame-lowered
+/// arguments again from every enclosing call grew the work with the square
+/// of the depth (529 and 2,081 lowerings at 32 and 64 levels). A nest of
+/// calls now lowers each call three times, whatever its depth: once among
+/// the whole-value arguments the call around it records, and once in each
+/// of the two positions its frame-lowered arguments lower in.
 #[test]
-fn nested_calls_lower_their_arguments_once_per_enclosing_call() {
-    let lowerings = [8, 12, 16].map(nested_call_lowerings);
+fn nested_calls_lower_each_call_a_bounded_number_of_times() {
     assert_eq!(
-        lowerings[2] + lowerings[0] - 2 * lowerings[1],
-        {
-            let wider = [12, 16, 20].map(nested_call_lowerings);
-            wider[2] + wider[0] - 2 * wider[1]
-        },
-        "the lowerings grow with the square of the depth: {lowerings:?}"
+        [8, 16, 32, 64].map(nested_call_lowerings),
+        [22, 46, 94, 190],
+        "three lowerings per nested call"
     );
+}
+
+/// Calls nested 10,000 deep lower on a 1 MiB thread: a call's recorded
+/// arguments, its callee and its frame-lowered arguments are frames of
+/// `lower_expr`'s task stack.
+#[test]
+fn calls_nested_10000_deep_lower_on_a_small_stack() {
+    let lowerings = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| nested_call_lowerings(10_000))
+        .expect("spawn the lowering thread")
+        .join()
+        .expect("the lowering returns");
+    assert_eq!(lowerings, 3 * 10_000 - 2);
 }
 
 #[test]
@@ -505,7 +518,7 @@ fn selected_annotation_descent_inspects_logarithmic_siblings() {
     let parsed =
         verter_parser::oxc_parse::Parser::new(&allocator, &source, oxc_span::SourceType::ts())
             .parse();
-    assert!(parsed.errors.is_empty());
+    assert!(parsed.diagnostics.is_empty());
     let reads = Cell::new(0);
     let siblings: Vec<_> = parsed
         .program
@@ -4764,9 +4777,12 @@ fn locator_miss_is_typed_none() {
     );
 
     let mut bad_descent = entry.clone();
-    bad_descent.locator.descent = Arc::from([FunctionDescentStep::VariableInitializer {
-        declarator_ordinal: 99,
-    }]);
+    bad_descent.locator.descent =
+        verter_semantic::analysis::function_program::FunctionDescent::new().then(
+            FunctionDescentStep::VariableInitializer {
+                declarator_ordinal: 99,
+            },
+        );
     assert!(
         memo.flow_slice_content(
             &bad_descent,
@@ -5975,4 +5991,58 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
             .any(|statement| matches!(statement, SliceStatement::Assignment { .. })),
         "conflicting addresses must not attach either site's execution evidence"
     );
+}
+
+/// How deeply `expr` nests through the operand of a `!`, a unary operator
+/// or the left operand of a binary one, walked iteratively.
+fn operator_chain_depth(expr: &SliceExpr) -> usize {
+    let mut depth = 0;
+    let mut current = expr;
+    loop {
+        current = match current {
+            SliceExpr::Not { operand, .. } | SliceExpr::NonNull { operand } => operand,
+            SliceExpr::Arithmetic { operands, .. } => &operands[0],
+            _ => return depth,
+        };
+        depth += 1;
+    }
+}
+
+/// The returned expression of `pf` in `source`.
+fn returned_expression(content: &SliceContent) -> &SliceExpr {
+    content
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Return {
+                argument: Some(argument),
+                ..
+            } => Some(argument),
+            _ => None,
+        })
+        .expect("a return statement")
+}
+
+/// A `!` chain, a unary negation chain and a binary `+` chain, each 10,000
+/// operators deep, lower on the declaration-lowering worker: each
+/// operator's operands lower from the lowering's explicit stack, not a
+/// native level each (about 4.4 KiB per level optimized; 43 MB at 10,000).
+#[test]
+fn operator_chains_10000_deep_lower_on_the_worker_stack() {
+    let depth = 10_000;
+    let chains = [
+        ("not", format!("{}x", "!".repeat(depth))),
+        ("negation", format!("{}x", "- ".repeat(depth))),
+        ("addition", vec!["x"; depth + 1].join(" + ")),
+    ];
+    for (form, chain) in chains {
+        let source = format!("function pf(x: number) {{ return {chain}; }}");
+        let content = content_for(&source, "pf");
+        assert_eq!(
+            operator_chain_depth(returned_expression(&content)),
+            depth,
+            "{form}"
+        );
+    }
 }

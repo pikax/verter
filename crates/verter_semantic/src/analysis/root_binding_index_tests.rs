@@ -24,7 +24,7 @@ use verter_type_expr::{ConstructorBindingOutcome, DeclBindingKey, TopLevelOwnerI
 fn analyze_ordinary(source: &str) -> crate::analysis::types::ScriptAnalysisSnapshot {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse: {source}");
+    assert!(!parsed.fatal_error, "fixture must parse: {source}");
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     crate::analysis::build_script_analysis_with_scope_from_program_with_owners(
         source,
@@ -32,7 +32,7 @@ fn analyze_ordinary(source: &str) -> crate::analysis::types::ScriptAnalysisSnaps
         &parsed.program,
         AnalysisScope::all(),
         &owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     )
 }
 
@@ -41,7 +41,7 @@ fn analyze_ordinary(source: &str) -> crate::analysis::types::ScriptAnalysisSnaps
 fn analyze_sloppy_script(source: &str) -> crate::analysis::types::ScriptAnalysisSnapshot {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::cjs()).parse();
-    assert!(!parsed.panicked, "fixture must parse: {source}");
+    assert!(!parsed.fatal_error, "fixture must parse: {source}");
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     crate::analysis::build_script_analysis_with_scope_from_program_with_owners(
         source,
@@ -49,7 +49,7 @@ fn analyze_sloppy_script(source: &str) -> crate::analysis::types::ScriptAnalysis
         &parsed.program,
         AnalysisScope::all(),
         &owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     )
 }
 
@@ -62,7 +62,7 @@ fn analyze_sloppy_ts_script(source: &str) -> crate::analysis::types::ScriptAnaly
     let source_type = SourceType::script().with_typescript(true);
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    assert!(!parsed.panicked, "fixture must parse: {source}");
+    assert!(!parsed.fatal_error, "fixture must parse: {source}");
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     crate::analysis::build_script_analysis_with_scope_from_program_with_owners(
         source,
@@ -70,7 +70,7 @@ fn analyze_sloppy_ts_script(source: &str) -> crate::analysis::types::ScriptAnaly
         &parsed.program,
         AnalysisScope::all(),
         &owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     )
 }
 
@@ -82,7 +82,7 @@ fn analyze_sloppy_ts_script(source: &str) -> crate::analysis::types::ScriptAnaly
 fn analyze_classic_script(source: &str) -> crate::analysis::types::ScriptAnalysisSnapshot {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::script()).parse();
-    assert!(!parsed.panicked, "fixture must parse: {source}");
+    assert!(!parsed.fatal_error, "fixture must parse: {source}");
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     crate::analysis::build_script_analysis_with_scope_from_program_with_owners(
         source,
@@ -90,7 +90,7 @@ fn analyze_classic_script(source: &str) -> crate::analysis::types::ScriptAnalysi
         &parsed.program,
         AnalysisScope::all(),
         &owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     )
 }
 
@@ -103,7 +103,7 @@ fn analyze_with_owners(
 ) -> crate::analysis::types::ScriptAnalysisSnapshot {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse: {source}");
+    assert!(!parsed.fatal_error, "fixture must parse: {source}");
     assert_eq!(
         parsed.program.body.len(),
         per_statement_owner.len(),
@@ -120,7 +120,7 @@ fn analyze_with_owners(
         &parsed.program,
         AnalysisScope::all(),
         &owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     )
 }
 
@@ -430,9 +430,9 @@ fn with_statement_is_indeterminate_never_global() {
     let source = "with (obj) { String; }";
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::cjs()).parse();
-    assert!(!parsed.panicked, "fixture must parse: {source}");
+    assert!(!parsed.fatal_error, "fixture must parse: {source}");
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
-    let index = RootBindingIndex::build(&parsed.program, &owners, !parsed.errors.is_empty());
+    let index = RootBindingIndex::build(&parsed.program, &owners, !parsed.diagnostics.is_empty());
 
     let offset = source.rfind("String").expect("fixture needle") as u32;
     let span = verter_span::Span::new(offset, offset + "String".len() as u32);
@@ -671,7 +671,7 @@ fn unmapped_redeclaration_span_is_ambiguous_not_silent_owner() {
     let source = "var Custom = 1;\nvar Custom = 2;\ndefineProps({ value: Custom });";
     let allocator = Allocator::default();
     let mut parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse: {source}");
+    assert!(!parsed.fatal_error, "fixture must parse: {source}");
     match parsed.program.body.get_mut(1) {
         Some(Statement::VariableDeclaration(decl)) => {
             decl.span = oxc_span::Span::new(u32::MAX - 8, u32::MAX);
@@ -687,7 +687,7 @@ fn unmapped_redeclaration_span_is_ambiguous_not_silent_owner() {
         &parsed.program,
         AnalysisScope::all(),
         &owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     );
     assert_eq!(
         only_macro_prop_bindings(&snap),
@@ -717,13 +717,13 @@ fn owner_natural_scope_fails_closed_on_ambiguous_root_binding() {
     let source = "import { Custom } from './a';\nimport { Custom } from './b';\nCustom;\n";
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse: {source}");
+    assert!(!parsed.fatal_error, "fixture must parse: {source}");
     let owners = TopLevelOwnerTable::try_from_statement_owners(
         parsed.program.body.len(),
         [module, instance, module],
     )
     .expect("validated owner table");
-    let index = RootBindingIndex::build(&parsed.program, &owners, !parsed.errors.is_empty());
+    let index = RootBindingIndex::build(&parsed.program, &owners, !parsed.diagnostics.is_empty());
 
     let offset = source.rfind("Custom;").expect("fixture needle") as u32;
     let span = verter_span::Span::new(offset, offset + "Custom".len() as u32);
@@ -755,13 +755,13 @@ fn owner_natural_scope_attributes_hoisted_setup_import_to_instance_not_module() 
     let source = "const unrelated = 1;\nimport { Custom } from './x';\nCustom;\n";
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse: {source}");
+    assert!(!parsed.fatal_error, "fixture must parse: {source}");
     let owners = TopLevelOwnerTable::try_from_statement_owners(
         parsed.program.body.len(),
         [module, instance, instance],
     )
     .expect("validated owner table");
-    let index = RootBindingIndex::build(&parsed.program, &owners, !parsed.errors.is_empty());
+    let index = RootBindingIndex::build(&parsed.program, &owners, !parsed.diagnostics.is_empty());
 
     let offset = source.rfind("Custom;").expect("fixture needle") as u32;
     let span = verter_span::Span::new(offset, offset + "Custom".len() as u32);
@@ -797,13 +797,13 @@ fn owner_natural_scope_fails_closed_on_nested_sibling_locals_instead_of_collidin
     let source = "function fm() { let X = 1; X; }\nfunction mod() { let X = 2; X; }\n";
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse: {source}");
+    assert!(!parsed.fatal_error, "fixture must parse: {source}");
     let owners = TopLevelOwnerTable::try_from_statement_owners(
         parsed.program.body.len(),
         [frontmatter, module],
     )
     .expect("validated owner table");
-    let index = RootBindingIndex::build(&parsed.program, &owners, !parsed.errors.is_empty());
+    let index = RootBindingIndex::build(&parsed.program, &owners, !parsed.diagnostics.is_empty());
 
     let fm_offset = source.find("X;").expect("fm needle") as u32;
     let fm_span = verter_span::Span::new(fm_offset, fm_offset + "X".len() as u32);
@@ -980,9 +980,9 @@ fn with_shadowed_local_eval_callee_still_recorded_as_possible_direct_eval() {
     let source = "function eval() {}\nwith (obj) { eval('var String = 1'); }";
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::cjs()).parse();
-    assert!(!parsed.panicked, "fixture must parse: {source}");
+    assert!(!parsed.fatal_error, "fixture must parse: {source}");
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
-    let index = RootBindingIndex::build(&parsed.program, &owners, !parsed.errors.is_empty());
+    let index = RootBindingIndex::build(&parsed.program, &owners, !parsed.diagnostics.is_empty());
     assert_eq!(
         index.sloppy_eval_scope_count(),
         1,

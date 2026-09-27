@@ -19,7 +19,7 @@ use oxc_ast::ast::{Expression, VariableDeclarator};
 use oxc_ast::{Comment, CommentContent};
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::{GetSpan, SourceType};
-use verter_parser::oxc_parse::Parser;
+use verter_parser::oxc_parse::{with_program_stack, Parser};
 
 impl TemplateProjector<'_, '_> {
     /// Project a `<svelte:*>` special element.
@@ -400,7 +400,7 @@ pub(super) fn extract_props_annotation(script: &str) -> Option<PropsAnnotation> 
     }
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, script, SourceType::tsx()).parse();
-    if parsed.panicked {
+    if parsed.fatal_error {
         return None;
     }
     let mut collector = PropsRuneCollector {
@@ -408,7 +408,7 @@ pub(super) fn extract_props_annotation(script: &str) -> Option<PropsAnnotation> 
         comments: &parsed.program.comments,
         annotation: None,
     };
-    collector.visit_program(&parsed.program);
+    with_program_stack(&parsed.program, || collector.visit_program(&parsed.program));
     collector.annotation
 }
 

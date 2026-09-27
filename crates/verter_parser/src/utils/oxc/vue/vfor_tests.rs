@@ -571,10 +571,8 @@ fn test_nested_callback_source_reference_recorded_for_liveness() {
 fn label_offsets(errs: &[oxc_diagnostics::OxcDiagnostic]) -> Vec<usize> {
     let mut out = Vec::new();
     for err in errs {
-        if let Some(labels) = &err.labels {
-            for label in labels.iter() {
-                out.push(label.offset());
-            }
+        for label in err.labels.iter() {
+            out.push(label.offset() as usize);
         }
     }
     out

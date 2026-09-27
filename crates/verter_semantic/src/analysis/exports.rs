@@ -27,7 +27,7 @@ pub fn extract_export_signatures(
         ..ParseOptions::default()
     });
     let result = parser.parse();
-    if result.panicked {
+    if result.fatal_error {
         return Vec::new();
     }
 
@@ -48,62 +48,57 @@ pub(crate) fn extract_export_signatures_from_program(
 
     for stmt in &program.body {
         match stmt {
+            Statement::ExportFromDeclaration(decl) => {
+                let source = &decl.source;
+                for spec in &decl.specifiers {
+                    let name = spec.exported.name().to_string();
+                    let local_name = spec.local.name().to_string();
+                    let hash_input = format!("reexport:{}:{}", source.value, name);
+                    let local_span = if spec.local.name() != spec.exported.name() {
+                        Some(spec.local.span().into())
+                    } else {
+                        None
+                    };
+                    out.push(ExportSignature {
+                        name,
+                        declaration_hash: hash_16(hash_input.as_bytes()),
+                        is_type: decl.export_kind.is_type(),
+                        span: spec.exported.span().into(),
+                        reexport_source: Some(source.value.to_string()),
+                        reexport_local: Some(local_name),
+                        local_span,
+                    });
+                }
+            }
             Statement::ExportNamedDeclaration(decl) => {
-                if let Some(ref source) = decl.source {
-                    for spec in &decl.specifiers {
-                        let name = spec.exported.name().to_string();
-                        let local_name = spec.local.name().to_string();
-                        let hash_input = format!("reexport:{}:{}", source.value, name);
-                        let local_span = if spec.local.name() != spec.exported.name() {
-                            Some(spec.local.span().into())
-                        } else {
-                            None
-                        };
-                        out.push(ExportSignature {
-                            name,
-                            declaration_hash: hash_16(hash_input.as_bytes()),
-                            is_type: decl.export_kind.is_type(),
-                            span: spec.exported.span().into(),
-                            reexport_source: Some(source.value.to_string()),
-                            reexport_local: Some(local_name),
-                            local_span,
-                        });
-                    }
-                    continue;
+                for spec in &decl.specifiers {
+                    let name = spec.exported.name().to_string();
+                    let local_name = spec.local.name().to_string();
+                    // Hash the declaration text if available, otherwise fall back to name-based hash
+                    let hash = if let Some(decl_text) = binding_spans.get(local_name.as_str()) {
+                        hash_16(decl_text.as_bytes())
+                    } else {
+                        let hash_input = format!("local-reexport:{}:{}", local_name, name);
+                        hash_16(hash_input.as_bytes())
+                    };
+                    let local_span = if spec.local.name() != spec.exported.name() {
+                        Some(spec.local.span().into())
+                    } else {
+                        None
+                    };
+                    out.push(ExportSignature {
+                        name,
+                        declaration_hash: hash,
+                        is_type: decl.export_kind.is_type(),
+                        span: spec.exported.span().into(),
+                        reexport_source: None,
+                        reexport_local: None,
+                        local_span,
+                    });
                 }
-
-                if !decl.specifiers.is_empty() && decl.declaration.is_none() {
-                    for spec in &decl.specifiers {
-                        let name = spec.exported.name().to_string();
-                        let local_name = spec.local.name().to_string();
-                        // Hash the declaration text if available, otherwise fall back to name-based hash
-                        let hash = if let Some(decl_text) = binding_spans.get(local_name.as_str()) {
-                            hash_16(decl_text.as_bytes())
-                        } else {
-                            let hash_input = format!("local-reexport:{}:{}", local_name, name);
-                            hash_16(hash_input.as_bytes())
-                        };
-                        let local_span = if spec.local.name() != spec.exported.name() {
-                            Some(spec.local.span().into())
-                        } else {
-                            None
-                        };
-                        out.push(ExportSignature {
-                            name,
-                            declaration_hash: hash,
-                            is_type: decl.export_kind.is_type(),
-                            span: spec.exported.span().into(),
-                            reexport_source: None,
-                            reexport_local: None,
-                            local_span,
-                        });
-                    }
-                    continue;
-                }
-
-                if let Some(ref declaration) = decl.declaration {
-                    extract_declaration_signatures(content, declaration, &mut out);
-                }
+            }
+            Statement::ExportDeclaration(decl) => {
+                extract_declaration_signatures(content, &decl.declaration, &mut out);
             }
             Statement::ExportDefaultDeclaration(decl) => {
                 let full_span = decl.span;
@@ -329,10 +324,9 @@ fn collect_binding_spans<'a>(content: &'a str, program: &Program<'_>) -> HashMap
                 }
             }
             // Also check exported declarations
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(ref declaration) = export.declaration {
-                    collect_declaration_binding_spans(content, declaration, &mut map);
-                }
+            Statement::ExportDeclaration(export) => {
+                let declaration = &export.declaration;
+                collect_declaration_binding_spans(content, declaration, &mut map);
             }
             _ => {}
         }

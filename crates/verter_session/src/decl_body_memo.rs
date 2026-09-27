@@ -1457,7 +1457,11 @@ impl DeclBodyMemo {
                         }
                         FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
                     };
-                    Some(build_indexed_function_body_skeleton(&source, entry))
+                    Some(build_indexed_function_body_skeleton(
+                        &source,
+                        p.source_str(),
+                        entry,
+                    ))
                 })
                 .flatten()
             })
@@ -1505,6 +1509,18 @@ impl DeclBodyMemo {
         &self,
         span: verter_span::Span,
     ) -> Option<Arc<IndexedFlowCallExpression>> {
+        self.indexed_call_expression_over_frame_at(span, Arc::from([]))
+    }
+
+    /// [`Self::indexed_call_expression_at`] for a flow frame that lowers
+    /// and evaluates the arguments `frame_lowered` names by ordinal itself:
+    /// a direct call among them keeps no record of its own
+    /// (`lower_indexed_call_expression_with_read_roots`).
+    pub(crate) fn indexed_call_expression_over_frame_at(
+        &self,
+        span: verter_span::Span,
+        frame_lowered: Arc<[bool]>,
+    ) -> Option<Arc<IndexedFlowCallExpression>> {
         use verter_semantic::analysis::function_program::IndexedCallSite;
         use verter_semantic::analysis::type_eval_build::{
             lower_indexed_call_expression_with_read_roots,
@@ -1521,12 +1537,22 @@ impl DeclBodyMemo {
                     .with_indexed_call_site(span, |site| match site {
                         IndexedCallSite::Call(call) => {
                             observed_indexed_call(call.arguments.len(), |observe| {
-                                lower_indexed_call_expression_with_read_roots(call, source, observe)
+                                lower_indexed_call_expression_with_read_roots(
+                                    call,
+                                    source,
+                                    observe,
+                                    &frame_lowered,
+                                )
                             })
                         }
                         IndexedCallSite::Construct(call) => {
                             observed_indexed_call(call.arguments.len(), |observe| {
-                                lower_indexed_new_expression_with_read_roots(call, source, observe)
+                                lower_indexed_new_expression_with_read_roots(
+                                    call,
+                                    source,
+                                    observe,
+                                    &frame_lowered,
+                                )
                             })
                         }
                         // The template strings are the first argument.
@@ -3379,22 +3405,17 @@ fn collect_augmentation_statement_dependencies(
     owner: TopLevelOwnerId,
     out: &mut FxHashMap<(AugmentationScopeKind, DeclBindingKey), DeclDependencyFacts>,
 ) {
-    use oxc_ast::ast::{Statement, TSModuleDeclarationBody, TSModuleDeclarationName};
+    use oxc_ast::ast::Statement;
     let (scope, body): (AugmentationScopeKind, &[oxc_ast::ast::Statement<'_>]) = match stmt {
         // `declare global { … }` is its own statement variant.
         Statement::TSGlobalDeclaration(global) => {
             (AugmentationScopeKind::Global, &global.body.body)
         }
-        Statement::TSModuleDeclaration(module) => {
-            let scope = match &module.id {
-                TSModuleDeclarationName::StringLiteral(spec) => {
-                    AugmentationScopeKind::Module(spec.value.to_string())
-                }
-                // An identifier namespace is NOT an augmentation scope — its
-                // inner decls key under qualified `Ns.Name` file-scope records.
-                TSModuleDeclarationName::Identifier(_) => return,
-            };
-            let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = module.body.as_ref() else {
+        // An identifier namespace is NOT an augmentation scope — its inner
+        // decls key under qualified `Ns.Name` file-scope records.
+        Statement::TSExternalModuleDeclaration(module) => {
+            let scope = AugmentationScopeKind::Module(module.id.value.to_string());
+            let Some(block) = module.body.as_ref() else {
                 return;
             };
             (scope, &block.body)

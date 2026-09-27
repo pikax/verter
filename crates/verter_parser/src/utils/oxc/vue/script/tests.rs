@@ -62,7 +62,7 @@ fn define_model_name_is_decoded_while_span_remains_the_authored_literal() {
     let source = r#"const model = defineModel('foo\nbar')"#;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
-    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = parse_script(&parsed.program, ScriptMode::Setup, 0, source);
 
     let (name, name_span) = result
@@ -87,7 +87,7 @@ fn define_model_name_is_decoded_while_span_remains_the_authored_literal() {
 fn with_defaults_object(source: &str, check: impl FnOnce(&str, &MacroObjectArg<'_>)) {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
-    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = parse_script(&parsed.program, ScriptMode::Setup, 0, source);
     let defaults = result
         .items
@@ -183,7 +183,7 @@ const emit = defineEmits({ change: (value: Réel /* Phantom */) => true })
 "#;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
-    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = parse_script(&parsed.program, ScriptMode::Setup, 0, source);
     let macros = result
         .items

@@ -140,31 +140,36 @@ impl<'s> Lowerer<'s> {
         // class site's own footprint, never as sites of their own, so the
         // class value as a whole is what the selection names.
         let selection = self.selection.take();
-        let heritage = class.super_class.as_ref().map(|base| SliceClassHeritage {
-            base: Box::new(self.lower_expr(
-                unwrap_parenthesized(base),
-                ExprMode::BindingInit {
-                    preserve_literal: true,
-                },
-            )),
-            type_arguments: class
-                .super_type_arguments
-                .as_ref()
-                .map(|arguments| {
-                    arguments
-                        .params
-                        .iter()
-                        .map(|argument| {
-                            self.gate(
-                                lower_ts_type(argument, self.source),
-                                argument.span(),
-                                &own_binders,
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_else(|| Arc::from(Vec::new().into_boxed_slice())),
-        });
+        let heritage = class
+            .heritage
+            .as_ref()
+            .map(|heritage| &heritage.expression)
+            .map(|base| SliceClassHeritage {
+                base: Box::new(self.lower_expr(
+                    unwrap_parenthesized(base),
+                    ExprMode::BindingInit {
+                        preserve_literal: true,
+                    },
+                )),
+                type_arguments: class
+                    .heritage
+                    .as_ref()
+                    .and_then(|heritage| heritage.type_arguments.as_ref())
+                    .map(|arguments| {
+                        arguments
+                            .params
+                            .iter()
+                            .map(|argument| {
+                                self.gate(
+                                    lower_ts_type(argument, self.source),
+                                    argument.span(),
+                                    &own_binders,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_else(|| Arc::from(Vec::new().into_boxed_slice())),
+            });
         let mut members: Vec<Option<SliceClassMember>> = Vec::with_capacity(class.body.body.len());
         let mut groups: Vec<MemberGroup<'_>> = Vec::new();
         let mut index_signatures = Vec::new();
@@ -177,9 +182,7 @@ impl<'s> Lowerer<'s> {
                 // member.
                 ClassElement::StaticBlock(_) => {}
                 ClassElement::TSIndexSignature(signature) => {
-                    let Some(parameter) = signature.parameters.first() else {
-                        continue;
-                    };
+                    let parameter = &signature.parameter;
                     let key = &parameter.type_annotation.type_annotation;
                     let value = &signature.type_annotation.type_annotation;
                     index_signatures.push(SliceClassIndexSignature {
@@ -397,7 +400,8 @@ impl<'s> Lowerer<'s> {
         // `extends` value lowered above as a value of its own, which
         // answers for its own effects.
         let mut scanner = LeafCallScanner::default();
-        scanner.visit_class_after_heritage(class);
+        self.walks
+            .with_node_stack(class.span(), || scanner.visit_class_after_heritage(class));
         self.drain_leaf_call_scanner(scanner);
         let name: Arc<str> = match (&class.id, assigned_name) {
             (Some(id), _) => Arc::from(id.name.as_str()),
@@ -819,7 +823,9 @@ impl<'s> Lowerer<'s> {
                 .program
                 .body
                 .get(self.contributor as usize)
-                .and_then(|statement| ClauseContainerFinder::find(statement, gate.anchor))
+                .and_then(|statement| {
+                    ClauseContainerFinder::find(&self.walks, statement, gate.anchor)
+                })
                 .unwrap_or_else(|| (Arc::from(ANONYMOUS_FUNCTION), None));
             if !gate.enclosing_type_parameters.is_empty() {
                 clauses.push(crate::semantic_query::ClassExpressionClause {
@@ -851,7 +857,11 @@ impl<'a> LeafCallScanner<'a> {
         if let Some(type_parameters) = &it.type_parameters {
             self.visit_ts_type_parameter_declaration(type_parameters);
         }
-        if let Some(super_type_arguments) = &it.super_type_arguments {
+        if let Some(super_type_arguments) = it
+            .heritage
+            .as_ref()
+            .and_then(|heritage| heritage.type_arguments.as_ref())
+        {
             self.visit_ts_type_parameter_instantiation(super_type_arguments);
         }
         self.visit_ts_class_implements_list(&it.implements);
@@ -914,6 +924,7 @@ impl ClauseContainerFinder {
     /// The container name of the function starting at `target` in
     /// `statement`, and its class's name when it is a class member.
     fn find(
+        walks: &verter_semantic::analysis::walk_stack::ProgramWalkStack<'_>,
         statement: &oxc_ast::ast::Statement<'_>,
         target: u32,
     ) -> Option<(Arc<str>, Option<Arc<str>>)> {
@@ -921,7 +932,7 @@ impl ClauseContainerFinder {
             target,
             ..Self::default()
         };
-        finder.visit_statement(statement);
+        walks.with_node_stack(statement.span(), || finder.visit_statement(statement));
         finder.found
     }
 

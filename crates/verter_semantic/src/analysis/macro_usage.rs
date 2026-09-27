@@ -90,7 +90,7 @@ pub fn collect_macro_usage(
         facts: MacroUsageFacts::default(),
         consumed: FxHashSet::default(),
     };
-    visitor.visit_program(program);
+    verter_parser::oxc_parse::with_program_stack(program, || visitor.visit_program(program));
     visitor.facts
 }
 
@@ -262,9 +262,9 @@ mod tests {
             verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
                 .parse();
         assert!(
-            parsed.errors.is_empty(),
+            parsed.diagnostics.is_empty(),
             "fixture must parse: {:?}",
-            parsed.errors
+            parsed.diagnostics
         );
         let vue: FxHashSet<String> = ["toRef", "toRefs", "useSlots"]
             .iter()

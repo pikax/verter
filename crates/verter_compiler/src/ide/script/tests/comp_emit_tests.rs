@@ -1630,12 +1630,12 @@ const props = defineProps<{ zIndex: number }>()
     let alloc = oxc_allocator::Allocator::new();
     let parsed =
         verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    for err in &parsed.diagnostics {
         eprintln!("OXC ERROR: {err}");
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "generated TSX should have no parse errors, got {}: {code}",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }

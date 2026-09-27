@@ -555,44 +555,18 @@ Recorded plainly so no reader mistakes absence for a pass:
   with the recursion restored). The declaration-lowering worker's deepest
   stack there is its re-parse of the file (4.0 MiB at 2,000).
 
-* **Every production thread that analyzes reserves the workers' stack.**
-  Several host APIs compute on the caller's own thread (`compile_entry`,
-  public-API extraction, the scheduler-missed analysis lane), so the
-  caller's stack matters as much as the workers'. Before, the LSP's tokio
-  workers and blocking pool (sync coordinator, background drain,
-  diagnostics, scanner compile, document analysis), every MCP tool call,
-  `verter-tsc`'s main thread and rayon pool, and the WebAssembly module ran
-  on 2 MiB, 1 MiB (Windows main threads) or 1 MiB (wasm32's linker
-  default). Measured on the calling thread with a 256-deep nest, the flow
-  evaluation of nested functions, blocks and object literals takes up to
-  2.6 MB optimized and 11.4 MB unoptimized (arrow functions; `if` 1.2 /
-  6.1 MB, object literals 0.5 / 2.6 MB, class expressions 1.6 / 6.8 MB), and
-  the declaration-lowering worker up to 1.3 / 7.2 MB. Every analysis
-  thread now reserves `verter_scheduler::WORKER_STACK_BYTES` (8 MiB
-  optimized, 32 MiB unoptimized): the scheduler's and host's workers, the
-  declaration-lowering workers, the LSP serve thread and its runtime's
-  workers and blocking threads (`thread_stack_size`), MCP's server thread
-  and runtime (`verter_mcp::run::run_blocking`), `verter-tsc`'s checker
-  thread and global rayon pool, and the WebAssembly module
-  (`crates/verter_wasm/build.rs`: `-zstack-size=8388608`; the built
-  module's stack pointer starts at 8 MiB). Node's own main thread, which
-  `verter_napi` computes on synchronously, is 8 MiB on Windows
-  (`SizeOfStackReserve` of node.exe) and the `ulimit` on Linux. On the
-  8 MiB wasm module every measured form at 250 levels answers through
-  `evaluateTypeExpressionWithAudit`.
-
 * **oxc's parse runs on a stack its source cannot exhaust.** oxc_parser
-  0.126's recursive descent has no depth limit and aborts the process when
+  0.151's recursive descent has no depth limit and aborts the process when
   a thread's stack runs out, before returning an AST: on an 8 MiB stack at
-  4,512 nested type arguments or object literals and 5,664 parentheses
-  (optimized), 2,272 and 3,424 unoptimized
+  3,500 nested object literals, 4,781 type arguments and 4,093 parentheses
+  (optimized), 2,484, 2,671 and 2,859 unoptimized
   (`docs/evidence/signature-kernel/oxc-deep-parse.md`, reproduced by
   `crates/verter_parser/examples/oxc_deep_parse.rs` with nothing of
   Verter's). Every production parse goes through
   `verter_parser::oxc_parse::Parser`, a drop-in that parses exactly what
   oxc parses: a linear scan bounds the syntax tree's depth from above and
-  the parse gets 8 KiB per level of it (twice oxc's costliest measured
-  level), in place when the thread has it and on a `stacker` segment
+  the parse gets 9 KiB per level of it (twice the costliest measured level
+  of the parse or of oxc's walks over its tree), in place when the thread has it and on a `stacker` segment
   otherwise. No source is refused and no depth is imposed.
   `oxc_parse/tests.rs` parses ten forms 10,000 deep and an unclosed
   200,000-deep nest on a 1 MiB thread (with the parse in place, or with a
@@ -601,9 +575,9 @@ Recorded plainly so no reader mistakes absence for a pass:
   `oxc_parser::Parser`. The scan costs about a third of the parse (8.1 ms
   against 6.1 ms for `lib.dom.d.ts`, optimized); a source short enough
   that every byte could be a level skips it. `stacker` cannot grow the
-  stack on wasm32, where the module's 8 MiB bounds the parse. What runs
-  after the parse (the syntax-tree clone, the semantic builder and
-  Verter's own passes) still recurses per level in places.
+  stack on wasm32, where the module's stack (1 MiB, wasm32's linker default)
+  bounds the parse. oxc's walks over the tree run under the same
+  containment (below).
 
 * **A class expression raises one instance per level.** The lane's graph
   of `class { m() { return class { … } } }` nested `n` deep is linear
@@ -626,6 +600,276 @@ Recorded plainly so no reader mistakes absence for a pass:
   folded nodes (a test counter in the raise's `fold_node`) and the raised
   size grow by the same amount per level over 4, 8 and 12; with the
   prototype printed they grow 136, 2,296, 36,856.
+
+* **Operator chains lower and drop from explicit stacks.** The slice
+  lowering built a `!`, a unary or binary arithmetic operator or a non-null
+  assertion by lowering its operands recursively, 4.4 KiB per level
+  optimized (43 MB for a 10,000-deep `!` or `+` chain on the
+  declaration-lowering worker); a `!` chain's guard classification
+  (`classify_guard`) recursed per `!` too, and the lowered `SliceExpr`'s
+  derived drop glue dropped a nest a native level per level. `lower_expr`
+  now lowers those forms' operands from an explicit task stack
+  (`operator_operands`, the same decisions its fall-through makes, so every
+  other form lowers as before), `classify_guard` peels a `!` chain and
+  negates the innermost test once per `!`, and `SliceExpr`'s `Drop` moves
+  the sub-expressions it solely owns onto a stack before it drops.
+  `flow_slice_content_tests.rs` →
+  `operator_chains_10000_deep_lower_on_the_worker_stack` lowers 10,000-deep
+  `!`, unary `-` and `+` chains on the 8 MiB worker and drops them on a
+  2 MiB test thread, unoptimized; restoring the recursive operand lowering
+  or the `!` classification overflows the worker, and restoring the
+  derived drop overflows the test thread.
+
+* **Nested conditionals, object literals and blocks lower and evaluate
+  from explicit stacks.** The slice lowering lowered a conditional's
+  branches, an object literal's member values and a block's statements
+  by recursing into them, and the evaluator evaluated them the same way:
+  the declaration-lowering worker overflowed on between 300 and 1,000 nested
+  conditionals and 300 nested object literals or blocks, and the 1 MiB
+  caller on fewer. A conditional and an object literal are now frames of
+  `lower_expr`'s task stack and of `eval_expr`'s (an object literal steps
+  to each child it needs, a spread source, a computed key, a member value
+  or its unwidened view, and resumes with it; a return's conditional reads
+  its arms from a stack of the guard overlays it enters), and a block
+  statement suspends its region's frame on `lower_region`'s and
+  `eval_region`'s stacks until the block's region completes. Beside them,
+  the assignment-span and hoisted-`var` region walks run from stacks, a
+  member's literal widening decides from the member's top instead of
+  comparing the widened value with the unwidened one (which walked the
+  whole nest at every level), and `SliceStatement`'s `Drop` moves the
+  statements of the regions it solely owns onto a stack.
+  `deep_input_tests.rs` answers 1,000 nested conditionals (returned, and
+  as a member's value), 3,000 nested object literals and 3,000 nested
+  blocks on a 1 MiB caller with 8 MiB workers, unoptimized, with
+  TypeScript 7.0.2's answers (`1 | 2`, `number`, `"v"`, `number`);
+  restoring any of the recursions (the conditional lowering, the member
+  conditional's evaluation, the return's arm walk, the object lowering or
+  evaluation, the block lowering or evaluation) or the derived statement
+  drop overflows a worker or the caller. At 10,000 levels the three forms'
+  demand slices exceed the flow-slice plan budget (4,096 selected nodes),
+  so they return a typed budget failure; they return it on the production
+  stacks.
+
+* **Function types lower from the locator lowering's explicit stack.** The
+  locator-shape lowering lowered a function or constructor type's
+  parameters, return and predicate target by recursing into
+  `lower_locator_shape_node` for each: a 100-deep `() => () => … 1`
+  overflowed a 1 MiB caller, unoptimized. A signature is now a
+  `LocatorFrame::Function`: once its type parameters' binder frame is
+  built, each parameter's type, a declared return and a predicate target
+  descend from the stack under that frame, and the signature interns when
+  the last is delivered (a body-derived return is still demanded from the
+  whole-function producer in place). `deep_input_tests.rs` →
+  `function_and_constructor_types_nested_10000_deep_answer_on_production_stacks`
+  answers `1` (TypeScript 7.0.2's) for `D extends Function ? 1 : 2` over
+  10,000 nested function types and 10,000 nested constructor types;
+  lowering the declared return in place overflows it. A type parameter's
+  constraint and default still lower in place, one native level per
+  signature nested in a bound.
+
+* **Nested calls lower from the task stack, each call's arguments once
+  per position.** The slice lowering recorded a call's whole-value
+  arguments, lowered its callee and lowered its frame-lowered arguments by
+  recursing into `lower_expr` for each: 3,000 nested calls `g(g(…))`
+  overflowed the lowering at the 174th, unoptimized. A nested call lowers
+  again as an argument of the call around it, once among the whole-value
+  arguments that call records and once among its frame-lowered arguments,
+  and each lowering of it lowered its own frame-lowered arguments again, so
+  the lowerings grew with the square of the depth (529 and 2,081 at 32 and
+  64 levels). A call is now frames of `lower_expr`'s task stack (its
+  recording, its callee's value-rooted object, its frame-lowered
+  arguments), the frame-lowered arguments a call lowered are kept by its
+  span, mode and whole-value position for the lowering's lifetime (unless
+  the lowering reached a side channel), and `SliceExpr`'s `Drop` takes a
+  call's owned operand and arguments onto its stack.
+  `flow_slice_content_tests.rs` → `nested_calls_lower_each_call_a_bounded_number_of_times`
+  counts three lowerings per nested call (22, 46, 94 and 190 at 8, 16, 32
+  and 64 levels) and `calls_nested_10000_deep_lower_on_a_small_stack`
+  lowers 10,000 nested calls on a 1 MiB thread; dropping the kept
+  arguments makes the counts quadratic again, and recording the
+  arguments, lowering the frame-lowered arguments or dropping a call's
+  arguments in place overflows the thread.
+
+* **Nested indexed call records build from an explicit stack.** A call's
+  indexed record (`type_eval_build::lower_indexed_call_expression`, which
+  the flow evaluator's executor route re-reads for every call it resolves)
+  lowered a call nested in an argument, a callee or a receiver by
+  recursing into it, and the record's derived drop dropped it the same
+  way: 2,000 nested calls overflowed the thread reading the outermost one,
+  unoptimized. The nested records now build from an explicit stack, each
+  record's children lowered in order and the record built over them, and
+  `IndexedValueCall`'s `Drop` moves the records it solely owns onto a
+  stack. A flow frame reads a record over the arguments it lowers and
+  evaluates itself (`indexed_call_expression_over_frame_at`): a direct
+  call among them keeps no record of its own, so reading a nest call by
+  call no longer lowers every call again under every call around it
+  (4,000 nested calls took 52 s to answer, 2.6 s now, unoptimized).
+  `type_eval_build_tests.rs` →
+  `calls_nested_10000_deep_lower_to_indexed_records_on_a_small_stack`
+  lowers and drops the record of 10,000 nested calls on a 1 MiB thread;
+  lowering a nested record in place or dropping the nest through the
+  derived glue overflows it. `decl_body_memo_tests.rs` →
+  `a_frame_lowered_call_argument_keeps_no_indexed_record` fails when the
+  frame's arguments are ignored.
+
+* **The flow-return schedule decides which calls a frame evaluates from
+  one sweep.** Deciding whether a call nested in another call's argument
+  is evaluated (`call_is_evaluated`) walked out through every call around
+  it, scanning all the frame's calls for the innermost enclosing one at
+  every step, and the composed-value callees scanned them again per call:
+  work cubic in a nest's depth (600 nested calls took 4.2 s to answer,
+  unoptimized). A `CallNest` built once per frame from one sweep
+  over the calls in source order gives each call's innermost enclosing
+  call and the call site at each span, and each call's verdict is decided
+  once and shared by the calls inside it (600 nested calls take 1.1 s).
+
+* **Calls evaluate from the flow evaluator's explicit stack.** The
+  evaluator evaluated a call's callee operand (an IIFE's function value, a
+  receiver, a constructed value's member object, a tag) and, on its
+  executor route, each frame-lowered argument by recursing into
+  `eval_expr`, about 40 KiB per nested call unoptimized: 30 nested calls
+  `f(f(…))` overflowed a 1 MiB caller. A call is now frames of
+  `eval_expr`'s stack (`flow_return_call_stack.rs`): it suspends while
+  its callee operand evaluates, its value computation runs with the
+  operand's value in hand and stops at an executor route over a lowered
+  argument, the route types the arguments one at a time and suspends for
+  each lowered one, and the computation runs again with the route's
+  answer (everything before the route reads the graph and the frame and
+  records nothing, so it reaches the route again exactly). A second
+  route over the same arguments reads the values the first evaluated
+  instead of evaluating the nest inside them again (1,100 nested calls
+  took 238 s, 3.4 s now, unoptimized). `deep_input_tests.rs` answers 500
+  nested calls on a 1 MiB caller with 8 MiB workers (TypeScript 7.0.2's
+  `number`); evaluating the arguments in place overflows the caller. At
+  10,000 levels the call resolutions exceed the connected-demand work
+  budget, so the return is its typed budget failure; it returns on the
+  production stacks, in about 6 s unoptimized.
+
+* **Template nesting walks from explicit stacks.** The carrier projection
+  (`project_vue_node`), the template data walk
+  (`walk_node_for_extraction`) and the VDOM code generator's handler-cache
+  and array-group-cache reservations recursed once per nested element: a
+  template nested 10,000 deep overflowed a 1 MiB thread in each,
+  unoptimized. Each now walks from an explicit stack in the order it
+  walked recursively: the projection writes a node's placeholder and kind
+  first and its children range once they have projected, the template
+  data walk keeps a stack of sibling lists each with its own `v-if` chain,
+  and the reservations visit an element's children before the element.
+  `compile_tests.rs` →
+  `a_template_nested_10000_deep_compiles_on_a_small_stack` compiles such a
+  template to the render function and to TSX with its template data
+  (10,000 elements, nesting depth 10,000), and
+  `registered_carrier_projection_tests.rs` →
+  `a_template_nested_10000_deep_projects_on_a_small_stack` projects it, on
+  a 1 MiB thread; restoring any of the four recursions overflows it.
+
+* **Array literals evaluate from the evaluator's explicit stack.** The
+  evaluator evaluated an array literal's elements and spread sources by
+  recursing into `eval_expr`: nested array literals overflowed a 1 MiB
+  caller from about 35 levels, unoptimized, below the 64 levels the
+  semantic inference depth budget admits them structurally. An array
+  literal is now a frame of `eval_expr`'s stack (`ArrayEvalFrame`), each
+  element evaluated from the stack in order (an element typed under a
+  contextual element type still evaluates in place), and the frames the
+  stack holds for object literals, array literals and calls are boxed so
+  the evaluator's own frame stays at about 5 KiB. `deep_input_tests.rs`
+  answers 64 nested array literals on a 1 MiB caller (TypeScript 7.0.2's
+  `1` for `ReturnType<typeof pf> extends unknown[] ? 1 : 2`); evaluating
+  the elements in place overflows it. At 10,000 levels the literal
+  exceeds that inference depth budget, so the return is its typed budget
+  failure; it returns on the production stacks. The same file answers
+  10,000 nested type arguments (`1`) and returns the typed budget failure
+  of a 10,000-deep `keyof` chain.
+
+* **Route facts walk a declaration body from explicit stacks.** The
+  shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
+  declaration's body recursively: the whole-route walk overflowed the
+  8 MiB declaration-lowering worker on a 10,000-deep `keyof` chain, and the
+  member-path seed enumeration, the type-reference enumeration and the
+  direct-object descents recursed per nested member or parenthesized arm.
+  Each now runs from an explicit stack, children queued last first so every
+  edge comes out in the order the recursive walk emitted it (only childless
+  nodes emit). `route_facts_tests.rs` →
+  `bodies_nested_10000_deep_produce_route_facts_on_a_small_stack` produces
+  the facts of a 10,000-deep `keyof` chain, object nest and parenthesized
+  intersection chain on a 1 MiB thread; walking the children in place
+  overflows it. The object nest's seed edges are one per member path, each
+  with its full path, so their count is linear and their size quadratic in
+  the nest's depth (8 s unoptimized at 10,000).
+
+* **Type dependency facts collect from an explicit stack.** The collector
+  of an authored type's dependency paths (`verter_type_expr_oxc`'s
+  `dependency_facts`) recursed once per nested type: 8.3 MB on the
+  declaration-lowering worker for a 10,000-deep `Box<…>` argument chain,
+  unoptimized, past its 8 MiB. Every visit now records its own paths and
+  pushes the types it reaches onto a stack that one loop drains (the facts
+  are sets, so the order they are found in is immaterial), and a qualified
+  name's or a member chain's segments are read from a loop down its left
+  spine. `dependency_facts_tests.rs` →
+  `types_nested_10000_deep_collect_on_a_small_stack` collects type
+  arguments, function types, object type members and conditional branches
+  nested 10,000 deep on a 1 MiB thread; visiting each nested type in place
+  overflows it.
+
+* **Nested callables index from an explicit stack, on shared locators.**
+  The function index discovered a callable nested in a callable's body by
+  recursing through its entry build, 13.9 MB for 10,000 nested arrows
+  optimized, and each nested callable's locator copied its parent's whole
+  descent and added a step, so a nest `n` deep held `n²/2` steps (the
+  10,000-deep nest's locators alone took hundreds of megabytes).
+  `discover_nested_positions` now walks the nest from an explicit stack of
+  the bodies it is in (depth first, each callable's own nested callables
+  before its next sibling, so every ordinal and key is as before), and a
+  locator's descent is a `FunctionDescent`: a path that shares every prefix
+  with its enclosing functions' descents, so each locator adds one step.
+  Its equality, hash and drop walk the path from a loop.
+  `function_program_tests.rs` →
+  `callables_nested_10000_deep_index_on_a_small_stack` indexes 10,000
+  nested arrows on a 1 MiB thread, unoptimized, and checks every nested
+  locator extends its parent's descent by one shared step; restoring the
+  recursion overflows the thread, and copying the parent's descent fails
+  the sharing check. The index still hashes each function's body with its
+  nested bodies in it, so indexing the nest takes time quadratic in its
+  depth (about a minute unoptimized at 10,000).
+
+* **Operator chains evaluate from explicit stacks.** The flow evaluator
+  evaluated a `!`, a non-null assertion and an arithmetic operator by
+  evaluating its operands recursively, 8.7 MB for a 10,000-deep `!` chain
+  optimized, on the thread that asks for the return type; the effect
+  pre-scan (`expression_effect_tree`, which collects the writes an
+  expression carries) recursed per level of any nest too. `eval_expr` now
+  evaluates those forms' operands from an explicit stack of the forms
+  waiting on them (each operand's value erased as its own evaluation would
+  erase it, an arithmetic operator stopping at the operand that holds or is
+  unmodeled), and `expression_effect_tree` walks from a stack in the same
+  tree order. `flow_return_null_policy_tests.rs` →
+  `operator_chains_10000_deep_evaluate_on_a_small_stack` answers
+  `boolean`, `number` and `number` (TypeScript 7.0.2's answers) for
+  10,000-deep `!`, unary `-` and `+` chains on a 1 MiB caller thread,
+  unoptimized; restoring either recursion overflows it.
+
+* **oxc's own walks run on the stack their source needs.** oxc's
+  `clone_in`, semantic builder and `Visit` / `VisitMut` walkers recurse
+  once per level of the tree they walk, as its parser does: cloning a
+  10,000-deep `!` chain took 13.7 MB on the unoptimized IO worker
+  (`root_binding_index`'s binding clone), past its 8 MiB. Every walk entry
+  now runs under one of `verter_parser::oxc_parse`'s containments, sized
+  the way the parse is (9 KiB per level of the nesting scan's bound plus
+  512 KiB, in place when the thread has it, on a stack segment otherwise):
+  `with_program_stack` for a whole program, `ProgramWalkStack` for the
+  many node walks one program's consumer makes (its program scanned at
+  most once), `with_node_stack` / `with_span_stack` / `with_source_stack`
+  for one node given its program or its text (the larger of a TypeScript
+  and a TSX scan where the source type is not at hand), and
+  `with_nesting_stack` for a known bound. `verter_semantic` re-exports the
+  first three as `analysis::walk_stack` for the flow lane, which does not
+  depend on the parser. The guard `no_crate_walks_oxc_syntax_around_the_containment`
+  fails any walk entry (a `visit_…` call on a visitor, a `walk::` call on
+  one, `clone_in`, `SemanticBuilder::new`) outside a containment, a walk
+  step or a helper only those call. `every_form_nested_10000_deep_walks_on_a_small_stack`
+  clones and walks each of the ten nesting forms 10,000 deep on a 1 MiB
+  thread under each containment; running the walks in place instead
+  overflows it.
 
 * **A call's arguments lower once per enclosing call.** A call nested
   as an argument (`g(g(…g(1)…))`) lowers again from the enclosing call's

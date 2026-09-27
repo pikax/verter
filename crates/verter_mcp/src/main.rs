@@ -18,7 +18,8 @@ use clap::Parser;
 
 use verter_mcp::config::Cli;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
@@ -28,7 +29,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
 
-    // The server and its runtime run on sized stacks
-    // (`verter_mcp::run::RUNTIME_STACK_BYTES`), not on this main thread.
-    verter_mcp::run::run_blocking(cli)
+    verter_mcp::run::run(cli).await
 }

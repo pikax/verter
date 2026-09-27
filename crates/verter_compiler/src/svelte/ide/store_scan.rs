@@ -204,7 +204,7 @@ pub(super) fn scan_store_subscriptions_and_host_with(
     let allocator = Allocator::default();
     let source_type = SourceType::tsx();
     let parsed = Parser::new(&allocator, text, source_type).parse();
-    if parsed.panicked {
+    if parsed.fatal_error {
         return StoreScanOutcome {
             subs: Vec::new(),
             uses_host_rune: false,
@@ -225,7 +225,9 @@ pub(super) fn scan_store_subscriptions_and_host_with(
         subs: Vec::new(),
         uses_host_rune: false,
     };
-    collector.visit_program(&parsed.program);
+    verter_parser::oxc_parse::with_program_stack(&parsed.program, || {
+        collector.visit_program(&parsed.program)
+    });
     StoreScanOutcome {
         subs: collector.subs,
         uses_host_rune: collector.uses_host_rune,
@@ -251,10 +253,12 @@ pub(super) fn collect_declared_dollar_names(text: &str) -> Vec<String> {
     }
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, text, SourceType::tsx()).parse();
-    if parsed.panicked {
+    if parsed.fatal_error {
         return Vec::new();
     }
-    top_level_dollar_bindings(&parsed.program)
+    verter_parser::oxc_parse::with_program_stack(&parsed.program, || {
+        top_level_dollar_bindings(&parsed.program)
+    })
 }
 
 /// Collect the `$`-prefixed binding names introduced by a markup BLOCK BINDING
@@ -283,11 +287,13 @@ pub(super) fn collect_pattern_dollar_names(pattern_text: &str) -> Vec<String> {
     let wrapped = format!("const [{pattern_text}] = null as any;");
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, &wrapped, SourceType::tsx()).parse();
-    if parsed.panicked {
+    if parsed.fatal_error {
         return Vec::new();
     }
     let mut names = LexicalDollarBindings::default();
-    names.scan_statements_direct(&parsed.program.body);
+    verter_parser::oxc_parse::with_program_stack(&parsed.program, || {
+        names.scan_statements_direct(&parsed.program.body)
+    });
     names.names
 }
 
@@ -387,8 +393,10 @@ fn function_own_dollar_bindings(func: &Function<'_>) -> Vec<String> {
 fn arrow_own_dollar_bindings(arrow: &ArrowFunctionExpression<'_>) -> Vec<String> {
     let mut names = LexicalDollarBindings::default();
     names.add_formal_params(&arrow.params);
-    names.scan_statements_direct(&arrow.body.statements);
-    names.scan_var_hoists(&arrow.body.statements);
+    if let Some(body) = arrow.get_function_body() {
+        names.scan_statements_direct(&body.statements);
+        names.scan_var_hoists(&body.statements);
+    }
     names.names
 }
 
@@ -509,10 +517,9 @@ impl LexicalDollarBindings {
                     // not).
                     self.add_binding(&import_eq.id);
                 }
-                Statement::ExportNamedDeclaration(export) => {
-                    if let Some(decl) = &export.declaration {
-                        self.add_declaration(decl);
-                    }
+                Statement::ExportDeclaration(export) => {
+                    let decl = &export.declaration;
+                    self.add_declaration(decl);
                 }
                 Statement::ExportDefaultDeclaration(export) => {
                     // `export default function $f(){}` / `export default class $C {}`
@@ -565,12 +572,10 @@ impl LexicalDollarBindings {
                 }
             }
             Declaration::TSEnumDeclaration(e) => self.add_binding(&e.id),
-            Declaration::TSModuleDeclaration(m) => {
-                if let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &m.id {
-                    let name = id.name.as_str();
-                    if name.starts_with('$') && !is_double_dollar_magic(name) {
-                        self.names.push(name.to_string());
-                    }
+            Declaration::TSNamespaceDeclaration(m) => {
+                let name = m.id.name.as_str();
+                if name.starts_with('$') && !is_double_dollar_magic(name) {
+                    self.names.push(name.to_string());
                 }
             }
             _ => {}

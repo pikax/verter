@@ -146,9 +146,9 @@ fn compiled_goldens_parse_as_valid_javascript() {
             let allocator = Allocator::default();
             let ret = Parser::new(&allocator, &code, SourceType::mjs()).parse();
             assert!(
-                !ret.panicked && ret.errors.is_empty(),
+                !ret.fatal_error && ret.diagnostics.is_empty(),
                 "golden {golden_rel} must parse as valid ESM JavaScript: {:?}",
-                ret.errors
+                ret.diagnostics
             );
             parsed += 1;
         }

@@ -36,7 +36,10 @@ use crate::framework_common::FrameworkParseArtifact;
 use crate::ide::vue_projection::attribute_operations::project_attribute_operations;
 use crate::ide::vue_projection::binder_capture::{capture_binder_plan, BinderCapturePlan};
 use crate::ide::vue_projection::binding_views::{project_binding_views, BindingViewsProjection};
+use crate::ide::vue_projection::component_use::project_component_uses;
+use crate::ide::vue_projection::generic_interop::project_advanced_generic_uses;
 use crate::ide::vue_projection::options_api::project_options_pair;
+use crate::ide::vue_projection::props::{caller_and_setup_from_blocks, project_props};
 
 /// STP13 named products: the acceptance surface of
 /// [`VueProjectionBackend::options_projection`]. Re-exported here (rather
@@ -57,6 +60,35 @@ pub use crate::ide::vue_projection::attribute_operations::{
     RuntimePropertyKeyPlan, RuntimePropertyWrite, SpreadKind, ValidationObligation, VueAttributeOp,
     VueAttributeSequence, WriteValue,
 };
+/// Prop-check products: caller default optionality, setup-resolved defaults,
+/// and certainty-aware spread obligations. The live Vue route remains owned
+/// by atomic activation.
+pub use crate::ide::vue_projection::props::{
+    CallerAndSetupPropsContract, PropCheckObligation, PropsProjection, SpreadCertaintyPolicy,
+};
+
+/// Component-use products: the acceptance surface of
+/// [`VueProjectionBackend::component_uses`]. Re-exported here (rather than
+/// through `ide`, which is crate-internal) so qualification harnesses and
+/// the slot, event, model and ref consumers name the same types as this
+/// backend.
+pub use crate::ide::vue_projection::component_use::{
+    CheckContract, ComponentUseProjection, ComponentUseWitness, ExcludedOperation, ExclusionReason,
+    InferenceTransaction, MemberValue, ObservationKind, SpecializationKey,
+    SpecializedUseObservation, TransactionMember, ValidationCheck, USE_CONSTRUCTOR, USE_LISTENER,
+    USE_MODEL, USE_PRELUDE, USE_PROP, USE_SLOT_PROPS, WITNESS_PREFIX,
+};
+
+/// Advanced generic use and foreign component contract products: the
+/// acceptance surface of [`VueProjectionBackend::advanced_generic_uses`].
+/// Re-exported here (rather than through `ide`, which is crate-internal)
+/// so qualification harnesses and the event, slot and resolution consumers
+/// name the same types as this backend.
+pub use crate::ide::vue_projection::generic_interop::{
+    AdvancedGenericUse, AdvancedGenericUseProjection, ForeignComponentContractAdapter,
+    UseContractAvailability, USE_CALLS, USE_COMPONENT, USE_CONSTRUCTS, USE_CONTRACT,
+    USE_FUNCTIONAL, USE_OPEN_ARGS, USE_SCOPE, USE_TOLERANT,
+};
 
 /// STP15 named products: the acceptance surface of
 /// [`VueProjectionBackend::binding_views`]. Re-exported here (rather
@@ -66,7 +98,7 @@ pub use crate::ide::vue_projection::binding_views::{
     BindingKind, BindingUsageSet, TemplateReadBinding, TemplateReadView, TemplateWriteTarget,
     UsageRegions, UsedBinding, ViewSnapshotKind, WritableBinding, WriteDomain, WriteRejection,
 };
-use crate::ide::vue_projection::public_constructor::project_public_constructor;
+use crate::ide::vue_projection::public_constructor::{project_public_constructor, public_binder};
 /// Public constructor products: the acceptance surface of
 /// [`VueProjectionBackend::public_constructor`] and the backend's
 /// [`ProjectionBackend::PublicApi`]. Re-exported here (rather than through
@@ -228,6 +260,84 @@ impl VueProjectionBackend {
         }
         let plan = self.projection_plan(source, artifact, canonical_id);
         Ok(project_attribute_operations(&plan, parsed, source))
+    }
+
+    /// One inference transaction per component use of the admitted parse:
+    /// a single construction of the used component carrying every
+    /// authorized contributor in the runtime's merge order, validation-only
+    /// checks that reuse its specialized instance, and slot / event / model /
+    /// ref observations read from that instance. Derived from the same
+    /// [`ProjectionPlan`] and attribute products; an incomplete plan or an
+    /// unnamed component yields an incomplete product. Dormant relative to
+    /// [`Self::project_ide`] until Vue atomic activation switches the live
+    /// route.
+    pub fn component_uses(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        canonical_id: &str,
+    ) -> Result<ComponentUseProjection, SetupProjectionRefusal> {
+        let parsed = VueCarrierCompiler
+            .parsed_sfc(artifact)
+            .ok_or(SetupProjectionRefusal::MissingParse)?;
+        if artifact.carrier_source().as_ref() != source {
+            return Err(SetupProjectionRefusal::MissingParse);
+        }
+        let plan = self.projection_plan(source, artifact, canonical_id);
+        let attributes = project_attribute_operations(&plan, parsed, source);
+        Ok(project_component_uses(&plan, &attributes))
+    }
+
+    /// Every component use of the admitted parse placed in one scope over
+    /// the carrier's authored `generic` binder and constructed through the
+    /// [`ForeignComponentContractAdapter`], with each use's contract
+    /// availability. Derived from the same [`ProjectionPlan`], attribute and
+    /// component-use products; an incomplete plan or an unnamed component
+    /// yields an incomplete product. Dormant relative to
+    /// [`Self::project_ide`] until Vue atomic activation switches the live
+    /// route.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a parse that is not of exactly `source` and a `generic`
+    /// attribute that does not parse.
+    pub fn advanced_generic_uses(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        canonical_id: &str,
+    ) -> Result<AdvancedGenericUseProjection, SetupProjectionRefusal> {
+        let (_, _, generic) = self.script_blocks(source, artifact)?;
+        let binder = public_binder(generic)?;
+        let parsed = VueCarrierCompiler
+            .parsed_sfc(artifact)
+            .ok_or(SetupProjectionRefusal::MissingParse)?;
+        let plan = self.projection_plan(source, artifact, canonical_id);
+        let attributes = project_attribute_operations(&plan, parsed, source);
+        let uses = project_component_uses(&plan, &attributes);
+        Ok(project_advanced_generic_uses(&plan, uses, binder))
+    }
+
+    /// Caller prop/default contracts and strict known-key spread obligations
+    /// for the admitted parse. This product is dormant until atomic Vue
+    /// activation switches the live route.
+    pub fn props(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        canonical_id: &str,
+    ) -> Result<(PropsProjection, CallerAndSetupPropsContract), SetupProjectionRefusal> {
+        let parsed = VueCarrierCompiler
+            .parsed_sfc(artifact)
+            .ok_or(SetupProjectionRefusal::MissingParse)?;
+        if artifact.carrier_source().as_ref() != source {
+            return Err(SetupProjectionRefusal::MissingParse);
+        }
+        let plan = self.projection_plan(source, artifact, canonical_id);
+        let attributes = project_attribute_operations(&plan, parsed, source);
+        let (normal, setup, generic) = self.script_blocks(source, artifact)?;
+        let caller = caller_and_setup_from_blocks(normal, setup, generic)?;
+        Ok((project_props(&attributes), caller))
     }
 
     /// Live template read/write views for the admitted parse: unwrapped

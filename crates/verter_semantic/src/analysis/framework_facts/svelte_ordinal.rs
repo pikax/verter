@@ -66,7 +66,7 @@ impl MacroOrdinalWalk {
 
     /// Visit one top-level statement: track its dispatcher imports and yield
     /// its ordinal-bearing macro calls to `visit`.
-    pub(super) fn visit_statement<'a, 'b>(
+    pub(super) fn yield_statement_macros<'a, 'b>(
         &mut self,
         stmt: &'b Statement<'a>,
         module_region: Option<(u32, u32)>,
@@ -80,18 +80,18 @@ impl MacroOrdinalWalk {
                 self.visit_props_declarators(&decl.declarations, visit);
                 self.visit_dispatcher_declarators(&decl.declarations, visit);
             }
-            Statement::ExportNamedDeclaration(export) => {
+            Statement::ExportDeclaration(export) => {
                 // A whole-statement type-only export carries no runtime macro
                 // call; a module-block export is a module binding, not a
                 // component macro (the same instance-only gate the legacy-prop
                 // capture applies).
-                if export.export_kind.is_type() {
+                if export.export_kind().is_type() {
                     return;
                 }
                 if statement_in_module(export.span.start, module_region) {
                     return;
                 }
-                if let Some(Declaration::VariableDeclaration(var)) = &export.declaration {
+                if let Declaration::VariableDeclaration(var) = &export.declaration {
                     self.visit_props_declarators(&var.declarations, visit);
                 }
             }

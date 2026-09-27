@@ -95,7 +95,12 @@ pub fn collect_template_used_vars(
         // direction), it never demotes a used binding.
         if let Some(ref expression) = expr.expression {
             let mut spans = FxHashSet::default();
-            collect_expression_free_ref_spans(expression, &FxHashSet::default(), &mut spans);
+            collect_expression_free_ref_spans(
+                expression,
+                source.get(expr.offset as usize..).unwrap_or(source),
+                &FxHashSet::default(),
+                &mut spans,
+            );
             for span in spans {
                 let start = (span.start + expr.offset) as usize;
                 let end = (span.end + expr.offset) as usize;

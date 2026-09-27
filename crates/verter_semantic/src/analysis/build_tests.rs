@@ -2509,7 +2509,7 @@ const props = defineProps<SetupProps>();
 "#;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let module = TopLevelOwnerId::module(0);
     let instance = TopLevelOwnerId::instance(0);
     let owners = TopLevelOwnerTable::try_from_statement_owners(
@@ -2523,7 +2523,7 @@ const props = defineProps<SetupProps>();
         &parsed.program,
         AnalysisScope::all(),
         &owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     );
 
     assert_eq!(snapshot.imports[0].owner, module);
@@ -2551,7 +2551,7 @@ fn declaration_content_hash_discriminates_owner_only_role_changes() {
     let source = "interface Shared { value: string }";
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let module_owners = TopLevelOwnerTable::try_from_statement_owners(
         parsed.program.body.len(),
         [TopLevelOwnerId::module(0)],
@@ -2568,7 +2568,7 @@ fn declaration_content_hash_discriminates_owner_only_role_changes() {
         &parsed.program,
         AnalysisScope::all(),
         &module_owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     );
     let instance = build_script_analysis_with_scope_from_program_with_owners(
         source,
@@ -2576,7 +2576,7 @@ fn declaration_content_hash_discriminates_owner_only_role_changes() {
         &parsed.program,
         AnalysisScope::all(),
         &instance_owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     );
 
     assert_ne!(
@@ -2601,7 +2601,7 @@ const instanceProps = defineProps<Props>();
 "#;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let module = TopLevelOwnerId::module(0);
     let instance = TopLevelOwnerId::instance(0);
     let owners = TopLevelOwnerTable::try_from_statement_owners(
@@ -2615,7 +2615,7 @@ const instanceProps = defineProps<Props>();
         &parsed.program,
         AnalysisScope::all(),
         &owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     );
 
     assert_eq!(snapshot.macros.len(), 2);
@@ -2636,7 +2636,7 @@ fn macro_local_type_resolution_uses_only_the_validated_one_way_parent() {
     let analyze = |source: &str, statement_owners: &[TopLevelOwnerId]| {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-        assert!(!parsed.panicked, "fixture must parse");
+        assert!(!parsed.fatal_error, "fixture must parse");
         let owners = TopLevelOwnerTable::try_from_statement_owners(
             parsed.program.body.len(),
             statement_owners.iter().copied(),
@@ -2648,7 +2648,7 @@ fn macro_local_type_resolution_uses_only_the_validated_one_way_parent() {
             &parsed.program,
             AnalysisScope::all(),
             &owners,
-            !parsed.errors.is_empty(),
+            !parsed.diagnostics.is_empty(),
         )
     };
 

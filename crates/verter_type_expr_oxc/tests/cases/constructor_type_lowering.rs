@@ -19,8 +19,8 @@
 //!    `+1n` into the wrong literal `-1n` — these tests catch exactly that.
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{BigintBase, Statement, TSType, UnaryOperator};
-use oxc_ast::AstBuilder;
+use oxc_ast::ast::{BigintBase, Expression, Statement, TSLiteral, TSType, UnaryOperator};
+use oxc_ast::builder::AstBuilder;
 use oxc_parser::Parser;
 use oxc_span::{SourceType, Span};
 
@@ -32,7 +32,7 @@ use verter_type_expr_oxc::lower_ts_type;
 fn lower_alias(source: &str) -> TypeExpr {
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!ret.panicked, "OXC parser panicked on `{source}`");
+    assert!(!ret.fatal_error, "OXC parser panicked on `{source}`");
 
     let alias = ret
         .program
@@ -67,20 +67,27 @@ fn lower_synthetic_unary_literal(
     let allocator = Allocator::default();
     let builder = AstBuilder::new(&allocator);
     let argument = if is_bigint {
-        builder.expression_big_int_literal(Span::default(), magnitude, None, BigintBase::Decimal)
+        Expression::new_big_int_literal(
+            Span::default(),
+            magnitude,
+            None,
+            BigintBase::Decimal,
+            &builder,
+        )
     } else {
         let value: f64 = magnitude
             .parse()
             .expect("numeric magnitude must parse as f64");
-        builder.expression_numeric_literal(
+        Expression::new_numeric_literal(
             Span::default(),
             value,
             None,
             oxc_ast::ast::NumberBase::Decimal,
+            &builder,
         )
     };
-    let literal = builder.ts_literal_unary_expression(Span::default(), operator, argument);
-    let ts_type = builder.ts_type_literal_type(Span::default(), literal);
+    let literal = TSLiteral::new_unary_expression(Span::default(), operator, argument, &builder);
+    let ts_type = TSType::new_ts_literal_type(Span::default(), literal, &builder);
     let TSType::TSLiteralType(_) = &ts_type else {
         panic!("builder must produce a TSLiteralType");
     };

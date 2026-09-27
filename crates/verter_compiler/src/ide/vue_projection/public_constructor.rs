@@ -64,6 +64,9 @@
 //! already types as a constructor (`defineComponent`); no generated
 //! constructor replaces it.
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArrayExpressionElement, ArrowFunctionExpression, AwaitExpression, BindingPattern,
@@ -627,41 +630,47 @@ impl VuePublicConstructorContract {
     }
 
     fn binder_list(&self, site: BinderSite) -> String {
-        if self.binder.is_empty() {
-            return String::new();
-        }
-        // Aliases cannot carry `const`; every function site keeps it.
-        let with_const = site != BinderSite::Alias;
-        let params: Vec<String> = self
-            .binder
-            .iter()
-            .map(|param| {
-                let mut text = String::new();
-                if with_const && param.is_const {
-                    text.push_str("const ");
-                }
-                text.push_str(&param.name);
-                if let Some(constraint) = &param.constraint {
-                    text.push_str(" extends ");
-                    text.push_str(constraint);
-                }
-                if let Some(default) = &param.default {
-                    text.push_str(" = ");
-                    text.push_str(default);
-                }
-                text
-            })
-            .collect();
-        // An arrow's trailing comma keeps `<T,>() =>` a type parameter list
-        // under the TSX grammar too.
-        let trailing = if site == BinderSite::Arrow { "," } else { "" };
-        format!("<{}{trailing}>", params.join(", "))
+        render_binder_list(&self.binder, site)
     }
+}
+
+/// The authored binder as a type parameter list for `site`: constraints and
+/// defaults verbatim, `const` kept at every function site, empty for an
+/// absent binder.
+pub(super) fn render_binder_list(binder: &[PublicBinderParam], site: BinderSite) -> String {
+    if binder.is_empty() {
+        return String::new();
+    }
+    // Aliases cannot carry `const`; every function site keeps it.
+    let with_const = site != BinderSite::Alias;
+    let params: Vec<String> = binder
+        .iter()
+        .map(|param| {
+            let mut text = String::new();
+            if with_const && param.is_const {
+                text.push_str("const ");
+            }
+            text.push_str(&param.name);
+            if let Some(constraint) = &param.constraint {
+                text.push_str(" extends ");
+                text.push_str(constraint);
+            }
+            if let Some(default) = &param.default {
+                text.push_str(" = ");
+                text.push_str(default);
+            }
+            text
+        })
+        .collect();
+    // An arrow's trailing comma keeps `<T,>() =>` a type parameter list
+    // under the TSX grammar too.
+    let trailing = if site == BinderSite::Arrow { "," } else { "" };
+    format!("<{}{trailing}>", params.join(", "))
 }
 
 /// Where a binder parameter list is rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BinderSite {
+pub(super) enum BinderSite {
     /// A type alias: no `const` modifiers.
     Alias,
     /// The construct signature or the expose provider.
@@ -697,6 +706,36 @@ fn quote(text: &str) -> String {
     out
 }
 
+/// Script-block parses performed by [`parse_block`] on this thread.
+#[cfg(test)]
+pub(crate) fn script_block_parses() -> u32 {
+    SCRIPT_BLOCK_PARSES.with(Cell::get)
+}
+
+/// Source reparses performed by [`super::props::ScriptPropFacts`] on this thread.
+#[cfg(test)]
+pub(crate) fn script_absorb_parses() -> u32 {
+    SCRIPT_ABSORB_PARSES.with(Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCRIPT_BLOCK_PARSES: Cell<u32> = const { Cell::new(0) };
+    pub(super) static SCRIPT_ABSORB_PARSES: Cell<u32> = const { Cell::new(0) };
+}
+
+/// The public constructor and the script programs it was read from. The
+/// programs borrow `allocator`; caller/setup facts walk them instead of
+/// parsing the same blocks again.
+pub(crate) struct ParsedPublicConstructor<'a> {
+    /// Owned constructor contract.
+    pub contract: VuePublicConstructorContract,
+    /// Parsed normal script, when one was supplied.
+    pub normal_program: Option<&'a Program<'a>>,
+    /// Parsed setup script, when one was supplied.
+    pub setup_program: Option<&'a Program<'a>>,
+}
+
 /// Derive the public constructor contract of one script pair. `generic` is
 /// the authored `generic` attribute value.
 ///
@@ -710,18 +749,27 @@ pub fn project_public_constructor(
     setup: Option<ScriptBlockInput<'_>>,
     generic: Option<&str>,
 ) -> Result<VuePublicConstructorContract, SetupProjectionRefusal> {
+    let allocator = Allocator::default();
+    project_public_constructor_in(&allocator, normal, setup, generic).map(|parsed| parsed.contract)
+}
+
+pub(crate) fn project_public_constructor_in<'a>(
+    allocator: &'a Allocator,
+    normal: Option<ScriptBlockInput<'_>>,
+    setup: Option<ScriptBlockInput<'_>>,
+    generic: Option<&str>,
+) -> Result<ParsedPublicConstructor<'a>, SetupProjectionRefusal> {
     if let (Some(n), Some(s)) = (&normal, &setup) {
         if n.lang != s.lang {
             return Err(SetupProjectionRefusal::ScriptLangConflict);
         }
     }
-    let allocator = Allocator::default();
-    let binder = project_binder(&allocator, generic)?;
+    let binder = project_binder(allocator, generic)?;
     let normal_program = normal
-        .map(|block| parse_block(&allocator, block, false))
+        .map(|block| parse_block(allocator, block, false))
         .transpose()?;
     let setup_program = setup
-        .map(|block| parse_block(&allocator, block, true))
+        .map(|block| parse_block(allocator, block, true))
         .transpose()?;
 
     let mut contract = VuePublicConstructorContract {
@@ -746,13 +794,28 @@ pub fn project_public_constructor(
         expose_argument: None,
     };
     let (Some(program), Some(block)) = (setup_program, setup) else {
-        return Ok(contract);
+        return Ok(ParsedPublicConstructor {
+            contract,
+            normal_program,
+            setup_program,
+        });
     };
     contract.source = ConstructorSource::ScriptSetup;
 
-    let semantic = SemanticBuilder::new().build(program).semantic;
+    let semantic = verter_parser::oxc_parse::with_program_stack(program, || {
+        SemanticBuilder::new().build(program)
+    })
+    .semantic;
     let normal_bindings = normal_program
-        .map(|program| value_bindings(SemanticBuilder::new().build(program).semantic.scoping()))
+        .map(|program| {
+            value_bindings(
+                verter_parser::oxc_parse::with_program_stack(program, || {
+                    SemanticBuilder::new().build(program)
+                })
+                .semantic
+                .scoping(),
+            )
+        })
         .unwrap_or_default();
     let module_bound: FxHashSet<&str> = normal_bindings.iter().map(String::as_str).collect();
     let vue_macro_imports = vue_runtime_macro_imports(program);
@@ -790,7 +853,7 @@ pub fn project_public_constructor(
         literal_consts: &literal_consts,
         used_consts: FxHashSet::default(),
     };
-    collector.visit_program(program);
+    verter_parser::oxc_parse::with_program_stack(program, || collector.visit_program(program));
     let requirement = collector.requirement;
     let top_level_await = collector.top_level_await;
     let mut used_consts: Vec<&(u32, String)> = collector
@@ -815,7 +878,11 @@ pub fn project_public_constructor(
     }
     contract.binder_dependent = dependent;
     contract.instance = instance_projection(&contract.expose, semantic.scoping());
-    Ok(contract)
+    Ok(ParsedPublicConstructor {
+        contract,
+        normal_program,
+        setup_program,
+    })
 }
 
 fn parse_block<'a>(
@@ -825,11 +892,25 @@ fn parse_block<'a>(
 ) -> Result<&'a Program<'a>, SetupProjectionRefusal> {
     let grammar = grammar_of(block.lang)?;
     let content = allocator.alloc_str(block.content);
+    #[cfg(test)]
+    SCRIPT_BLOCK_PARSES.with(|count| count.set(count.get() + 1));
     let parsed = Parser::new(allocator, content, grammar.source_type()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(SetupProjectionRefusal::SyntaxErrors { setup });
     }
     Ok(allocator.alloc(parsed.program))
+}
+
+/// The authored binder of a `generic` attribute value, parsed once under
+/// the same rules the public constructor renders from.
+///
+/// # Errors
+///
+/// Refuses a `generic` attribute that does not parse.
+pub(crate) fn public_binder(
+    generic: Option<&str>,
+) -> Result<Vec<PublicBinderParam>, SetupProjectionRefusal> {
+    project_binder(&Allocator::default(), generic)
 }
 
 fn project_binder(
@@ -880,17 +961,19 @@ fn provider_statements(program: &Program<'_>, content: &str) -> Vec<String> {
             | Statement::ExportAllDeclaration(_)
             | Statement::ExportDefaultDeclaration(_)
             | Statement::TSExportAssignment(_)
-            | Statement::TSNamespaceExportDeclaration(_) => None,
-            Statement::ExportNamedDeclaration(export) => export
-                .declaration
-                .as_ref()
+            | Statement::TSNamespaceExportDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_) => None,
+            Statement::ExportDeclaration(export) => Some(&export.declaration)
                 .filter(|declaration| !declaration.declare())
                 .map(|declaration| text(declaration.span())),
             other => match other.as_declaration() {
                 Some(declaration) if declaration.declare() => None,
-                Some(Declaration::TSModuleDeclaration(_) | Declaration::TSGlobalDeclaration(_)) => {
-                    None
-                }
+                Some(
+                    Declaration::TSExternalModuleDeclaration(_)
+                    | Declaration::TSNamespaceDeclaration(_)
+                    | Declaration::TSGlobalDeclaration(_),
+                ) => None,
                 _ => Some(text(other.span())),
             },
         })
@@ -911,7 +994,7 @@ impl<'a> LocalTypes<'a> {
         for program in self.programs.iter().flatten() {
             for statement in &program.body {
                 let declaration = match statement {
-                    Statement::ExportNamedDeclaration(export) => export.declaration.as_ref(),
+                    Statement::ExportDeclaration(export) => Some(&export.declaration),
                     other => other.as_declaration(),
                 };
                 let requirement = match declaration {
@@ -1342,7 +1425,9 @@ impl PublicCollector<'_, '_> {
             names: self.binder_names,
             found: false,
         };
-        refs.visit_ts_type(ty);
+        verter_parser::oxc_parse::with_span_stack(self.content, ty.span(), || {
+            refs.visit_ts_type(ty)
+        });
         refs.found
     }
 
@@ -1365,8 +1450,11 @@ impl PublicCollector<'_, '_> {
         contextual: Option<&str>,
     ) {
         let text = self.text(expression.span());
+        let content = self.content;
         self.hoist_scanned(name, text, surface, contextual, |refs| {
-            refs.visit_expression(expression);
+            verter_parser::oxc_parse::with_span_stack(content, expression.span(), || {
+                refs.visit_expression(expression)
+            });
         });
     }
 
@@ -1564,6 +1652,7 @@ impl PublicCollector<'_, '_> {
                     .iter()
                     .map(|property| self.text(property.span()))
                     .collect();
+                let content = self.content;
                 self.hoist_scanned(
                     format!("{MODEL_OPTIONS}{ordinal}"),
                     format!("{{ {} }}", members.join(", ")),
@@ -1571,7 +1660,11 @@ impl PublicCollector<'_, '_> {
                     Some("{ readonly required?: boolean; readonly [key: string]: unknown }"),
                     |refs| {
                         for property in deciding {
-                            refs.visit_object_property_kind(property);
+                            verter_parser::oxc_parse::with_span_stack(
+                                content,
+                                property.span(),
+                                || refs.visit_object_property_kind(property),
+                            );
                         }
                     },
                 );

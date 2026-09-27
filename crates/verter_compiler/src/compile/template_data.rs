@@ -367,30 +367,48 @@ pub fn extract_raw_template_data(
         bindings,
     };
 
-    // Track v-if chains: when we see v-if, start a new chain.
-    // v-else-if/v-else extend the current chain.
-    let mut current_if_chain: Option<RawIfChain> = None;
-
-    // Walk the root children
-    if let Some(ref content) = ast.root.content {
-        for &child_id in &content.children {
-            walk_node_for_extraction(
-                &ctx,
-                child_id,
-                0, // depth
-                None,
-                None, // parent_element_index
-                &mut data,
-                &mut max_depth,
-                &mut current_if_chain,
-            );
-        }
-    }
-
-    // Flush any pending if-chain
-    if let Some(chain) = current_if_chain.take() {
-        if chain.conditions.len() > 1 {
-            data.if_chains.push(chain);
+    // Walk the root children, and every element's children, from an
+    // explicit stack of sibling lists: elements nest without bound. Each
+    // list tracks its own v-if chain (v-if starts a chain, v-else-if /
+    // v-else extend it) and flushes it once its last sibling is walked.
+    let root_children = ast
+        .root
+        .content
+        .as_ref()
+        .map(|content| content.children.as_slice())
+        .unwrap_or(&[]);
+    let mut lists = vec![SiblingWalk {
+        children: root_children,
+        next: 0,
+        depth: 0,
+        parent_tag: None,
+        parent_element_index: None,
+        if_chain: None,
+    }];
+    while let Some(list) = lists.last_mut() {
+        let Some(&child_id) = list.children.get(list.next) else {
+            let list = lists.pop().expect("the list just read");
+            if let Some(chain) = list.if_chain {
+                if chain.conditions.len() > 1 {
+                    data.if_chains.push(chain);
+                }
+            }
+            continue;
+        };
+        list.next += 1;
+        let parent_tag = list.parent_tag.clone();
+        let (depth, parent_element_index) = (list.depth, list.parent_element_index);
+        if let Some(children) = walk_node_for_extraction(
+            &ctx,
+            child_id,
+            depth,
+            parent_tag.as_deref(),
+            parent_element_index,
+            &mut data,
+            &mut max_depth,
+            &mut list.if_chain,
+        ) {
+            lists.push(children);
         }
     }
 
@@ -398,9 +416,22 @@ pub fn extract_raw_template_data(
     data
 }
 
+/// One sibling list of the template walk: the children, the next one to
+/// walk, where they sit, and their v-if chain.
+struct SiblingWalk<'a> {
+    children: &'a [NodeId],
+    next: usize,
+    depth: u16,
+    parent_tag: Option<std::rc::Rc<str>>,
+    parent_element_index: Option<u32>,
+    if_chain: Option<RawIfChain>,
+}
+
+/// Extract one node's data; an element with children returns their
+/// sibling list, which [`extract_raw_template_data`] walks next.
 #[allow(clippy::too_many_arguments)]
-fn walk_node_for_extraction(
-    ctx: &ExtractCtx<'_>,
+fn walk_node_for_extraction<'a>(
+    ctx: &ExtractCtx<'a>,
     node_id: NodeId,
     depth: u16,
     parent_tag: Option<&str>,
@@ -408,7 +439,7 @@ fn walk_node_for_extraction(
     data: &mut RawTemplateData,
     max_depth: &mut u16,
     current_if_chain: &mut Option<RawIfChain>,
-) {
+) -> Option<SiblingWalk<'a>> {
     let node = &ctx.ast.nodes[node_id.0];
     let oxc_data = &ctx.oxc_ast.data[node_id.0];
 
@@ -488,33 +519,21 @@ fn walk_node_for_extraction(
 
             extract_binding_occurrences(oxc_data, ctx.bindings, ctx.source, data);
 
-            // Recurse into children
-            if let Some(ref content) = el.content {
-                let mut child_if_chain: Option<RawIfChain> = None;
-                for &child_id in &content.children {
-                    walk_node_for_extraction(
-                        ctx,
-                        child_id,
-                        current_depth,
-                        Some(&tag_name),
-                        Some(this_element_index),
-                        data,
-                        max_depth,
-                        &mut child_if_chain,
-                    );
-                }
-                if let Some(chain) = child_if_chain.take() {
-                    if chain.conditions.len() > 1 {
-                        data.if_chains.push(chain);
-                    }
-                }
-            }
+            // The children walk next, with a v-if chain of their own.
+            return el.content.as_ref().map(|content| SiblingWalk {
+                children: content.children.as_slice(),
+                next: 0,
+                depth: current_depth,
+                parent_tag: Some(std::rc::Rc::from(tag_name.as_str())),
+                parent_element_index: Some(this_element_index),
+                if_chain: None,
+            });
         }
         AstNodeKind::Interpolation(_interp) => {
             flush_if_chain(current_if_chain, data);
 
             if let OxcNodeData::Interpolation(ref oxc_expr) = oxc_data {
-                note_expression_completeness(oxc_expr, data);
+                note_expression_completeness(oxc_expr, ctx.source, data);
                 if let Some(ref result) = oxc_expr.bindings {
                     for binding in &result.bindings {
                         if !binding.ignore {
@@ -544,6 +563,7 @@ fn walk_node_for_extraction(
             flush_if_chain(current_if_chain, data);
         }
     }
+    None
 }
 
 /// Check whether an element has at least one text child with non-whitespace content.
@@ -1581,6 +1601,7 @@ pub struct RawMemberRead {
 /// Also harvests static member reads for the unused-declaration population.
 fn note_expression_completeness(
     exp: &crate::template::oxc::types::OxcParsedExpression<'_>,
+    source: &str,
     data: &mut RawTemplateData,
 ) {
     if exp.errors.is_some() || exp.bindings.as_ref().is_some_and(|b| b.has_errors) {
@@ -1592,7 +1613,12 @@ fn note_expression_completeness(
             out: &mut data.member_reads,
         };
         use oxc_ast_visit::Visit;
-        collector.visit_expression(expression);
+        // The expression's spans are relative to its slice at `exp.offset`.
+        let span = oxc_span::GetSpan::span(expression);
+        let in_source = oxc_span::Span::new(exp.offset + span.start, exp.offset + span.end);
+        verter_parser::oxc_parse::with_span_stack(source, in_source, || {
+            collector.visit_expression(expression)
+        });
     }
 }
 
@@ -1658,7 +1684,7 @@ fn extract_binding_occurrences(
             .into_iter()
             .flatten()
         {
-            note_expression_completeness(exp, data);
+            note_expression_completeness(exp, source, data);
             if let Some(ref result) = exp.bindings {
                 for b in &result.bindings {
                     if !b.ignore {
@@ -1676,7 +1702,7 @@ fn extract_binding_occurrences(
 
     // Extract from v-if condition
     if let Some(ref cond) = oxc_el.condition {
-        note_expression_completeness(cond, data);
+        note_expression_completeness(cond, source, data);
         if let Some(ref result) = cond.bindings {
             for b in &result.bindings {
                 if !b.ignore {
@@ -1705,7 +1731,11 @@ fn extract_binding_occurrences(
                 out: &mut data.member_reads,
             };
             use oxc_ast_visit::Visit;
-            collector.visit_expression(right);
+            verter_parser::oxc_parse::with_span_stack(
+                source,
+                oxc_span::GetSpan::span(right),
+                || collector.visit_expression(right),
+            );
         }
         for reference in &vfor.parsed.references {
             let name = reference.slice(source);
@@ -1724,7 +1754,7 @@ fn extract_binding_occurrences(
     // Extract from a dynamic v-slot name (`#[expr]` computes in the outer scope).
     if let Some(ref v_slot) = oxc_el.v_slot {
         if let Some(ref dynamic_name) = v_slot.dynamic_name {
-            note_expression_completeness(dynamic_name, data);
+            note_expression_completeness(dynamic_name, source, data);
             if let Some(ref result) = dynamic_name.bindings {
                 for b in &result.bindings {
                     if !b.ignore {

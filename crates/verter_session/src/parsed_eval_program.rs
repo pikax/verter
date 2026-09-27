@@ -78,8 +78,8 @@ impl ParsedEvalProgram {
                     ..oxc_parser::ParseOptions::default()
                 })
                 .parse();
-                panicked = result.panicked;
-                had_errors = !result.errors.is_empty();
+                panicked = result.fatal_error;
+                had_errors = !result.diagnostics.is_empty();
                 // The retained arena is the dominant per-file live footprint;
                 // `used_bytes()` walks the chunk list, which is why the amount
                 // must never be evaluated when attribution is off.

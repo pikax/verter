@@ -989,7 +989,7 @@ fn build_svelte_snapshot_from_eval_source(
                 ..ParseOptions::default()
             });
             let result = parser.parse();
-            if result.panicked {
+            if result.fatal_error {
                 fatal_snapshot(None)
             } else {
                 match top_level_owner_table(&result.program, Some(artifact)) {
@@ -999,7 +999,7 @@ fn build_svelte_snapshot_from_eval_source(
                         source_type,
                         &result.program,
                         &owners,
-                        !result.errors.is_empty(),
+                        !result.diagnostics.is_empty(),
                     ),
                     Err(error) => fatal_snapshot(Some(&error)),
                 }
@@ -2301,7 +2301,7 @@ fn build_vue_script_outputs(
     let Some(parse_result) = parse_result else {
         return outputs;
     };
-    if parse_result.panicked {
+    if parse_result.fatal_error {
         return outputs;
     }
 
@@ -2312,7 +2312,7 @@ fn build_vue_script_outputs(
         parsed,
         needs_exports,
         needs_script_analysis,
-        !parse_result.errors.is_empty(),
+        !parse_result.diagnostics.is_empty(),
     );
     // Keep production diagnostic order: parse first, then the walks.
     let mut panic_diags = outputs.panic_diags;
@@ -2614,7 +2614,7 @@ pub(crate) fn parse_non_sfc_snapshot(
         ..ParseOptions::default()
     });
     let result = parser.parse();
-    if result.panicked {
+    if result.fatal_error {
         return ParseSnapshot {
             whole_hash: hash_16(source.as_bytes()),
             semantic_hash: hash_16(source.as_bytes()),
@@ -2638,7 +2638,7 @@ pub(crate) fn parse_non_sfc_snapshot(
         source,
         source_type,
         &result.program,
-        !result.errors.is_empty(),
+        !result.diagnostics.is_empty(),
     )
 }
 
@@ -2668,7 +2668,7 @@ mod tests {
         let source = "const moduleValue = 0;\nconst instanceZero = 0;\nconst frontmatter = 0;\nconst instanceOne = 1;";
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-        assert!(!parsed.panicked);
+        assert!(!parsed.fatal_error);
         let table = top_level_owner_table_from_region_spans(
             &parsed.program,
             &[
@@ -2701,7 +2701,7 @@ mod tests {
         let source = "const owned = 0;\nconst escaped = 1;";
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-        assert!(!parsed.panicked);
+        assert!(!parsed.fatal_error);
 
         assert!(matches!(
             top_level_owner_table_from_region_spans(
@@ -2723,7 +2723,7 @@ mod tests {
         let source = "const value = 0;";
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-        assert!(!parsed.panicked);
+        assert!(!parsed.fatal_error);
 
         assert!(matches!(
             top_level_owner_table_from_region_spans(

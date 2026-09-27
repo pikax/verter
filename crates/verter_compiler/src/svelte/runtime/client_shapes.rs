@@ -199,17 +199,17 @@ fn arrow_body_is_state_writes(
     bindings: &BindingTable,
     scopes: &ScopeGraph,
 ) -> bool {
-    // An expression-bodied arrow lowers its single expression into the function
-    // body as a return/expression statement; OXC models it as a one-statement body
-    // flagged `expression`. (A concise-body `$inspect.trace()` is an EXPRESSION
+    // An expression-bodied arrow's body is its single expression. (A concise-body `$inspect.trace()` is an EXPRESSION
     // position — an official ERROR, not the elidable statement form — so it is
     // NOT skipped here; it fails the state-write check and refuses downstream.)
-    if arrow.r#expression {
-        let [Statement::ExpressionStatement(stmt)] = arrow.body.statements.as_slice() else {
-            return false;
-        };
-        return expr_is_state_write(&stmt.expression, scope, bindings, scopes);
-    }
+    let body = match &arrow.body {
+        oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) => body,
+        body => {
+            return body.as_expression().is_some_and(|expression| {
+                expr_is_state_write(expression, scope, bindings, scopes)
+            });
+        }
+    };
     // A block-bodied arrow: every statement is a `$state` assignment / update
     // expression statement or a well-formed effect-family call statement (the
     // shared statement predicate — statement-only rule preserved for plain/pre,
@@ -217,7 +217,7 @@ fn arrow_body_is_state_writes(
     // `$inspect.trace(...)` statements skipped; at least one real admitted
     // statement must remain.
     let mut admitted = 0usize;
-    for stmt in &arrow.body.statements {
+    for stmt in &body.statements {
         let Statement::ExpressionStatement(es) = stmt else {
             return false;
         };
@@ -1191,10 +1191,10 @@ pub(super) fn collect_export_let_prop_locals(instance_source: Option<&str>) -> V
         return locals;
     };
     for stmt in &program.body {
-        let Statement::ExportNamedDeclaration(export) = stmt else {
+        let Statement::ExportDeclaration(export) = stmt else {
             continue;
         };
-        let Some(oxc_ast::ast::Declaration::VariableDeclaration(decl)) = &export.declaration else {
+        let oxc_ast::ast::Declaration::VariableDeclaration(decl) = &export.declaration else {
             continue;
         };
         if decl.kind != oxc_ast::ast::VariableDeclarationKind::Let {

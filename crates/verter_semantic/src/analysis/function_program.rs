@@ -110,7 +110,137 @@ pub struct FunctionBodyLocator {
     /// The contributing top-level statement.
     pub contributor: DeclContributorAnchor,
     /// Ordinal descent from the contributing statement to the function node.
-    pub descent: Arc<[FunctionDescentStep]>,
+    pub descent: FunctionDescent,
+}
+
+/// The ordinal descent of a [`FunctionBodyLocator`], from the contributing
+/// statement to the function node. A descent shares every prefix with the
+/// descents of the functions enclosing it, so a function nested `n` deep
+/// adds one step to its parent's descent rather than copying `n`, and
+/// every locator of a nest costs its own step only.
+#[derive(Clone, Default)]
+pub struct FunctionDescent(Option<Arc<DescentLink>>);
+
+/// One step of a [`FunctionDescent`] and the descent it extends.
+struct DescentLink {
+    step: FunctionDescentStep,
+    len: usize,
+    parent: FunctionDescent,
+}
+
+impl FunctionDescent {
+    /// The empty descent: the contributing statement itself.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(None)
+    }
+
+    /// This descent extended by `step`, sharing this one.
+    #[must_use]
+    pub fn then(&self, step: FunctionDescentStep) -> Self {
+        Self(Some(Arc::new(DescentLink {
+            step,
+            len: self.len() + 1,
+            parent: self.clone(),
+        })))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |link| link.len)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// The step that lands on the function node.
+    pub fn last(&self) -> Option<&FunctionDescentStep> {
+        self.0.as_ref().map(|link| &link.step)
+    }
+
+    /// Whether this descent is `parent` extended by one step, sharing it.
+    #[cfg(test)]
+    fn extends(&self, parent: &FunctionDescent) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|link| match (&link.parent.0, &parent.0) {
+                (Some(shared), Some(parent)) => Arc::ptr_eq(shared, parent),
+                (None, None) => true,
+                _ => false,
+            })
+    }
+
+    /// The steps, from the last to the first.
+    fn links(&self) -> impl Iterator<Item = &DescentLink> {
+        std::iter::successors(self.0.as_deref(), |link| link.parent.0.as_deref())
+    }
+
+    /// The steps, from the contributing statement down.
+    pub fn to_vec(&self) -> Vec<FunctionDescentStep> {
+        let mut steps: Vec<FunctionDescentStep> = self.links().map(|link| link.step).collect();
+        steps.reverse();
+        steps
+    }
+}
+
+impl From<&[FunctionDescentStep]> for FunctionDescent {
+    fn from(steps: &[FunctionDescentStep]) -> Self {
+        steps
+            .iter()
+            .fold(Self::new(), |descent, step| descent.then(*step))
+    }
+}
+
+impl PartialEq for FunctionDescent {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        let (mut left, mut right) = (self.0.as_ref(), other.0.as_ref());
+        while let (Some(l), Some(r)) = (left, right) {
+            // A shared link shares the rest of the descent.
+            if Arc::ptr_eq(l, r) {
+                return true;
+            }
+            if l.step != r.step {
+                return false;
+            }
+            (left, right) = (l.parent.0.as_ref(), r.parent.0.as_ref());
+        }
+        true
+    }
+}
+
+impl Eq for FunctionDescent {}
+
+impl std::hash::Hash for FunctionDescent {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for link in self.links() {
+            link.step.hash(state);
+        }
+    }
+}
+
+impl std::fmt::Debug for FunctionDescent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.to_vec()).finish()
+    }
+}
+
+/// A descent is as long as the nest it addresses, and the derived drop
+/// would release it a native level per step: the links this descent solely
+/// owns are released from this loop.
+impl Drop for FunctionDescent {
+    fn drop(&mut self) {
+        let mut next = self.0.take();
+        while let Some(link) = next {
+            next = match Arc::try_unwrap(link) {
+                Ok(mut link) => link.parent.0.take(),
+                Err(_) => None,
+            };
+        }
+    }
 }
 
 /// The full program identity of one served function position.
@@ -877,7 +1007,7 @@ impl<'a> Visit<'a> for ClassSyntaxCollector {
         self.classes.push(ClassSyntaxRecord {
             span: class.span.into(),
             expression: class.r#type == oxc_ast::ast::ClassType::ClassExpression,
-            has_heritage: class.super_class.is_some(),
+            has_heritage: class.heritage.is_some(),
             members: Arc::from(members.into_boxed_slice()),
         });
         walk::walk_class(self, class);
@@ -1033,6 +1163,9 @@ impl FunctionProgramIndex {
 struct DiscoveryCtx<'source, 'ast> {
     canonical_id: Arc<str>,
     source: &'source str,
+    /// The containment every walk of oxc's over a node of the program runs
+    /// under, scanning the program at most once for all of them.
+    walks: verter_parser::oxc_parse::ProgramWalkStack<'ast>,
     owners: &'source TopLevelOwnerTable,
     nodes: Option<FunctionProgramNodes<'ast>>,
     enclosing_type_parameters: Option<&'ast oxc_ast::ast::TSTypeParameterDeclaration<'ast>>,
@@ -1134,6 +1267,7 @@ fn build_function_program_index_impl<'ast>(
     let mut ctx = DiscoveryCtx {
         canonical_id,
         source,
+        walks: verter_parser::oxc_parse::ProgramWalkStack::new(program),
         owners,
         nodes,
         enclosing_type_parameters: None,
@@ -1154,7 +1288,8 @@ fn build_function_program_index_impl<'ast>(
         );
     }
     let mut classes = ClassSyntaxCollector::default();
-    classes.visit_program(program);
+    ctx.walks
+        .with_node_stack(program.span, || classes.visit_program(program));
     resolve_captures(&mut ctx.entries);
     resolve_nested_capture_reads(&mut ctx.entries);
     resolve_call_site_targets(&mut ctx.entries);
@@ -1624,6 +1759,21 @@ pub fn for_each_call_expression<'a>(
     for_each_call_expression_root(CallExpressionWalkRoot::Statements(statements), fire);
 }
 
+/// Walk every call expression inside one function body in source order: a
+/// block body's statements, or an expression body's expression (the one
+/// expression statement it was).
+pub fn for_each_call_expression_in_body<'a>(
+    body: FunctionBodyRef<'a>,
+    fire: impl FnMut(&'a CallExpression<'a>),
+) {
+    match body {
+        FunctionBodyRef::Block(body) => for_each_call_expression(&body.statements, fire),
+        FunctionBodyRef::Expression(expression) => {
+            for_each_call_expression_in_expression(expression, fire);
+        }
+    }
+}
+
 /// Walk every call expression inside one expression in the same source
 /// order and with the same nested-frame boundary as
 /// [`for_each_call_expression`].
@@ -1723,10 +1873,8 @@ fn for_each_call_expression_root<'a>(
                     }
                 }
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(oxc_ast::ast::Declaration::VariableDeclaration(decl)) =
-                    export.declaration.as_ref()
-                {
+            Statement::ExportDeclaration(export) => {
+                if let oxc_ast::ast::Declaration::VariableDeclaration(decl) = &export.declaration {
                     for declarator in &decl.declarations {
                         if let Some(init) = &declarator.init {
                             walk_expr(init, fire);
@@ -2211,41 +2359,40 @@ fn discover_statement<'ast>(
         Statement::ClassDeclaration(class) => {
             discover_class(class, contributor_index, namespace_prefix, ctx);
         }
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(decl) = export.declaration.as_ref() {
-                match decl {
-                    oxc_ast::ast::Declaration::FunctionDeclaration(func) => {
-                        discover_function_declaration(
-                            func,
-                            contributor_index,
-                            namespace_prefix,
-                            overload_tracker,
-                            ctx,
-                        );
-                    }
-                    oxc_ast::ast::Declaration::VariableDeclaration(var_decl) => {
-                        discover_variable_declaration(
-                            var_decl,
-                            contributor_index,
-                            namespace_prefix,
-                            ctx,
-                        );
-                    }
-                    oxc_ast::ast::Declaration::ClassDeclaration(class) => {
-                        discover_class(class, contributor_index, namespace_prefix, ctx);
-                    }
-                    oxc_ast::ast::Declaration::TSModuleDeclaration(module) => {
-                        discover_namespace_block(
-                            module,
-                            contributor_index,
-                            &[],
-                            namespace_prefix,
-                            overload_tracker,
-                            ctx,
-                        );
-                    }
-                    _ => {}
+        Statement::ExportDeclaration(export) => {
+            let decl = &export.declaration;
+            match decl {
+                oxc_ast::ast::Declaration::FunctionDeclaration(func) => {
+                    discover_function_declaration(
+                        func,
+                        contributor_index,
+                        namespace_prefix,
+                        overload_tracker,
+                        ctx,
+                    );
                 }
+                oxc_ast::ast::Declaration::VariableDeclaration(var_decl) => {
+                    discover_variable_declaration(
+                        var_decl,
+                        contributor_index,
+                        namespace_prefix,
+                        ctx,
+                    );
+                }
+                oxc_ast::ast::Declaration::ClassDeclaration(class) => {
+                    discover_class(class, contributor_index, namespace_prefix, ctx);
+                }
+                oxc_ast::ast::Declaration::TSNamespaceDeclaration(module) => {
+                    discover_namespace_block(
+                        module,
+                        contributor_index,
+                        &FunctionDescent::new(),
+                        namespace_prefix,
+                        overload_tracker,
+                        ctx,
+                    );
+                }
+                _ => {}
             }
         }
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
@@ -2287,9 +2434,11 @@ fn discover_statement<'ast>(
                     let member_path: Arc<[u32]> = Arc::from(
                         vec![u32::try_from(member_ordinal).unwrap_or(u32::MAX)].into_boxed_slice(),
                     );
-                    let descent = vec![FunctionDescentStep::ExportDefaultObjectMember {
-                        member_ordinal: u32::try_from(member_ordinal).unwrap_or(u32::MAX),
-                    }];
+                    let descent = FunctionDescent::new().then(
+                        FunctionDescentStep::ExportDefaultObjectMember {
+                            member_ordinal: u32::try_from(member_ordinal).unwrap_or(u32::MAX),
+                        },
+                    );
                     match &p.value {
                         Expression::FunctionExpression(func) => {
                             discover_function_inner(
@@ -2317,11 +2466,11 @@ fn discover_statement<'ast>(
                 }
             }
         },
-        Statement::TSModuleDeclaration(module) => {
+        Statement::TSNamespaceDeclaration(module) => {
             discover_namespace_block(
                 module,
                 contributor_index,
-                &[],
+                &FunctionDescent::new(),
                 namespace_prefix,
                 overload_tracker,
                 ctx,
@@ -2339,25 +2488,21 @@ fn discover_statement<'ast>(
 /// "specifier" { .. }` is an ambient augmentation, not a file-scope function
 /// owner — never indexed here.
 fn discover_namespace_block<'ast>(
-    module: &'ast oxc_ast::ast::TSModuleDeclaration<'ast>,
+    module: &'ast oxc_ast::ast::TSNamespaceDeclaration<'ast>,
     contributor_index: usize,
-    descent: &[FunctionDescentStep],
+    descent: &FunctionDescent,
     namespace_prefix: Option<&str>,
     overload_tracker: &mut OverloadTracker,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
-    let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &module.id else {
-        return;
-    };
+    let id = &module.id;
     let prefix = match namespace_prefix {
         Some(prefix) => format!("{prefix}.{}", id.name),
         None => id.name.to_string(),
     };
-    if let Some(oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block)) = module.body.as_ref()
-    {
+    if let oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) = &module.body {
         for (statement_ordinal, inner) in block.body.iter().enumerate() {
-            let mut inner_descent = descent.to_vec();
-            inner_descent.push(namespace_member_step(statement_ordinal));
+            let inner_descent = descent.then(namespace_member_step(statement_ordinal));
             discover_namespaced_statement(
                 inner,
                 contributor_index,
@@ -2387,49 +2532,48 @@ fn namespace_member_step(statement_ordinal: usize) -> FunctionDescentStep {
 fn discover_namespaced_statement<'ast>(
     stmt: &'ast Statement<'ast>,
     contributor_index: usize,
-    descent: &[FunctionDescentStep],
+    descent: &FunctionDescent,
     namespace: &str,
     overload_tracker: &mut OverloadTracker,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
     match stmt {
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(decl) = export.declaration.as_ref() {
-                match decl {
-                    oxc_ast::ast::Declaration::FunctionDeclaration(func) => {
-                        discover_namespaced_function(
-                            func,
-                            contributor_index,
-                            descent,
-                            namespace,
-                            overload_tracker,
-                            ctx,
-                        );
-                    }
-                    oxc_ast::ast::Declaration::VariableDeclaration(var_decl) => {
-                        discover_variable_declaration_ns(
-                            var_decl,
-                            contributor_index,
-                            descent,
-                            namespace,
-                            ctx,
-                        );
-                    }
-                    oxc_ast::ast::Declaration::ClassDeclaration(class) => {
-                        discover_class_ns(class, contributor_index, descent, namespace, ctx);
-                    }
-                    oxc_ast::ast::Declaration::TSModuleDeclaration(module) => {
-                        discover_namespace_block(
-                            module,
-                            contributor_index,
-                            descent,
-                            Some(namespace),
-                            overload_tracker,
-                            ctx,
-                        );
-                    }
-                    _ => {}
+        Statement::ExportDeclaration(export) => {
+            let decl = &export.declaration;
+            match decl {
+                oxc_ast::ast::Declaration::FunctionDeclaration(func) => {
+                    discover_namespaced_function(
+                        func,
+                        contributor_index,
+                        descent,
+                        namespace,
+                        overload_tracker,
+                        ctx,
+                    );
                 }
+                oxc_ast::ast::Declaration::VariableDeclaration(var_decl) => {
+                    discover_variable_declaration_ns(
+                        var_decl,
+                        contributor_index,
+                        descent,
+                        namespace,
+                        ctx,
+                    );
+                }
+                oxc_ast::ast::Declaration::ClassDeclaration(class) => {
+                    discover_class_ns(class, contributor_index, descent, namespace, ctx);
+                }
+                oxc_ast::ast::Declaration::TSNamespaceDeclaration(module) => {
+                    discover_namespace_block(
+                        module,
+                        contributor_index,
+                        descent,
+                        Some(namespace),
+                        overload_tracker,
+                        ctx,
+                    );
+                }
+                _ => {}
             }
         }
         Statement::FunctionDeclaration(func) => {
@@ -2448,7 +2592,7 @@ fn discover_namespaced_statement<'ast>(
         Statement::ClassDeclaration(class) => {
             discover_class_ns(class, contributor_index, descent, namespace, ctx);
         }
-        Statement::TSModuleDeclaration(module) => {
+        Statement::TSNamespaceDeclaration(module) => {
             discover_namespace_block(
                 module,
                 contributor_index,
@@ -2465,7 +2609,7 @@ fn discover_namespaced_statement<'ast>(
 fn discover_namespaced_function<'ast>(
     func: &'ast Function<'ast>,
     contributor_index: usize,
-    descent: &[FunctionDescentStep],
+    descent: &FunctionDescent,
     namespace: &str,
     overload_tracker: &mut OverloadTracker,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
@@ -2473,8 +2617,7 @@ fn discover_namespaced_function<'ast>(
     if let Some(id) = func.id.as_ref() {
         let qualified = format!("{namespace}.{}", id.name);
         let overload_ordinal = overload_tracker.next_function_ordinal(&qualified);
-        let mut full_descent = descent.to_vec();
-        full_descent.push(FunctionDescentStep::FunctionDeclaration);
+        let full_descent = descent.then(FunctionDescentStep::FunctionDeclaration);
         discover_function_inner(
             func,
             &qualified,
@@ -2531,7 +2674,7 @@ fn discover_function_declaration_named<'ast>(
         &name,
         FunctionPartIdentity::DeclarationBody,
         contributor_index,
-        vec![FunctionDescentStep::FunctionDeclaration],
+        FunctionDescent::new().then(FunctionDescentStep::FunctionDeclaration),
         overload_ordinal,
         ctx,
     );
@@ -2555,7 +2698,8 @@ fn discover_variable_declaration<'ast>(
             continue;
         };
         let declarator_ordinal = u32::try_from(declarator_ordinal).unwrap_or(u32::MAX);
-        let base_descent = vec![FunctionDescentStep::VariableInitializer { declarator_ordinal }];
+        let base_descent = FunctionDescent::new()
+            .then(FunctionDescentStep::VariableInitializer { declarator_ordinal });
         if let Some(anchor) = ctx.anchor(contributor_index) {
             ctx.expressions.push(ProgramExpressionRecord {
                 point: ProgramExpressionIdentity {
@@ -2565,18 +2709,13 @@ fn discover_variable_declaration<'ast>(
                 span: init.span().into(),
                 locator: FunctionBodyLocator {
                     contributor: anchor,
-                    descent: Arc::from(base_descent.clone().into_boxed_slice()),
+                    descent: base_descent.clone(),
                 },
-                source: program_expression_source(init),
+                source: program_expression_source(&ctx.walks, init),
             });
             discover_top_level_call_arg_positions(init, &name, anchor, &base_descent, ctx);
         }
-        let descent = |extra: FunctionDescentStep| {
-            vec![
-                FunctionDescentStep::VariableInitializer { declarator_ordinal },
-                extra,
-            ]
-        };
+        let descent = |extra: FunctionDescentStep| base_descent.then(extra);
         match init {
             Expression::ArrowFunctionExpression(arrow) => {
                 discover_arrow_inner(
@@ -2737,7 +2876,10 @@ fn new_site_record(call: &oxc_ast::ast::NewExpression<'_>) -> FunctionCallSiteRe
     }
 }
 
-fn program_expression_source(expression: &Expression<'_>) -> ProgramExpressionSource {
+fn program_expression_source(
+    walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
+    expression: &Expression<'_>,
+) -> ProgramExpressionSource {
     match unwrap_program_expression(expression) {
         Expression::CallExpression(call) => ProgramExpressionSource::SemanticCall {
             kind: ProgramExpressionCallKind::Call,
@@ -2747,12 +2889,17 @@ fn program_expression_source(expression: &Expression<'_>) -> ProgramExpressionSo
             kind: ProgramExpressionCallKind::Construct,
             site: new_site_record(call),
         },
-        expression if expression_has_call(expression) => ProgramExpressionSource::UnsupportedCall,
+        expression if expression_has_call(walks, expression) => {
+            ProgramExpressionSource::UnsupportedCall
+        }
         _ => ProgramExpressionSource::Value,
     }
 }
 
-fn expression_has_call(expression: &Expression<'_>) -> bool {
+fn expression_has_call(
+    walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
+    expression: &Expression<'_>,
+) -> bool {
     #[derive(Default)]
     struct Probe(bool);
     impl<'a> Visit<'a> for Probe {
@@ -2769,7 +2916,7 @@ fn expression_has_call(expression: &Expression<'_>) -> bool {
         fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {}
     }
     let mut probe = Probe::default();
-    probe.visit_expression(expression);
+    walks.with_node_stack(expression.span(), || probe.visit_expression(expression));
     probe.0
 }
 
@@ -2777,7 +2924,7 @@ fn discover_top_level_call_arg_positions<'ast>(
     expression: &'ast Expression<'ast>,
     declaration_name: &str,
     contributor: DeclContributorAnchor,
-    base_descent: &[FunctionDescentStep],
+    base_descent: &FunctionDescent,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
     let mut call_ordinal = 0usize;
@@ -2795,8 +2942,7 @@ fn discover_top_level_call_arg_positions<'ast>(
             };
             let ordinal = ctx.next_nested_ordinal;
             ctx.next_nested_ordinal += 1;
-            let mut descent = base_descent.to_vec();
-            descent.push(FunctionDescentStep::CallArgument {
+            let descent = base_descent.then(FunctionDescentStep::CallArgument {
                 call_ordinal: u32::try_from(current_call_ordinal).unwrap_or(u32::MAX),
                 arg_ordinal: u32::try_from(arg_ordinal).unwrap_or(u32::MAX),
             });
@@ -2818,18 +2964,24 @@ fn discover_top_level_callable<'ast>(
     span: verter_span::Span,
     declaration_name: &str,
     contributor: DeclContributorAnchor,
-    descent: Vec<FunctionDescentStep>,
+    descent: FunctionDescent,
     ordinal: u32,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
-    let (params, statements) = match &node {
+    let (params, body) = match &node {
         FunctionNode::Function(function) => {
             let Some(body) = function.body.as_ref() else {
                 return;
             };
-            (formal_params(&function.params), &body.statements[..])
+            (
+                formal_params(&function.params),
+                FunctionBodyRef::Block(body),
+            )
         }
-        FunctionNode::Arrow(arrow) => (formal_params(&arrow.params), &arrow.body.statements[..]),
+        FunctionNode::Arrow(arrow) => (
+            formal_params(&arrow.params),
+            FunctionBodyRef::of_arrow(arrow),
+        ),
     };
     let key = FunctionProgramKey {
         declaration: FunctionDeclarationRef {
@@ -2842,24 +2994,17 @@ fn discover_top_level_callable<'ast>(
     };
     let locator = FunctionBodyLocator {
         contributor,
-        descent: Arc::from(descent.into_boxed_slice()),
+        descent,
     };
-    let entry = ctx.build_entry(
-        key.clone(),
-        locator.clone(),
-        params,
-        statements,
-        span.start,
-        node,
-    );
+    let entry = ctx.build_entry(key.clone(), locator.clone(), params, body, span.start, node);
     ctx.push(entry, node);
-    discover_nested_positions(statements, &key, &locator, ctx);
+    discover_nested_positions(body, &key, &locator, ctx);
 }
 
 fn discover_variable_declaration_ns<'ast>(
     var_decl: &'ast VariableDeclaration<'ast>,
     contributor_index: usize,
-    descent: &[FunctionDescentStep],
+    descent: &FunctionDescent,
     namespace: &str,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
@@ -2872,8 +3017,7 @@ fn discover_variable_declaration_ns<'ast>(
             continue;
         };
         let declarator_ordinal = u32::try_from(declarator_ordinal).unwrap_or(u32::MAX);
-        let mut base = descent.to_vec();
-        base.push(FunctionDescentStep::VariableInitializer { declarator_ordinal });
+        let base = descent.then(FunctionDescentStep::VariableInitializer { declarator_ordinal });
         if let Some(anchor) = ctx.anchor(contributor_index) {
             ctx.expressions.push(ProgramExpressionRecord {
                 point: ProgramExpressionIdentity {
@@ -2883,9 +3027,9 @@ fn discover_variable_declaration_ns<'ast>(
                 span: init.span().into(),
                 locator: FunctionBodyLocator {
                     contributor: anchor,
-                    descent: Arc::from(base.clone().into_boxed_slice()),
+                    descent: base.clone(),
                 },
-                source: program_expression_source(init),
+                source: program_expression_source(&ctx.walks, init),
             });
             discover_top_level_call_arg_positions(init, &name, anchor, &base, ctx);
         }
@@ -2929,8 +3073,8 @@ fn discover_class<'ast>(
         Some(prefix) => format!("{prefix}.{}", id.name),
         None => id.name.to_string(),
     };
-    discover_class_heritage_expression(class, contributor_index, &[], ctx);
-    discover_class_members(class, &name, contributor_index, Vec::new(), ctx);
+    discover_class_heritage_expression(class, contributor_index, &FunctionDescent::new(), ctx);
+    discover_class_members(class, &name, contributor_index, FunctionDescent::new(), ctx);
 }
 
 /// Index a class declaration's `extends` EXPRESSION — one the declaration
@@ -2941,10 +3085,10 @@ fn discover_class<'ast>(
 fn discover_class_heritage_expression<'ast>(
     class: &'ast Class<'ast>,
     contributor_index: usize,
-    descent: &[FunctionDescentStep],
+    descent: &FunctionDescent,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
-    let Some(heritage) = class.super_class.as_ref() else {
+    let Some(heritage) = class.heritage.as_ref().map(|heritage| &heritage.expression) else {
         return;
     };
     if crate::analysis::type_eval_build::heritage_expression_name(heritage).is_some() {
@@ -2953,8 +3097,7 @@ fn discover_class_heritage_expression<'ast>(
     let Some(anchor) = ctx.anchor(contributor_index) else {
         return;
     };
-    let mut descent = descent.to_vec();
-    descent.push(FunctionDescentStep::ClassHeritage);
+    let descent = descent.then(FunctionDescentStep::ClassHeritage);
     ctx.expressions.push(ProgramExpressionRecord {
         point: ProgramExpressionIdentity {
             canonical_id: Arc::clone(&ctx.canonical_id),
@@ -2963,16 +3106,16 @@ fn discover_class_heritage_expression<'ast>(
         span: heritage.span().into(),
         locator: FunctionBodyLocator {
             contributor: anchor,
-            descent: Arc::from(descent.into_boxed_slice()),
+            descent,
         },
-        source: program_expression_source(heritage),
+        source: program_expression_source(&ctx.walks, heritage),
     });
 }
 
 fn discover_class_ns<'ast>(
     class: &'ast Class<'ast>,
     contributor_index: usize,
-    descent: &[FunctionDescentStep],
+    descent: &FunctionDescent,
     namespace: &str,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
@@ -2981,14 +3124,14 @@ fn discover_class_ns<'ast>(
     };
     let name = format!("{namespace}.{}", id.name);
     discover_class_heritage_expression(class, contributor_index, descent, ctx);
-    discover_class_members(class, &name, contributor_index, descent.to_vec(), ctx);
+    discover_class_members(class, &name, contributor_index, descent.clone(), ctx);
 }
 
 fn discover_class_members<'ast>(
     class: &'ast Class<'ast>,
     name: &str,
     contributor_index: usize,
-    base_descent: Vec<FunctionDescentStep>,
+    base_descent: FunctionDescent,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
     let previous_type_parameters = ctx.enclosing_type_parameters;
@@ -3022,18 +3165,15 @@ fn discover_class_members<'ast>(
                 // (prototype) for an instance member, its STATIC side for a
                 // static one — the member's own `static` flag decides which.
                 ctx.enclosing_heritage =
-                    class
-                        .super_class
-                        .as_ref()
-                        .map(|super_class| EnclosingHeritage {
-                            super_class,
-                            super_type_arguments: class.super_type_arguments.as_deref(),
-                            static_side: method.r#static,
-                        });
+                    class.heritage.as_ref().map(|heritage| EnclosingHeritage {
+                        super_class: &heritage.expression,
+                        super_type_arguments: heritage.type_arguments.as_deref(),
+                        static_side: method.r#static,
+                    });
                 ctx.enclosing_this = Some(EnclosingThis::of_member(method.r#static));
                 let member_path: Arc<[u32]> = Arc::from(vec![member_ordinal].into_boxed_slice());
-                let mut descent = base_descent.clone();
-                descent.push(FunctionDescentStep::ClassMember { member_ordinal });
+                let descent =
+                    base_descent.then(FunctionDescentStep::ClassMember { member_ordinal });
                 discover_function_inner(
                     &method.value,
                     name,
@@ -3051,22 +3191,21 @@ fn discover_class_members<'ast>(
                     continue;
                 };
                 let member_path: Arc<[u32]> = Arc::from(vec![member_ordinal].into_boxed_slice());
-                let mut descent = base_descent.clone();
-                descent.push(FunctionDescentStep::ClassMember { member_ordinal });
+                let descent =
+                    base_descent.then(FunctionDescentStep::ClassMember { member_ordinal });
                 ctx.enclosing_heritage =
-                    class
-                        .super_class
-                        .as_ref()
-                        .map(|super_class| EnclosingHeritage {
-                            super_class,
-                            super_type_arguments: class.super_type_arguments.as_deref(),
-                            static_side: prop.r#static,
-                        });
+                    class.heritage.as_ref().map(|heritage| EnclosingHeritage {
+                        super_class: &heritage.expression,
+                        super_type_arguments: heritage.type_arguments.as_deref(),
+                        static_side: prop.r#static,
+                    });
                 ctx.enclosing_this = Some(EnclosingThis::of_member(prop.r#static));
                 // A field whose initializer's type derives from a call is an
                 // indexed program expression its synthetic value reads.
                 if let (Some(_), Some(value), Some(anchor)) = (
-                    crate::analysis::type_eval_build::class_field_value_name(name, prop),
+                    crate::analysis::type_eval_build::class_field_value_name(
+                        name, prop, ctx.source,
+                    ),
                     prop.value.as_ref(),
                     ctx.anchor(contributor_index),
                 ) {
@@ -3078,9 +3217,9 @@ fn discover_class_members<'ast>(
                         span: value.span().into(),
                         locator: FunctionBodyLocator {
                             contributor: anchor,
-                            descent: Arc::from(descent.clone().into_boxed_slice()),
+                            descent: descent.clone(),
                         },
-                        source: program_expression_source(value),
+                        source: program_expression_source(&ctx.walks, value),
                     });
                 }
                 match prop.value.as_ref() {
@@ -3127,7 +3266,7 @@ fn discover_function_inner<'ast>(
     name: &str,
     part: FunctionPartIdentity,
     contributor_index: usize,
-    descent: Vec<FunctionDescentStep>,
+    descent: FunctionDescent,
     overload_ordinal: u32,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
@@ -3149,18 +3288,18 @@ fn discover_function_inner<'ast>(
     };
     let locator = FunctionBodyLocator {
         contributor: anchor,
-        descent: Arc::from(descent.into_boxed_slice()),
+        descent,
     };
     let entry = ctx.build_entry(
         key.clone(),
         locator.clone(),
         params,
-        &body.statements,
+        FunctionBodyRef::Block(body),
         func.span.start,
         FunctionNode::Function(func),
     );
     ctx.push(entry, FunctionNode::Function(func));
-    discover_nested_positions(&body.statements, &key, &locator, ctx);
+    discover_nested_positions(FunctionBodyRef::Block(body), &key, &locator, ctx);
 }
 
 fn discover_arrow_inner<'ast>(
@@ -3168,7 +3307,7 @@ fn discover_arrow_inner<'ast>(
     name: &str,
     part: FunctionPartIdentity,
     contributor_index: usize,
-    descent: Vec<FunctionDescentStep>,
+    descent: FunctionDescent,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
     let Some(anchor) = ctx.anchor(contributor_index) else {
@@ -3186,18 +3325,18 @@ fn discover_arrow_inner<'ast>(
     };
     let locator = FunctionBodyLocator {
         contributor: anchor,
-        descent: Arc::from(descent.into_boxed_slice()),
+        descent,
     };
     let entry = ctx.build_entry(
         key.clone(),
         locator.clone(),
         params,
-        &arrow.body.statements,
+        FunctionBodyRef::of_arrow(arrow),
         arrow.span.start,
         FunctionNode::Arrow(arrow),
     );
     ctx.push(entry, FunctionNode::Arrow(arrow));
-    discover_nested_positions(&arrow.body.statements, &key, &locator, ctx);
+    discover_nested_positions(FunctionBodyRef::of_arrow(arrow), &key, &locator, ctx);
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -3212,7 +3351,8 @@ pub fn take_nested_callable_walk_visits_for_tests() -> usize {
 /// Visit each directly nested callable once, without entering its frame,
 /// with whether it is a class expression's method or accessor.
 fn for_each_nested_callable<'a>(
-    statements: &'a [Statement<'a>],
+    walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
+    body: FunctionBodyRef<'a>,
     mut visit: impl FnMut(FunctionNode<'a>, bool),
 ) {
     struct CallableVisitor<'f, F>(&'f mut F);
@@ -3254,64 +3394,118 @@ fn for_each_nested_callable<'a>(
         fn visit_ts_type(&mut self, _ty: &oxc_ast::ast::TSType<'a>) {}
     }
     let mut visitor = CallableVisitor(&mut visit);
-    for statement in statements {
-        visitor.visit_statement(statement);
+    for statement in body.statements() {
+        walks.with_node_stack(statement.span(), || visitor.visit_statement(statement));
+    }
+    // An expression body walks as the one expression statement it was.
+    if let Some(expression) = body.expression() {
+        #[cfg(any(test, feature = "test-support"))]
+        NESTED_CALLABLE_WALK_VISITS.with(|visits| visits.set(visits.get() + 1));
+        walks.with_node_stack(expression.span(), || visitor.visit_expression(expression));
     }
 }
 
 /// Index every directly nested callable under its exact lexical parent.
 fn discover_nested_positions<'ast>(
-    statements: &'ast [Statement<'ast>],
+    body: FunctionBodyRef<'ast>,
     parent_key: &FunctionProgramKey,
     parent_locator: &FunctionBodyLocator,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
+    // Nested callables are discovered depth first, each one's own nested
+    // callables before its next sibling, from an explicit stack of the
+    // bodies being walked: a callable nested in a callable's body costs no
+    // native level. No enclosing type parameters, heritage or `this` reach
+    // a nested callable's entry, however deep.
+    struct Body<'ast> {
+        callables: std::vec::IntoIter<(FunctionNode<'ast>, bool)>,
+        key: FunctionProgramKey,
+        locator: FunctionBodyLocator,
+        local_ordinal: u32,
+    }
+    fn nested_body<'ast>(
+        walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
+        body: FunctionBodyRef<'ast>,
+        key: FunctionProgramKey,
+        locator: FunctionBodyLocator,
+    ) -> Body<'ast> {
+        let mut callables = Vec::new();
+        for_each_nested_callable(walks, body, |node, class_member| {
+            callables.push((node, class_member));
+        });
+        Body {
+            callables: callables.into_iter(),
+            key,
+            locator,
+            local_ordinal: 0,
+        }
+    }
     let previous_type_parameters = ctx.enclosing_type_parameters.take();
     let previous_heritage = ctx.enclosing_heritage.take();
     let previous_this = ctx.enclosing_this.take();
-    let mut local_ordinal = 0;
-    for_each_nested_callable(statements, |node, class_member| {
+    let mut bodies = vec![nested_body(
+        &ctx.walks,
+        body,
+        parent_key.clone(),
+        parent_locator.clone(),
+    )];
+    while let Some(parent) = bodies.last_mut() {
+        let Some((node, class_member)) = parent.callables.next() else {
+            bodies.pop();
+            continue;
+        };
         let ordinal = ctx.next_nested_ordinal;
         ctx.next_nested_ordinal += 1;
-        let mut descent = parent_locator.descent.to_vec();
-        descent.push(FunctionDescentStep::NestedCallable {
-            ordinal: local_ordinal,
-        });
-        local_ordinal += 1;
-        discover_nested_callable(
+        let descent = parent
+            .locator
+            .descent
+            .then(FunctionDescentStep::NestedCallable {
+                ordinal: parent.local_ordinal,
+            });
+        parent.local_ordinal += 1;
+        let discovered = discover_nested_callable(
             node,
-            parent_key,
-            parent_locator,
+            &parent.key,
+            &parent.locator,
             descent,
             ordinal,
             class_member,
             ctx,
         );
-    });
+        if let Some((key, locator, body)) = discovered {
+            bodies.push(nested_body(&ctx.walks, body, key, locator));
+        }
+    }
     ctx.enclosing_type_parameters = previous_type_parameters;
     ctx.enclosing_heritage = previous_heritage;
     ctx.enclosing_this = previous_this;
 }
 /// One function / arrow expression in call-argument position, discovered
-/// under its lexical parent's key.
+/// under its lexical parent's key: its key, locator and body, whose own
+/// nested callables the caller discovers next.
 fn discover_nested_callable<'ast>(
     node: FunctionNode<'ast>,
     parent_key: &FunctionProgramKey,
     parent_locator: &FunctionBodyLocator,
-    descent: Vec<FunctionDescentStep>,
+    descent: FunctionDescent,
     ordinal: u32,
     class_member: bool,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
-) {
+) -> Option<(
+    FunctionProgramKey,
+    FunctionBodyLocator,
+    FunctionBodyRef<'ast>,
+)> {
     let span: verter_span::Span = node.span().into();
-    let (params, statements) = match &node {
+    let (params, body) = match &node {
         FunctionNode::Function(func) => {
-            let Some(body) = func.body.as_ref() else {
-                return;
-            };
-            (formal_params(&func.params), &body.statements[..])
+            let body = func.body.as_ref()?;
+            (formal_params(&func.params), FunctionBodyRef::Block(body))
         }
-        FunctionNode::Arrow(arrow) => (formal_params(&arrow.params), &arrow.body.statements[..]),
+        FunctionNode::Arrow(arrow) => (
+            formal_params(&arrow.params),
+            FunctionBodyRef::of_arrow(arrow),
+        ),
     };
     let key = FunctionProgramKey {
         declaration: parent_key.declaration.clone(),
@@ -3320,16 +3514,9 @@ fn discover_nested_callable<'ast>(
     };
     let locator = FunctionBodyLocator {
         contributor: parent_locator.contributor,
-        descent: Arc::from(descent.into_boxed_slice()),
+        descent,
     };
-    let mut entry = ctx.build_entry(
-        key.clone(),
-        locator.clone(),
-        params,
-        statements,
-        span.start,
-        node,
-    );
+    let mut entry = ctx.build_entry(key.clone(), locator.clone(), params, body, span.start, node);
     entry.lexical_parent = Some(Box::new(parent_key.clone()));
     entry.class_member = class_member;
     if let FunctionNode::Function(function) = node {
@@ -3339,7 +3526,7 @@ fn discover_nested_callable<'ast>(
         }
     }
     ctx.push(entry, node);
-    discover_nested_positions(statements, &key, &locator, ctx);
+    Some((key, locator, body))
 }
 
 fn formal_params(params: &oxc_ast::ast::FormalParameters<'_>) -> Arc<[FunctionParamRecord]> {
@@ -3406,7 +3593,7 @@ struct TypeParamOccurrences {
 }
 
 impl TypeParamOccurrences {
-    fn of(node: &FunctionNode<'_>) -> Self {
+    fn of(walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>, node: &FunctionNode<'_>) -> Self {
         let params = match node {
             FunctionNode::Function(func) => &func.params,
             FunctionNode::Arrow(arrow) => &arrow.params,
@@ -3414,23 +3601,32 @@ impl TypeParamOccurrences {
         let mut out = Self::default();
         for (ordinal, param) in params.items.iter().enumerate() {
             if let Some(annotation) = param.type_annotation.as_ref() {
-                out.collect(&annotation.type_annotation, ordinal as u32);
+                out.collect(walks, &annotation.type_annotation, ordinal as u32);
             }
         }
         if let Some(rest) = params.rest.as_ref() {
             if let Some(annotation) = rest.type_annotation.as_ref() {
-                out.collect(&annotation.type_annotation, params.items.len() as u32);
+                out.collect(
+                    walks,
+                    &annotation.type_annotation,
+                    params.items.len() as u32,
+                );
             }
         }
         out
     }
 
-    fn collect(&mut self, ty: &oxc_ast::ast::TSType<'_>, ordinal: u32) {
+    fn collect(
+        &mut self,
+        walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
+        ty: &oxc_ast::ast::TSType<'_>,
+        ordinal: u32,
+    ) {
         let mut visitor = ReferencedTypeNames {
             found: Vec::new(),
             shadowed: Vec::new(),
         };
-        visitor.visit_ts_type(ty);
+        walks.with_node_stack(ty.span(), || visitor.visit_ts_type(ty));
         for name in visitor.found {
             self.first
                 .entry(name)
@@ -3539,7 +3735,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
         key: FunctionProgramKey,
         locator: FunctionBodyLocator,
         params: Arc<[FunctionParamRecord]>,
-        statements: &'ast [Statement<'ast>],
+        body: FunctionBodyRef<'ast>,
         function_start: u32,
         node: FunctionNode<'ast>,
     ) -> FunctionProgramEntry {
@@ -3565,30 +3761,43 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
         inventory.in_parameter_list = true;
         for param in &node.params().items {
             inventory.record_pattern(&param.pattern, FunctionBindingKind::Param, frame_span);
-            inventory.visit_binding_pattern(&param.pattern);
-            if let Some(annotation) = &param.type_annotation {
-                inventory.record_type_queries(
-                    &annotation.type_annotation,
-                    FunctionTypeQueryPosition::Parameter,
-                );
-            }
-            if let Some(initializer) = &param.initializer {
-                inventory.visit_expression(initializer);
-            }
+            self.walks.with_node_stack(param.span, || {
+                inventory.visit_binding_pattern(&param.pattern);
+                if let Some(annotation) = &param.type_annotation {
+                    inventory.visit_type_queries(
+                        &annotation.type_annotation,
+                        FunctionTypeQueryPosition::Parameter,
+                    );
+                }
+                if let Some(initializer) = &param.initializer {
+                    inventory.visit_expression(initializer);
+                }
+            });
         }
         if let Some(rest) = &node.params().rest {
             inventory.record_pattern(&rest.rest.argument, FunctionBindingKind::Param, frame_span);
-            inventory.visit_binding_pattern(&rest.rest.argument);
-            if let Some(annotation) = &rest.type_annotation {
-                inventory.record_type_queries(
-                    &annotation.type_annotation,
-                    FunctionTypeQueryPosition::Parameter,
-                );
-            }
+            self.walks.with_node_stack(rest.span, || {
+                inventory.visit_binding_pattern(&rest.rest.argument);
+                if let Some(annotation) = &rest.type_annotation {
+                    inventory.visit_type_queries(
+                        &annotation.type_annotation,
+                        FunctionTypeQueryPosition::Parameter,
+                    );
+                }
+            });
         }
         inventory.in_parameter_list = false;
-        for stmt in statements {
-            inventory.visit_statement(stmt);
+        for stmt in body.statements() {
+            self.walks
+                .with_node_stack(stmt.span(), || inventory.visit_statement(stmt));
+        }
+        // An expression body walks as the one expression statement it was:
+        // no control input rides into it.
+        if let Some(expression) = body.expression() {
+            let previous_control = inventory.control_input.take();
+            self.walks
+                .with_node_stack(expression.span(), || inventory.visit_expression(expression));
+            inventory.control_input = previous_control;
         }
         let InventoryVisitor {
             call_addresses: _,
@@ -3616,11 +3825,11 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
         // (`for_each_call_expression`) — the same ordering the callback
         // locator ordinals and the deref use, by construction.
         let mut call_sites = Vec::new();
-        for_each_call_expression(statements, |call| {
+        for_each_call_expression_in_body(body, |call| {
             call_sites.push(call_site_record(call));
         });
 
-        let parameter_occurrences = TypeParamOccurrences::of(&node);
+        let parameter_occurrences = TypeParamOccurrences::of(&self.walks, &node);
         let type_parameters: Vec<FunctionProgramTypeParam> = node
             .type_parameters()
             .map(|declaration| {
@@ -3641,8 +3850,9 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
 
         let function_span = node.span();
         let hash = crate::analysis::function_program_hash::hash_function_body(
+            &self.walks,
             source,
-            statements,
+            body,
             &params,
             function_start,
             node,
@@ -3660,7 +3870,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             body_span: node
                 .body()
                 .expect("indexed functions have a body")
-                .span
+                .span()
                 .into(),
             locator,
             params,
@@ -3710,10 +3920,13 @@ pub struct StatementListInventory {
 }
 
 /// Inventory one statement list with the SAME single walk the index uses.
-pub fn inventory_statement_list(statements: &[Statement<'_>]) -> StatementListInventory {
+pub fn inventory_statement_list(
+    walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
+    statements: &[Statement<'_>],
+) -> StatementListInventory {
     let mut inventory = InventoryVisitor::default();
     for stmt in statements {
-        inventory.visit_statement(stmt);
+        walks.with_node_stack(stmt.span(), || inventory.visit_statement(stmt));
     }
     let mut nested_function_names = Vec::new();
     let mut var_names = Vec::new();
@@ -3831,7 +4044,7 @@ impl InventoryVisitor<'_, '_> {
     }
 
     /// Record every bare `typeof name` inside `ty` at `position`.
-    fn record_type_queries(
+    fn visit_type_queries(
         &mut self,
         ty: &oxc_ast::ast::TSType<'_>,
         position: FunctionTypeQueryPosition,
@@ -3904,11 +4117,11 @@ impl<'a> InventoryVisitor<'_, 'a> {
 
 impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
     fn visit_ts_type(&mut self, it: &oxc_ast::ast::TSType<'a>) {
-        self.record_type_queries(it, FunctionTypeQueryPosition::Expression);
+        self.visit_type_queries(it, FunctionTypeQueryPosition::Expression);
     }
 
     fn visit_ts_type_annotation(&mut self, it: &oxc_ast::ast::TSTypeAnnotation<'a>) {
-        self.record_type_queries(&it.type_annotation, FunctionTypeQueryPosition::Expression);
+        self.visit_type_queries(&it.type_annotation, FunctionTypeQueryPosition::Expression);
     }
 
     fn visit_variable_declarator(&mut self, it: &oxc_ast::ast::VariableDeclarator<'a>) {
@@ -3920,7 +4133,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
                 }
                 _ => FunctionTypeQueryPosition::Expression,
             };
-            self.record_type_queries(&annotation.type_annotation, position);
+            self.visit_type_queries(&annotation.type_annotation, position);
         }
         if let Some(init) = &it.init {
             self.visit_expression(init);
@@ -4008,7 +4221,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
             }
         }
         evaluated.visit_decorators(&class.decorators);
-        if let Some(heritage) = &class.super_class {
+        if let Some(heritage) = class.heritage.as_ref().map(|heritage| &heritage.expression) {
             evaluated.visit_expression(heritage);
         }
         for element in &class.body.body {
@@ -4077,12 +4290,9 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
             Statement::TSEnumDeclaration(declaration) => {
                 Some((&declaration.id, FunctionBindingKind::Enum))
             }
-            Statement::TSModuleDeclaration(module) => match &module.id {
-                oxc_ast::ast::TSModuleDeclarationName::Identifier(id) => {
-                    Some((id, FunctionBindingKind::Namespace))
-                }
-                _ => None,
-            },
+            Statement::TSNamespaceDeclaration(module) => {
+                Some((&module.id, FunctionBindingKind::Namespace))
+            }
             Statement::TSImportEqualsDeclaration(declaration) => {
                 Some((&declaration.id, FunctionBindingKind::ImportEquals))
             }
@@ -4373,6 +4583,59 @@ fn collect_static_member_path(
 // Locator resolution against the retained snapshot
 // ---------------------------------------------------------------------------
 
+/// One function's body: a block, or an expression-bodied arrow's single
+/// expression. oxc's AST before 0.151 carried an expression body as a block
+/// holding one expression statement; every walk over a body visits the
+/// expression exactly where it visited that statement.
+#[derive(Clone, Copy)]
+pub enum FunctionBodyRef<'a> {
+    /// A block body.
+    Block(&'a oxc_ast::ast::FunctionBody<'a>),
+    /// An expression-bodied arrow's expression.
+    Expression(&'a Expression<'a>),
+}
+
+impl<'a> FunctionBodyRef<'a> {
+    /// The body of an arrow function.
+    #[must_use]
+    pub fn of_arrow(arrow: &'a ArrowFunctionExpression<'a>) -> Self {
+        match &arrow.body {
+            oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) => Self::Block(body),
+            body => Self::Expression(
+                body.as_expression()
+                    .expect("a non-block arrow body is an expression"),
+            ),
+        }
+    }
+
+    /// The block body's statements (none for an expression body).
+    #[must_use]
+    pub fn statements(self) -> &'a [Statement<'a>] {
+        match self {
+            Self::Block(body) => &body.statements,
+            Self::Expression(_) => &[],
+        }
+    }
+
+    /// The expression body, when this is one.
+    #[must_use]
+    pub fn expression(self) -> Option<&'a Expression<'a>> {
+        match self {
+            Self::Block(_) => None,
+            Self::Expression(expression) => Some(expression),
+        }
+    }
+
+    /// The body's source span.
+    #[must_use]
+    pub fn span(self) -> oxc_span::Span {
+        match self {
+            Self::Block(body) => body.span,
+            Self::Expression(expression) => expression.span(),
+        }
+    }
+}
+
 /// The function node a [`FunctionBodyLocator`] descent lands on — the ONE
 /// authored-position view every per-function body product (skeleton
 /// build, lazy body lowering) reads from the retained snapshot.
@@ -4405,17 +4668,17 @@ impl<'a> FunctionNode<'a> {
 
     /// The function body (`None` for a bodiless overload signature).
     #[must_use]
-    pub fn body(&self) -> Option<&'a oxc_ast::ast::FunctionBody<'a>> {
+    pub fn body(&self) -> Option<FunctionBodyRef<'a>> {
         match self {
-            Self::Function(func) => func.body.as_deref(),
-            Self::Arrow(arrow) => Some(&arrow.body),
+            Self::Function(func) => func.body.as_deref().map(FunctionBodyRef::Block),
+            Self::Arrow(arrow) => Some(FunctionBodyRef::of_arrow(arrow)),
         }
     }
 
     /// Whether this is an expression-bodied arrow (`(x) => x * 2`).
     #[must_use]
     pub fn is_expression_body(&self) -> bool {
-        matches!(self, Self::Arrow(arrow) if arrow.expression)
+        matches!(self, Self::Arrow(arrow) if arrow.is_expression())
     }
 
     /// The function's own type parameter clause, when authored.
@@ -4448,8 +4711,9 @@ enum DeclRef<'a> {
     /// A class declaration.
     #[cfg(any(test, feature = "test-support"))]
     Class(&'a Class<'a>),
-    /// A namespace (`TSModuleDeclaration`).
-    Module(&'a oxc_ast::ast::TSModuleDeclaration<'a>),
+    /// A namespace or module declaration's block (`None` for a bodiless
+    /// module or a dotted namespace, whose body is the inner namespace).
+    Module(Option<&'a oxc_ast::ast::TSModuleBlock<'a>>),
     /// An `export default { … }` object expression.
     #[cfg(any(test, feature = "test-support"))]
     ExportDefaultObject(&'a oxc_ast::ast::ObjectExpression<'a>),
@@ -4460,7 +4724,7 @@ fn class_declaration_of<'a>(statement: &'a Statement<'a>) -> Option<&'a Class<'a
     use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
     match statement {
         Statement::ClassDeclaration(class) => Some(class),
-        Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
+        Statement::ExportDeclaration(export) => match &export.declaration {
             Declaration::ClassDeclaration(class) => Some(class),
             _ => None,
         },
@@ -4472,6 +4736,16 @@ fn class_declaration_of<'a>(statement: &'a Statement<'a>) -> Option<&'a Class<'a
     }
 }
 
+/// A namespace declaration's own block (`None` for a dotted namespace).
+fn namespace_block<'a>(
+    module: &'a oxc_ast::ast::TSNamespaceDeclaration<'a>,
+) -> Option<&'a oxc_ast::ast::TSModuleBlock<'a>> {
+    match &module.body {
+        oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => Some(block),
+        oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => None,
+    }
+}
+
 fn declaration_of<'a>(statement: &'a Statement<'a>) -> Option<DeclRef<'a>> {
     use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
     match statement {
@@ -4479,13 +4753,21 @@ fn declaration_of<'a>(statement: &'a Statement<'a>) -> Option<DeclRef<'a>> {
         Statement::VariableDeclaration(decl) => Some(DeclRef::Variable(decl)),
         #[cfg(any(test, feature = "test-support"))]
         Statement::ClassDeclaration(class) => Some(DeclRef::Class(class)),
-        Statement::TSModuleDeclaration(module) => Some(DeclRef::Module(module)),
-        Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
+        Statement::TSNamespaceDeclaration(module) => Some(DeclRef::Module(namespace_block(module))),
+        Statement::TSExternalModuleDeclaration(module) => {
+            Some(DeclRef::Module(module.body.as_deref()))
+        }
+        Statement::ExportDeclaration(export) => match &export.declaration {
             Declaration::FunctionDeclaration(func) => Some(DeclRef::Function(func)),
             Declaration::VariableDeclaration(decl) => Some(DeclRef::Variable(decl)),
             #[cfg(any(test, feature = "test-support"))]
             Declaration::ClassDeclaration(class) => Some(DeclRef::Class(class)),
-            Declaration::TSModuleDeclaration(module) => Some(DeclRef::Module(module)),
+            Declaration::TSNamespaceDeclaration(module) => {
+                Some(DeclRef::Module(namespace_block(module)))
+            }
+            Declaration::TSExternalModuleDeclaration(module) => {
+                Some(DeclRef::Module(module.body.as_deref()))
+            }
             _ => None,
         },
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
@@ -4636,7 +4918,8 @@ pub fn resolve_function_node<'a>(
     program: &'a oxc_ast::ast::Program<'a>,
     locator: &FunctionBodyLocator,
 ) -> Option<ResolvedFunctionNode<'a>> {
-    use oxc_ast::ast::{ClassElement, TSModuleDeclarationBody};
+    use oxc_ast::ast::ClassElement;
+    let walks = verter_parser::oxc_parse::ProgramWalkStack::new(program);
     let mut statement = program
         .body
         .get(locator.contributor.contributor_index as usize)?;
@@ -4644,27 +4927,25 @@ pub fn resolve_function_node<'a>(
     // stepped INSIDE it (a nested declaration, a callback argument, an
     // IIFE callee). `None` while the descent is still navigating
     // declarations from the contributor statement.
-    let mut current_body: Option<&'a oxc_ast::ast::FunctionBody<'a>> = None;
+    let mut current_body: Option<FunctionBodyRef<'a>> = None;
     // The heritage context of the innermost enclosing class member, set by
     // a `ClassMember` step and cleared by every deeper nested-position step
     // — mirroring discovery, which binds the heritage only to the member's
     // own program.
     let mut enclosing_heritage: Option<EnclosingHeritage<'a>> = None;
     let mut enclosing_this: Option<EnclosingThis> = None;
-    let mut steps = locator.descent.iter().peekable();
+    let steps = locator.descent.to_vec();
+    let mut steps = steps.iter().peekable();
     loop {
         match steps.next()? {
             // A heritage expression is an indexed program expression, never a
             // function position.
             FunctionDescentStep::ClassHeritage => return None,
             FunctionDescentStep::NamespaceMember { statement_ordinal } => {
-                let DeclRef::Module(module) = declaration_of(statement)? else {
+                let DeclRef::Module(block) = declaration_of(statement)? else {
                     return None;
                 };
-                let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = module.body.as_ref()
-                else {
-                    return None;
-                };
+                let block = block?;
                 statement = block.body.get(*statement_ordinal as usize)?;
             }
             FunctionDescentStep::FunctionDeclaration => {
@@ -4683,7 +4964,7 @@ pub fn resolve_function_node<'a>(
                     });
                 }
                 // Non-terminal: a nested position inside this function's body.
-                current_body = func.body.as_deref();
+                current_body = func.body.as_deref().map(FunctionBodyRef::Block);
             }
             FunctionDescentStep::VariableInitializer { declarator_ordinal } => {
                 let DeclRef::Variable(var_decl) = declaration_of(statement)? else {
@@ -4753,15 +5034,11 @@ pub fn resolve_function_node<'a>(
                     ),
                     _ => return None,
                 };
-                enclosing_heritage =
-                    class
-                        .super_class
-                        .as_ref()
-                        .map(|super_class| EnclosingHeritage {
-                            super_class,
-                            super_type_arguments: class.super_type_arguments.as_deref(),
-                            static_side: member_is_static,
-                        });
+                enclosing_heritage = class.heritage.as_ref().map(|heritage| EnclosingHeritage {
+                    super_class: &heritage.expression,
+                    super_type_arguments: heritage.type_arguments.as_deref(),
+                    static_side: member_is_static,
+                });
                 enclosing_this = Some(EnclosingThis::of_member(member_is_static));
                 if steps.len() == 0 {
                     // Terminal step: the class member at `member_ordinal`.
@@ -4816,7 +5093,7 @@ pub fn resolve_function_node<'a>(
                 let body = current_body?;
                 let mut position = 0;
                 let mut selected = None;
-                for_each_nested_callable(&body.statements, |node, _| {
+                for_each_nested_callable(&walks, body, |node, _| {
                     if position == *ordinal {
                         selected = Some(node);
                     }
@@ -4847,7 +5124,7 @@ pub fn resolve_function_node<'a>(
                 // function's body — a hoisted nested function declaration.
                 let body = current_body?;
                 let Statement::FunctionDeclaration(func) =
-                    body.statements.get(*statement_ordinal as usize)?
+                    body.statements().get(*statement_ordinal as usize)?
                 else {
                     return None;
                 };
@@ -4862,7 +5139,7 @@ pub fn resolve_function_node<'a>(
                     });
                 }
                 // Non-terminal: a nested position inside this declaration's body.
-                current_body = func.body.as_deref();
+                current_body = func.body.as_deref().map(FunctionBodyRef::Block);
             }
             FunctionDescentStep::CallArgument {
                 call_ordinal,
@@ -4873,7 +5150,7 @@ pub fn resolve_function_node<'a>(
                 // The argument at `arg_ordinal` of the enclosing body's
                 // `call_ordinal`-th call site — a callback position.
                 let body = current_body?;
-                let call = nth_call_expression(&body.statements, *call_ordinal)?;
+                let call = nth_call_expression(body, *call_ordinal)?;
                 let argument = call.arguments.get(*arg_ordinal as usize)?;
                 let expression = argument.as_expression()?;
                 let node = function_from_expression(unwrap_program_expression(expression))?;
@@ -4901,7 +5178,7 @@ pub fn resolve_function_node<'a>(
                 // The CALLEE of the enclosing body's `call_ordinal`-th call
                 // site — an immediately-invoked function expression.
                 let body = current_body?;
-                let call = nth_call_expression(&body.statements, *call_ordinal)?;
+                let call = nth_call_expression(body, *call_ordinal)?;
                 let node = function_from_expression(unwrap_program_expression(&call.callee))?;
                 if steps.len() == 0 {
                     let self_name = match node {
@@ -4962,32 +5239,29 @@ pub fn build_indexed_program_expression_ir(
     let mut statement = program
         .body
         .get(record.locator.contributor.contributor_index as usize)?;
-    let mut current_body: Option<&oxc_ast::ast::FunctionBody<'_>> = None;
-    let mut steps = record.locator.descent.iter().peekable();
+    let mut current_body: Option<FunctionBodyRef<'_>> = None;
+    let steps = record.locator.descent.to_vec();
+    let mut steps = steps.iter().peekable();
     // Prefix steps navigate to the declaration OWNING the expression: a
     // namespace block or the enclosing function's body statement list.
     loop {
         match steps.peek() {
             Some(FunctionDescentStep::NamespaceMember { statement_ordinal }) => {
                 steps.next();
-                let DeclRef::Module(module) = declaration_of(statement)? else {
+                let DeclRef::Module(block) = declaration_of(statement)? else {
                     return None;
                 };
-                let Some(oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block)) =
-                    module.body.as_ref()
-                else {
-                    return None;
-                };
+                let block = block?;
                 statement = block.body.get(*statement_ordinal as usize)?;
             }
             Some(FunctionDescentStep::BodyStatement { statement_ordinal }) => {
                 steps.next();
                 let body = current_body?;
-                statement = body.statements.get(*statement_ordinal as usize)?;
+                statement = body.statements().get(*statement_ordinal as usize)?;
                 let DeclRef::Function(func) = declaration_of(statement)? else {
                     return None;
                 };
-                current_body = func.body.as_deref();
+                current_body = func.body.as_deref().map(FunctionBodyRef::Block);
             }
             _ => break,
         }
@@ -5016,7 +5290,10 @@ pub fn build_indexed_program_expression_ir(
             }
         }
         FunctionDescentStep::ClassHeritage if steps.len() == 0 => {
-            class_declaration_of(statement)?.super_class.as_ref()?
+            &class_declaration_of(statement)?
+                .heritage
+                .as_ref()?
+                .expression
         }
         // A class field's initializer.
         FunctionDescentStep::ClassMember { member_ordinal } if steps.len() == 0 => {
@@ -5061,12 +5338,12 @@ pub fn build_indexed_program_expression_ir(
 /// `call_ordinal` (so a locator derefs to exactly the call it indexed).
 #[cfg(any(test, feature = "test-support"))]
 fn nth_call_expression<'a>(
-    statements: &'a [Statement<'a>],
+    body: FunctionBodyRef<'a>,
     ordinal: u32,
 ) -> Option<&'a CallExpression<'a>> {
     let mut seen = 0u32;
     let mut found = None;
-    for_each_call_expression(statements, |call| {
+    for_each_call_expression_in_body(body, |call| {
         if found.is_none() {
             if seen == ordinal {
                 found = Some(call);

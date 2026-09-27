@@ -66,7 +66,7 @@ fn lowered_depth(annotation: String) -> usize {
             let allocator = Allocator::default();
             let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
             assert!(
-                !parsed.panicked && parsed.errors.is_empty(),
+                !parsed.fatal_error && parsed.diagnostics.is_empty(),
                 "the fixture parses"
             );
             let Some(Statement::TSTypeAliasDeclaration(alias)) = parsed.program.body.last() else {

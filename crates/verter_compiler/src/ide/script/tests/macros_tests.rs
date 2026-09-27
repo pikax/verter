@@ -42,10 +42,10 @@ fn generated_identifier_facts<'name>(
         verter_parser::oxc_parse::Parser::new(&allocator, &full, oxc_span::SourceType::tsx())
             .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "generated IDE carrier must remain valid TSX: {:?}\n---\n{full}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
@@ -678,10 +678,10 @@ fn no_script_blocks_has_type_constructs() {
         verter_parser::oxc_parse::Parser::new(&val_alloc, &full, oxc_span::SourceType::tsx())
             .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Full TSX must be valid: {:?}\n---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -765,10 +765,10 @@ fn no_script_blocks_with_slot_and_style() {
         verter_parser::oxc_parse::Parser::new(&val_alloc, &full, oxc_span::SourceType::tsx())
             .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Full TSX must be valid: {:?}\n---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -882,9 +882,9 @@ fn script_setup_ts_type_assertion_nested() {
         verter_parser::oxc_parse::Parser::new(&parse_alloc, &carrier, oxc_span::SourceType::tsx())
             .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "nested assertion rewrite must be valid TSX: {:?}\n{carrier}",
-        parsed.errors
+        parsed.diagnostics
     );
     let mut facts = AsExpressionFacts {
         type_names_postorder: Vec::new(),

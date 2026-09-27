@@ -47,6 +47,9 @@ import {
   STP15_MANDATORY_CASES,
   STP16_MANDATORY_CASES,
   STP17_MANDATORY_CASES,
+  STP18_MANDATORY_CASES,
+  STP19_MANDATORY_CASES,
+  STP20_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
 } from "./node-mandatory-cases.mjs";
 
@@ -68,6 +71,9 @@ export {
   STP15_MANDATORY_CASES,
   STP16_MANDATORY_CASES,
   STP17_MANDATORY_CASES,
+  STP18_MANDATORY_CASES,
+  STP19_MANDATORY_CASES,
+  STP20_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
 };
 
@@ -1759,6 +1765,11 @@ function evaluateHarnessRun(
     );
   }
   const expectedCode = probes.expectedNegativeCode;
+  const allowedCodes = new Set(
+    [expectedCode].concat(
+      Array.isArray(probes.allowedNegativeCodes) ? probes.allowedNegativeCodes : [],
+    ),
+  );
   const anchored = (run.negative.diags || []).filter((diag) => diag.code === expectedCode);
   if (anchored.length === 0) {
     errors.push(
@@ -1770,7 +1781,7 @@ function evaluateHarnessRun(
     );
   }
   const unrelated = (run.negative.diags || []).filter(
-    (diag) => diag.code && diag.code !== expectedCode,
+    (diag) => diag.code && !allowedCodes.has(diag.code),
   );
   if (unrelated.length > 0) {
     errors.push(
@@ -1780,6 +1791,22 @@ function evaluateHarnessRun(
         `${engineId} negative probe had unrelated diagnostic ${unrelated[0].code}: ${unrelated[0].message}`,
       ),
     );
+  }
+  for (const anchor of probes.negativeAnchors || []) {
+    const hit = (run.negative.diags || []).some(
+      (diag) =>
+        diag.code === anchor.code &&
+        String(diag.message || "").includes(String(anchor.messageIncludes || "")),
+    );
+    if (!hit) {
+      errors.push(
+        err(
+          anchor.id || "STP1-harness",
+          "missing-negative",
+          `${engineId} negative probe lacked ${anchor.messageIncludes} (TS${anchor.code}); got ${JSON.stringify(run.negative.diags)}`,
+        ),
+      );
+    }
   }
   errors.push(
     ...assertCheckCounts(run.checkCounts, engineId, harnessProbeFiles(probes), maxChecksPerFile),
@@ -2089,6 +2116,20 @@ export async function verifyNode(options) {
     errors.push(...stp17.errors);
   }
 
+  if (nodeId === "STP18") {
+    const stp18 = await evaluateStp18Node({ repoRoot });
+    errors.push(...stp18.errors);
+  }
+
+  if (nodeId === "STP19") {
+    const stp19 = await evaluateStp19Node({
+      repoRoot,
+      resolvedEngines,
+      skipProbes: options.skipProbes,
+    });
+    errors.push(...stp19.errors);
+  }
+
   if (nodeId === "STS0") {
     const sts0 = await evaluateSts0Node({ repoRoot, skipProbes: options.skipProbes });
     errors.push(...sts0.errors);
@@ -2290,6 +2331,32 @@ async function evaluateStp17Node({ repoRoot }) {
   return { errors: stp17.errors };
 }
 
+async function evaluateStp18Node({ repoRoot }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP18/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const stp18 = await protocol.evaluateStp18({ repoRoot });
+  return { errors: stp18.errors };
+}
+
+async function evaluateStp19Node({ repoRoot, resolvedEngines, skipProbes }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP19/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const stp19 = await protocol.evaluateStp19({
+    repoRoot,
+    engines: resolvedEngines,
+    runEngine: (engine, probes) =>
+      engine.kind === "javascript"
+        ? runJsEngine(engine, probes, repoRoot)
+        : runNativeEngine(engine, probes, repoRoot),
+    skipProbes,
+  });
+  return { errors: stp19.errors };
+}
+
 async function evaluateSts0Node({ repoRoot, skipProbes }) {
   const protocolHref = pathToFileURL(
     repoPath(repoRoot, "tests/sfc-projection/STS0/protocol.mjs"),
@@ -2484,10 +2551,10 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan, STP10 emission correspondence, STP11 script setup, STP12 JavaScript projection, STP13 Options API, STP14 binder capture, STP15 binding views, STP16 public constructor, STP17 attribute operations, STS0 Svelte profile lock)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan, STP10 emission correspondence, STP11 script setup, STP12 JavaScript projection, STP13 Options API, STP14 binder capture, STP15 binding views, STP16 public constructor, STP17 attribute operations, STP18 component-use inference, STP19 advanced generic uses, STS0 Svelte profile lock)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9|STP10|STP11|STP12|STP13|STP14|STP15|STP16|STP17|STS0 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9|STP10|STP11|STP12|STP13|STP14|STP15|STP16|STP17|STP18|STP19|STS0 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted

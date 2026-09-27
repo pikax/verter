@@ -36,10 +36,11 @@
 //!   this exact pinned OXC version.
 use oxc_allocator::{Allocator, TakeIn};
 use oxc_ast::ast::{
-    AccessorPropertyType, ClassBody, ClassElement, Declaration, ExportNamedDeclaration, Expression,
+    AccessorPropertyType, ClassBody, ClassElement, Declaration, ExportDeclaration, Expression,
     FormalParameters, MethodDefinitionType, PropertyDefinitionType, Statement, TSAccessibility,
 };
-use oxc_ast::{match_member_expression, AstBuilder};
+use oxc_ast::builder::AstBuilder;
+use oxc_ast::match_member_expression;
 use oxc_ast_visit::{walk_mut, VisitMut};
 
 /// The two documented per-framework classification deltas. See the module
@@ -128,7 +129,8 @@ pub fn statement_is_scope_erased(stmt: &Statement<'_>, delta: ErasureDelta) -> b
         // lets a real one bind normally (the value-space filter already
         // excludes a type-only, non-instantiated one — see
         // `ErasureDelta::namespace_always_erased`).
-        Statement::TSModuleDeclaration(m) => delta.namespace_always_erased || m.declare,
+        Statement::TSExternalModuleDeclaration(m) => delta.namespace_always_erased || m.declare,
+        Statement::TSNamespaceDeclaration(m) => delta.namespace_always_erased || m.declare,
         // Pure TS declarations that leave no runtime binding, plus the
         // scope-INERT forms `create_scopes` declares nothing for
         // (`export = X`, `export as namespace X`).
@@ -144,7 +146,9 @@ pub fn statement_is_scope_erased(stmt: &Statement<'_>, delta: ErasureDelta) -> b
         Statement::ImportDeclaration(i) => i.import_kind.is_type(),
         Statement::ExportAllDeclaration(e) => e.export_kind.is_type(),
         Statement::ExportDefaultDeclaration(_) => false,
-        Statement::ExportNamedDeclaration(e) => export_named_is_scope_erased(e, delta),
+        Statement::ExportDeclaration(e) => export_declaration_is_scope_erased(e, delta),
+        Statement::ExportNamedDeclaration(e) => e.export_kind.is_type(),
+        Statement::ExportFromDeclaration(e) => e.export_kind.is_type(),
         // Runtime control-flow / expression statements — always kept
         // (recursed for nested erasure / unwrap).
         Statement::BlockStatement(_)
@@ -168,23 +172,21 @@ pub fn statement_is_scope_erased(stmt: &Statement<'_>, delta: ErasureDelta) -> b
     }
 }
 
-/// Whether an `export … ` named declaration is erased from the scope view. A
-/// whole-statement `export type { … }` is erased; an `export <decl>` is
-/// erased iff the inner declaration is; an `export { a, type b }` specifier
-/// list is kept (the value specifiers survive; `type` specifiers bind as
-/// type-only and are dropped by the value-symbol filter downstream).
+/// Whether an `export <decl>` is erased from the scope view: a type-only one
+/// (a type or `declare` declaration) is erased, otherwise iff the inner
+/// declaration is. (A whole-statement `export type { … }` is erased; an
+/// `export { a, type b }` specifier list is kept — the value specifiers
+/// survive; `type` specifiers bind as type-only and are dropped by the
+/// value-symbol filter downstream.)
 #[must_use]
-pub fn export_named_is_scope_erased(
-    export: &ExportNamedDeclaration<'_>,
+pub fn export_declaration_is_scope_erased(
+    export: &ExportDeclaration<'_>,
     delta: ErasureDelta,
 ) -> bool {
-    if export.export_kind.is_type() {
+    if export.export_kind().is_type() {
         return true;
     }
-    if let Some(declaration) = &export.declaration {
-        return declaration_is_scope_erased(declaration, delta);
-    }
-    false
+    declaration_is_scope_erased(&export.declaration, delta)
 }
 
 /// Whether a `Declaration` (in statement position or nested under `export`)
@@ -201,7 +203,8 @@ pub fn declaration_is_scope_erased(declaration: &Declaration<'_>, delta: Erasure
         Declaration::TSImportEqualsDeclaration(i) => {
             delta.import_equals_always_erased || i.import_kind.is_type()
         }
-        Declaration::TSModuleDeclaration(m) => delta.namespace_always_erased || m.declare,
+        Declaration::TSExternalModuleDeclaration(m) => delta.namespace_always_erased || m.declare,
+        Declaration::TSNamespaceDeclaration(m) => delta.namespace_always_erased || m.declare,
         Declaration::TSTypeAliasDeclaration(_)
         | Declaration::TSInterfaceDeclaration(_)
         | Declaration::TSGlobalDeclaration(_) => true,
@@ -289,7 +292,7 @@ impl<'a> VisitMut<'a> for RuntimeSurvivalProjection<'a> {
             // Erased: replace with an empty statement (no binding), do NOT
             // recurse — an erased declaration contributes nothing to the
             // scope view.
-            *stmt = self.ast.statement_empty(oxc_span::GetSpan::span(stmt));
+            *stmt = Statement::new_empty_statement(oxc_span::GetSpan::span(stmt), &self.ast);
             return;
         }
         walk_mut::walk_statement(self, stmt);
@@ -302,13 +305,11 @@ impl<'a> VisitMut<'a> for RuntimeSurvivalProjection<'a> {
         // wildcard for a TS node kind — a new OXC expression variant breaks
         // the build.
         let unwrapped: Option<Expression<'a>> = match expr {
-            Expression::TSAsExpression(e) => Some(e.expression.take_in(self.ast.allocator)),
-            Expression::TSSatisfiesExpression(e) => Some(e.expression.take_in(self.ast.allocator)),
-            Expression::TSTypeAssertion(e) => Some(e.expression.take_in(self.ast.allocator)),
-            Expression::TSNonNullExpression(e) => Some(e.expression.take_in(self.ast.allocator)),
-            Expression::TSInstantiationExpression(e) => {
-                Some(e.expression.take_in(self.ast.allocator))
-            }
+            Expression::TSAsExpression(e) => Some(e.expression.take_in(&self.ast)),
+            Expression::TSSatisfiesExpression(e) => Some(e.expression.take_in(&self.ast)),
+            Expression::TSTypeAssertion(e) => Some(e.expression.take_in(&self.ast)),
+            Expression::TSNonNullExpression(e) => Some(e.expression.take_in(&self.ast)),
+            Expression::TSInstantiationExpression(e) => Some(e.expression.take_in(&self.ast)),
             Expression::BooleanLiteral(_)
             | Expression::NullLiteral(_)
             | Expression::NumericLiteral(_)
@@ -317,7 +318,8 @@ impl<'a> VisitMut<'a> for RuntimeSurvivalProjection<'a> {
             | Expression::StringLiteral(_)
             | Expression::TemplateLiteral(_)
             | Expression::Identifier(_)
-            | Expression::MetaProperty(_)
+            | Expression::ImportMeta(_)
+            | Expression::NewTarget(_)
             | Expression::Super(_)
             | Expression::ArrayExpression(_)
             | Expression::ArrowFunctionExpression(_)

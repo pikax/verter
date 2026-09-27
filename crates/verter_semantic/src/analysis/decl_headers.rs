@@ -21,9 +21,10 @@
 use oxc_ast::ast::{
     Class, ClassElement, Comment, Declaration, ExportDefaultDeclarationKind, Expression,
     MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, Program, PropertyKey, Statement,
-    TSEnumDeclaration, TSInterfaceDeclaration, TSModuleBlock, TSModuleDeclaration,
-    TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature, TSType, TSTypeAliasDeclaration,
-    TSTypeParameterDeclaration, VariableDeclarationKind, VariableDeclarator,
+    TSEnumDeclaration, TSExternalModuleDeclaration, TSInterfaceDeclaration, TSModuleBlock,
+    TSNamespaceDeclaration, TSNamespaceDeclarationBody, TSSignature, TSType,
+    TSTypeAliasDeclaration, TSTypeName, TSTypeParameterDeclaration, VariableDeclarationKind,
+    VariableDeclarator,
 };
 use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -106,35 +107,47 @@ pub struct NamespaceBlockRecord {
 }
 
 /// Whether a namespace body is instantiated ([`NamespaceBlockRecord::instantiated`]).
-pub(crate) fn module_body_instantiated(body: &TSModuleDeclarationBody<'_>) -> bool {
+pub(crate) fn module_body_instantiated(body: &TSNamespaceDeclarationBody<'_>) -> bool {
     match body {
-        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
-            inner.body.as_ref().is_some_and(module_body_instantiated)
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
+            module_body_instantiated(&inner.body)
         }
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
-            block.body.iter().any(statement_instantiates)
-        }
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => module_block_instantiated(block),
     }
+}
+
+/// Whether a module block is instantiated ([`NamespaceBlockRecord::instantiated`]).
+pub(crate) fn module_block_instantiated(block: &TSModuleBlock<'_>) -> bool {
+    block.body.iter().any(statement_instantiates)
+}
+
+/// Whether an external module declaration (`declare module "x"`) is
+/// instantiated: a bodiless one is not.
+fn external_module_instantiated(module: &TSExternalModuleDeclaration<'_>) -> bool {
+    module
+        .body
+        .as_ref()
+        .is_some_and(|block| module_block_instantiated(block))
 }
 
 fn statement_instantiates(statement: &Statement<'_>) -> bool {
     match statement {
         Statement::TSInterfaceDeclaration(_) | Statement::TSTypeAliasDeclaration(_) => false,
         Statement::TSEnumDeclaration(enum_decl) => !enum_decl.r#const,
-        Statement::TSModuleDeclaration(module) => {
-            module.body.as_ref().is_some_and(module_body_instantiated)
-        }
-        Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
-            Some(
-                Declaration::TSInterfaceDeclaration(_) | Declaration::TSTypeAliasDeclaration(_),
-            ) => false,
-            Some(Declaration::TSEnumDeclaration(enum_decl)) => !enum_decl.r#const,
-            Some(Declaration::TSModuleDeclaration(module)) => {
-                module.body.as_ref().is_some_and(module_body_instantiated)
+        Statement::TSNamespaceDeclaration(module) => module_body_instantiated(&module.body),
+        Statement::TSExternalModuleDeclaration(module) => external_module_instantiated(module),
+        Statement::ExportDeclaration(export) => match &export.declaration {
+            Declaration::TSInterfaceDeclaration(_) | Declaration::TSTypeAliasDeclaration(_) => {
+                false
             }
-            Some(_) => true,
-            None => false,
+            Declaration::TSEnumDeclaration(enum_decl) => !enum_decl.r#const,
+            Declaration::TSNamespaceDeclaration(module) => module_body_instantiated(&module.body),
+            Declaration::TSExternalModuleDeclaration(module) => {
+                external_module_instantiated(module)
+            }
+            _ => true,
         },
+        Statement::ExportNamedDeclaration(_) | Statement::ExportFromDeclaration(_) => false,
         _ => true,
     }
 }
@@ -804,8 +817,11 @@ fn index_top_level_statement(
         Statement::TSInterfaceDeclaration(decl) => {
             index_interface(decl, decl.id.name.as_str(), ctx, &mut index.type_headers);
         }
-        Statement::TSModuleDeclaration(module) => {
+        Statement::TSNamespaceDeclaration(module) => {
             index_module_declaration(module, ctx, index, None, ctx.declaration_file);
+        }
+        Statement::TSExternalModuleDeclaration(module) => {
+            index_external_module_declaration(module, ctx, index);
         }
         Statement::TSGlobalDeclaration(global) => {
             index_augmentation_block(&global.body, ctx, index, &AugmentationScopeKind::Global);
@@ -824,10 +840,9 @@ fn index_top_level_statement(
         Statement::TSEnumDeclaration(enum_decl) => {
             index_enum(enum_decl, enum_decl.id.name.as_str(), ctx, index);
         }
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(ref decl) = export.declaration {
-                index_declaration(decl, ctx, index);
-            }
+        Statement::ExportDeclaration(export) => {
+            let decl = &export.declaration;
+            index_declaration(decl, ctx, index);
         }
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
@@ -886,8 +901,11 @@ fn index_declaration(
         Declaration::TSInterfaceDeclaration(iface) => {
             index_interface(iface, iface.id.name.as_str(), ctx, &mut index.type_headers);
         }
-        Declaration::TSModuleDeclaration(module) => {
+        Declaration::TSNamespaceDeclaration(module) => {
             index_module_declaration(module, ctx, index, None, ctx.declaration_file);
+        }
+        Declaration::TSExternalModuleDeclaration(module) => {
+            index_external_module_declaration(module, ctx, index);
         }
         Declaration::TSGlobalDeclaration(global) => {
             index_augmentation_block(&global.body, ctx, index, &AugmentationScopeKind::Global);
@@ -1003,31 +1021,30 @@ fn index_enum(
 /// Mirror of `extract_module_declaration`: a string-literal module name is
 /// an ambient augmentation scope; an identifier name is a namespace whose
 /// inner type declarations register under qualified `Ns.Name` names.
+fn index_external_module_declaration(
+    decl: &TSExternalModuleDeclaration<'_>,
+    ctx: HeaderStatementContext<'_>,
+    index: &mut DeclHeaderIndex,
+) {
+    if let Some(block) = decl.body.as_ref() {
+        let scope = AugmentationScopeKind::Module(decl.id.value.to_string());
+        index_augmentation_block(block, ctx, index, &scope);
+    }
+}
+
+/// The identifier-named half of [`index_external_module_declaration`].
 fn index_module_declaration(
-    decl: &TSModuleDeclaration<'_>,
+    decl: &TSNamespaceDeclaration<'_>,
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     prefix: Option<&str>,
     ambient: bool,
 ) {
-    if let TSModuleDeclarationName::StringLiteral(spec) = &decl.id {
-        if let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = decl.body.as_ref() {
-            let scope = AugmentationScopeKind::Module(spec.value.to_string());
-            index_augmentation_block(block, ctx, index, &scope);
-        }
-        return;
-    }
-
-    let module_name = match &decl.id {
-        TSModuleDeclarationName::Identifier(id) => match prefix {
-            Some(prefix) => format!("{prefix}.{}", id.name),
-            None => id.name.to_string(),
-        },
-        TSModuleDeclarationName::StringLiteral(_) => return,
+    let module_name = match prefix {
+        Some(prefix) => format!("{prefix}.{}", decl.id.name),
+        None => decl.id.name.to_string(),
     };
-    let Some(body) = decl.body.as_ref() else {
-        return;
-    };
+    let body = &decl.body;
     let ambient = ambient || decl.declare;
 
     // Record the namespace BLOCK itself (EMPTY blocks included — a
@@ -1042,10 +1059,10 @@ fn index_module_declaration(
     });
 
     match body {
-        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
             index_module_declaration(inner, ctx, index, Some(module_name.as_str()), ambient);
         }
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
             let implicit_export = ambient && !statements_have_export_declarations(&block.body);
             for stmt in &block.body {
                 index_namespaced_statement(
@@ -1109,24 +1126,24 @@ fn index_namespaced_statement(
                 index.namespace_private_members.insert(ctx.key(&name));
             }
         }
-        Statement::TSModuleDeclaration(module) => {
+        Statement::TSNamespaceDeclaration(module) => {
             if !implicit_export {
-                if let TSModuleDeclarationName::Identifier(id) = &module.id {
-                    index
-                        .namespace_private_members
-                        .insert(ctx.key(&format!("{namespace}.{}", id.name)));
-                }
+                index
+                    .namespace_private_members
+                    .insert(ctx.key(&format!("{namespace}.{}", module.id.name)));
             }
             index_module_declaration(module, ctx, index, Some(namespace), ambient);
+        }
+        Statement::TSExternalModuleDeclaration(module) => {
+            index_external_module_declaration(module, ctx, index);
         }
         // Export-only: a DIRECT (non-exported) value declaration is private to
         // a non-ambient namespace body and is NOT indexed. The exported path
         // below (`export const VERSION = …` → `index_namespaced_declaration`)
         // registers a qualified value member.
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(ref decl) = export.declaration {
-                index_namespaced_declaration(decl, ctx, index, namespace, ambient);
-            }
+        Statement::ExportDeclaration(export) => {
+            let decl = &export.declaration;
+            index_namespaced_declaration(decl, ctx, index, namespace, ambient);
         }
         Statement::VariableDeclaration(var_decl) if implicit_export => {
             for decl in &var_decl.declarations {
@@ -1168,8 +1185,11 @@ fn index_namespaced_declaration(
                 index_named_class(class, &name, ctx, index);
             }
         }
-        Declaration::TSModuleDeclaration(module) => {
+        Declaration::TSNamespaceDeclaration(module) => {
             index_module_declaration(module, ctx, index, Some(namespace), ambient);
+        }
+        Declaration::TSExternalModuleDeclaration(module) => {
+            index_external_module_declaration(module, ctx, index);
         }
         Declaration::TSEnumDeclaration(enum_decl) => {
             let name = format!("{namespace}.{}", enum_decl.id.name);
@@ -1253,13 +1273,13 @@ fn vue_ignored_heritage_arms(
     let mut ignored = Vec::new();
 
     for heritage in &decl.extends {
-        if !is_lowerable_heritage_expression(&heritage.expression) {
+        if !is_lowerable_heritage_type_name(&heritage.type_name) {
             continue;
         }
-        if matches!(heritage.expression, Expression::Identifier(_))
+        if matches!(heritage.type_name, TSTypeName::IdentifierReference(_))
             && ctx
                 .vue_ignore_attachment_starts
-                .contains(&heritage.expression.span().start)
+                .contains(&heritage.type_name.span().start)
         {
             ignored.push(lowered_arm_ordinal);
         }
@@ -1271,20 +1291,20 @@ fn vue_ignored_heritage_arms(
     ignored
 }
 
-fn is_lowerable_heritage_expression(expression: &Expression<'_>) -> bool {
-    match expression {
-        Expression::Identifier(_) => true,
-        Expression::StaticMemberExpression(member) => {
-            let mut object = &member.object;
+fn is_lowerable_heritage_type_name(name: &TSTypeName<'_>) -> bool {
+    match name {
+        TSTypeName::IdentifierReference(_) => true,
+        TSTypeName::QualifiedName(qualified) => {
+            let mut left = &qualified.left;
             loop {
-                match object {
-                    Expression::Identifier(_) => return true,
-                    Expression::StaticMemberExpression(parent) => object = &parent.object,
-                    _ => return false,
+                match left {
+                    TSTypeName::IdentifierReference(_) => return true,
+                    TSTypeName::QualifiedName(parent) => left = &parent.left,
+                    TSTypeName::ThisExpression(_) => return false,
                 }
             }
         }
-        _ => false,
+        TSTypeName::ThisExpression(_) => false,
     }
 }
 
@@ -1340,9 +1360,14 @@ fn index_named_class(
     }
     // A heritage EXPRESSION's synthetic value (see
     // `class_heritage_value_name`), mirroring `collect_named_class`.
-    if let Some(heritage) = decl.super_class.as_ref().filter(|heritage| {
-        crate::analysis::type_eval_build::heritage_expression_name(heritage).is_none()
-    }) {
+    if let Some(heritage) = decl
+        .heritage
+        .as_ref()
+        .map(|heritage| &heritage.expression)
+        .filter(|heritage| {
+            crate::analysis::type_eval_build::heritage_expression_name(heritage).is_none()
+        })
+    {
         let span: Span = heritage.span().into();
         let entry = index
             .value_headers
@@ -1371,7 +1396,9 @@ fn index_named_class(
                 // A field initialized by a call's synthetic value (see
                 // `class_field_value_name`), mirroring `collect_named_class`.
                 if let (Some(field_name), Some(value)) = (
-                    crate::analysis::type_eval_build::class_field_value_name(name, prop),
+                    crate::analysis::type_eval_build::class_field_value_name(
+                        name, prop, ctx.source,
+                    ),
                     prop.value.as_ref(),
                 ) {
                     let span: Span = value.span().into();

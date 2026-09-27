@@ -11,7 +11,7 @@ fn parse_on_a_small_stack(source: String) -> (usize, usize) {
         .spawn(move || {
             let allocator = Allocator::default();
             let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
-            (parsed.program.body.len(), parsed.errors.len())
+            (parsed.program.body.len(), parsed.diagnostics.len())
         })
         .expect("spawn the parsing thread")
         .join()
@@ -20,12 +20,19 @@ fn parse_on_a_small_stack(source: String) -> (usize, usize) {
 
 /// Every way syntax nests, 10,000 levels deep, parses on a 1 MiB thread:
 /// the parse runs on a stack its source's length cannot exhaust. oxc's own
-/// parser overflows a 1 MiB stack from 274 (`Box<…>`, unoptimized) to
-/// 3,712 (`!`, optimized) levels
+/// parser overflows a 1 MiB stack from 298 (an object literal, unoptimized) to
+/// 9,000 (`!`, optimized) levels
 /// (`docs/evidence/signature-kernel/oxc-deep-parse.md`).
 #[test]
 fn every_form_nested_10000_deep_parses_on_a_small_stack() {
-    let depth = 10_000;
+    for (form, source) in forms_nested(10_000) {
+        assert_eq!(parse_on_a_small_stack(source), (1, 0), "{form}");
+    }
+}
+
+/// Every way syntax nests, `depth` levels deep: each form's name and a
+/// one-statement source.
+fn forms_nested(depth: usize) -> [(&'static str, String); 10] {
     let wrap = |open: &str, close: &str| format!("{}1{}", open.repeat(depth), close.repeat(depth));
     let sources = [
         (
@@ -60,8 +67,56 @@ fn every_form_nested_10000_deep_parses_on_a_small_stack() {
             format!("{}{}", "{ ".repeat(depth), " }".repeat(depth)),
         ),
     ];
-    for (form, source) in sources {
-        assert_eq!(parse_on_a_small_stack(source), (1, 0), "{form}");
+    sources
+}
+
+/// Every way syntax nests, 10,000 levels deep, walks on a 1 MiB thread
+/// under each containment: oxc's `clone_in` and a `Visit` walk of the
+/// whole program, and of its one statement, each recurse once per level
+/// and run on a stack the source sizes. Without the containment a walk
+/// overflows the thread as the parse would.
+#[test]
+fn every_form_nested_10000_deep_walks_on_a_small_stack() {
+    use oxc_allocator::CloneIn;
+    use oxc_ast_visit::Visit;
+    use oxc_span::GetSpan;
+    #[derive(Default)]
+    struct Count(usize);
+    impl<'a> Visit<'a> for Count {
+        fn enter_node(&mut self, _kind: oxc_ast::AstKind<'a>) {
+            self.0 += 1;
+        }
+    }
+    for (form, source) in forms_nested(10_000) {
+        let walked = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                let allocator = Allocator::default();
+                let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
+                let program = &parsed.program;
+                let statement = &program.body[0];
+                let clones = Allocator::default();
+                let cloned =
+                    super::with_program_stack(program, || program.clone_in(&clones).body.len());
+                let mut whole = Count::default();
+                super::with_program_stack(program, || whole.visit_program(program));
+                let walks = super::ProgramWalkStack::new(program);
+                let mut node = Count::default();
+                walks.with_node_stack(statement.span(), || node.visit_statement(statement));
+                let mut text = Count::default();
+                super::with_span_stack(&source, statement.span(), || {
+                    text.visit_statement(statement)
+                });
+                (
+                    cloned,
+                    whole.0 > 10_000,
+                    node.0 == text.0 && node.0 >= 10_000,
+                )
+            })
+            .expect("spawn the walking thread")
+            .join()
+            .expect("the walks return");
+        assert_eq!(walked, (1, true, true), "{form}");
     }
 }
 
@@ -307,4 +362,366 @@ export default defineComponent({
 })
 "#;
     assert!(ts(source) < 40, "{}", ts(source));
+}
+
+/// oxc alone, on an ordinary 8 MiB thread with no containment: 10,000 nested
+/// type arguments.
+fn oxc_parses_10000_nested_type_arguments_on_an_8_mib_thread() -> bool {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let source = format!("type D = {}1{};", "Box<".repeat(10_000), ">".repeat(10_000));
+            let allocator = Allocator::default();
+            let parsed = oxc_parser::Parser::new(&allocator, &source, SourceType::ts()).parse();
+            !parsed.fatal_error && parsed.diagnostics.is_empty()
+        })
+        .expect("spawn the parsing thread")
+        .join()
+        .expect("the parse returns")
+}
+
+/// The environment variable that makes this test binary run the oxc-only
+/// parse itself ([`oxc_still_overflows_on_10000_nested_type_arguments`]).
+const OXC_CANARY_CHILD: &str = "VERTER_OXC_DEEP_PARSE_CANARY_CHILD";
+
+/// Canary: oxc's parser returns an AST for 10,000 nested type arguments on
+/// an ordinary 8 MiB thread. It does not today — its recursive descent
+/// overflows the thread and aborts the process
+/// (`docs/evidence/signature-kernel/oxc-deep-parse.md`), which is why every
+/// parse goes through [`Parser`]'s stack containment. When it passes, oxc
+/// parses this depth by itself and the containment can be revisited.
+#[test]
+#[ignore = "oxc parser recursion limit; passes once oxc parses this depth"]
+fn oxc_parses_deep_nesting_on_an_ordinary_stack() {
+    assert!(oxc_parses_10000_nested_type_arguments_on_an_8_mib_thread());
+}
+
+/// The same oxc-only parse, run in a child process so its abort is
+/// observed rather than fatal: it still overflows. The day this fails
+/// because the child succeeded, un-ignore
+/// [`oxc_parses_deep_nesting_on_an_ordinary_stack`] and revisit the
+/// containment.
+#[test]
+fn oxc_still_overflows_on_10000_nested_type_arguments() {
+    if std::env::var_os(OXC_CANARY_CHILD).is_some() {
+        oxc_parses_10000_nested_type_arguments_on_an_8_mib_thread();
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            "oxc_parse::tests::oxc_still_overflows_on_10000_nested_type_arguments",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(OXC_CANARY_CHILD, "1")
+        .output()
+        .expect("run the oxc-only parse in a child process");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && stderr.contains("has overflowed its stack"),
+        "oxc now parses 10,000 nested type arguments on an 8 MiB thread \
+         (status {:?}); un-ignore `oxc_parses_deep_nesting_on_an_ordinary_stack` \
+         and revisit the parse containment",
+        output.status
+    );
+}
+
+/// The walks of oxc's (a `Visit` or `VisitMut` entry, `clone_in`, the
+/// semantic builder) that recurse once per level of a syntax tree.
+const WALK_ENTRIES: [&str; 5] = [
+    ".clone_in(",
+    "SemanticBuilder::new(",
+    ".visit_",
+    "walk::walk_",
+    "walk_mut::walk_",
+];
+
+/// The containments a walk of oxc's runs under.
+const CONTAINMENTS: [&str; 6] = [
+    "with_program_stack",
+    "with_node_stack",
+    "with_ast_stack",
+    "with_source_stack",
+    "with_span_stack",
+    "with_nesting_stack",
+];
+
+/// `source` with its comments, strings and character literals blanked
+/// (their bytes turned to spaces), so its brackets are the code's.
+fn code_only(source: &str) -> Vec<u8> {
+    let bytes = source.as_bytes();
+    let mut out = bytes.to_vec();
+    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+        let to = to.min(out.len());
+        for byte in &mut out[from..to] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                let end = source[i..].find('\n').map_or(bytes.len(), |at| i + at);
+                blank(&mut out, i, end);
+                i = end;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let end = source[i + 2..]
+                    .find("*/")
+                    .map_or(bytes.len(), |at| i + 2 + at + 2);
+                blank(&mut out, i, end);
+                i = end;
+            }
+            b'r' if matches!(bytes.get(i + 1), Some(b'"' | b'#'))
+                && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_')) =>
+            {
+                let hashes = bytes[i + 1..].iter().take_while(|&&b| b == b'#').count();
+                if bytes.get(i + 1 + hashes) != Some(&b'"') {
+                    i += 1;
+                    continue;
+                }
+                let close = format!("\"{}", "#".repeat(hashes));
+                let body = i + 2 + hashes;
+                let end = source[body..]
+                    .find(&close)
+                    .map_or(bytes.len(), |at| body + at + close.len());
+                blank(&mut out, i, end);
+                i = end;
+            }
+            b'"' => {
+                let mut end = i + 1;
+                while end < bytes.len() && bytes[end] != b'"' {
+                    end += if bytes[end] == b'\\' { 2 } else { 1 };
+                }
+                blank(&mut out, i, end + 1);
+                i = end + 1;
+            }
+            b'\'' => {
+                // A character literal (`'x'`, `'\n'`, `'\u{..}'`); a lifetime
+                // has no closing quote.
+                let rest = &source[i + 1..];
+                let len = if rest.starts_with('\\') {
+                    rest.find('\'').filter(|&at| at > 1).map(|at| at + 1)
+                } else {
+                    rest.chars()
+                        .next()
+                        .filter(|c| rest[c.len_utf8()..].starts_with('\''))
+                        .map(|c| c.len_utf8() + 1)
+                };
+                match len {
+                    Some(len) => {
+                        blank(&mut out, i, i + 1 + len);
+                        i += 1 + len;
+                    }
+                    None => i += 1,
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// One production source file the guard reads: its code (comments,
+/// strings and character literals blanked) up to its inline test module.
+struct GuardFile {
+    path: std::path::PathBuf,
+    source: String,
+    code: Vec<u8>,
+}
+
+/// Whether the code at `at` in `files[file]` runs contained: inside a
+/// closure or argument of one of the [`CONTAINMENTS`] called in its own
+/// function; in a step of a walk (a `visit_…` method, entered only from a
+/// walk, as a call to one from anywhere else is itself an entry this guard
+/// checks); or in a helper every call of which in the workspace runs
+/// contained (a helper only walk steps or containments call; a private
+/// one's calls are its file's, a public one's the workspace's). `callers`
+/// holds the helpers being traced, so a recursive helper is not assumed to
+/// contain itself.
+fn contained(files: &[GuardFile], file: usize, at: usize, callers: &mut Vec<String>) -> bool {
+    let code = &files[file].code;
+    let (mut parens, mut braces) = (0usize, 0usize);
+    let mut i = at;
+    while i > 0 {
+        i -= 1;
+        match code[i] {
+            b')' => parens += 1,
+            b'(' if parens > 0 => parens -= 1,
+            b'(' => {
+                let callee = code[..i].trim_ascii_end();
+                if CONTAINMENTS
+                    .iter()
+                    .any(|name| callee.ends_with(name.as_bytes()))
+                {
+                    return true;
+                }
+            }
+            b'}' => braces += 1,
+            b'{' if braces > 0 => braces -= 1,
+            b'{' => {
+                // The body of the enclosing function ends the search.
+                let head_start = code[..i]
+                    .iter()
+                    .rposition(|&b| matches!(b, b';' | b'{' | b'}'))
+                    .map_or(0, |at| at + 1);
+                let head = String::from_utf8_lossy(&code[head_start..i]);
+                let public = head
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .any(|word| word == "pub");
+                let mut words = head
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .filter(|word| !word.is_empty());
+                if words.any(|word| word == "fn") {
+                    let Some(name) = words.next() else {
+                        return false;
+                    };
+                    if name.starts_with("visit_") {
+                        return true;
+                    }
+                    if callers.iter().any(|caller| caller == name) {
+                        return false;
+                    }
+                    callers.push(name.to_string());
+                    // A private helper is called only from its own file.
+                    let calls: Vec<(usize, usize)> = calls_of(files, name)
+                        .into_iter()
+                        .filter(|&(caller, _)| public || caller == file)
+                        .collect();
+                    let contained = !calls.is_empty()
+                        && calls
+                            .into_iter()
+                            .all(|(file, call)| contained(files, file, call, callers));
+                    callers.pop();
+                    return contained;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Where the workspace's production code uses a function named `name`: a
+/// call, or the function passed as a value (not where it defines or
+/// imports one).
+fn calls_of(files: &[GuardFile], name: &str) -> Vec<(usize, usize)> {
+    let mut calls = Vec::new();
+    for (file, guard_file) in files.iter().enumerate() {
+        let text = String::from_utf8_lossy(&guard_file.code);
+        for (at, _) in text.match_indices(name) {
+            let before = text[..at].chars().next_back();
+            let after = &text[at + name.len()..];
+            // The statement the name sits in, from the end of the one before.
+            let statement_start = text[..at].rfind([';', '}']).map_or(0, |at| at + 1);
+            let statement = text[statement_start..at].trim_start();
+            let imported = ["use ", "pub use ", "pub(crate) use ", "pub(super) use "]
+                .iter()
+                .any(|import| statement.starts_with(import));
+            if before.is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+                && !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                && !after.trim_start().starts_with('!')
+                && !text[..at].trim_end().ends_with("fn")
+                && !imported
+            {
+                calls.push((file, at));
+            }
+        }
+    }
+    calls
+}
+
+/// Every walk of oxc's in the workspace's crates runs under one of this
+/// module's containments: a walk recurses once per level of the tree it
+/// walks, and on a thread's fixed stack a deep enough tree overflows it.
+/// Test code walks on its own test thread and is not checked.
+#[test]
+fn no_crate_walks_oxc_syntax_around_the_containment() {
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the crates directory");
+    let mut files = Vec::new();
+    let mut stack = Vec::new();
+    for entry in std::fs::read_dir(crates)
+        .expect("read the crates directory")
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "verter_bench" || name == "verter_type_expr_oxc" {
+            continue;
+        }
+        stack.push(entry.path().join("src"));
+    }
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "tests" && !name.ends_with("_tests") && name != "oxc_parse" {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !name.ends_with(".rs")
+                || name == "tests.rs"
+                || name.ends_with("_tests.rs")
+                || name == "test_support.rs"
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read a source file");
+            let mut code = code_only(&source);
+            // An inline test module walks on its test thread.
+            if let Some(end) = String::from_utf8_lossy(&code).find("#[cfg(test)]\nmod ") {
+                code.truncate(end);
+            }
+            files.push(GuardFile { path, source, code });
+        }
+    }
+    let mut bypasses = Vec::new();
+    for (file, guard_file) in files.iter().enumerate() {
+        let visits = guard_file.source.contains("oxc_ast_visit");
+        let text = String::from_utf8_lossy(&guard_file.code);
+        for walk in WALK_ENTRIES {
+            for (at, _) in text.match_indices(walk) {
+                // A visitor steps its own walk through `self`.
+                let step = match walk {
+                    ".visit_" => text[..at]
+                        .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .next()
+                        .is_some_and(|receiver| receiver == "self"),
+                    "walk::walk_" | "walk_mut::walk_" => text[at..]
+                        .split_once('(')
+                        .is_some_and(|(_, arguments)| arguments.trim_start().starts_with("self")),
+                    _ => false,
+                };
+                let visitor_walk = walk != ".clone_in(" && walk != "SemanticBuilder::new(";
+                if step || (visitor_walk && !visits) {
+                    continue;
+                }
+                if !contained(&files, file, at, &mut Vec::new()) {
+                    let line = text[..at].matches('\n').count();
+                    bypasses.push(format!(
+                        "{}:{}: {}",
+                        guard_file.path.display(),
+                        line + 1,
+                        guard_file.source.lines().nth(line).unwrap_or("").trim()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        bypasses.is_empty(),
+        "walk oxc syntax under `with_program_stack`, `with_node_stack`, `with_ast_stack`, \
+         `with_source_stack`, `with_span_stack` or `with_nesting_stack` ({} sites):\n{}",
+        bypasses.len(),
+        bypasses.join("\n")
+    );
 }

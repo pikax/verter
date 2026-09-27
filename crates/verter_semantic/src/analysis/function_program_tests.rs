@@ -11,9 +11,9 @@ fn index_of(source: &str) -> FunctionProgramIndex {
     let source_type = oxc_span::SourceType::ts();
     let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
     assert!(
-        ret.errors.is_empty(),
+        ret.diagnostics.is_empty(),
         "fixture must parse: {:?}",
-        ret.errors
+        ret.diagnostics
     );
     let owners = TopLevelOwnerTable::ordinary_file(ret.program.body.len());
     build_function_program_index(&ret.program, source, &owners, Arc::from("/test.ts"))
@@ -330,8 +330,10 @@ fn flow_binding_map_is_bijective_for_value_bindings() {
     let Statement::FunctionDeclaration(function) = &parsed.program.body[0] else {
         panic!("function fixture");
     };
-    let skeleton =
-        build_function_body_skeleton(&FunctionBodySource::from_function(function).unwrap());
+    let skeleton = build_function_body_skeleton(
+        &FunctionBodySource::from_function(function).unwrap(),
+        source,
+    );
     let map =
         FlowBindingMap::build(&skeleton, &entry.bindings, &entry.key, entry.span.start).unwrap();
     assert_eq!(map.value_count(), entry.bindings.len());
@@ -1347,9 +1349,9 @@ namespace N {
     let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
         .parse();
     assert!(
-        ret.errors.is_empty(),
+        ret.diagnostics.is_empty(),
         "fixture must parse: {:?}",
-        ret.errors
+        ret.diagnostics
     );
     let owners = TopLevelOwnerTable::ordinary_file(ret.program.body.len());
     let index = build_function_program_index(&ret.program, source, &owners, Arc::from("/test.ts"));
@@ -1366,7 +1368,7 @@ namespace N {
 
     let inner = entry_of(&index, "N.M.make");
     assert_eq!(
-        inner.locator.descent.as_ref(),
+        inner.locator.descent.to_vec().as_slice(),
         &[
             FunctionDescentStep::NamespaceMember {
                 statement_ordinal: 3
@@ -1474,7 +1476,7 @@ fn retained_function_addresses_preserve_exact_locator_metadata() {
     let parsed =
         verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
             .parse();
-    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let (index, nodes) = build_function_program_index_with_nodes(
         &parsed.program,
@@ -1617,4 +1619,35 @@ fn every_class_records_the_members_its_body_declares() {
         None,
         "a plain parameter declares no property"
     );
+}
+
+/// Callables nested 10,000 deep index on a 1 MiB thread: discovery walks
+/// the nest from an explicit stack of the bodies it is in, and each nested
+/// callable's locator extends its parent's descent by one shared step, so
+/// the nest's locators cost a step each, not a copy of the path above.
+#[test]
+fn callables_nested_10000_deep_index_on_a_small_stack() {
+    let (entries, deepest, shared) = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let source = format!("export const v = {}1;", "() => ".repeat(10_000));
+            let index = index_of(&source);
+            let deepest = index
+                .entries
+                .iter()
+                .map(|entry| entry.locator.descent.len())
+                .max()
+                .unwrap_or(0);
+            let shared = index.entries.iter().all(|entry| {
+                entry.lexical_parent.as_deref().is_none_or(|parent| {
+                    let parent = index.get(parent).expect("the parent is indexed").entry();
+                    entry.locator.descent.extends(&parent.locator.descent)
+                })
+            });
+            (index.entries.len(), deepest, shared)
+        })
+        .expect("spawn the indexing thread")
+        .join()
+        .expect("the index builds");
+    assert_eq!((entries, deepest, shared), (10_000, 10_000, true));
 }

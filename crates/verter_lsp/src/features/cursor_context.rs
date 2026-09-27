@@ -1267,7 +1267,7 @@ pub fn classify_expression_context(tsx_content: &str, tsx_offset: usize) -> Expr
     let parse_result =
         verter_parser::oxc_parse::Parser::new(&allocator, &wrapped, source_type).parse();
 
-    if parse_result.panicked {
+    if parse_result.fatal_error {
         return ExpressionContext::Unknown;
     }
 
@@ -1519,16 +1519,12 @@ fn classify_expression(expr: &oxc_ast::ast::Expression<'_>, offset: usize) -> Ex
         // Arrow function body
         Expression::ArrowFunctionExpression(arrow) => {
             // Check if it has an expression body (single expression, no braces)
-            if !arrow.expression {
+            let Some(expression) = arrow.get_expression() else {
                 return ExpressionContext::IdentifierExpected;
-            }
-            if let Some(oxc_ast::ast::Statement::ExpressionStatement(expr_stmt)) =
-                arrow.body.statements.first()
-            {
-                let span = expr_stmt.expression.span();
-                if offset >= span.start as usize && offset <= span.end as usize {
-                    return classify_expression(&expr_stmt.expression, offset);
-                }
+            };
+            let span = expression.span();
+            if offset >= span.start as usize && offset <= span.end as usize {
+                return classify_expression(expression, offset);
             }
         }
 

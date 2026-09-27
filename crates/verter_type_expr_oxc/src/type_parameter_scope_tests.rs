@@ -13,7 +13,7 @@ use super::lower_ts_type;
 fn lowered_alias(source: &str) -> TypeExpr {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(parsed.errors.is_empty(), "the fixture parses");
+    assert!(parsed.diagnostics.is_empty(), "the fixture parses");
     let Some(Statement::TSTypeAliasDeclaration(alias)) = parsed.program.body.last() else {
         panic!("the fixture ends in a type alias");
     };

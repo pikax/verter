@@ -9,6 +9,7 @@ use oxc_semantic::{
     AstNodes, NodeId, ReferenceId, ScopeId, Scoping, Semantic, SymbolFlags, SymbolId,
 };
 use oxc_span::{GetSpan, Span};
+use verter_parser::utils::oxc::script::export_parts::NamedExportParts;
 
 use super::canonize::{kind_name_of_declaration, module_export_name, refused};
 use super::{BindingKey, BindingKind, Canon};
@@ -187,13 +188,18 @@ fn collect_exported_symbols(semantic: &Semantic) -> BTreeSet<SymbolId> {
     let mut out = BTreeSet::new();
     for stmt in &semantic.nodes().program().body {
         match stmt {
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(declaration) = &export.declaration {
+            Statement::ExportDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_) => {
+                let Some(export) = NamedExportParts::of_statement(stmt) else {
+                    continue;
+                };
+                if let Some(declaration) = export.declaration {
                     collect_declaration_bindings(declaration, &mut |symbol_id| {
                         out.insert(symbol_id);
                     });
                 }
-                for specifier in &export.specifiers {
+                for specifier in export.specifiers {
                     match &specifier.local {
                         ModuleExportName::IdentifierReference(reference) => {
                             if let Some(symbol_id) = reference

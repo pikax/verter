@@ -326,7 +326,7 @@ fn parse_declarations(text: &str) -> Result<(), String> {
     // A `.d.ts` module; `from_path` only fails on unknown extensions.
     let source_type = SourceType::from_path("module.d.ts").unwrap_or_default();
     let ret = Parser::new(&allocator, text, source_type).parse();
-    match ret.errors.first() {
+    match ret.diagnostics.first() {
         Some(error) => Err(format!("parse error: {}", error.message)),
         None => Ok(()),
     }

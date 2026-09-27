@@ -166,10 +166,10 @@ fn assert_parses(code: &str, label: &str) {
         verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, oxc_span::SourceType::mjs())
             .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "{label}: generated JS failed to parse: {:?}\n--- code ---\n{code}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>()

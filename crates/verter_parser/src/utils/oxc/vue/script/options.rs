@@ -85,10 +85,8 @@ pub fn process_options_statement<'a>(
         // export also introduces a real module-scope value, so retain the same
         // declaration fact as its non-exported spelling. Downstream consumers
         // must not have to infer lexical bindings from export syntax.
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(declaration) = &export.declaration {
-                record_exported_declaration(declaration, items);
-            }
+        Statement::ExportDeclaration(export) => {
+            record_exported_declaration(&export.declaration, items);
         }
         Statement::ExportAllDeclaration(_) => {}
 
@@ -115,7 +113,8 @@ fn record_exported_declaration<'a>(
         Declaration::TSTypeAliasDeclaration(_)
         | Declaration::TSInterfaceDeclaration(_)
         | Declaration::TSEnumDeclaration(_)
-        | Declaration::TSModuleDeclaration(_)
+        | Declaration::TSExternalModuleDeclaration(_)
+        | Declaration::TSNamespaceDeclaration(_)
         | Declaration::TSImportEqualsDeclaration(_)
         | Declaration::TSGlobalDeclaration(_) => {}
     }
@@ -356,25 +355,17 @@ fn process_setup_value<'a>(
             if arrow.r#async {
                 *is_async = true;
             }
-            // Arrow function body is always a FunctionBody struct
-            // If arrow.expression is true, it's a single expression body
-            if arrow.expression {
-                // Expression body - no statements to process
-                None
-            } else {
+            if let Some(body) = arrow.get_function_body() {
                 // Block body with statements
                 let mut setup_ctx = SetupContext::new();
-                process_setup_statements(
-                    &arrow.body.statements,
-                    ctx,
-                    &mut setup_ctx,
-                    items,
-                    errors,
-                );
+                process_setup_statements(&body.statements, ctx, &mut setup_ctx, items, errors);
                 if setup_ctx.is_async {
                     *is_async = true;
                 }
-                Some(Span::from(arrow.body.span))
+                Some(Span::from(body.span))
+            } else {
+                // Expression body - no statements to process
+                None
             }
         }
         _ => None,
@@ -456,19 +447,15 @@ fn extract_data_return_keys(value: &Expression<'_>, bindings: &mut Vec<(Span, Bi
         }
         // data: () => ({ ... })
         Expression::ArrowFunctionExpression(arrow) => {
-            if arrow.expression {
-                // Expression body: the first statement is the expression
-                for stmt in &arrow.body.statements {
-                    if let Statement::ExpressionStatement(es) = stmt {
-                        // Unwrap parenthesized: (({...}))
-                        let inner = unwrap_parens(&es.expression);
-                        if let Expression::ObjectExpression(obj) = inner {
-                            extract_ident_keys_from_object(obj, BindingType::Data, bindings);
-                        }
-                    }
+            if let Some(expression) = arrow.get_expression() {
+                // Expression body
+                // Unwrap parenthesized: (({...}))
+                let inner = unwrap_parens(expression);
+                if let Expression::ObjectExpression(obj) = inner {
+                    extract_ident_keys_from_object(obj, BindingType::Data, bindings);
                 }
-            } else {
-                extract_return_object_keys(&arrow.body.statements, BindingType::Data, bindings);
+            } else if let Some(body) = arrow.get_function_body() {
+                extract_return_object_keys(&body.statements, BindingType::Data, bindings);
             }
         }
         _ => {}

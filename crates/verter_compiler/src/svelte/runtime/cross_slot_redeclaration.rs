@@ -105,15 +105,15 @@ impl ModuleSlotBindings {
                 // `export`-wrapped declarations still bind their names in the module
                 // scope (oracle-probed: `export const z` + an instance `import { z }`
                 // is `declaration_duplicate`; `export var v` stays `var`-exempt).
-                Statement::ExportNamedDeclaration(export) => {
-                    if !matches!(export.export_kind, ImportOrExportKind::Value) {
+                Statement::ExportDeclaration(export) => {
+                    if !matches!(export.export_kind(), ImportOrExportKind::Value) {
                         continue;
                     }
                     match &export.declaration {
-                        Some(Declaration::VariableDeclaration(decl)) => {
+                        Declaration::VariableDeclaration(decl) => {
                             collect_variable_names(decl, &mut names);
                         }
-                        Some(Declaration::FunctionDeclaration(func)) => {
+                        Declaration::FunctionDeclaration(func) => {
                             if func.body.is_none() {
                                 continue;
                             }
@@ -121,7 +121,7 @@ impl ModuleSlotBindings {
                                 names.push((id.name.to_string(), ModuleBindingKind::Lexical));
                             }
                         }
-                        Some(Declaration::ClassDeclaration(class)) => {
+                        Declaration::ClassDeclaration(class) => {
                             if class.declare {
                                 continue;
                             }
@@ -332,8 +332,8 @@ fn first_conflicting_declarator(
     for stmt in &program.body {
         let decl = match stmt {
             Statement::VariableDeclaration(decl) => decl,
-            Statement::ExportNamedDeclaration(export) => match &export.declaration {
-                Some(Declaration::VariableDeclaration(decl)) => decl,
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::VariableDeclaration(decl) => decl,
                 _ => continue,
             },
             _ => continue,

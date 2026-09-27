@@ -23,7 +23,7 @@ export interface Props<T extends Bound = Default> extends NS.Base<Arg> {
 }
 "#;
     let parsed = parse(source);
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let owner = TopLevelOwnerId::module(7);
     let rows = collect_statement_dependency_names(&parsed.program.body[0], owner);
     assert_eq!(rows.len(), 1);

@@ -282,7 +282,7 @@ fn extract_vfor_bindings_internal(
         // outside the source expression, so partition here by name: non-ignored
         // names feed liveness, ignored (template-scope) names feed the
         // scope-local reference set for the slot-flag `hasScopeRef` decision.
-        for name in collect_expression_free_refs(right) {
+        for name in collect_expression_free_refs(right, input) {
             if ignored.contains(name.as_bytes()) {
                 scope_local_reference_names.push(name.to_string());
             } else {

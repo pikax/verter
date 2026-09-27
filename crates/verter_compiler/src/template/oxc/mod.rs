@@ -207,8 +207,8 @@ fn parse_statement_list<'alloc>(
     verter_audit::attribute_n!(CompilerExpressionParse, source_slice.len());
     let ret = verter_parser::oxc_parse::Parser::new(alloc, source_slice, source_type).parse();
 
-    if ret.panicked || !ret.errors.is_empty() {
-        let mut errors = ret.errors;
+    if ret.fatal_error || !ret.diagnostics.is_empty() {
+        let mut errors = ret.diagnostics.into_vec();
         adjust_diagnostics_spans(&mut errors, span.start);
         return OxcParsedExpression {
             offset: span.start,

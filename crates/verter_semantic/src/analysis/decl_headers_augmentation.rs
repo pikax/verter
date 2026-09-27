@@ -108,47 +108,46 @@ pub(super) fn index_augmentation_block(
                     .or_default();
                 index_type_alias(alias, alias.id.name.as_str(), ctx, scoped);
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(decl) = export.declaration.as_ref() {
-                    match decl {
-                        Declaration::TSInterfaceDeclaration(iface) => {
-                            let scoped = index
-                                .augmentation_type_headers
-                                .entry(scope.clone())
-                                .or_default();
-                            index_interface(iface, iface.id.name.as_str(), ctx, scoped);
-                        }
-                        Declaration::TSTypeAliasDeclaration(alias) => {
-                            let scoped = index
-                                .augmentation_type_headers
-                                .entry(scope.clone())
-                                .or_default();
-                            index_type_alias(alias, alias.id.name.as_str(), ctx, scoped);
-                        }
-                        Declaration::VariableDeclaration(var_decl) => {
-                            let scoped = index
-                                .augmentation_value_headers
-                                .entry(scope.clone())
-                                .or_default();
-                            for d in &var_decl.declarations {
-                                index_variable(d, var_decl.kind, ctx, scoped, None);
-                            }
-                        }
-                        Declaration::FunctionDeclaration(func) => {
-                            let scoped = index
-                                .augmentation_value_headers
-                                .entry(scope.clone())
-                                .or_default();
-                            index_function(func, ctx, scoped);
-                        }
-                        Declaration::ClassDeclaration(cls) => {
-                            index_augmentation_class_value(cls, ctx, index, scope);
-                        }
-                        Declaration::TSModuleDeclaration(module) => {
-                            index_augmentation_module_declaration(module, ctx, index, scope, None);
-                        }
-                        _ => {}
+            Statement::ExportDeclaration(export) => {
+                let decl = &export.declaration;
+                match decl {
+                    Declaration::TSInterfaceDeclaration(iface) => {
+                        let scoped = index
+                            .augmentation_type_headers
+                            .entry(scope.clone())
+                            .or_default();
+                        index_interface(iface, iface.id.name.as_str(), ctx, scoped);
                     }
+                    Declaration::TSTypeAliasDeclaration(alias) => {
+                        let scoped = index
+                            .augmentation_type_headers
+                            .entry(scope.clone())
+                            .or_default();
+                        index_type_alias(alias, alias.id.name.as_str(), ctx, scoped);
+                    }
+                    Declaration::VariableDeclaration(var_decl) => {
+                        let scoped = index
+                            .augmentation_value_headers
+                            .entry(scope.clone())
+                            .or_default();
+                        for d in &var_decl.declarations {
+                            index_variable(d, var_decl.kind, ctx, scoped, None);
+                        }
+                    }
+                    Declaration::FunctionDeclaration(func) => {
+                        let scoped = index
+                            .augmentation_value_headers
+                            .entry(scope.clone())
+                            .or_default();
+                        index_function(func, ctx, scoped);
+                    }
+                    Declaration::ClassDeclaration(cls) => {
+                        index_augmentation_class_value(cls, ctx, index, scope);
+                    }
+                    Declaration::TSNamespaceDeclaration(module) => {
+                        index_augmentation_module_declaration(module, ctx, index, scope, None);
+                    }
+                    _ => {}
                 }
             }
             Statement::VariableDeclaration(var_decl) => {
@@ -177,7 +176,7 @@ pub(super) fn index_augmentation_block(
             // `extract_augmentation_module_declaration` (the body builder); the
             // two MUST agree on the qualified key so `has_global_augmentation`
             // and the lazy body memo resolve the same `(scope, name)` identity.
-            Statement::TSModuleDeclaration(module) => {
+            Statement::TSNamespaceDeclaration(module) => {
                 index_augmentation_module_declaration(module, ctx, index, scope, None);
             }
             _ => {}
@@ -190,22 +189,17 @@ pub(super) fn index_augmentation_block(
 /// members under their qualified `Ns.Member` names in the augmentation
 /// inventory. A string-literal module name nested here contributes nothing.
 fn index_augmentation_module_declaration(
-    decl: &TSModuleDeclaration<'_>,
+    decl: &TSNamespaceDeclaration<'_>,
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     scope: &AugmentationScopeKind,
     prefix: Option<&str>,
 ) {
-    let namespace = match &decl.id {
-        TSModuleDeclarationName::Identifier(id) => match prefix {
-            Some(prefix) => format!("{prefix}.{}", id.name),
-            None => id.name.to_string(),
-        },
-        TSModuleDeclarationName::StringLiteral(_) => return,
+    let namespace = match prefix {
+        Some(prefix) => format!("{prefix}.{}", decl.id.name),
+        None => decl.id.name.to_string(),
     };
-    let Some(body) = decl.body.as_ref() else {
-        return;
-    };
+    let body = &decl.body;
     if matches!(scope, AugmentationScopeKind::Module(_)) {
         index.augmentation_namespace_blocks.push((
             scope.clone(),
@@ -218,7 +212,7 @@ fn index_augmentation_module_declaration(
         ));
     }
     match body {
-        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
             index_augmentation_module_declaration(
                 inner,
                 ctx,
@@ -227,7 +221,7 @@ fn index_augmentation_module_declaration(
                 Some(namespace.as_str()),
             );
         }
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
             let implicit_export = !statements_have_export_declarations(&block.body);
             for stmt in &block.body {
                 index_namespaced_statement_into_augmentation(
@@ -269,17 +263,16 @@ fn index_namespaced_statement_into_augmentation(
                 .or_default();
             index_interface(iface, name.as_str(), ctx, scoped);
         }
-        Statement::TSModuleDeclaration(module) => {
+        Statement::TSNamespaceDeclaration(module) => {
             index_augmentation_module_declaration(module, ctx, index, scope, Some(namespace));
         }
         // An augmentation block is ambient, so a namespace body inside it
         // without an export declaration exports every member, written
         // `export` or not (mirror of an ambient namespace in
         // `index_namespaced_statement`).
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(ref decl) = export.declaration {
-                index_namespaced_declaration_into_augmentation(decl, ctx, index, namespace, scope);
-            }
+        Statement::ExportDeclaration(export) => {
+            let decl = &export.declaration;
+            index_namespaced_declaration_into_augmentation(decl, ctx, index, namespace, scope);
         }
         Statement::VariableDeclaration(var_decl) if implicit_export => {
             let scoped = index
@@ -326,7 +319,7 @@ fn index_namespaced_declaration_into_augmentation(
                 .or_default();
             index_interface(iface, name.as_str(), ctx, scoped);
         }
-        Declaration::TSModuleDeclaration(module) => {
+        Declaration::TSNamespaceDeclaration(module) => {
             index_augmentation_module_declaration(module, ctx, index, scope, Some(namespace));
         }
         Declaration::VariableDeclaration(var_decl) => {

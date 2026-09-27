@@ -845,7 +845,7 @@ mod tests {
         let parsed =
             verter_parser::oxc_parse::Parser::new(&alloc, source, oxc_span::SourceType::ts())
                 .parse();
-        assert!(!parsed.panicked, "route fixture must parse");
+        assert!(!parsed.fatal_error, "route fixture must parse");
         Arc::new(
             verter_parser::utils::oxc::script::route_inventory::build_script_route_inventory(
                 &parsed.program,

@@ -1707,6 +1707,22 @@ fn vue_tagged(
     }
 }
 
+/// A template node's projection, begun: its placeholder, its projected
+/// kind, and the children it projects, under `child_namespace`.
+struct StartedVueNode<'t> {
+    placeholder: MarkupNodeId,
+    parent: Option<MarkupNodeId>,
+    kind: MarkupNodeKind,
+    children: &'t [verter_parser::types::NodeId],
+    child_namespace: MarkupNamespace,
+}
+
+/// Project one template node and its subtree. Elements nest without bound,
+/// so a node's children project from an explicit stack of the elements
+/// waiting on them: each node takes its placeholder and projects its own
+/// kind first, its children follow in order, and its children range is
+/// written once they have all projected, so every id and range is the one
+/// a recursive projection wrote.
 fn project_vue_node(
     builder: &mut Builder<'_>,
     ast: &verter_parser::ast::types::TemplateAst,
@@ -1715,6 +1731,69 @@ fn project_vue_node(
     parent: Option<MarkupNodeId>,
     parent_namespace: MarkupNamespace,
 ) -> MarkupNodeId {
+    let mut waiting: Vec<(StartedVueNode<'_>, Vec<MarkupNodeId>)> = Vec::new();
+    let mut next = (id, parent, parent_namespace);
+    loop {
+        let (id, parent, namespace) = next;
+        let started = start_vue_node(builder, ast, id, root_block, parent, namespace);
+        let mut done = match started.children.first() {
+            Some(&first) => {
+                next = (first, Some(started.placeholder), started.child_namespace);
+                let projected = Vec::with_capacity(started.children.len());
+                waiting.push((started, projected));
+                continue;
+            }
+            None => finish_vue_node(builder, root_block, started, Vec::new()),
+        };
+        loop {
+            let Some((started, projected)) = waiting.last_mut() else {
+                return done;
+            };
+            projected.push(done);
+            if let Some(&child) = started.children.get(projected.len()) {
+                next = (child, Some(started.placeholder), started.child_namespace);
+                break;
+            }
+            let (started, projected) = waiting.pop().expect("the element just read");
+            done = finish_vue_node(builder, root_block, started, projected);
+        }
+    }
+}
+
+/// Write a begun node with its projected children's range.
+fn finish_vue_node(
+    builder: &mut Builder<'_>,
+    root_block: BlockId,
+    started: StartedVueNode<'_>,
+    children: Vec<MarkupNodeId>,
+) -> MarkupNodeId {
+    let StartedVueNode {
+        placeholder,
+        parent,
+        kind,
+        ..
+    } = started;
+    let start = builder.child_ids.len() as u32;
+    builder.child_ids.extend(children);
+    let end = builder.child_ids.len() as u32;
+    builder.nodes[placeholder.0 as usize] = MarkupSyntaxNode {
+        id: placeholder,
+        root_block,
+        parent,
+        children: start..end,
+        kind,
+    };
+    placeholder
+}
+
+fn start_vue_node<'t>(
+    builder: &mut Builder<'_>,
+    ast: &'t verter_parser::ast::types::TemplateAst,
+    id: verter_parser::types::NodeId,
+    root_block: BlockId,
+    parent: Option<MarkupNodeId>,
+    parent_namespace: MarkupNamespace,
+) -> StartedVueNode<'t> {
     use verter_parser::ast::types::AstNodeKind;
     let placeholder = MarkupNodeId(builder.nodes.len() as u32);
     builder.nodes.push(MarkupSyntaxNode {
@@ -1727,12 +1806,13 @@ fn project_vue_node(
         },
     });
     let node = &ast.nodes[id.0];
-    let (kind, children) = match &node.kind {
+    let (kind, children, child_namespace) = match &node.kind {
         AstNodeKind::Text(v) => (
             MarkupNodeKind::Text {
                 content_span: builder.raw_span(v.start, v.end),
             },
-            vec![],
+            &[][..],
+            parent_namespace,
         ),
         AstNodeKind::Comment(v) => (
             MarkupNodeKind::Comment {
@@ -1747,7 +1827,8 @@ fn project_vue_node(
                     SyntaxTermination::UnclosedEof
                 },
             },
-            vec![],
+            &[][..],
+            parent_namespace,
         ),
         AstNodeKind::Interpolation(v) => (
             MarkupNodeKind::Interpolation {
@@ -1762,7 +1843,8 @@ fn project_vue_node(
                     SyntaxTermination::UnclosedEof
                 },
             },
-            vec![],
+            &[][..],
+            parent_namespace,
         ),
         AstNodeKind::Element(v) => {
             let name_span = builder.raw_span(v.tag_open.start + 1, v.tag_open.name_end);
@@ -1825,19 +1907,6 @@ fn project_vue_node(
                 } else {
                     namespace
                 };
-            let children = child_parser_ids
-                .iter()
-                .map(|child| {
-                    project_vue_node(
-                        builder,
-                        ast,
-                        *child,
-                        root_block,
-                        Some(placeholder),
-                        child_namespace,
-                    )
-                })
-                .collect();
             let void_element = namespace == MarkupNamespace::Html && is_void_html(&lower_name);
             (
                 MarkupNodeKind::Element(MarkupElementSyntax {
@@ -1882,21 +1951,18 @@ fn project_vue_node(
                     },
                     attributes: Arc::from(attributes),
                 }),
-                children,
+                child_parser_ids,
+                child_namespace,
             )
         }
     };
-    let start = builder.child_ids.len() as u32;
-    builder.child_ids.extend(children);
-    let end = builder.child_ids.len() as u32;
-    builder.nodes[placeholder.0 as usize] = MarkupSyntaxNode {
-        id: placeholder,
-        root_block,
+    StartedVueNode {
+        placeholder,
         parent,
-        children: start..end,
         kind,
-    };
-    placeholder
+        children,
+        child_namespace,
+    }
 }
 
 fn is_void_html(name: &str) -> bool {

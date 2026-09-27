@@ -39,7 +39,11 @@ pub fn strip_types<'a>(source: &'a str, allocator: &'a Allocator) -> StripTypesR
     let parser = Parser::new(allocator, source, source_type);
     let parse_result = parser.parse();
 
-    let errors: Vec<String> = parse_result.errors.iter().map(|e| e.to_string()).collect();
+    let errors: Vec<String> = parse_result
+        .diagnostics
+        .iter()
+        .map(|e| e.to_string())
+        .collect();
 
     let mut code_transform = CodeTransform::new(source, allocator);
 

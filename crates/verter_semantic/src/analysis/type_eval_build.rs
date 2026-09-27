@@ -23,10 +23,11 @@ use oxc_ast::ast::{
     ArrowFunctionExpression, BinaryOperator, BindingPattern, Class, ClassElement, Declaration,
     ExportDefaultDeclarationKind, Expression, FormalParameters, Function, MethodDefinition,
     MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, Program, PropertyKey, PropertyKind,
-    Statement, TSAccessibility, TSEnumDeclaration, TSInterfaceDeclaration, TSModuleBlock,
-    TSModuleDeclaration, TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature,
-    TSThisParameter, TSType, TSTypeAliasDeclaration, TSTypeOperatorOperator,
-    TSTypeParameterDeclaration, UnaryOperator, VariableDeclarationKind, VariableDeclarator,
+    Statement, TSAccessibility, TSEnumDeclaration, TSExternalModuleDeclaration,
+    TSInterfaceDeclaration, TSModuleBlock, TSNamespaceDeclaration, TSNamespaceDeclarationBody,
+    TSSignature, TSThisParameter, TSType, TSTypeAliasDeclaration, TSTypeName,
+    TSTypeOperatorOperator, TSTypeParameterDeclaration, UnaryOperator, VariableDeclarationKind,
+    VariableDeclarator,
 };
 use oxc_ast_visit::Visit;
 use oxc_span::GetSpan;
@@ -564,8 +565,11 @@ fn collect_statement_parts(
                 decl.id.name.to_string(),
             ));
         }
-        Statement::TSModuleDeclaration(module) => {
+        Statement::TSNamespaceDeclaration(module) => {
             collect_module_declaration(module, source, out, None, declaration_file);
+        }
+        Statement::TSExternalModuleDeclaration(module) => {
+            collect_external_module_declaration(module, source, out);
         }
         Statement::TSGlobalDeclaration(global) => {
             collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
@@ -588,10 +592,9 @@ fn collect_statement_parts(
                 }
             }
         }
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(ref decl) = export.declaration {
-                collect_from_declaration(decl, source, declaration_file, out);
-            }
+        Statement::ExportDeclaration(export) => {
+            let decl = &export.declaration;
+            collect_from_declaration(decl, source, declaration_file, out);
         }
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
@@ -934,8 +937,11 @@ fn collect_from_declaration(
                 iface.id.name.to_string(),
             ));
         }
-        Declaration::TSModuleDeclaration(module) => {
+        Declaration::TSNamespaceDeclaration(module) => {
             collect_module_declaration(module, source, out, None, declaration_file);
+        }
+        Declaration::TSExternalModuleDeclaration(module) => {
+            collect_external_module_declaration(module, source, out);
         }
         Declaration::TSGlobalDeclaration(global) => {
             collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
@@ -1759,6 +1765,7 @@ pub(crate) fn class_heritage_value_name(class_name: &str) -> String {
 pub(crate) fn class_field_value_name(
     class_name: &str,
     prop: &oxc_ast::ast::PropertyDefinition<'_>,
+    source: &str,
 ) -> Option<String> {
     if prop.type_annotation.is_some() || matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
         return None;
@@ -1767,7 +1774,7 @@ pub(crate) fn class_field_value_name(
     if matches!(
         value,
         Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-    ) || !value_type_derives_from_a_call(value)
+    ) || !value_type_derives_from_a_call(value, source)
         || has_authoritative_value_assertion(value)
     {
         return None;
@@ -1775,6 +1782,19 @@ pub(crate) fn class_field_value_name(
     let key = crate::analysis::function_program::static_property_key_name(&prop.key)?;
     let side = if prop.r#static { "static" } else { "field" };
     Some(format!("{class_name}:{side}:{key}"))
+}
+
+/// [`heritage_expression_name`] for an interface heritage clause's type name
+/// (`A`, `A.B.C`); a `this`-rooted name has none.
+pub(crate) fn heritage_type_name(name: &TSTypeName<'_>) -> Option<String> {
+    match name {
+        TSTypeName::IdentifierReference(identifier) => Some(identifier.name.to_string()),
+        TSTypeName::QualifiedName(qualified) => {
+            let left = heritage_type_name(&qualified.left)?;
+            Some(format!("{left}.{}", qualified.right.name))
+        }
+        TSTypeName::ThisExpression(_) => None,
+    }
 }
 
 pub(crate) fn heritage_expression_name(expression: &Expression<'_>) -> Option<String> {
@@ -1819,7 +1839,7 @@ fn lower_named_interface_parts(
         // the own-member object pushed after the loop.
         let mut parts = Vec::with_capacity(decl.extends.len() + 1);
         for heritage in &decl.extends {
-            let Some(base_name) = heritage_expression_name(&heritage.expression) else {
+            let Some(base_name) = heritage_type_name(&heritage.type_name) else {
                 continue;
             };
             let base_args: Vec<TypeExpr> = heritage
@@ -1875,12 +1895,10 @@ fn unique_symbol_members_of_interface_body(decl: &TSInterfaceDeclaration<'_>) ->
 /// declaration file, or inside a `declare namespace`. An ambient namespace
 /// body without an export declaration is an export context — it exports each
 /// member, written `export` or not.
-fn collect_module_declaration(
-    decl: &TSModuleDeclaration<'_>,
+fn collect_external_module_declaration(
+    decl: &TSExternalModuleDeclaration<'_>,
     source: &str,
     out: &mut LoweredStatementParts,
-    prefix: Option<&str>,
-    ambient: bool,
 ) {
     // `declare module "<specifier>" { ... }` — an AMBIENT MODULE AUGMENTATION,
     // NOT a file-scope namespace. Its inner declarations augment the surface of
@@ -1889,31 +1907,32 @@ fn collect_module_declaration(
     // are retained in the augmentation-scope inventory keyed by the raw
     // specifier — never the file's top-level `type_symbols`. (A string-literal
     // name only ever wraps a single `TSModuleBlock`, never a nested module.)
-    if let TSModuleDeclarationName::StringLiteral(spec) = &decl.id {
-        if let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = decl.body.as_ref() {
-            collect_augmentation_block(
-                block,
-                source,
-                out,
-                AugmentationScopeKind::Module(spec.value.to_string()),
-            );
-        }
-        return;
+    if let Some(block) = decl.body.as_ref() {
+        collect_augmentation_block(
+            block,
+            source,
+            out,
+            AugmentationScopeKind::Module(decl.id.value.to_string()),
+        );
     }
+}
 
-    let Some(module_name) = qualified_module_name(prefix, &decl.id) else {
-        return;
-    };
-    let Some(body) = decl.body.as_ref() else {
-        return;
-    };
+/// The identifier-named half of [`collect_external_module_declaration`].
+fn collect_module_declaration(
+    decl: &TSNamespaceDeclaration<'_>,
+    source: &str,
+    out: &mut LoweredStatementParts,
+    prefix: Option<&str>,
+    ambient: bool,
+) {
+    let module_name = qualified_module_name(prefix, &decl.id);
     let ambient = ambient || decl.declare;
 
-    match body {
-        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+    match &decl.body {
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
             collect_module_declaration(inner, source, out, Some(module_name.as_str()), ambient);
         }
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
             let implicit_export = ambient && !statements_have_export_declarations(&block.body);
             for stmt in &block.body {
                 collect_namespaced_statement(
@@ -1956,10 +1975,9 @@ fn collect_augmentation_block(
                     lower_named_type_alias_parts(alias, source, name),
                 ));
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(decl) = export.declaration.as_ref() {
-                    collect_augmentation_declaration(decl, source, out, &scope);
-                }
+            Statement::ExportDeclaration(export) => {
+                let decl = &export.declaration;
+                collect_augmentation_declaration(decl, source, out, &scope);
             }
             // Value-space declarations (`const`/`let`/`var`, `function`,
             // `class`) augment the target module's VALUE surface. Reuse the
@@ -1981,7 +1999,7 @@ fn collect_augmentation_block(
             // name)` and APPENDS, a repeated `declare global { namespace JSX {
             // ... } }` block folds into the same ordered group and the existing
             // `MergedDecl` peer-merge stitch unions the surfaces.
-            Statement::TSModuleDeclaration(module) => {
+            Statement::TSNamespaceDeclaration(module) => {
                 collect_augmentation_module_declaration(module, source, out, &scope, None);
             }
             _ => {}
@@ -2020,7 +2038,7 @@ fn collect_augmentation_declaration(
             collect_from_declaration(decl, source, true, &mut inner);
             move_value_parts_into_augmentation(inner, out, scope);
         }
-        Declaration::TSModuleDeclaration(module) => {
+        Declaration::TSNamespaceDeclaration(module) => {
             collect_augmentation_module_declaration(module, source, out, scope, None);
         }
         _ => {}
@@ -2043,7 +2061,7 @@ fn collect_augmentation_declaration(
 /// identifier-name branch (which routes a file-scope namespace's members to
 /// the file-scope parts under the same qualified names).
 fn collect_augmentation_module_declaration(
-    decl: &TSModuleDeclaration<'_>,
+    decl: &TSNamespaceDeclaration<'_>,
     source: &str,
     out: &mut LoweredStatementParts,
     scope: &AugmentationScopeKind,
@@ -2052,14 +2070,9 @@ fn collect_augmentation_module_declaration(
     // A string-literal module name (`declare module "X"`) nested inside another
     // augmentation block is not a namespace-member contributor; only
     // identifier-named namespaces (`namespace JSX`) qualify members here.
-    let Some(namespace) = qualified_module_name(prefix, &decl.id) else {
-        return;
-    };
-    let Some(body) = decl.body.as_ref() else {
-        return;
-    };
-    match body {
-        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+    let namespace = qualified_module_name(prefix, &decl.id);
+    match &decl.body {
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
             collect_augmentation_module_declaration(
                 inner,
                 source,
@@ -2068,7 +2081,7 @@ fn collect_augmentation_module_declaration(
                 Some(namespace.as_str()),
             );
         }
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
             let implicit_export = !statements_have_export_declarations(&block.body);
             for stmt in &block.body {
                 collect_namespaced_statement_into_augmentation(
@@ -2116,19 +2129,16 @@ fn collect_namespaced_statement_into_augmentation(
                 ),
             ));
         }
-        Statement::TSModuleDeclaration(module) => {
+        Statement::TSNamespaceDeclaration(module) => {
             collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
         }
         // An augmentation block is ambient, so a namespace body inside it
         // without an export declaration exports every member, written
         // `export` or not (an ambient namespace in
         // `collect_namespaced_statement`).
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(ref decl) = export.declaration {
-                collect_namespaced_declaration_into_augmentation(
-                    decl, source, out, namespace, scope,
-                );
-            }
+        Statement::ExportDeclaration(export) => {
+            let decl = &export.declaration;
+            collect_namespaced_declaration_into_augmentation(decl, source, out, namespace, scope);
         }
         Statement::VariableDeclaration(var_decl) if implicit_export => {
             for declarator in &var_decl.declarations {
@@ -2180,7 +2190,7 @@ fn collect_namespaced_declaration_into_augmentation(
                 ),
             ));
         }
-        Declaration::TSModuleDeclaration(module) => {
+        Declaration::TSNamespaceDeclaration(module) => {
             collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
         }
         Declaration::VariableDeclaration(var_decl) => {
@@ -2299,8 +2309,11 @@ fn collect_namespaced_statement(
                 );
             }
         }
-        Statement::TSModuleDeclaration(module) => {
+        Statement::TSNamespaceDeclaration(module) => {
             collect_module_declaration(module, source, out, Some(namespace), ambient);
+        }
+        Statement::TSExternalModuleDeclaration(module) => {
+            collect_external_module_declaration(module, source, out);
         }
         // A namespace's enum registers under its qualified name, exported
         // or not, as a class does: the header index records which a
@@ -2321,10 +2334,9 @@ fn collect_namespaced_statement(
         // `collect_namespaced_declaration`) registers a qualified value member
         // such as `N.VERSION` — and a namespace body that is an export
         // context exports every member, written `export` or not.
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(ref decl) = export.declaration {
-                collect_namespaced_declaration(decl, source, out, namespace, ambient);
-            }
+        Statement::ExportDeclaration(export) => {
+            let decl = &export.declaration;
+            collect_namespaced_declaration(decl, source, out, namespace, ambient);
         }
         Statement::VariableDeclaration(var_decl) if implicit_export => {
             for declarator in &var_decl.declarations {
@@ -2376,8 +2388,11 @@ fn collect_namespaced_declaration(
                 );
             }
         }
-        Declaration::TSModuleDeclaration(module) => {
+        Declaration::TSNamespaceDeclaration(module) => {
             collect_module_declaration(module, source, out, Some(namespace), ambient);
+        }
+        Declaration::TSExternalModuleDeclaration(module) => {
+            collect_external_module_declaration(module, source, out);
         }
         Declaration::TSEnumDeclaration(enum_decl) => {
             collect_enum(
@@ -2408,13 +2423,10 @@ fn collect_namespaced_declaration(
     }
 }
 
-fn qualified_module_name(prefix: Option<&str>, id: &TSModuleDeclarationName<'_>) -> Option<String> {
-    match id {
-        TSModuleDeclarationName::Identifier(id) => Some(match prefix {
-            Some(prefix) => qualified_name(prefix, &id.name),
-            None => id.name.to_string(),
-        }),
-        TSModuleDeclarationName::StringLiteral(_) => None,
+fn qualified_module_name(prefix: Option<&str>, id: &oxc_ast::ast::BindingIdentifier<'_>) -> String {
+    match prefix {
+        Some(prefix) => qualified_name(prefix, &id.name),
+        None => id.name.to_string(),
     }
 }
 
@@ -2733,7 +2745,7 @@ fn collect_named_class(
                 // `let` does.
                 let field_value = function_value
                     .is_none()
-                    .then(|| class_field_value_name(&name, prop))
+                    .then(|| class_field_value_name(&name, prop, source))
                     .flatten()
                     .map(|field_name| {
                         out.value_decls.push(LoweredValueDeclParts {
@@ -3029,8 +3041,9 @@ fn collect_named_class(
     // A heritage EXPRESSION the facts cannot name reads its value through a
     // synthetic value declaration indexed at the expression.
     let heritage_expression = decl
-        .super_class
+        .heritage
         .as_ref()
+        .map(|heritage| &heritage.expression)
         .filter(|heritage| heritage_expression_name(heritage).is_none());
     if let Some(heritage) = heritage_expression {
         out.value_decls.push(LoweredValueDeclParts {
@@ -3049,7 +3062,7 @@ fn collect_named_class(
             literal_freshness: DeclaredLiteralFreshness::Regular,
         });
     }
-    let base_name = match decl.super_class.as_ref() {
+    let base_name = match decl.heritage.as_ref().map(|heritage| &heritage.expression) {
         Some(heritage) => {
             heritage_expression_name(heritage).or_else(|| Some(class_heritage_value_name(&name)))
         }
@@ -3058,8 +3071,9 @@ fn collect_named_class(
     let body = match base_name {
         Some(base_name) => {
             let base_args: Vec<TypeExpr> = decl
-                .super_type_arguments
+                .heritage
                 .as_ref()
+                .and_then(|heritage| heritage.type_arguments.as_ref())
                 .map(|tp| tp.params.iter().map(|p| lower_ts_type(p, source)).collect())
                 .unwrap_or_default();
             let base_ref = if base_args.is_empty() {
@@ -3523,15 +3537,10 @@ fn apply_svelte_rune_initializer_inference(
 ) {
     let variable = match stmt {
         Statement::VariableDeclaration(variable) => Some(variable.as_ref()),
-        Statement::ExportNamedDeclaration(export) => {
-            export
-                .declaration
-                .as_ref()
-                .and_then(|declaration| match declaration {
-                    Declaration::VariableDeclaration(variable) => Some(variable.as_ref()),
-                    _ => None,
-                })
-        }
+        Statement::ExportDeclaration(export) => match &export.declaration {
+            Declaration::VariableDeclaration(variable) => Some(variable.as_ref()),
+            _ => None,
+        },
         _ => None,
     };
     let Some(variable) = variable else {
@@ -3561,7 +3570,7 @@ fn apply_svelte_rune_initializer_inference(
                 parts.inference_unavailable = None;
                 continue;
             }
-            if svelte_rune_value_argument_contains_call(initializer) {
+            if svelte_rune_value_argument_contains_call(initializer, source) {
                 // Preserve the declaration initializer's indexed call source;
                 // rune inference never re-derives its nested call as a value
                 // type of its own.
@@ -3604,7 +3613,7 @@ fn apply_svelte_rune_initializer_inference(
     }
 }
 
-fn svelte_rune_value_argument_contains_call(expr: &Expression<'_>) -> bool {
+fn svelte_rune_value_argument_contains_call(expr: &Expression<'_>, source: &str) -> bool {
     let Expression::CallExpression(call) = unwrap_expression_wrappers(expr) else {
         return false;
     };
@@ -3618,7 +3627,7 @@ fn svelte_rune_value_argument_contains_call(expr: &Expression<'_>) -> bool {
     call.arguments
         .first()
         .and_then(|argument| argument.as_expression())
-        .is_some_and(value_type_derives_from_a_call)
+        .is_some_and(|argument| value_type_derives_from_a_call(argument, source))
 }
 
 fn inline_svelte_derived_by_callback_point(expr: &Expression<'_>) -> Option<u32> {
@@ -3914,9 +3923,9 @@ fn lower_class_expression_value(
 ) -> Option<LoweredValueDeclParts> {
     if class.type_parameters.is_some()
         || class
-            .super_class
+            .heritage
             .as_ref()
-            .is_some_and(|heritage| heritage_expression_name(heritage).is_none())
+            .is_some_and(|heritage| heritage_expression_name(&heritage.expression).is_none())
     {
         return None;
     }
@@ -4304,7 +4313,7 @@ fn lower_identifier_variable_parts(
         }
 
         if type_annotation.is_none()
-            && value_type_derives_from_a_call(init)
+            && value_type_derives_from_a_call(init, source)
             && !has_authoritative_value_assertion(init)
         {
             expression_source_offset = Some(init.span().start);
@@ -4443,11 +4452,9 @@ fn implicit_property_type(
                     ClassElement::MethodDefinition(method)
                         if method.kind == MethodDefinitionKind::Constructor =>
                     {
-                        method
-                            .value
-                            .body
-                            .as_ref()
-                            .is_some_and(|body| constructor_assigns_this_member(body, &name))
+                        method.value.body.as_ref().is_some_and(|body| {
+                            constructor_assigns_this_member(body, &name, source)
+                        })
                     }
                     _ => false,
                 })
@@ -4465,7 +4472,11 @@ fn implicit_property_type(
 /// Whether a constructor body assigns `this.<name>` in its own control
 /// flow: an assignment inside a nested function, arrow or class is not on
 /// the constructor's flow.
-fn constructor_assigns_this_member(body: &oxc_ast::ast::FunctionBody<'_>, name: &str) -> bool {
+fn constructor_assigns_this_member(
+    body: &oxc_ast::ast::FunctionBody<'_>,
+    name: &str,
+    source: &str,
+) -> bool {
     struct Assigns<'n> {
         name: &'n str,
         found: bool,
@@ -4495,7 +4506,9 @@ fn constructor_assigns_this_member(body: &oxc_ast::ast::FunctionBody<'_>, name: 
         fn visit_class(&mut self, _: &Class<'a>) {}
     }
     let mut assigns = Assigns { name, found: false };
-    assigns.visit_function_body(body);
+    verter_parser::oxc_parse::with_span_stack(source, body.span, || {
+        assigns.visit_function_body(body)
+    });
     assigns.found
 }
 
@@ -4821,22 +4834,14 @@ fn extract_arrow_signature_with_budget(
             lower_return_annotation(&return_type.type_annotation, source);
         predicate = authored_predicate;
         Some(return_type)
-    } else if arrow.expression {
-        arrow
-            .body
-            .statements
-            .first()
-            .and_then(|statement| match statement {
-                Statement::ExpressionStatement(expression) => Some(infer_expression_type_ctx(
-                    &expression.expression,
-                    source,
-                    MemberLiteralPolicy::Widen,
-                    budget,
-                    depth + 1,
-                )),
-                _ => None,
-            })
-            .transpose()?
+    } else if let Some(expression) = arrow.get_expression() {
+        Some(infer_expression_type_ctx(
+            expression,
+            source,
+            MemberLiteralPolicy::Widen,
+            budget,
+            depth + 1,
+        )?)
     } else {
         None
     };
@@ -6298,19 +6303,12 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
             ))
         }
         TSSignature::TSIndexSignature(idx) => {
-            let (key_name, key_type, key_span) = if let Some(param) = idx.parameters.first() {
-                (
-                    param.name.to_string(),
-                    lower_ts_type(&param.type_annotation.type_annotation, source),
-                    Some(param.span.into()),
-                )
-            } else {
-                (
-                    "key".to_string(),
-                    TypeExpr::Primitive(PrimitiveName::String),
-                    None,
-                )
-            };
+            let param = &idx.parameter;
+            let (key_name, key_type, key_span) = (
+                param.name.to_string(),
+                lower_ts_type(&param.type_annotation.type_annotation, source),
+                Some(param.span.into()),
+            );
             let value_type = lower_ts_type(&idx.type_annotation.type_annotation, source);
             let spans = IndexSignatureSpans {
                 declaration: Some(idx.span.into()),
@@ -7236,19 +7234,225 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
     expr: &Expression<'_>,
     source: &str,
     policy: MemberLiteralPolicy,
-    mut read_root: Option<&mut IndexedValueReadRoot>,
+    read_root: Option<&mut IndexedValueReadRoot>,
 ) -> IndexedValueExpression {
+    match indexed_value_step(expr, source, policy, read_root) {
+        IndexedValueStep::Lowered(lowered) => lowered,
+        IndexedValueStep::Call(call) => lower_nested_indexed_calls(call, source),
+    }
+}
+
+/// A direct call, construct or tagged template whose indexed record lowers
+/// its callee, receiver and arguments.
+#[derive(Clone, Copy)]
+enum IndexedCallNode<'a> {
+    Call(&'a oxc_ast::ast::CallExpression<'a>),
+    New(&'a oxc_ast::ast::NewExpression<'a>),
+    Tagged(&'a oxc_ast::ast::TaggedTemplateExpression<'a>),
+}
+
+/// One value expression's indexed lowering: done, or a direct call-like
+/// record to build over its children.
+enum IndexedValueStep<'a> {
+    Lowered(IndexedValueExpression),
+    Call(IndexedCallNode<'a>),
+}
+
+/// Lower a direct call-like expression, and every direct call-like
+/// expression nested in its callee, receiver and arguments, from an
+/// explicit stack: a call nested in an argument of a call (`f(f(f(1)))`) or
+/// in a receiver (`a.m().m()`) costs no native level. The nested records
+/// report no read roots, exactly as their recursive lowering did.
+fn lower_nested_indexed_calls(first: IndexedCallNode<'_>, source: &str) -> IndexedValueExpression {
+    enum Task<'a> {
+        Value(&'a Expression<'a>, MemberLiteralPolicy),
+        Build(IndexedCallNode<'a>),
+    }
+    fn push_node<'a>(node: IndexedCallNode<'a>, tasks: &mut Vec<Task<'a>>) {
+        tasks.push(Task::Build(node));
+        let (callee, arguments): (Option<&'a Expression<'a>>, Vec<&'a Expression<'a>>) = match node
+        {
+            IndexedCallNode::Call(call) => (
+                Some(&call.callee),
+                call.arguments
+                    .iter()
+                    .map(indexed_argument_expression)
+                    .collect(),
+            ),
+            IndexedCallNode::New(call) => (
+                Some(&call.callee),
+                call.arguments
+                    .iter()
+                    .map(indexed_argument_expression)
+                    .collect(),
+            ),
+            IndexedCallNode::Tagged(tagged) => {
+                (Some(&tagged.tag), tagged.quasi.expressions.iter().collect())
+            }
+        };
+        for argument in arguments.into_iter().rev() {
+            tasks.push(Task::Value(argument, MemberLiteralPolicy::Argument));
+        }
+        if let Some(callee) = callee {
+            tasks.push(Task::Value(callee, MemberLiteralPolicy::Widen));
+            if !matches!(node, IndexedCallNode::New(_)) {
+                if let Some(receiver) = indexed_call_receiver(callee) {
+                    tasks.push(Task::Value(receiver, MemberLiteralPolicy::Widen));
+                }
+            }
+        }
+    }
+    let mut tasks = Vec::new();
+    let mut values: Vec<IndexedValueExpression> = Vec::new();
+    push_node(first, &mut tasks);
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Value(expr, policy) => match indexed_value_step(expr, source, policy, None) {
+                IndexedValueStep::Lowered(lowered) => values.push(lowered),
+                IndexedValueStep::Call(node) => push_node(node, &mut tasks),
+            },
+            Task::Build(node) => {
+                let call = build_indexed_call(node, &mut values, source);
+                values.push(IndexedValueExpression::Call(call));
+            }
+        }
+    }
+    values
+        .pop()
+        .expect("the outermost record is the one value left")
+}
+
+/// The expression one call or `new` argument passes (a spread's operand).
+fn indexed_argument_expression<'a>(argument: &'a oxc_ast::ast::Argument<'a>) -> &'a Expression<'a> {
+    match argument {
+        oxc_ast::ast::Argument::SpreadElement(spread) => &spread.argument,
+        argument => argument.to_expression(),
+    }
+}
+
+/// The indexed record of `node` over its lowered children, which
+/// [`lower_nested_indexed_calls`] left on `values` in order: the receiver
+/// (a call or tagged template whose callee has one), the callee, then the
+/// arguments.
+fn build_indexed_call(
+    node: IndexedCallNode<'_>,
+    values: &mut Vec<IndexedValueExpression>,
+    source: &str,
+) -> IndexedValueCall {
+    let argument_count = match node {
+        IndexedCallNode::Call(call) => call.arguments.len(),
+        IndexedCallNode::New(call) => call.arguments.len(),
+        IndexedCallNode::Tagged(tagged) => tagged.quasi.expressions.len(),
+    };
+    let lowered_arguments = values.split_off(values.len() - argument_count);
+    let callee = values.pop().expect("the callee's record");
+    let receiver = match node {
+        IndexedCallNode::Call(call) => indexed_call_receiver(&call.callee),
+        IndexedCallNode::Tagged(tagged) => indexed_call_receiver(&tagged.tag),
+        IndexedCallNode::New(_) => None,
+    }
+    .map(|_| Box::new(values.pop().expect("the receiver's record")));
+    let argument = |expression: &Expression<'_>, lowered, spread| IndexedValueCallArg {
+        expression: lowered,
+        point: expression.span().start,
+        spread,
+        literal_mode: indexed_literal_mode(Some(expression)),
+        context_sensitive: indexed_context_sensitive(Some(expression)),
+        function_return_source: None,
+    };
+    let call_arguments = |arguments: &[oxc_ast::ast::Argument<'_>], lowered: Vec<_>| {
+        let args: Vec<IndexedValueCallArg> = arguments
+            .iter()
+            .zip(lowered)
+            .map(|(authored, lowered)| {
+                argument(
+                    indexed_argument_expression(authored),
+                    lowered,
+                    matches!(authored, oxc_ast::ast::Argument::SpreadElement(_)),
+                )
+            })
+            .collect();
+        Arc::from(args.into_boxed_slice())
+    };
+    match node {
+        IndexedCallNode::Call(call) => IndexedValueCall {
+            point: call.span.start,
+            kind: IndexedValueCallKind::Call,
+            callee: Box::new(callee),
+            receiver,
+            args: call_arguments(&call.arguments, lowered_arguments),
+            explicit_type_args: lower_indexed_explicit_type_arguments(
+                call.type_arguments.as_deref(),
+                source,
+            ),
+        },
+        IndexedCallNode::New(call) => IndexedValueCall {
+            point: call.span.start,
+            kind: IndexedValueCallKind::Construct,
+            callee: Box::new(callee),
+            receiver: None,
+            args: call_arguments(&call.arguments, lowered_arguments),
+            explicit_type_args: lower_indexed_explicit_type_arguments(
+                call.type_arguments.as_deref(),
+                source,
+            ),
+        },
+        IndexedCallNode::Tagged(tagged) => {
+            let mut args = Vec::with_capacity(argument_count + 1);
+            args.push(IndexedValueCallArg {
+                expression: IndexedValueExpression::TemplateStrings {
+                    point: tagged.quasi.span.start,
+                },
+                point: tagged.quasi.span.start,
+                spread: false,
+                literal_mode: IndexedValueLiteralMode::Literal,
+                context_sensitive: false,
+                function_return_source: None,
+            });
+            args.extend(
+                tagged
+                    .quasi
+                    .expressions
+                    .iter()
+                    .zip(lowered_arguments)
+                    .map(|(expression, lowered)| argument(expression, lowered, false)),
+            );
+            IndexedValueCall {
+                point: tagged.span.start,
+                kind: IndexedValueCallKind::Call,
+                callee: Box::new(callee),
+                receiver,
+                args: Arc::from(args.into_boxed_slice()),
+                explicit_type_args: lower_indexed_explicit_type_arguments(
+                    tagged.type_arguments.as_deref(),
+                    source,
+                ),
+            }
+        }
+    }
+}
+
+/// One value expression's indexed lowering up to a direct call-like
+/// record, whose children [`lower_nested_indexed_calls`] lowers.
+fn indexed_value_step<'a>(
+    expr: &'a Expression<'a>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+    mut read_root: Option<&mut IndexedValueReadRoot>,
+) -> IndexedValueStep<'a> {
     if let Some(read_root) = read_root.as_deref_mut() {
         *read_root = IndexedValueReadRoot::NonBinding;
     }
     let input = match indexed_value_disposition(expr) {
         IndexedValueDisposition::Asserted(input) => {
             // The assertion supplies the result; its operand's binding does not.
-            return lower_value_expression_with_read_root(input, source, policy, read_root)
-                .map(IndexedValueExpression::Value)
-                .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
-                    PrimitiveName::Any,
-                )));
+            return IndexedValueStep::Lowered(
+                lower_value_expression_with_read_root(input, source, policy, read_root)
+                    .map(IndexedValueExpression::Value)
+                    .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
+                        PrimitiveName::Any,
+                    ))),
+            );
         }
         // `… as const` over a literal keeps the literal it spells, readonly:
         // the operand is inferred in the const context the assertion opens.
@@ -7261,23 +7465,25 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
             | Expression::BooleanLiteral(_)
             | Expression::TemplateLiteral(_),
         ) if expr_is_const_asserted(expr, source) => {
-            return lower_value_expression_with_read_root(expr, source, policy, read_root)
-                .map(IndexedValueExpression::Value)
-                .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
-                    PrimitiveName::Any,
-                )));
+            return IndexedValueStep::Lowered(
+                lower_value_expression_with_read_root(expr, source, policy, read_root)
+                    .map(IndexedValueExpression::Value)
+                    .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
+                        PrimitiveName::Any,
+                    ))),
+            );
         }
         IndexedValueDisposition::Inferred(input) => input,
     };
-    match input {
+    IndexedValueStep::Lowered(match input {
         Expression::CallExpression(call) => {
-            IndexedValueExpression::Call(lower_indexed_call_expression(call, source))
+            return IndexedValueStep::Call(IndexedCallNode::Call(call));
         }
         Expression::NewExpression(call) => {
-            IndexedValueExpression::Call(lower_indexed_new_expression(call, source))
+            return IndexedValueStep::Call(IndexedCallNode::New(call));
         }
         Expression::TaggedTemplateExpression(tagged) => {
-            IndexedValueExpression::Call(lower_indexed_tagged_template_expression(tagged, source))
+            return IndexedValueStep::Call(IndexedCallNode::Tagged(tagged));
         }
         Expression::FunctionExpression(function) => {
             let signature = extract_function_signature(function, source);
@@ -7297,7 +7503,7 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
                 .with_predicate(signature.predicate),
             )))
         }
-        unwrapped if value_type_derives_from_a_call(unwrapped) => {
+        unwrapped if value_type_derives_from_a_call(unwrapped, source) => {
             IndexedValueExpression::UnsupportedCall {
                 point: unwrapped.span().start,
             }
@@ -7307,7 +7513,7 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
             .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
                 PrimitiveName::Any,
             ))),
-    }
+    })
 }
 
 /// The authored literal shape of one argument position — the ONE
@@ -7399,7 +7605,10 @@ pub fn lower_indexed_call_expression(
     call: &oxc_ast::ast::CallExpression<'_>,
     source: &str,
 ) -> IndexedValueCall {
-    lower_indexed_call_expression_observed(call, source, None)
+    match lower_nested_indexed_calls(IndexedCallNode::Call(call), source) {
+        IndexedValueExpression::Call(call) => call,
+        _ => unreachable!("a call lowers to its call record"),
+    }
 }
 
 /// Lower one call while reporting exact direct-input source provenance.
@@ -7407,18 +7616,26 @@ pub fn lower_indexed_call_expression(
 /// is reported exactly when the lowered call contains one. Nested calls use
 /// their ordinary lowering and do not report into this observer.
 /// Authored whole type queries are distinct from runtime operand reads.
+///
+/// `frame_lowered` names, by ordinal, the arguments the caller lowers and
+/// evaluates itself (a flow frame's frame-lowered arguments): such an
+/// argument that is a direct call keeps no record of its own
+/// ([`IndexedValueExpression::UnsupportedCall`] at its point), so a nest of
+/// calls read call by call is not lowered again at every level.
 pub fn lower_indexed_call_expression_with_read_roots(
     call: &oxc_ast::ast::CallExpression<'_>,
     source: &str,
     observe: &mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot),
+    frame_lowered: &[bool],
 ) -> IndexedValueCall {
-    lower_indexed_call_expression_observed(call, source, Some(observe))
+    lower_indexed_call_expression_observed(call, source, Some(observe), frame_lowered)
 }
 
 fn lower_indexed_call_expression_observed(
     call: &oxc_ast::ast::CallExpression<'_>,
     source: &str,
     mut observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+    frame_lowered: &[bool],
 ) -> IndexedValueCall {
     let (callee, receiver) = indexed_callee_and_receiver(&call.callee, source, &mut observe);
     IndexedValueCall {
@@ -7426,19 +7643,12 @@ fn lower_indexed_call_expression_observed(
         kind: IndexedValueCallKind::Call,
         callee: Box::new(callee),
         receiver,
-        args: lower_indexed_call_arguments(&call.arguments, source, observe),
+        args: lower_indexed_call_arguments(&call.arguments, source, observe, frame_lowered),
         explicit_type_args: lower_indexed_explicit_type_arguments(
             call.type_arguments.as_deref(),
             source,
         ),
     }
-}
-
-fn lower_indexed_new_expression(
-    call: &oxc_ast::ast::NewExpression<'_>,
-    source: &str,
-) -> IndexedValueCall {
-    lower_indexed_new_expression_observed(call, source, None)
 }
 
 /// The construct twin of [`lower_indexed_call_expression_with_read_roots`]:
@@ -7448,33 +7658,28 @@ pub fn lower_indexed_new_expression_with_read_roots(
     call: &oxc_ast::ast::NewExpression<'_>,
     source: &str,
     observe: &mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot),
+    frame_lowered: &[bool],
 ) -> IndexedValueCall {
-    lower_indexed_new_expression_observed(call, source, Some(observe))
+    lower_indexed_new_expression_observed(call, source, Some(observe), frame_lowered)
 }
 
 fn lower_indexed_new_expression_observed(
     call: &oxc_ast::ast::NewExpression<'_>,
     source: &str,
     observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+    frame_lowered: &[bool],
 ) -> IndexedValueCall {
     IndexedValueCall {
         point: call.span.start,
         kind: IndexedValueCallKind::Construct,
         callee: Box::new(lower_indexed_value_expression(&call.callee, source)),
         receiver: None,
-        args: lower_indexed_call_arguments(&call.arguments, source, observe),
+        args: lower_indexed_call_arguments(&call.arguments, source, observe, frame_lowered),
         explicit_type_args: lower_indexed_explicit_type_arguments(
             call.type_arguments.as_deref(),
             source,
         ),
     }
-}
-
-fn lower_indexed_tagged_template_expression(
-    tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>,
-    source: &str,
-) -> IndexedValueCall {
-    lower_indexed_tagged_template_expression_observed(tagged, source, None)
 }
 
 /// The tagged-template twin of
@@ -7521,6 +7726,7 @@ fn lower_indexed_tagged_template_expression_observed(
             index + 1,
             source,
             &mut observe,
+            false,
         ));
     }
     IndexedValueCall {
@@ -7542,21 +7748,31 @@ fn lower_indexed_call_arguments(
     arguments: &[oxc_ast::ast::Argument<'_>],
     source: &str,
     mut observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+    frame_lowered: &[bool],
 ) -> Arc<[IndexedValueCallArg]> {
     let args = arguments
         .iter()
         .enumerate()
-        .map(|(ordinal, argument)| match argument {
-            oxc_ast::ast::Argument::SpreadElement(spread) => {
-                lower_indexed_call_argument(&spread.argument, true, ordinal, source, &mut observe)
+        .map(|(ordinal, argument)| {
+            let frame_lowered = frame_lowered.get(ordinal).copied().unwrap_or(false);
+            match argument {
+                oxc_ast::ast::Argument::SpreadElement(spread) => lower_indexed_call_argument(
+                    &spread.argument,
+                    true,
+                    ordinal,
+                    source,
+                    &mut observe,
+                    frame_lowered,
+                ),
+                argument => lower_indexed_call_argument(
+                    argument.to_expression(),
+                    false,
+                    ordinal,
+                    source,
+                    &mut observe,
+                    frame_lowered,
+                ),
             }
-            argument => lower_indexed_call_argument(
-                argument.to_expression(),
-                false,
-                ordinal,
-                source,
-                &mut observe,
-            ),
         })
         .collect::<Vec<_>>();
     Arc::from(args.into_boxed_slice())
@@ -7569,14 +7785,24 @@ fn lower_indexed_call_argument(
     ordinal: usize,
     source: &str,
     observe: &mut Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+    frame_lowered: bool,
 ) -> IndexedValueCallArg {
     let mut read_root = IndexedValueReadRoot::NonBinding;
-    let lowered = lower_indexed_value_expression_with_policy_and_read_root(
+    let lowered = match indexed_value_step(
         expression,
         source,
         MemberLiteralPolicy::Argument,
         observe.as_ref().map(|_| &mut read_root),
-    );
+    ) {
+        IndexedValueStep::Lowered(lowered) => lowered,
+        // A direct call the caller lowers and evaluates itself.
+        IndexedValueStep::Call(IndexedCallNode::Call(_)) if frame_lowered => {
+            IndexedValueExpression::UnsupportedCall {
+                point: expression.span().start,
+            }
+        }
+        IndexedValueStep::Call(node) => lower_nested_indexed_calls(node, source),
+    };
     if let Some(observe) = observe.as_mut() {
         observe(IndexedCallReadSite::Argument(ordinal), read_root);
     }
@@ -7622,11 +7848,11 @@ fn lower_indexed_explicit_type_arguments(
 /// lowering fixes syntactically answers the same thing however its
 /// sub-expressions evaluate, so a call underneath one is not fabricated
 /// either.
-pub fn value_inference_fabricates_a_call(expr: &Expression<'_>, _source: &str) -> bool {
-    !has_authoritative_value_assertion(expr) && value_type_derives_from_a_call(expr)
+pub fn value_inference_fabricates_a_call(expr: &Expression<'_>, source: &str) -> bool {
+    !has_authoritative_value_assertion(expr) && value_type_derives_from_a_call(expr, source)
 }
 
-fn value_type_derives_from_a_call(expr: &Expression<'_>) -> bool {
+fn value_type_derives_from_a_call(expr: &Expression<'_>, source: &str) -> bool {
     #[derive(Default)]
     struct CallProbe(bool);
 
@@ -7677,6 +7903,6 @@ fn value_type_derives_from_a_call(expr: &Expression<'_>) -> bool {
     }
 
     let mut probe = CallProbe::default();
-    probe.visit_expression(expr);
+    verter_parser::oxc_parse::with_span_stack(source, expr.span(), || probe.visit_expression(expr));
     probe.0
 }

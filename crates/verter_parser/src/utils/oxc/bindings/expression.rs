@@ -4,7 +4,7 @@
 //! JavaScript/TypeScript expressions parsed by OXC.
 
 use oxc_ast::ast::*;
-use oxc_span::Span as OxcSpan;
+use oxc_span::{GetSpan, Span as OxcSpan};
 use smallvec::SmallVec;
 
 use super::keywords::{is_global, is_keyword};
@@ -271,15 +271,18 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
                     }
                 }
             }
-            Statement::TSModuleDeclaration(module_decl) => {
+            Statement::TSNamespaceDeclaration(module_decl) => {
                 // `namespace X { … }` binds `X` in the enclosing scope; every
                 // name declared inside is namespace-local, so the body is walked
                 // in a child context.
-                if let TSModuleDeclarationName::Identifier(id) = &module_decl.id {
-                    self.ctx.add_ignored(arena_name(id));
-                }
+                self.ctx.add_ignored(arena_name(&module_decl.id));
+                self.visit_ts_module_body(&module_decl.body);
+            }
+            Statement::TSExternalModuleDeclaration(module_decl) => {
+                // `declare module "x" { … }` binds nothing in the enclosing
+                // scope; its body is walked in a child context.
                 if let Some(body) = &module_decl.body {
-                    self.visit_ts_module_body(body);
+                    self.visit_ts_module_block(body);
                 }
             }
             Statement::TSGlobalDeclaration(global_decl) => {
@@ -319,34 +322,34 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
             Statement::ImportDeclaration(_)
             | Statement::ExportAllDeclaration(_)
             | Statement::ExportDefaultDeclaration(_)
+            | Statement::ExportDeclaration(_)
             | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_)
             | Statement::TSExportAssignment(_)
             | Statement::TSNamespaceExportDeclaration(_) => {}
         }
     }
 
     /// Walk a `namespace` / `module` body in a child context.
-    fn visit_ts_module_body(&mut self, body: &TSModuleDeclarationBody<'a>) {
+    fn visit_ts_module_body(&mut self, body: &TSNamespaceDeclarationBody<'a>) {
         match body {
-            TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+            TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
                 let child_ctx = self.ctx.child_with_ignored(SmallVec::new());
                 let mut child_visitor =
                     BindingVisitor::new(self.source_bytes, child_ctx, self.result);
-                if let TSModuleDeclarationName::Identifier(id) = &inner.id {
-                    child_visitor.ctx.add_ignored(arena_name(id));
-                }
-                if let Some(inner_body) = &inner.body {
-                    child_visitor.visit_ts_module_body(inner_body);
-                }
+                child_visitor.ctx.add_ignored(arena_name(&inner.id));
+                child_visitor.visit_ts_module_body(&inner.body);
             }
-            TSModuleDeclarationBody::TSModuleBlock(block) => {
-                let child_ctx = self.ctx.child_with_ignored(SmallVec::new());
-                let mut child_visitor =
-                    BindingVisitor::new(self.source_bytes, child_ctx, self.result);
-                for stmt in &block.body {
-                    child_visitor.visit_statement(stmt);
-                }
-            }
+            TSNamespaceDeclarationBody::TSModuleBlock(block) => self.visit_ts_module_block(block),
+        }
+    }
+
+    /// Walk a `namespace` / `module` block in a child context.
+    fn visit_ts_module_block(&mut self, block: &TSModuleBlock<'a>) {
+        let child_ctx = self.ctx.child_with_ignored(SmallVec::new());
+        let mut child_visitor = BindingVisitor::new(self.source_bytes, child_ctx, self.result);
+        for stmt in &block.body {
+            child_visitor.visit_statement(stmt);
         }
     }
 
@@ -362,8 +365,8 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
         for decorator in &class.decorators {
             self.visit_expression(&decorator.expression);
         }
-        if let Some(super_class) = &class.super_class {
-            self.visit_expression(super_class);
+        if let Some(heritage) = &class.heritage {
+            self.visit_expression(&heritage.expression);
         }
 
         let mut class_local: ParamBytes<'a> = SmallVec::new();
@@ -672,7 +675,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
                 }
             }
 
-            Expression::MetaProperty(_) => {}
+            Expression::ImportMeta(_) | Expression::NewTarget(_) => {}
 
             Expression::V8IntrinsicExpression(intrinsic) => {
                 // `%Foo(a, b)` — the name is an intrinsic, the arguments are
@@ -882,21 +885,19 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
         // Record the function
         self.result.functions.push(FunctionBinding {
             span: arrow.span.into(),
-            body_span: arrow.body.span.into(),
+            body_span: arrow.body.span().into(),
             pos: arrow.span.start + self.ctx.base_offset,
-            body_pos: arrow.body.span.start + self.ctx.base_offset,
+            body_pos: arrow.body.span().start + self.ctx.base_offset,
         });
 
         // Visit body with extended context
         let child_ctx = self.ctx.child_with_ignored(param_bytes);
         let mut child_visitor = BindingVisitor::new(self.source_bytes, child_ctx, self.result);
 
-        if arrow.expression {
-            if let Some(Statement::ExpressionStatement(expr_stmt)) = arrow.body.statements.first() {
-                child_visitor.visit_expression(&expr_stmt.expression);
-            }
-        } else {
-            for stmt in &arrow.body.statements {
+        if let Some(expression) = arrow.get_expression() {
+            child_visitor.visit_expression(expression);
+        } else if let Some(body) = arrow.get_function_body() {
+            for stmt in &body.statements {
                 child_visitor.visit_statement(stmt);
             }
         }

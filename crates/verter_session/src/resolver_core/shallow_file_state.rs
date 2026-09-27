@@ -630,7 +630,10 @@ impl ShallowFileState {
         let parsed =
             verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
                 .parse();
-        assert!(!parsed.panicked, "service-backed test fixture must parse");
+        assert!(
+            !parsed.fatal_error,
+            "service-backed test fixture must parse"
+        );
         let owner_table = Arc::new(match statement_owners {
             Some(owners) => {
                 verter_semantic::analysis::TopLevelOwnerTable::try_from_statement_owners(
@@ -2945,7 +2948,10 @@ mod tests {
         let parsed =
             verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
                 .parse();
-        assert!(!parsed.panicked, "owner-qualified route fixture must parse");
+        assert!(
+            !parsed.fatal_error,
+            "owner-qualified route fixture must parse"
+        );
         let owner_table = verter_semantic::analysis::TopLevelOwnerTable::try_from_statement_owners(
             parsed.program.body.len(),
             owners,
@@ -3168,7 +3174,7 @@ mod tests {
         let parsed =
             verter_parser::oxc_parse::Parser::new(&alloc, source, oxc_span::SourceType::ts())
                 .parse();
-        assert!(!parsed.panicked, "route fixture must parse");
+        assert!(!parsed.fatal_error, "route fixture must parse");
         Arc::new(
             verter_parser::utils::oxc::script::route_inventory::build_script_route_inventory(
                 &parsed.program,

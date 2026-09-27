@@ -1334,10 +1334,10 @@ fn capture_candidates_for(
         ..ParseOptions::default()
     });
     let result = parser.parse();
-    if result.panicked {
+    if result.fatal_error {
         return Err(ScriptFactUnavailableReason::CaptureFailed);
     }
-    let recovered = !result.errors.is_empty();
+    let recovered = !result.diagnostics.is_empty();
     let owner_table = crate::parse::top_level_owner_table(&result.program, framework_parse)
         .map_err(|_| ScriptFactUnavailableReason::CaptureFailed)?;
     if recovered {

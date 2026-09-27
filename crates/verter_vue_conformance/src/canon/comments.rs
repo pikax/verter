@@ -19,7 +19,11 @@ use super::Canon;
 pub(crate) fn anchor_comments(semantic: &Semantic, source: &str) -> HashMap<NodeId, Vec<Canon>> {
     let mut out: HashMap<NodeId, Vec<Canon>> = HashMap::new();
     for comment in semantic.comments() {
-        if matches!(comment.content, CommentContent::None) {
+        // A `#__KEY__` comment had no class before oxc 0.151.
+        if matches!(
+            comment.content,
+            CommentContent::None | CommentContent::PropertyKey
+        ) {
             continue;
         }
         let class = match comment.content {
@@ -28,12 +32,17 @@ pub(crate) fn anchor_comments(semantic: &Semantic, source: &str) -> HashMap<Node
             CommentContent::JsdocLegal => "jsdoc-legal",
             CommentContent::Pure => "pure",
             CommentContent::PureNotApplied => "pure-not-applied",
-            CommentContent::NoSideEffects => "no-side-effects",
+            // Before oxc 0.151 an unapplied `#__NO_SIDE_EFFECTS__` was `NoSideEffects`.
+            CommentContent::NoSideEffects | CommentContent::NoSideEffectsNotApplied => {
+                "no-side-effects"
+            }
             CommentContent::Webpack => "webpack",
             CommentContent::Vite => "vite",
-            CommentContent::CoverageIgnore => "coverage-ignore",
+            CommentContent::CoverageIgnore | CommentContent::CoverageIgnoreFile => {
+                "coverage-ignore"
+            }
             CommentContent::Turbopack => "turbopack",
-            CommentContent::None => unreachable!(),
+            CommentContent::None | CommentContent::PropertyKey => unreachable!(),
         };
         let raw = &source[comment.content_span()];
         let text: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");

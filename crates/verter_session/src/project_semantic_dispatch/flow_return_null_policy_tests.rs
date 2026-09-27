@@ -12369,3 +12369,53 @@ fn member_writes_narrow_their_member_path() {
         MEMBER_WRITES_TABLE,
     );
 }
+
+/// `pf`'s observed return on a thread with a 1 MiB stack, the smallest a
+/// production caller runs on (a Windows main thread).
+fn observe_on_a_1_mib_thread(path: &'static str, source: String) -> String {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let host = four_policy_host();
+            upsert(&host, path, &source);
+            observe(&host, path, "pf")
+        })
+        .expect("spawn the evaluating thread")
+        .join()
+        .expect("the return evaluates")
+}
+
+/// A `!` chain, a unary negation chain and a binary `+` chain, 10,000
+/// operators deep, evaluate on a 1 MiB thread: each operator's operands
+/// evaluate from the evaluator's explicit stack, not a native level each
+/// (8.7 MB at 10,000 optimized).
+///
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`, all
+/// four settings): `boolean` for 10,000 `!`s, `number` for the negation
+/// and the addition over `x: number`.
+#[test]
+fn operator_chains_10000_deep_evaluate_on_a_small_stack() {
+    let depth = 10_000;
+    let returning =
+        |chain: String| format!("export function pf(x: number) {{ return {chain}; }}\n");
+    let rows = [
+        (
+            "/strict/not-chain.ts",
+            returning(format!("{}x", "!".repeat(depth))),
+            "boolean",
+        ),
+        (
+            "/strict/negation-chain.ts",
+            returning(format!("{}x", "- ".repeat(depth))),
+            "number",
+        ),
+        (
+            "/strict/addition-chain.ts",
+            returning(vec!["x"; depth + 1].join(" + ")),
+            "number",
+        ),
+    ];
+    for (path, source, expected) in rows {
+        assert_eq!(observe_on_a_1_mib_thread(path, source), expected, "{path}");
+    }
+}

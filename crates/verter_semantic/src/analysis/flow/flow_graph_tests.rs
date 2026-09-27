@@ -228,7 +228,7 @@ fn indexed_returned_arrow(source: &str) -> FunctionBodySkeleton {
         panic!("arrow fixture");
     };
     let prepared =
-        build_indexed_function_body_skeleton(&FunctionBodySource::from_arrow(arrow), child)
+        build_indexed_function_body_skeleton(&FunctionBodySource::from_arrow(arrow), source, child)
             .unwrap();
     prepared.skeleton
 }

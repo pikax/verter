@@ -71,7 +71,7 @@ pub fn expr_has_call(
     let alloc = Allocator::default();
     let wrapped = format!("({source})");
     let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(());
     }
     let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
@@ -322,7 +322,7 @@ pub(super) fn expr_has_binding_impurity(
     let alloc = Allocator::default();
     let wrapped = format!("({source})");
     let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(());
     }
     let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {

@@ -991,9 +991,9 @@ pub struct FunctionBodySource<'a, 'ast> {
     pub kind: FunctionBodyKind,
     /// The body statements.
     pub statements: &'a [Statement<'ast>],
-    /// Whether the body is an expression-bodied arrow (the single
-    /// expression statement is the implicit return).
-    pub expression_body: bool,
+    /// An expression-bodied arrow's body expression (the implicit return);
+    /// its [`Self::statements`] are empty.
+    pub expression_body: Option<&'a oxc_ast::ast::Expression<'ast>>,
     /// The body span.
     pub body_span: verter_span::Span,
     /// The FUNCTION's own start offset — the anchor every [`FrameSpan`]
@@ -1037,7 +1037,7 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
             params: &function.params,
             kind: function_body_kind(function.r#async, function.generator),
             statements: &body.statements,
-            expression_body: false,
+            expression_body: None,
             body_span: body.span.into(),
             anchor: function.span.start,
             self_binding: None,
@@ -1061,9 +1061,11 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
         Self {
             params: &arrow.params,
             kind: function_body_kind(arrow.r#async, false),
-            statements: &arrow.body.statements,
-            expression_body: arrow.expression,
-            body_span: arrow.body.span.into(),
+            statements: arrow
+                .get_function_body()
+                .map_or(&[], |body| &body.statements),
+            expression_body: arrow.get_expression(),
+            body_span: arrow.body.span().into(),
             anchor: arrow.span.start,
             self_binding: None,
         }
@@ -1086,8 +1088,13 @@ fn function_body_kind(is_async: bool, is_generator: bool) -> FunctionBodyKind {
 /// nested function / arrow / class bodies are never entered (they are their
 /// own frames).
 #[must_use]
-pub fn build_function_body_skeleton(source: &FunctionBodySource<'_, '_>) -> FunctionBodySkeleton {
-    build_body_skeleton(source, None)
+///
+/// `source_text` is the text the function's spans index.
+pub fn build_function_body_skeleton(
+    source: &FunctionBodySource<'_, '_>,
+    source_text: &str,
+) -> FunctionBodySkeleton {
+    build_body_skeleton(source, source_text, None)
 }
 
 /// A complete indexed structural artifact, built once before graph publication.
@@ -1112,11 +1119,14 @@ impl PreparedFunctionBodySkeleton {
 
 /// Build one current frame using the index's exact nested access facts. No child
 /// skeleton or graph is constructed to recover closure dependencies.
+///
+/// `source_text` is the text the function's spans index.
 pub fn build_indexed_function_body_skeleton(
     source: &FunctionBodySource<'_, '_>,
+    source_text: &str,
     entry: &FunctionProgramEntry,
 ) -> Result<PreparedFunctionBodySkeleton, FlowBindingMapError> {
-    let skeleton = build_body_skeleton(source, Some(entry));
+    let skeleton = build_body_skeleton(source, source_text, Some(entry));
     prepare_function_body_skeleton(skeleton, entry)
 }
 
@@ -1326,6 +1336,18 @@ fn arc_push<T: Clone>(slot: &mut Arc<[T]>, value: T) {
 
 fn build_body_skeleton(
     source: &FunctionBodySource<'_, '_>,
+    source_text: &str,
+    entry: Option<&FunctionProgramEntry>,
+) -> FunctionBodySkeleton {
+    // The build walks the function's parameters and body.
+    let function = oxc_span::Span::new(source.anchor, source.body_span.end);
+    verter_parser::oxc_parse::with_span_stack(source_text, function, || {
+        build_body_skeleton_contained(source, entry)
+    })
+}
+
+fn build_body_skeleton_contained(
+    source: &FunctionBodySource<'_, '_>,
     entry: Option<&FunctionProgramEntry>,
 ) -> FunctionBodySkeleton {
     let mut builder = SkeletonBuilder::new(source.anchor, source.kind, source.body_span, entry);
@@ -1345,12 +1367,10 @@ fn build_body_skeleton(
         );
     }
     builder.collect_params(source.params);
-    if source.expression_body {
-        if let [Statement::ExpressionStatement(statement)] = source.statements {
-            let argument = builder.open_root_site(&statement.expression);
-            builder.push_implicit_return(argument, statement.span.into());
-            return builder.finish();
-        }
+    if let Some(expression) = source.expression_body {
+        let argument = builder.open_root_site(expression);
+        builder.push_implicit_return(argument, expression.span().into());
+        return builder.finish();
     }
     for statement in source.statements {
         builder.visit_statement(statement);
@@ -2392,8 +2412,8 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
         }
         self.class_values += 1;
         self.visit_decorators(&it.decorators);
-        if let Some(super_class) = &it.super_class {
-            self.visit_expression(super_class);
+        if let Some(heritage) = &it.heritage {
+            self.visit_expression(&heritage.expression);
         }
         for element in &it.body.body {
             match element {
@@ -2470,16 +2490,17 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                 );
                 walk::walk_statement(self, it);
             }
-            Statement::TSModuleDeclaration(module) => {
-                if let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &module.id {
-                    self.push_binding(
-                        id.name.as_str(),
-                        SkeletonBindingKind::Namespace,
-                        id.span.into(),
-                        None,
-                        false,
-                    );
-                }
+            Statement::TSNamespaceDeclaration(module) => {
+                self.push_binding(
+                    module.id.name.as_str(),
+                    SkeletonBindingKind::Namespace,
+                    module.id.span.into(),
+                    None,
+                    false,
+                );
+                walk::walk_statement(self, it);
+            }
+            Statement::TSExternalModuleDeclaration(_) => {
                 walk::walk_statement(self, it);
             }
             Statement::TSImportEqualsDeclaration(import_equals) => {
@@ -3327,8 +3348,8 @@ fn class_runs_unserved_code(class: &oxc_ast::ast::Class<'_>) -> bool {
         fn visit_class(&mut self, _it: &oxc_ast::ast::Class<'a>) {}
     }
     let mut writes = Writes::default();
-    if let Some(heritage) = &class.super_class {
-        writes.visit_expression(heritage);
+    if let Some(heritage) = &class.heritage {
+        writes.visit_expression(&heritage.expression);
     }
     for element in &class.body.body {
         match element {
