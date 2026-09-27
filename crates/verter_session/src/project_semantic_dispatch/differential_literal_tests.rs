@@ -133,6 +133,9 @@ export function cTemplateLocalMember() { const n = 1; return { k: `v${n}` } as c
 export function cTemplateElement(s: string) { return [`p${s}`] as const; }
 export function cSpread() { const base = { a: 1 } as const; return { ...base, b: 2 }; }
 export function cSpreadConst() { const base = { a: 1 } as const; return { ...base, b: 2 } as const; }
+export function cSpreadParam(o: { a: string }) { return { ...o, b: 1 }; }
+export function cSpreadOverride(o: { a: string }) { return { ...o, a: 1 }; }
+export function cSpreadOptional(o: { a?: string }) { return { ...o }; }
 export function cArrSpread() { const t = [1, 2] as const; return [...t, 3]; }
 export function cArrSpreadConst() { const t = [1, 2] as const; return [...t, 3] as const; }
 export function cBool() { return true as const; }
@@ -211,24 +214,33 @@ fn a_const_template_reads_its_value_holes_as_the_checker_reads_them() {
 }
 
 /// `{ ...base, b: 2 }` over `const base = { a: 1 } as const` is `{ a: 1; b:
-/// number; }` (`{ readonly a: 1; readonly b: 2; }` under `as const`); the lane
-/// publishes an unevaluated spread program.
-///
-/// What the lane gives:
-/// - `cSpread`: the checker answers `{ a: 1; b: number; }`; the lane measured
-///   `<unrendered ObjectSpreadProgram(ObjectSpreadProgram { effects:
-///   [Spread(S>`.
-/// - `cSpreadConst`: the checker answers `{ readonly a: 1; readonly b: 2; }`;
-///   the lane measured `<unrendered ObjectSpreadProgram(ObjectSpreadProgram {
-///   effects: [Spread(S>`.
+/// number; }`: a spread copies its source's properties without their
+/// `readonly`, a later property overrides an earlier one, and an optional
+/// property stays optional.
 #[test]
-#[ignore = "an object literal spreading a const object is the merged object type"]
 fn an_object_spread_of_a_const_object_is_its_merged_object() {
     let matrix = Matrix::new(AS_CONST);
     let failures = matrix.returns(&[
         ("cSpread", "{ a: 1; b: number; }"),
-        ("cSpreadConst", "{ readonly a: 1; readonly b: 2; }"),
+        ("cSpreadParam", "{ a: string; b: number; }"),
+        ("cSpreadOverride", "{ a: number; }"),
+        ("cSpreadOptional", "{ a?: string; }"),
     ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `{ ...base, b: 2 } as const` is `{ readonly a: 1; readonly b: 2; }`: a
+/// spread in a const context copies its source's properties `readonly`.
+/// Wrong-but-clean: the lane keeps the spread properties mutable.
+///
+/// What the lane gives:
+/// - `cSpreadConst`: the checker answers `{ readonly a: 1; readonly b: 2; }`;
+///   the lane measured `{ a: 1; readonly b: 2; }`.
+#[test]
+#[ignore = "a spread in a const context copies its source's properties readonly"]
+fn wrong_clean_a_const_spread_copies_its_properties_readonly() {
+    let matrix = Matrix::new(AS_CONST);
+    let failures = matrix.returns(&[("cSpreadConst", "{ readonly a: 1; readonly b: 2; }")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

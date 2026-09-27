@@ -11193,7 +11193,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// positive member evidence plus the completeness flag: `false` only
     /// for a single closed alternative (the exact complete domain),
     /// `true` for open / multi-alternative formulas (positive-only).
-    fn spread_program_members_for_published_projection(
+    pub(super) fn spread_program_members_for_published_projection(
         &self,
         program: SemanticNodeId,
         caller_context: crate::semantic_query::ProjectionReductionContext,

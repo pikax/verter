@@ -450,6 +450,26 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
     let Some(data) = graph.node_data(node) else {
         return "<evicted>".to_owned();
     };
+    // A construction program with one closed alternative is the object it
+    // builds, as every consumer of the carrier reduces it.
+    if matches!(data.as_ref(), SemanticNodeData::ObjectSpreadProgram(_)) {
+        if let Some((members, false)) = dispatch.spread_program_members_for_published_projection(
+            node,
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        ) {
+            let object = graph.intern_node(SemanticNodeData::Object(
+                crate::semantic_query::SurfaceView::from_entries(
+                    members
+                        .into_iter()
+                        .map(crate::semantic_query::SurfaceEntry::Member)
+                        .collect(),
+                    None,
+                    false,
+                ),
+            ));
+            return print(dispatch, object, depth);
+        }
+    }
     let at = |node: SemanticNodeId| print(dispatch, node, depth + 1);
     match data.as_ref() {
         SemanticNodeData::Primitive(kind) => match kind {
