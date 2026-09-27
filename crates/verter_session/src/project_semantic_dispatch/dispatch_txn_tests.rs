@@ -1065,6 +1065,7 @@ fn flow_demand_carriers_default_none_and_round_trip() {
     let provenance = super::flow_obligation_state::FlowEvaluationProvenance::new(7, 3, 5, 0);
     let plan = fixture
         .build_plan(FlowDemandRequest {
+            ancestry: Default::default(),
             query,
             input_basis: verter_identity::identity::InputBasisId::from_canonical(&provenance),
             resources: FlowResourcePolicy::default(),
@@ -1181,6 +1182,7 @@ fn zero_obligation_demand_never_converges_or_seals() {
     let provenance = super::flow_obligation_state::FlowEvaluationProvenance::new(11, 3, 5, 0);
     let plan = fixture
         .build_plan(FlowDemandRequest {
+            ancestry: Default::default(),
             query,
             input_basis: verter_identity::identity::InputBasisId::from_canonical(&provenance),
             resources: FlowResourcePolicy::default(),

@@ -92,8 +92,11 @@ use verter_semantic::analysis::type_eval_build::{
 use verter_type_expr::{PrimitiveName, TypeExpr};
 use verter_type_expr_oxc::{lower_return_annotation, lower_ts_type};
 
+#[path = "flow_slice_content_branches.rs"]
+mod branches;
 #[path = "flow_slice_content_class.rs"]
 mod class_expression;
+use branches::{arm_statements, LoopLower, LowerAcc, LowerEntered, LowerStep};
 
 /// The demand selection one content lowering serves: the value-selected
 /// expression spans and the value-selected slot declaration spans of ONE
@@ -908,6 +911,39 @@ pub struct SlicePatternElement {
     pub default: Option<Box<SliceExpr>>,
     /// Whether the default is a bare literal — a FRESH literal type.
     pub default_fresh: bool,
+}
+
+/// A pattern is as deep as the destructuring it lowers, and the derived
+/// drop would release it a native level per nested pattern: the nested
+/// patterns this element solely owns are taken off and released from this
+/// loop, each leaving an empty pattern behind.
+impl Drop for SlicePatternElement {
+    fn drop(&mut self) {
+        let empty = || SlicePattern::Array {
+            elements: Arc::from([]),
+            rest: None,
+        };
+        let mut released = vec![std::mem::replace(&mut self.pattern, empty())];
+        while let Some(mut pattern) = released.pop() {
+            match &mut pattern {
+                SlicePattern::Object { properties, .. } => {
+                    if let Some(properties) = Arc::get_mut(properties) {
+                        for (_, element) in properties.iter_mut() {
+                            released.push(std::mem::replace(&mut element.pattern, empty()));
+                        }
+                    }
+                }
+                SlicePattern::Array { elements, .. } => {
+                    if let Some(elements) = Arc::get_mut(elements) {
+                        for element in elements.iter_mut().flatten() {
+                            released.push(std::mem::replace(&mut element.pattern, empty()));
+                        }
+                    }
+                }
+                SlicePattern::Binding { .. } | SlicePattern::Target { .. } => {}
+            }
+        }
+    }
 }
 
 impl SlicePattern {
@@ -4700,6 +4736,68 @@ enum NarrowDestination {
     Absent,
 }
 
+/// A binding pattern waiting on an element ([`Lowerer::lower_pattern`]).
+enum PatternFrame<'p, 'x> {
+    /// An object pattern: the properties lowered so far, the next one, and
+    /// the key of the one whose element is being lowered.
+    Object {
+        object: &'p oxc_ast::ast::ObjectPattern<'x>,
+        next: usize,
+        properties: Vec<(SlicePatternKey, SlicePatternElement)>,
+        key: Option<SlicePatternKey>,
+    },
+    /// An array pattern: the elements lowered so far and the next one.
+    Array {
+        array: &'p oxc_ast::ast::ArrayPattern<'x>,
+        next: usize,
+        elements: Vec<Option<SlicePatternElement>>,
+    },
+    /// An element whose pattern is being lowered, with the default it
+    /// lowers once its pattern is in.
+    Element { default: Option<&'p Expression<'x>> },
+}
+
+/// What a composite binding pattern needs next.
+enum PatternStep<'p, 'x> {
+    /// This element's pattern lowered.
+    Element(&'p BindingPattern<'x>),
+    /// Nothing: the complete pattern.
+    Complete(SlicePattern),
+}
+
+/// What [`Lowerer::classify_guard`] needs next for one form.
+enum GuardStep<'t> {
+    /// Nothing: the form's disposition.
+    Done(GuardDisposition),
+    /// This operand's disposition, composed by the wait (none where the
+    /// form's disposition is the operand's).
+    Operand(Option<GuardWait<'t>>, &'t Expression<'t>),
+}
+
+/// A composing form waiting on an operand's disposition.
+enum GuardWait<'t> {
+    /// A chain of `!`s: the operand's disposition negated this many times.
+    Negate(usize),
+    /// A logical chain's spine, innermost node first: the disposition
+    /// composed so far, and the node whose right operand is next.
+    Spine {
+        spine: Vec<&'t oxc_ast::ast::LogicalExpression<'t>>,
+        next: usize,
+        composed: Option<GuardDisposition>,
+    },
+    /// A conditional: no narrowing when neither branch narrows.
+    Conditional {
+        alternate: &'t Expression<'t>,
+        consequent: Option<GuardDisposition>,
+    },
+    /// A plain write to a narrowable binding: the binding's truthiness
+    /// when the written value narrows nothing.
+    AssignedTruthy(SliceNarrowSubject),
+    /// A write whose target is no narrowable binding: no narrowing when
+    /// the written value narrows nothing.
+    AssignedValue,
+}
+
 /// What ONE control test establishes, as three mutually exclusive
 /// answers.
 ///
@@ -5605,102 +5703,114 @@ fn loop_body_reaches_exit<'a>(
     nested_labels: &mut Vec<&'a str>,
     enclosing_breakables: u32,
 ) -> bool {
-    let recurse =
-        |statement: &'a Statement<'a>, nested_labels: &mut Vec<&'a str>, enclosing_breakables| {
-            loop_body_reaches_exit(
-                statement,
-                wrapping_labels,
-                nested_labels,
-                enclosing_breakables,
-            )
-        };
-    match statement {
-        Statement::BreakStatement(break_stmt) => match break_stmt.label.as_ref() {
-            None => enclosing_breakables == 0,
-            // A label declared inside the body names an inner construct, so
-            // a break naming it cannot reach the loop's own exit.
-            Some(label) => {
-                let name = label.name.as_str();
-                !nested_labels.contains(&name)
-                    && wrapping_labels.iter().any(|wrapping| &**wrapping == name)
-            }
-        },
-        // A `continue` re-enters the loop; it never reaches the exit edge.
-        Statement::ContinueStatement(_) => false,
-        Statement::LabeledStatement(labeled) => {
-            nested_labels.push(labeled.label.name.as_str());
-            let reaches = recurse(&labeled.body, nested_labels, enclosing_breakables);
-            nested_labels.pop();
-            reaches
-        }
-        Statement::BlockStatement(block) => block
-            .body
-            .iter()
-            .any(|statement| recurse(statement, nested_labels, enclosing_breakables)),
-        Statement::IfStatement(if_stmt) => {
-            recurse(&if_stmt.consequent, nested_labels, enclosing_breakables)
-                || if_stmt.alternate.as_ref().is_some_and(|alternate| {
-                    recurse(alternate, nested_labels, enclosing_breakables)
-                })
-        }
-        Statement::WithStatement(with_stmt) => {
-            recurse(&with_stmt.body, nested_labels, enclosing_breakables)
-        }
-        Statement::TryStatement(try_stmt) => {
-            try_stmt
-                .block
-                .body
-                .iter()
-                .any(|statement| recurse(statement, nested_labels, enclosing_breakables))
-                || try_stmt.handler.as_ref().is_some_and(|handler| {
-                    handler
-                        .body
-                        .body
-                        .iter()
-                        .any(|statement| recurse(statement, nested_labels, enclosing_breakables))
-                })
-                || try_stmt.finalizer.as_ref().is_some_and(|finalizer| {
-                    finalizer
-                        .body
-                        .iter()
-                        .any(|statement| recurse(statement, nested_labels, enclosing_breakables))
-                })
-        }
-        // A nested breakable construct captures an unlabeled `break`.
-        Statement::SwitchStatement(switch) => switch.cases.iter().any(|case| {
-            case.consequent
-                .iter()
-                .any(|statement| recurse(statement, nested_labels, enclosing_breakables + 1))
-        }),
-        Statement::DoWhileStatement(do_while) => {
-            recurse(&do_while.body, nested_labels, enclosing_breakables + 1)
-        }
-        Statement::WhileStatement(while_stmt) => {
-            recurse(&while_stmt.body, nested_labels, enclosing_breakables + 1)
-        }
-        Statement::ForStatement(for_stmt) => {
-            recurse(&for_stmt.body, nested_labels, enclosing_breakables + 1)
-        }
-        Statement::ForInStatement(for_in) => {
-            recurse(&for_in.body, nested_labels, enclosing_breakables + 1)
-        }
-        Statement::ForOfStatement(for_of) => {
-            recurse(&for_of.body, nested_labels, enclosing_breakables + 1)
-        }
-        // Forms that cannot lexically carry a `break` bound to an enclosing
-        // loop. A nested function body is excluded by the grammar.
-        Statement::DebuggerStatement(_)
-        | Statement::EmptyStatement(_)
-        | Statement::ExpressionStatement(_)
-        | Statement::ReturnStatement(_)
-        | Statement::ThrowStatement(_)
-        | Statement::VariableDeclaration(_)
-        | Statement::FunctionDeclaration(_)
-        | Statement::ClassDeclaration(_) => false,
-        // Anything else is treated as possibly carrying a reaching break,
-        // which keeps the exit reachable and preserves today's answer.
-        _ => true,
+    // The statements walk from an explicit stack (a label declared around
+    // a body is taken off once the body is walked): a statement nested in
+    // a statement costs no native level.
+    enum Walk<'a> {
+        Statement(&'a Statement<'a>, u32),
+        LeaveLabel,
     }
+    let mut walk = vec![Walk::Statement(statement, enclosing_breakables)];
+    let push_all = |walk: &mut Vec<Walk<'a>>, statements: &'a [Statement<'a>], breakables| {
+        walk.extend(
+            statements
+                .iter()
+                .rev()
+                .map(|statement| Walk::Statement(statement, breakables)),
+        );
+    };
+    while let Some(item) = walk.pop() {
+        let (statement, enclosing_breakables) = match item {
+            Walk::LeaveLabel => {
+                nested_labels.pop();
+                continue;
+            }
+            Walk::Statement(statement, breakables) => (statement, breakables),
+        };
+        match statement {
+            Statement::BreakStatement(break_stmt) => {
+                let reaches = match break_stmt.label.as_ref() {
+                    None => enclosing_breakables == 0,
+                    // A label declared inside the body names an inner
+                    // construct, so a break naming it cannot reach the
+                    // loop's own exit.
+                    Some(label) => {
+                        let name = label.name.as_str();
+                        !nested_labels.contains(&name)
+                            && wrapping_labels.iter().any(|wrapping| &**wrapping == name)
+                    }
+                };
+                if reaches {
+                    return true;
+                }
+            }
+            // A `continue` re-enters the loop; it never reaches the exit edge.
+            Statement::ContinueStatement(_) => {}
+            Statement::LabeledStatement(labeled) => {
+                nested_labels.push(labeled.label.name.as_str());
+                walk.push(Walk::LeaveLabel);
+                walk.push(Walk::Statement(&labeled.body, enclosing_breakables));
+            }
+            Statement::BlockStatement(block) => {
+                push_all(&mut walk, &block.body, enclosing_breakables)
+            }
+            Statement::IfStatement(if_stmt) => {
+                if let Some(alternate) = if_stmt.alternate.as_ref() {
+                    walk.push(Walk::Statement(alternate, enclosing_breakables));
+                }
+                walk.push(Walk::Statement(&if_stmt.consequent, enclosing_breakables));
+            }
+            Statement::WithStatement(with_stmt) => {
+                walk.push(Walk::Statement(&with_stmt.body, enclosing_breakables));
+            }
+            Statement::TryStatement(try_stmt) => {
+                if let Some(finalizer) = try_stmt.finalizer.as_ref() {
+                    push_all(&mut walk, &finalizer.body, enclosing_breakables);
+                }
+                if let Some(handler) = try_stmt.handler.as_ref() {
+                    push_all(&mut walk, &handler.body.body, enclosing_breakables);
+                }
+                push_all(&mut walk, &try_stmt.block.body, enclosing_breakables);
+            }
+            // A nested breakable construct captures an unlabeled `break`.
+            Statement::SwitchStatement(switch) => {
+                for case in switch.cases.iter().rev() {
+                    push_all(&mut walk, &case.consequent, enclosing_breakables + 1);
+                }
+            }
+            Statement::DoWhileStatement(do_while) => {
+                walk.push(Walk::Statement(&do_while.body, enclosing_breakables + 1));
+            }
+            Statement::WhileStatement(while_stmt) => {
+                walk.push(Walk::Statement(&while_stmt.body, enclosing_breakables + 1));
+            }
+            Statement::ForStatement(for_stmt) => {
+                walk.push(Walk::Statement(&for_stmt.body, enclosing_breakables + 1));
+            }
+            Statement::ForInStatement(for_in) => {
+                walk.push(Walk::Statement(&for_in.body, enclosing_breakables + 1));
+            }
+            Statement::ForOfStatement(for_of) => {
+                walk.push(Walk::Statement(&for_of.body, enclosing_breakables + 1));
+            }
+            // Forms that cannot lexically carry a `break` bound to an
+            // enclosing loop. A nested function body is excluded by the
+            // grammar.
+            Statement::DebuggerStatement(_)
+            | Statement::EmptyStatement(_)
+            | Statement::ExpressionStatement(_)
+            | Statement::ReturnStatement(_)
+            | Statement::ThrowStatement(_)
+            | Statement::VariableDeclaration(_)
+            | Statement::FunctionDeclaration(_)
+            | Statement::ClassDeclaration(_) => {}
+            // Anything else is treated as possibly carrying a reaching
+            // break, which keeps the exit reachable and preserves today's
+            // answer.
+            _ => return true,
+        }
+    }
+    false
 }
 
 fn loop_transfers_to_enclosing_label(
@@ -6405,9 +6515,11 @@ struct RegionLowerFrame<'s, 'x> {
     can_fall_through: bool,
     hit_unsupported: bool,
     may_break: Vec<SliceBreakTarget>,
-    /// Where the block statement the frame is suspended at begins in
-    /// `out`.
+    /// Where the statement the frame is suspended at begins in `out`.
     block_statement_start: usize,
+    /// The statement the frame is suspended at, with what it resumes with
+    /// once the region it entered is lowered.
+    entered: Option<LowerEntered<'s, 'x>>,
 }
 
 /// What a region's lowering needs next: a block's region lowered, or
@@ -6648,6 +6760,22 @@ impl NestedFlowContext {
             current = frame.gate.outer.enclosing.as_deref();
         }
         Vec::new()
+    }
+}
+
+/// A chain drops from this loop, each frame no other scope shares taken off
+/// in turn: dropping it frame inside frame would take a native level per
+/// enclosing function.
+impl Drop for CaptureScope {
+    fn drop(&mut self) {
+        let mut next = self.enclosing.take();
+        while let Some(frame) = next {
+            next = Arc::try_unwrap(frame).ok().and_then(|frame| {
+                Arc::try_unwrap(frame.gate)
+                    .ok()
+                    .and_then(|mut gate| gate.outer.enclosing.take())
+            });
+        }
     }
 }
 
@@ -8385,6 +8513,7 @@ impl<'a> Lowerer<'a> {
             hit_unsupported: false,
             may_break: Vec::new(),
             block_statement_start: 0,
+            entered: None,
         }
     }
 
@@ -8402,21 +8531,68 @@ impl<'a> Lowerer<'a> {
         let mut hit_unsupported = frame.hit_unsupported;
         let mut may_break = std::mem::take(&mut frame.may_break);
         if let Some(child) = delivered {
-            can_fall_through = child
-                .region
-                .can_fall_through
-                .reaches_end(CompletionDischarge::RegionComposition);
-            hit_unsupported = child.hit_unsupported;
-            // A block absorbs no `break` — an exit targeting an
-            // enclosing switch / labeled statement passes through.
-            may_break.extend(child.may_break);
-            out.push(SliceStatement::Block(child.region));
-            self.finish_region_statement(
-                frame.block_statement_start,
-                &mut out,
-                hit_unsupported,
-                &mut can_fall_through,
-            );
+            match frame
+                .entered
+                .take()
+                .expect("the statement the region is suspended at")
+            {
+                LowerEntered::Block => {
+                    can_fall_through = child
+                        .region
+                        .can_fall_through
+                        .reaches_end(CompletionDischarge::RegionComposition);
+                    hit_unsupported = child.hit_unsupported;
+                    // A block absorbs no `break` — an exit targeting an
+                    // enclosing switch / labeled statement passes through.
+                    may_break.extend(child.may_break);
+                    out.push(SliceStatement::Block(child.region));
+                    self.finish_region_statement(
+                        frame.block_statement_start,
+                        &mut out,
+                        hit_unsupported,
+                        &mut can_fall_through,
+                    );
+                }
+                LowerEntered::Unreachable => {
+                    if child.hit_unsupported {
+                        out.insert(
+                            0,
+                            SliceStatement::Gap(crate::semantic_query::FlowGap::AbruptCompletion),
+                        );
+                    } else {
+                        out.push(SliceStatement::Unreachable(Box::new(child.region)));
+                    }
+                    frame.next = statements.len();
+                }
+                entered => {
+                    let step = self.resume_entered_lowering(
+                        entered,
+                        child,
+                        LowerAcc {
+                            out: &mut out,
+                            can_fall_through: &mut can_fall_through,
+                            hit_unsupported: &mut hit_unsupported,
+                            may_break: &mut may_break,
+                        },
+                    );
+                    match step {
+                        LowerStep::Enter(entered, next) => {
+                            frame.entered = Some(entered);
+                            frame.out = out;
+                            frame.can_fall_through = can_fall_through;
+                            frame.hit_unsupported = hit_unsupported;
+                            frame.may_break = may_break;
+                            return RegionLowerStep::EnterBlock(next);
+                        }
+                        LowerStep::Done => self.finish_region_statement(
+                            frame.block_statement_start,
+                            &mut out,
+                            hit_unsupported,
+                            &mut can_fall_through,
+                        ),
+                    }
+                }
+            }
         }
         while let Some(statement) = statements.get(frame.next) {
             let index = frame.next;
@@ -8425,15 +8601,14 @@ impl<'a> Lowerer<'a> {
                 if !hit_unsupported
                     && unreachable_statements_contribute(&self.walks, &statements[index..])
                 {
-                    let unreachable = self.lower_region(&statements[index..]);
-                    if unreachable.hit_unsupported {
-                        out.insert(
-                            0,
-                            SliceStatement::Gap(crate::semantic_query::FlowGap::AbruptCompletion),
-                        );
-                    } else {
-                        out.push(SliceStatement::Unreachable(Box::new(unreachable.region)));
-                    }
+                    // The unreachable statements lower next, from the
+                    // caller's stack.
+                    frame.entered = Some(LowerEntered::Unreachable);
+                    frame.out = out;
+                    frame.can_fall_through = can_fall_through;
+                    frame.hit_unsupported = hit_unsupported;
+                    frame.may_break = may_break;
+                    return RegionLowerStep::EnterBlock(&statements[index..]);
                 }
                 break;
             }
@@ -8499,6 +8674,7 @@ impl<'a> Lowerer<'a> {
                     frame.hit_unsupported = hit_unsupported;
                     frame.may_break = may_break;
                     frame.block_statement_start = statement_start;
+                    frame.entered = Some(LowerEntered::Block);
                     return RegionLowerStep::EnterBlock(&block.body);
                 }
                 Statement::IfStatement(if_stmt) if discarded_value_holds_write(&if_stmt.test) => {
@@ -8512,88 +8688,27 @@ impl<'a> Lowerer<'a> {
                     out.extend(lowered.region.statements.iter().cloned());
                 }
                 Statement::IfStatement(if_stmt) => {
-                    // The evaluator never consumes the test's VALUE, so no
-                    // test content lowers — but its narrowing facts do,
-                    // through the ONE guard authority both control
-                    // spellings share.
-                    let guard = self.lower_guard(&if_stmt.test);
-                    // A guard form the lowering REFUSED (an unprovable
-                    // `instanceof` constructor) flagged the gap while the
-                    // test lowered. Take it here, ahead of the arms: an arm
-                    // region's own statement loop would otherwise drain it
-                    // INTO the arm.
-                    let unprovable_guard = std::mem::take(&mut self.control_test_gap);
-                    // A call in the TEST is decided above ONLY when its
-                    // result provably cannot control the arms' narrowing;
-                    // a predicate call takes evaluator evidence at guard
-                    // application, and an unprovable callee degrades the
-                    // demand through the typed guard-narrowing gap below.
-                    // An entered `asserts` call in the test narrows once
-                    // the test has run, ahead of both arms.
-                    let mut unprovable_control_call = false;
-                    let test_assertions = self.collecting_entered_assertions(|this| {
-                        unprovable_control_call = this.record_control_position_calls(&if_stmt.test);
-                    });
-                    out.extend(test_assertions);
-                    let active_guard_base = self.active_guard_bindings.len();
-                    let guard_bindings = self.guard_bindings(&guard, if_stmt.test.span());
-                    self.active_guard_bindings
-                        .extend(guard_bindings.iter().copied());
-                    let consequent = self.lower_arm(&if_stmt.consequent);
-                    self.active_guard_bindings.truncate(active_guard_base);
-                    let alternate = if_stmt.alternate.as_ref().map(|alternate| {
-                        self.active_guard_bindings
-                            .extend(guard_bindings.iter().copied());
-                        let lowered = self.lower_arm(alternate);
-                        self.active_guard_bindings.truncate(active_guard_base);
-                        lowered
-                    });
-                    can_fall_through = consequent
-                        .region
-                        .can_fall_through
-                        .reaches_end(CompletionDischarge::RegionComposition)
-                        || alternate
-                            .as_ref()
-                            .map(|region| {
-                                region
-                                    .region
-                                    .can_fall_through
-                                    .reaches_end(CompletionDischarge::RegionComposition)
-                            })
-                            .unwrap_or(true);
-                    hit_unsupported = consequent.hit_unsupported
-                        || alternate
-                            .as_ref()
-                            .is_some_and(|region| region.hit_unsupported);
-                    // An `if` absorbs no `break` either: a conditional exit
-                    // (`if (f) break;`) is still an exit of the region.
-                    may_break.extend(consequent.may_break);
-                    // A call in the TEST is a throw point BEFORE either
-                    // arm — the test lowers to guard facts only, so the
-                    // marker carries the point (ahead of the `if`, where
-                    // the test evaluates).
-                    if unprovable_control_call || unprovable_guard {
-                        out.push(SliceStatement::Gap(
-                            crate::semantic_query::FlowGap::GuardNarrowing,
-                        ));
-                    }
-                    if verter_semantic::analysis::flow::expression_contains_call(&if_stmt.test) {
-                        out.push(SliceStatement::ThrowPoint);
-                    }
-                    self.lower_test_updates(&if_stmt.test, &mut out);
-                    if let Some(alternate) = alternate {
-                        may_break.extend(alternate.may_break);
-                        out.push(SliceStatement::If {
-                            guard,
-                            consequent: Box::new(consequent.region),
-                            alternate: Some(Box::new(alternate.region)),
-                        });
-                    } else {
-                        out.push(SliceStatement::If {
-                            guard,
-                            consequent: Box::new(consequent.region),
-                            alternate: None,
-                        });
+                    // Its arms lower next, from the caller's stack
+                    // (`flow_slice_content_branches`).
+                    match self.begin_if_lowering(
+                        if_stmt,
+                        LowerAcc {
+                            out: &mut out,
+                            can_fall_through: &mut can_fall_through,
+                            hit_unsupported: &mut hit_unsupported,
+                            may_break: &mut may_break,
+                        },
+                    ) {
+                        LowerStep::Enter(entered, next) => {
+                            frame.entered = Some(entered);
+                            frame.out = out;
+                            frame.can_fall_through = can_fall_through;
+                            frame.hit_unsupported = hit_unsupported;
+                            frame.may_break = may_break;
+                            frame.block_statement_start = statement_start;
+                            return RegionLowerStep::EnterBlock(next);
+                        }
+                        LowerStep::Done => {}
                     }
                 }
                 Statement::VariableDeclaration(decl) => {
@@ -8686,14 +8801,16 @@ impl<'a> Lowerer<'a> {
                         || loop_transfers_to_enclosing_label(statement, &self.loop_direct_labels)
                         || self.loop_has_selected_transfer(statement)
                     {
-                        match self.lower_loop(statement, labels) {
-                            Some(lowered) => {
-                                hit_unsupported = lowered.hit_unsupported;
-                                may_break.extend(lowered.may_break);
-                                if !lowered.completes || hit_unsupported {
-                                    can_fall_through = false;
-                                }
-                                out.push(SliceStatement::Loop(Box::new(lowered.lowered)));
+                        // Its body lowers next, from the caller's stack.
+                        match self.begin_lower_loop(statement, labels) {
+                            Some((lowering, body)) => {
+                                frame.entered = Some(LowerEntered::Loop(lowering));
+                                frame.out = out;
+                                frame.can_fall_through = can_fall_through;
+                                frame.hit_unsupported = hit_unsupported;
+                                frame.may_break = may_break;
+                                frame.block_statement_start = statement_start;
+                                return RegionLowerStep::EnterBlock(body);
                             }
                             None => {
                                 out.push(SliceStatement::Unsupported(SliceUnsupported::Loop));
@@ -8714,388 +8831,57 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 Statement::LabeledStatement(labeled) => {
-                    // The label is a break target for its OWN body in both
-                    // paths: a `break` naming it exits to after the
-                    // statement, which the absorption below folds into the
-                    // statement's reachability.
-                    let label: Arc<str> = Arc::from(labeled.label.name.as_str());
-                    self.break_targets.push(Some(Arc::clone(&label)));
-                    self.break_target_followed_by_return
-                        .push(self.current_statement_followed_by_return);
-                    // A label chain directly wrapping a loop names the
-                    // loop's own exit/iteration edge: record it so the
-                    // loop's transparency classification treats a jump to
-                    // it as local rather than an escaping transfer.
-                    let direct_wrap = label_directly_wraps_loop(&labeled.body);
-                    let pending_base = self.pending_loop_labels.len();
-                    if direct_wrap {
-                        self.loop_direct_labels.push(Arc::clone(&label));
-                        self.pending_loop_labels.push(Arc::clone(&label));
-                    }
-                    let child = self.lower_arm(&labeled.body);
-                    self.pending_loop_labels.truncate(pending_base);
-                    if direct_wrap {
-                        self.loop_direct_labels.pop();
-                    }
-                    self.break_targets.pop();
-                    self.break_target_followed_by_return.pop();
-                    let mut absorbed = false;
-                    for target in child.may_break {
-                        match target {
-                            SliceBreakTarget::Named(name) if name == label => absorbed = true,
-                            other => may_break.push(other),
+                    // Its body lowers next, from the caller's stack.
+                    match self.begin_labeled_lowering(labeled) {
+                        LowerStep::Enter(entered, next) => {
+                            frame.entered = Some(entered);
+                            frame.out = out;
+                            frame.can_fall_through = can_fall_through;
+                            frame.hit_unsupported = hit_unsupported;
+                            frame.may_break = may_break;
+                            frame.block_statement_start = statement_start;
+                            return RegionLowerStep::EnterBlock(next);
                         }
+                        LowerStep::Done => {}
                     }
-                    // The body lowers identically whether or not it bears a
-                    // return: the label wraps an ordinary statement whose
-                    // own rail decides (a block's hoisted `var`s, a loop's
-                    // escaping `var` fail-close, an `if` arm's conditional
-                    // binding, `switch` / `try` / `with` unsupported), and
-                    // the EVALUATOR needs the label's name either way —
-                    // the absorbed `break` is what lets execution reach
-                    // past the statement even when the body itself cannot,
-                    // and its captured state is that edge's layer state.
-                    can_fall_through = child
-                        .region
-                        .can_fall_through
-                        .reaches_end(CompletionDischarge::RegionComposition)
-                        || absorbed;
-                    hit_unsupported = child.hit_unsupported;
-                    out.push(SliceStatement::Labeled {
-                        label,
-                        body: Box::new(child.region),
-                    });
                 }
                 Statement::SwitchStatement(switch) => {
-                    // Each case clause lowers as its own region with the
-                    // switch on the break-target stack: a `break` ends the
-                    // case's path and is absorbed into the clause's
-                    // `breaks` flag; a `break` naming an OUTER labeled
-                    // statement propagates through the switch untouched.
-                    // The discriminant lowers no value content; when it is
-                    // a narrowable reference it rides the statement so the
-                    // evaluator can narrow it per dispatch edge, and each
-                    // literal case test rides its clause for the same
-                    // purpose (a non-literal test narrows nothing).
-                    //
-                    // Both positions still EXECUTE, so their effects take
-                    // the fail-closed scan: the discriminant's value feeds
-                    // the dispatch but never the demanded answer (the
-                    // discarded-operand discipline — only an `asserts`
-                    // callee narrows what follows), and each case TEST is
-                    // a control position exactly as an `if` test is —
-                    // `switch (true) { case isString(x): … }` narrows `x`
-                    // inside the clause in the checker.
-                    //
-                    // The scan alone is NOT completeness evidence, because
-                    // a case relation narrows with no call and no write at
-                    // all: `switch (true) { case typeof x === "string": }`
-                    // narrows `x` inside the clause, and `case K:` against a
-                    // literal-typed `const` narrows the discriminant. The
-                    // MODELED dispatches are a represented discriminant
-                    // against a LITERAL case relation, a `switch (typeof x)`
-                    // string case, and a `switch (true)` case whose
-                    // condition is a guard; every other clause with a test
-                    // mints the typed gap.
-                    //
-                    // The gap belongs AHEAD of the switch: a case test
-                    // evaluates whether or not its clause is entered, so
-                    // the flag must not drain into a clause region's own
-                    // statement loop.
-                    let mut unprovable_switch_effect =
-                        self.record_discarded_operand_calls(&switch.discriminant);
-                    let has_default = switch.cases.iter().any(|case| case.test.is_none());
-                    let discriminant = self.narrow_subject_of(&switch.discriminant);
-                    self.break_targets.push(None);
-                    self.break_target_followed_by_return
-                        .push(SuffixReturn::NotGuaranteed);
-                    // A clause body evaluates under the dispatch narrow
-                    // of the discriminant, so a closure created there
-                    // takes the closure-capture rail the `if` arms and
-                    // the ternary's arms take.
-                    let active_guard_base = self.active_guard_bindings.len();
-                    if let Some(subject) = discriminant.as_ref() {
-                        let bindings = self.subject_bindings(subject, switch.discriminant.span());
-                        self.active_guard_bindings.extend(bindings);
-                    }
-                    let mut cases = Vec::with_capacity(switch.cases.len());
-                    for case in &switch.cases {
-                        if let Some(test) = case.test.as_ref() {
-                            unprovable_switch_effect |= self.record_control_position_calls(test);
+                    // Its clauses lower next, from the caller's stack.
+                    match self.begin_switch_lowering(
+                        switch,
+                        LowerAcc {
+                            out: &mut out,
+                            can_fall_through: &mut can_fall_through,
+                            hit_unsupported: &mut hit_unsupported,
+                            may_break: &mut may_break,
+                        },
+                    ) {
+                        LowerStep::Enter(entered, next) => {
+                            frame.entered = Some(entered);
+                            frame.out = out;
+                            frame.can_fall_through = can_fall_through;
+                            frame.hit_unsupported = hit_unsupported;
+                            frame.may_break = may_break;
+                            frame.block_statement_start = statement_start;
+                            return RegionLowerStep::EnterBlock(next);
                         }
-                        // The MODELED dispatch is exactly one pair: a
-                        // represented discriminant against a LITERAL case
-                        // relation. Anything else — a `typeof` or
-                        // equality relation under a non-reference
-                        // discriminant, a case test naming a constant, a
-                        // template case, a discriminant this half cannot
-                        // represent — establishes a clause narrow the
-                        // checker applies and this lowering carries
-                        // nothing for, so the switch degrades. The
-                        // unrecognized clause keeps its OWN carrier: it
-                        // must never be dispatched as the default edge.
-                        let test = match case.test.as_ref() {
-                            None => SliceSwitchTest::Default,
-                            // `switch (typeof x)`: each string case is the
-                            // `typeof x === "…"` guard.
-                            Some(test)
-                                if discriminant.is_none()
-                                    && self
-                                        .typeof_guard(&switch.discriminant, test, false)
-                                        .is_some() =>
-                            {
-                                SliceSwitchTest::Guard(Box::new(
-                                    self.typeof_guard(&switch.discriminant, test, false)
-                                        .expect("the guard was just lowered"),
-                                ))
-                            }
-                            // `switch (true)`: each case is its condition.
-                            Some(test)
-                                if matches!(
-                                    unwrap_parenthesized(&switch.discriminant),
-                                    Expression::BooleanLiteral(literal) if literal.value
-                                ) =>
-                            {
-                                match self.lower_guard(test) {
-                                    SliceGuard::None => {
-                                        unprovable_switch_effect = true;
-                                        SliceSwitchTest::Unmodeled
-                                    }
-                                    guard => SliceSwitchTest::Guard(Box::new(guard)),
-                                }
-                            }
-                            Some(test) => {
-                                match guard_literal_of(test, self.source)
-                                    .or_else(|| self.guard_value_path_of(test))
-                                    .filter(|_| discriminant.is_some())
-                                {
-                                    Some(literal) => SliceSwitchTest::Literal(literal),
-                                    None => {
-                                        unprovable_switch_effect = true;
-                                        SliceSwitchTest::Unmodeled
-                                    }
-                                }
-                            }
-                        };
-                        let lowered = self.lower_region(&case.consequent);
-                        hit_unsupported |= lowered.hit_unsupported;
-                        let mut breaks = false;
-                        for target in lowered.may_break {
-                            match target {
-                                SliceBreakTarget::Anonymous => breaks = true,
-                                named => may_break.push(named),
-                            }
-                        }
-                        cases.push(SliceSwitchCase {
-                            region: lowered.region,
-                            breaks: NormalCompletion::minted(
-                                breaks,
-                                CompletionConstruction::SwitchCaseBreak,
-                            ),
-                            test,
-                        });
+                        LowerStep::Done => {}
                     }
-                    self.active_guard_bindings.truncate(active_guard_base);
-                    self.break_targets.pop();
-                    self.break_target_followed_by_return.pop();
-                    // Past the switch is reachable when no `default`
-                    // exists (a non-matching discriminant skips every
-                    // case), when the LAST clause falls off the end of the
-                    // switch, or when any clause exits via `break`.
-                    can_fall_through = !has_default
-                        || cases.last().is_some_and(|case| {
-                            case.region
-                                .can_fall_through
-                                .reaches_end(CompletionDischarge::RegionComposition)
-                        })
-                        || cases.iter().any(|case| {
-                            case.breaks
-                                .reaches_end(CompletionDischarge::RegionComposition)
-                        });
-                    if unprovable_switch_effect {
-                        out.push(SliceStatement::Gap(
-                            crate::semantic_query::FlowGap::GuardNarrowing,
-                        ));
-                    }
-                    out.push(SliceStatement::Switch {
-                        discriminant,
-                        cases: Arc::from(cases.into_boxed_slice()),
-                        has_default,
-                    });
                 }
                 Statement::TryStatement(try_stmt) => {
-                    let block = self.lower_region(&try_stmt.block.body);
-                    hit_unsupported |= block.hit_unsupported;
-                    let mut clause_may_break = block.may_break;
-                    let block = block.region;
-                    let catch = try_stmt.handler.as_ref().map(|handler| {
-                        let param = handler.param.as_ref().and_then(|param| {
-                            match &param.pattern {
-                                BindingPattern::BindingIdentifier(id) => {
-                                    Some(Arc::from(id.name.as_str()))
-                                }
-                                // A destructured catch parameter binds
-                                // nothing this frame can name.
-                                _ => None,
-                            }
-                        });
-                        let region = self.lower_region(&handler.body.body);
-                        hit_unsupported |= region.hit_unsupported;
-                        clause_may_break.extend(region.may_break);
-                        let declared = handler.param.as_ref().and_then(|param| {
-                            param.type_annotation.as_ref().map(|annotation| {
-                                self.gate(
-                                    lower_ts_type(&annotation.type_annotation, self.source),
-                                    param.pattern.span(),
-                                    &[],
-                                )
-                            })
-                        });
-                        Box::new(SliceCatchClause {
-                            declared,
-                            binding: handler.param.as_ref().and_then(|param| {
-                                match &param.pattern {
-                                    BindingPattern::BindingIdentifier(id) => {
-                                        self.bindings.declaration_at_span(self.rebase(id.span))
-                                    }
-                                    _ => None,
-                                }
-                            }),
-                            param,
-                            region: region.region,
-                        })
-                    });
-                    let finally = try_stmt.finalizer.as_ref().map(|finalizer| {
-                        let region = self.lower_region(&finalizer.body);
-                        hit_unsupported |= region.hit_unsupported;
-                        (Box::new(region.region), region.may_break)
-                    });
-                    // A `finally` that CANNOT fall through completes
-                    // abruptly on every path, and abrupt completion
-                    // discards the try/catch's pending exits — pending
-                    // returns AND pending `break`s alike. A finally that
-                    // CAN fall through overrides nothing on that path: a
-                    // pending break proceeds past the try when the finally
-                    // does not return, so the try/catch clauses' break
-                    // exits propagate whenever the finally has a
-                    // fall-through path (or does not exist). The finally
-                    // clause's OWN break exits always propagate: they fire
-                    // after every override decision, they are never
-                    // pending.
-                    let finally_blocks_exits = finally.as_ref().is_some_and(|(region, _)| {
-                        !region
-                            .can_fall_through
-                            .reaches_end(CompletionDischarge::RegionComposition)
-                    });
-                    // A named break crossing this try for any enclosing
-                    // label remains an authored return-inference path even
-                    // when blocks or inner labels wrap the try. An abrupt
-                    // finally replaces the runtime edge, but not that
-                    // implicit-`undefined` inference contribution.
-                    let target_followed_by_return = |name: &Arc<str>| {
-                        self.break_targets
-                            .iter()
-                            .zip(self.break_target_followed_by_return.iter())
-                            .rev()
-                            .find(|(entry, _)| entry.as_ref() == Some(name))
-                            .map(|(_, followed_by_return)| *followed_by_return)
-                    };
-                    // An anonymous break's destination is the innermost
-                    // anonymous breakable's continuation.
-                    let anonymous_followed_by_return = || {
-                        self.break_targets
-                            .iter()
-                            .zip(self.break_target_followed_by_return.iter())
-                            .rev()
-                            .find(|(entry, _)| entry.is_none())
-                            .map(|(_, followed_by_return)| *followed_by_return)
-                    };
-                    // The destination decides the contribution, and an
-                    // UNDECIDED destination decides nothing: the value keeps
-                    // the derivation it always had, and the gap below makes
-                    // the result return without ever being admitted.
-                    let pending_break_destination = |state: SuffixReturn| {
-                        finally_blocks_exits
-                            && clause_may_break.iter().any(|target| match target {
-                                SliceBreakTarget::Named(name) => {
-                                    target_followed_by_return(name) == Some(state)
-                                }
-                                SliceBreakTarget::Anonymous => {
-                                    anonymous_followed_by_return() == Some(state)
-                                }
-                            })
-                    };
-                    let pending_break_destination_undecided =
-                        pending_break_destination(SuffixReturn::Undecided);
-                    let pending_break_contributes_undefined =
-                        pending_break_destination(SuffixReturn::NotGuaranteed)
-                            || pending_break_destination_undecided;
-                    let mut pending_break_following_return_targets: Vec<Arc<str>> = Vec::new();
-                    if finally_blocks_exits {
-                        for target in &clause_may_break {
-                            let SliceBreakTarget::Named(name) = target else {
-                                continue;
-                            };
-                            if target_followed_by_return(name) == Some(SuffixReturn::Guaranteed)
-                                && !pending_break_following_return_targets.contains(name)
-                            {
-                                pending_break_following_return_targets.push(Arc::clone(name));
-                            }
+                    // Its clauses lower next, from the caller's stack.
+                    match self.begin_try_lowering(try_stmt) {
+                        LowerStep::Enter(entered, next) => {
+                            frame.entered = Some(entered);
+                            frame.out = out;
+                            frame.can_fall_through = can_fall_through;
+                            frame.hit_unsupported = hit_unsupported;
+                            frame.may_break = may_break;
+                            frame.block_statement_start = statement_start;
+                            return RegionLowerStep::EnterBlock(next);
                         }
+                        LowerStep::Done => {}
                     }
-                    if !finally_blocks_exits {
-                        may_break.extend(clause_may_break);
-                    } else {
-                        // When the crossed target is followed by a guaranteed
-                        // return, inference keeps that suffix return instead
-                        // of the implicit-undefined contribution. Propagate
-                        // the named exit until its label absorbs it; the
-                        // qualifier is inherited through intervening labels
-                        // and blocks by `lower_region`.
-                        may_break.extend(
-                            pending_break_following_return_targets
-                                .iter()
-                                .cloned()
-                                .map(SliceBreakTarget::Named),
-                        );
-                    }
-                    if let Some((_, finally_may_break)) = &finally {
-                        may_break.extend(finally_may_break.iter().cloned());
-                    }
-                    let pre_finally_fall_through = block
-                        .can_fall_through
-                        .reaches_end(CompletionDischarge::RegionComposition)
-                        || catch.as_ref().is_some_and(|catch| {
-                            catch
-                                .region
-                                .can_fall_through
-                                .reaches_end(CompletionDischarge::RegionComposition)
-                        });
-                    can_fall_through = pre_finally_fall_through
-                        && finally.as_ref().is_none_or(|(region, _)| {
-                            region
-                                .can_fall_through
-                                .reaches_end(CompletionDischarge::RegionComposition)
-                        });
-                    if pending_break_destination_undecided {
-                        // A pending break whose destination this lowering
-                        // cannot classify. The contribution above is a
-                        // derivation, not a proof, so the slice carries the
-                        // typed gap ahead of the try: the evaluation returns
-                        // the value and refuses to warm it.
-                        out.push(SliceStatement::Gap(
-                            crate::semantic_query::FlowGap::AbruptCompletion,
-                        ));
-                    }
-                    out.push(SliceStatement::Try {
-                        block: Box::new(block),
-                        catch,
-                        finally: finally.map(|(region, _)| region),
-                        pending_break_contributes_undefined,
-                        pending_break_following_return_targets: Arc::from(
-                            pending_break_following_return_targets.into_boxed_slice(),
-                        ),
-                    });
                 }
                 Statement::WithStatement(_) => {
                     out.push(SliceStatement::Unsupported(SliceUnsupported::With));
@@ -9296,11 +9082,11 @@ impl<'a> Lowerer<'a> {
     /// ([`SliceLoop`]). `None` for a shape it does not model — `for
     /// await`, or a `for…of` / `for…in` declaring more than one binding
     /// — which keeps the typed loop refusal.
-    fn lower_loop(
+    fn begin_lower_loop<'s, 'x>(
         &mut self,
-        statement: &Statement<'_>,
+        statement: &'s Statement<'x>,
         labels: Vec<Arc<str>>,
-    ) -> Option<LoweredLoop> {
+    ) -> Option<(Box<LoopLower<'s, 'x>>, &'s [Statement<'x>])> {
         let (test, update, body, test_after, element_source) = match statement {
             Statement::WhileStatement(while_stmt) => {
                 (Some(&while_stmt.test), None, &while_stmt.body, false, None)
@@ -9455,7 +9241,45 @@ impl<'a> Lowerer<'a> {
         if let Some(bindings) = &active_guard {
             self.active_guard_bindings.extend(bindings.iter().copied());
         }
-        let lowered_body = self.lower_arm(body);
+        Some((
+            Box::new(LoopLower {
+                statement,
+                update,
+                test_gap,
+                init,
+                test,
+                test_effects,
+                element,
+                labels,
+                test_throws,
+                completes,
+                active_guard_base,
+                enclosing_direct_labels,
+            }),
+            arm_statements(body),
+        ))
+    }
+
+    /// The part of a loop's lowering after its body's region is lowered.
+    fn finish_lower_loop(
+        &mut self,
+        lowered: Box<LoopLower<'_, '_>>,
+        lowered_body: LoweredRegion,
+    ) -> LoweredLoop {
+        let LoopLower {
+            statement,
+            update,
+            test_gap,
+            init,
+            test,
+            test_effects,
+            element,
+            labels,
+            test_throws,
+            completes,
+            active_guard_base,
+            enclosing_direct_labels,
+        } = *lowered;
         self.active_guard_bindings.truncate(active_guard_base);
         self.continue_targets.pop();
         self.break_target_followed_by_return.pop();
@@ -9483,7 +9307,7 @@ impl<'a> Lowerer<'a> {
             .filter(|target| !matches!(target, SliceBreakTarget::Anonymous))
             .collect();
         let (writes, inferred) = self.loop_dependencies(statement);
-        Some(LoweredLoop {
+        LoweredLoop {
             lowered: SliceLoop {
                 init: region(init),
                 test,
@@ -9499,7 +9323,7 @@ impl<'a> Lowerer<'a> {
             hit_unsupported: lowered_body.hit_unsupported,
             may_break,
             completes,
-        })
+        }
     }
 
     /// The dependencies the checker's loop analysis follows: every write
@@ -9850,78 +9674,198 @@ impl<'a> Lowerer<'a> {
     /// form it does not model (a computed key that is not a literal, a
     /// rest element that is itself a pattern).
     fn lower_pattern(&mut self, pattern: &BindingPattern<'_>) -> Option<SlicePattern> {
-        match pattern {
-            BindingPattern::BindingIdentifier(id) => {
-                let span = self.rebase(id.span);
-                Some(SlicePattern::Binding {
-                    binding: self.bindings.declaration_at_span(span)?,
-                    span,
-                })
-            }
-            BindingPattern::ObjectPattern(object) => {
-                let mut properties = Vec::with_capacity(object.properties.len());
-                for property in &object.properties {
-                    let key = match pattern_property_key(&property.key, property.computed) {
-                        Some(name) => SlicePatternKey::Named(name),
-                        None => SlicePatternKey::Computed(Box::new(self.lower_expr(
-                            property.key.as_expression()?,
-                            ExprMode::BindingInit {
-                                preserve_literal: true,
-                            },
-                        ))),
-                    };
-                    properties.push((key, self.lower_pattern_element(&property.value)?));
+        // A pattern nested in a pattern lowers from an explicit stack of
+        // the patterns waiting on their elements (each element's own
+        // pattern first, then its default), in the order a recursive
+        // lowering takes: a pattern nested in a pattern costs no native
+        // level. A form it does not model fails the whole pattern.
+        enum Lowered {
+            Pattern(SlicePattern),
+            Element(SlicePatternElement),
+        }
+        let mut frames: Vec<PatternFrame<'_, '_>> = Vec::new();
+        let mut next = pattern;
+        loop {
+            let opened = match next {
+                BindingPattern::BindingIdentifier(id) => {
+                    let span = self.rebase(id.span);
+                    Some(SlicePattern::Binding {
+                        binding: self.bindings.declaration_at_span(span)?,
+                        span,
+                    })
                 }
-                let rest = match object.rest.as_ref() {
-                    Some(rest) => Some(self.lower_rest_binding(&rest.argument)?),
-                    None => None,
-                };
-                Some(SlicePattern::Object {
-                    properties: Arc::from(properties.into_boxed_slice()),
-                    rest,
-                })
-            }
-            BindingPattern::ArrayPattern(array) => {
-                let mut elements = Vec::with_capacity(array.elements.len());
-                for element in &array.elements {
-                    elements.push(match element {
-                        Some(element) => Some(self.lower_pattern_element(element)?),
-                        None => None,
+                BindingPattern::ObjectPattern(object) => {
+                    frames.push(PatternFrame::Object {
+                        object,
+                        next: 0,
+                        properties: Vec::with_capacity(object.properties.len()),
+                        key: None,
                     });
+                    None
                 }
-                let rest = match array.rest.as_ref() {
-                    Some(rest) => Some(self.lower_rest_binding(&rest.argument)?),
-                    None => None,
-                };
-                Some(SlicePattern::Array {
-                    elements: Arc::from(elements.into_boxed_slice()),
-                    rest,
-                })
+                BindingPattern::ArrayPattern(array) => {
+                    frames.push(PatternFrame::Array {
+                        array,
+                        next: 0,
+                        elements: Vec::with_capacity(array.elements.len()),
+                    });
+                    None
+                }
+                BindingPattern::AssignmentPattern(_) => return None,
+            };
+            let mut value = match opened {
+                Some(leaf) => Lowered::Pattern(leaf),
+                None => match self.pattern_frame_step(&mut frames)? {
+                    PatternStep::Element(element) => {
+                        next = element;
+                        continue;
+                    }
+                    PatternStep::Complete(pattern) => Lowered::Pattern(pattern),
+                },
+            };
+            loop {
+                match (frames.last_mut(), value) {
+                    (None, Lowered::Pattern(pattern)) => return Some(pattern),
+                    (None, Lowered::Element(_)) => unreachable!("an element has its pattern"),
+                    (Some(PatternFrame::Element { default }), Lowered::Pattern(pattern)) => {
+                        let default = *default;
+                        frames.pop();
+                        value = Lowered::Element(SlicePatternElement {
+                            pattern,
+                            default: default.map(|default| {
+                                Box::new(self.lower_expr(
+                                    default,
+                                    ExprMode::BindingInit {
+                                        preserve_literal: true,
+                                    },
+                                ))
+                            }),
+                            default_fresh: default.is_some_and(expr_is_bare_literal),
+                        });
+                    }
+                    (Some(frame), Lowered::Element(element)) => {
+                        match frame {
+                            PatternFrame::Object {
+                                next,
+                                properties,
+                                key,
+                                ..
+                            } => {
+                                properties.push((key.take().expect("the element's key"), element));
+                                *next += 1;
+                            }
+                            PatternFrame::Array { next, elements, .. } => {
+                                elements.push(Some(element));
+                                *next += 1;
+                            }
+                            PatternFrame::Element { .. } => {
+                                unreachable!("an element frame waits on a pattern")
+                            }
+                        }
+                        match self.pattern_frame_step(&mut frames)? {
+                            PatternStep::Element(element) => {
+                                next = element;
+                                break;
+                            }
+                            PatternStep::Complete(pattern) => value = Lowered::Pattern(pattern),
+                        }
+                    }
+                    (Some(_), Lowered::Pattern(_)) => {
+                        unreachable!("a composite pattern waits on an element")
+                    }
+                }
             }
-            BindingPattern::AssignmentPattern(_) => None,
         }
     }
 
-    fn lower_pattern_element(
+    /// Advance the composite pattern on top of `frames`: its next
+    /// element, whose own pattern lowers next under a pushed element frame,
+    /// or — every element in and its rest lowered — the complete pattern,
+    /// taken off. `None` fails the pattern.
+    fn pattern_frame_step<'p, 'x>(
         &mut self,
-        element: &BindingPattern<'_>,
-    ) -> Option<SlicePatternElement> {
+        frames: &mut Vec<PatternFrame<'p, 'x>>,
+    ) -> Option<PatternStep<'p, 'x>> {
+        let element = match frames.last_mut().expect("the composite pattern") {
+            PatternFrame::Object {
+                object, next, key, ..
+            } => match object.properties.get(*next) {
+                Some(property) => {
+                    *key = Some(
+                        match pattern_property_key(&property.key, property.computed) {
+                            Some(name) => SlicePatternKey::Named(name),
+                            None => SlicePatternKey::Computed(Box::new(self.lower_expr(
+                                property.key.as_expression()?,
+                                ExprMode::BindingInit {
+                                    preserve_literal: true,
+                                },
+                            ))),
+                        },
+                    );
+                    Some(&property.value)
+                }
+                None => None,
+            },
+            PatternFrame::Array {
+                array,
+                next,
+                elements,
+            } => {
+                let mut element = None;
+                while let Some(slot) = array.elements.get(*next) {
+                    match slot {
+                        Some(slot) => {
+                            element = Some(slot);
+                            break;
+                        }
+                        None => {
+                            elements.push(None);
+                            *next += 1;
+                        }
+                    }
+                }
+                element
+            }
+            PatternFrame::Element { .. } => unreachable!("an element frame is no composite"),
+        };
         match element {
-            BindingPattern::AssignmentPattern(assignment) => Some(SlicePatternElement {
-                pattern: self.lower_pattern(&assignment.left)?,
-                default: Some(Box::new(self.lower_expr(
-                    &assignment.right,
-                    ExprMode::BindingInit {
-                        preserve_literal: true,
+            // The element's own pattern lowers first, then its default.
+            Some(BindingPattern::AssignmentPattern(assignment)) => {
+                frames.push(PatternFrame::Element {
+                    default: Some(&assignment.right),
+                });
+                Some(PatternStep::Element(&assignment.left))
+            }
+            Some(other) => {
+                frames.push(PatternFrame::Element { default: None });
+                Some(PatternStep::Element(other))
+            }
+            // Every element is in: the rest completes the pattern.
+            None => Some(PatternStep::Complete(
+                match frames.pop().expect("the composite pattern") {
+                    PatternFrame::Object {
+                        object, properties, ..
+                    } => SlicePattern::Object {
+                        properties: Arc::from(properties.into_boxed_slice()),
+                        rest: match object.rest.as_ref() {
+                            Some(rest) => Some(self.lower_rest_binding(&rest.argument)?),
+                            None => None,
+                        },
                     },
-                ))),
-                default_fresh: expr_is_bare_literal(&assignment.right),
-            }),
-            other => Some(SlicePatternElement {
-                pattern: self.lower_pattern(other)?,
-                default: None,
-                default_fresh: false,
-            }),
+                    PatternFrame::Array {
+                        array, elements, ..
+                    } => SlicePattern::Array {
+                        elements: Arc::from(elements.into_boxed_slice()),
+                        rest: match array.rest.as_ref() {
+                            Some(rest) => Some(self.lower_rest_binding(&rest.argument)?),
+                            None => None,
+                        },
+                    },
+                    PatternFrame::Element { .. } => {
+                        unreachable!("an element frame is no composite")
+                    }
+                },
+            )),
         }
     }
 
@@ -10294,6 +10238,122 @@ impl<'a> Lowerer<'a> {
     /// loop-transparency rule consults, which must classify a test
     /// WITHOUT degrading the enclosing statement.
     fn classify_guard(&mut self, test: &Expression<'_>) -> GuardDisposition {
+        // A composing form's operands classify from an explicit stack of
+        // the forms waiting on them, each composed as its recursion would
+        // compose it: an operand nested in an operand (`b ? 1 : b ? 1 : 2`,
+        // `a = a = 1`) costs no native level.
+        let mut waiting: Vec<GuardWait<'_>> = Vec::new();
+        let mut current = test;
+        loop {
+            let mut value = match self.classify_guard_step(current) {
+                GuardStep::Done(disposition) => disposition,
+                GuardStep::Operand(wait, operand) => {
+                    if let Some(wait) = wait {
+                        waiting.push(wait);
+                    }
+                    current = operand;
+                    continue;
+                }
+            };
+            loop {
+                let Some(wait) = waiting.pop() else {
+                    return value;
+                };
+                match self.resume_guard_wait(wait, value) {
+                    GuardStep::Done(disposition) => value = disposition,
+                    GuardStep::Operand(wait, operand) => {
+                        if let Some(wait) = wait {
+                            waiting.push(wait);
+                        }
+                        current = operand;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// One composing form waiting on an operand's disposition, given it.
+    fn resume_guard_wait<'t>(
+        &mut self,
+        wait: GuardWait<'t>,
+        value: GuardDisposition,
+    ) -> GuardStep<'t> {
+        match wait {
+            GuardWait::Negate(negations) => {
+                let mut disposition = value;
+                for _ in 0..negations {
+                    disposition = disposition.negated();
+                }
+                GuardStep::Done(disposition)
+            }
+            GuardWait::Spine {
+                spine,
+                mut next,
+                composed,
+            } => {
+                let composed = match composed {
+                    None => value,
+                    Some(left) => {
+                        let composed =
+                            compose_logical_disposition(spine[next].operator, left, value);
+                        next += 1;
+                        composed
+                    }
+                };
+                match spine.get(next).copied() {
+                    Some(node) => {
+                        let right = &node.right;
+                        GuardStep::Operand(
+                            Some(GuardWait::Spine {
+                                spine,
+                                next,
+                                composed: Some(composed),
+                            }),
+                            right,
+                        )
+                    }
+                    None => GuardStep::Done(composed),
+                }
+            }
+            GuardWait::Conditional {
+                alternate,
+                consequent: None,
+            } => GuardStep::Operand(
+                Some(GuardWait::Conditional {
+                    alternate,
+                    consequent: Some(value),
+                }),
+                alternate,
+            ),
+            GuardWait::Conditional {
+                consequent: Some(consequent),
+                ..
+            } => GuardStep::Done(if consequent.is_no_narrowing() && value.is_no_narrowing() {
+                GuardDisposition::NoNarrowing
+            } else {
+                GuardDisposition::Unexpressible
+            }),
+            GuardWait::AssignedTruthy(subject) => GuardStep::Done(if value.is_no_narrowing() {
+                GuardDisposition::modeled(SliceGuard::Truthy {
+                    subject,
+                    negated: false,
+                })
+            } else {
+                GuardDisposition::Unexpressible
+            }),
+            GuardWait::AssignedValue => GuardStep::Done(if value.is_no_narrowing() {
+                GuardDisposition::NoNarrowing
+            } else {
+                GuardDisposition::Unexpressible
+            }),
+        }
+    }
+
+    /// [`Self::classify_guard`] of one form: its disposition, or the
+    /// operand whose disposition it composes, with the wait that composes
+    /// it (none where the form's disposition IS the operand's).
+    fn classify_guard_step<'t>(&mut self, test: &'t Expression<'t>) -> GuardStep<'t> {
         #[cfg(test)]
         lowering_probe::classify();
         // The whole test rides the same reference-transparent wrappers a
@@ -10322,11 +10382,7 @@ impl<'a> Lowerer<'a> {
                     negations += 1;
                     operand = &inner.argument;
                 }
-                let mut disposition = self.classify_guard(operand);
-                for _ in 0..negations {
-                    disposition = disposition.negated();
-                }
-                disposition
+                GuardStep::Operand(Some(GuardWait::Negate(negations)), operand)
             }
             // A chain nests its left operands; its left spine is classified
             // from the innermost operand outward, each node composing its
@@ -10342,14 +10398,19 @@ impl<'a> Lowerer<'a> {
                     spine.push(inner);
                     innermost_left = &inner.left;
                 }
-                let mut disposition = self.classify_guard(innermost_left);
-                for node in spine.into_iter().rev() {
-                    let right = self.classify_guard(&node.right);
-                    disposition = compose_logical_disposition(node.operator, disposition, right);
-                }
-                disposition
+                spine.reverse();
+                GuardStep::Operand(
+                    Some(GuardWait::Spine {
+                        spine,
+                        next: 0,
+                        composed: None,
+                    }),
+                    innermost_left,
+                )
             }
-            Expression::BinaryExpression(binary) => self.classify_binary_guard(binary),
+            Expression::BinaryExpression(binary) => {
+                GuardStep::Done(self.classify_binary_guard(binary))
+            }
             // A call's narrowing lives in its CALLEE's declared return,
             // and the control-position call rail owns it entirely
             // ([`Self::record_control_position_calls`] certifies a
@@ -10359,47 +10420,48 @@ impl<'a> Lowerer<'a> {
             // A call the executor cannot resolve here (a callee rooted at a
             // free name outside a module scope, say) still narrows by its
             // callee's declared signatures when the file closes their set.
-            Expression::CallExpression(call) => match self.lower_predicate_guard(call) {
-                SliceGuard::None => match self.classify_call_predicate(call) {
-                    GuardDisposition::Unexpressible => match unwrap_parenthesized(&call.callee) {
-                        Expression::Identifier(callee)
-                            if matches!(
-                                self.classify_occurrence(callee.span),
-                                NameBinding::Free
-                            ) && self
-                                .closed_callee_declaration(callee.name.as_str())
-                                .is_none() =>
+            Expression::CallExpression(call) => {
+                GuardStep::Done(match self.lower_predicate_guard(call) {
+                    SliceGuard::None => match self.classify_call_predicate(call) {
+                        GuardDisposition::Unexpressible => match unwrap_parenthesized(&call.callee)
                         {
-                            match self.lower_callee_signature_guard(call, callee) {
-                                SliceGuard::None => GuardDisposition::Unexpressible,
-                                guard => GuardDisposition::modeled(guard),
+                            Expression::Identifier(callee)
+                                if matches!(
+                                    self.classify_occurrence(callee.span),
+                                    NameBinding::Free
+                                ) && self
+                                    .closed_callee_declaration(callee.name.as_str())
+                                    .is_none() =>
+                            {
+                                match self.lower_callee_signature_guard(call, callee) {
+                                    SliceGuard::None => GuardDisposition::Unexpressible,
+                                    guard => GuardDisposition::modeled(guard),
+                                }
                             }
-                        }
-                        _ => GuardDisposition::Unexpressible,
+                            _ => GuardDisposition::Unexpressible,
+                        },
+                        disposition => disposition,
                     },
-                    disposition => disposition,
-                },
-                guard => GuardDisposition::modeled(guard),
-            },
+                    guard => GuardDisposition::modeled(guard),
+                })
+            }
             // The test's VALUE is one of the branches; this half carries
             // no branch/merge composition for a guard, so a branch that
             // establishes anything degrades the test.
-            Expression::ConditionalExpression(conditional) => {
-                let consequent = self.classify_guard(&conditional.consequent);
-                let alternate = self.classify_guard(&conditional.alternate);
-                if consequent.is_no_narrowing() && alternate.is_no_narrowing() {
-                    GuardDisposition::NoNarrowing
-                } else {
-                    GuardDisposition::Unexpressible
-                }
-            }
+            Expression::ConditionalExpression(conditional) => GuardStep::Operand(
+                Some(GuardWait::Conditional {
+                    alternate: &conditional.alternate,
+                    consequent: None,
+                }),
+                &conditional.consequent,
+            ),
             // A sequence's VALUE is its last operand, and the checker
             // narrows through it (`narrowType` reads a comma's right
             // operand); the earlier operands only run first, and their
             // calls take the discarded-operand rail.
             Expression::SequenceExpression(sequence) => match sequence.expressions.last() {
-                Some(last) => self.classify_guard(last),
-                None => GuardDisposition::NoNarrowing,
+                Some(last) => GuardStep::Operand(None, last),
+                None => GuardStep::Done(GuardDisposition::NoNarrowing),
             },
             // An assignment used as a test narrows the binding it WROTE
             // (the checker takes the target as the reference and the
@@ -10433,22 +10495,22 @@ impl<'a> Lowerer<'a> {
                     root,
                     path: Arc::from(Vec::new().into_boxed_slice()),
                 });
+                // The right-hand side classifies once: a narrowing one
+                // leaves the write's truthiness unexpressible whatever
+                // the target.
                 match subject {
                     Some(subject)
-                        if !self.subject_root_carries_an_unmentioned_narrowing(&subject)
-                            && self.classify_guard(&assignment.right).is_no_narrowing() =>
+                        if !self.subject_root_carries_an_unmentioned_narrowing(&subject) =>
                     {
-                        GuardDisposition::modeled(SliceGuard::Truthy {
-                            subject,
-                            negated: false,
-                        })
+                        GuardStep::Operand(
+                            Some(GuardWait::AssignedTruthy(subject)),
+                            &assignment.right,
+                        )
                     }
-                    _ if self.identifier_roots_a_narrow_destination(name, target.span)
-                        || !self.classify_guard(&assignment.right).is_no_narrowing() =>
-                    {
-                        GuardDisposition::Unexpressible
+                    _ if self.identifier_roots_a_narrow_destination(name, target.span) => {
+                        GuardStep::Done(GuardDisposition::Unexpressible)
                     }
-                    _ => GuardDisposition::NoNarrowing,
+                    _ => GuardStep::Operand(Some(GuardWait::AssignedValue), &assignment.right),
                 }
             }
             Expression::AssignmentExpression(assignment) => {
@@ -10459,11 +10521,10 @@ impl<'a> Lowerer<'a> {
                         .as_member_expression()
                         .is_some_and(|member| self.member_root_is_represented(member)),
                 };
-                if target_reaches_slot || !self.classify_guard(&assignment.right).is_no_narrowing()
-                {
-                    GuardDisposition::Unexpressible
+                if target_reaches_slot {
+                    GuardStep::Done(GuardDisposition::Unexpressible)
                 } else {
-                    GuardDisposition::NoNarrowing
+                    GuardStep::Operand(Some(GuardWait::AssignedValue), &assignment.right)
                 }
             }
             // `#field in obj` is the private-name brand check: the
@@ -10475,7 +10536,7 @@ impl<'a> Lowerer<'a> {
             // in; a top-level class this half resolves by name narrows as
             // `instanceof` of that class does (`getNarrowedType` with
             // derivation checked, both edges).
-            Expression::PrivateInExpression(private_in) => {
+            Expression::PrivateInExpression(private_in) => GuardStep::Done({
                 match (
                     self.narrow_subject_of(&private_in.right),
                     self.private_brand_class(private_in),
@@ -10492,8 +10553,8 @@ impl<'a> Lowerer<'a> {
                         _ => GuardDisposition::Unexpressible,
                     },
                 }
-            }
-            other => self.classify_truthiness_guard(other),
+            }),
+            other => GuardStep::Done(self.classify_truthiness_guard(other)),
         }
     }
 
@@ -14730,6 +14791,8 @@ impl<'a> Lowerer<'a> {
             /// ([`Lowerer::call_arguments_step`]), waiting on the one it
             /// asked for last.
             CallArguments(Box<CallArgumentsFrame<'e, 'a>>),
+            /// An `await` waiting on its operand.
+            Awaited,
         }
         /// Push what a call's frame-lowered argument lowering asks for next.
         fn continue_call_arguments<'e, 'a>(
@@ -14793,6 +14856,15 @@ impl<'a> Lowerer<'a> {
                         tasks.push(Task::Object(ObjectFrame::new(object, whole, mode, policy)));
                         continue;
                     }
+                    // An `await x` lowers its operand through its own arm
+                    // and the evaluator unwraps the resolved value through
+                    // the lib `Awaited` surface (see [`Self::lower_expr_level`]):
+                    // an await of an await costs no native level.
+                    if let Expression::AwaitExpression(awaited) = expr {
+                        tasks.push(Task::Awaited);
+                        tasks.push(Task::Lower(&awaited.argument, mode));
+                        continue;
+                    }
                     let mut transparent = None;
                     let mut deferred_call = None;
                     let value =
@@ -14811,6 +14883,12 @@ impl<'a> Lowerer<'a> {
                         }
                         (None, None) => values.push(value),
                     }
+                }
+                Task::Awaited => {
+                    let operand = values.pop().expect("the await's operand");
+                    values.push(SliceExpr::Awaited {
+                        operand: Box::new(operand),
+                    });
                 }
                 Task::CallRecord(mut frame) => {
                     let delivered = values.pop().expect("the argument the call asked for");
@@ -18239,39 +18317,22 @@ impl<'a> Visit<'a> for DeclaredCallEffects {
 
 /// Whether a statement list contains a `return` in ITS OWN frame — a
 /// nested function or class body is a different frame and its returns
-/// say nothing about this one.
+/// say nothing about this one, so the search never enters one (walking
+/// every nested frame of every function cost the square of the nesting).
 #[derive(Default)]
 struct OwnFrameReturnFinder {
-    nested_frame_nesting: u32,
     found: bool,
 }
 
 impl<'a> Visit<'a> for OwnFrameReturnFinder {
     fn visit_return_statement(&mut self, it: &oxc_ast::ast::ReturnStatement<'a>) {
-        if self.nested_frame_nesting == 0 {
-            self.found = true;
-        }
+        self.found = true;
         walk::walk_return_statement(self, it);
     }
-    fn visit_function(
-        &mut self,
-        it: &oxc_ast::ast::Function<'a>,
-        flags: oxc_syntax::scope::ScopeFlags,
-    ) {
-        self.nested_frame_nesting += 1;
-        walk::walk_function(self, it, flags);
-        self.nested_frame_nesting -= 1;
+    fn visit_function(&mut self, _: &oxc_ast::ast::Function<'a>, _: oxc_syntax::scope::ScopeFlags) {
     }
-    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
-        self.nested_frame_nesting += 1;
-        walk::walk_arrow_function_expression(self, it);
-        self.nested_frame_nesting -= 1;
-    }
-    fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
-        self.nested_frame_nesting += 1;
-        walk::walk_class(self, it);
-        self.nested_frame_nesting -= 1;
-    }
+    fn visit_arrow_function_expression(&mut self, _: &oxc_ast::ast::ArrowFunctionExpression<'a>) {}
+    fn visit_class(&mut self, _: &oxc_ast::ast::Class<'a>) {}
 }
 
 /// Whether a statement contains a `yield` of ITS OWN frame. A generator's
@@ -18323,13 +18384,12 @@ fn body_has_unmodeled_yield(
     finder.found
 }
 
-/// The `yield` twin of [`OwnFrameReturnFinder`]. With
-/// `statement_yields_modeled` set it skips the yield of a statement-position
-/// `yield x` / `yield;` (its argument is still searched) and finds only
-/// the other yields.
+/// The `yield` twin of [`OwnFrameReturnFinder`], which never enters a
+/// nested frame either. With `statement_yields_modeled` set it skips the
+/// yield of a statement-position `yield x` / `yield;` (its argument is
+/// still searched) and finds only the other yields.
 #[derive(Default)]
 struct OwnFrameYieldFinder {
-    nested_frame_nesting: u32,
     statement_yields_modeled: bool,
     found: bool,
 }
@@ -18349,30 +18409,13 @@ impl<'a> Visit<'a> for OwnFrameYieldFinder {
         walk::walk_expression_statement(self, it);
     }
     fn visit_yield_expression(&mut self, it: &oxc_ast::ast::YieldExpression<'a>) {
-        if self.nested_frame_nesting == 0 {
-            self.found = true;
-        }
+        self.found = true;
         walk::walk_yield_expression(self, it);
     }
-    fn visit_function(
-        &mut self,
-        it: &oxc_ast::ast::Function<'a>,
-        flags: oxc_syntax::scope::ScopeFlags,
-    ) {
-        self.nested_frame_nesting += 1;
-        walk::walk_function(self, it, flags);
-        self.nested_frame_nesting -= 1;
+    fn visit_function(&mut self, _: &oxc_ast::ast::Function<'a>, _: oxc_syntax::scope::ScopeFlags) {
     }
-    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
-        self.nested_frame_nesting += 1;
-        walk::walk_arrow_function_expression(self, it);
-        self.nested_frame_nesting -= 1;
-    }
-    fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
-        self.nested_frame_nesting += 1;
-        walk::walk_class(self, it);
-        self.nested_frame_nesting -= 1;
-    }
+    fn visit_arrow_function_expression(&mut self, _: &oxc_ast::ast::ArrowFunctionExpression<'a>) {}
+    fn visit_class(&mut self, _: &oxc_ast::ast::Class<'a>) {}
 }
 
 /// A position whose calls never feed the demanded value, with the rule
