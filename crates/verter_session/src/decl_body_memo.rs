@@ -3107,39 +3107,40 @@ fn lowered_type_decl_from_group(
         }
     }
 
-    // Heritage-base FACTS of a CLASS body's Intersection fold, minted ONCE at
-    // this lazy lowering from the SAME transient contributor bodies — a pure
-    // syntactic extraction (no head resolution, no argument lowering; the
-    // dispatch resolves heads and lowers demanded arguments). Gated on the
-    // group's authoritative kind: only a CLASS Intersection fold encodes
-    // heritage (an alias/interface intersection is not class heritage). A
-    // merged group mints per contributor under its `MergedContributor` path
-    // step so the argument locators deref through the merged body shape; a
-    // single group mints from the primary (last-wins) body — the one body the
-    // locator deref serves.
-    let heritage_bases: Arc<[HeritageBaseFact]> =
-        if enum_type_arms.is_none() && primary.kind == TypeDeclKind::Class {
-            if body.is_merged() {
-                let mut facts: Vec<HeritageBaseFact> = Vec::new();
-                for (ordinal, contributor_body) in retained.bodies.iter().enumerate() {
-                    let prefix = [TypeBodyPathStep::MergedContributor {
-                        ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                    }];
-                    facts.extend(collect_heritage_base_facts(
-                        &root_identity,
-                        contributor_body,
-                        &prefix,
-                    ));
-                }
-                facts.into()
-            } else if let Some(primary_body) = retained.bodies.last() {
-                collect_heritage_base_facts(&root_identity, primary_body, &[]).into()
-            } else {
-                Arc::from([])
+    // Heritage-base FACTS of a CLASS or INTERFACE body's Intersection fold,
+    // minted ONCE at this lazy lowering from the SAME transient contributor
+    // bodies — a pure syntactic extraction (no head resolution, no argument
+    // lowering; the dispatch resolves heads and lowers demanded arguments).
+    // Gated on the group's authoritative kind: a class or interface
+    // Intersection fold encodes its `extends` heritage, an alias
+    // intersection none. A merged group mints per contributor under its
+    // `MergedContributor` path step so the argument locators deref through
+    // the merged body shape; a single group mints from the primary
+    // (last-wins) body — the one body the locator deref serves.
+    let heritage_bases: Arc<[HeritageBaseFact]> = if enum_type_arms.is_none()
+        && matches!(primary.kind, TypeDeclKind::Class | TypeDeclKind::Interface)
+    {
+        if body.is_merged() {
+            let mut facts: Vec<HeritageBaseFact> = Vec::new();
+            for (ordinal, contributor_body) in retained.bodies.iter().enumerate() {
+                let prefix = [TypeBodyPathStep::MergedContributor {
+                    ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                }];
+                facts.extend(collect_heritage_base_facts(
+                    &root_identity,
+                    contributor_body,
+                    &prefix,
+                ));
             }
+            facts.into()
+        } else if let Some(primary_body) = retained.bodies.last() {
+            collect_heritage_base_facts(&root_identity, primary_body, &[]).into()
         } else {
             Arc::from([])
-        };
+        }
+    } else {
+        Arc::from([])
+    };
 
     // KEY-DOMAIN closedness FACT, minted ONCE at this lazy lowering from the
     // SAME transient contributor bodies — a pure syntactic extraction

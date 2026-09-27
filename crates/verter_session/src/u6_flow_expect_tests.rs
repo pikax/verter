@@ -6405,20 +6405,18 @@ fn unclassifiable_in_guard_arms_remain_possible_degrade_and_never_warm() {
 /// is related in either direction the WHOLE remaining subject
 /// intersects the instance type (the checker keeps such a branch
 /// ALIVE — measured `0 | ({ name: string } & Unrel)` from the pinned
-/// tsc, not a dead branch). An arm assignable to the instance type
-/// without BEING it — or one the instance type is assignable to (the
-/// downcast direction) — is underivable structurally: a genuine
-/// subclass and a same-shape underived constructor are
-/// indistinguishable, and guessing either way can publish a subset or
-/// an ungapped superset, so the subject stays UNCHANGED behind the
-/// typed guard gap, ReturnOnly. Negated edge: only an arm proved to BE
-/// the tested class (node identity with the instance type) drops;
-/// structural assignability alone cannot prove derivation (the checker
-/// KEEPS a same-shape underived arm), so such an arm is retained with
-/// the typed guard gap. A generic-class arm the relation oracle cannot
-/// decide and a construct-signature-typed right-hand side stay
-/// retained + gapped — sound supersets, never warm, never a fabricated
-/// dead edge.
+/// tsc, not a dead branch). Derivation is nominal: a class or an
+/// interface derives from what its `extends` clauses name, never from
+/// structure — a genuine subclass and a same-shape underived constructor
+/// are indistinguishable structurally — so an arm whose heritage cannot
+/// be decided leaves the subject UNCHANGED behind the typed guard gap,
+/// ReturnOnly. Negated edge: only an arm proved within the tested
+/// class's family drops; an arm proved unrelated by heritage (the
+/// checker KEEPS a same-shape underived arm) is retained exactly, and an
+/// undecided one with the typed guard gap. A generic-class arm the
+/// relation oracle cannot decide and a construct-signature-typed
+/// right-hand side stay retained + gapped — sound supersets, never warm,
+/// never a fabricated dead edge.
 #[test]
 fn instanceof_narrows_by_the_checker_rule_and_gaps_only_unproven_arms() {
     struct Case {
@@ -6455,17 +6453,16 @@ fn instanceof_narrows_by_the_checker_rule_and_gaps_only_unproven_arms() {
         },
         Case {
             // An interface subject under an implementing-class test:
-            // `implements` contributes no heritage fact to the class
-            // surface (it is a check, not a derivation), so the downcast
-            // direction stays structurally underivable — the subject
-            // stays `Animal` behind the typed gap, an honest superset of
-            // the checker's downcast.
+            // `implements` is a check, not a derivation, and the
+            // interface declares no `extends`, so the arm is unrelated by
+            // heritage in both directions and the checker's union-level
+            // fallback reads the instance type, a subtype of the subject.
             id: "instanceof_interface_subject_implementing_class",
             script: "interface Animal { name: string }\nclass Dog implements Animal { name: string = \"\"; bark(): void { } }\nexport function f(x: Animal) { if (x instanceof Dog) return x; return 0; }",
             checker: "0 | Dog",
-            rendered: "Union(DeclRef(Animal) | 0)",
-            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
-            warm: false,
+            rendered: "Union(DeclRef(Dog) | 0)",
+            degradation: Degr::None,
+            warm: true,
         },
         Case {
             id: "instanceof_unrelated_structural_arm_intersects_alive",
@@ -6484,12 +6481,14 @@ fn instanceof_narrows_by_the_checker_rule_and_gaps_only_unproven_arms() {
             warm: true,
         },
         Case {
-            id: "instanceof_negated_assignable_underived_arm_retained_gapped",
+            // An interface declaring no `extends` is unrelated to the
+            // class by heritage: the negated edge keeps it exactly.
+            id: "instanceof_negated_underived_interface_arm_retained",
             script: "interface Doglike { name: string; bark(): void }\nclass Dog { name = \"\"; bark(): void { } }\nexport function f(x: Doglike | number) { if (!(x instanceof Dog)) return x; return 1; }",
             checker: "number | Doglike",
             rendered: "Union(DeclRef(Doglike) | number)",
-            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
-            warm: false,
+            degradation: Degr::None,
+            warm: true,
         },
         Case {
             id: "instanceof_generic_class_arm_retained_gapped",

@@ -161,6 +161,12 @@ export function iStrOrAElse(x: string | A) { if (x instanceof A) throw 0; return
 export function iNot(x: A | B) { if (!(x instanceof A)) return x; throw 0; }
 export function iObj(x: { a: number }) { if (x instanceof B) return x; throw 0; }
 export function iInterface(x: HasZ | A) { if (x instanceof A) return x; throw 0; }
+interface HasA extends A { extra: 1 }
+interface Deep extends HasA { d: 1 }
+export function iInterfaceElse(x: HasZ | A) { if (x instanceof A) throw 0; return x; }
+export function iIfaceExt(x: HasA | B) { if (x instanceof A) return x; throw 0; }
+export function iIfaceExtElse(x: HasA | B) { if (x instanceof A) throw 0; return x; }
+export function iIfaceDeep(x: Deep | B) { if (x instanceof A) return x; throw 0; }
 export function iAny(x: any) { if (x instanceof A) return x; throw 0; }
 export function iTernary(x: A | B) { return x instanceof B ? x : null; }
 export function iMember(o: { v: A | B }) { if (o.v instanceof A) return o.v; throw 0; }
@@ -206,18 +212,20 @@ fn instanceof_narrows_to_a_constructor_values_instance_type() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `x instanceof A` over `HasZ | A` keeps only `A`: the unrelated interface arm
-/// is filtered out.
-///
-/// What the lane gives:
-/// - `iInterface`: the checker answers `A`; the lane measured `A | HasZ`
-///   degraded by FlowGap(GuardNarrowing); measured `HasZ | A` degraded by
-///   FlowGap(GuardNarrowing).
+/// `x instanceof A` over `HasZ | A` keeps only `A`: an interface derives
+/// from what its `extends` clauses name, so `HasZ` is unrelated to `A` and
+/// filtered out, while an interface extending `A`, directly or through
+/// another interface, is within `A`'s family on both edges.
 #[test]
-#[ignore = "instanceof drops a union arm unrelated to the class"]
 fn instanceof_filters_an_unrelated_interface_arm() {
     let matrix = Matrix::new(INSTANCEOF);
-    let failures = matrix.returns(&[("iInterface", "A")]);
+    let failures = matrix.returns(&[
+        ("iInterface", "A"),
+        ("iInterfaceElse", "HasZ"),
+        ("iIfaceExt", "HasA"),
+        ("iIfaceExtElse", "B"),
+        ("iIfaceDeep", "Deep"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

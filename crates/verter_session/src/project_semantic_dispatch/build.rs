@@ -3673,8 +3673,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// element carries the fact's authored type-argument LOCATORS
     /// (`extends Base<string>`) — the Static composer derefs + lowers only
     /// the demanded arguments in the derived class's scope. Non-class decls
-    /// and heritage-free classes return an empty list (the producer mints no
-    /// facts for them).
+    /// and heritage-free classes return an empty list.
     pub(super) fn class_heritage_bases(
         &self,
         canonical: &str,
@@ -3689,9 +3688,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// The base list alone is ambiguous: the SAME empty list stands for a
     /// heritage-free class, a declaration this generation cannot prepare at
-    /// all (an unresolved heritage import), a NON-class declaration (the
-    /// producer mints heritage facts only for classes, so an interface's
-    /// `extends` arms are simply absent), and a class whose `extends`
+    /// all (an unresolved heritage import), a NON-class declaration (an
+    /// interface's `extends` arms are read by the ancestry authority
+    /// alone), and a class whose `extends`
     /// clause is an EXPRESSION the fact producer could not name
     /// (`class X extends mixin(K) {}`). Only the first is a proof of
     /// absence. A NOMINAL consumer — anything that concludes "not derived"
@@ -3707,13 +3706,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol: &str,
     ) -> ClassHeritageReading {
+        self.declared_heritage_reading(canonical, owner, symbol, false)
+    }
+
+    /// [`Self::class_heritage_reading`] of a class or, when `interfaces`
+    /// holds, of an interface too: an interface's `extends` clauses are
+    /// its bases (`hasBaseType` reads them), each an entity name the fact
+    /// producer names.
+    fn declared_heritage_reading(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol: &str,
+        interfaces: bool,
+    ) -> ClassHeritageReading {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
         let Some(prepared) = self
             .ctx
             .prepared_type_decl_return_only(canonical, owner, symbol)
         else {
             return ClassHeritageReading::undecidable();
         };
-        if prepared.kind != verter_semantic::analysis::type_eval::TypeDeclKind::Class {
+        let readable = match prepared.kind {
+            TypeDeclKind::Class => true,
+            TypeDeclKind::Interface => interfaces,
+            _ => false,
+        };
+        if !readable {
             return ClassHeritageReading::undecidable();
         }
         let bases = prepared
@@ -4020,10 +4039,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // unrooted, which makes it no proof.
                 None => decided = false,
             }
-            let reading = self.class_heritage_reading(
+            let reading = self.declared_heritage_reading(
                 &current.canonical_id,
                 current.owner,
                 &current.decl_name,
+                true,
             );
             if !reading.decidable {
                 decided = false;
