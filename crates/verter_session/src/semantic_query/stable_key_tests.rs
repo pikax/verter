@@ -933,3 +933,71 @@ fn stable_key_encoder_formats_no_debug_text() {
         );
     }
 }
+
+/// `import("<specifier>").G` written in `importer`.
+fn import_type_spelled(
+    graph: &SemanticGraphStore,
+    importer: &str,
+    specifier: &str,
+) -> SemanticNodeId {
+    graph.intern_node_with_scope(
+        SemanticNodeData::new_import_type(
+            Arc::from(specifier),
+            Arc::from([Arc::<str>::from("G")]),
+            Arc::from(Vec::new()),
+            false,
+        ),
+        crate::semantic_query::NodeScopeId::File {
+            canonical_id: Arc::from(importer),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: [3u8; 16],
+            local_scope: None,
+        },
+    )
+}
+
+/// Two spellings of one module from one importer — `./a` and `../x/a`
+/// written in `/x/b.ts` both name `/x/a` — should key as one identity. The
+/// key of an unresolved carrier is its importing unit plus its authored
+/// specifier, so today the two key apart and converge only once
+/// demand-time resolution produces the declaration node.
+#[test]
+#[ignore = "import-type identity converges only after resolution; needs an indexing-time resolved-module producer"]
+fn two_spellings_of_one_module_key_alike() {
+    let graph = SemanticGraphStore::new();
+    let direct = import_type_spelled(&graph, "/x/b.ts", "./a");
+    let roundabout = import_type_spelled(&graph, "/x/b.ts", "../x/a");
+    assert!(
+        stable_key_for_node(&graph, direct) == stable_key_for_node(&graph, roundabout),
+        "`./a` and `../x/a` from `/x/b.ts` name one module and key alike"
+    );
+}
+
+/// One spelling written in two importing units can name two modules, so a
+/// union of the two unresolved carriers keeps both arms. Measured with tsc
+/// 7.0.2 (`--declaration --emitDeclarationOnly`, every `strictNullChecks` x
+/// `noImplicitAny` setting): with `src/m.ts` exporting `G = { a: 1 }`,
+/// `src/lib/m.ts` exporting `G = { b: 2 }`, `src/a.ts` and `src/lib/b.ts`
+/// each exporting a value of `import("./m").G`, and `src/c.ts` exporting
+/// `u = Math.random() ? x : y`, the emitted type is
+/// `import("./m").G | import("./lib/m").G`. The union reducer's structural
+/// comparator excludes the arena scope, which is where an import-type
+/// carrier's importing unit lives, so it merges the two arms today.
+#[test]
+#[ignore = "the union reducer's structural comparator ignores an import-type carrier's importing unit"]
+fn one_spelling_from_two_importers_keeps_two_union_arms() {
+    use crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union;
+    let graph = SemanticGraphStore::new();
+    let from_a = import_type_spelled(&graph, "/src/a.ts", "./m");
+    let from_lib = import_type_spelled(&graph, "/src/lib/b.ts", "./m");
+    let union = intern_ordered_union(
+        &graph,
+        &[from_a, from_lib],
+        crate::semantic_query::NullabilityPolicy::Strict,
+    );
+    assert_eq!(
+        union_arms(&graph, union.node).len(),
+        2,
+        "`import(\"./m\").G` from two importing units keeps two arms"
+    );
+}

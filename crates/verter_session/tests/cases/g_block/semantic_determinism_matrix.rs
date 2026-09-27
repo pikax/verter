@@ -488,6 +488,12 @@ const STABLE_KEY_TABLE: &[StableKeyRow] = &[
     StableKeyRow { variant: "ClassExpressionInstance", domain: "anonymous authored types", inputs: "the class expression's authored position (logical source unit, owner and offset) plus its printed name, its enclosing clauses (each declaration's printed name and parameter names) and its own arity, and the stable-key references of the reference's type arguments and the instance surface", residual: None },
     StableKeyRow { variant: "MergedDecl", domain: "authored carriers", inputs: "merged declaration population: per-symbol logical membership and precedence before publication", residual: None },
     StableKeyRow { variant: "BareRef", domain: "authored carriers", inputs: "owner scope anchor plus the unresolved head name (an authored-unresolved carrier, never a discovery ordinal)", residual: None },
+    // An unresolved import-type carrier is identified by its importing unit,
+    // its authored specifier, its role, qualifier and type arguments: fixed
+    // for a fixed snapshot, never by loading progress. Two spellings of one
+    // module converge only once demand-time resolution yields the declaration
+    // or namespace node (contract and successor proposal:
+    // docs/evidence/signature-kernel/determinism-matrix.md).
     StableKeyRow { variant: "ImportType", domain: "authored carriers", inputs: "resolved module logical identity plus the imported anchor and qualifier path", residual: Some("the encoder consumes the resolver's inputs, the importing logical source unit and the authored specifier, not the resolved module logical identity: one spelling from two importers keys as two identities, but two spellings of one module key apart until the carrier resolves, because key construction never resolves a module") },
     StableKeyRow { variant: "RawFallback", domain: "synthetic", inputs: "the raw type text, the payload's whole equality identity (its diagnostic provenance is excluded)", residual: None },
     StableKeyRow { variant: "SyntheticBinding", domain: "binders", inputs: "stable owner/role anchor of the synthesizing operation plus binder position: the component scope, the binding surface role, the slot and bound name, and the bound value's stable-key reference (never its arena ordinal)", residual: None },
