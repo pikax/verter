@@ -1299,7 +1299,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } => {
                 let distributive = matches!(
                     graph.node_data(check_id).as_deref(),
-                    Some(SemanticNodeData::TypeParam { .. })
+                    Some(SemanticNodeData::TypeParam { .. } | SemanticNodeData::InferRef { .. })
                 );
                 LocatorStep::Value(graph.intern_node_with_scope(
                     SemanticNodeData::Conditional {

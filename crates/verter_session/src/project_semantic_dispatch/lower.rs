@@ -2601,7 +2601,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let output = self.build_conditional_from_lowering(
                     check_id,
                     extends_id,
-                    matches!(check.as_ref(), TypeExpr::TypeParameter(_)),
+                    // A naked type parameter as the check type distributes
+                    // it, an `infer` placeholder of an enclosing conditional
+                    // among them (`X extends infer K ? K extends "a" ? 1 : 0
+                    // : 2` distributes over the `K` it binds).
+                    matches!(check.as_ref(), TypeExpr::TypeParameter(_))
+                        || matches!(
+                            graph.node_data(check_id).as_deref(),
+                            Some(
+                                SemanticNodeData::TypeParam { .. }
+                                    | SemanticNodeData::InferRef { .. }
+                            )
+                        ),
                     &mut |take_true| {
                         let index = usize::from(take_true);
                         if let Some(node) = lowered[index] {

@@ -2518,18 +2518,11 @@ fn an_infer_bound_non_union_passes_through() {
 
 /// `K extends "p0" ? 1 : 0` with `K` inferred as a union (`keyof O extends
 /// infer K`, `"a" | "b" extends infer K`, `["a" | "b"] extends [infer K]`)
-/// distributes over `K`: `0 | 1`. Wrong-but-clean: the lane answers `0`.
-///
-/// What the lane gives:
-/// - `keyof O extends infer K ? K extends "p0" ? 1 : 0 : 2`: the checker
-///   answers `0 | 1`; the lane measured `0`.
-/// - `"a" | "b" extends infer K ? K extends "a" ? 1 : 0 : 2`: the checker
-///   answers `0 | 1`; the lane measured `0`.
-/// - `["a" | "b"] extends [infer K] ? K extends "a" ? 1 : 0 : 2`: the checker
-///   answers `0 | 1`; the lane measured `0`.
+/// distributes over `K`: `0 | 1`. An `infer` placeholder is a type
+/// parameter, so a conditional checking it is distributive, and a `keyof`
+/// over a closed type is the union of its keys.
 #[test]
-#[ignore = "a conditional whose check type is an infer-bound union distributes over it"]
-fn wrong_clean_a_conditional_over_an_infer_bound_union_distributes() {
+fn a_conditional_over_an_infer_bound_union_distributes() {
     let matrix = Matrix::new(INFER_DISTRIBUTION);
     let failures = matrix.types(&[
         (

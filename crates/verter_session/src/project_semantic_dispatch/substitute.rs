@@ -178,7 +178,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Whether `node` holds a type parameter or an `infer` placeholder
     /// anywhere below it: the checker's generic type, whose operators stay
     /// deferred.
-    fn mentions_binder(&self, node: SemanticNodeId) -> bool {
+    pub(super) fn mentions_binder(&self, node: SemanticNodeId) -> bool {
         let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
         let mut stack = vec![node];
         while let Some(current) = stack.pop() {

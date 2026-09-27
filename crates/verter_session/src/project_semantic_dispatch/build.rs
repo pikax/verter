@@ -13441,6 +13441,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(surface) = union_members_of(check) {
             return Some(surface);
         }
+        // A `keyof` over a type holding no type parameter is the union of
+        // its keys (`getIndexType` reduces it eagerly), which the check
+        // distributes over.
+        let closed_key_of = match self.graph().node_data(check).as_deref() {
+            Some(SemanticNodeData::KeyOf { base }) if !self.mentions_binder(*base) => Some(*base),
+            _ => None,
+        };
+        if let Some(base) = closed_key_of {
+            return union_members_of(self.key_set_of(base)?);
+        }
         // Only carrier / deferred-shell shapes can still hide a union;
         // every other shape is already terminal for the union-ness fact.
         let is_resolvable_shell = matches!(
