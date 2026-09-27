@@ -9856,6 +9856,26 @@ pub enum SemanticNodeData {
 }
 
 impl SemanticNodeData {
+    /// The ONE constructor for [`Self::SyntheticBinding`]: the carrier for
+    /// `key`, or the typed [`QueryError::StaleSemanticOperand`] refusal when
+    /// the carrier's backing value is not a node the graph already holds
+    /// (an ordinal at or past `node_count`, a stale or foreign seed). The
+    /// arena is acyclic by contract, so such a forward reference never
+    /// enters it, and a refusal never publishes a clean answer.
+    #[must_use]
+    pub(crate) fn synthetic_binding(
+        key: &verter_type_expr::SyntheticCarrierKey,
+        node_count: usize,
+    ) -> Self {
+        if key.value_node >= node_count as u64 {
+            return Self::Opaque(QueryError::StaleSemanticOperand);
+        }
+        Self::SyntheticBinding {
+            id: SyntheticBindingId::from_carrier_key(key),
+            value_node: key.value_node,
+        }
+    }
+
     /// The ONE constructor for [`Self::IntrinsicApplication`]: `None` unless
     /// `args` has exactly [`CompilerIntrinsicTypeOp::arity`] operands, so a
     /// malformed compiler-native node never exists — not even transiently for

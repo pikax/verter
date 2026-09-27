@@ -125,6 +125,22 @@ impl DeferredCallable {
         }
     }
 
+    /// Visit every child node the carrier holds (parameter types, binder
+    /// declarations and their bounds, a declared return carrier). Topology
+    /// only, for structural invariants such as the arena's: no decision
+    /// reads the parts through it.
+    pub(crate) fn for_each_child_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        self.params.iter().for_each(|param| visit(param.ty));
+        for decl in self.type_parameters.iter() {
+            visit(decl.param);
+            decl.constraint.into_iter().for_each(&mut visit);
+            decl.default.into_iter().for_each(&mut visit);
+        }
+        if let SignatureReturnCarrier::Declared(node) = &self.return_carrier {
+            visit(*node);
+        }
+    }
+
     /// A carrier from explicit parts, for this crate's unit tests only.
     #[cfg(test)]
     #[must_use]

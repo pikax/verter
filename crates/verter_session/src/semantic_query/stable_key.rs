@@ -6,10 +6,9 @@
 //! names, run relations, instantiate, or reduce unions.
 
 use std::cmp::Ordering;
-use std::rc::Rc;
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::semantic_query::composite::CompositeOriginCategory;
 use crate::semantic_query::{
@@ -99,8 +98,8 @@ pub mod subtag {
     pub const OBJECT_SPREAD: u8 = 10;
     pub const DEFERRED_CALLABLE: u8 = 11;
     pub const RAW_FALLBACK: u8 = 12;
-    // Recursive references. Sub-tag 2 was the retired depth-exhausted marker.
-    pub const BACK_REFERENCE: u8 = 1;
+    // Recursive references. Sub-tags 1 (a cycle back-reference) and 2 (the
+    // depth-exhausted marker) are retired: the arena is acyclic by contract.
     pub const SHARED_SUBTREE: u8 = 3;
 }
 
@@ -243,19 +242,6 @@ impl Recipe {
             },
         ));
     }
-
-    /// Every child node, in hole order.
-    fn children(&self) -> Vec<SemanticNodeId> {
-        let mut children = Vec::new();
-        for (_, hole) in &self.holes {
-            match hole {
-                Hole::Child(child) => children.push(*child),
-                Hole::Unless { child, .. } => children.push(*child),
-                Hole::Set(members) => children.extend_from_slice(members),
-            }
-        }
-        children
-    }
 }
 
 fn primitive_subtag(kind: PrimitiveKind) -> u8 {
@@ -339,34 +325,32 @@ fn encode_scope_id(enc: &mut Recipe, scope: &ScopeId) {
 
 /// Encode a node.
 ///
-/// The key is the node's exact structure written out, with two rules that
-/// keep it finite and linear in the graph it describes:
+/// The key is the node's exact structure written out. The arena is acyclic
+/// by contract (every child id is below its parent's), so the structure is
+/// a DAG and the key is finite; the walk descends only to children below
+/// their parent and treats any other child as absent, so it terminates on
+/// any arena. A subtree whose written-out form is longer than
+/// [`SHARED_SUBTREE_MIN_BYTES`] and equal to one already written earlier in
+/// the key encodes as a reference to that earlier subtree, so a key is
+/// linear in the graph it describes however often a subtree is shared.
 ///
-/// * a child already open on the path from the root is a true cycle and
-///   encodes as a back-reference to that frame's level, never a node id;
-/// * a subtree whose written-out form is longer than
-///   [`SHARED_SUBTREE_MIN_BYTES`] and equal to one already written earlier
-///   in the key encodes as a reference to that earlier subtree.
-///
-/// Both rules are functions of the structure alone, so equal structures
-/// get equal keys and distinct structures distinct ones, at any depth and
-/// however often a subtree is shared. A key with no repeated subtree over
-/// that length writes every subtree in full. The encoder works in two
-/// passes over heap stacks and never recurses natively: it first reduces
-/// the reachable structure to a table of distinct subtrees (classes), then
-/// writes the root's class.
+/// Sharing is a function of the structure alone, so equal structures get
+/// equal keys and distinct structures distinct ones. A key with no repeated
+/// subtree over that length writes every subtree in full. The encoder works
+/// in two passes over heap stacks and never recurses natively: it first
+/// reduces the reachable structure to a table of distinct subtrees
+/// (classes), classifying each node once, then writes the root's class.
 pub fn stable_key_for_node(graph: &SemanticGraphStore, id: SemanticNodeId) -> StableKey {
     let mut table = ClassTable::new(graph);
     let root = table.classify(id);
     StableKey::from_exact(table.write(root))
 }
 
-// Test-only: classification frames opened and ancestor pairs copied into
-// placements on this thread.
+// Test-only: classification frames opened on this thread.
 #[cfg(test)]
 thread_local! {
-    pub(crate) static CLASSIFICATION_WORK: std::cell::Cell<(u64, u64)> =
-        const { std::cell::Cell::new((0, 0)) };
+    pub(crate) static CLASSIFICATION_FRAMES: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// Shortest written-out subtree a key refers back to rather than repeats.
@@ -391,18 +375,6 @@ struct Class {
     /// Length of the subtree written out in full, every occurrence inline
     /// (saturating).
     full_len: u64,
-    /// Whether a cycle back-reference occurs anywhere inside.
-    has_back_refs: bool,
-}
-
-/// The placement a subtree containing back-references was classified at:
-/// its depth, and the open frames of its own strongly connected component
-/// (the only ancestors it can reach back to) with their levels.
-#[derive(PartialEq, Eq, Hash)]
-struct Placement {
-    node: SemanticNodeId,
-    depth: u32,
-    open: Box<[(SemanticNodeId, u32)]>,
 }
 
 /// A child a frame has classified, per hole.
@@ -414,25 +386,11 @@ enum Filled {
 /// One node open on the classification path.
 struct OpenFrame {
     node: SemanticNodeId,
-    component: u32,
-    recipe: Rc<Recipe>,
+    recipe: Recipe,
     next_hole: usize,
     filled: Vec<Filled>,
     /// The set hole being filled: its next member and the classes so far.
     set: Option<(usize, Vec<ClassId>)>,
-    placement: Placement,
-}
-
-/// Tarjan's working state.
-#[derive(Default)]
-struct Tarjan {
-    index: FxHashMap<SemanticNodeId, u32>,
-    low: FxHashMap<SemanticNodeId, u32>,
-    on_stack: FxHashSet<SemanticNodeId>,
-    stack: Vec<SemanticNodeId>,
-    calls: Vec<(SemanticNodeId, Vec<SemanticNodeId>, usize)>,
-    next_index: u32,
-    next_component: u32,
 }
 
 /// Classification state for one key. It lives for one key computation and
@@ -441,21 +399,11 @@ struct ClassTable<'g> {
     graph: &'g SemanticGraphStore,
     classes: Vec<Class>,
     interned: FxHashMap<Box<[u8]>, ClassId>,
-    /// Each reachable node's recipe; `None` for a node with no payload.
-    recipes: FxHashMap<SemanticNodeId, Option<Rc<Recipe>>>,
-    /// Each reachable node's strongly connected component.
-    components: FxHashMap<SemanticNodeId, u32>,
-    /// Classes of subtrees with no back-reference: the same at every
-    /// occurrence of their node.
-    unplaced: FxHashMap<SemanticNodeId, ClassId>,
-    /// Classes of subtrees with back-references, by placement.
-    placed: FxHashMap<Placement, ClassId>,
+    /// Each classified node's class: a node's subtree is the same at every
+    /// occurrence, so it is classified once.
+    classified: FxHashMap<SemanticNodeId, ClassId>,
     order: FxHashMap<(ClassId, ClassId), Ordering>,
     frames: Vec<OpenFrame>,
-    /// Each open node's level.
-    open: FxHashMap<SemanticNodeId, u32>,
-    /// Open nodes per component, in path order, with their levels.
-    open_by_component: FxHashMap<u32, Vec<(SemanticNodeId, u32)>>,
 }
 
 impl<'g> ClassTable<'g> {
@@ -464,81 +412,15 @@ impl<'g> ClassTable<'g> {
             graph,
             classes: Vec::new(),
             interned: FxHashMap::default(),
-            recipes: FxHashMap::default(),
-            components: FxHashMap::default(),
-            unplaced: FxHashMap::default(),
-            placed: FxHashMap::default(),
+            classified: FxHashMap::default(),
             order: FxHashMap::default(),
             frames: Vec::new(),
-            open: FxHashMap::default(),
-            open_by_component: FxHashMap::default(),
         }
-    }
-
-    fn recipe(&mut self, id: SemanticNodeId) -> Option<Rc<Recipe>> {
-        if let Some(recipe) = self.recipes.get(&id) {
-            return recipe.clone();
-        }
-        let recipe = self
-            .graph
-            .node_data(id)
-            .map(|data| Rc::new(encode_data(self.graph, id, &data)));
-        self.recipes.insert(id, recipe.clone());
-        recipe
-    }
-
-    /// Tarjan's strongly connected components over the structure reachable
-    /// from `root`, on an explicit stack.
-    fn assign_components(&mut self, root: SemanticNodeId) {
-        let mut state = Tarjan::default();
-        self.tarjan_visit(root, &mut state);
-        while let Some(top) = state.calls.last_mut() {
-            let node = top.0;
-            if let Some(&child) = top.1.get(top.2) {
-                top.2 += 1;
-                if !state.index.contains_key(&child) {
-                    self.tarjan_visit(child, &mut state);
-                } else if state.on_stack.contains(&child) {
-                    let reach = state.index[&child].min(state.low[&node]);
-                    state.low.insert(node, reach);
-                }
-                continue;
-            }
-            state.calls.pop();
-            if let Some(parent) = state.calls.last().map(|call| call.0) {
-                let reach = state.low[&node].min(state.low[&parent]);
-                state.low.insert(parent, reach);
-            }
-            if state.low[&node] == state.index[&node] {
-                while let Some(member) = state.stack.pop() {
-                    state.on_stack.remove(&member);
-                    self.components.insert(member, state.next_component);
-                    if member == node {
-                        break;
-                    }
-                }
-                state.next_component += 1;
-            }
-        }
-    }
-
-    fn tarjan_visit(&mut self, node: SemanticNodeId, state: &mut Tarjan) {
-        state.index.insert(node, state.next_index);
-        state.low.insert(node, state.next_index);
-        state.next_index += 1;
-        state.stack.push(node);
-        state.on_stack.insert(node);
-        let children = self
-            .recipe(node)
-            .map(|recipe| recipe.children())
-            .unwrap_or_default();
-        state.calls.push((node, children, 0));
     }
 
     /// Reduce the structure reachable from `root` to classes and return the
     /// root's.
     fn classify(&mut self, root: SemanticNodeId) -> ClassId {
-        self.assign_components(root);
         if let Some(class) = self.enter(root) {
             return class;
         }
@@ -546,8 +428,13 @@ impl<'g> ClassTable<'g> {
             let Some(frame) = self.frames.last_mut() else {
                 unreachable!("the root frame completes with a class");
             };
-            let recipe = Rc::clone(&frame.recipe);
-            let next = match recipe.holes.get(frame.next_hole).map(|(_, hole)| hole) {
+            let parent = frame.node;
+            let hole = frame
+                .recipe
+                .holes
+                .get(frame.next_hole)
+                .map(|(_, hole)| hole);
+            let next = match hole {
                 Some(Hole::Set(members)) => match &mut frame.set {
                     None => {
                         frame.set = Some((0, Vec::new()));
@@ -568,8 +455,9 @@ impl<'g> ClassTable<'g> {
                     },
                 },
                 Some(Hole::Child(child) | Hole::Unless { child, .. }) => {
+                    let child = *child;
                     frame.next_hole += 1;
-                    *child
+                    child
                 }
                 None => {
                     if let Some(class) = self.complete() {
@@ -578,7 +466,14 @@ impl<'g> ClassTable<'g> {
                     continue;
                 }
             };
-            if let Some(class) = self.enter(next) {
+            // The arena holds every child below its parent; any other child
+            // is absent here, so the walk can never meet a cycle.
+            let class = if next.0 < parent.0 {
+                self.enter(next)
+            } else {
+                Some(self.absent())
+            };
+            if let Some(class) = class {
                 self.deliver(class);
             }
         }
@@ -588,16 +483,8 @@ impl<'g> ClassTable<'g> {
     /// to the enclosing frame, or return it when the root closes.
     fn complete(&mut self) -> Option<ClassId> {
         let frame = self.frames.pop()?;
-        self.open.remove(&frame.node);
-        if let Some(open) = self.open_by_component.get_mut(&frame.component) {
-            open.pop();
-        }
         let class = self.build(&frame.recipe, frame.filled);
-        if self.classes[class as usize].has_back_refs {
-            self.placed.insert(frame.placement, class);
-        } else {
-            self.unplaced.insert(frame.node, class);
-        }
+        self.classified.insert(frame.node, class);
         if self.frames.is_empty() {
             return Some(class);
         }
@@ -616,64 +503,34 @@ impl<'g> ClassTable<'g> {
         }
     }
 
-    /// Begin classifying `id`: a back-reference, an absent node or an
-    /// already classified subtree answers at once; anything else opens a
-    /// frame.
+    /// Begin classifying `id`: an absent node or an already classified one
+    /// answers at once; anything else opens a frame.
     fn enter(&mut self, id: SemanticNodeId) -> Option<ClassId> {
-        if let Some(&level) = self.open.get(&id) {
-            let mut enc = Recipe::new();
-            enc.header(category::RECURSIVE, subtag::BACK_REFERENCE);
-            enc.u32(level);
-            return Some(self.leaf(enc.buf, true));
-        }
-        let Some(recipe) = self.recipe(id) else {
-            let mut enc = Recipe::new();
-            enc.header(category::INTRINSIC, subtag::OPAQUE);
-            enc.u8(0xff);
-            return Some(self.leaf(enc.buf, false));
-        };
-        if let Some(&class) = self.unplaced.get(&id) {
+        if let Some(&class) = self.classified.get(&id) {
             return Some(class);
         }
-        let component = self.components.get(&id).copied().unwrap_or(u32::MAX);
-        let depth = self.frames.len() as u32;
-        let placement = Placement {
-            node: id,
-            depth,
-            open: self
-                .open_by_component
-                .get(&component)
-                .map(|open| open.clone().into_boxed_slice())
-                .unwrap_or_default(),
+        let Some(data) = self.graph.node_data(id) else {
+            return Some(self.absent());
         };
-        if let Some(&class) = self.placed.get(&placement) {
-            return Some(class);
-        }
-        self.open.insert(id, depth);
-        self.open_by_component
-            .entry(component)
-            .or_default()
-            .push((id, depth));
         #[cfg(test)]
-        CLASSIFICATION_WORK.with(|work| {
-            let (frames, copied) = work.get();
-            work.set((frames + 1, copied + placement.open.len() as u64));
-        });
+        CLASSIFICATION_FRAMES.with(|frames| frames.set(frames.get() + 1));
         self.frames.push(OpenFrame {
             node: id,
-            component,
-            recipe,
+            recipe: encode_data(self.graph, id, &data),
             next_hole: 0,
             filled: Vec::new(),
             set: None,
-            placement,
         });
         None
     }
 
-    fn leaf(&mut self, lit: Vec<u8>, back_ref: bool) -> ClassId {
-        let len = lit.len() as u32;
-        self.intern(lit, vec![Part::Lit(0, len)], back_ref)
+    /// The class of an absent child.
+    fn absent(&mut self) -> ClassId {
+        let mut enc = Recipe::new();
+        enc.header(category::INTRINSIC, subtag::OPAQUE);
+        enc.u8(0xff);
+        let len = enc.buf.len() as u32;
+        self.intern(enc.buf, vec![Part::Lit(0, len)])
     }
 
     /// The class of a completed frame: its recipe with every hole filled,
@@ -714,10 +571,10 @@ impl<'g> ClassTable<'g> {
             }
         }
         push_lit(&mut lit, &mut parts, &recipe.buf[written..]);
-        self.intern(lit, parts, false)
+        self.intern(lit, parts)
     }
 
-    fn intern(&mut self, lit: Vec<u8>, parts: Vec<Part>, back_ref: bool) -> ClassId {
+    fn intern(&mut self, lit: Vec<u8>, parts: Vec<Part>) -> ClassId {
         let mut repr = Vec::with_capacity(lit.len() + parts.len() * 5);
         for part in &parts {
             match *part {
@@ -736,7 +593,6 @@ impl<'g> ClassTable<'g> {
             return class;
         }
         let mut full_len = 0u64;
-        let mut has_back_refs = back_ref;
         for part in &parts {
             match *part {
                 Part::Lit(start, end) => {
@@ -747,7 +603,6 @@ impl<'g> ClassTable<'g> {
                     full_len = full_len
                         .saturating_add(length_prefix(child.full_len).1 as u64)
                         .saturating_add(child.full_len);
-                    has_back_refs |= child.has_back_refs;
                 }
             }
         }
@@ -756,7 +611,6 @@ impl<'g> ClassTable<'g> {
             lit,
             parts,
             full_len,
-            has_back_refs,
         });
         self.interned.insert(repr.into_boxed_slice(), class);
         class

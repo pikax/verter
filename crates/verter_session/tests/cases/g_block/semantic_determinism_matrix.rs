@@ -458,6 +458,10 @@ struct StableKeyRow {
     residual: Option<&'static str>,
 }
 
+// The semantic node arena is acyclic by contract (a forward child reference
+// interns as a typed refusal), so no row's inputs include a cycle
+// back-reference: recursion reaches a key only through declaration and alias
+// references, whose identities the rows below name.
 const STABLE_KEY_TABLE: &[StableKeyRow] = &[
     StableKeyRow { variant: "IntrinsicApplication", domain: "synthetic", inputs: "closed intrinsic op tag plus ordered argument stable-key references", residual: None },
     StableKeyRow { variant: "Alias", domain: "authored carriers", inputs: "owner/role anchor of the aliasing declaration plus the aliased stable-key reference", residual: None },
