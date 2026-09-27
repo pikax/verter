@@ -3291,3 +3291,207 @@ fn the_module_reference_collector_walks_10000_nested_calls_on_a_small_stack() {
         .expect("the collector returns");
     assert_eq!(references, [Some("./deep".to_string())]);
 }
+
+/// Scripts nesting `depth` deep through each form the analysis's own passes
+/// read: a module constant's initializer, a `<script setup>`'s awaits, an
+/// exported function's returns, Vue API calls, macros and destructuring.
+fn deeply_nested_scripts(depth: usize) -> Vec<(&'static str, String)> {
+    let wrap = |open: &str, close: &str| format!("{}x{}", open.repeat(depth), close.repeat(depth));
+    let chain = |operator: &str| vec!["x"; depth + 1].join(operator);
+    vec![
+        ("calls", format!("const v = {};", wrap("f(", ")"))),
+        ("parentheses", format!("const v = {};", wrap("(", ")"))),
+        ("arrays", format!("const v = {};", wrap("[", "]"))),
+        ("objects", format!("const v = {};", wrap("{ v: ", " }"))),
+        (
+            "conditionals",
+            format!("const v = {}x;", "c ? x : ".repeat(depth)),
+        ),
+        ("sums", format!("const v = {};", chain(" + "))),
+        ("logical", format!("const v = {};", chain(" && "))),
+        ("members", format!("const v = x{};", ".v".repeat(depth))),
+        ("awaits", format!("const v = {}x;", "await ".repeat(depth))),
+        (
+            "awaited calls",
+            format!("const v = {};", wrap("f(await ", ")")),
+        ),
+        ("sequence", format!("const v = {};", wrap("(x, ", ")"))),
+        ("unary", format!("const v = {}x;", "!".repeat(depth))),
+        (
+            "assignments",
+            format!("let v; v = {}x;", "v = ".repeat(depth)),
+        ),
+        ("templates", format!("const v = {};", wrap("`${", "}`"))),
+        ("arrows", format!("const v = {}x;", "() => ".repeat(depth))),
+        (
+            "refs",
+            format!(
+                "import {{ ref }} from 'vue';\nconst v = {};",
+                wrap("ref(", ")")
+            ),
+        ),
+        (
+            "computed",
+            format!(
+                "import {{ computed }} from 'vue';\nconst v = {};",
+                wrap("computed(() => ", ")")
+            ),
+        ),
+        (
+            "props",
+            format!("const props = defineProps({});", wrap("{ v: ", " }")),
+        ),
+        (
+            "props type",
+            format!("const props = defineProps<{}>();", wrap("{ v: ", " }")),
+        ),
+        (
+            "props type arguments",
+            format!("const props = defineProps<{}>();", wrap("Box<", ">")),
+        ),
+        (
+            "props qualified type",
+            format!("const props = defineProps<A{}>();", ".B".repeat(depth)),
+        ),
+        (
+            "props with defaults",
+            format!(
+                "const props = {}defineProps<P>(){};",
+                "withDefaults(".repeat(depth),
+                ", {})".repeat(depth)
+            ),
+        ),
+        (
+            "emits",
+            format!("const emit = defineEmits({});", wrap("[", "]")),
+        ),
+        (
+            "destructuring",
+            format!("const {} = x;", wrap("{ v: ", " }").replace("x", "w")),
+        ),
+        (
+            "array destructuring",
+            format!("const {} = x;", wrap("[", "]").replace("x", "w")),
+        ),
+        (
+            "returns",
+            format!("export function f() {{ return {}; }}", wrap("(", ")")),
+        ),
+        (
+            "returned objects",
+            format!("export function f() {{ return {}; }}", wrap("{ v: ", " }")),
+        ),
+        (
+            "returns in blocks",
+            format!(
+                "export function f() {{ {}return x;{} }}",
+                "{ ".repeat(depth),
+                " }".repeat(depth)
+            ),
+        ),
+        (
+            "returns in ifs",
+            format!(
+                "export function f() {{ {}return x; }}",
+                "if (c) ".repeat(depth)
+            ),
+        ),
+        (
+            "nested functions",
+            format!(
+                "export function f() {{ {}return x;{} }}",
+                "return function () { ".repeat(depth),
+                " }".repeat(depth)
+            ),
+        ),
+        (
+            "composable",
+            format!(
+                "export function useThing() {{ const v = {}; return {{ v }}; }}",
+                wrap("ref(", ")")
+            ),
+        ),
+        (
+            "statement blocks",
+            format!("{}x;{}", "{ ".repeat(depth), " }".repeat(depth)),
+        ),
+        ("statement ifs", format!("{}x;", "if (c) ".repeat(depth))),
+        ("expression statement", format!("{};", wrap("f(", ")"))),
+        (
+            "classes",
+            format!(
+                "class C {{ m() {{ {}x{} }} }}",
+                "return class { m() { ".repeat(depth),
+                " } }".repeat(depth)
+            ),
+        ),
+    ]
+}
+
+/// The environment variable naming the form of [`deeply_nested_scripts`] a
+/// child run of [`every_deeply_nested_script_is_analyzed_on_a_small_stack`]
+/// analyzes.
+const DEEP_SCRIPT_CHILD: &str = "VERTER_DEEP_SCRIPT_CHILD";
+
+/// Every form of [`deeply_nested_scripts`], 10,000 deep, is analyzed on a
+/// 1 MiB thread: the analysis's own passes walk from explicit stacks, and
+/// only oxc's walks run on a stack region. Each form runs in a child
+/// process, so a recursion that overflows names its form rather than
+/// aborting this process. The forms reach each pass that walks from an
+/// explicit stack: the await scan (`find_await_offset`: calls, arrays,
+/// objects, conditionals, logical chains, members, `!`, assignments, `ref`,
+/// `defineProps` and `defineEmits` arguments), the string evaluator
+/// (`evaluate_string_candidates`: parentheses, sums, sequences, templates),
+/// the nested-macro scan (`scan_nested_macros`: arrows, `computed`, blocks,
+/// `if`s), the macro type references (`collect_type_references`: a props
+/// type literal, type arguments, a qualified name), the macro call walk
+/// (`collect_macro_call_from_expr`: calls, `withDefaults`), the binding
+/// leaves (`extract_destructured_binding_leaves`: object and array
+/// patterns) and the module-reference collector.
+#[test]
+fn every_deeply_nested_script_is_analyzed_on_a_small_stack() {
+    if let Some(name) = std::env::var_os(DEEP_SCRIPT_CHILD) {
+        let (_, source) = deeply_nested_scripts(10_000)
+            .into_iter()
+            .find(|(form, _)| *form == name)
+            .expect("a form of the list");
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                let allocator = Allocator::new();
+                build_script_analysis(&source, SourceType::ts(), &allocator);
+            })
+            .expect("spawn the analyzing thread")
+            .join()
+            .expect("the analysis returns");
+        println!("{DEEP_SCRIPT_CHILD}: analyzed");
+        return;
+    }
+    let failures: Vec<String> = deeply_nested_scripts(10_000)
+        .into_iter()
+        .filter_map(|(form, _)| {
+            let output =
+                std::process::Command::new(std::env::current_exe().expect("this test binary"))
+                    .args([
+                        "--exact",
+                        "analysis::build::build_tests::every_deeply_nested_script_is_analyzed_on_a_small_stack",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(DEEP_SCRIPT_CHILD, form)
+                    .output()
+                    .expect("run the form in a child process");
+            let analyzed = String::from_utf8_lossy(&output.stdout)
+                .contains(&format!("{DEEP_SCRIPT_CHILD}: analyzed"));
+            (!output.status.success() || !analyzed).then(|| {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let reason = stderr
+                    .lines()
+                    .find(|line| line.contains("overflowed") || line.contains("panicked"))
+                    .unwrap_or("");
+                format!("{form}: {:?} {reason}", output.status)
+            })
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
