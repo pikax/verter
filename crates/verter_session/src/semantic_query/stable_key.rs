@@ -341,15 +341,20 @@ fn encode_scope_id(enc: &mut Recipe, scope: &ScopeId) {
 /// reduces the reachable structure to a table of distinct subtrees
 /// (classes), classifying each node once, then writes the root's class.
 pub fn stable_key_for_node(graph: &SemanticGraphStore, id: SemanticNodeId) -> StableKey {
-    let mut table = ClassTable::new(graph);
-    let root = table.classify(id);
-    StableKey::from_exact(table.write(root))
+    graph.with_key_classes(|classes| {
+        let mut table = ClassTable::new(graph, classes);
+        let root = table.classify(id);
+        StableKey::from_exact(table.write(root))
+    })
 }
 
-// Test-only: classification frames opened on this thread.
+// Test-only: classification frames opened, and key bytes written to hash a
+// class's fingerprint, on this thread.
 #[cfg(test)]
 thread_local! {
     pub(crate) static CLASSIFICATION_FRAMES: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+    pub(crate) static FINGERPRINTED_BYTES: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
 }
 
@@ -375,6 +380,9 @@ struct Class {
     /// Length of the subtree written out in full, every occurrence inline
     /// (saturating).
     full_len: u64,
+    /// The fingerprint of the class's key (the class written as a key's
+    /// root), once computed.
+    fingerprint: Option<u64>,
 }
 
 /// A child a frame has classified, per hole.
@@ -393,27 +401,50 @@ struct OpenFrame {
     set: Option<(usize, Vec<ClassId>)>,
 }
 
-/// Classification state for one key. It lives for one key computation and
-/// is dropped with it.
-struct ClassTable<'g> {
-    graph: &'g SemanticGraphStore,
+/// The stable-key classes of one store's nodes: every distinct subtree the
+/// store's keys have met, hash-consed by its parts, each node's class, the
+/// memoized order of compared class pairs, and each class's key
+/// fingerprint once computed.
+///
+/// **Owner, lifetime, release.** The table belongs to the
+/// [`SemanticGraphStore`] whose arena its node ids index, and dies with it:
+/// it is never shared between stores. A node's class is a pure function of
+/// its immutable payload and its children's classes over an append-only,
+/// acyclic arena, so an entry never goes stale and needs no invalidation;
+/// dropping the whole table at any point only costs recomputation, and the
+/// next key rebuilds identical classes. It grows with the nodes the store's
+/// keys have classified (one class at most per node), the same bound as the
+/// arena and its per-node sidecar.
+#[derive(Default)]
+pub(crate) struct KeyClasses {
     classes: Vec<Class>,
     interned: FxHashMap<Box<[u8]>, ClassId>,
     /// Each classified node's class: a node's subtree is the same at every
-    /// occurrence, so it is classified once.
+    /// occurrence, so it is classified once per store.
     classified: FxHashMap<SemanticNodeId, ClassId>,
     order: FxHashMap<(ClassId, ClassId), Ordering>,
+}
+
+impl std::fmt::Debug for KeyClasses {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyClasses")
+            .field("classes", &self.classes.len())
+            .finish()
+    }
+}
+
+/// Classification of one key's structure into its store's table.
+struct ClassTable<'t> {
+    graph: &'t SemanticGraphStore,
+    table: &'t mut KeyClasses,
     frames: Vec<OpenFrame>,
 }
 
-impl<'g> ClassTable<'g> {
-    fn new(graph: &'g SemanticGraphStore) -> Self {
+impl<'t> ClassTable<'t> {
+    fn new(graph: &'t SemanticGraphStore, table: &'t mut KeyClasses) -> Self {
         Self {
             graph,
-            classes: Vec::new(),
-            interned: FxHashMap::default(),
-            classified: FxHashMap::default(),
-            order: FxHashMap::default(),
+            table,
             frames: Vec::new(),
         }
     }
@@ -484,7 +515,7 @@ impl<'g> ClassTable<'g> {
     fn complete(&mut self) -> Option<ClassId> {
         let frame = self.frames.pop()?;
         let class = self.build(&frame.recipe, frame.filled);
-        self.classified.insert(frame.node, class);
+        self.table.classified.insert(frame.node, class);
         if self.frames.is_empty() {
             return Some(class);
         }
@@ -506,7 +537,7 @@ impl<'g> ClassTable<'g> {
     /// Begin classifying `id`: an absent node or an already classified one
     /// answers at once; anything else opens a frame.
     fn enter(&mut self, id: SemanticNodeId) -> Option<ClassId> {
-        if let Some(&class) = self.classified.get(&id) {
+        if let Some(&class) = self.table.classified.get(&id) {
             return Some(class);
         }
         let Some(data) = self.graph.node_data(id) else {
@@ -589,7 +620,7 @@ impl<'g> ClassTable<'g> {
                 }
             }
         }
-        if let Some(&class) = self.interned.get(repr.as_slice()) {
+        if let Some(&class) = self.table.interned.get(repr.as_slice()) {
             return class;
         }
         let mut full_len = 0u64;
@@ -599,20 +630,21 @@ impl<'g> ClassTable<'g> {
                     full_len = full_len.saturating_add(u64::from(end - start));
                 }
                 Part::Child(class) => {
-                    let child = &self.classes[class as usize];
+                    let child = &self.table.classes[class as usize];
                     full_len = full_len
                         .saturating_add(length_prefix(child.full_len).1 as u64)
                         .saturating_add(child.full_len);
                 }
             }
         }
-        let class = self.classes.len() as ClassId;
-        self.classes.push(Class {
+        let class = self.table.classes.len() as ClassId;
+        self.table.classes.push(Class {
             lit,
             parts,
             full_len,
+            fingerprint: None,
         });
-        self.interned.insert(repr.into_boxed_slice(), class);
+        self.table.interned.insert(repr.into_boxed_slice(), class);
         class
     }
 
@@ -623,13 +655,16 @@ impl<'g> ClassTable<'g> {
         if a == b {
             return Ordering::Equal;
         }
-        if let Some(&order) = self.order.get(&(a, b)) {
+        if let Some(&order) = self.table.order.get(&(a, b)) {
             return order;
         }
         let mut left = FullStream::new(a);
         let mut right = FullStream::new(b);
         let order = loop {
-            match (left.peek(&self.classes), right.peek(&self.classes)) {
+            match (
+                left.peek(&self.table.classes),
+                right.peek(&self.table.classes),
+            ) {
                 (Event::End, Event::End) => break Ordering::Equal,
                 (Event::End, _) => break Ordering::Less,
                 (_, Event::End) => break Ordering::Greater,
@@ -637,8 +672,8 @@ impl<'g> ClassTable<'g> {
                     left.skip();
                     right.skip();
                 }
-                (Event::Child(x), _) => left.descend(x, &self.classes),
-                (_, Event::Child(y)) => right.descend(y, &self.classes),
+                (Event::Child(x), _) => left.descend(x, &self.table.classes),
+                (_, Event::Child(y)) => right.descend(y, &self.table.classes),
                 (Event::Byte(x), Event::Byte(y)) => {
                     if x != y {
                         break x.cmp(&y);
@@ -648,9 +683,47 @@ impl<'g> ClassTable<'g> {
                 }
             }
         };
-        self.order.insert((a, b), order);
-        self.order.insert((b, a), order.reverse());
+        self.table.order.insert((a, b), order);
+        self.table.order.insert((b, a), order.reverse());
         order
+    }
+
+    /// The fingerprint of `class`'s key, hashed once per class.
+    fn fingerprint(&mut self, class: ClassId) -> u64 {
+        if let Some(fingerprint) = self.table.classes[class as usize].fingerprint {
+            return fingerprint;
+        }
+        let key = self.write(class);
+        #[cfg(test)]
+        FINGERPRINTED_BYTES.with(|bytes| bytes.set(bytes.get() + key.len() as u64));
+        let fingerprint = fingerprint_v1(&key);
+        self.table.classes[class as usize].fingerprint = Some(fingerprint);
+        fingerprint
+    }
+
+    /// `members` with their classes, in key order: the `(fingerprint,
+    /// exact)` order of their keys. Each class's fingerprint is hashed once;
+    /// exact bytes are written only for two classes whose fingerprints
+    /// collide, and equal classes (equal keys) keep their input order.
+    fn key_ordered(&mut self, members: &[SemanticNodeId]) -> Vec<(ClassId, SemanticNodeId)> {
+        let mut keyed: Vec<(u64, ClassId, SemanticNodeId)> = Vec::with_capacity(members.len());
+        for &id in members {
+            let class = self.classify(id);
+            keyed.push((self.fingerprint(class), class, id));
+        }
+        keyed.sort_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| {
+                if a.1 == b.1 {
+                    Ordering::Equal
+                } else {
+                    self.write(a.1).cmp(&self.write(b.1))
+                }
+            })
+        });
+        keyed
+            .into_iter()
+            .map(|(_, class, id)| (class, id))
+            .collect()
     }
 
     /// Write `root`'s class: every subtree in full the first time, and a
@@ -675,7 +748,7 @@ impl<'g> ClassTable<'g> {
             length_slot: None,
         }];
         while let Some(top) = stack.last_mut() {
-            let class = &self.classes[top.class as usize];
+            let class = &self.table.classes[top.class as usize];
             let part = class.parts.get(top.part).copied();
             if part.is_some() {
                 top.part += 1;
@@ -706,7 +779,7 @@ impl<'g> ClassTable<'g> {
                     let Some(done) = stack.pop() else {
                         break;
                     };
-                    if self.classes[done.class as usize].full_len > SHARED_SUBTREE_MIN_BYTES {
+                    if self.table.classes[done.class as usize].full_len > SHARED_SUBTREE_MIN_BYTES {
                         let index = written.len() as u32;
                         written.insert(done.class, index);
                     }
@@ -1656,19 +1729,33 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
     }
 }
 
+/// `members` with their classes, in key order: the `(fingerprint, exact)`
+/// order of their keys, equal keys in input order.
+fn key_ordered(
+    graph: &SemanticGraphStore,
+    members: &[SemanticNodeId],
+) -> Vec<(ClassId, SemanticNodeId)> {
+    graph.with_key_classes(|classes| ClassTable::new(graph, classes).key_ordered(members))
+}
+
 /// Sort `members` by `VerterStableV1`. Equal keys stay in input order
 /// only when they are indistinguishable; distinguishable members never
 /// compare equal.
 pub fn sort_by_stable_key(graph: &SemanticGraphStore, members: &mut [SemanticNodeId]) {
-    members.sort_by_cached_key(|id| stable_key_for_node(graph, *id));
+    let ordered = key_ordered(graph, members);
+    for (slot, (_, id)) in members.iter_mut().zip(ordered) {
+        *slot = id;
+    }
 }
 
 /// Stable-key equality, which may license a collapse: every key encodes
-/// its whole structure, so equal keys name one encoded structure.
+/// its whole structure, so equal keys name one encoded structure, one
+/// class of the store's table.
 pub fn provably_equal(graph: &SemanticGraphStore, a: SemanticNodeId, b: SemanticNodeId) -> bool {
-    let key_a = stable_key_for_node(graph, a);
-    let key_b = stable_key_for_node(graph, b);
-    key_a == key_b
+    graph.with_key_classes(|classes| {
+        let mut table = ClassTable::new(graph, classes);
+        table.classify(a) == table.classify(b)
+    })
 }
 
 /// Union-set canonicalization: sort by stable key and drop repeated node ids.
@@ -1676,11 +1763,7 @@ pub fn canonicalize_union_members(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],
 ) -> Arc<[SemanticNodeId]> {
-    let mut keyed: Vec<(StableKey, SemanticNodeId)> = members
-        .iter()
-        .map(|&id| (stable_key_for_node(graph, id), id))
-        .collect();
-    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut keyed = key_ordered(graph, members);
     if graph.union_order_reversed() {
         keyed.reverse();
     }
@@ -1706,16 +1789,12 @@ pub fn sort_union_members_by_stable_key(
 
 /// Order a union's members as [`sort_union_members_by_stable_key`] does and
 /// drop each member whose key equals its neighbour's (the key-equality
-/// collapse [`provably_equal`] licenses), keying every member once.
+/// collapse [`provably_equal`] licenses), classifying every member once.
 pub fn sort_and_collapse_union_members(
     graph: &SemanticGraphStore,
     members: &mut Vec<SemanticNodeId>,
 ) {
-    let mut keyed: Vec<(StableKey, SemanticNodeId)> = members
-        .iter()
-        .map(|&id| (stable_key_for_node(graph, id), id))
-        .collect();
-    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut keyed = key_ordered(graph, members);
     if graph.union_order_reversed() {
         keyed.reverse();
     }

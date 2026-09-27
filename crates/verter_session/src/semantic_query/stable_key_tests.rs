@@ -1654,3 +1654,57 @@ fn classification_visits_each_node_once() {
         key.exact().len()
     );
 }
+
+/// Union reduction classifies each node once per store and hashes each
+/// class's key once: a chain of unions nested `depth` deep (each level
+/// `U(k) = U(k - 1)[] | k`) opens exactly three classification frames per
+/// level, and reducing every level again opens none and hashes nothing.
+#[test]
+fn union_reduction_classifies_each_node_once_per_store() {
+    use crate::semantic_query::stable_key::{CLASSIFICATION_FRAMES, FINGERPRINTED_BYTES};
+    let work = || {
+        (
+            CLASSIFICATION_FRAMES.with(std::cell::Cell::get),
+            FINGERPRINTED_BYTES.with(std::cell::Cell::get),
+        )
+    };
+    for depth in [500usize, 1_000] {
+        let graph = SemanticGraphStore::new();
+        let chain = |graph: &SemanticGraphStore| {
+            let mut node = prim(graph, PrimitiveKind::Number);
+            for index in 0..depth {
+                let wrapped = graph.intern_node(SemanticNodeData::Array {
+                    element: node,
+                    readonly: false,
+                });
+                let literal = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(
+                    index as f64,
+                )));
+                node = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+                    graph,
+                    &[wrapped, literal],
+                    crate::semantic_query::NullabilityPolicy::Strict,
+                )
+                .node;
+            }
+            node
+        };
+        CLASSIFICATION_FRAMES.with(|frames| frames.set(0));
+        FINGERPRINTED_BYTES.with(|bytes| bytes.set(0));
+        let first = chain(&graph);
+        let (frames, _) = work();
+        assert_eq!(
+            frames,
+            3 * depth as u64,
+            "{depth} levels classify the array, the literal and the union once each"
+        );
+        let cold = work();
+        let again = chain(&graph);
+        assert_eq!(again, first, "premise: the same chain");
+        assert_eq!(
+            work(),
+            cold,
+            "reducing every level again classifies and hashes nothing new"
+        );
+    }
+}
