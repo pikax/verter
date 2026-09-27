@@ -1651,3 +1651,81 @@ fn callables_nested_10000_deep_index_on_a_small_stack() {
         .expect("the index builds");
     assert_eq!((entries, deepest, shared), (10_000, 10_000, true));
 }
+
+/// The stable and exact hashes of every entry of `source`, in entry order.
+fn hashes_of(
+    source: &str,
+) -> Vec<(
+    crate::analysis::types::Hash16,
+    Option<crate::analysis::types::Hash16>,
+)> {
+    index_of(source)
+        .entries
+        .iter()
+        .map(|entry| (entry.flow_body_stable_hash, entry.flow_body_exact_hash))
+        .collect()
+}
+
+/// A function nested in a function is folded into the one around it from
+/// its own hash, not walked again: the same source always fingerprints the
+/// same, an edit in the innermost body changes every function around it,
+/// the enclosing function stays alpha-normalized over the names its nested
+/// function reads from it, and which of its bindings a nested function
+/// reads stays in its hash.
+#[test]
+fn nested_function_hashes_fold_into_the_function_around_them() {
+    let source = "export function flow(a: number) { return (b: number) => () => a + b + 1; }";
+    assert_eq!(
+        hashes_of(source),
+        hashes_of(source),
+        "identical fingerprints"
+    );
+    let edited =
+        hashes_of("export function flow(a: number) { return (b: number) => () => a + b + 2; }");
+    let base = hashes_of(source);
+    assert_eq!(base.len(), 3);
+    for (before, after) in base.iter().zip(&edited) {
+        assert_ne!(before.0, after.0, "the stable hash sees the nested edit");
+        assert_ne!(before.1, after.1, "the exact hash sees the nested edit");
+    }
+    assert_eq!(
+        hash_of(
+            "export function flow(a: number) { return () => a + 1; }",
+            "flow"
+        ),
+        hash_of(
+            "export function flow(z: number) { return () => z + 1; }",
+            "flow"
+        ),
+        "renaming a binding a nested function reads keeps the enclosing hash"
+    );
+    assert_ne!(
+        hash_of(
+            "export function flow(x: number, y: number) { return () => x; }",
+            "flow"
+        ),
+        hash_of(
+            "export function flow(y: number, x: number) { return () => x; }",
+            "flow"
+        ),
+        "which binding the nested function reads is part of the hash"
+    );
+}
+
+/// Folding the hashes of a nest of functions folds each function's own
+/// syntax once: the expressions folded grow with the nest's depth, where
+/// folding every nested function again for each function around it grew
+/// them with its square.
+#[test]
+fn nested_function_hashes_fold_each_function_once() {
+    let folded = [100, 200, 300].map(|depth| {
+        crate::analysis::function_program_hash::hash_probe::take();
+        index_of(&format!("export const v = {}1;", "() => ".repeat(depth)));
+        crate::analysis::function_program_hash::hash_probe::take()
+    });
+    assert_eq!(
+        folded[1] - folded[0],
+        folded[2] - folded[1],
+        "each hundred nested functions fold the same expressions: {folded:?}"
+    );
+}

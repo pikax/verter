@@ -1172,6 +1172,9 @@ struct DiscoveryCtx<'source, 'ast> {
     enclosing_heritage: Option<EnclosingHeritage<'ast>>,
     enclosing_this: Option<EnclosingThis>,
     entries: Vec<FunctionProgramEntry>,
+    /// Each entry's function node, by entry ordinal, whose hashes
+    /// [`hash_entries`] folds once discovery is done.
+    hashed_nodes: Vec<(usize, FunctionNode<'ast>)>,
     expressions: Vec<ProgramExpressionRecord>,
     /// Source-order ordinal counter for nested served positions (hoisted
     /// nested function declarations and call-argument function values)
@@ -1224,6 +1227,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
                     enclosing_this: self.enclosing_this,
                 });
         }
+        self.hashed_nodes.push((self.entries.len(), node));
         self.entries.push(entry);
     }
 }
@@ -1274,6 +1278,7 @@ fn build_function_program_index_impl<'ast>(
         enclosing_heritage: None,
         enclosing_this: None,
         entries: Vec::new(),
+        hashed_nodes: Vec::new(),
         expressions: Vec::new(),
         next_nested_ordinal: 0,
     };
@@ -1292,6 +1297,7 @@ fn build_function_program_index_impl<'ast>(
             }
             ctx.walks
                 .with_node_stack(program.span, || classes.visit_program(program));
+            hash_entries(ctx);
         },
     );
     resolve_captures(&mut ctx.entries);
@@ -1333,6 +1339,107 @@ fn build_function_program_index_impl<'ast>(
         },
         ctx.nodes,
     )
+}
+
+/// Fold every entry's stable and exact hashes, the functions nested in a
+/// function before it (discovery lists a function before the functions
+/// nested in it), each nested function's hashes folded into the one around
+/// it rather than its syntax walked again: a function's hashes cost its own
+/// syntax, however many functions it nests.
+///
+/// The exact hash is the function's own bytes with each function nested
+/// directly in it replaced by that function's exact hash and length: equal
+/// exactly when the function's text is (a function with none nested hashes
+/// its text).
+fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>) {
+    use crate::analysis::function_program_hash::{hash_function_body, NestedHashes};
+    let mut nested: NestedHashes = rustc_hash::FxHashMap::default();
+    // The exact hash and span of each hashed function, and the functions
+    // nested directly in each, by entry ordinal.
+    let mut exact: rustc_hash::FxHashMap<usize, (Option<Hash16>, verter_span::Span)> =
+        rustc_hash::FxHashMap::default();
+    let ordinal_of: rustc_hash::FxHashMap<FunctionProgramKey, usize> = ctx
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(ordinal, entry)| (entry.key.clone(), ordinal))
+        .collect();
+    let mut children: rustc_hash::FxHashMap<usize, Vec<usize>> = rustc_hash::FxHashMap::default();
+    for (ordinal, entry) in ctx.entries.iter().enumerate() {
+        if let Some(parent) = entry
+            .lexical_parent
+            .as_deref()
+            .and_then(|key| ordinal_of.get(key))
+        {
+            children.entry(*parent).or_default().push(ordinal);
+        }
+    }
+    let hashed = std::mem::take(&mut ctx.hashed_nodes);
+    for (ordinal, node) in hashed.into_iter().rev() {
+        let Some(body) = node.body() else {
+            continue;
+        };
+        let (params, function_start) = {
+            let entry = &ctx.entries[ordinal];
+            (Arc::clone(&entry.params), entry.span.start)
+        };
+        let (stable, part) = hash_function_body(
+            &ctx.walks,
+            ctx.source,
+            body,
+            &params,
+            function_start,
+            node,
+            &nested,
+        );
+        let span = node.span();
+        nested.insert((span.start, span.end), part);
+        let span: verter_span::Span = span.into();
+        // A span outside the source is a MISS, never the empty string's
+        // hash: hashing `b""` gives every out-of-range entry the same
+        // constant and silently retires the exact-content axis for all of
+        // them.
+        let exact_hash = ctx
+            .source
+            .get(span.start as usize..span.end as usize)
+            .map(|_| {
+                let mut inner: Vec<(verter_span::Span, Option<Hash16>)> = children
+                    .get(&ordinal)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|child| exact.get(child))
+                    .map(|(hash, child_span)| (*child_span, *hash))
+                    .filter(|(child_span, _)| {
+                        child_span.start >= span.start && child_span.end <= span.end
+                    })
+                    .collect();
+                inner.sort_by_key(|(child_span, _)| child_span.start);
+                let mut bytes = Vec::new();
+                let mut at = span.start as usize;
+                for (child_span, hash) in inner {
+                    let (start, end) = (child_span.start as usize, child_span.end as usize);
+                    if start < at {
+                        continue;
+                    }
+                    bytes.extend_from_slice(&ctx.source.as_bytes()[at..start]);
+                    match hash {
+                        Some(hash) => {
+                            bytes.push(0xFF);
+                            bytes.extend_from_slice(&hash);
+                            bytes.extend_from_slice(&((end - start) as u32).to_le_bytes());
+                        }
+                        None => bytes.extend_from_slice(&ctx.source.as_bytes()[start..end]),
+                    }
+                    at = end;
+                }
+                bytes.extend_from_slice(&ctx.source.as_bytes()[at..span.end as usize]);
+                crate::analysis::types::hash_16(&bytes)
+            });
+        exact.insert(ordinal, (exact_hash, span));
+        let entry = &mut ctx.entries[ordinal];
+        entry.flow_body_stable_hash = stable;
+        entry.flow_body_exact_hash = exact_hash;
+    }
 }
 
 /// Resolve exact direct local call targets after discovery: a bare
@@ -3743,7 +3850,6 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
         function_start: u32,
         node: FunctionNode<'ast>,
     ) -> FunctionProgramEntry {
-        let source = self.source;
         let function_end = match node {
             FunctionNode::Function(function) => function.span.end,
             FunctionNode::Arrow(arrow) => arrow.span.end,
@@ -3852,22 +3958,8 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             })
             .unwrap_or_default();
 
-        let function_span = node.span();
-        let hash = crate::analysis::function_program_hash::hash_function_body(
-            &self.walks,
-            source,
-            body,
-            &params,
-            function_start,
-            node,
-        );
-        // A span outside the source is a MISS, never the empty string's hash:
-        // hashing `b""` gives every out-of-range entry the same constant and
-        // silently retires the exact-content axis for all of them.
-        let exact_hash = source
-            .get(function_span.start as usize..function_span.end as usize)
-            .map(|text| crate::analysis::types::hash_16(text.as_bytes()));
-
+        // The stable and exact hashes fold each nested function's once
+        // discovery is done (`hash_entries`).
         FunctionProgramEntry {
             key,
             span: frame_span,
@@ -3900,8 +3992,8 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             nested_declaration_name: None,
             captures: CanonicalCaptureIdentity::default(),
             captures_exhaustive: !creates_unserved_callable,
-            flow_body_stable_hash: hash,
-            flow_body_exact_hash: exact_hash,
+            flow_body_stable_hash: Hash16::default(),
+            flow_body_exact_hash: None,
         }
     }
 }

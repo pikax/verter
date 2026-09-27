@@ -801,6 +801,30 @@ Recorded plainly so no reader mistakes absence for a pass:
   `walks_within_a_program_containment_run_in_place` and
   `own_syntax_takes_the_nested_bodies_out`.
 
+* **Function hashes fold each nested function once.** A function's
+  stable hash folded its whole syntax, every function nested in it
+  included, and its exact hash hashed its whole text: a nest of
+  functions hashed every nested function again for every function
+  around it (3,000 nested arrows: 724 ms folding and 458 ms hashing text,
+  the square of the depth; 10,000 took most of a minute to index,
+  unoptimized). The index now hashes a function after the functions
+  nested in it: a nested function is folded into the one around it from
+  its SHAPE (its own bindings as ordinals, the names it reads from
+  around it as indices) and those names as the enclosing function
+  resolves them, and the exact hash replaces each nested function's text
+  with its exact hash and length. Two functions fold alike exactly when
+  their syntax did before (the same alpha-normalization, a nested
+  function's reads of the enclosing function's bindings included), and
+  a function with no nested function hashes its text as before.
+  `function_program_tests.rs` →
+  `nested_function_hashes_fold_into_the_function_around_them` (identical
+  fingerprints for one source, a nested edit reaching every enclosing
+  hash, a renamed read binding keeping it, the read binding's ordinal
+  staying in it) and `nested_function_hashes_fold_each_function_once`
+  (the expressions folded grow linearly with the nest); folding nested
+  functions in place fails the second, and dropping their reads'
+  resolution the first.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the

@@ -19,9 +19,36 @@ use crate::analysis::types::{hash_16, Hash16};
 // Whole-function stable hash
 // ---------------------------------------------------------------------------
 
-const HASH_SALT: &[u8] = b"verter-flow-body-stable-hash:v1";
+const HASH_SALT: &[u8] = b"verter-flow-body-stable-hash:v2";
 const HASH_SEP: u8 = 0;
 
+/// A function's part in the hash of the function around it: its SHAPE —
+/// its structure with its own bindings folded as ordinals and every name it
+/// reads from around it as an index into `free` — and those names, in the
+/// order it first reads them.
+///
+/// A function's stable hash is its shape with its free names' bytes. The
+/// function around it folds the nested function's shape, and each of the
+/// nested function's free names as the enclosing function resolves it (one
+/// of its own bindings' ordinal, or one of its own free names): exactly
+/// what folding the nested function's syntax in place determined, so two
+/// functions fold alike exactly when they did, while each nested function
+/// is folded once, however deep it sits — folding every nested function's
+/// syntax again for every function around it cost the square of the
+/// nesting.
+#[derive(Debug, Clone)]
+pub(super) struct NestedHash {
+    shape: Hash16,
+    free: std::sync::Arc<[String]>,
+}
+
+/// The nested functions whose [`NestedHash`] is folded in place of their
+/// syntax, by their span.
+pub(super) type NestedHashes = rustc_hash::FxHashMap<(u32, u32), NestedHash>;
+
+/// Hash one function: its stable hash, and its part in the hash of the
+/// function around it. The functions nested directly in it are folded from
+/// `nested`; one missing there is folded in place.
 pub(super) fn hash_function_body(
     walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
     source: &str,
@@ -29,26 +56,41 @@ pub(super) fn hash_function_body(
     params: &[FunctionParamRecord],
     function_start: u32,
     node: crate::analysis::function_program::FunctionNode<'_>,
-) -> Hash16 {
-    // Folding walks the whole function: its signature's types, its
-    // parameters' initializers and its body.
-    walks.with_node_stack(node.span(), || {
-        fold_function_body(source, body, params, function_start, node)
-    })
+    nested: &NestedHashes,
+) -> (Hash16, NestedHash) {
+    // Folding walks the function: its signature's types, its parameters'
+    // initializers and its body.
+    let hash = walks.with_node_stack(node.span(), || {
+        fold_function_body(source, body, params, function_start, node, nested)
+    });
+    let mut stable = Vec::with_capacity(64);
+    stable.extend_from_slice(HASH_SALT);
+    stable.push(HASH_SEP);
+    stable.extend_from_slice(&hash.shape);
+    for name in hash.free.iter() {
+        stable.extend_from_slice(&u32::try_from(name.len()).unwrap_or(u32::MAX).to_le_bytes());
+        stable.extend_from_slice(name.as_bytes());
+    }
+    (hash_16(&stable), hash)
 }
 
-/// [`hash_function_body`] on the stack the function's walks need.
+/// [`hash_function_body`]'s shape and free names, on the stack the
+/// function's walks need.
 fn fold_function_body(
     source: &str,
     body: crate::analysis::function_program::FunctionBodyRef<'_>,
     params: &[FunctionParamRecord],
     function_start: u32,
     node: crate::analysis::function_program::FunctionNode<'_>,
-) -> Hash16 {
+    nested: &NestedHashes,
+) -> NestedHash {
     let mut visitor = HashVisitor {
         buf: Vec::with_capacity(512),
         scopes: vec![rustc_hash::FxHashMap::default()],
         next_ordinal: 0,
+        free: Vec::new(),
+        free_slots: rustc_hash::FxHashMap::default(),
+        nested,
     };
     visitor.buf.extend_from_slice(HASH_SALT);
     visitor.tag(HASH_SEP);
@@ -63,6 +105,10 @@ fn fold_function_body(
             visitor.fold_u8(u8::from(func.generator));
             visitor.fold_ts_type_annotation(func.return_type.as_ref());
             visitor.fold_ts_type_parameters(func.type_parameters.as_ref());
+            visitor.fold_u8(u8::from(func.this_param.is_some()));
+            if let Some(this_param) = func.this_param.as_ref() {
+                visitor.fold_ts_type_annotation(this_param.type_annotation.as_ref());
+            }
         }
         crate::analysis::function_program::FunctionNode::Arrow(arrow) => {
             visitor.fold_u8(u8::from(arrow.r#async));
@@ -117,7 +163,10 @@ fn fold_function_body(
     if let Some(expression) = body.expression() {
         visitor.visit_expression_body(expression);
     }
-    hash_16(&visitor.buf)
+    NestedHash {
+        shape: hash_16(&visitor.buf),
+        free: visitor.free.into(),
+    }
 }
 
 /// The structural body folder. Bound identifiers (parameters, locals,
@@ -126,13 +175,18 @@ fn fold_function_body(
 /// observable — node kinds in order, operators, literals, property keys
 /// (shorthand / keyed / computed), calls, writes, control, annotations,
 /// template text — enters the fold.
-struct HashVisitor {
+struct HashVisitor<'n> {
     buf: Vec<u8>,
     scopes: Vec<rustc_hash::FxHashMap<String, u32>>,
     next_ordinal: u32,
+    /// The names the function reads from around it, in first-read order.
+    free: Vec<String>,
+    free_slots: rustc_hash::FxHashMap<String, u32>,
+    /// The nested functions folded from their [`NestedHash`].
+    nested: &'n NestedHashes,
 }
 
-impl HashVisitor {
+impl HashVisitor<'_> {
     /// An arrow's expression body, hashed as the one expression statement
     /// oxc's AST carried it as before 0.151.
     fn visit_expression_body(&mut self, expression: &Expression<'_>) {
@@ -198,9 +252,34 @@ impl HashVisitor {
             }
             None => {
                 self.tag(0xB1);
-                self.fold_str(name);
+                let slot = match self.free_slots.get(name) {
+                    Some(slot) => *slot,
+                    None => {
+                        let slot = u32::try_from(self.free.len()).unwrap_or(u32::MAX);
+                        self.free.push(name.to_string());
+                        self.free_slots.insert(name.to_string(), slot);
+                        slot
+                    }
+                };
+                self.fold_u32(slot);
             }
         }
+    }
+
+    /// Fold a nested function from its [`NestedHash`]: its shape, and each
+    /// name it reads from around it as this function resolves that name
+    /// where the nested function sits. `false` when `span` has none.
+    fn fold_nested(&mut self, span: oxc_span::Span) -> bool {
+        let Some(nested) = self.nested.get(&(span.start, span.end)).cloned() else {
+            return false;
+        };
+        self.tag(0xE0);
+        self.buf.extend_from_slice(&nested.shape);
+        self.fold_u32(u32::try_from(nested.free.len()).unwrap_or(u32::MAX));
+        for name in nested.free.iter() {
+            self.fold_identifier_use(name);
+        }
+        true
     }
 
     fn fold_ts_type_annotation(
@@ -340,7 +419,7 @@ fn type_affecting_jsdoc_tag_payloads(block: &str) -> Vec<(&str, &str)> {
     out
 }
 
-impl<'a> Visit<'a> for HashVisitor {
+impl<'a> Visit<'a> for HashVisitor<'_> {
     fn visit_statement(&mut self, it: &Statement<'a>) {
         let tag = match it {
             Statement::BlockStatement(_) => 0x10,
@@ -396,6 +475,8 @@ impl<'a> Visit<'a> for HashVisitor {
     }
 
     fn visit_expression(&mut self, it: &Expression<'a>) {
+        #[cfg(test)]
+        hash_probe::expression();
         let tag = match it {
             Expression::BooleanLiteral(_) => 0x40,
             Expression::NullLiteral(_) => 0x41,
@@ -559,6 +640,9 @@ impl<'a> Visit<'a> for HashVisitor {
     }
 
     fn visit_function(&mut self, it: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
+        if self.fold_nested(it.span) {
+            return;
+        }
         self.push_scope();
         if let Some(id) = it.id.as_ref() {
             self.bind(id.name.as_str());
@@ -568,6 +652,9 @@ impl<'a> Visit<'a> for HashVisitor {
     }
 
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
+        if self.fold_nested(it.span) {
+            return;
+        }
         self.push_scope();
         walk::walk_arrow_function_expression(self, it);
         self.pop_scope();
@@ -650,5 +737,21 @@ impl<'a> Visit<'a> for HashVisitor {
                 self.tag(0x94);
             }
         }
+    }
+}
+
+/// Counts the expressions the hash folds on this thread; test-only.
+#[cfg(test)]
+pub(super) mod hash_probe {
+    use std::cell::Cell;
+    thread_local! {
+        static EXPRESSIONS: Cell<usize> = const { Cell::new(0) };
+    }
+    pub(super) fn expression() {
+        EXPRESSIONS.with(|count| count.set(count.get() + 1));
+    }
+    /// The expressions folded since the last call.
+    pub(crate) fn take() -> usize {
+        EXPRESSIONS.with(|count| count.replace(0))
     }
 }
