@@ -36,6 +36,7 @@ use crate::framework_common::FrameworkParseArtifact;
 use crate::ide::vue_projection::attribute_operations::project_attribute_operations;
 use crate::ide::vue_projection::binder_capture::{capture_binder_plan, BinderCapturePlan};
 use crate::ide::vue_projection::binding_views::{project_binding_views, BindingViewsProjection};
+use crate::ide::vue_projection::component_resolution::project_component_resolution;
 use crate::ide::vue_projection::component_use::project_component_uses;
 use crate::ide::vue_projection::generic_interop::project_advanced_generic_uses;
 use crate::ide::vue_projection::options_api::project_options_pair;
@@ -67,6 +68,12 @@ pub use crate::ide::vue_projection::props::{
     CallerAndSetupPropsContract, PropCheckObligation, PropsProjection, SpreadCertaintyPolicy,
 };
 
+/// Component resolution and dynamic correlation products consumed by the
+/// qualified Vue projection before atomic activation.
+pub use crate::ide::vue_projection::component_resolution::{
+    ComponentResolutionObservation, ComponentResolutionProjection, ComponentSource,
+    DynamicComponentUseContract, ResolutionSpecializationKey, DYNAMIC_USE_PRELUDE,
+};
 /// Component-use products: the acceptance surface of
 /// [`VueProjectionBackend::component_uses`]. Re-exported here (rather than
 /// through `ide`, which is crate-internal) so qualification harnesses and
@@ -286,6 +293,33 @@ impl VueProjectionBackend {
         let plan = self.projection_plan(source, artifact, canonical_id);
         let attributes = project_attribute_operations(&plan, parsed, source);
         Ok(project_component_uses(&plan, &attributes))
+    }
+
+    /// Resolve component expressions against the admitted plan and the
+    /// script projection's binding inventory. TypeScript checks the emitted
+    /// values; absent global declarations remain `unknown`. `custom_elements`
+    /// must be the prefixes selected for this parsed artifact.
+    pub fn component_resolution(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        canonical_id: &str,
+        custom_elements: Option<&[String]>,
+    ) -> Result<ComponentResolutionProjection, SetupProjectionRefusal> {
+        let script = self.script_projection(source, artifact)?;
+        let parsed = VueCarrierCompiler
+            .parsed_sfc(artifact)
+            .ok_or(SetupProjectionRefusal::MissingParse)?;
+        let plan = self.projection_plan(source, artifact, canonical_id);
+        let attributes = project_attribute_operations(&plan, parsed, source);
+        let uses = project_component_uses(&plan, &attributes);
+        Ok(project_component_resolution(
+            &plan,
+            &uses,
+            &script,
+            canonical_id,
+            custom_elements,
+        ))
     }
 
     /// Every component use of the admitted parse placed in one scope over

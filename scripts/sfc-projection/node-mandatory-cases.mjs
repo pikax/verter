@@ -160,6 +160,14 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP20-optional",
     "STP20-overwritten",
   ]),
+  STP32: Object.freeze([
+    "STP32-dynamic-correlated",
+    "STP32-async",
+    "STP32-recursive",
+    "STP32-global",
+    "STP32-namespace",
+    "STP32-missing",
+  ]),
   STS0: Object.freeze([
     "STS0-svelte-inventory",
     "STS0-svelte-abi",

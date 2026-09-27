@@ -5,6 +5,7 @@
 pub mod attribute_operations;
 pub mod binder_capture;
 pub mod binding_views;
+pub mod component_resolution;
 pub mod component_use;
 pub mod generic_interop;
 pub mod options_api;
@@ -18,6 +19,8 @@ mod attribute_operations_tests;
 mod binder_capture_tests;
 #[cfg(test)]
 mod binding_views_tests;
+#[cfg(test)]
+mod component_resolution_tests;
 #[cfg(test)]
 mod component_use_tests;
 #[cfg(test)]

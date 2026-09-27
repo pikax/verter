@@ -212,7 +212,7 @@ const GC_NAV_PROBE_CLOSE: &str = ";";
 /// JS form carries no provider-resolvable conditional (no probe): Pascal-authored
 /// names stay the fail-closed JSDoc `unknown` cast; kebab-authored names cast `*`
 /// (fail-open `any` — the JS-mode equivalent of the intrinsic surface).
-pub(super) fn emit_global_component_fallbacks(
+pub(crate) fn emit_global_component_fallbacks(
     buf: &mut String,
     fallbacks: &[GlobalComponentFallback],
     is_jsx: bool,
