@@ -127,3 +127,68 @@ fn a_400_deep_nested_object_type_reads_on_the_default_stack() {
     let failures = mismatches(&source, &[(reads.as_str(), "1")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// `type U0 = 0 | 1; type U1 = U0 | 2; …; type U{links} = U{links-1} | {links+1}`.
+fn union_alias_chain(links: usize) -> String {
+    let mut source = String::from("type U0 = 0 | 1;\n");
+    for link in 1..=links {
+        source.push_str(&format!("type U{link} = U{} | {};\n", link - 1, link + 1));
+    }
+    source
+}
+
+/// A union alias that names the previous one, chained 1,000 deep, reads
+/// on a 1 MiB thread, completely: a union's reduction reads each named
+/// arm's own demand, and each named arm is the next alias of the chain, so
+/// those demands nest once per link, and the walk over a named union's
+/// members reads the names the arm's own demand already read.
+///
+/// Measured on TypeScript 7.0.2 (all four settings): the checker prints
+/// `U1000` over the 1,000-link chain as `U1000` (and `U3` over three
+/// links as `U3`); `U1000` and `0 | 1 | … | 1001` are mutually
+/// assignable, as are `U3000` and `0 | 1 | … | 3001` over 3,000 links.
+#[test]
+fn a_1000_deep_union_alias_chain_reads_on_a_small_stack() {
+    let run = |links: usize| {
+        let source = union_alias_chain(links);
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                let probe = format!("U{links}");
+                super::checker_probe_lane_tests::mismatches(
+                    &source,
+                    &[(probe.as_str(), probe.as_str())],
+                )
+            })
+            .expect("spawn the 1 MiB thread")
+            .join()
+            .expect("the chain reads without exhausting the stack")
+    };
+    let failures: Vec<String> = run(3).into_iter().chain(run(1000)).collect();
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+"
+        )
+    );
+}
+
+/// A union alias whose arm names another union alias evaluates to the
+/// members both name.
+///
+/// Measured on TypeScript 7.0.2 (all four settings): with `type U0 = 0 |
+/// 1; type U1 = U0 | 2`, `U1` and `0 | 1 | 2` are mutually assignable (as
+/// are `U3` and `0 | 1 | 2 | 3 | 4` over three links). The lane evaluates
+/// the named arm to a declaration placeholder: `U1` evaluates to
+/// `<placeholder> | 2`.
+#[test]
+#[ignore = "a union alias's arm naming another union alias evaluates to a declaration placeholder"]
+fn a_union_alias_naming_a_union_alias_evaluates_to_both_members() {
+    let failures = super::checker_probe_lane_tests::evaluated_mismatches(
+        &union_alias_chain(1),
+        &[("U1", "0 | 1 | 2")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
