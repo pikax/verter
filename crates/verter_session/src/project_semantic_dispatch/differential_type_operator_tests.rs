@@ -385,6 +385,27 @@ fn infer_in_a_template_literal_pattern_resolves() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Template literal patterns over sources that are no string literal.
+const TEMPLATE_PATTERN_SOURCES: &str = r##"
+type T10<S> = S extends `a${infer H}` ? H : "none";
+type T12<S> = S extends `${infer H}-${number}` ? H : "none";
+"##;
+
+/// A source the pattern cannot slice takes the false branch when it is not
+/// below the pattern even with each placeholder read as `string`: `string`
+/// and `number` against `a${infer H}`, `boolean` against `${infer H}-${number}`.
+/// Measured on TypeScript 7.0.2, alike under all four settings.
+#[test]
+fn a_source_no_placeholder_reading_fits_takes_the_false_branch() {
+    let matrix = Matrix::new(TEMPLATE_PATTERN_SOURCES);
+    let failures = matrix.types(&[
+        ("T10<string>", "\"none\""),
+        ("T10<number>", "\"none\""),
+        ("T12<boolean>", "\"none\""),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// `(<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ?
 /// true : false` is `true` for `1, 1` and `false` for `1, number`.
 ///

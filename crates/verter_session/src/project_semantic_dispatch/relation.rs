@@ -8774,6 +8774,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             });
             return;
         }
+        // A source the pattern cannot slice (no string literal or template)
+        // that is not below the pattern even with every placeholder read as
+        // `string` is not below it (`string` against `a${infer H}`).
+        if let Some(widened) = self.template_infer_pattern_over_string(target) {
+            drop(source_data);
+            drop(target_data);
+            if matches!(
+                self.relate_member(source, widened, bindings, InferPosition::Covariant),
+                RelationResult::NotAssignable
+            ) {
+                results.push(RelationResult::NotAssignable);
+            } else {
+                results.push(RelationResult::Unknown);
+            }
+            return;
+        }
         if let Some(accepted) = self.string_mapping_relation(source, target) {
             results.push(if accepted {
                 assignable(bindings)
