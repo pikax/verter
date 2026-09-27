@@ -24481,13 +24481,13 @@ mod nested_input_basis_tests {
     use verter_identity::encoding::CanonicalDigest;
     use verter_identity::identity::InputBasisId;
 
-    /// The bases of a nest `depth` levels deep, innermost last, and the
+    /// The bases of a nest `levels` levels deep, innermost last, and the
     /// ancestry of the innermost.
-    fn nest(root: &[u8], depth: usize) -> (Vec<InputBasisId>, FlowInputAncestry) {
-        let mut bases = Vec::with_capacity(depth);
+    fn nest(root: &[u8], levels: usize) -> (Vec<InputBasisId>, FlowInputAncestry) {
+        let mut bases = Vec::with_capacity(levels);
         let mut ancestry = FlowInputAncestry::default();
         let mut parent = CanonicalDigest::of_bytes(root);
-        for level in 0..depth {
+        for level in 0..levels {
             let basis = InputBasisId::from_canonical(&NestedFlowInputBasis {
                 parent,
                 parameters: &[SemanticNodeId(level as u64)],
