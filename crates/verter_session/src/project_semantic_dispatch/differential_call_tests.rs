@@ -657,3 +657,47 @@ fn a_constrained_method_type_parameter_infers_on_an_instantiated_interface() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Arguments whose types a declaration names, against naked type
+/// parameters.
+const NAMED_ARGUMENTS: &str = r##"
+declare function id<T>(o: T): T;
+declare function wrap<T>(o: T): { v: T };
+declare function arr<T>(o: T): T[];
+interface I { a: string; b: number }
+type A = { a: string };
+type U = "a" | "b";
+type S = string;
+class C { x = 1 }
+interface G<X> { g: X }
+export function b1(o: I) { return id(o); }
+export function b2(o: I) { return wrap(o); }
+export function b3(o: A) { return id(o); }
+export function b4(o: U) { return id(o); }
+export function b5(o: S) { return id(o); }
+export function b6(o: C) { return arr(o); }
+export function b7(o: G<number>) { return id(o); }
+export function b8(o: I | undefined) { return id(o); }
+"##;
+
+/// An argument whose type a declaration names infers that declaration:
+/// `id(o)` over `o: I` is `I`, `wrap(o)` is `{ v: I; }`, and an alias of an
+/// object or a union type is kept by name too; an alias of an intrinsic
+/// type is that type (`type S = string` makes `id(o)` a `string`).
+/// TypeScript 7.0.2, all four settings alike but for the `undefined` arm
+/// `strictNullChecks` drops.
+#[test]
+fn a_declared_argument_type_infers_by_its_name() {
+    let matrix = Matrix::new(NAMED_ARGUMENTS);
+    let mut failures = matrix.returns(&[
+        ("b1", "I"),
+        ("b2", "{ v: I; }"),
+        ("b3", "A"),
+        ("b4", "U"),
+        ("b5", "string"),
+        ("b6", "C[]"),
+        ("b7", "G<number>"),
+    ]);
+    failures.extend(matrix.nullness(&[(Read::Return("b8"), "I | undefined", "I")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -6937,11 +6937,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(r) = self.try_object_vs_record_relation(source, target, bindings) {
             return r;
         }
+        // A naked type parameter on the other side takes the operand as it
+        // is written: an inference records the declaration carrier (an
+        // interface-typed argument infers the interface, `id(i)` is `I`),
+        // never the surface it stands for — unless that surface is an
+        // intrinsic type, which no declaration names (`type S = string`
+        // makes `id(x as S)` a `string`).
+        let is_binder = |node: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::TypeParam { .. })
+            )
+        };
+        let intrinsic = |node: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_))
+            )
+        };
+        let (source_is_binder, target_is_binder) = (is_binder(source), is_binder(target));
         let source = match self.unwrap_identity_carrier_for_relation(source) {
+            IdentityCarrierUnwrap::Concrete(id) if target_is_binder && !intrinsic(id) => source,
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
         };
         let target = match self.unwrap_identity_carrier_for_relation(target) {
+            IdentityCarrierUnwrap::Concrete(id) if source_is_binder && !intrinsic(id) => target,
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
         };
