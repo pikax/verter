@@ -86,7 +86,6 @@ fn a_keyof_over_a_pattern_index_signature_holds_the_pattern() {
 /// is `1`, `"Ab" extends Uppercase<string> ? 1 : 2` is `2`, and
 /// `` `${Uppercase<string>}` extends string ? 1 : 2 `` is `1`.
 #[test]
-#[ignore = "a string mapping over string relates by the mapping as a conditional operand"]
 fn a_string_mapping_over_string_relates_by_the_mapping() {
     let failures = mismatches(
         "",

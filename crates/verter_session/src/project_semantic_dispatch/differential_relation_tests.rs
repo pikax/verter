@@ -766,22 +766,9 @@ fn enum_and_template_literal_types_relate_as_the_checker_relates_them() {
 /// A literal is below `Lowercase<string>` / `Capitalize<string>` /
 /// `Uncapitalize<string>` when the mapping leaves it unchanged, and a template
 /// over a mapping is below `string`; the operands here are one-element tuples.
-///
-/// What the lane gives:
-/// - `[`${Lowercase<string>}`] extends [string] ? 1 : 2`: the checker answers
-///   `1`; the lane measured `<unreduced conditional>`.
-/// - `["abc"] extends [Lowercase<string>] ? 1 : 2`: the checker answers `1`;
-///   the lane measured `<unreduced conditional>`.
-/// - `["aBc"] extends [Lowercase<string>] ? 1 : 2`: the checker answers `2`;
-///   the lane measured `<unreduced conditional>`.
-/// - `["Abc"] extends [Capitalize<string>] ? 1 : 2`: the checker answers `1`;
-///   the lane measured `<unreduced conditional>`.
-/// - `["abc"] extends [Capitalize<string>] ? 1 : 2`: the checker answers `2`;
-///   the lane measured `<unreduced conditional>`.
-/// - `["ab"] extends [Uncapitalize<string>] ? 1 : 2`: the checker answers `1`;
-///   the lane measured `<unreduced conditional>`.
+/// The mapping over `string` is its own type: a relation decides it by the
+/// mapping, never by a body.
 #[test]
-#[ignore = "Lowercase, Capitalize and Uncapitalize over string relate by the mapping"]
 fn a_string_mapping_of_string_relates_by_the_mapping_in_a_tuple() {
     let matrix = Matrix::new(ENUMS);
     let failures = matrix.types(&[

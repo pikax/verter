@@ -9506,6 +9506,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             {
                 return IdentityCarrierUnwrap::Concrete(current);
             }
+            // A string mapping the reducer keeps (`Uppercase<string>`) is
+            // the checker's string mapping type itself: relations decide it
+            // by the mapping ([`Self::string_mapping_relation`]), never by a
+            // body it does not have.
+            if self.string_mapping_of(current).is_some() {
+                return IdentityCarrierUnwrap::Concrete(current);
+            }
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
                     Arc::clone(&identity.canonical_id),
