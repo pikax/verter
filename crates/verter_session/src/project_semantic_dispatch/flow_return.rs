@@ -5567,6 +5567,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             auto_typed_locals: rustc_hash::FxHashSet::default(),
             inferred_declared_locals: rustc_hash::FxHashMap::default(),
             declared_capture_types: rustc_hash::FxHashMap::default(),
+            extended_capture_identities: rustc_hash::FxHashSet::default(),
             evolving_locals: rustc_hash::FxHashSet::default(),
             circular_inferred: rustc_hash::FxHashSet::default(),
             unwidened_views: rustc_hash::FxHashMap::default(),
@@ -8446,6 +8447,14 @@ struct FlowEvaluator<'d, 'b> {
         verter_semantic::analysis::function_program::FlowBindingIdentity,
         SemanticNodeId,
     >,
+    /// The captures of a nested body that entered it past their last
+    /// assignment, at the narrowed type where the body was created: a
+    /// function the body creates takes them at the type they hold there, as
+    /// the checker keeps a never-reassigned reference's narrowing in
+    /// closures however deeply nested. Owned by the evaluator for its one
+    /// frame.
+    extended_capture_identities:
+        rustc_hash::FxHashSet<verter_semantic::analysis::function_program::FlowBindingIdentity>,
     /// The frame's EVOLVING-array bindings (declared `autoArrayType` under
     /// `noImplicitAny`), by canonical runtime subject: a write to one takes
     /// the checker's `autoArrayType` assignment rule.
@@ -21939,7 +21948,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 let local = self.bindings.local(identity);
                 // A capture past its last assignment enters the body at its
                 // narrowed type where the function is created.
-                let extended = local.is_some_and(|binding| extended_captures.contains(&binding));
+                // A capture of this frame's own that entered it extended is
+                // extended for the functions this frame creates too.
+                let extended = match local {
+                    Some(binding) => extended_captures.contains(&binding),
+                    None => self.extended_capture_identities.contains(identity),
+                };
                 let parent = local
                     .map(FlowProductSubject::Local)
                     .unwrap_or_else(|| FlowProductSubject::Captured(identity.clone()));
@@ -22229,6 +22243,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return self.unmodeled_position();
         };
         let mut declared_capture_types = rustc_hash::FxHashMap::default();
+        let extended_capture_identities: rustc_hash::FxHashSet<_> = capture_inputs
+            .iter()
+            .filter(|input| input.value_demanded && input.extended)
+            .filter_map(|input| match &input.subject {
+                FlowProductSubject::Captured(identity) => Some(identity.clone()),
+                _ => None,
+            })
+            .collect();
         for input in capture_inputs {
             if !input.value_demanded {
                 continue;
@@ -22303,6 +22325,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 auto_typed_locals: rustc_hash::FxHashSet::default(),
                 inferred_declared_locals: rustc_hash::FxHashMap::default(),
                 declared_capture_types,
+                extended_capture_identities,
                 evolving_locals: rustc_hash::FxHashSet::default(),
                 circular_inferred: rustc_hash::FxHashSet::default(),
                 unwidened_views: rustc_hash::FxHashMap::default(),

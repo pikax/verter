@@ -410,6 +410,10 @@ declare function each(f: () => void): void;
 export function cCallbackResult() { let seen = false; each(() => { seen = true; }); return seen; }
 export function cClosureWrites() { let x: string | number = "s"; const f = () => { x = 1; }; f(); return x; }
 export function cNested(x: string | undefined) { if (x) { return () => () => x; } throw 0; }
+export function cNestedWrite(x: string | undefined) { if (x) { return () => { x = undefined; return () => x; }; } throw 0; }
+export function cNestedLet(v: string | undefined) { let x = v; if (x) { return () => () => x; } throw 0; }
+export function cNestedLetLater(v: string | undefined) { let x = v; if (x) { const f = () => () => x; x = undefined; return f; } throw 0; }
+export function cNestedThree(x: string | undefined) { if (x) { return () => () => () => x; } throw 0; }
 export function cArrowReturn() { const f = (a: number) => a > 0 ? "p" : "n"; return f(1); }
 export function cFnExprReturn() { const f = function (a: number) { return a; }; return f; }
 "##;
@@ -443,18 +447,29 @@ fn closures_capture_as_the_checker_captures() {
 }
 
 /// `if (x) return () => () => x;` over `x: string | undefined` is `() => () =>
-/// string`: the narrowing of a parameter never reassigned reaches closures at
-/// any depth. Wrong-but-clean: the lane keeps `string | undefined` in the inner
-/// closure.
-///
-/// What the lane gives:
-/// - `cNested`: the checker answers `() => () => string`; the lane measured `()
-///   => () => string | undefined` (strict, noImplicitAny off).
+/// string`: the narrowing of a reference past its last assignment reaches
+/// closures at any depth (a `let` too), and a write anywhere after it (in
+/// the frame or a closure) keeps the declared type.
 #[test]
-#[ignore = "a closure nested in a closure keeps a never-reassigned parameter's narrowing"]
-fn wrong_clean_a_nested_closure_keeps_its_outer_parameter_narrowing() {
+fn a_nested_closure_keeps_its_outer_parameter_narrowing() {
     let matrix = Matrix::new(CLOSURES);
-    let failures = matrix.returns(&[("cNested", "() => () => string")]);
+    let mut failures = matrix.returns(&[
+        ("cNested", "() => () => string"),
+        ("cNestedLet", "() => () => string"),
+        ("cNestedThree", "() => () => () => string"),
+    ]);
+    failures.extend(matrix.nullness(&[
+        (
+            Read::Return("cNestedWrite"),
+            "() => () => string | undefined",
+            "() => () => string",
+        ),
+        (
+            Read::Return("cNestedLetLater"),
+            "() => () => string | undefined",
+            "() => () => string",
+        ),
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
