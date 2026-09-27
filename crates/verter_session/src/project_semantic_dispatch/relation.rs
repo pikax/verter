@@ -3319,6 +3319,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
         computed
     }
 
+    /// The `infer` placeholders `root` holds through structure alone —
+    /// object members and their signatures, signature parameters and
+    /// returns, array and tuple elements, union arms — in discovery order.
+    /// `None` when a placeholder sits anywhere else (a conditional or
+    /// mapped type scoping its own, an application, an operator), where
+    /// the relation that deposits into it is not the structural one.
+    pub(super) fn structural_infer_sites(
+        &self,
+        root: SemanticNodeId,
+    ) -> Option<Vec<SemanticNodeId>> {
+        let graph = self.graph();
+        let mut sites = Vec::new();
+        let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            let data = graph.node_data(node)?;
+            match data.as_ref() {
+                SemanticNodeData::Infer { .. } => sites.push(node),
+                SemanticNodeData::Object(surface) => {
+                    stack.extend(surface.positive_members().iter().map(|member| member.value));
+                    stack.extend(surface.call_signatures.iter().copied());
+                    stack.extend(surface.construct_signatures.iter().copied());
+                }
+                SemanticNodeData::Signature {
+                    params,
+                    return_type,
+                    type_parameters,
+                    ..
+                } if type_parameters.is_empty() => {
+                    stack.extend(params.iter().map(|param| param.ty));
+                    stack.push(*return_type);
+                }
+                SemanticNodeData::Array { element, .. } => stack.push(*element),
+                SemanticNodeData::Tuple { elements, .. } => {
+                    stack.extend(elements.iter().map(|element| element.value));
+                }
+                SemanticNodeData::Union(members) => stack.extend(members.iter().copied()),
+                _ if self.subtree_contains_infer(node) => return None,
+                _ => {}
+            }
+        }
+        Some(sites)
+    }
+
     fn relation_pattern_info_uncached(&self, target: SemanticNodeId) -> Option<InferPatternInfo> {
         let graph = self.graph();
         if let Some(spec) = self.reverse_homomorphic_spec(target) {
@@ -3357,6 +3404,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name: Arc::clone(name),
                             priority: InferenceCandidatePriority::Argument,
                         });
+                    } else {
+                        // `infer` placeholders nested in a member through
+                        // structure alone (a method's callback parameter)
+                        // are sites of the same pattern.
+                        for node in self
+                            .structural_infer_sites(member.value)
+                            .unwrap_or_default()
+                        {
+                            if let Some(SemanticNodeData::Infer { name, .. }) =
+                                graph.node_data(node).as_deref()
+                            {
+                                sites.push(InferParamSite {
+                                    node,
+                                    name: Arc::clone(name),
+                                    priority: InferenceCandidatePriority::Argument,
+                                });
+                            }
+                        }
                     }
                 }
                 (!sites.is_empty())

@@ -13689,7 +13689,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ) {
                         direct = true;
                     } else if self.subtree_contains_infer(member.value) {
-                        return ConditionalInferRoute::OutOfScope;
+                        // A placeholder nested through structure alone (a
+                        // method's callback parameter) is deposited by the
+                        // structural relation; any other nesting is not.
+                        if self.structural_infer_sites(member.value).is_none() {
+                            return ConditionalInferRoute::OutOfScope;
+                        }
+                        direct = true;
                     }
                 }
                 if direct {

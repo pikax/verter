@@ -244,6 +244,9 @@ type IsStr<T> = T extends string ? "yes" : "no";
 type Wrapped<T> = [T] extends [string] ? "yes" : "no";
 type ElemOf<T> = T extends (infer E)[] ? E : never;
 type Unpromise<T> = T extends { then(cb: (v: infer V) => void): void } ? V : T;
+type OnName<T> = T extends { on(h: (e: infer E) => void): void; name: infer N } ? [E, N] : 0;
+type MethodRet<T> = T extends { f(): infer R } ? R : 0;
+type MemberElem<T> = T extends { a: (infer U)[] } ? U : 0;
 type First<T extends unknown[]> = T extends [infer H, ...unknown[]] ? H : never;
 type Last<T extends unknown[]> = T extends [...unknown[], infer L] ? L : never;
 type Fn1<T> = T extends (a: infer A) => infer R ? [A, R] : never;
@@ -308,16 +311,27 @@ fn a_check_no_inference_relates_takes_the_false_branch() {
 }
 
 /// `T extends { then(cb: (v: infer V) => void): void } ? V : T` over `{
-/// then(cb: (v: 7) => void): void }` is `7`.
-///
-/// What the lane gives:
-/// - `Unpromise<{ then(cb: (v: 7) => void): void }>`: the checker answers `7`;
-///   the lane measured `<unreduced conditional>`.
+/// then(cb: (v: 7) => void): void }` is `7`: an `infer` placeholder nested
+/// in a member through structure alone (a method's callback parameter, a
+/// method's return, an array element) is inferred by the structural
+/// relation, beside a direct member placeholder.
 #[test]
-#[ignore = "infer inside a method's callback parameter resolves"]
 fn infer_from_a_method_callback_parameter_resolves() {
     let matrix = Matrix::new(CONDITIONALS);
-    let failures = matrix.types(&[("Unpromise<{ then(cb: (v: 7) => void): void }>", "7")]);
+    let failures = matrix.types(&[
+        ("Unpromise<{ then(cb: (v: 7) => void): void }>", "7"),
+        (
+            "OnName<{ on(h: (e: \"x\") => void): void; name: \"n\" }>",
+            "[\"x\", \"n\"]",
+        ),
+        ("MethodRet<{ f(): 5 }>", "5"),
+        ("MemberElem<{ a: string[] }>", "string"),
+        (
+            "Unpromise<{ then(cb: string): void }>",
+            "{ then(cb: string): void; }",
+        ),
+        ("MemberElem<{ a: number }>", "0"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
