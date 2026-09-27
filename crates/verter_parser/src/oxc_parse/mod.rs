@@ -15,10 +15,12 @@
 //! the parse runs in place, which is every source of ordinary depth;
 //! otherwise it runs on a stack segment reserved for it ([`stack`]), which
 //! commits only the stack the parse touches. Where a stack can grow no
-//! depth is too deep: the segment is sized from the source. A source
-//! whose segment cannot be reserved is not parsed: the parse returns an
-//! empty program and [`stack_unavailable_diagnostic`]'s diagnostic,
-//! operational incompleteness rather than a syntax error.
+//! depth is too deep: the segment is sized from the source. On wasm32 the
+//! engine's own call stack, which nothing grows, bounds the recursion, and
+//! a source nesting past [`WASM_ENGINE_NESTING`] is not parsed; nor,
+//! anywhere, is a source whose segment cannot be reserved. Such a parse
+//! returns an empty program and [`stack_unavailable_diagnostic`]'s
+//! diagnostic: operational incompleteness, not a syntax error.
 //!
 //! oxc's own walks over what it parsed (`clone_in`, the semantic builder,
 //! the `Visit` and `VisitMut` walkers) recurse once per level of the same
@@ -80,12 +82,49 @@ pub fn parse_stack_bytes(source_text: &str, source_type: SourceType) -> usize {
     stack_bytes(syntax_nesting(source_text, source_type).depth as usize)
 }
 
+/// How deeply syntax may nest for oxc to parse and walk it on wasm32,
+/// where the engine's own call stack, which no segment grows, bounds the
+/// recursion: [`WASM_ENGINE_STACK_BYTES`] less
+/// [`WASM_ENGINE_RESERVED_BYTES`], at [`WASM_ENGINE_BYTES_PER_LEVEL`] a
+/// level. Everywhere else the parse's stack grows to what its source
+/// needs, and no nesting is refused.
+pub const WASM_ENGINE_NESTING: usize =
+    (WASM_ENGINE_STACK_BYTES - WASM_ENGINE_RESERVED_BYTES) / WASM_ENGINE_BYTES_PER_LEVEL;
+
+/// The engine stack a WebAssembly host gives the module: V8's default
+/// (`--stack-size`, 984 KiB), the stack of Node.js and of Chromium's
+/// threads.
+pub const WASM_ENGINE_STACK_BYTES: usize = 984 * 1024;
+
+/// The engine stack kept for the frames around a parse: the host's own and
+/// the module's callers of the parse, a quarter of the stack (the module's
+/// callers, from `VerterHost.upsert` down to the parse, take under 16 KiB
+/// under Node.js).
+pub const WASM_ENGINE_RESERVED_BYTES: usize = 256 * 1024;
+
+/// The most engine stack oxc 0.151's parser, or a walk of oxc's over what
+/// it parsed, spends per level of [`nesting`]'s bound on wasm32, with
+/// twice the margin. Measured on the optimized module under Node.js 26, as
+/// the engine stack a level adds: an object literal's level takes 1,188
+/// bytes, the costliest (a parenthesis 1,034, a type argument 1,034, an
+/// array 1,159, a template hole 639 a level, a `!` 104), and no level of
+/// `clone_in`, `Visit` or the semantic builder takes more
+/// (`docs/evidence/signature-kernel/oxc-deep-parse.md`).
+pub const WASM_ENGINE_BYTES_PER_LEVEL: usize = 2 * 1188;
+
+/// Whether syntax nesting `depth` levels deep fits the engine stack on this
+/// target.
+fn within_engine_stack(depth: usize) -> bool {
+    !cfg!(target_arch = "wasm32") || depth <= WASM_ENGINE_NESTING
+}
+
 /// Every level of nesting takes at least one byte of source, so a source
 /// whose every byte could be a level fits the thread's remaining stack
 /// without the scan: the many short sources (a template's expressions, a
 /// synthesized wrapper) parse and walk in place at once.
 fn fits_by_length(length: usize) -> bool {
-    stack::remaining().is_some_and(|remaining| remaining >= stack_bytes(length))
+    within_engine_stack(length)
+        && stack::remaining().is_some_and(|remaining| remaining >= stack_bytes(length))
 }
 
 /// Run `parse`, a parse of `source_text`, with at least
@@ -101,6 +140,11 @@ fn parse_with_stack<R>(
         return Ok(parse());
     }
     let depth = syntax_nesting(source_text, source_type).depth as usize;
+    if !within_engine_stack(depth) {
+        return Err(StackUnavailable {
+            needed: depth.saturating_mul(WASM_ENGINE_BYTES_PER_LEVEL),
+        });
+    }
     stack::with_stack(stack_bytes(depth), parse)
 }
 

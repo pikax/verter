@@ -566,18 +566,23 @@ Recorded plainly so no reader mistakes absence for a pass:
   `verter_parser::oxc_parse::Parser`, a drop-in that parses exactly what
   oxc parses: a linear scan bounds the syntax tree's depth from above and
   the parse gets 9 KiB per level of it (twice the costliest measured level
-  of the parse or of oxc's walks over its tree), in place when the thread has it and on a `stacker` segment
-  otherwise. No source is refused and no depth is imposed.
+  of the parse or of oxc's walks over its tree), in place when the thread
+  has it and otherwise on a stack segment that reserves that size and
+  commits what the parse touches. Where a stack can grow no depth is
+  imposed; a segment that cannot be reserved returns the typed
+  `verter(stack-unavailable)` diagnostic and an empty program.
   `oxc_parse/tests.rs` parses ten forms 10,000 deep and an unclosed
   200,000-deep nest on a 1 MiB thread (with the parse in place, or with a
   per-level stack below what oxc spends, it overflows), and
   `no_crate_parses_around_the_guard` fails on a direct
-  `oxc_parser::Parser`. The scan costs about a third of the parse (8.1 ms
-  against 6.1 ms for `lib.dom.d.ts`, optimized); a source short enough
-  that every byte could be a level skips it. `stacker` cannot grow the
-  stack on wasm32, where the module's stack (1 MiB, wasm32's linker default)
-  bounds the parse. oxc's walks over the tree run under the same
-  containment (below).
+  `oxc_parser::Parser`. The scan costs about a third of the parse (1.8 ms
+  against 5.8 ms for `lib.dom.d.ts`, optimized); a source short enough
+  that every byte could be a level skips it. On wasm32 the engine's own
+  call stack, which nothing grows, bounds the parse: a source nesting past
+  `WASM_ENGINE_NESTING` (313 levels, from V8's 984 KiB default stack and
+  the measured 1,188 bytes of the costliest level) returns the same typed
+  diagnostic. oxc's walks over the tree run under the same containment
+  (below).
 
 * **A class expression raises one instance per level.** The lane's graph
   of `class { m() { return class { … } } }` nested `n` deep is linear
