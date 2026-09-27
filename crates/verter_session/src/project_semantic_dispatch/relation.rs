@@ -1185,8 +1185,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // (0a) A structured relation of a chain that overflowed answers
         // false before anything else, as the checker's
         // `recursiveTypeRelatedTo` does once `overflow` is set.
+        // A variance measurement starts a chain of its own.
+        let measurement = self.relation_key_is_variance_measurement(&key);
         let structured = self.relation_pair_is_structured(key.source, key.target);
-        let chain = self.current_relation_chain();
+        let chain = (!measurement)
+            .then(|| self.current_relation_chain())
+            .flatten();
         if let Some(chain) = chain.filter(|chain| structured && chain.overflowed) {
             return self.overflow_relation_chain(&chain);
         }
@@ -1211,6 +1215,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // where computing the relation here would answer the same.
         if self.dispatch_txn.borrow().active_session().is_none() {
             if let Some(payload) = graph.get_relation_payload(self.ctx, &key) {
+                if measurement {
+                    return relation_step_from_payload(&payload);
+                }
                 if self.relation_replays_cold(payload.recursion) {
                     self.note_relation_replay(payload.recursion);
                     return relation_step_from_payload(&payload);
@@ -1631,11 +1638,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// a type alias — the alias applied (`InstantiationRef`) or named
     /// (`DeclRef`): the checker's identity of the type an alias names is
     /// its declaration's symbol, shared by every instantiation. An interface
-    /// or class reference has none here: the checker relates two
-    /// references to one generic interface or class by its type
-    /// arguments' variance before it relates them structurally, and this
-    /// engine relates them structurally, so identifying them would stop a
-    /// finite recursion the checker never enters.
+    /// or class reference has none here: two references to one generic
+    /// interface or class relate by their type arguments' variance
+    /// ([`Self::relate_by_variance`]) before any structural comparison; one whose
+    /// variance is unmeasurable here falls back to structure, where
+    /// identifying it would stop as deeply nested a finite recursion the
+    /// checker decides by variance.
     fn relation_recursion_identity(
         &self,
         carrier: SemanticNodeId,
@@ -1935,7 +1943,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             None
         };
-        let parent_chain = self.current_relation_chain();
+        // A variance measurement is a relation of its own: it starts a chain.
+        let parent_chain = if self.relation_key_is_variance_measurement(key) {
+            None
+        } else {
+            self.current_relation_chain()
+        };
         let mut txn = self.dispatch_txn.borrow_mut();
         if txn.reentry().nearest_relate().is_none() {
             // Re-snapshot at every relation ROOT so the behavioral branch
@@ -4263,7 +4276,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Whether an inference session is currently active.
-    fn relation_session_active(&self) -> bool {
+    pub(super) fn relation_session_active(&self) -> bool {
         self.dispatch_txn.borrow().active_session().is_some()
     }
 
@@ -6347,11 +6360,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         {
             return result;
         }
-        // Variance annotations decide before any structural comparison.
-        if let Some(result) = self.relate_by_variance_annotations(key.source, key.target, bindings)
-        {
-            return result;
-        }
         // A source with no inferable index — a declared interface or class
         // instance among them — takes an index signature only through an
         // index signature of its own.
@@ -6386,95 +6394,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             self.relate_member(source, target, bindings, InferPosition::Covariant)
         }
-    }
-
-    /// Two applications of one generic declaration whose every type
-    /// parameter carries a variance annotation relate by their arguments
-    /// under those annotations, before any structural comparison
-    /// (`structuredTypeRelatedTo`'s reference variance check, where
-    /// `getVariances` reads an annotation instead of measuring). `None` for
-    /// any other pair.
-    #[inline(never)]
-    fn relate_by_variance_annotations(
-        &self,
-        source: SemanticNodeId,
-        target: SemanticNodeId,
-        bindings: &mut Vec<InferBinding>,
-    ) -> Option<RelationResult> {
-        let pairs = self.annotated_variance_argument_pairs(source, target)?;
-        let mut acc = assignable(bindings);
-        for (source, target) in pairs {
-            let result = self.relate_member(source, target, bindings, InferPosition::Covariant);
-            acc = result_and(acc, result);
-            if matches!(acc, RelationResult::NotAssignable) {
-                return Some(RelationResult::NotAssignable);
-            }
-        }
-        Some(acc)
-    }
-
-    /// The `(source, target)` argument pairs two applications of ONE
-    /// generic declaration relate by when every one of its type parameters
-    /// carries a variance annotation: an `out` argument pair as written, an
-    /// `in` pair reversed, an `in out` pair both ways. `None` for any other
-    /// pair — different declarations, an unannotated parameter (whose
-    /// variance the checker measures; the structural comparison answers
-    /// it), or a declaration whose header is not read.
-    fn annotated_variance_argument_pairs(
-        &self,
-        source: SemanticNodeId,
-        target: SemanticNodeId,
-    ) -> Option<Vec<(SemanticNodeId, SemanticNodeId)>> {
-        use verter_type_expr::facts::TypeParamVariance;
-        let graph = self.graph();
-        let source_data = graph.node_data(source)?;
-        let target_data = graph.node_data(target)?;
-        let (
-            SemanticNodeData::InstantiationRef {
-                base: source_base,
-                args: source_args,
-            },
-            SemanticNodeData::InstantiationRef {
-                base: target_base,
-                args: target_args,
-            },
-        ) = (&*source_data, &*target_data)
-        else {
-            return None;
-        };
-        if source_base.canonical_id != target_base.canonical_id
-            || source_base.owner != target_base.owner
-            || source_base.decl_name != target_base.decl_name
-            || source_args.len() != target_args.len()
-        {
-            return None;
-        }
-        let prepared = self.ctx.prepared_type_decl_return_only(
-            source_base.canonical_id.as_ref(),
-            source_base.owner,
-            source_base.decl_name.as_ref(),
-        )?;
-        if prepared.type_parameters.len() != source_args.len() {
-            return None;
-        }
-        let mut pairs = Vec::with_capacity(source_args.len());
-        for ((param, s), t) in prepared
-            .type_parameters
-            .iter()
-            .zip(source_args.iter())
-            .zip(target_args.iter())
-        {
-            match param.variance {
-                TypeParamVariance::Unannotated => return None,
-                TypeParamVariance::Out => pairs.push((*s, *t)),
-                TypeParamVariance::In => pairs.push((*t, *s)),
-                TypeParamVariance::InOut => {
-                    pairs.push((*s, *t));
-                    pairs.push((*t, *s));
-                }
-            }
-        }
-        Some(pairs)
     }
 
     fn try_object_spread_program_relation(
@@ -7276,6 +7195,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         });
         if let Some(result) = self.enter_checker_recursion([source, target], concrete) {
+            return result;
+        }
+        // Two references to one generic declaration relate by their type
+        // arguments' variance before any structural comparison.
+        if let Some(result) = self.relate_by_variance(source, target, bindings) {
             return result;
         }
         if let Some(r) = self.try_object_vs_record_relation(source, target, bindings) {
@@ -8897,6 +8821,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
+        // ── Variance markers: the type parameters a measurement relates ──
+        let marker = self.variance_marker_pair(source, target);
+        match marker {
+            super::relation_variance::MarkerPair::NotMarker
+            | super::relation_variance::MarkerPair::Distribute => {}
+            super::relation_variance::MarkerPair::Decided(result) => {
+                results.push(result);
+                return;
+            }
+            super::relation_variance::MarkerPair::Relate(source, target) => {
+                work.push(RelateWork::Eval(source, target));
+                return;
+            }
+        }
+
         // ── Type parameters: call-owned sessions bind their exact declared
         // parameter nodes; otherwise Unknown unless identical. Runs BEFORE
         // the deferred-shell arm: a deposit records the source node AS the
@@ -8904,8 +8843,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `InstantiationRef` — an interface-typed argument against a naked
         // binder) deposits verbatim and resolves at the bound's own demand
         // points, exactly like any other candidate. ──────────────────────
-        if matches!(&*source_data, SemanticNodeData::TypeParam { .. })
-            || matches!(&*target_data, SemanticNodeData::TypeParam { .. })
+        if !matches!(marker, super::relation_variance::MarkerPair::Distribute)
+            && (matches!(&*source_data, SemanticNodeData::TypeParam { .. })
+                || matches!(&*target_data, SemanticNodeData::TypeParam { .. }))
         {
             if self.relation_session_active() {
                 let deposited = match occurrence.variance {

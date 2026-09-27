@@ -144,6 +144,26 @@ Drivers: `relation_depth_tests::a_relation_answers_its_cold_answer_in_either_ord
 `one_snapshot_answers_every_query_order_alike` (the probes forward, backward
 and interleaved from one host).
 
+Type-argument variance follows the same rule. Two references to one generic
+interface or class relate by their parameters' variances; a parameter's
+annotation is its variance, and any other is measured as the checker's
+`getVariances` measures it — marker instantiations related in a relation
+chain of their own, memoized in the relation memo like any other relation
+(the markers are type parameters of the measured declaration past every
+authored one, so no other relation names them). A measurement's own
+references to its declaration answer `Unknown` while it is open, and every
+relation reached from them carries its markers, so each is always related
+with the measurement open. A measurement nested inside another
+declaration's that reaches the OUTER declaration's references depends on
+the outer measurement, so nothing of that build is memoized: each root
+relation measures the variance it needs as if it were the first. Measured
+on 7.0.2 over `interface E<T> { d: D<T> }` and `interface D<T> { e: E<T>;
+f: (x: T) => void }`, `E` is contravariant whichever relation comes first
+(`[E<1>] extends [E<number>] ? 1 : 2` is `2` cold and after `[D<1>]
+extends [D<number>]`); measured inside `D`'s measurement it reads
+independent, which the memo must never keep. Driver:
+`relation_variance_tests::mutually_dependent_variances_answer_alike_in_either_order`.
+
 ## §5.4 stable-key table
 
 The same file carries the §5.4 stable-key registration. It is enumerated

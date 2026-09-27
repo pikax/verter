@@ -150,17 +150,15 @@ fn a_recursive_interface_reference_is_not_deeply_nested() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// An infinitely recursive generic interface: the checker measures its
-/// variance through the recursion, which stops as deeply nested.
+/// An infinitely recursive generic interface relates by the variance the
+/// checker measures through its recursion: its references to itself answer
+/// `Unknown` while the measurement is open, so it never descends a level
+/// per nesting.
 ///
 /// Measured: over `interface R<T> { v: R<[T]>; t: T }`, `[R<1>] extends
 /// [R<number>] ? 1 : 2` is `1` and `[R<string>] extends [R<number>] ? 1 :
-/// 2` is `2`. This engine relates the references structurally and has no
-/// recursion identity for an interface (see
-/// `a_recursive_interface_reference_is_not_deeply_nested`), so the first
-/// probe overflows the depth limit instead: `2`.
+/// 2` is `2`.
 #[test]
-#[ignore = "two references to one generic interface relate by the variance of its type arguments"]
 fn an_infinitely_recursive_interface_relates_by_its_variance() {
     let failures = mismatches(
         "interface R<T> { v: R<[T]>; t: T }\n",
@@ -286,5 +284,33 @@ fn one_snapshot_answers_every_query_order_alike() {
                 .map(|failure| format!("{order}: {failure}")),
         );
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Written inline on both sides, nested object types overflow at the same
+/// depth as through an alias: the tuple's element pair is the checker's
+/// second nested structured relation.
+///
+/// Measured: `[{ v: …99…1… }] extends [{ v: …99…number… }] ? 1 : 2` is `1`
+/// and over 100 nested literals it is `2` with TS2321. This engine relates
+/// a tuple's or an array's element pair of two object literal types inside
+/// the enclosing relation's frame, so that pair never counts toward the
+/// depth: the 100-deep relation answers `1`.
+#[test]
+#[ignore = "an element pair of two inline object literal types counts toward the relation depth"]
+fn inline_nested_object_types_overflow_at_the_checkers_depth() {
+    let failures: Vec<String> = [(99, "1"), (100, "2")]
+        .into_iter()
+        .flat_map(|(depth, expected)| {
+            let probe = format!(
+                "[{}] extends [{}] ? 1 : 2",
+                nested(depth, "1"),
+                nested(depth, "number")
+            );
+            mismatches("", &[(probe.as_str(), expected)])
+                .into_iter()
+                .map(move |failure| format!("depth {depth}: {failure}"))
+        })
+        .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
