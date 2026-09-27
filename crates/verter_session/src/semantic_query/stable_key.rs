@@ -361,6 +361,14 @@ pub fn stable_key_for_node(graph: &SemanticGraphStore, id: SemanticNodeId) -> St
     StableKey::from_exact(table.write(root))
 }
 
+/// Test-only: classification frames opened and ancestor pairs copied into
+/// placements on this thread.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CLASSIFICATION_WORK: std::cell::Cell<(u64, u64)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
 /// Shortest written-out subtree a key refers back to rather than repeats.
 /// A reference costs seven bytes; shorter subtrees are written each time.
 pub const SHARED_SUBTREE_MIN_BYTES: u64 = 256;
@@ -646,6 +654,11 @@ impl<'g> ClassTable<'g> {
             .entry(component)
             .or_default()
             .push((id, depth));
+        #[cfg(test)]
+        CLASSIFICATION_WORK.with(|work| {
+            let (frames, copied) = work.get();
+            work.set((frames + 1, copied + placement.open.len() as u64));
+        });
         self.frames.push(OpenFrame {
             node: id,
             component,

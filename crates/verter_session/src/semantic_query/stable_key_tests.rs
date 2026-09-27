@@ -1578,3 +1578,84 @@ fn slot_binding_mapper_name(padding: usize) -> Arc<str> {
 fn mapped_binder_names_do_not_depend_on_arena_ordinals() {
     assert_eq!(slot_binding_mapper_name(0), slot_binding_mapper_name(1));
 }
+
+/// The classification work of one key: frames opened and ancestor pairs
+/// copied into placements.
+fn classification_work(graph: &SemanticGraphStore, node: SemanticNodeId) -> (u64, u64) {
+    use crate::semantic_query::stable_key::CLASSIFICATION_WORK;
+    CLASSIFICATION_WORK.with(|work| work.set((0, 0)));
+    let _ = stable_key_for_node(graph, node);
+    CLASSIFICATION_WORK.with(std::cell::Cell::get)
+}
+
+/// A strongly connected diamond chain: `A(i) = [B(i), C(i)]`,
+/// `B(i) = A(i + 1)[]`, `C(i) = readonly A(i + 1)[]`, and `A(n) = A(0)[]`.
+/// Returns `A(0)` and the node count.
+fn diamond_ring(graph: &SemanticGraphStore, diamonds: usize) -> (SemanticNodeId, usize) {
+    let base = graph.node_count() as u64;
+    let first = SemanticNodeId(base + 3 * diamonds as u64);
+    let mut next = graph.intern_node(SemanticNodeData::Array {
+        element: first,
+        readonly: false,
+    });
+    for _ in 0..diamonds {
+        let b = graph.intern_node(SemanticNodeData::Array {
+            element: next,
+            readonly: false,
+        });
+        let c = graph.intern_node(SemanticNodeData::Array {
+            element: next,
+            readonly: true,
+        });
+        let element = |value| crate::semantic_query::TupleElement {
+            label: None,
+            value,
+            optional: false,
+            rest: false,
+        };
+        next = graph.intern_node(SemanticNodeData::Tuple {
+            elements: Arc::from([element(b), element(c)]),
+            readonly: false,
+        });
+    }
+    assert_eq!(next, first, "the fixture closes the ring at A(0)");
+    (first, 3 * diamonds + 1)
+}
+
+/// A ring of `length` arrays: each node's element is the next, the last's
+/// the first.
+fn array_ring(graph: &SemanticGraphStore, length: usize) -> SemanticNodeId {
+    let base = graph.node_count() as u64;
+    let first = SemanticNodeId(base + length as u64 - 1);
+    let mut next = first;
+    for _ in 0..length {
+        let node = graph.intern_node(SemanticNodeData::Array {
+            element: next,
+            readonly: false,
+        });
+        next = node;
+    }
+    assert_eq!(next, first, "the fixture closes the ring");
+    first
+}
+
+/// Classifying a strongly connected component is linear in its size:
+/// reconverging paths inside it are not enumerated, and a long ring copies
+/// no ancestor path per node.
+#[test]
+#[ignore = "cyclic stable-key classification enumerates the paths inside a strongly connected component"]
+fn cyclic_classification_is_linear_in_the_component() {
+    let graph = SemanticGraphStore::new();
+    let (diamond, nodes) = diamond_ring(&graph, 14);
+    let (frames, _) = classification_work(&graph, diamond);
+    assert!(
+        frames <= 4 * nodes as u64,
+        "a {nodes}-node diamond ring opens {frames} classification frames"
+    );
+    let ring = array_ring(&graph, 10_000);
+    let (frames, copied) = classification_work(&graph, ring);
+    assert!(
+        frames <= 4 * 10_000 && copied <= 4 * 10_000,
+        "a 10000-node ring opens {frames} frames and copies {copied} ancestor pairs"
+    );
+}
