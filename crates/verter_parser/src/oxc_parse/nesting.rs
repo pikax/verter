@@ -263,6 +263,44 @@ fn is_ident_part(byte: u8) -> bool {
     IDENT_PART[byte as usize]
 }
 
+/// The end of the numeric literal starting at `start`, as the lexical
+/// grammar reads it: a `0x` / `0o` / `0b` literal's digits, or decimal
+/// digits with one fraction and one exponent, each with `_` separators,
+/// then a BigInt's `n`. A `.` after that is a member access (`1..a`,
+/// `1.5.a`, `0x1f.a`, `017.a`), which the scan counts.
+fn numeric_literal_end(bytes: &[u8], start: usize) -> usize {
+    let at = |index: usize| bytes.get(index).copied().unwrap_or(0);
+    let digits = |mut index: usize, digit: fn(&u8) -> bool| {
+        while digit(&at(index)) || at(index) == b'_' {
+            index += 1;
+        }
+        index
+    };
+    let mut end = start;
+    if at(end) == b'0' && matches!(at(end + 1), b'x' | b'X' | b'o' | b'O' | b'b' | b'B') {
+        end = digits(end + 2, u8::is_ascii_hexdigit);
+    } else if at(end) == b'0' && at(end + 1).is_ascii_digit() {
+        // A legacy octal literal (`017`) takes no fraction; one read as a
+        // member access after it only over-counts.
+        return digits(end, u8::is_ascii_digit);
+    } else {
+        end = digits(end, u8::is_ascii_digit);
+        if at(end) == b'.' {
+            end = digits(end + 1, u8::is_ascii_digit);
+        }
+        if matches!(at(end), b'e' | b'E') {
+            let sign = usize::from(matches!(at(end + 1), b'+' | b'-'));
+            if at(end + 1 + sign).is_ascii_digit() {
+                end = digits(end + 1 + sign, u8::is_ascii_digit);
+            }
+        }
+    }
+    if at(end) == b'n' {
+        end += 1;
+    }
+    end
+}
+
 /// The length of the operator starting `rest`: the longest the scan tells
 /// apart (`>>>=` down to one byte).
 fn operator_len(rest: &[u8]) -> usize {
@@ -531,11 +569,7 @@ impl<'s> Scanner<'s> {
             self.top().head = Head::Other;
         }
         if byte.is_ascii_digit() || (byte == b'.' && self.peek(1).is_ascii_digit()) {
-            while self.pos < self.bytes.len()
-                && (is_ident_part(self.bytes[self.pos]) || self.bytes[self.pos] == b'.')
-            {
-                self.pos += 1;
-            }
+            self.pos = numeric_literal_end(self.bytes, self.pos);
             self.operand();
             return Ok(());
         }

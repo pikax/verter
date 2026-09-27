@@ -32,7 +32,7 @@ fn every_form_nested_10000_deep_parses_on_a_small_stack() {
 
 /// Every way syntax nests, `depth` levels deep: each form's name and a
 /// one-statement source.
-fn forms_nested(depth: usize) -> [(&'static str, String); 10] {
+fn forms_nested(depth: usize) -> [(&'static str, String); 11] {
     let wrap = |open: &str, close: &str| format!("{}1{}", open.repeat(depth), close.repeat(depth));
     let sources = [
         (
@@ -65,6 +65,10 @@ fn forms_nested(depth: usize) -> [(&'static str, String); 10] {
         (
             "block",
             format!("{}{}", "{ ".repeat(depth), " }".repeat(depth)),
+        ),
+        (
+            "numeric member",
+            format!("export const v = 1.{};", ".a".repeat(depth)),
         ),
     ];
     sources
@@ -239,6 +243,40 @@ fn brackets_and_links_nest() {
     assert_eq!(ts("b ? 1 : b ? 2 : 3"), 2);
     assert_eq!(ts("type A = Box<Box<Box<1>>>"), 4);
     assert_eq!(ts(&format!("{}1{}", "[".repeat(40), "]".repeat(40))), 40);
+}
+
+/// A numeric literal ends where the lexical grammar ends it, so the member
+/// accesses after it nest: `1..a` is `1.` then `.a`, `1.e3.a` an exponent
+/// then `.a`, and `0x1f.a` a hex literal then `.a`.
+#[test]
+fn a_numeric_literal_ends_at_its_token_boundary() {
+    let chain = ".a".repeat(500);
+    for number in [
+        "1.",
+        "1.5",
+        ".5",
+        "1.e3",
+        "1e+3",
+        "1E-3",
+        "0x1f",
+        "0o17",
+        "0b1",
+        "1_000",
+        "1n",
+        "0x1fn",
+        "017",
+        "1_0.2_5e1_0",
+    ] {
+        assert!(
+            ts(&format!("const v = {number}{chain}")) >= 500,
+            "{number}: {}",
+            ts(&format!("const v = {number}{chain}"))
+        );
+    }
+    // The literal's own characters are one operand.
+    assert_eq!(ts("x = 1.5e+10"), 1);
+    assert_eq!(ts("x = 0x1f_ffn"), 1);
+    assert_eq!(ts("x = 1_000.25"), 1);
 }
 
 #[test]
