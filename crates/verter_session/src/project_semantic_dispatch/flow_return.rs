@@ -10176,9 +10176,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// An object literal failing closed: its receiver given back, and the
     /// literal the unmodelled position.
     /// A const-context spread's source properties, each `readonly`
-    /// (`getSpreadType` under `inConstContext`). `None` for a source that
-    /// is no object surface of properties alone, which keeps the spread
-    /// behind the typed expression gap.
+    /// (`getSpreadType` under `inConstContext`): a method is copied as a
+    /// readonly property of its function type (`getSpreadSymbol` mints a
+    /// property for it). `None` for a source that is no object surface of
+    /// properties and methods alone, an accessor among them, which keeps the
+    /// spread behind the typed expression gap.
     fn readonly_spread_members(
         &mut self,
         operand: SemanticNodeId,
@@ -10191,7 +10193,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             Some(SemanticNodeData::Object(surface))
                 if surface.index_signatures.is_empty()
                     && surface.call_signatures.is_empty()
-                    && surface.construct_signatures.is_empty() =>
+                    && surface.construct_signatures.is_empty()
+                    && surface.positive_members().iter().all(|member| {
+                        matches!(
+                            member.method_kind,
+                            None | Some(verter_type_expr::ObjectMethodKind::Method)
+                        )
+                    }) =>
             {
                 surface.clone()
             }
@@ -10208,6 +10216,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .iter()
                 .map(|member| crate::semantic_query::SurfaceMember {
                     readonly: true,
+                    method_kind: None,
+                    has_implementation_body: false,
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::SpreadTainted,
                     ..member.clone()
                 })
