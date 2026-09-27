@@ -324,7 +324,14 @@ where
     /// Clear all cached results in both subsystems.
     pub fn clear_caches(&self) {
         self.fallthrough.clear_cache();
-        self.component_meta.clear();
+        // The view bookkeeping goes with the states it tracks, under the
+        // admission lock, so a reset host keeps no fingerprint queue for a
+        // document it no longer holds.
+        {
+            let mut recent = self.recent_component_meta_views.lock();
+            recent.clear();
+            self.component_meta.clear();
+        }
         self.prepared_decl_bundles.clear();
         self.top_level_fallthrough_singleflight.clear();
         self.indexed_singleflight.clear();
@@ -427,6 +434,13 @@ where
             .retain(|key| key.symbol_id != canonical_id);
         drop(recent);
         before - self.component_meta.len()
+    }
+
+    /// Documents and modes whose recent view fingerprints the admission
+    /// bookkeeping tracks.
+    #[cfg(test)]
+    pub(crate) fn component_meta_view_bookkeeping_len(&self) -> usize {
+        self.recent_component_meta_views.lock().len()
     }
 
     /// Cached component-meta states across every document, mode and view
@@ -605,5 +619,24 @@ mod tests {
             assert!(holds(&runtime, &kept), "{kept:?} is untouched");
         }
         assert_eq!(runtime.component_meta_state_count(), 5);
+    }
+
+    /// A whole-runtime reset (host `close()` / `set_workspace()`) drops the
+    /// view bookkeeping with the states it tracks.
+    ///
+    /// Discriminating: `clear_caches` cleared the states but kept every
+    /// document's fingerprint queue, so a host reused across workspaces kept
+    /// the old canonicals for its life.
+    #[test]
+    fn clearing_the_caches_drops_the_view_bookkeeping() {
+        let runtime = UnifiedResolverRuntime::<u32, ()>::for_tests();
+        admit_view(&runtime, view_key("/src/A.vue", 1));
+        admit_view(&runtime, view_key("/src/B.vue", 1));
+        assert_eq!(runtime.component_meta_view_bookkeeping_len(), 2);
+
+        runtime.clear_caches();
+
+        assert_eq!(runtime.component_meta_state_count(), 0);
+        assert_eq!(runtime.component_meta_view_bookkeeping_len(), 0);
     }
 }

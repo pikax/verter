@@ -19800,3 +19800,44 @@ fn overlay_views_of_an_open_owner_keep_two_component_meta_views() {
         );
     }
 }
+
+/// A whole-host reset — `close()`, or `set_workspace()` onto another
+/// workspace — drops the component-meta view bookkeeping together with the
+/// states it tracks.
+///
+/// Discriminating: the reset reached `UnifiedResolverRuntime::clear_caches`,
+/// which cleared the states but kept every document's fingerprint queue, so a
+/// host reused across workspaces kept the old canonicals for its life.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_whole_host_reset_drops_the_component_meta_view_bookkeeping() {
+    let (_ws, host) = activity_gate_fixture();
+    assert!(
+        host.resolver_runtime()
+            .component_meta_view_bookkeeping_len()
+            > 0,
+        "fixture: the cold publication noted its view"
+    );
+    host.close();
+    assert_eq!(host.retention_snapshot().component_meta_states, 0);
+    assert_eq!(
+        host.resolver_runtime()
+            .component_meta_view_bookkeeping_len(),
+        0,
+        "close() forgets the view bookkeeping"
+    );
+
+    let (_ws, host) = activity_gate_fixture();
+    assert!(
+        host.resolver_runtime()
+            .component_meta_view_bookkeeping_len()
+            > 0
+    );
+    host.set_workspace(Arc::new(CountingWorkspace::new()));
+    assert_eq!(
+        host.resolver_runtime()
+            .component_meta_view_bookkeeping_len(),
+        0,
+        "set_workspace() forgets the view bookkeeping"
+    );
+}
