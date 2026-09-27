@@ -832,6 +832,7 @@ fn tagged_pending_ledger_drains_exactly_the_push_time_watermark_suffix() {
                 session_delta: false,
                 opened_session: None,
                 inline_flight: None,
+                recursion: Default::default(),
             }),
         });
     };

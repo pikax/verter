@@ -6494,6 +6494,33 @@ pub struct RelationPayload {
     /// detail dereferences the table by id. (Wire exposure of proof detail is a
     /// separate concern — see the type doc above.)
     pub relation_proof: RelationProofId,
+    /// What the relation's computation used of the checker's recursion
+    /// bounds. A warm read replays the outcome only where the cold
+    /// computation takes the same course.
+    pub recursion: RelationRecursionFootprint,
+}
+
+/// What a relation's cold computation used of the checker's two recursion
+/// bounds — `recursiveTypeRelatedTo`'s depth limit and
+/// `isDeeplyNestedType` — measured from the relation itself.
+///
+/// A relation answers what it answers when it is checked with fresh
+/// caches. The checker's own relation cache lets an earlier relation
+/// change a later one's answer (a cached shallower pair spares a deeper
+/// relation the depth that overflows it); this engine does not. A memo
+/// entry is replayed inside another relation only where its footprint
+/// proves the cold computation from that position takes the same course:
+/// it reaches no deeper than the depth left, and the recursion identities
+/// below the read cannot complete a deeply-nested stack with its own.
+/// Anywhere else the relation is computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct RelationRecursionFootprint {
+    /// The most structured relations the computation stacked, the
+    /// relation itself included (`0` for a pair of simple types).
+    pub height: u16,
+    /// Per side (source, target): the most distinct instantiations of one
+    /// recursion identity the computation stacked on one path.
+    pub repeats: [u16; 2],
 }
 
 /// Public value-domain outcome of a relation query (assignability / subtype /
@@ -11200,6 +11227,7 @@ mod tests {
                     outcome: RelationOutcome::Assignable,
                     bindings: Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
                     relation_proof: RelationProofId(0),
+                    recursion: RelationRecursionFootprint::default(),
                 }),
                 SemanticQueryValueTag::Relation,
             ),

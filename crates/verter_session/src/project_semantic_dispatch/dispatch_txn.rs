@@ -344,6 +344,47 @@ pub(crate) struct RelationChainPosition {
     /// with the node each was read from (see
     /// `ProjectSemanticDispatch::relation_recursion_identity`).
     pub(crate) identities: [Option<(crate::semantic_query::DeclIdentity, SemanticNodeId)>; 2],
+    /// The chain's depth when this frame opened — the depth its parent
+    /// had reached.
+    pub(crate) opened_at: u16,
+    /// What this frame's computation used of the checker's recursion
+    /// bounds so far (see [`RelationRecursionUse`]).
+    pub(crate) recursion: RelationRecursionUse,
+}
+
+/// What one relation's computation used of the checker's two recursion
+/// bounds — the chain depth it reached and the recursion identities it
+/// stacked — measured from the frame that computes it. Its footprint is
+/// published with the relation, so a warm read replays the answer only
+/// where the cold computation takes the same course
+/// (`ProjectSemanticDispatch::relation_replays_cold`). Transient: it lives
+/// on the frame and on the pending member, and is released at publish.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct RelationRecursionUse {
+    /// The deepest chain depth a counted frame of the computation reached,
+    /// or a replayed memo entry would have reached.
+    pub(crate) reached: u16,
+    /// Per side (source, target): the most distinct instantiations of one
+    /// recursion identity the computation stacked on one path from this
+    /// frame, a replayed entry's own count added to the chain's below it.
+    pub(crate) repeats: [u16; 2],
+    /// The counted frames the computation opened, itself included.
+    pub(crate) frames: u32,
+    /// The deepest a replayed memo entry reaches below its read.
+    pub(crate) replayed_height: u16,
+}
+
+/// A closed relation frame's [`RelationRecursionUse`], measured from the
+/// frame itself: the footprint its own publication carries, and what a
+/// cyclic component's members are bounded by.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ClosedRelationRecursion {
+    /// The frame's own footprint.
+    pub(crate) footprint: crate::semantic_query::RelationRecursionFootprint,
+    /// The counted frames the frame's computation opened.
+    pub(crate) frames: u32,
+    /// The deepest a replayed memo entry reached below its read.
+    pub(crate) replayed_height: u16,
 }
 
 /// The flow-return-domain payload of one in-flight frame. The ordered
@@ -658,6 +699,8 @@ pub(crate) struct RelationPendingState {
     pub(crate) opened_session: Option<SessionId>,
     /// Store-owned admission for this inline non-binding member.
     pub(crate) inline_flight: Option<InlineMemberFlight>,
+    /// What the member's computation used of the recursion bounds.
+    pub(crate) recursion: ClosedRelationRecursion,
 }
 
 /// The decided outcome of a popped flow-return member. Decided at pop:

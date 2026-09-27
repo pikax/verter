@@ -4187,6 +4187,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         session_delta: state.session_delta,
                         opened_session: state.opened_session,
                         inline_flight: state.inline_flight,
+                        recursion: state.recursion,
                     });
                 }
                 PendingObligationDomain::ResolveCall(state) => {

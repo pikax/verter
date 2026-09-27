@@ -1013,10 +1013,10 @@
         "pubFn": 179,
         "pubFnTestHooks": 0,
         "pubCrateFn": 47,
-        "pubType": 201,
+        "pubType": 202,
         "pubCrateMod": 2,
         "inlinePubMod": 15,
-        "pubStructField": 306
+        "pubStructField": 309
       },
       "authority": [
         {
