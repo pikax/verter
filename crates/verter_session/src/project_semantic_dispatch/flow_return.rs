@@ -1397,11 +1397,103 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expression: &verter_type_expr::IndexedValueExpression,
         hold_flow_result: bool,
     ) -> Option<IndexedValue> {
-        use verter_type_expr::{IndexedValueCallKind, IndexedValueExpression};
+        // A call's callee, receiver and arguments evaluate from an explicit
+        // stack of the calls waiting on them, in that order, a call ending
+        // at a callee or argument with no value: a call nested in an
+        // argument or a receiver (`f(f(f(1)))`, `b.m().m()`) costs no
+        // native level.
+        struct Waiting<'e> {
+            call: &'e verter_type_expr::IndexedValueCall,
+            hold_flow_result: bool,
+            callee: Option<crate::semantic_query::SemanticNodeId>,
+            receiver: Option<Option<crate::semantic_query::SemanticNodeId>>,
+            args: Vec<crate::semantic_query::CallArgKey>,
+        }
+        let mut waiting: Vec<Waiting<'_>> = Vec::new();
+        let (mut current, mut hold) = (expression, hold_flow_result);
+        loop {
+            let mut value = match self.indexed_value_leaf(canonical, owner, current) {
+                Ok(value) => value,
+                Err(call) => {
+                    waiting.push(Waiting {
+                        call,
+                        hold_flow_result: hold,
+                        callee: None,
+                        receiver: None,
+                        args: Vec::with_capacity(call.args.len()),
+                    });
+                    (current, hold) = (&call.callee, false);
+                    continue;
+                }
+            };
+            loop {
+                let Some(top) = waiting.last_mut() else {
+                    return value;
+                };
+                let call = top.call;
+                if top.callee.is_none() {
+                    let Some(callee) = value else {
+                        waiting.pop();
+                        value = None;
+                        continue;
+                    };
+                    top.callee = Some(callee.node);
+                    if let Some(receiver) = call.receiver.as_deref() {
+                        (current, hold) = (receiver, false);
+                        break;
+                    }
+                    top.receiver = Some(None);
+                } else if top.receiver.is_none() {
+                    top.receiver = Some(value.map(|receiver| receiver.node));
+                } else {
+                    let Some(argument_value) = value else {
+                        waiting.pop();
+                        value = None;
+                        continue;
+                    };
+                    let argument = &call.args[top.args.len()];
+                    top.args.push(crate::semantic_query::CallArgKey::Eager {
+                        ty: argument_value.node,
+                        spread: argument.spread,
+                        context_sensitive: argument.context_sensitive,
+                        const_view: None,
+                        literal_mode: indexed_argument_literal_mode(
+                            argument.literal_mode,
+                            argument_value.fresh,
+                        ),
+                    });
+                }
+                if let Some(argument) = call.args.get(top.args.len()) {
+                    (current, hold) = (&argument.expression, false);
+                    break;
+                }
+                let finished = waiting.pop().expect("the call on top");
+                value = self.resolve_indexed_call(
+                    canonical,
+                    owner,
+                    finished.call,
+                    finished.callee.expect("a resolved call has a callee"),
+                    finished.receiver.flatten(),
+                    finished.args,
+                    finished.hold_flow_result,
+                );
+            }
+        }
+    }
+
+    /// One indexed expression evaluated, unless it is a call, whose
+    /// children [`Self::evaluate_indexed_value`] evaluates first.
+    fn indexed_value_leaf<'e>(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &'e verter_type_expr::IndexedValueExpression,
+    ) -> Result<Option<IndexedValue>, &'e verter_type_expr::IndexedValueCall> {
+        use verter_type_expr::IndexedValueExpression;
         let regular = |node: Option<crate::semantic_query::SemanticNodeId>| {
             node.map(|node| IndexedValue { node, fresh: false })
         };
-        match expression {
+        Ok(match expression {
             IndexedValueExpression::Value(value) => {
                 regular(self.lower_type_expr_in_owner_scope_with_mode(
                     canonical,
@@ -1417,72 +1509,59 @@ impl<'a> ProjectSemanticDispatch<'a> {
             IndexedValueExpression::TemplateStrings { .. } => {
                 regular(self.global_template_strings_array(canonical, owner))
             }
-            IndexedValueExpression::Call(call) => {
-                let callee = self.evaluate_indexed_value_expression_node_inner(
+            IndexedValueExpression::Call(call) => return Err(call),
+        })
+    }
+
+    /// Resolve one indexed call over its evaluated callee, receiver and
+    /// arguments.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_indexed_call(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        call: &verter_type_expr::IndexedValueCall,
+        callee: crate::semantic_query::SemanticNodeId,
+        receiver: Option<crate::semantic_query::SemanticNodeId>,
+        args: Vec<crate::semantic_query::CallArgKey>,
+        hold_flow_result: bool,
+    ) -> Option<IndexedValue> {
+        use verter_type_expr::IndexedValueCallKind;
+        let explicit_type_args = call
+            .explicit_type_args
+            .iter()
+            .map(|argument| {
+                self.lower_type_expr_in_owner_scope_with_mode(
                     canonical,
                     owner,
-                    &call.callee,
-                    false,
-                )?;
-                let receiver = call.receiver.as_deref().and_then(|receiver| {
-                    self.evaluate_indexed_value_expression_node_inner(
-                        canonical, owner, receiver, false,
-                    )
-                });
-                let mut args = Vec::with_capacity(call.args.len());
-                for argument in call.args.iter() {
-                    let value =
-                        self.evaluate_indexed_value(canonical, owner, &argument.expression, false)?;
-                    args.push(crate::semantic_query::CallArgKey::Eager {
-                        ty: value.node,
-                        spread: argument.spread,
-                        context_sensitive: argument.context_sensitive,
-                        const_view: None,
-                        literal_mode: indexed_argument_literal_mode(
-                            argument.literal_mode,
-                            value.fresh,
-                        ),
-                    });
-                }
-                let explicit_type_args = call
-                    .explicit_type_args
-                    .iter()
-                    .map(|argument| {
-                        self.lower_type_expr_in_owner_scope_with_mode(
-                            canonical,
-                            owner,
-                            argument,
-                            crate::semantic_query::ProjectionMode::Navigate,
-                        )
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                let (result, held) = self.execute_indexed_resolve_call_with_flow_hold(
-                    crate::semantic_query::ResolveCallKey {
-                        point: crate::semantic_query::ProgramPointId {
-                            canonical_id: Arc::from(canonical),
-                            offset: call.point,
-                        },
-                        callee,
-                        kind: match call.kind {
-                            IndexedValueCallKind::Call => crate::semantic_query::CallKind::Call,
-                            IndexedValueCallKind::Construct => {
-                                crate::semantic_query::CallKind::Construct
-                            }
-                        },
-                        receiver,
-                        args: Arc::from(args.into_boxed_slice()),
-                        explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
-                        flow: crate::semantic_query::FlowNarrowingKey::empty(),
-                        context: self.resolve_call_context_for(canonical),
-                    },
-                    hold_flow_result,
-                );
-                if result.is_none() && !held {
-                    crate::request_context::mark_request_result_partial();
-                }
-                result
-            }
+                    argument,
+                    crate::semantic_query::ProjectionMode::Navigate,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let (result, held) = self.execute_indexed_resolve_call_with_flow_hold(
+            crate::semantic_query::ResolveCallKey {
+                point: crate::semantic_query::ProgramPointId {
+                    canonical_id: Arc::from(canonical),
+                    offset: call.point,
+                },
+                callee,
+                kind: match call.kind {
+                    IndexedValueCallKind::Call => crate::semantic_query::CallKind::Call,
+                    IndexedValueCallKind::Construct => crate::semantic_query::CallKind::Construct,
+                },
+                receiver,
+                args: Arc::from(args.into_boxed_slice()),
+                explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
+                flow: crate::semantic_query::FlowNarrowingKey::empty(),
+                context: self.resolve_call_context_for(canonical),
+            },
+            hold_flow_result,
+        );
+        if result.is_none() && !held {
+            crate::request_context::mark_request_result_partial();
         }
+        result
     }
 
     /// Consume an inferred declaration's indexed semantic expression source.

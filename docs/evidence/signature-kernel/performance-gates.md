@@ -901,6 +901,20 @@ Recorded plainly so no reader mistakes absence for a pass:
   three links return on a 1 MiB caller; with the recursive walker
   restored it overflows.
 
+* **Indexed values evaluate from an explicit stack.** An inferred
+  declaration's indexed value (`evaluate_indexed_value`) evaluated a
+  call's callee, receiver and arguments by recursing, a native level per
+  nested call. It now keeps the calls waiting on a value on an explicit
+  stack (`indexed_value_leaf` evaluates a non-call, `resolve_indexed_call`
+  resolves a call over its evaluated parts), in the same order, a call
+  ending where its callee or an argument has no value. `deep_input_tests.rs`
+  → `module_calls_nested_1000_deep_answer_on_production_stacks` answers
+  TypeScript 7.0.2's `1` for 1,000 nested generic calls at module level,
+  and `module_calls_nested_10000_deep_return_on_production_stacks` returns
+  on a 1 MiB caller for 10,000 read in a function (its calls' resolutions
+  exceed the connected-demand work budget, a typed failure); with the
+  recursive evaluation restored it overflows.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the
