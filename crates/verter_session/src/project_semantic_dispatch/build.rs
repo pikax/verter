@@ -1855,6 +1855,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ))
     }
 
+    /// Whether `member` of the class instance `instance` (a reference to a
+    /// class declaration) is a `readonly` property without an annotation
+    /// whose literal initializer declares its fresh literal type
+    /// ([`DeclaredLiteralFreshness::WideningMembers`]): a read of it widens
+    /// as a bare literal does (`k.r` over `readonly r = 1` is `number` at a
+    /// return).
+    pub(super) fn instance_member_read_widens(
+        &self,
+        instance: SemanticNodeId,
+        member: &str,
+    ) -> bool {
+        use verter_type_expr::facts::DeclaredLiteralFreshness;
+        let identity = match self.graph().node_data(instance).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
+            _ => return false,
+        };
+        let Some((_, _, _, prepared)) = self.effective_prepared_value_decl(
+            &identity.canonical_id,
+            identity.owner,
+            &identity.decl_name,
+        ) else {
+            return false;
+        };
+        matches!(
+            &prepared.type_annotation.literal_freshness,
+            DeclaredLiteralFreshness::WideningMembers { instance, .. }
+                if instance.iter().any(|widening| widening.as_str() == member)
+        )
+    }
+
     /// Whether a read of the value `path` names, in `canonical`'s `owner`
     /// scope, yields a WIDENING literal: the value's declared type is the
     /// fresh literal type a `const` takes from its literal initializer
@@ -1932,8 +1962,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             return matches!(
                 &prepared.type_annotation.literal_freshness,
-                DeclaredLiteralFreshness::WideningStaticMembers(members)
-                    if members.iter().any(|widening| widening.as_str() == member.as_ref())
+                DeclaredLiteralFreshness::WideningMembers { statics, .. }
+                    if statics.iter().any(|widening| widening.as_str() == member.as_ref())
             );
         }
         match &prepared.type_annotation.literal_freshness {
@@ -1951,7 +1981,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     })
             }
             DeclaredLiteralFreshness::Regular
-            | DeclaredLiteralFreshness::WideningStaticMembers(_)
+            | DeclaredLiteralFreshness::WideningMembers { .. }
             | DeclaredLiteralFreshness::WideningNullish => false,
             DeclaredLiteralFreshness::Widening => true,
             DeclaredLiteralFreshness::Follows(copied) => {

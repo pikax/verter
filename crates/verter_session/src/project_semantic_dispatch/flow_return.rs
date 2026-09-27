@@ -19351,12 +19351,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if !value.type_args.is_empty() {
             return false;
         }
-        let literal = match self.dispatch.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::EnumLiteral(literal)) if &*literal.member == member.as_str() => {
-                literal.clone()
-            }
-            _ => return false,
-        };
         let subject = crate::flow_slice_content::SliceNarrowSubject {
             root: crate::flow_slice_content::SliceNarrowRoot::Local {
                 name: Arc::from(root.as_str()),
@@ -19364,9 +19358,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             },
             path: Arc::from(Vec::new().into_boxed_slice()),
         };
-        self.narrowed_read(&subject)
-            .or_else(|| self.local_value(binding))
-            .is_some_and(|object| self.dispatch.is_enum_object_of(object, &literal))
+        let object = self
+            .narrowed_read(&subject)
+            .or_else(|| self.local_value(binding));
+        match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::EnumLiteral(literal)) if &*literal.member == member.as_str() => {
+                object.is_some_and(|object| self.dispatch.is_enum_object_of(object, literal))
+            }
+            // A class instance's `readonly` member declared by its literal
+            // initializer holds that fresh literal.
+            Some(SemanticNodeData::Literal(_)) => object
+                .is_some_and(|object| self.dispatch.instance_member_read_widens(object, member)),
+            _ => false,
+        }
     }
 
     /// The completed fresh-literal call this expression IS (transparently)

@@ -1982,11 +1982,16 @@ pub enum DeclaredLiteralFreshness {
     /// fresh exactly when that value's are. The path is the value's
     /// reference in the declaring scope.
     Follows(Arc<[String]>),
-    /// A class: the named static members are `readonly` properties without
-    /// an annotation whose initializer is a literal (`static readonly s =
-    /// 1`), whose declared types are fresh as a `const`'s are — a read of
-    /// `C.s` widens.
-    WideningStaticMembers(Arc<[String]>),
+    /// A class: the named members are `readonly` properties without an
+    /// annotation whose initializer is a literal (`static readonly s = 1`,
+    /// `readonly r = 1`), whose declared types are fresh as a `const`'s are —
+    /// a read of `C.s`, or of `k.r` over an instance, widens.
+    WideningMembers {
+        /// The widening static members.
+        statics: Arc<[String]>,
+        /// The widening instance members.
+        instance: Arc<[String]>,
+    },
     /// The initializer is `null`, `undefined` or a `void` expression and
     /// there is no annotation: with `strictNullChecks` off the checker
     /// widens the declared type to `any`.

@@ -2628,6 +2628,7 @@ fn collect_named_class(
     // `unique symbol` — the member-level nominal fact for `typeof C.A`.
     let mut static_unique_symbol_members = Vec::new();
     let mut static_widening_members: Vec<String> = Vec::new();
+    let mut instance_widening_members: Vec<String> = Vec::new();
     // Every public constructor declaration with its spans and whether it
     // has a body: the overloads, then the implementation.
     let mut ctor_sigs: Vec<(LoweredSignatureParts, FunctionSpans, bool)> = Vec::new();
@@ -2799,15 +2800,20 @@ fn collect_named_class(
                         class_member_visibility(&prop.key, prop.accessibility),
                         spans,
                     ));
+                // A `readonly` property without an annotation declares the
+                // fresh literal type of its literal initializer, instance and
+                // static alike.
+                let widening = prop.readonly
+                    && prop.type_annotation.is_none()
+                    && prop.value.as_ref().is_some_and(|value| {
+                        initializer_literal_freshness(value) == DeclaredLiteralFreshness::Widening
+                    });
+                if widening && !prop.r#static {
+                    if let Some(key) = static_property_key_name(&prop.key) {
+                        instance_widening_members.push(key);
+                    }
+                }
                 if prop.r#static {
-                    // A `readonly` static without an annotation declares the
-                    // fresh literal type of its literal initializer.
-                    let widening = prop.readonly
-                        && prop.type_annotation.is_none()
-                        && prop.value.as_ref().is_some_and(|value| {
-                            initializer_literal_freshness(value)
-                                == DeclaredLiteralFreshness::Widening
-                        });
                     if widening {
                         if let Some(key) = static_property_key_name(&prop.key) {
                             static_widening_members.push(key);
@@ -3168,12 +3174,15 @@ fn collect_named_class(
         object_shape: Some(constructor_shape),
         enum_members: None,
         enum_member_names: None,
-        literal_freshness: if static_widening_members.is_empty() {
+        literal_freshness: if static_widening_members.is_empty()
+            && instance_widening_members.is_empty()
+        {
             DeclaredLiteralFreshness::Regular
         } else {
-            DeclaredLiteralFreshness::WideningStaticMembers(Arc::from(
-                static_widening_members.into_boxed_slice(),
-            ))
+            DeclaredLiteralFreshness::WideningMembers {
+                statics: Arc::from(static_widening_members.into_boxed_slice()),
+                instance: Arc::from(instance_widening_members.into_boxed_slice()),
+            }
         },
     });
 }

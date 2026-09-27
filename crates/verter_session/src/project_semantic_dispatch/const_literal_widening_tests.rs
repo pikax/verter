@@ -563,11 +563,10 @@ export function krCtor(k: K) { return k.rCtor; }
 /// literal.
 ///
 /// Measured on TypeScript 7.0.2 (alike on the four `strictNullChecks` ×
-/// `noImplicitAny` settings): `kr`, `krn`, `krLet` and `tkr` are `number`,
-/// `krs` `string`, `krObj` `{ v: number; }`, while `krAnn` and `krAs` stay
-/// `1` and `krc` is `number`.
+/// `noImplicitAny` settings): `kr`, `krn` and `krLet` are `number`, `krs`
+/// `string`, `krObj` `{ v: number; }`, while `krAnn` and `krAs` stay `1` and
+/// `krc` is `number`.
 #[test]
-#[ignore = "a read of an unannotated readonly instance property with a literal initializer widens"]
 fn a_readonly_instance_literal_widens_as_the_checker_declares() {
     let failures = mismatches(
         READONLY_INSTANCE,
@@ -580,9 +579,24 @@ fn a_readonly_instance_literal_widens_as_the_checker_declares() {
             ("ReturnType<typeof krc>", "number"),
             ("ReturnType<typeof krObj>", "{ v: number; }"),
             ("ReturnType<typeof krLet>", "number"),
-            ("ReturnType<typeof tkr>", "number"),
         ],
     );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The indexed-access TYPE of such a property is its fresh literal type too:
+/// `const x: K['r'] = …; return x` is `number` on TypeScript 7.0.2 (all four
+/// settings). The lane models freshness at value reads, not in the type
+/// graph, so a binding annotated with the property's type reads the regular
+/// literal.
+///
+/// What the lane gives:
+/// - `ReturnType<typeof tkr>`: the checker answers `number`; the lane measured
+///   `1`.
+#[test]
+#[ignore = "the indexed-access type of a fresh-declared property is its fresh literal type"]
+fn a_readonly_instance_literal_property_type_is_fresh() {
+    let failures = mismatches(READONLY_INSTANCE, &[("ReturnType<typeof tkr>", "number")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
