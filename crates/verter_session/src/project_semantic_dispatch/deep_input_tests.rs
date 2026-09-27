@@ -191,3 +191,18 @@ fn a_member_conditional_nested_1000_deep_answers_on_production_stacks() {
         Vec::<String>::new()
     );
 }
+
+/// A function type returning a function type, 10,000 deep, and the same
+/// for constructor types: each signature's return lowers from the locator
+/// lowering's explicit stack.
+#[test]
+fn function_and_constructor_types_nested_10000_deep_answer_on_production_stacks() {
+    for arrow in ["() => ", "new () => "] {
+        let source = format!("type D = {}1;\n", arrow.repeat(DEPTH));
+        assert_eq!(
+            mismatches_on_a_small_stack(source, "D extends Function ? 1 : 2", "1"),
+            Vec::<String>::new(),
+            "{arrow}"
+        );
+    }
+}

@@ -650,6 +650,23 @@ Recorded plainly so no reader mistakes absence for a pass:
   so they return a typed budget failure; they return it on the production
   stacks.
 
+* **Function types lower from the locator lowering's explicit stack.** The
+  locator-shape lowering lowered a function or constructor type's
+  parameters, return and predicate target by recursing into
+  `lower_locator_shape_node` for each: a 100-deep `() => () => … 1`
+  overflowed a 1 MiB caller, unoptimized. A signature is now a
+  `LocatorFrame::Function`: once its type parameters' binder frame is
+  built, each parameter's type, a declared return and a predicate target
+  descend from the stack under that frame, and the signature interns when
+  the last is delivered (a body-derived return is still demanded from the
+  whole-function producer in place). `deep_input_tests.rs` →
+  `function_and_constructor_types_nested_10000_deep_answer_on_production_stacks`
+  answers `1` (TypeScript 7.0.2's) for `D extends Function ? 1 : 2` over
+  10,000 nested function types and 10,000 nested constructor types;
+  lowering the declared return in place overflows it. A type parameter's
+  constraint and default still lower in place, one native level per
+  signature nested in a bound.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the
