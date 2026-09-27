@@ -8,6 +8,20 @@ use super::{FlowEvaluator, Positional};
 use crate::flow_slice_content::SliceExpr;
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SignatureKind};
 
+/// A function-value argument to type under a contextual signature: the
+/// nested function's demand, and what its outcome is read against.
+pub(super) struct FunctionArgumentRequest {
+    pub(super) demand: super::nested::NestedDemand,
+    pub(super) mark: FunctionArgumentMark,
+}
+
+/// The frame's holds and degradation before a function-value argument
+/// evaluates.
+pub(super) struct FunctionArgumentMark {
+    holds_before: usize,
+    degradation_before: Option<crate::semantic_query::FlowReturnDegradation>,
+}
+
 /// The contextual signature a function value is checked under: the type at
 /// each parameter position and the contextual return type.
 #[derive(Clone)]
@@ -92,47 +106,17 @@ impl FlowEvaluator<'_, '_> {
         expr: &SliceExpr,
         contextual: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
-        let SliceExpr::NestedFunctionValue {
-            function,
-            context,
-            has_declared_return,
-            gap,
-            declared_evolving_captures,
-            extended_captures,
-        } = expr
-        else {
-            return None;
-        };
-        if gap.is_some() {
+        if !matches!(expr, SliceExpr::NestedFunctionValue { gap: None, .. }) {
             return None;
         }
         let signature = self.contextual_signature(contextual)?;
-        let holds_before = self.holds.len();
-        let degradation_before = self.degradation;
-        let outer_env = self.binder_env;
-        let node = self.eval_nested_function(
-            function,
-            context,
-            *has_declared_return,
-            outer_env,
-            extended_captures,
-            declared_evolving_captures,
-            Some(&signature),
-        );
-        let finished = self.holds.len() == holds_before && self.degradation == degradation_before;
-        self.holds.truncate(holds_before);
-        if !finished {
-            self.degradation = degradation_before;
-            return None;
-        }
-        match self.dispatch.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Signature { .. }) => Some(node),
-            _ => None,
-        }
+        let request = self.function_argument_request(expr, Some(signature))?;
+        let node = self.eval_nested_demand(request.demand);
+        self.function_argument_value(request.mark, Positional::Value(node))
     }
 
-    /// A function-value argument that is not context sensitive, typed with
-    /// the call's first pass (`checkExpressionWithContextualType`): its
+    /// The request to type a function-value argument that is not context
+    /// sensitive with the call's first pass (`checkExpressionWithContextualType`): its
     /// parameters are its own, and its body return widens a lone fresh
     /// literal unless the parameter's contextual return type is a literal
     /// context for it — the type the callee's one call signature declares
@@ -140,48 +124,65 @@ impl FlowEvaluator<'_, '_> {
     /// over `run<R>(cb: () => R): R` passes `() => number`, over `R extends
     /// number` `() => 1`). A callee with several signatures gives no
     /// contextual return, so the literal widens. `None` when the argument is
-    /// no nested function value or its evaluation does not finish here.
-    pub(super) fn eval_function_argument_under_parameter(
+    /// no nested function value; its evaluation is read by
+    /// [`Self::function_argument_value`].
+    pub(super) fn function_argument_request_under_parameter(
         &mut self,
         expr: &SliceExpr,
         callee: SemanticNodeId,
         ordinal: usize,
-    ) -> Option<SemanticNodeId> {
-        let SliceExpr::NestedFunctionValue {
-            function,
-            context,
-            has_declared_return,
-            gap,
-            declared_evolving_captures,
-            extended_captures,
-        } = expr
-        else {
-            return None;
-        };
-        if gap.is_some() {
+    ) -> Option<FunctionArgumentRequest> {
+        if !matches!(expr, SliceExpr::NestedFunctionValue { gap: None, .. }) {
             return None;
         }
         let signature = self
             .callee_parameter_type(callee, ordinal)
             .and_then(|parameter| self.contextual_signature(parameter));
-        let holds_before = self.holds.len();
-        let degradation_before = self.degradation;
-        let outer_env = self.binder_env;
-        let node = self.eval_nested_function(
-            function,
-            context,
-            *has_declared_return,
-            outer_env,
-            extended_captures,
-            declared_evolving_captures,
-            signature.as_ref(),
-        );
+        self.function_argument_request(expr, signature)
+    }
+
+    /// The request to type the function-value argument `expr` (no flow
+    /// gap) under `signature`: its demand, and the frame's holds and
+    /// degradation before it evaluates.
+    pub(super) fn function_argument_request(
+        &mut self,
+        expr: &SliceExpr,
+        signature: Option<ContextualSignature>,
+    ) -> Option<FunctionArgumentRequest> {
+        let (demand, gap) = super::nested::NestedDemand::of(expr, signature)?;
+        if gap.is_some() {
+            return None;
+        }
+        Some(FunctionArgumentRequest {
+            demand,
+            mark: FunctionArgumentMark {
+                holds_before: self.holds.len(),
+                degradation_before: self.degradation,
+            },
+        })
+    }
+
+    /// A function-value argument's type from its evaluated signature
+    /// `value`: `None` when its evaluation did not finish (it held or
+    /// degraded the frame, which is then restored) or is no signature.
+    pub(super) fn function_argument_value(
+        &mut self,
+        mark: FunctionArgumentMark,
+        value: Positional<SemanticNodeId>,
+    ) -> Option<SemanticNodeId> {
+        let FunctionArgumentMark {
+            holds_before,
+            degradation_before,
+        } = mark;
         let finished = self.holds.len() == holds_before && self.degradation == degradation_before;
         self.holds.truncate(holds_before);
         if !finished {
             self.degradation = degradation_before;
             return None;
         }
+        let Positional::Value(node) = value else {
+            return None;
+        };
         match self.dispatch.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Signature { .. }) => Some(node),
             _ => None,

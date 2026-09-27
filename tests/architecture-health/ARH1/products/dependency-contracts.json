@@ -728,7 +728,6 @@
         "crateInternal": [
           "build_toolchain_fingerprint",
           "cache_runtime",
-          "file_artifact_store",
           "flow_completion_inventory",
           "flow_return_audit",
           "flow_slice_content",
