@@ -3828,6 +3828,32 @@ fn frameless_incomplete_canonical_evidence_marks_request_partial() {
     );
 }
 
+/// A closed operator whose evaluation stops partial keeps its operand for
+/// the caller, and the partial folds into the enclosing build's frame: the
+/// build around the kept operand is partial and not memoized.
+#[test]
+fn a_partial_closed_operator_evaluation_marks_the_enclosing_build_partial() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let never = host
+        .project_type_store()
+        .semantic_graph()
+        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+    let guard =
+        crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    let released = super::evaluate::EvaluateDeferredOutcome::partial(
+        never,
+        crate::semantic_query::PartialReasonSet::BUDGET_EXCEEDED,
+    )
+    .into_complete_active_query_build_node(&dispatch);
+    let frame = guard.finish();
+    assert_eq!(released, None);
+    assert!(frame.result_is_partial && frame.cache_suppress);
+    assert!(frame
+        .partial_reasons
+        .contains(crate::semantic_query::PartialReasonSet::BUDGET_EXCEEDED));
+}
+
 /// The FRAMED twin of the frameless disposition: with an ACTIVE cold-build
 /// taint frame, an `Incomplete` canonical-evidence deposit must taint the
 /// frame's RESULT-PARTIAL rail (which the build output copies onto the

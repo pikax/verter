@@ -140,7 +140,7 @@ impl EvaluateDeferredOutcome {
     }
 
     /// A partial (never-published) carrier-stop result carrying `reasons`.
-    fn partial(node: SemanticNodeId, reasons: PartialReasonSet) -> Self {
+    pub(super) fn partial(node: SemanticNodeId, reasons: PartialReasonSet) -> Self {
         Self {
             node,
             completeness: ResultCompleteness::partial(reasons),
@@ -219,14 +219,20 @@ impl EvaluateDeferredOutcome {
 
     /// The evaluated node of a complete evaluation, released as
     /// [`Self::into_active_query_build_node`] releases it; `None` for a
-    /// partial one, whose caller keeps the operand it asked about and
-    /// folds nothing.
+    /// partial one, whose caller keeps the operand it asked about. The
+    /// partial still folds into the active build's rails, so the build
+    /// around the kept operand is partial and never memoized.
     pub(super) fn into_complete_active_query_build_node(
         self,
         dispatch: &ProjectSemanticDispatch<'_>,
     ) -> Option<SemanticNodeId> {
-        matches!(self.completeness, ResultCompleteness::Complete)
-            .then(|| self.into_active_query_build_node(dispatch))
+        match self.completeness {
+            ResultCompleteness::Complete => Some(self.into_active_query_build_node(dispatch)),
+            ResultCompleteness::Partial(reasons) => {
+                dispatch.fold_local_partial_completeness(reasons);
+                None
+            }
+        }
     }
 }
 
