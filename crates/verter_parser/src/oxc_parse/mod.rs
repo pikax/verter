@@ -13,9 +13,12 @@
 //! tree nests; the parse needs at most [`PARSE_STACK_BYTES_PER_LEVEL`] per
 //! level of that bound. When the calling thread has that much stack left
 //! the parse runs in place, which is every source of ordinary depth;
-//! otherwise it runs on a stack segment allocated for it (`stacker`). No
-//! source is refused, and no depth is too deep: the segment is sized from
-//! the source.
+//! otherwise it runs on a stack segment reserved for it ([`stack`]), which
+//! commits only the stack the parse touches. Where a stack can grow no
+//! depth is too deep: the segment is sized from the source. A source
+//! whose segment cannot be reserved is not parsed: the parse returns an
+//! empty program and [`stack_unavailable_diagnostic`]'s diagnostic,
+//! operational incompleteness rather than a syntax error.
 //!
 //! oxc's own walks over what it parsed (`clone_in`, the semantic builder,
 //! the `Visit` and `VisitMut` walkers) recurse once per level of the same
@@ -34,8 +37,10 @@ use oxc_parser::{ParseOptions, ParserReturn};
 use oxc_span::{SourceType, Span};
 
 mod nesting;
+mod stack;
 
 pub use nesting::Nesting;
+pub use stack::StackUnavailable;
 
 /// The most native stack oxc 0.151's parser, or a walk of oxc's over what
 /// it parsed, spends per level of [`nesting`]'s bound, with twice the
@@ -62,34 +67,88 @@ pub fn syntax_nesting(source: &str, source_type: SourceType) -> Nesting {
     }
 }
 
-/// The stack a parse of `source_text` can need.
-pub fn parse_stack_bytes(source_text: &str, source_type: SourceType) -> usize {
-    (syntax_nesting(source_text, source_type).depth as usize)
+/// The stack a parse or walk of syntax nesting `depth` levels deep can
+/// need.
+fn stack_bytes(depth: usize) -> usize {
+    depth
         .saturating_mul(PARSE_STACK_BYTES_PER_LEVEL)
         .saturating_add(PARSE_STACK_BASE_BYTES)
 }
 
-/// Run `walk`, a parse of `source_text` or a walk of oxc's over syntax
-/// parsed from it, with at least [`parse_stack_bytes`] of stack: in place
-/// when the thread has it, on a new stack segment otherwise.
+/// The stack a parse of `source_text` can need.
+pub fn parse_stack_bytes(source_text: &str, source_type: SourceType) -> usize {
+    stack_bytes(syntax_nesting(source_text, source_type).depth as usize)
+}
+
+/// Every level of nesting takes at least one byte of source, so a source
+/// whose every byte could be a level fits the thread's remaining stack
+/// without the scan: the many short sources (a template's expressions, a
+/// synthesized wrapper) parse and walk in place at once.
+fn fits_by_length(length: usize) -> bool {
+    stack::remaining().is_some_and(|remaining| remaining >= stack_bytes(length))
+}
+
+/// Run `parse`, a parse of `source_text`, with at least
+/// [`parse_stack_bytes`] of stack: in place when the thread has it, on a
+/// new stack segment otherwise. A source nesting deeper than a stack this
+/// host can provide is not parsed.
+fn parse_with_stack<R>(
+    source_text: &str,
+    source_type: SourceType,
+    parse: impl FnOnce() -> R,
+) -> Result<R, StackUnavailable> {
+    if fits_by_length(source_text.len()) {
+        return Ok(parse());
+    }
+    let depth = syntax_nesting(source_text, source_type).depth as usize;
+    stack::with_stack(stack_bytes(depth), parse)
+}
+
+/// Run `walk`, a walk of oxc's over parsed syntax, with at least `needed`
+/// bytes of stack. The parse of the syntax had as much or more (or it
+/// returned [`StackUnavailable`] and parsed nothing), so a walk that cannot
+/// have it meets an address space exhausted since, which ends the process
+/// as any failed allocation does.
+fn walk_with_stack<R>(needed: usize, walk: impl FnOnce() -> R) -> R {
+    match stack::with_stack(needed, walk) {
+        Ok(result) => result,
+        Err(unavailable) => std::alloc::handle_alloc_error(
+            std::alloc::Layout::from_size_align(unavailable.needed.max(1), 16)
+                .unwrap_or(std::alloc::Layout::new::<u128>()),
+        ),
+    }
+}
+
+/// The diagnostic a parse returns for a source nesting deeper than a stack
+/// this host can provide, in place of the program it did not parse.
+pub fn stack_unavailable_diagnostic(unavailable: StackUnavailable) -> OxcDiagnostic {
+    OxcDiagnostic::error(unavailable.to_string())
+        .with_error_code(STACK_UNAVAILABLE_SCOPE, STACK_UNAVAILABLE_CODE)
+}
+
+/// Whether `diagnostic` is [`stack_unavailable_diagnostic`]'s: the parse
+/// did not run, and its empty program is operational incompleteness, not
+/// the source's syntax.
+pub fn is_stack_unavailable(diagnostic: &OxcDiagnostic) -> bool {
+    diagnostic.code.scope.as_deref() == Some(STACK_UNAVAILABLE_SCOPE)
+        && diagnostic.code.number.as_deref() == Some(STACK_UNAVAILABLE_CODE)
+}
+
+const STACK_UNAVAILABLE_SCOPE: &str = "verter";
+const STACK_UNAVAILABLE_CODE: &str = "stack-unavailable";
+
+/// Run `walk`, a walk of oxc's over syntax parsed from `source_text`, with
+/// at least [`parse_stack_bytes`] of stack: in place when the thread has
+/// it, on a new stack segment otherwise.
 pub fn with_ast_stack<R>(
     source_text: &str,
     source_type: SourceType,
     walk: impl FnOnce() -> R,
 ) -> R {
-    // Every level of nesting takes at least one byte of source, so a source
-    // whose every byte could be a level fits the thread's remaining stack
-    // without the scan: the many short sources (a template's expressions, a
-    // synthesized wrapper) parse in place at once.
-    let by_length = source_text
-        .len()
-        .saturating_mul(PARSE_STACK_BYTES_PER_LEVEL)
-        .saturating_add(PARSE_STACK_BASE_BYTES);
-    if stacker::remaining_stack().is_some_and(|remaining| remaining >= by_length) {
+    if fits_by_length(source_text.len()) {
         return walk();
     }
-    let needed = parse_stack_bytes(source_text, source_type);
-    stacker::maybe_grow(needed, needed, walk)
+    walk_with_stack(parse_stack_bytes(source_text, source_type), walk)
 }
 
 /// [`with_ast_stack`] for a walk of `program`, or of any node in it.
@@ -114,11 +173,7 @@ pub fn with_node_stack<R>(program: &Program<'_>, span: Span, walk: impl FnOnce()
 /// count; the syntax nests no deeper than the larger of a TypeScript and a
 /// TSX scan of it, whichever it is.
 pub fn with_source_stack<R>(source_text: &str, walk: impl FnOnce() -> R) -> R {
-    let by_length = source_text
-        .len()
-        .saturating_mul(PARSE_STACK_BYTES_PER_LEVEL)
-        .saturating_add(PARSE_STACK_BASE_BYTES);
-    if stacker::remaining_stack().is_some_and(|remaining| remaining >= by_length) {
+    if fits_by_length(source_text.len()) {
         return walk();
     }
     let nesting = Nesting {
@@ -226,10 +281,7 @@ impl<'p> ProgramWalkStack<'p> {
         if self.inside.get() {
             return walk();
         }
-        let by_length = (span.size() as usize)
-            .saturating_mul(PARSE_STACK_BYTES_PER_LEVEL)
-            .saturating_add(PARSE_STACK_BASE_BYTES);
-        if stacker::remaining_stack().is_some_and(|remaining| remaining >= by_length) {
+        if fits_by_length(span.size() as usize) {
             return walk();
         }
         with_nesting_stack(self.program_nesting(), walk)
@@ -304,10 +356,7 @@ pub(crate) mod scan_probe {
 /// Run `walk`, a walk of oxc's over syntax that nests as `nesting`
 /// measured (a node's, or its program's), with the stack that can need.
 pub fn with_nesting_stack<R>(nesting: Nesting, walk: impl FnOnce() -> R) -> R {
-    let needed = (nesting.depth as usize)
-        .saturating_mul(PARSE_STACK_BYTES_PER_LEVEL)
-        .saturating_add(PARSE_STACK_BASE_BYTES);
-    stacker::maybe_grow(needed, needed, walk)
+    walk_with_stack(stack_bytes(nesting.depth as usize), walk)
 }
 
 /// `oxc_parser::Parser`, parsing on a stack its source cannot exhaust.
@@ -352,22 +401,28 @@ impl<'a, C: ParserConfig> Parser<'a, C> {
         }
     }
 
-    /// Parse the source as a program.
+    /// Parse the source as a program. A source nesting deeper than a stack
+    /// this host can provide is not parsed: its program is empty and its
+    /// one diagnostic is [`stack_unavailable_diagnostic`]'s.
     pub fn parse(self) -> ParserReturn<'a> {
         let Self {
             inner,
+            allocator,
             source_text,
             source_type,
-            ..
+            options,
         } = self;
-        with_ast_stack(source_text, source_type, move || inner.parse())
+        parse_with_stack(source_text, source_type, move || inner.parse())
+            .unwrap_or_else(|unavailable| unparsed(allocator, source_type, options, unavailable))
     }
 
     /// Parse the source as one expression: the expression at its start, as
     /// oxc parsed it before 0.151, leaving any content after it to the
     /// caller. oxc 0.151's `parse_expression` instead rejects a source with
     /// content after the expression — a lone `Unexpected token` at that
-    /// content — so that case parses the source before the token.
+    /// content — so that case parses the source before the token. A source
+    /// nesting deeper than a stack this host can provide is not parsed: its
+    /// one diagnostic is [`stack_unavailable_diagnostic`]'s.
     pub fn parse_expression(self) -> Result<Expression<'a>, Vec<OxcDiagnostic>> {
         let Self {
             inner,
@@ -376,7 +431,7 @@ impl<'a, C: ParserConfig> Parser<'a, C> {
             source_type,
             options,
         } = self;
-        with_ast_stack(source_text, source_type, move || {
+        parse_with_stack(source_text, source_type, move || {
             let diagnostics = match inner.parse_expression() {
                 Ok(expression) => return Ok(expression),
                 Err(diagnostics) => diagnostics,
@@ -389,7 +444,25 @@ impl<'a, C: ParserConfig> Parser<'a, C> {
                 None => Err(diagnostics.into_vec()),
             }
         })
+        .unwrap_or_else(|unavailable| Err(vec![stack_unavailable_diagnostic(unavailable)]))
     }
+}
+
+/// What a parse that could not have its stack returns: an empty program
+/// whose one diagnostic is [`stack_unavailable_diagnostic`]'s.
+fn unparsed<'a>(
+    allocator: &'a Allocator,
+    source_type: SourceType,
+    options: ParseOptions,
+    unavailable: StackUnavailable,
+) -> ParserReturn<'a> {
+    let mut empty = oxc_parser::Parser::new(allocator, "", source_type)
+        .with_options(options)
+        .parse();
+    empty
+        .diagnostics
+        .push(stack_unavailable_diagnostic(unavailable));
+    empty
 }
 
 /// Where the content after a parsed expression starts, when `diagnostics`

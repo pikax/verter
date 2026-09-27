@@ -1459,10 +1459,10 @@ fn walks_within_a_program_containment_run_in_place() {
                 &mut owner,
                 |owner| &owner.walks,
                 |owner| {
-                    let outer = stacker::remaining_stack().expect("the stack is known");
+                    let outer = super::stack::remaining().expect("the stack is known");
                     let inner = owner
                         .walks
-                        .with_node_stack(parsed.program.span, stacker::remaining_stack)
+                        .with_node_stack(parsed.program.span, super::stack::remaining)
                         .expect("the stack is known");
                     // The same segment: the walk ran a few frames deeper.
                     outer >= inner && outer - inner < 64 * 1024
@@ -1489,4 +1489,115 @@ fn own_syntax_takes_the_nested_bodies_out() {
         [body("{ return 1; }"), body("{ a(); }")],
     );
     assert_eq!(own.as_deref(), Some("f(() => 0, function g() 0)"));
+}
+
+/// This process's commit charge, in bytes.
+#[cfg(windows)]
+fn committed_bytes() -> usize {
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `counters` is a live `PROCESS_MEMORY_COUNTERS_EX` whose `cb`
+    // holds its size, which the call may fill as its prefix
+    // `PROCESS_MEMORY_COUNTERS`.
+    let read = unsafe {
+        K32GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            (&raw mut counters).cast::<PROCESS_MEMORY_COUNTERS>(),
+            counters.cb,
+        )
+    };
+    assert_ne!(read, 0, "read the process memory counters");
+    counters.PrivateUsage
+}
+
+/// The environment variable that makes this test binary measure a grown
+/// stack's commit itself
+/// ([`a_grown_stack_commits_what_the_walk_touches_not_what_it_reserves`]).
+#[cfg(windows)]
+const COMMIT_CHILD: &str = "VERTER_GROWN_STACK_COMMIT_CHILD";
+
+/// A stack grown for a deep source reserves what its nesting can need and
+/// commits what the walk on it touches: a 1,000,000-level bound reserves
+/// about 8.6 GiB, and a walk a few frames deep commits a few pages of it.
+/// Committing the reservation up front made a handful of deep sources
+/// exhaust the system's commit limit. The measure runs in a child process,
+/// so no other test's allocations move it.
+#[cfg(windows)]
+#[test]
+fn a_grown_stack_commits_what_the_walk_touches_not_what_it_reserves() {
+    if std::env::var_os(COMMIT_CHILD).is_some() {
+        let committed = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(|| {
+                let before = committed_bytes();
+                let during =
+                    super::with_nesting_stack(super::Nesting { depth: 1_000_000 }, committed_bytes);
+                during.saturating_sub(before)
+            })
+            .expect("spawn the measuring thread")
+            .join()
+            .expect("the measure returns");
+        println!("{COMMIT_CHILD}: {committed}");
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            "oxc_parse::tests::a_grown_stack_commits_what_the_walk_touches_not_what_it_reserves",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(COMMIT_CHILD, "1")
+        .output()
+        .expect("measure in a child process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let committed: usize = stdout
+        .lines()
+        .find_map(|line| line.split_once(&format!("{COMMIT_CHILD}: ")))
+        .and_then(|(_, bytes)| bytes.trim().parse().ok())
+        .unwrap_or_else(|| {
+            panic!(
+                "the child measured nothing ({:?}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    assert!(
+        committed < 64 << 20,
+        "a grown stack committed {committed} bytes"
+    );
+}
+
+/// A stack no host can reserve is a typed failure, not a panic: the work
+/// does not run.
+#[test]
+fn a_stack_that_cannot_be_reserved_is_a_typed_failure() {
+    let needed = 1usize << (usize::BITS - 2);
+    let mut ran = false;
+    let result = super::stack::with_stack(needed, || ran = true);
+    assert_eq!(result, Err(super::StackUnavailable { needed }));
+    assert!(!ran);
+}
+
+/// A parse that cannot have its stack returns an empty program whose one
+/// diagnostic says so.
+#[test]
+fn a_parse_without_its_stack_returns_the_typed_diagnostic() {
+    let allocator = Allocator::default();
+    let unparsed = super::unparsed(
+        &allocator,
+        SourceType::ts(),
+        oxc_parser::ParseOptions::default(),
+        super::StackUnavailable { needed: 1 << 40 },
+    );
+    assert!(unparsed.program.body.is_empty());
+    assert_eq!(unparsed.diagnostics.len(), 1);
+    let diagnostic = unparsed.diagnostics.errors().next().expect("one error");
+    assert!(super::is_stack_unavailable(diagnostic), "{diagnostic:?}");
 }

@@ -3691,6 +3691,7 @@ version = "0.0.1-beta.5"
 dependencies = [
  "bumpalo",
  "hotpath",
+ "libc",
  "memchr",
  "oxc_allocator",
  "oxc_ast",
@@ -3700,6 +3701,7 @@ dependencies = [
  "oxc_span",
  "oxc_syntax",
  "phf 0.13.1",
+ "psm",
  "rustc-hash",
  "serde",
  "smallvec",
@@ -3709,6 +3711,7 @@ dependencies = [
  "verter_span",
  "verter_type_expr",
  "verter_type_expr_oxc",
+ "windows-sys",
 ]
 
 [[package]]
