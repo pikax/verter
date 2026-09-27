@@ -5100,13 +5100,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if self.relation_session_active() {
             match occurrence.variance {
                 VariancePhase::Covariant | VariancePhase::Invariant => {
+                    // A type parameter the session does not infer is a fixed
+                    // type: it relates below as any other type does.
                     if matches!(
                         graph.node_data(target).as_deref(),
                         Some(SemanticNodeData::Infer { .. } | SemanticNodeData::TypeParam { .. })
-                    ) {
-                        if !self.relation_deposit(target, source, occurrence) {
-                            return RelationResult::Unknown;
-                        }
+                    ) && self.relation_deposit(target, source, occurrence)
+                    {
                         return assignable(bindings);
                     }
                 }
@@ -5114,10 +5114,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     if matches!(
                         graph.node_data(source).as_deref(),
                         Some(SemanticNodeData::Infer { .. } | SemanticNodeData::TypeParam { .. })
-                    ) {
-                        if !self.relation_deposit(source, target, occurrence) {
-                            return RelationResult::Unknown;
-                        }
+                    ) && self.relation_deposit(source, target, occurrence)
+                    {
                         return assignable(bindings);
                     }
                 }
@@ -8666,8 +8664,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     return;
                 }
             }
-            results.push(RelationResult::Unknown);
-            return;
+            // A type parameter against a union relates to each member (the
+            // checker's `eachTypeRelatedToSomeType` over the target): an
+            // identical member holds it. Any other pair stays undecided.
+            let source_against_union = matches!(&*source_data, SemanticNodeData::TypeParam { .. })
+                && matches!(&*target_data, SemanticNodeData::Union(_));
+            if !source_against_union {
+                results.push(RelationResult::Unknown);
+                return;
+            }
         }
 
         // ── String literal vs template-literal pattern: decided by the

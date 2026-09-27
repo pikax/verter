@@ -882,6 +882,17 @@ export function localOverloads<U>(u: U) { function k(x: string): 1; function k(x
 export function localGenericOverloads<U>(u: U) { function k<T>(x: T, y: U | string): "first"; function k(x: unknown, y: unknown): "second"; function k(x: any, y: any): any { return x; } const v = "a" as "a" | "b"; return k(1, v); }
 "##;
 
+/// A rigid type parameter argument relates to a union parameter holding it
+/// through that identical member, so `b.put(1, u)` over `put<T>(x: T, y: U
+/// | string): T` infers `T` from `1`: `number`. Measured on TypeScript
+/// 7.0.2, alike under all four settings.
+#[test]
+fn a_rigid_type_parameter_relates_to_a_union_holding_it() {
+    let matrix = Matrix::new(RIGID_AND_LOCAL_OVERLOADS);
+    let failures = matrix.returns(&[("rigidArgument", "number")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// The rows of local overloaded functions, with the checker's answers:
 /// the call resolves over the overload signatures, never the
 /// implementation's (`1` and `"first"`). Measured on TypeScript 7.0.2, alike
