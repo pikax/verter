@@ -5885,3 +5885,104 @@ async fn diagnostics_captured_before_a_frameless_close_never_outlive_it() {
     );
     assert!(provider.diagnostics_cache.lock().await.is_empty());
 }
+
+/// Issue a diagnostics pull for an open document, then close and reopen it
+/// with different text BEFORE the engine answers with ranges valid for the
+/// first text. Returns the pull's outcome and the provider.
+async fn pull_answered_across_a_reopen(
+    background: bool,
+) -> (
+    Result<Vec<TypeDiagnostic>, TypeProviderError>,
+    TsgoTypeProvider,
+) {
+    let (provider_side, mut relay_side) = tokio::io::duplex(64 * 1024);
+    let (read, write) = tokio::io::split(provider_side);
+    let provider = TsgoTypeProvider::from_initialized_transport(read, write);
+    let path = if cfg!(windows) {
+        "D:/w/Reopened.vue.tsx"
+    } else {
+        "/w/Reopened.vue.tsx"
+    };
+    provider
+        .open_file(path, "export const count: number = 'wrong';\n")
+        .await
+        .unwrap();
+
+    let reopen_then_answer = async {
+        let mut framer = MessageFramer::new();
+        let mut chunk = [0u8; 8192];
+        let request = loop {
+            if let Some(message) = framer.next_message().expect("decode") {
+                if message["method"] == "textDocument/diagnostic" {
+                    break message;
+                }
+                continue;
+            }
+            let n = relay_side.read(&mut chunk).await.expect("read request");
+            assert_ne!(n, 0, "provider closed before issuing the pull");
+            framer.push(&chunk[..n]);
+        };
+        provider.close_file(path).await.unwrap();
+        provider.open_file(path, "let b = 1;\n").await.unwrap();
+        relay_side
+            .write_all(&encode_message(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {
+                    "kind": "full",
+                    "items": [{
+                        "range": {
+                            "start": { "line": 0, "character": 29 },
+                            "end": { "line": 0, "character": 36 }
+                        },
+                        "severity": 1,
+                        "code": 2322,
+                        "message": "Type 'string' is not assignable to type 'number'."
+                    }]
+                }
+            })))
+            .await
+            .unwrap();
+        relay_side.flush().await.unwrap();
+    };
+    let pull = async {
+        if background {
+            provider.get_diagnostics_background(path).await
+        } else {
+            provider.get_diagnostics_strict(path).await
+        }
+    };
+    let (pulled, ()) = tokio::join!(pull, reopen_then_answer);
+    (pulled, provider)
+}
+
+/// A strict diagnostics pull answered after its document closed and reopened
+/// is refused as superseded: it is neither returned nor cached.
+///
+/// Discriminating: the pull read the registered content only AFTER the
+/// response arrived, so a response computed for incarnation A was parsed
+/// against B's text (its ranges mapped onto the wrong source) and passed the
+/// admission fence because B was registered by then.
+#[tokio::test]
+async fn a_strict_pull_answered_across_a_close_and_reopen_is_refused() {
+    let (pulled, provider) = pull_answered_across_a_reopen(false).await;
+    assert!(
+        pulled.is_err(),
+        "a response for the previous incarnation must not be served: {pulled:?}"
+    );
+    assert!(
+        provider.diagnostics_cache.lock().await.is_empty(),
+        "nor cached against the reopened document"
+    );
+}
+
+/// The background pull refuses the same superseded response (it caches
+/// nothing, but used to parse the response against the reopened text too).
+#[tokio::test]
+async fn a_background_pull_answered_across_a_close_and_reopen_is_refused() {
+    let (pulled, _provider) = pull_answered_across_a_reopen(true).await;
+    assert!(
+        pulled.is_err(),
+        "a response for the previous incarnation must not be served: {pulled:?}"
+    );
+}

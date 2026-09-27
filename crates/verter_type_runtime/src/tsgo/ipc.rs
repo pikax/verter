@@ -1372,6 +1372,55 @@ async fn admit_published_diagnostics(
     .await
 }
 
+/// Parse a `textDocument/diagnostic` response against `issued_under`, the
+/// content registered for `path` when the pull was ISSUED — or refuse it as
+/// superseded when the document has since closed, reopened or changed.
+///
+/// The response describes the text the engine held when it answered, which is
+/// the issuing incarnation only while that incarnation is still registered (the
+/// same `Arc` identity [`admit_diagnostics_for_incarnation`] fences on). Reading
+/// the content only once the response arrives parsed a response computed for
+/// one incarnation against the next one's text, mapping its ranges onto the
+/// wrong source. A superseded pull fails like any other failed pull, so a strict
+/// caller makes its explicit fallback decision instead of serving it.
+async fn diagnostics_for_pulled_incarnation(
+    contents_cache: &Mutex<HashMap<String, Arc<str>>>,
+    path: &str,
+    issued_under: Option<&Arc<str>>,
+    value: &serde_json::Value,
+) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {
+    let current = contents_cache
+        .lock()
+        .await
+        .get(&contents_key(path))
+        .cloned();
+    let unchanged = match (issued_under, current.as_ref()) {
+        (Some(issued), Some(current)) => Arc::ptr_eq(issued, current),
+        (None, None) => true,
+        _ => false,
+    };
+    if !unchanged {
+        return Err(TypeProviderError::new(format!(
+            "diagnostics pull for {path} was answered after the document changed; \
+             the response is superseded"
+        )));
+    }
+    // One index for the whole pull response — see `parse_lsp_diagnostic`.
+    let index = issued_under.map(|content| SourceIndex::new_utf16(content));
+    Ok(value
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|diagnostic| {
+                    parse_lsp_diagnostic(diagnostic, index.as_ref(), Some(path))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default())
+}
+
 /// The diagnostics-admission fence shared by the push and pull paths.
 ///
 /// Every sync registers a fresh content `Arc` and every close retires it, so
@@ -2483,6 +2532,7 @@ impl TsgoTypeProvider {
         path: &str,
     ) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {
         let uri = Self::path_to_uri(path);
+        let issued_under = self.contents.lock().await.get(&contents_key(path)).cloned();
         let value = self
             .transport
             .request(
@@ -2490,24 +2540,12 @@ impl TsgoTypeProvider {
                 serde_json::json!({ "textDocument": { "uri": uri } }),
             )
             .await?;
-        let content = self.contents.lock().await.get(&contents_key(path)).cloned();
-        // One index for the whole pull response — see `parse_lsp_diagnostic`.
-        let index = content.as_deref().map(SourceIndex::new_utf16);
-        let diagnostics = value
-            .get("items")
-            .and_then(serde_json::Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|diagnostic| {
-                        parse_lsp_diagnostic(diagnostic, index.as_ref(), Some(path))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let diagnostics =
+            diagnostics_for_pulled_incarnation(&self.contents, path, issued_under.as_ref(), &value)
+                .await?;
         // Cached under the same incarnation fence as pushed batches: a pull
         // answered across a close must not outlive it.
-        if let Some(incarnation) = content.as_ref() {
+        if let Some(incarnation) = issued_under.as_ref() {
             admit_diagnostics_for_incarnation(
                 &self.contents,
                 &self.diagnostics_cache,
@@ -4072,37 +4110,26 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let result = transport
+            let issued_under = contents_cache
+                .lock()
+                .await
+                .get(&contents_key(&path_owned))
+                .cloned();
+            let value = transport
                 .request_with_priority(
                     "textDocument/diagnostic",
                     serde_json::json!({ "textDocument": { "uri": uri } }),
                     None,
                     ProviderPriority::Background,
                 )
-                .await;
-            match result {
-                Ok(val) => {
-                    let items = val
-                        .get("items")
-                        .and_then(|v| v.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-                    let content = contents_cache
-                        .lock()
-                        .await
-                        .get(&contents_key(&path_owned))
-                        .cloned();
-                    // One index for the whole pull response — see `parse_lsp_diagnostic`.
-                    let index = content.as_deref().map(SourceIndex::new_utf16);
-                    Ok(items
-                        .iter()
-                        .filter_map(|d| {
-                            parse_lsp_diagnostic(d, index.as_ref(), Some(path_owned.as_str()))
-                        })
-                        .collect())
-                }
-                Err(error) => Err(error),
-            }
+                .await?;
+            diagnostics_for_pulled_incarnation(
+                &contents_cache,
+                &path_owned,
+                issued_under.as_ref(),
+                &value,
+            )
+            .await
         })
     }
 
