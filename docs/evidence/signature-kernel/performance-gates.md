@@ -712,6 +712,17 @@ Recorded plainly so no reader mistakes absence for a pass:
   `a_frame_lowered_call_argument_keeps_no_indexed_record` fails when the
   frame's arguments are ignored.
 
+* **The flow-return schedule decides which calls a frame evaluates from
+  one sweep.** Deciding whether a call nested in another call's argument
+  is evaluated (`call_is_evaluated`) walked out through every call around
+  it, scanning all the frame's calls for the innermost enclosing one at
+  every step, and the composed-value callees scanned them again per call:
+  work cubic in a nest's depth (600 nested calls took 4.2 s to answer,
+  unoptimized). A `CallNest` built once per frame from one sweep
+  over the calls in source order gives each call's innermost enclosing
+  call and the call site at each span, and each call's verdict is decided
+  once and shared by the calls inside it (600 nested calls take 1.1 s).
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the

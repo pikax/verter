@@ -676,6 +676,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 FlowEffect::Write { .. } => None,
             })
             .collect();
+        let mut nest = CallNest::of(&every_call, entry);
         let mut scope_payload = None;
         let mut out = Vec::new();
         // Only a call whose value the slice evaluates: an effect-only
@@ -699,7 +700,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &mut scope_payload,
                     entry,
                     span,
-                    &every_call,
+                    &mut nest,
                 )
             {
                 continue;
@@ -806,64 +807,94 @@ impl<'a> ProjectSemanticDispatch<'a> {
         scope_payload: &mut Option<Option<DeclarationScopePayload>>,
         entry: &FunctionProgramEntry,
         span: verter_span::Span,
-        every_call: &[verter_span::Span],
+        nest: &mut CallNest<'_>,
     ) -> bool {
+        // Each call is decided once: every call on the way out that passes
+        // its own checks takes the verdict of the call around it.
+        let mut passed = Vec::new();
         let mut span = span;
-        loop {
-            let Some(enclosing) = every_call
-                .iter()
-                .filter(|outer| **outer != span && contains(**outer, span))
-                .min_by_key(|outer| outer.end - outer.start)
-                .copied()
-            else {
-                return true;
-            };
-            let Some(site) = entry.call_sites.iter().find(|site| site.span == enclosing) else {
-                return false;
-            };
-            let direct_argument = site
-                .args
-                .iter()
-                .any(|argument| !argument.spread && argument.point == span.start);
-            let FunctionEffectCallee::Identifier(name) = &site.callee else {
-                return false;
-            };
-            if !direct_argument || !callee_is_free(entry, name, enclosing) {
-                return false;
+        let verdict = loop {
+            if let Some(verdict) = nest.evaluated.get(&span) {
+                break *verdict;
             }
-            let prepared = match &site.target {
-                Some(target) => self.ctx.prepared_value_decl_return_only(
-                    canonical,
-                    target.declaration.owner,
-                    target.declaration.name.as_ref(),
-                ),
-                None => {
-                    let payload = self.scope_payload(canonical, owner, scope_payload);
-                    crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-                        self.ctx, canonical, owner, payload, name,
-                    )
-                    .and_then(|root| {
-                        self.ctx.prepared_value_decl_return_only(
-                            root.canonical_id.as_ref(),
-                            root.owner,
-                            root.symbol_name.as_ref(),
-                        )
-                    })
+            if !self.call_passes_to_enclosing(canonical, owner, scope_payload, entry, span, nest) {
+                nest.evaluated.insert(span, false);
+                break false;
+            }
+            match nest.enclosing.get(&span) {
+                Some(enclosing) => {
+                    passed.push(span);
+                    span = *enclosing;
                 }
-            };
-            let evaluates_arguments = prepared.is_some_and(|prepared| {
-                !annotated(&prepared)
-                    && (prepared.signatures.len() > 1
-                        || prepared
-                            .signatures
-                            .iter()
-                            .any(|signature| !signature.type_parameters.is_empty()))
-            });
-            if !evaluates_arguments {
-                return false;
+                None => {
+                    nest.evaluated.insert(span, true);
+                    break true;
+                }
             }
-            span = enclosing;
+        };
+        for span in passed {
+            nest.evaluated.insert(span, verdict);
         }
+        verdict
+    }
+
+    /// Whether the call at `span` is evaluated when the call enclosing it
+    /// is: it has none, or it is a direct argument of that call, whose
+    /// free, bare-identifier callee's call sink evaluates its arguments
+    /// (see [`Self::call_is_evaluated`]).
+    fn call_passes_to_enclosing(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        scope_payload: &mut Option<Option<DeclarationScopePayload>>,
+        entry: &FunctionProgramEntry,
+        span: verter_span::Span,
+        nest: &CallNest<'_>,
+    ) -> bool {
+        let Some(enclosing) = nest.enclosing.get(&span).copied() else {
+            return true;
+        };
+        let Some(site) = nest.sites.get(&enclosing).copied() else {
+            return false;
+        };
+        let direct_argument = site
+            .args
+            .iter()
+            .any(|argument| !argument.spread && argument.point == span.start);
+        let FunctionEffectCallee::Identifier(name) = &site.callee else {
+            return false;
+        };
+        if !direct_argument || !callee_is_free(entry, name, enclosing) {
+            return false;
+        }
+        let prepared = match &site.target {
+            Some(target) => self.ctx.prepared_value_decl_return_only(
+                canonical,
+                target.declaration.owner,
+                target.declaration.name.as_ref(),
+            ),
+            None => {
+                let payload = self.scope_payload(canonical, owner, scope_payload);
+                crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                    self.ctx, canonical, owner, payload, name,
+                )
+                .and_then(|root| {
+                    self.ctx.prepared_value_decl_return_only(
+                        root.canonical_id.as_ref(),
+                        root.owner,
+                        root.symbol_name.as_ref(),
+                    )
+                })
+            }
+        };
+        prepared.is_some_and(|prepared| {
+            !annotated(&prepared)
+                && (prepared.signatures.len() > 1
+                    || prepared
+                        .signatures
+                        .iter()
+                        .any(|signature| !signature.type_parameters.is_empty()))
+        })
     }
 
     /// Record that the instantiation transfer answered the instantiated
@@ -1305,6 +1336,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut out = Vec::new();
         let every_call: Vec<verter_span::Span> =
             value.effects.iter().map(|effect| effect.span).collect();
+        let nest = CallNest::of(&every_call, value);
         for effect in value.effects.iter() {
             let FunctionEffectCallee::Identifier(name) = &effect.callee else {
                 continue;
@@ -1316,7 +1348,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .return_sites
                     .iter()
                     .any(|site| contains(site.span, effect.span));
-            if !returned || nested_in_another_call(effect.span, &every_call) {
+            if !returned || nest.enclosing.contains_key(&effect.span) {
                 continue;
             }
             // A name the frame around the value binds is a captured binding
@@ -1562,12 +1594,51 @@ fn contains(outer: verter_span::Span, inner: verter_span::Span) -> bool {
     outer.start <= inner.start && inner.end <= outer.end
 }
 
-/// Whether the call at `span` sits inside another call — an argument, or a
-/// callee expression — whose own evaluation decides whether it runs.
-fn nested_in_another_call(span: verter_span::Span, calls: &[verter_span::Span]) -> bool {
-    calls
-        .iter()
-        .any(|outer| *outer != span && contains(*outer, span))
+/// A frame's calls as they nest: the innermost call strictly enclosing
+/// each call (an argument, or a callee expression, of that call), and the
+/// authored call site at each span. Built once per frame from one sweep
+/// over the calls in source order, so reading a call's enclosing call is
+/// no scan of the others.
+struct CallNest<'e> {
+    enclosing: rustc_hash::FxHashMap<verter_span::Span, verter_span::Span>,
+    sites: rustc_hash::FxHashMap<
+        verter_span::Span,
+        &'e verter_semantic::analysis::function_program::FunctionCallSiteRecord,
+    >,
+    /// Whether each call decided so far is evaluated
+    /// ([`ProjectSemanticDispatch::call_is_evaluated`]).
+    evaluated: rustc_hash::FxHashMap<verter_span::Span, bool>,
+}
+
+impl<'e> CallNest<'e> {
+    fn of(calls: &[verter_span::Span], entry: &'e FunctionProgramEntry) -> Self {
+        // Calls nest or are disjoint: sorted by start, an enclosing call
+        // before the calls it encloses, the innermost call still open
+        // around a call is the one enclosing it.
+        let mut spans = calls.to_vec();
+        spans.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+        spans.dedup();
+        let mut open: Vec<verter_span::Span> = Vec::new();
+        let mut enclosing = rustc_hash::FxHashMap::default();
+        for span in spans {
+            while open.last().is_some_and(|outer| !contains(*outer, span)) {
+                open.pop();
+            }
+            if let Some(outer) = open.last() {
+                enclosing.insert(span, *outer);
+            }
+            open.push(span);
+        }
+        let mut sites = rustc_hash::FxHashMap::default();
+        for site in entry.call_sites.iter() {
+            sites.entry(site.span).or_insert(site);
+        }
+        Self {
+            enclosing,
+            sites,
+            evaluated: rustc_hash::FxHashMap::default(),
+        }
+    }
 }
 
 #[cfg(test)]
