@@ -363,7 +363,7 @@ pub fn build_script_analysis_with_scope_from_program_with_providers_and_owners(
 }
 
 /// The analysis reads the program through recursions of its own (the
-/// module-reference collector, the binding and call extractors), each
+/// await, return, reactivity and macro scans, the binding extractors), each
 /// spending native stack once per level of the syntax it reads, so it runs
 /// under the program's stack containment, as oxc's own walks do.
 fn build_script_analysis_inner(
@@ -1061,17 +1061,46 @@ fn build_dynamic_module_reference(
 
 /// Collects module reference sites (`import()`, `require()`) from expression trees.
 ///
-/// Encapsulates the recursive walk state (content, const values, output vec)
-/// so callers and recursive calls pass `&mut self` instead of 4 parameters.
+/// Encapsulates the walk state (content, const values, output vec) so the
+/// walk's steps pass `&mut self` instead of 4 parameters. The walk runs from
+/// an explicit stack of pending nodes, so a deeply nested expression costs
+/// heap, not native stack.
 struct ModuleReferenceCollector<'a, 'b> {
     content: &'a str,
     const_string_values: &'a FxHashMap<String, Vec<String>>,
     module_references: &'b mut Vec<AnalyzedModuleReference>,
 }
 
+/// A node the collector has yet to visit.
+enum PendingReference<'e, 'x> {
+    Expression(&'e Expression<'x>),
+    Chain(&'e ChainElement<'x>),
+}
+
 impl ModuleReferenceCollector<'_, '_> {
-    /// Walk an expression tree, collecting `import()` and `require()` sites.
+    /// Walk an expression tree, collecting `import()` and `require()` sites
+    /// in source order: each node's own site before its children's, the
+    /// children in order.
     fn collect(&mut self, expr: &Expression<'_>) {
+        let mut pending = vec![PendingReference::Expression(expr)];
+        while let Some(next) = pending.pop() {
+            // Children are pushed in reverse, so they pop in order.
+            let children_from = pending.len();
+            match next {
+                PendingReference::Expression(expr) => self.visit(expr, &mut pending),
+                PendingReference::Chain(chain) => Self::visit_chain(chain, &mut pending),
+            }
+            pending[children_from..].reverse();
+        }
+    }
+
+    /// Record `expr`'s own site and push its children, in order.
+    fn visit<'e, 'x>(
+        &mut self,
+        expr: &'e Expression<'x>,
+        pending: &mut Vec<PendingReference<'e, 'x>>,
+    ) {
+        let mut push = |expr: &'e Expression<'x>| pending.push(PendingReference::Expression(expr));
         match expr {
             Expression::ImportExpression(import) => {
                 self.module_references.push(build_dynamic_module_reference(
@@ -1083,7 +1112,7 @@ impl ModuleReferenceCollector<'_, '_> {
                     self.content,
                     self.const_string_values,
                 ));
-                self.collect(&import.source);
+                push(&import.source);
             }
             Expression::CallExpression(call) => {
                 if let Expression::Identifier(id) = &call.callee {
@@ -1103,84 +1132,91 @@ impl ModuleReferenceCollector<'_, '_> {
                         }
                     }
                 }
-                self.collect(&call.callee);
+                push(&call.callee);
                 for arg in &call.arguments {
                     if let Some(arg_expr) = arg.as_expression() {
-                        self.collect(arg_expr);
+                        push(arg_expr);
                     }
                 }
             }
-            Expression::AwaitExpression(aw) => self.collect(&aw.argument),
-            Expression::ParenthesizedExpression(paren) => self.collect(&paren.expression),
-            Expression::TSAsExpression(expr) => self.collect(&expr.expression),
-            Expression::TSSatisfiesExpression(expr) => self.collect(&expr.expression),
-            Expression::TSTypeAssertion(expr) => self.collect(&expr.expression),
+            Expression::AwaitExpression(aw) => push(&aw.argument),
+            Expression::ParenthesizedExpression(paren) => push(&paren.expression),
+            Expression::TSAsExpression(expr) => push(&expr.expression),
+            Expression::TSSatisfiesExpression(expr) => push(&expr.expression),
+            Expression::TSTypeAssertion(expr) => push(&expr.expression),
             Expression::BinaryExpression(bin) => {
-                self.collect(&bin.left);
-                self.collect(&bin.right);
+                push(&bin.left);
+                push(&bin.right);
             }
             Expression::LogicalExpression(log) => {
-                self.collect(&log.left);
-                self.collect(&log.right);
+                push(&log.left);
+                push(&log.right);
             }
             Expression::ConditionalExpression(cond) => {
-                self.collect(&cond.test);
-                self.collect(&cond.consequent);
-                self.collect(&cond.alternate);
+                push(&cond.test);
+                push(&cond.consequent);
+                push(&cond.alternate);
             }
             Expression::ArrayExpression(arr) => {
                 for elem in &arr.elements {
                     if let Some(elem_expr) = elem.as_expression() {
-                        self.collect(elem_expr);
+                        push(elem_expr);
                     }
                 }
             }
             Expression::ObjectExpression(obj) => {
                 for prop in &obj.properties {
                     match prop {
-                        ObjectPropertyKind::ObjectProperty(prop) => self.collect(&prop.value),
-                        ObjectPropertyKind::SpreadProperty(prop) => self.collect(&prop.argument),
+                        ObjectPropertyKind::ObjectProperty(prop) => push(&prop.value),
+                        ObjectPropertyKind::SpreadProperty(prop) => push(&prop.argument),
                     }
                 }
             }
             Expression::TemplateLiteral(tpl) => {
                 for expr in &tpl.expressions {
-                    self.collect(expr);
+                    push(expr);
                 }
             }
             Expression::TaggedTemplateExpression(tagged) => {
-                self.collect(&tagged.tag);
+                push(&tagged.tag);
                 for expr in &tagged.quasi.expressions {
-                    self.collect(expr);
+                    push(expr);
                 }
             }
-            Expression::StaticMemberExpression(member) => self.collect(&member.object),
+            Expression::StaticMemberExpression(member) => push(&member.object),
             Expression::ComputedMemberExpression(member) => {
-                self.collect(&member.object);
-                self.collect(&member.expression);
+                push(&member.object);
+                push(&member.expression);
             }
-            Expression::ChainExpression(chain) => self.collect_chain(&chain.expression),
+            Expression::ChainExpression(chain) => {
+                pending.push(PendingReference::Chain(&chain.expression));
+            }
             _ => {}
         }
     }
 
-    /// Handle `ChainElement` variants (optional chaining: `a?.b?.c()`).
-    fn collect_chain(&mut self, chain: &ChainElement<'_>) {
+    /// Push a `ChainElement`'s children (optional chaining: `a?.b?.c()`),
+    /// in order.
+    fn visit_chain<'e, 'x>(
+        chain: &'e ChainElement<'x>,
+        pending: &mut Vec<PendingReference<'e, 'x>>,
+    ) {
+        let mut push = |expr: &'e Expression<'x>| pending.push(PendingReference::Expression(expr));
         match chain {
             ChainElement::CallExpression(call) => {
-                self.collect(&call.callee);
+                push(&call.callee);
                 for arg in &call.arguments {
                     if let Some(arg_expr) = arg.as_expression() {
-                        self.collect(arg_expr);
+                        push(arg_expr);
                     }
                 }
             }
             ChainElement::ComputedMemberExpression(member) => {
-                self.collect(&member.object);
-                self.collect(&member.expression);
+                push(&member.object);
+                push(&member.expression);
             }
-            ChainElement::StaticMemberExpression(member) => self.collect(&member.object),
-            ChainElement::TSNonNullExpression(non_null) => self.collect(&non_null.expression),
+            ChainElement::StaticMemberExpression(member) => push(&member.object),
+            ChainElement::TSNonNullExpression(non_null) => push(&non_null.expression),
             _ => {}
         }
     }

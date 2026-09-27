@@ -3238,3 +3238,56 @@ fn with_defaults_bound_props_genuinely_unused_member_records_no_read_while_armed
         "an armed pass over a bounded member read must not fail open: no escape"
     );
 }
+
+/// Module references are collected in source order, each site before the
+/// sites nested in its arguments.
+#[test]
+fn collects_nested_module_references_in_source_order() {
+    let result = analyze(
+        "const v = f(import('./a'), cond ? require('./b') : g(import(require('./c'))), x?.(import('./d')));",
+    );
+    let specifiers: Vec<_> = result
+        .module_references
+        .iter()
+        .map(|reference| reference.literal_specifier.as_deref())
+        .collect();
+    assert_eq!(
+        specifiers,
+        [Some("./a"), Some("./b"), None, Some("./c"), Some("./d")]
+    );
+}
+
+/// The module-reference collector walks 10,000 nested calls on a 1 MiB
+/// thread, outside any stack containment: it walks from an explicit stack,
+/// never a native frame per call.
+#[test]
+fn the_module_reference_collector_walks_10000_nested_calls_on_a_small_stack() {
+    let references = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let source = format!(
+                "{}require('./deep'){}",
+                "f(".repeat(10_000),
+                ")".repeat(10_000)
+            );
+            let allocator = Allocator::new();
+            let expression = Parser::new(&allocator, &source, SourceType::ts())
+                .parse_expression()
+                .expect("the calls parse");
+            let mut references = Vec::new();
+            collect_module_references_from_expression(
+                &expression,
+                &source,
+                &FxHashMap::default(),
+                &mut references,
+            );
+            references
+                .into_iter()
+                .map(|reference| reference.literal_specifier)
+                .collect::<Vec<_>>()
+        })
+        .expect("spawn the collecting thread")
+        .join()
+        .expect("the collector returns");
+    assert_eq!(references, [Some("./deep".to_string())]);
+}
