@@ -21880,3 +21880,35 @@ fn missing_sfc_entry_block_for_empty_style_or_custom_block_only_carriers() {
         );
     }
 }
+
+/// A template nested 10,000 deep compiles on a 1 MiB thread, to the
+/// runtime render function and to TSX with its template data: the
+/// handler-cache and array-group-cache reservations and the template data
+/// walk run from explicit stacks.
+#[test]
+fn a_template_nested_10000_deep_compiles_on_a_small_stack() {
+    const DEPTH: usize = 10_000;
+    let compiled = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let source = format!(
+                "<template>{}x{}</template>
+",
+                "<div>".repeat(DEPTH),
+                "</div>".repeat(DEPTH)
+            );
+            let runtime = compile_sfc(&source);
+            let tsx = compile_tsx_with_template_data(&source);
+            let data = tsx.template_data.as_ref().expect("template data");
+            (
+                runtime.errors.len(),
+                tsx.errors.len(),
+                data.elements.len(),
+                data.max_nesting_depth,
+            )
+        })
+        .expect("spawn the compiling thread")
+        .join()
+        .expect("the compile returns");
+    assert_eq!(compiled, (0, 0, DEPTH, DEPTH as u16));
+}

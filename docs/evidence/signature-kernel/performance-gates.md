@@ -745,6 +745,24 @@ Recorded plainly so no reader mistakes absence for a pass:
   budget, so the return is its typed budget failure; it returns on the
   production stacks, in about 6 s unoptimized.
 
+* **Template nesting walks from explicit stacks.** The carrier projection
+  (`project_vue_node`), the template data walk
+  (`walk_node_for_extraction`) and the VDOM code generator's handler-cache
+  and array-group-cache reservations recursed once per nested element: a
+  template nested 10,000 deep overflowed a 1 MiB thread in each,
+  unoptimized. Each now walks from an explicit stack in the order it
+  walked recursively: the projection writes a node's placeholder and kind
+  first and its children range once they have projected, the template
+  data walk keeps a stack of sibling lists each with its own `v-if` chain,
+  and the reservations visit an element's children before the element.
+  `compile_tests.rs` →
+  `a_template_nested_10000_deep_compiles_on_a_small_stack` compiles such a
+  template to the render function and to TSX with its template data
+  (10,000 elements, nesting depth 10,000), and
+  `registered_carrier_projection_tests.rs` →
+  `a_template_nested_10000_deep_projects_on_a_small_stack` projects it, on
+  a 1 MiB thread; restoring any of the four recursions overflows it.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the
