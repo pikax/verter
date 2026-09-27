@@ -180,9 +180,10 @@ impl Drop for RecursionStackGuard {
 /// leave `state.claimed == true` with `state.completed == None`. Any
 /// subsequent caller for the same key would block on the condvar forever
 /// because no publish ever wakes it. The guard detects the abnormal drop
-/// via a `completed` flag, marks the entry with an error sentinel, wakes
-/// joiners, and removes the entry from the in-flight table so fresh
-/// callers start a new build.
+/// via a `completed` flag, marks the entry aborted (a partial,
+/// non-cacheable fault sentinel), wakes joiners so they retry cold, and
+/// removes the entry from the in-flight table so fresh callers start a new
+/// build.
 pub(super) struct InflightPanicGuard<'a> {
     inflight: Arc<FlightCell>,
     registration: InflightRegistration<'a>,
@@ -232,9 +233,12 @@ impl<'a> Drop for InflightPanicGuard<'a> {
         if self.finished {
             return;
         }
-        // Panic / early-return path — mark the entry completed with an
-        // error sentinel so joiners can wake and fail fresh rather than
-        // wait forever on a condvar that will never be signalled.
+        // Panic / early-return path — mark the entry aborted, with an
+        // error sentinel, so joiners wake rather than wait forever on a
+        // condvar that will never be signalled. The build answered
+        // nothing: a parked joiner retries the query cold, and one past
+        // its retry budget reads a partial, non-cacheable fault, never a
+        // finished error it could admit.
         {
             let mut state = self.inflight.state.lock();
             if state.completed.is_none() {
@@ -243,6 +247,11 @@ impl<'a> Drop for InflightPanicGuard<'a> {
                 ))));
                 state.dep_signature = Some(empty_signature());
             }
+            state.aborted = true;
+            state.graph_carrier = None;
+            state.cache_suppress = true;
+            state.result_is_partial = true;
+            state.partial_reasons = crate::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT;
         }
         self.inflight.ready.notify_all();
         // `ptr_eq`-guarded remove: only retire THIS guard's own
