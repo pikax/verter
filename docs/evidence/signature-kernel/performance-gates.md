@@ -667,6 +667,29 @@ Recorded plainly so no reader mistakes absence for a pass:
   constraint and default still lower in place, one native level per
   signature nested in a bound.
 
+* **Nested calls lower from the task stack, each call's arguments once
+  per position.** The slice lowering recorded a call's whole-value
+  arguments, lowered its callee and lowered its frame-lowered arguments by
+  recursing into `lower_expr` for each: 3,000 nested calls `g(g(…))`
+  overflowed the lowering at the 174th, unoptimized. A nested call lowers
+  again as an argument of the call around it, once among the whole-value
+  arguments that call records and once among its frame-lowered arguments,
+  and each lowering of it lowered its own frame-lowered arguments again, so
+  the lowerings grew with the square of the depth (529 and 2,081 at 32 and
+  64 levels). A call is now frames of `lower_expr`'s task stack (its
+  recording, its callee's value-rooted object, its frame-lowered
+  arguments), the frame-lowered arguments a call lowered are kept by its
+  span, mode and whole-value position for the lowering's lifetime (unless
+  the lowering reached a side channel), and `SliceExpr`'s `Drop` takes a
+  call's owned operand and arguments onto its stack.
+  `flow_slice_content_tests.rs` → `nested_calls_lower_each_call_a_bounded_number_of_times`
+  counts three lowerings per nested call (22, 46, 94 and 190 at 8, 16, 32
+  and 64 levels) and `calls_nested_10000_deep_lower_on_a_small_stack`
+  lowers 10,000 nested calls on a 1 MiB thread; dropping the kept
+  arguments makes the counts quadratic again, and recording the
+  arguments, lowering the frame-lowered arguments or dropping a call's
+  arguments in place overflows the thread.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the

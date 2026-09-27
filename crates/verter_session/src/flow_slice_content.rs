@@ -1660,6 +1660,23 @@ impl SliceExpr {
             }
             SliceExpr::Arithmetic { operands, .. } => take_all(operands, out),
             SliceExpr::Union { arms, .. } => take_all(arms, out),
+            SliceExpr::Call(call, _, arguments) => {
+                match call {
+                    SliceCall::Nested(value)
+                    | SliceCall::OnValue { object: value, .. }
+                    | SliceCall::Member {
+                        receiver: value, ..
+                    }
+                    | SliceCall::Construct(value)
+                    | SliceCall::TaggedTemplate(value) => take(value, out),
+                    _ => {}
+                }
+                if let Some(arguments) = Arc::get_mut(&mut arguments.0) {
+                    for argument in arguments.iter_mut().flatten() {
+                        take(argument, out);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1696,6 +1713,76 @@ impl OperatorShape {
                     operands: Arc::from(operands.into_boxed_slice()),
                 }
             }
+        }
+    }
+}
+
+/// A call's whole-value argument recording in progress, stepped by
+/// [`Lowerer::record_call_step`].
+struct CallRecordFrame<'e, 'x> {
+    call: &'e oxc_ast::ast::CallExpression<'x>,
+    /// The side channels as they stood before the recording.
+    mark: SideChannelMark,
+    recorded: Vec<SliceCallArgument>,
+    /// Argument `recorded.len()`'s value, waiting on its const-context
+    /// view.
+    value: Option<SliceExpr>,
+}
+
+/// A call's frame-lowered argument lowering in progress, stepped by
+/// [`Lowerer::call_arguments_step`]: the carrier they attach to and the
+/// arguments lowered so far.
+struct CallArgumentsFrame<'e, 'x> {
+    lowered: SliceExpr,
+    call: &'e oxc_ast::ast::CallExpression<'x>,
+    mode: ExprMode,
+    key: (oxc_span::Span, ExprMode, bool),
+    mark: SideChannelMark,
+    arguments: Vec<Option<SliceExpr>>,
+}
+
+/// What a call's frame-lowered argument lowering needs next.
+enum CallArgumentsStep<'e, 'x> {
+    /// The argument to lower, with the frame waiting on it.
+    Descend(Box<CallArgumentsFrame<'e, 'x>>, &'e Expression<'x>),
+    /// The call carrier with its arguments attached.
+    Done(SliceExpr),
+}
+
+/// The side channels a lowering can reach (the budget failure, the
+/// decided-above call spans and the control-test gap), as they stood at
+/// one point.
+struct SideChannelMark {
+    budget_failure: Option<verter_type_expr::facts::InferenceUnavailableReason>,
+    decided_above: usize,
+    control_test_gap: bool,
+}
+
+/// Whether a call argument lowers through the frame's own carriers
+/// ([`Lowerer::lower_call_arguments`]): a call that is no immediately
+/// invoked function, or a static member read (through parentheses).
+fn lowers_in_frame(argument: &oxc_ast::ast::Argument<'_>) -> bool {
+    argument
+        .as_expression()
+        .map(unwrap_parenthesized)
+        .is_some_and(|argument| match argument {
+            Expression::CallExpression(call) => !matches!(
+                unwrap_parenthesized(&call.callee),
+                Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)
+            ),
+            Expression::StaticMemberExpression(_) => true,
+            _ => false,
+        })
+}
+
+/// The arguments slot of the call carrier `lowered` is (through
+/// frame-shadow wrappers), if it is one.
+fn call_arguments_slot(mut lowered: &mut SliceExpr) -> Option<&mut SliceCallArguments> {
+    loop {
+        match lowered {
+            SliceExpr::Call(_, _, arguments) => return Some(arguments),
+            SliceExpr::FrameShadowed { inner, .. } => lowered = inner,
+            _ => return None,
         }
     }
 }
@@ -3650,6 +3737,7 @@ pub(crate) fn build_flow_slice_content(
         logical_value_sites: Vec::new(),
         decided_above_call_spans: Vec::new(),
         call_arguments: FxHashMap::default(),
+        lowered_call_arguments: FxHashMap::default(),
         whole_value_nesting: 0,
         predicate_guard_call_spans: FxHashSet::default(),
         non_narrowing_call_spans: FxHashSet::default(),
@@ -6065,7 +6153,7 @@ fn lower_params(
 
 /// The expression-lowering position, selecting the shared shallow-pass
 /// entry's literal policy.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum ExprMode {
     /// Return-argument position (including an expression-bodied arrow's
     /// synthesized return): the literal is PRESERVED here — tsc widens a
@@ -7083,6 +7171,11 @@ struct Lowerer<'a> {
     /// The frame-lowered argument values of each call — see
     /// [`SliceContent::call_arguments`].
     call_arguments: FxHashMap<verter_span::Span, Arc<[SliceCallArgument]>>,
+    /// The frame-lowered arguments of each call, by the call's span, its
+    /// mode and whether it lowered as (or inside) a whole value — see
+    /// [`Lowerer::call_arguments_frame`]. Owned by this lowering and
+    /// dropped with it.
+    lowered_call_arguments: FxHashMap<(oxc_span::Span, ExprMode, bool), SliceCallArguments>,
     /// Nonzero while a call argument lowers as a WHOLE value: every
     /// position inside it is a value position, whatever the demand
     /// selected.
@@ -13993,11 +14086,16 @@ impl<'a> Lowerer<'a> {
     /// invoked function — its callee resolved through the frame's one
     /// lexical binding authority, then the file-level callee rails. Its
     /// frame-lowered arguments are attached by [`Self::with_call_arguments`].
-    fn lower_call_expression(
+    ///
+    /// A member call on a constructed value or an object literal lowers
+    /// its object from `lower_expr`'s task stack: this sets `on_value` to
+    /// the member and returns a placeholder.
+    fn lower_call_expression<'e, 'x>(
         &mut self,
         expr: &Expression<'_>,
-        call: &oxc_ast::ast::CallExpression<'_>,
+        call: &'e oxc_ast::ast::CallExpression<'x>,
         mode: ExprMode,
+        on_value: &mut Option<&'e oxc_ast::ast::StaticMemberExpression<'x>>,
     ) -> SliceExpr {
         if let Expression::Identifier(callee) = &call.callee {
             let name = callee.name.as_str();
@@ -14145,17 +14243,8 @@ impl<'a> Lowerer<'a> {
         // literal: the object is a flow value, never a leaf answer.
         if let Expression::StaticMemberExpression(member) = unwrap_parenthesized(&call.callee) {
             if value_rooted_member_object(&member.object) {
-                self.open_value_rooted_reads += 1;
-                let object = self.lower_expr(&member.object, mode);
-                self.open_value_rooted_reads -= 1;
-                return SliceExpr::Call(
-                    SliceCall::OnValue {
-                        object: Box::new(object),
-                        member: Arc::from(member.property.name.as_str()),
-                    },
-                    call_site(call),
-                    SliceCallArguments::none(),
-                );
+                *on_value = Some(member);
+                return SliceExpr::Elided;
             }
         }
         // A `super.m()` callee root: the base member resolves
@@ -14196,26 +14285,108 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Attach `arguments`' frame-lowered calls to the call carrier
-    /// `lowered` (through a frame-shadow wrapper). A position that lowered
-    /// to anything but a call carrier has no call sink to read them.
-    fn with_call_arguments(
+    /// Begin attaching `call`'s frame-lowered arguments
+    /// ([`Self::lower_call_arguments`]) to the call carrier `lowered`
+    /// (through a frame-shadow wrapper). A position that lowered to
+    /// anything but a call carrier has no call sink to read them.
+    ///
+    /// A call lowers again as an argument of the call around it: once
+    /// among the whole-value arguments that call records
+    /// ([`Self::record_call_start`]) and once among its frame-lowered
+    /// arguments, each of which lowered this call's own arguments again.
+    /// The arguments a call lowered are kept by its span, mode and
+    /// whole-value position, so a call's arguments lower once per position
+    /// and a nest of calls lowers in time linear in its depth. A lowering
+    /// that reached a side channel is not kept: lowering it again reaches
+    /// the side channel again.
+    fn call_arguments_frame<'e, 'x>(
         &mut self,
         mut lowered: SliceExpr,
-        arguments: &[oxc_ast::ast::Argument<'_>],
+        call: &'e oxc_ast::ast::CallExpression<'x>,
         mode: ExprMode,
-    ) -> SliceExpr {
-        match &mut lowered {
-            SliceExpr::Call(_, _, lowered_arguments) => {
-                *lowered_arguments = self.lower_call_arguments(arguments, mode);
-            }
-            SliceExpr::FrameShadowed { inner, .. } => {
-                let taken = std::mem::replace(&mut **inner, SliceExpr::Elided);
-                **inner = self.with_call_arguments(taken, arguments, mode);
-            }
-            _ => {}
+    ) -> CallArgumentsStep<'e, 'x> {
+        if call_arguments_slot(&mut lowered).is_none() {
+            return CallArgumentsStep::Done(lowered);
         }
-        lowered
+        let key = (
+            call.span,
+            mode,
+            self.whole_value_nesting > 0 || self.open_value_rooted_reads > 0,
+        );
+        let kept = if call.arguments.iter().any(lowers_in_frame) {
+            self.lowered_call_arguments.get(&key).cloned()
+        } else {
+            Some(SliceCallArguments::none())
+        };
+        if let Some(arguments) = kept {
+            if let Some(slot) = call_arguments_slot(&mut lowered) {
+                *slot = arguments;
+            }
+            return CallArgumentsStep::Done(lowered);
+        }
+        let frame = CallArgumentsFrame {
+            lowered,
+            call,
+            mode,
+            key,
+            mark: self.side_channel_mark(),
+            arguments: Vec::with_capacity(call.arguments.len()),
+        };
+        self.call_arguments_step(Box::new(frame), None)
+    }
+
+    /// Continue a call's frame-lowered arguments with `delivered`, the
+    /// lowering of the argument it asked for last: the next argument
+    /// lowered in the frame, or the carrier with its arguments attached.
+    fn call_arguments_step<'e, 'x>(
+        &mut self,
+        mut frame: Box<CallArgumentsFrame<'e, 'x>>,
+        delivered: Option<SliceExpr>,
+    ) -> CallArgumentsStep<'e, 'x> {
+        if let Some(value) = delivered {
+            frame.arguments.push(Some(value));
+        }
+        let call = frame.call;
+        while let Some(argument) = call.arguments.get(frame.arguments.len()) {
+            if lowers_in_frame(argument) {
+                let expression = argument
+                    .as_expression()
+                    .expect("an in-frame argument is an expression");
+                return CallArgumentsStep::Descend(frame, unwrap_parenthesized(expression));
+            }
+            frame.arguments.push(None);
+        }
+        let CallArgumentsFrame {
+            mut lowered,
+            key,
+            mark,
+            arguments,
+            ..
+        } = *frame;
+        let arguments = SliceCallArguments(Arc::from(arguments.into_boxed_slice()));
+        if !self.side_channel_since(&mark) {
+            self.lowered_call_arguments.insert(key, arguments.clone());
+        }
+        if let Some(slot) = call_arguments_slot(&mut lowered) {
+            *slot = arguments;
+        }
+        CallArgumentsStep::Done(lowered)
+    }
+
+    /// The side channels a lowering can reach, as they stand now.
+    fn side_channel_mark(&self) -> SideChannelMark {
+        SideChannelMark {
+            budget_failure: self.budget_failure,
+            decided_above: self.decided_above_call_spans.len(),
+            control_test_gap: self.control_test_gap,
+        }
+    }
+
+    /// Whether a lowering since `mark` reached a side channel.
+    fn side_channel_since(&self, mark: &SideChannelMark) -> bool {
+        self.budget_failure != mark.budget_failure
+            || self.decided_above_call_spans.len() != mark.decided_above
+            || self.control_test_gap != mark.control_test_gap
     }
 
     /// The [`SliceCallArguments`] of one call's `arguments`: each argument
@@ -14229,26 +14400,13 @@ impl<'a> Lowerer<'a> {
         arguments: &[oxc_ast::ast::Argument<'_>],
         mode: ExprMode,
     ) -> SliceCallArguments {
-        let in_frame = |argument: &oxc_ast::ast::Argument<'_>| {
-            argument
-                .as_expression()
-                .map(unwrap_parenthesized)
-                .is_some_and(|argument| match argument {
-                    Expression::CallExpression(call) => !matches!(
-                        unwrap_parenthesized(&call.callee),
-                        Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)
-                    ),
-                    Expression::StaticMemberExpression(_) => true,
-                    _ => false,
-                })
-        };
-        if !arguments.iter().any(in_frame) {
+        if !arguments.iter().any(lowers_in_frame) {
             return SliceCallArguments::none();
         }
         let lowered: Vec<Option<SliceExpr>> = arguments
             .iter()
             .map(|argument| {
-                in_frame(argument).then(|| {
+                lowers_in_frame(argument).then(|| {
                     let expression = unwrap_parenthesized(
                         argument
                             .as_expression()
@@ -14296,6 +14454,57 @@ impl<'a> Lowerer<'a> {
             Build(OperatorShape),
             Branches(ConditionalStart),
             Object(ObjectFrame<'e, 'a>),
+            /// A call recording its whole-value arguments
+            /// ([`Lowerer::record_call_step`]), waiting on the one it
+            /// asked for last.
+            CallRecord(CallRecordFrame<'e, 'a>),
+            /// A call whose callee lowers once its arguments are recorded.
+            CallCallee(
+                &'e Expression<'a>,
+                &'e oxc_ast::ast::CallExpression<'a>,
+                ExprMode,
+            ),
+            /// A call on a value-rooted member, waiting on the member's
+            /// object.
+            CallOnValue(
+                &'e oxc_ast::ast::CallExpression<'a>,
+                &'e oxc_ast::ast::StaticMemberExpression<'a>,
+                ExprMode,
+            ),
+            /// A call lowering its frame-lowered arguments
+            /// ([`Lowerer::call_arguments_step`]), waiting on the one it
+            /// asked for last.
+            CallArguments(Box<CallArgumentsFrame<'e, 'a>>),
+        }
+        /// Push what a call's frame-lowered argument lowering asks for next.
+        fn continue_call_arguments<'e, 'a>(
+            step: CallArgumentsStep<'e, 'a>,
+            tasks: &mut Vec<Task<'e, 'a>>,
+            values: &mut Vec<SliceExpr>,
+        ) {
+            match step {
+                CallArgumentsStep::Descend(frame, child) => {
+                    let mode = frame.mode;
+                    tasks.push(Task::CallArguments(frame));
+                    tasks.push(Task::Lower(child, mode));
+                }
+                CallArgumentsStep::Done(value) => values.push(value),
+            }
+        }
+        /// Push the argument a call's whole-value recording asks for next.
+        fn continue_call_record<'e, 'a>(
+            frame: CallRecordFrame<'e, 'a>,
+            child: Option<(&'e Expression<'a>, bool)>,
+            tasks: &mut Vec<Task<'e, 'a>>,
+        ) {
+            if let Some((child, const_context)) = child {
+                tasks.push(Task::CallRecord(frame));
+                tasks.push(if const_context {
+                    Task::LowerConst(child, ExprMode::Return)
+                } else {
+                    Task::Lower(child, ExprMode::Return)
+                });
+            }
         }
         let mut tasks = vec![Task::Lower(expr, mode)];
         let mut values: Vec<SliceExpr> = Vec::new();
@@ -14330,11 +14539,62 @@ impl<'a> Lowerer<'a> {
                         continue;
                     }
                     let mut transparent = None;
-                    let value = self.lower_expr_level(expr, mode, &mut transparent);
-                    match transparent {
-                        Some(inner) => tasks.push(Task::Lower(inner, mode)),
-                        None => values.push(value),
+                    let mut deferred_call = None;
+                    let value =
+                        self.lower_expr_level(expr, mode, &mut transparent, &mut deferred_call);
+                    match (transparent, deferred_call) {
+                        (Some(inner), _) => tasks.push(Task::Lower(inner, mode)),
+                        // A call records its arguments as whole values,
+                        // then lowers its callee, then its frame-lowered
+                        // arguments.
+                        (None, Some(call)) => {
+                            tasks.push(Task::CallCallee(expr, call, mode));
+                            if let Some(mut frame) = self.record_call_start(call) {
+                                let child = self.record_call_step(&mut frame, None);
+                                continue_call_record(frame, child, &mut tasks);
+                            }
+                        }
+                        (None, None) => values.push(value),
                     }
+                }
+                Task::CallRecord(mut frame) => {
+                    let delivered = values.pop().expect("the argument the call asked for");
+                    let child = self.record_call_step(&mut frame, Some(delivered));
+                    continue_call_record(frame, child, &mut tasks);
+                }
+                Task::CallCallee(expr, call, mode) => {
+                    let mut on_value = None;
+                    let lowered = self.lower_call_expression(expr, call, mode, &mut on_value);
+                    match on_value {
+                        Some(member) => {
+                            self.open_value_rooted_reads += 1;
+                            tasks.push(Task::CallOnValue(call, member, mode));
+                            tasks.push(Task::Lower(&member.object, mode));
+                        }
+                        None => {
+                            let step = self.call_arguments_frame(lowered, call, mode);
+                            continue_call_arguments(step, &mut tasks, &mut values);
+                        }
+                    }
+                }
+                Task::CallOnValue(call, member, mode) => {
+                    let object = values.pop().expect("the member's object");
+                    self.open_value_rooted_reads -= 1;
+                    let lowered = SliceExpr::Call(
+                        SliceCall::OnValue {
+                            object: Box::new(object),
+                            member: Arc::from(member.property.name.as_str()),
+                        },
+                        call_site(call),
+                        SliceCallArguments::none(),
+                    );
+                    let step = self.call_arguments_frame(lowered, call, mode);
+                    continue_call_arguments(step, &mut tasks, &mut values);
+                }
+                Task::CallArguments(frame) => {
+                    let delivered = values.pop().expect("the argument the call asked for");
+                    let step = self.call_arguments_step(frame, Some(delivered));
+                    continue_call_arguments(step, &mut tasks, &mut values);
                 }
                 Task::Build(shape) => {
                     let value = shape.build(&mut values);
@@ -14533,6 +14793,7 @@ impl<'a> Lowerer<'a> {
         expr: &'e Expression<'x>,
         mode: ExprMode,
         transparent: &mut Option<&'e Expression<'x>>,
+        deferred_call: &mut Option<&'e oxc_ast::ast::CallExpression<'x>>,
     ) -> SliceExpr {
         match self.lower_evolving_operation(expr, mode) {
             EvolvingLowering::Operation(operation) => {
@@ -14687,10 +14948,13 @@ impl<'a> Lowerer<'a> {
                 tagged_template_site(tagged),
                 SliceCallArguments::none(),
             ),
+            // Every other call lowers as frames of `lower_expr`'s task
+            // stack (`Task::CallCallee` and the frames it starts), so a
+            // call nested in a call's arguments or callee costs no native
+            // level.
             Expression::CallExpression(call) => {
-                self.record_call_arguments(call);
-                let lowered = self.lower_call_expression(expr, call, mode);
-                self.with_call_arguments(lowered, &call.arguments, mode)
+                *deferred_call = Some(call);
+                SliceExpr::Elided
             }
             // A member read off a constructed value or an object literal
             // (`new C().p`, `({ a: 1 }).a`, `({ o: { x: 1 } }).o.x`).
@@ -15992,53 +16256,92 @@ impl<'a> Lowerer<'a> {
     /// resolved at this function value's own position. The descriptor retains
     /// exact captured identities and lexical signature facts. Its body lowers
     /// only when evaluated, through the child's own indexed graph and demand.
-    /// Lower every argument of `call` in this frame as a whole value
-    /// ([`SliceContent::call_arguments`]). The lowering leaves no trace
+    /// Begin lowering every argument of `call` in this frame as a whole
+    /// value ([`SliceContent::call_arguments`]), from `lower_expr`'s task
+    /// stack ([`Self::record_call_step`]). The lowering leaves no trace
     /// beside the recorded values: a side channel it reached is undone
-    /// and the call keeps its indexed arguments.
-    fn record_call_arguments(&mut self, call: &oxc_ast::ast::CallExpression<'_>) {
+    /// and the call keeps its indexed arguments. `None` when the call
+    /// records nothing.
+    fn record_call_start<'e, 'x>(
+        &mut self,
+        call: &'e oxc_ast::ast::CallExpression<'x>,
+    ) -> Option<CallRecordFrame<'e, 'x>> {
         if call
             .arguments
             .iter()
             .any(|argument| argument.as_expression().is_none())
         {
-            return;
+            return None;
         }
         // A call lowers again as an argument of the call around it (its
         // frame-lowered arguments, [`Self::lower_call_arguments`]); the
         // arguments it recorded the first time are the same, and lowering
         // them again from every enclosing call doubled the work per level.
         if self.call_arguments.contains_key(&call.span.into()) {
-            return;
+            return None;
         }
-        let budget_failure = self.budget_failure;
-        let decided_above = self.decided_above_call_spans.len();
-        let control_test_gap = self.control_test_gap;
+        let mark = self.side_channel_mark();
         self.whole_value_nesting += 1;
-        let arguments: Vec<SliceCallArgument> = call
-            .arguments
-            .iter()
-            .filter_map(|argument| argument.as_expression())
-            .map(|argument| SliceCallArgument {
-                value: self.lower_expr(argument, ExprMode::Return),
-                const_context: matches!(
+        Some(CallRecordFrame {
+            call,
+            mark,
+            recorded: Vec::with_capacity(call.arguments.len()),
+            value: None,
+        })
+    }
+
+    /// Continue recording a call's whole-value arguments with `delivered`,
+    /// the lowering it asked for last: each argument's value, then, for an
+    /// object or array literal, its const-context view. Returns the next
+    /// argument to lower (and whether in its const context), or `None`
+    /// once every argument is recorded.
+    fn record_call_step<'e, 'x>(
+        &mut self,
+        frame: &mut CallRecordFrame<'e, 'x>,
+        delivered: Option<SliceExpr>,
+    ) -> Option<(&'e Expression<'x>, bool)> {
+        let call = frame.call;
+        if let Some(delivered) = delivered {
+            let argument = call.arguments[frame.recorded.len()]
+                .as_expression()
+                .expect("a recorded argument is an expression");
+            match frame.value.take() {
+                Some(value) => frame.recorded.push(SliceCallArgument {
+                    value,
+                    const_context: Some(delivered),
+                }),
+                None if matches!(
                     value_descent(unwrap_parenthesized(argument)),
                     ValueDescent::Object(_) | ValueDescent::Array(_)
-                )
-                .then(|| self.lower_in_const_context(argument, ExprMode::Return)),
-            })
-            .collect();
-        self.whole_value_nesting -= 1;
-        let side_channel = self.budget_failure != budget_failure
-            || self.decided_above_call_spans.len() != decided_above
-            || self.control_test_gap != control_test_gap;
-        self.budget_failure = budget_failure;
-        self.decided_above_call_spans.truncate(decided_above);
-        self.control_test_gap = control_test_gap;
-        if !side_channel {
-            self.call_arguments
-                .insert(call.span.into(), Arc::from(arguments.into_boxed_slice()));
+                ) =>
+                {
+                    frame.value = Some(delivered);
+                    return Some((argument, true));
+                }
+                None => frame.recorded.push(SliceCallArgument {
+                    value: delivered,
+                    const_context: None,
+                }),
+            }
         }
+        if let Some(argument) = call.arguments.get(frame.recorded.len()) {
+            let argument = argument
+                .as_expression()
+                .expect("a recorded argument is an expression");
+            return Some((argument, false));
+        }
+        self.whole_value_nesting -= 1;
+        let side_channel = self.side_channel_since(&frame.mark);
+        self.budget_failure = frame.mark.budget_failure;
+        self.decided_above_call_spans
+            .truncate(frame.mark.decided_above);
+        self.control_test_gap = frame.mark.control_test_gap;
+        if !side_channel {
+            let recorded = std::mem::take(&mut frame.recorded);
+            self.call_arguments
+                .insert(call.span.into(), Arc::from(recorded.into_boxed_slice()));
+        }
+        None
     }
 
     fn lower_nested_function(&mut self, node: &FunctionNode<'_>) -> SliceExpr {
