@@ -286,6 +286,9 @@ export function lgAndNarrow(v: string | undefined) { return v !== undefined && v
 export function lgOrNarrow(v: string | undefined) { return v === undefined || v; }
 export function lgAssignInCond() { let x: string | undefined; if ((x = maybe())) return x; throw 0; }
 export function lgCommaValue() { let x = 0; return (x++, "s"); }
+export function lgCommaAssign() { let x: string | number = 0; return (x = "s", x); }
+export function lgCommaTwo() { let x = 0; let y: string | boolean = true; return (x++, y = "t", y); }
+export function lgCommaLet() { let x: string | number = "a"; const v = (x = 1, 2); return [v, x] as const; }
 export function lgOptionalMember(o: { a?: { b: number } }) { return o.a?.b; }
 export function lgOptionalCall(f?: () => string) { return f?.(); }
 export function lgNonNull(v: string | undefined) { return v!; }
@@ -363,16 +366,17 @@ fn a_logical_expression_keeps_a_redundant_literal_as_the_checker_reduces_it() {
 }
 
 /// `(x++, "s")` is `string`: the comma expression applies the increment and
-/// takes its last operand's type.
-///
-/// What the lane gives:
-/// - `lgCommaValue`: the checker answers `string`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnappliedWriteEffect.
+/// takes its last operand's type; every discarded write applies in order
+/// and the last operand reads what they wrote.
 #[test]
-#[ignore = "a comma expression applies its operands' writes and is its last operand"]
 fn a_comma_expression_is_its_last_operand_after_its_writes() {
     let matrix = Matrix::new(LOGICAL);
-    let failures = matrix.returns(&[("lgCommaValue", "string")]);
+    let failures = matrix.returns(&[
+        ("lgCommaValue", "string"),
+        ("lgCommaAssign", "string"),
+        ("lgCommaTwo", "string"),
+        ("lgCommaLet", "readonly [2, number]"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

@@ -763,3 +763,94 @@ fn a_private_name_in_test_narrows_by_its_class() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Classes whose static private names brand their constructor.
+const PRIVATE_BRAND_SUBJECTS: &str = r##"
+class SS { static #s = 1; static is(x: typeof SS | { z: 1 }) { if (#s in x) return x; throw 0; } }
+class SI { static #s = 1; static is(x: typeof SI | SI) { if (#s in x) return x; throw 0; } }
+"##;
+
+/// A static private name brands the class constructor, so `#s in x` keeps
+/// `typeof SS`, and drops the instance arm of `typeof SI | SI`. Measured on
+/// TypeScript 7.0.2, alike under all four settings.
+const PRIVATE_BRAND_SUBJECT_ROWS: [(&str, &str); 2] = [
+    ("ReturnType<typeof SS.is>", "typeof SS"),
+    ("ReturnType<typeof SI.is>", "typeof SI"),
+];
+
+/// Each private-brand subject row that does not read the checker's answer,
+/// only those the lane publishes clean when `clean_only`.
+fn private_brand_subject_misses(clean_only: bool) -> Vec<String> {
+    let matrix = Matrix::new(PRIVATE_BRAND_SUBJECTS);
+    let rows: Vec<(Read<'_>, Vec<&str>)> = PRIVATE_BRAND_SUBJECT_ROWS
+        .iter()
+        .map(|(text, answer)| (Read::Type(text), vec![*answer; 4]))
+        .collect();
+    PRIVATE_BRAND_SUBJECT_ROWS
+        .iter()
+        .zip(matrix.verdicts(&rows))
+        .flat_map(|((text, _), verdicts)| {
+            verdicts
+                .into_iter()
+                .filter(|verdict| !verdict.matched && (!clean_only || verdict.class != "GAP"))
+                .map(move |verdict| format!("`{text}`: {}", verdict.lane))
+        })
+        .collect()
+}
+
+/// A constructor brand, which this vocabulary does not carry, degrades
+/// instead of narrowing to the instance type.
+#[test]
+fn a_static_private_brand_is_never_read_as_the_instance() {
+    let wrong = private_brand_subject_misses(true);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// What the lane gives: each row keeps the unnarrowed subject, degraded by
+/// UnresolvedValue (the constructor type reads its own `typeof` parameter).
+#[test]
+#[ignore = "a static private-name brand narrows to the class constructor"]
+fn a_static_private_name_in_test_narrows_to_its_constructor() {
+    let failures = private_brand_subject_misses(false);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Class members whose returns narrow through a guard the lane degrades.
+const DEGRADED_MEMBER_RETURNS: &str = r##"
+class CS { static is(x: Record<string, number> | string[]) { if ("a" in x) { return x; } return null!; } }
+class CM { m(x: Record<string, number> | string[]) { if ("a" in x) { return x; } return null!; } }
+class CG<T> { t?: T; static is(x: Record<string, number> | string[]) { if ("a" in x) { return x; } return null!; } }
+export function viaStatic(x: Record<string, number> | string[]) { return CS.is(x); }
+export function viaMethod(x: Record<string, number> | string[]) { return new CM().m(x); }
+export function viaGeneric(x: Record<string, number> | string[]) { return CG.is(x); }
+class GB<T> { #g = 1; t?: T; static is(x: GB<string> | { z: 1 }) { if (#g in x) return x; throw 0; } }
+export function viaBrand(x: GB<string> | { z: 1 }) { return GB.is(x); }
+"##;
+
+/// A call of a class member whose body-derived return degraded (here by
+/// the `in` guard over an index-signature arm, and by a generic class's
+/// private brand) carries the degradation to its caller, as a call of a
+/// function declaration does, instead of publishing the unnarrowed union
+/// clean. The checker answers `Record<string, number>` (and `GB<string>`),
+/// measured on TypeScript 7.0.2, alike under all four settings.
+#[test]
+fn a_call_of_a_degraded_member_return_is_never_read_clean() {
+    let matrix = Matrix::new(DEGRADED_MEMBER_RETURNS);
+    let rows: Vec<(Read<'_>, Vec<&str>)> = [
+        ("viaStatic", "Record<string, number>"),
+        ("viaMethod", "Record<string, number>"),
+        ("viaGeneric", "Record<string, number>"),
+        ("viaBrand", "GB<string>"),
+    ]
+    .iter()
+    .map(|(function, answer)| (Read::Return(function), vec![*answer; 4]))
+    .collect();
+    let wrong: Vec<String> = matrix
+        .verdicts(&rows)
+        .into_iter()
+        .flatten()
+        .filter(|verdict| !verdict.matched && verdict.class != "GAP")
+        .map(|verdict| verdict.lane)
+        .collect();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
