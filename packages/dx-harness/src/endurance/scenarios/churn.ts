@@ -828,8 +828,13 @@ export function decideChurnSlope(
     const shiftBytes = shiftIndex > 0 ? rss[shiftIndex] - rss[shiftIndex - 1] : 0;
     const band = role === "root" ? bands.rssSettlingBytes : bands.childPlateauBytes;
     // A child has no exact figure, so its resident set carries the trend test
-    // too: a slow, steady climb that still fits the band is not a plateau.
-    const testTrend = role === "child";
+    // too: a slow, steady climb that still fits the band is not a plateau. A
+    // segment shorter than a plateau proof has too few readings for a slope's
+    // standard error to mean anything (two readings have none), so only its
+    // band is read; the post-shift segment always has enough, or it is
+    // inconclusive already.
+    const testTrend = (readings: number) =>
+      role === "child" && readings >= bands.minPlateauReadings;
     let levelShift: ChurnLevelShift | null = null;
     let inconclusive = false;
     let rssChecks: PlateauCheck[];
@@ -851,9 +856,9 @@ export function decideChurnSlope(
       // has no slope to judge, and the post-shift segment covers the span.
       rssChecks = [before, after]
         .filter((segment) => segment.ys.length >= 2)
-        .map((segment) => plateau(segment.xs, segment.ys, band, testTrend));
+        .map((segment) => plateau(segment.xs, segment.ys, band, testTrend(segment.ys.length)));
     } else {
-      rssChecks = [plateau(cycles, rss, band, testTrend)];
+      rssChecks = [plateau(cycles, rss, band, testTrend(rss.length))];
     }
     // A child whose resident set rises significantly inside its band has not
     // shown a plateau yet: a Go collector's heap goal can drift for a few

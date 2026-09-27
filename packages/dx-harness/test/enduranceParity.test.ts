@@ -1361,6 +1361,26 @@ describe("churn retained-byte plateau verdict", () => {
     expect(slope.pass).toBe(true);
   });
 
+  it("reads only the band of a pre-shift segment too short to carry a trend", () => {
+    // Two readings before an early shift, 4 KiB apart, then a flat new level:
+    // two readings leave a slope no standard error, so a trend test would call
+    // any difference significant and no extension could ever add readings
+    // before the shift. The segment is read against its band only.
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB,
+        provider: 35 * MIB + (cycles >= 550 ? 26 * MIB : cycles >= 500 ? 4 * KIB : 0),
+      })),
+      options,
+    );
+    const child = member(slope, "child");
+    expect(child?.levelShift).toMatchObject({ fromCycle: 600, toCycle: 650 });
+    expect(child?.rss[0].readings).toBe(2);
+    expect(child?.rss[0].significantlyRising).toBe(false);
+    expect(child?.inconclusive, slope.detail).toBe(false);
+    expect(slope.pass, slope.detail).toBe(true);
+  });
+
   it("does not accept a second level shift", () => {
     const slope = decideChurnSlope(
       trajectory((cycles) => ({
