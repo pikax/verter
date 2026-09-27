@@ -12007,15 +12007,19 @@ impl<'a> Lowerer<'a> {
             return None;
         }
         let field = private_in.left.name.as_str();
+        // An instance private name brands the class's instances; a static
+        // one brands the constructor (`#s in v` narrows to `typeof C`),
+        // which this guard does not carry.
         let declares = |class: &oxc_ast::ast::Class<'_>| {
             class.body.body.iter().any(|element| {
-                let key = match element {
-                    ClassElement::MethodDefinition(method) => &method.key,
-                    ClassElement::PropertyDefinition(property) => &property.key,
-                    ClassElement::AccessorProperty(accessor) => &accessor.key,
+                let (key, is_static) = match element {
+                    ClassElement::MethodDefinition(method) => (&method.key, method.r#static),
+                    ClassElement::PropertyDefinition(property) => (&property.key, property.r#static),
+                    ClassElement::AccessorProperty(accessor) => (&accessor.key, accessor.r#static),
                     _ => return false,
                 };
-                matches!(key, PropertyKey::PrivateIdentifier(name) if name.name.as_str() == field)
+                !is_static
+                    && matches!(key, PropertyKey::PrivateIdentifier(name) if name.name.as_str() == field)
             })
         };
         let span = private_in.span;
@@ -12072,7 +12076,8 @@ impl<'a> Lowerer<'a> {
             outer: class.span,
             found: false,
         };
-        redeclared.visit_class(class);
+        self.walks
+            .with_node_stack(class.span, || redeclared.visit_class(class));
         (!redeclared.found).then(|| Arc::from(name))
     }
 
