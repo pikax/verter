@@ -2984,6 +2984,11 @@ pub(crate) struct ParseSnapshot {
     pub(crate) markup_class_tokens: Vec<verter_semantic::analysis::MarkupClassToken>,
     /// Blocks that need external preprocessing (non-native `lang` attributes).
     pub(crate) preprocessor_requests: Vec<PendingPreprocessorRequest>,
+    /// The source's script parse, or the walk-stack lease of its walks, was
+    /// refused: nothing in this snapshot was read from the script, and the
+    /// source stage reports the refusal in its place
+    /// ([`verter_scheduler::executor::StageErrorKind::StackUnavailable`]).
+    pub(crate) refused: Option<verter_parser::oxc_parse::StackUnavailable>,
 }
 
 #[derive(Debug, Clone)]

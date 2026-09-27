@@ -36,6 +36,14 @@ pub enum StageErrorKind {
         /// The adapter id of the carrier-less language row.
         adapter_id: FrameworkAdapterId,
     },
+    /// The source nests deeper than a stack this host can provide: its
+    /// parse, or the walk-stack lease of the walks over its program, was
+    /// refused. Typed operational incompleteness: the stage publishes
+    /// nothing for the source, never an empty file's facts in its place.
+    StackUnavailable {
+        /// The bytes of stack the parse or its walks needed.
+        needed: usize,
+    },
 }
 
 impl StageError {
@@ -57,6 +65,17 @@ impl StageError {
                  adapter '{adapter_id}'"
             ),
             kind: StageErrorKind::UnsupportedLanguage { adapter_id },
+        }
+    }
+
+    /// Typed stack refusal: the source nests deeper than a stack this host
+    /// can provide, so its parse or its walks did not run.
+    pub fn stack_unavailable(needed: usize) -> Self {
+        Self {
+            message: format!(
+                "the source nests deeper than a stack this host can provide ({needed} bytes needed)"
+            ),
+            kind: StageErrorKind::StackUnavailable { needed },
         }
     }
 }

@@ -935,6 +935,7 @@ fn build_svelte_snapshot_from_eval_source(
         prepared_styles: Vec::new(),
         markup_class_tokens: Vec::new(),
         preprocessor_requests: Vec::new(),
+        refused: None,
     };
 
     // The eval-source IS the carrier's position-preserving extracted script — so
@@ -990,7 +991,9 @@ fn build_svelte_snapshot_from_eval_source(
             });
             let result = parser.parse();
             if result.fatal_error {
-                fatal_snapshot(None)
+                let mut fatal = fatal_snapshot(None);
+                fatal.refused = verter_parser::oxc_parse::parse_refusal(&result);
+                fatal
             } else {
                 match top_level_owner_table(&result.program, Some(artifact)) {
                     Ok(owners) => build_snapshot_from_program_with_owners(
@@ -1711,8 +1714,10 @@ pub(crate) fn build_vue_snapshot_from_parsed(
                 .needs_script_analysis()
                 .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
             panic_diags: Vec::new(),
+            refused: None,
         },
     };
+    let refused = script_outputs.refused;
     let export_signatures = script_outputs.export_signatures;
     let mut script_analysis = script_outputs.script_analysis.unwrap_or_default();
     // Producer-side locator absolutization: fill the analyzer's empty-sentinel
@@ -1762,6 +1767,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
         prepared_styles,
         markup_class_tokens: Vec::new(),
         preprocessor_requests,
+        refused,
     }
 }
 
@@ -2123,6 +2129,9 @@ struct VueScriptOutputs {
     /// Panic diagnostics in production order: parse, export walk,
     /// analysis walk.
     panic_diags: Vec<HostDiagnostic>,
+    /// The script's parse, or the walk-stack lease of its walks, was
+    /// refused: nothing above was read from it.
+    refused: Option<verter_parser::oxc_parse::StackUnavailable>,
 }
 
 /// Where the `.vue` snapshot build gets its script program from.
@@ -2155,7 +2164,39 @@ pub(crate) enum VueScriptProgram<'a> {
 /// Each walk is caught independently (an export-walk panic still
 /// yields script analysis, and vice versa), preserving the
 /// per-consumer granularity the split builders had.
+///
+/// The walks run under the program's walk-stack lease: when it is refused
+/// none of them runs, and the outputs carry the refusal instead.
 fn vue_script_walks_from_program(
+    script_source: &str,
+    source_type: SourceType,
+    program: &Program<'_>,
+    owners: &verter_semantic::analysis::TopLevelOwnerTable,
+    needs_exports: bool,
+    needs_script_analysis: bool,
+    parse_errors: bool,
+) -> VueScriptOutputs {
+    verter_parser::oxc_parse::with_program_walk_stack_lease(program, || {
+        vue_script_walks_under_lease(
+            script_source,
+            source_type,
+            program,
+            owners,
+            needs_exports,
+            needs_script_analysis,
+            parse_errors,
+        )
+    })
+    .unwrap_or_else(|refused| VueScriptOutputs {
+        export_signatures: Vec::new(),
+        script_analysis: needs_script_analysis
+            .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+        panic_diags: Vec::new(),
+        refused: Some(refused),
+    })
+}
+
+fn vue_script_walks_under_lease(
     script_source: &str,
     source_type: SourceType,
     program: &Program<'_>,
@@ -2169,6 +2210,7 @@ fn vue_script_walks_from_program(
         script_analysis: needs_script_analysis
             .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
         panic_diags: Vec::new(),
+        refused: None,
     };
 
     if needs_exports {
@@ -2236,6 +2278,7 @@ fn vue_script_walks_for_sfc(
             script_analysis: needs_script_analysis
                 .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
             panic_diags: vec![script_owner_index_diagnostic(&error, script_source)],
+            refused: None,
         },
     }
 }
@@ -2272,6 +2315,7 @@ fn build_vue_script_outputs(
         script_analysis: needs_script_analysis
             .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
         panic_diags: Vec::new(),
+        refused: None,
     };
     if !needs_exports && !needs_script_analysis {
         return outputs;
@@ -2302,6 +2346,7 @@ fn build_vue_script_outputs(
         return outputs;
     };
     if parse_result.fatal_error {
+        outputs.refused = verter_parser::oxc_parse::parse_refusal(&parse_result);
         return outputs;
     }
 
@@ -2535,7 +2580,58 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
     )
 }
 
+/// The snapshot of a script whose parse failed fatally: nothing read from
+/// it. `refused` is the stack refusal the parse, or the walk-stack lease
+/// of its walks, returned in its place, which the source stage reports
+/// instead of publishing this snapshot.
+fn fatal_script_snapshot(
+    source: &str,
+    refused: Option<verter_parser::oxc_parse::StackUnavailable>,
+) -> ParseSnapshot {
+    ParseSnapshot {
+        whole_hash: hash_16(source.as_bytes()),
+        semantic_hash: hash_16(source.as_bytes()),
+        slices: SliceHashes::default(),
+        descriptor: DescriptorMin::default(),
+        meta: FileMeta::default(),
+        external_requests: Vec::new(),
+        src_blocks: Vec::new(),
+        parse_diagnostics: DiagnosticsSnapshot::default(),
+        script_analysis: Arc::new(verter_semantic::analysis::ScriptAnalysisSnapshot::default()),
+        export_signatures: Vec::new(),
+        style_analyses: Vec::new(),
+        prepared_styles: Vec::new(),
+        markup_class_tokens: Vec::new(),
+        preprocessor_requests: Vec::new(),
+        refused,
+    }
+}
+
+/// The snapshot of a parsed script program, its walks run under the
+/// program's walk-stack lease: when the lease is refused none of them runs,
+/// and the snapshot carries the refusal instead.
 fn build_snapshot_from_program_with_owners(
+    canonical_id: &str,
+    source: &str,
+    source_type: SourceType,
+    program: &Program<'_>,
+    owners: &verter_semantic::analysis::TopLevelOwnerTable,
+    parse_errors: bool,
+) -> ParseSnapshot {
+    verter_parser::oxc_parse::with_program_walk_stack_lease(program, || {
+        build_snapshot_under_lease(
+            canonical_id,
+            source,
+            source_type,
+            program,
+            owners,
+            parse_errors,
+        )
+    })
+    .unwrap_or_else(|refused| fatal_script_snapshot(source, Some(refused)))
+}
+
+fn build_snapshot_under_lease(
     canonical_id: &str,
     source: &str,
     source_type: SourceType,
@@ -2588,6 +2684,7 @@ fn build_snapshot_from_program_with_owners(
         prepared_styles: Vec::new(),
         markup_class_tokens: Vec::new(),
         preprocessor_requests: Vec::new(),
+        refused: None,
     }
 }
 
@@ -2615,22 +2712,7 @@ pub(crate) fn parse_non_sfc_snapshot(
     });
     let result = parser.parse();
     if result.fatal_error {
-        return ParseSnapshot {
-            whole_hash: hash_16(source.as_bytes()),
-            semantic_hash: hash_16(source.as_bytes()),
-            slices: SliceHashes::default(),
-            descriptor: DescriptorMin::default(),
-            meta: FileMeta::default(),
-            external_requests: Vec::new(),
-            src_blocks: Vec::new(),
-            parse_diagnostics: DiagnosticsSnapshot::default(),
-            script_analysis: Arc::new(verter_semantic::analysis::ScriptAnalysisSnapshot::default()),
-            export_signatures: Vec::new(),
-            style_analyses: Vec::new(),
-            prepared_styles: Vec::new(),
-            markup_class_tokens: Vec::new(),
-            preprocessor_requests: Vec::new(),
-        };
+        return fatal_script_snapshot(source, verter_parser::oxc_parse::parse_refusal(&result));
     }
 
     build_non_sfc_snapshot_from_program(

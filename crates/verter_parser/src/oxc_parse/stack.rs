@@ -80,7 +80,11 @@ pub fn remaining() -> Option<usize> {
 /// place when the stack this thread runs on has them; on the lease's
 /// region, without reserving, when the thread holds a lease covering them;
 /// on a region of `needed` bytes reserved for it otherwise.
-pub fn with_stack<R>(needed: usize, work: impl FnOnce() -> R) -> Result<R, StackUnavailable> {
+pub fn with_stack<R>(
+    needed: usize,
+    purpose: Reservation,
+    work: impl FnOnce() -> R,
+) -> Result<R, StackUnavailable> {
     if remaining().is_some_and(|left| left >= needed) {
         return Ok(work());
     }
@@ -96,10 +100,10 @@ pub fn with_stack<R>(needed: usize, work: impl FnOnce() -> R) -> Result<R, Stack
                 region if !region.busy.get() => Ok(region.run(work)),
                 // Work on the region is suspended under a region reserved
                 // past the lease: this walk gets one of its own.
-                _ => Ok(Region::reserve(needed)?.run(work)),
+                _ => Ok(Region::reserve(needed, purpose)?.run(work)),
             },
         },
-        _ => Ok(Region::reserve(needed)?.run(work)),
+        _ => Ok(Region::reserve(needed, purpose)?.run(work)),
     }
 }
 
@@ -121,7 +125,7 @@ pub fn with_walk_stack_lease<R>(
     let region = if remaining().is_some_and(|left| left >= needed) {
         None
     } else {
-        Some(Region::reserve(needed)?)
+        Some(Region::reserve(needed, Reservation::Lease)?)
     };
     let _lease = LeaseScope::enter(Lease {
         bytes: needed,
@@ -188,21 +192,53 @@ fn thread_remaining() -> Option<usize> {
     Some(stack_pointer().saturating_sub(&raw const __stack_low as usize))
 }
 
+/// What a stack region is reserved for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reservation {
+    /// A parse whose source nests deeper than the thread's stack.
+    Parse,
+    /// An operation's walk-stack lease.
+    Lease,
+    /// A walk no lease covers.
+    Walk,
+}
+
 /// Reservation counting and fault injection at the one step that can fail:
-/// tests make the next reservations on a thread fail and count them,
-/// without exhausting the machine.
+/// tests make reservations fail and count them, without exhausting the
+/// machine. A thread's own next reservations fail on
+/// [`faults::fail_next_reservations`]; a reservation on any thread (a
+/// scheduler worker's) fails on [`faults::fail_reservations_needing`] when
+/// its purpose and size match.
 #[cfg(any(test, feature = "stack-fault-injection"))]
 pub mod faults {
     use std::cell::Cell;
+    use std::sync::Mutex;
+
+    pub use super::Reservation;
 
     thread_local! {
         static FAILING: Cell<usize> = const { Cell::new(0) };
         static RESERVED: Cell<usize> = const { Cell::new(0) };
     }
 
+    /// Reservations on any thread still to fail: purpose, bytes, count.
+    static TARGETED: Mutex<Vec<(Reservation, usize, usize)>> = Mutex::new(Vec::new());
+
     /// Make the next `count` reservations on this thread fail.
     pub fn fail_next_reservations(count: usize) {
         FAILING.with(|failing| failing.set(count));
+    }
+
+    /// Make the next `count` reservations for `purpose` of exactly `needed`
+    /// bytes fail, on whichever thread makes them.
+    pub fn fail_reservations_needing(purpose: Reservation, needed: usize, count: usize) {
+        let mut targeted = TARGETED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        targeted.retain(|&(held, bytes, _)| (held, bytes) != (purpose, needed));
+        if count > 0 {
+            targeted.push((purpose, needed, count));
+        }
     }
 
     /// The reservations this thread attempted since the last call, failed
@@ -212,13 +248,30 @@ pub mod faults {
     }
 
     /// Count one reservation; whether it is to fail.
-    pub(super) fn reserving() -> bool {
+    pub(super) fn reserving(needed: usize, purpose: Reservation) -> bool {
         RESERVED.with(|reserved| reserved.set(reserved.get() + 1));
-        FAILING.with(|failing| {
+        let thread_fails = FAILING.with(|failing| {
             let left = failing.get();
             failing.set(left.saturating_sub(1));
             left > 0
-        })
+        });
+        if thread_fails {
+            return true;
+        }
+        let mut targeted = TARGETED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(at) = targeted
+            .iter()
+            .position(|&(held, bytes, _)| (held, bytes) == (purpose, needed))
+        else {
+            return false;
+        };
+        targeted[at].2 -= 1;
+        if targeted[at].2 == 0 {
+            targeted.remove(at);
+        }
+        true
     }
 }
 
@@ -232,11 +285,13 @@ pub(crate) struct Region {
 
 impl Region {
     /// Reserve a region of at least `needed` bytes of stack.
-    pub(crate) fn reserve(needed: usize) -> Result<Region, StackUnavailable> {
+    pub(crate) fn reserve(needed: usize, purpose: Reservation) -> Result<Region, StackUnavailable> {
         #[cfg(any(test, feature = "stack-fault-injection"))]
-        if faults::reserving() {
+        if faults::reserving(needed, purpose) {
             return Err(StackUnavailable { needed });
         }
+        #[cfg(not(any(test, feature = "stack-fault-injection")))]
+        let _ = purpose;
         platform::Region::reserve(needed)
             .map(|platform| Region {
                 platform,

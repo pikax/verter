@@ -216,7 +216,7 @@ fn parse_with_stack_under<R>(
             needed: depth.saturating_mul(profile.bytes_per_level),
         });
     }
-    stack::with_stack(stack_bytes(depth), parse)
+    stack::with_stack(stack_bytes(depth), stack::Reservation::Parse, parse)
 }
 
 /// Run `walk`, a walk of oxc's over parsed syntax, with at least `needed`
@@ -227,7 +227,7 @@ fn parse_with_stack_under<R>(
 /// address space exhausted since, which ends the process as any failed
 /// allocation does.
 fn walk_with_stack<R>(needed: usize, walk: impl FnOnce() -> R) -> R {
-    match stack::with_stack(needed, walk) {
+    match stack::with_stack(needed, stack::Reservation::Walk, walk) {
         Ok(result) => result,
         Err(unavailable) => std::alloc::handle_alloc_error(
             std::alloc::Layout::from_size_align(unavailable.needed.max(1), 16)
@@ -273,6 +273,34 @@ pub fn with_program_walk_stack_lease<R>(
 pub fn stack_unavailable_diagnostic(unavailable: StackUnavailable) -> OxcDiagnostic {
     OxcDiagnostic::error(unavailable.to_string())
         .with_error_code(STACK_UNAVAILABLE_SCOPE, STACK_UNAVAILABLE_CODE)
+        .with_note(unavailable.needed.to_string())
+}
+
+/// The refusal a parse returned in place of its program: the
+/// [`StackUnavailable`] its [`stack_unavailable_diagnostic`] carries, when
+/// the parse is fatal and carries one.
+pub fn parse_refusal(parsed: &ParserReturn<'_>) -> Option<StackUnavailable> {
+    if !parsed.fatal_error {
+        return None;
+    }
+    diagnostics_refusal(parsed.diagnostics.errors())
+}
+
+/// The [`StackUnavailable`] a [`stack_unavailable_diagnostic`] among
+/// `diagnostics` carries.
+pub fn diagnostics_refusal<'d>(
+    diagnostics: impl IntoIterator<Item = &'d OxcDiagnostic>,
+) -> Option<StackUnavailable> {
+    diagnostics
+        .into_iter()
+        .find(|diagnostic| is_stack_unavailable(diagnostic))
+        .map(|diagnostic| StackUnavailable {
+            needed: diagnostic
+                .note
+                .as_deref()
+                .and_then(|needed| needed.parse().ok())
+                .unwrap_or(usize::MAX),
+        })
 }
 
 /// Whether `diagnostic` is [`stack_unavailable_diagnostic`]'s: the parse

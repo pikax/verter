@@ -6654,6 +6654,12 @@ impl Scheduler {
                             adapter_id,
                         }
                     }
+                    crate::executor::StageErrorKind::StackUnavailable { needed } => {
+                        SchedulerError::StackUnavailable {
+                            file_id: node.canonical_id.clone(),
+                            needed,
+                        }
+                    }
                     crate::executor::StageErrorKind::Generic => SchedulerError::StageFailed {
                         file_id: node.canonical_id.clone(),
                         stage: "Source".to_string(),

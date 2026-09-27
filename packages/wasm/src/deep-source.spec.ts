@@ -8,7 +8,9 @@
  * The module parses under the V8 engine-stack profile
  * (`V8_DEFAULT_STACK_PROFILE` in `verter_parser::oxc_parse`): a script
  * whose nesting bound passes the profile's is not parsed, as typed
- * operational incompleteness, and the same instance goes on serving.
+ * operational incompleteness: the upsert reports the typed refusal, the
+ * host publishes nothing for the file, and the same instance goes on
+ * serving.
  *
  * These run on the engine they load in, so an engine or oxc whose frames
  * cost more than the profile measured fails the admitted depth here: the
@@ -69,18 +71,26 @@ describe("@verter/wasm deeply nested script", () => {
     expect(bindingNames(host, "/Admitted.vue")).toEqual(["n"]);
   });
 
-  it("refuses one level past the profile, and far past it, without trapping the instance", () => {
+  it("refuses one level past the profile, and far past it, as typed incompleteness", () => {
     for (const depth of [PROFILE_NESTING, PROFILE_NESTING * 100]) {
-      expect(() => {
-        host.upsert({ inputId: "/Refused.vue", source: nestedObjects(depth) });
-        host.getAnalysis("/Refused.vue");
-        host.lint("/Refused.vue", undefined);
-      }, `depth ${depth}`).not.toThrow();
+      // The upsert reports the typed refusal: the source stage published
+      // nothing for the file, rather than an empty file's facts.
+      expect(
+        () => host.upsert({ inputId: `/Refused${depth}.vue`, source: nestedObjects(depth) }),
+        `depth ${depth}`,
+      ).toThrow(/nests deeper than a stack this host can provide/);
+      // No analysis is served for it, and no diagnostic is read off an
+      // empty program: the template's `n` is not reported undefined.
+      expect(host.getAnalysis(`/Refused${depth}.vue`) ?? null).toBeNull();
+      const lint = host.lint(`/Refused${depth}.vue`, undefined) as { rule: string }[];
+      expect(lint.filter((diagnostic) => diagnostic.rule === "no-undef-properties")).toEqual([]);
     }
   });
 
   it("serves a shallow script on the same instance after a refused one", () => {
-    host.upsert({ inputId: "/Refused.vue", source: nestedObjects(PROFILE_NESTING * 100) });
+    expect(() =>
+      host.upsert({ inputId: "/Refused.vue", source: nestedObjects(PROFILE_NESTING * 100) }),
+    ).toThrow(/nests deeper than a stack this host can provide/);
     host.upsert({ inputId: "/Shallow.vue", source: SHALLOW });
     expect(bindingNames(host, "/Shallow.vue")).toEqual(["n"]);
     // The refused file itself parses again once it is shallow.

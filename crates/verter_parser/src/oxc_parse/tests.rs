@@ -1580,7 +1580,7 @@ fn a_grown_stack_commits_what_the_walk_touches_not_what_it_reserves() {
 fn a_stack_that_cannot_be_reserved_is_a_typed_failure() {
     let needed = 1usize << (usize::BITS - 2);
     let mut ran = false;
-    let result = super::stack::with_stack(needed, || ran = true);
+    let result = super::stack::with_stack(needed, super::stack::Reservation::Walk, || ran = true);
     assert_eq!(result, Err(super::StackUnavailable { needed }));
     assert!(!ran);
 }
@@ -1601,6 +1601,10 @@ fn a_parse_without_its_stack_returns_the_typed_diagnostic() {
     assert_eq!(unparsed.diagnostics.len(), 1);
     let diagnostic = unparsed.diagnostics.errors().next().expect("one error");
     assert!(super::is_stack_unavailable(diagnostic), "{diagnostic:?}");
+    assert_eq!(
+        super::parse_refusal(&unparsed),
+        Some(super::StackUnavailable { needed: 1 << 40 })
+    );
 }
 
 /// Run `work` on a fresh 1 MiB thread, its reservation count and fault
