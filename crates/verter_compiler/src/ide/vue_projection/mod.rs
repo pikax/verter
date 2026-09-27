@@ -5,7 +5,9 @@
 pub mod attribute_operations;
 pub mod binder_capture;
 pub mod binding_views;
+pub mod component_resolution;
 pub mod component_use;
+pub mod event_keys;
 pub mod generic_interop;
 pub mod options_api;
 pub mod props;
@@ -19,7 +21,11 @@ mod binder_capture_tests;
 #[cfg(test)]
 mod binding_views_tests;
 #[cfg(test)]
+mod component_resolution_tests;
+#[cfg(test)]
 mod component_use_tests;
+#[cfg(test)]
+mod event_keys_tests;
 #[cfg(test)]
 mod generic_interop_tests;
 #[cfg(test)]

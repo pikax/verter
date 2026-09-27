@@ -2340,6 +2340,7 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
                 param.name.hash(hasher);
                 param.optional.hash(hasher);
                 param.rest.hash(hasher);
+                param.declared_literal.hash(hasher);
             }
             type_parameters.len().hash(hasher);
             for decl in type_parameters.iter() {
@@ -2879,7 +2880,12 @@ fn compare_shallow(
                 mapper: mb,
             },
         ) => {
-            if ma.optionality != mb.optionality || ma.readonly != mb.readonly || ma.kind != mb.kind
+            // A homomorphic mapping passes a primitive source through where a
+            // concrete-key mapping enumerates its properties.
+            if ma.optionality != mb.optionality
+                || ma.readonly != mb.readonly
+                || ma.kind != mb.kind
+                || ma.over_type_variable != mb.over_type_variable
             {
                 return false;
             }
@@ -3088,8 +3094,14 @@ fn compare_shallow(
                 }
                 _ => return false,
             }
+            // A parameter written as a literal type makes the signature a
+            // specialized one, which overload priority reads.
             for (fa, fb) in pa.iter().zip(pb.iter()) {
-                if fa.name != fb.name || fa.optional != fb.optional || fa.rest != fb.rest {
+                if fa.name != fb.name
+                    || fa.optional != fb.optional
+                    || fa.rest != fb.rest
+                    || fa.declared_literal != fb.declared_literal
+                {
                     return false;
                 }
                 work.push((fa.ty, fb.ty));
