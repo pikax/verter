@@ -63,6 +63,29 @@ fn space_key_of<T: Hash>(value: &T) -> u64 {
     hash_u64(value) & 0x7FFF_FFFF
 }
 
+/// The binder space of a signature with no authored occurrence, named by
+/// its complete stable key: every field derives from the exact key bytes,
+/// never from the 64-bit fingerprint alone, so two signatures whose keys
+/// share a fingerprint but differ in bytes claim two identities, and a
+/// truncated-key clash between them is the store's typed collision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RootlessSpace {
+    key: u64,
+    identity: u128,
+    group: u64,
+}
+
+impl RootlessSpace {
+    fn of(key: &crate::semantic_query::stable_key::StableKey) -> Self {
+        let exact = key.exact();
+        Self {
+            key: space_key_of(&exact),
+            identity: identity_u128(&exact),
+            group: hash_u64(&exact),
+        }
+    }
+}
+
 /// Whether a canonical file id names a JavaScript-family module.
 fn is_js_canonical(canonical_id: &str) -> bool {
     std::path::Path::new(canonical_id)
@@ -134,9 +157,6 @@ impl DiscoveryTypes for GraphTypes<'_, '_> {
         let graph = self.dispatch.graph();
         let ka = crate::semantic_query::stable_key::stable_key_for_node(graph, na);
         let kb = crate::semantic_query::stable_key::stable_key_for_node(graph, nb);
-        if !ka.is_complete() || !kb.is_complete() {
-            return None;
-        }
         Some(ka == kb)
     }
 
@@ -771,22 +791,8 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             ),
             None => {
                 let key = crate::semantic_query::stable_key::stable_key_for_node(graph, node);
-                // Only a complete key proves which binder space a rootless
-                // signature's binders live in. A signature with no binders
-                // mints no binder token, so an over-deep structure still
-                // publishes: two of them sharing the depth-exhausted key
-                // share an EMPTY space, which identifies nothing.
-                if !key.is_complete() && !type_parameters.is_empty() {
-                    return unsettled();
-                }
-                let fingerprint = key.fingerprint();
-                (
-                    space_key_of(&fingerprint),
-                    identity_u128(&fingerprint),
-                    hash_u64(&fingerprint),
-                    0,
-                    ordinal,
-                )
+                let space = RootlessSpace::of(&key);
+                (space.key, space.identity, space.group, 0, ordinal)
             }
         };
         // An authored JavaScript signature with no type information at all:
@@ -2480,3 +2486,7 @@ fn incomplete_output(
 #[cfg(test)]
 #[path = "signature_epoch_tests.rs"]
 mod signature_epoch_tests;
+
+#[cfg(test)]
+#[path = "signature_rootless_space_tests.rs"]
+mod signature_rootless_space_tests;

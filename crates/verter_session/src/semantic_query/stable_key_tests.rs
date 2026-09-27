@@ -3,6 +3,9 @@
 
 use std::sync::Arc;
 
+use crate::project_semantic_dispatch::canonical_algebra::{
+    compare_structural, CanonicalEvidence, StructuralIdentity,
+};
 use crate::semantic_query::composite::{CompositeList, UnionKind};
 use crate::semantic_query::stable_key::{
     fingerprint_v1, sort_by_stable_key, stable_key_for_node, StableKey,
@@ -255,4 +258,1228 @@ fn union_views_are_scoped_to_their_store() {
         sorted(&b_members),
         "store B must read ITS union, not the view store A built under the same id"
     );
+}
+
+/// `depth` nested arrays around a `leaf` primitive.
+fn array_chain(graph: &SemanticGraphStore, depth: usize, leaf: PrimitiveKind) -> SemanticNodeId {
+    let mut node = prim(graph, leaf);
+    for _ in 0..depth {
+        node = graph.intern_node(SemanticNodeData::Array {
+            element: node,
+            readonly: false,
+        });
+    }
+    node
+}
+
+/// The members of a union node, or the node itself when it is not one.
+fn union_arms(graph: &SemanticGraphStore, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+    match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Union(list)) => list.iter().copied().collect(),
+        _ => vec![node],
+    }
+}
+
+/// A depth past 256 levels.
+const PAST_256_LEVELS: usize = 300;
+
+/// One store's fixture: two structures identical through
+/// [`PAST_256_LEVELS`] levels that differ only in their leaf, each also
+/// wrapped as an intersection arm, interned A-first or B-first.
+struct DeepPair {
+    graph: SemanticGraphStore,
+    a: SemanticNodeId,
+    b: SemanticNodeId,
+    a_arm: SemanticNodeId,
+    b_arm: SemanticNodeId,
+}
+
+impl DeepPair {
+    fn build(a_first: bool) -> Self {
+        let graph = SemanticGraphStore::new();
+        let (a, b) = if a_first {
+            let a = array_chain(&graph, PAST_256_LEVELS, PrimitiveKind::Number);
+            let b = array_chain(&graph, PAST_256_LEVELS, PrimitiveKind::String);
+            (a, b)
+        } else {
+            let b = array_chain(&graph, PAST_256_LEVELS, PrimitiveKind::String);
+            let a = array_chain(&graph, PAST_256_LEVELS, PrimitiveKind::Number);
+            (a, b)
+        };
+        let tag = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: crate::semantic_query::DeclIdentity::synthetic("Tag"),
+        });
+        let arm = |deep| {
+            crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
+                &graph,
+                &[tag, deep],
+            )
+            .node
+        };
+        let (a_arm, b_arm) = if a_first {
+            let a_arm = arm(a);
+            (a_arm, arm(b))
+        } else {
+            let b_arm = arm(b);
+            (arm(a), b_arm)
+        };
+        Self {
+            graph,
+            a,
+            b,
+            a_arm,
+            b_arm,
+        }
+    }
+
+    /// `"A"` / `"B"` for this store's nodes, so orders compare across stores.
+    fn label(&self, node: SemanticNodeId) -> &'static str {
+        if node == self.a || node == self.a_arm {
+            "A"
+        } else if node == self.b || node == self.b_arm {
+            "B"
+        } else {
+            panic!("an unexpected node {node:?} in the ordered output")
+        }
+    }
+
+    fn labels(&self, nodes: &[SemanticNodeId]) -> Vec<&'static str> {
+        nodes.iter().map(|node| self.label(*node)).collect()
+    }
+
+    /// Every union ordering consumer's answer over the pair, fed A-first or
+    /// B-first.
+    fn orders(&self, a_first: bool) -> Vec<Vec<&'static str>> {
+        use crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union;
+        use crate::semantic_query::stable_key::{
+            canonicalize_union_members, sort_union_members_by_stable_key,
+        };
+        let input = |x, y| if a_first { [x, y] } else { [y, x] };
+        let mut sorted = input(self.a, self.b);
+        sort_union_members_by_stable_key(&self.graph, &mut sorted);
+        let canonical = canonicalize_union_members(&self.graph, &input(self.a, self.b));
+        let union = intern_ordered_union(
+            &self.graph,
+            &input(self.a, self.b),
+            crate::semantic_query::NullabilityPolicy::Strict,
+        );
+        let arm_union = intern_ordered_union(
+            &self.graph,
+            &input(self.a_arm, self.b_arm),
+            crate::semantic_query::NullabilityPolicy::Strict,
+        );
+        vec![
+            self.labels(&sorted),
+            self.labels(&canonical),
+            self.labels(&union_arms(&self.graph, union.node)),
+            self.labels(&union_arms(&self.graph, arm_union.node)),
+        ]
+    }
+}
+
+/// Two structures identical through more than 256 levels that differ only
+/// below them get distinct keys, the same keys in two stores that interned
+/// them in opposite orders, and one canonical order through every union
+/// ordering consumer — never an order inherited from arrival.
+#[test]
+fn structures_differing_below_256_levels_keep_distinct_keys_and_one_order() {
+    let forward = DeepPair::build(true);
+    let reverse = DeepPair::build(false);
+    for pair in [&forward, &reverse] {
+        assert!(
+            stable_key_for_node(&pair.graph, pair.a) != stable_key_for_node(&pair.graph, pair.b),
+            "structures that differ below the 256th level must not share a key"
+        );
+        assert!(
+            stable_key_for_node(&pair.graph, pair.a_arm)
+                != stable_key_for_node(&pair.graph, pair.b_arm),
+            "intersections over them must not share a key"
+        );
+    }
+    for (node_forward, node_reverse) in [
+        (forward.a, reverse.a),
+        (forward.b, reverse.b),
+        (forward.a_arm, reverse.a_arm),
+        (forward.b_arm, reverse.b_arm),
+    ] {
+        assert!(
+            stable_key_for_node(&forward.graph, node_forward)
+                == stable_key_for_node(&reverse.graph, node_reverse),
+            "a key is a function of structure, not of intern order"
+        );
+    }
+    let expected = forward.orders(true);
+    for orders in [
+        forward.orders(false),
+        reverse.orders(true),
+        reverse.orders(false),
+    ] {
+        assert_eq!(
+            orders, expected,
+            "every ordering consumer answers one order in both stores and for both inputs"
+        );
+    }
+    for order in &expected {
+        assert_eq!(order.len(), 2, "no consumer collapses the pair: {order:?}");
+    }
+}
+
+/// An array node whose element is `next`, an id the store has not minted yet.
+fn array_of(graph: &SemanticGraphStore, next: u64) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::Array {
+        element: SemanticNodeId(next),
+        readonly: false,
+    })
+}
+
+/// A true cycle — a node reaching itself, directly or through another node
+/// — terminates at a back-reference to its open frame's level, so its key
+/// is finite and the same in stores where the cycle sits at other ids.
+#[test]
+fn true_cycles_terminate_at_level_back_references() {
+    let cycles = |padding: usize| {
+        let graph = SemanticGraphStore::new();
+        for index in 0..padding {
+            let _ = lit_str(&graph, &format!("padding-{index}"));
+        }
+        let own = graph.node_count() as u64;
+        let self_cycle = array_of(&graph, own);
+        assert_eq!(
+            self_cycle,
+            SemanticNodeId(own),
+            "the fixture needs a self edge"
+        );
+        let first = graph.node_count() as u64;
+        let head = array_of(&graph, first + 1);
+        let tail = graph.intern_node(SemanticNodeData::Tuple {
+            elements: Arc::from([crate::semantic_query::TupleElement {
+                label: None,
+                value: SemanticNodeId(first),
+                optional: false,
+                rest: false,
+            }]),
+            readonly: false,
+        });
+        assert_eq!(
+            (head, tail),
+            (SemanticNodeId(first), SemanticNodeId(first + 1)),
+            "the fixture needs a two-node cycle"
+        );
+        [
+            stable_key_for_node(&graph, self_cycle),
+            stable_key_for_node(&graph, head),
+            stable_key_for_node(&graph, tail),
+        ]
+    };
+    let near = cycles(0);
+    let far = cycles(17);
+    assert!(
+        near == far,
+        "a cycle's key does not depend on where its nodes sit"
+    );
+    // The self cycle is an array whose element is a back-reference to the
+    // root frame, level 0.
+    let back_reference = [1u8, 7, 1, 0, 0, 0, 0];
+    let mut expected = vec![1u8, 6, 3, 0];
+    expected.extend_from_slice(&(back_reference.len() as u32).to_le_bytes());
+    expected.extend_from_slice(&back_reference);
+    assert_eq!(near[0].exact(), expected.as_slice());
+    assert!(
+        near[1] != near[2],
+        "each entry point of a cycle keys its own shape"
+    );
+}
+
+/// Ten thousand levels encode completely on a 1 MiB thread: the encoder
+/// keeps its frames on the heap, so depth never reaches the native stack.
+#[test]
+fn ten_thousand_levels_encode_on_a_one_mebibyte_thread() {
+    const DEPTH: usize = 10_000;
+    let worker = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            use crate::semantic_query::stable_key::{
+                canonicalize_union_members, sort_union_members_by_stable_key,
+            };
+            let graph = SemanticGraphStore::new();
+            let b = array_chain(&graph, DEPTH, PrimitiveKind::String);
+            let a = array_chain(&graph, DEPTH, PrimitiveKind::Number);
+            let key_a = stable_key_for_node(&graph, a);
+            let key_b = stable_key_for_node(&graph, b);
+            assert!(key_a != key_b, "the leaves differ ten thousand levels down");
+            assert!(
+                key_a == stable_key_for_node(&graph, a),
+                "re-encoding reproduces the key"
+            );
+            let mut forward = [a, b];
+            let mut reverse = [b, a];
+            sort_union_members_by_stable_key(&graph, &mut forward);
+            sort_union_members_by_stable_key(&graph, &mut reverse);
+            assert_eq!(forward, reverse, "one order for both inputs");
+            assert_eq!(
+                canonicalize_union_members(&graph, &[b, a]).as_ref(),
+                &forward,
+                "the union view agrees with the sort"
+            );
+            key_a.exact().len()
+        })
+        .expect("spawn the 1 MiB encoder thread");
+    let bytes = worker
+        .join()
+        .expect("the encoder completes on a 1 MiB stack");
+    assert!(
+        bytes > DEPTH * 7,
+        "every level is in the key ({bytes} bytes for {DEPTH} levels)"
+    );
+}
+
+fn std_hash(key: &StableKey) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// `Eq`, `Ord` and `Hash` agree on every pair of keys: `a.cmp(b)` is
+/// `Equal` exactly when `a == b`, the order is antisymmetric and
+/// transitive, and equal keys hash alike. The adversaries are an encoded
+/// key deeper than 256 levels beside its byte-identical rebuild, equal
+/// prefixes, the empty key, and forced full fingerprint collisions: equal
+/// fingerprints over distinct bytes, and equal bytes under distinct
+/// fingerprints.
+#[test]
+fn stable_key_equality_order_and_hash_agree_on_every_pair() {
+    use std::cmp::Ordering;
+    let graph = SemanticGraphStore::new();
+    let deep = stable_key_for_node(
+        &graph,
+        array_chain(&graph, PAST_256_LEVELS, PrimitiveKind::Number),
+    );
+    let keys = [
+        deep.clone(),
+        StableKey::from_exact(deep.exact().to_vec()),
+        StableKey::from_exact(Vec::new()),
+        StableKey::from_exact(b"aa".to_vec()),
+        StableKey::from_exact(b"aaa".to_vec()),
+        StableKey::with_forced_fingerprint(Vec::new(), 7),
+        StableKey::with_forced_fingerprint(b"aa".to_vec(), 7),
+        StableKey::with_forced_fingerprint(b"aaa".to_vec(), 7),
+        StableKey::with_forced_fingerprint(b"ab".to_vec(), 7),
+        StableKey::with_forced_fingerprint(b"aa".to_vec(), 8),
+        StableKey::with_forced_fingerprint(deep.exact().to_vec(), deep.fingerprint()),
+    ];
+    assert!(
+        keys[0] == keys[1] && keys[0].cmp(&keys[1]) == Ordering::Equal,
+        "an encoded key equals its byte-identical rebuild under both relations"
+    );
+    for a in &keys {
+        for b in &keys {
+            assert_eq!(
+                a.cmp(b) == Ordering::Equal,
+                a == b,
+                "Ord and Eq disagree on {a:?} / {b:?}"
+            );
+            assert_eq!(a.partial_cmp(b), Some(a.cmp(b)));
+            assert_eq!(a.cmp(b), b.cmp(a).reverse(), "antisymmetry");
+            if a == b {
+                assert_eq!(std_hash(a), std_hash(b), "equal keys hash alike");
+            }
+            for c in &keys {
+                if a <= b && b <= c {
+                    assert!(a <= c, "transitivity over {a:?} <= {b:?} <= {c:?}");
+                }
+            }
+        }
+    }
+}
+
+/// An intrinsic application keys its op by the op's frozen, append-only
+/// stable tag, the one tag authority for compiler intrinsics. Every op is
+/// listed, each keeps its pinned tag, and no two ops share a key.
+#[test]
+fn intrinsic_applications_key_by_the_frozen_op_tag() {
+    use verter_type_expr::CompilerIntrinsicTypeOp;
+    // Exhaustive: a new op fails to compile here until it states its
+    // pinned tag, and it joins `every_op`, which `ALL` must cover.
+    let pinned = |op: CompilerIntrinsicTypeOp| match op {
+        CompilerIntrinsicTypeOp::Awaited => 0u8,
+    };
+    let every_op = [CompilerIntrinsicTypeOp::Awaited];
+    assert!(
+        every_op
+            .iter()
+            .all(|op| CompilerIntrinsicTypeOp::ALL.contains(op)),
+        "`ALL` lists every op"
+    );
+    let graph = SemanticGraphStore::new();
+    let operand = prim(&graph, PrimitiveKind::String);
+    let mut keys: Vec<StableKey> = Vec::new();
+    for op in CompilerIntrinsicTypeOp::ALL {
+        assert_eq!(op.stable_hash_tag(), pinned(*op), "{op:?} keeps its tag");
+        let node = graph.intern_node(
+            SemanticNodeData::intrinsic_application(*op, Arc::from(vec![operand; op.arity()]))
+                .expect("a well-formed application"),
+        );
+        let key = stable_key_for_node(&graph, node);
+        // Version, the synthetic category, the intrinsic-application
+        // sub-tag, then the op tag.
+        assert_eq!(&key.exact()[..4], &[1, 6, 21, pinned(*op)], "{op:?}");
+        assert!(!keys.contains(&key), "{op:?} shares a key with another op");
+        keys.push(key);
+    }
+}
+
+/// `count` unrelated literals, so the next nodes a store mints sit at other
+/// arena ids than in a fresh store.
+fn pad(graph: &SemanticGraphStore, count: usize) {
+    for index in 0..count {
+        let _ = lit_str(graph, &format!("padding-{index}"));
+    }
+}
+
+fn function_occurrence(
+    symbol: &str,
+    signature_ordinal: u32,
+) -> crate::semantic_query::SignatureNodeOccurrence {
+    use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
+    use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
+    crate::semantic_query::SignatureNodeOccurrence {
+        function: FlowFunctionReturnIdentity {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from("/src/f.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from(symbol),
+                space: LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        },
+        signature_ordinal,
+    }
+}
+
+/// One deferred callable `(x: param) => <deferred>`.
+fn deferred_callable(
+    graph: &SemanticGraphStore,
+    occurrence: crate::semantic_query::SignatureNodeOccurrence,
+    param: PrimitiveKind,
+    body_derived: bool,
+) -> SemanticNodeId {
+    use crate::semantic_query::{
+        DeferredCallable, FunctionParam, SignatureKind, SignatureReturnCarrier,
+    };
+    use verter_type_expr::facts::FunctionReturnSource;
+    let ty = prim(graph, param);
+    let return_carrier = SignatureReturnCarrier::Function(if body_derived {
+        FunctionReturnSource::Flow(occurrence.function.clone())
+    } else {
+        FunctionReturnSource::Absent
+    });
+    graph.intern_node(SemanticNodeData::DeferredCallable(
+        DeferredCallable::from_parts_for_tests(
+            SignatureKind::Call,
+            Arc::from([FunctionParam::synthetic(
+                Some(Arc::from("x")),
+                ty,
+                false,
+                false,
+            )]),
+            Arc::from(Vec::new()),
+            occurrence,
+            return_carrier,
+        ),
+    ))
+}
+
+/// A deferred callable keys its whole closed recipe — the served position
+/// it was composed at, its parameters and its deferred return carrier —
+/// and never the arena ids of its children.
+#[test]
+fn deferred_callables_key_their_composed_position_and_parameters() {
+    let graph = SemanticGraphStore::new();
+    let base = deferred_callable(
+        &graph,
+        function_occurrence("f", 0),
+        PrimitiveKind::Number,
+        true,
+    );
+    let variants = [
+        deferred_callable(
+            &graph,
+            function_occurrence("f", 1),
+            PrimitiveKind::Number,
+            true,
+        ),
+        deferred_callable(
+            &graph,
+            function_occurrence("g", 0),
+            PrimitiveKind::Number,
+            true,
+        ),
+        deferred_callable(
+            &graph,
+            function_occurrence("f", 0),
+            PrimitiveKind::String,
+            true,
+        ),
+        deferred_callable(
+            &graph,
+            function_occurrence("f", 0),
+            PrimitiveKind::Number,
+            false,
+        ),
+    ];
+    let mut keys = vec![stable_key_for_node(&graph, base)];
+    for variant in variants {
+        let key = stable_key_for_node(&graph, variant);
+        assert!(
+            !keys.contains(&key),
+            "deferred callables over another position, parameter or return share a key"
+        );
+        keys.push(key);
+    }
+    let elsewhere = SemanticGraphStore::new();
+    pad(&elsewhere, 11);
+    let same = deferred_callable(
+        &elsewhere,
+        function_occurrence("f", 0),
+        PrimitiveKind::Number,
+        true,
+    );
+    assert!(
+        stable_key_for_node(&elsewhere, same) == keys[0],
+        "the same recipe keys alike wherever its children sit"
+    );
+}
+
+fn synthetic_binding(
+    graph: &SemanticGraphStore,
+    scope: &str,
+    surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind,
+    slot_name: Option<&str>,
+    binding_name: &str,
+    value: PrimitiveKind,
+) -> SemanticNodeId {
+    let value = prim(graph, value);
+    graph.intern_node(SemanticNodeData::SyntheticBinding {
+        id: crate::semantic_query::SyntheticBindingId {
+            scope_canonical_id: Arc::from(scope),
+            surface_kind,
+            slot_name: slot_name.map(Arc::from),
+            binding_name: Arc::from(binding_name),
+        },
+        value_node: value.0,
+    })
+}
+
+/// A synthetic binding keys its synthesizing scope, its surface role, its
+/// slot and bound name, and the key of its bound value, never the arena
+/// ordinal of that value.
+#[test]
+fn synthetic_bindings_key_owner_role_position_and_value() {
+    use verter_type_expr::SyntheticCarrierSurfaceKind::{Binding, SlotBinding};
+    let graph = SemanticGraphStore::new();
+    let number = PrimitiveKind::Number;
+    let base = synthetic_binding(
+        &graph,
+        "/c.vue",
+        SlotBinding,
+        Some("default"),
+        "item",
+        number,
+    );
+    let variants = [
+        synthetic_binding(
+            &graph,
+            "/d.vue",
+            SlotBinding,
+            Some("default"),
+            "item",
+            number,
+        ),
+        synthetic_binding(&graph, "/c.vue", Binding, Some("default"), "item", number),
+        synthetic_binding(&graph, "/c.vue", SlotBinding, None, "item", number),
+        synthetic_binding(
+            &graph,
+            "/c.vue",
+            SlotBinding,
+            Some("header"),
+            "item",
+            number,
+        ),
+        synthetic_binding(
+            &graph,
+            "/c.vue",
+            SlotBinding,
+            Some("default"),
+            "row",
+            number,
+        ),
+        synthetic_binding(
+            &graph,
+            "/c.vue",
+            SlotBinding,
+            Some("default"),
+            "item",
+            PrimitiveKind::String,
+        ),
+    ];
+    let mut keys = vec![stable_key_for_node(&graph, base)];
+    for variant in variants {
+        let key = stable_key_for_node(&graph, variant);
+        assert!(
+            !keys.contains(&key),
+            "bindings with another owner, role, position or value share a key"
+        );
+        keys.push(key);
+    }
+    let elsewhere = SemanticGraphStore::new();
+    pad(&elsewhere, 5);
+    let same = synthetic_binding(
+        &elsewhere,
+        "/c.vue",
+        SlotBinding,
+        Some("default"),
+        "item",
+        number,
+    );
+    assert!(
+        stable_key_for_node(&elsewhere, same) == keys[0],
+        "the bound value keys by structure, not by its arena ordinal"
+    );
+}
+
+/// A raw fallback keys its raw text, the whole equality identity of the
+/// payload: the diagnostic provenance, which never distinguishes two
+/// payloads, never distinguishes two keys either.
+#[test]
+fn raw_fallbacks_key_their_raw_text_not_their_provenance() {
+    use verter_type_expr::UnknownValue;
+    let raw = |value: UnknownValue| {
+        let graph = SemanticGraphStore::new();
+        let node = graph.intern_node(SemanticNodeData::RawFallback { value });
+        stable_key_for_node(&graph, node)
+    };
+    assert!(
+        raw(UnknownValue::unsupported_syntax("Foo<"))
+            == raw(UnknownValue::jsdoc_parse_fallback("Foo<")),
+        "one raw text keys alike under every provenance"
+    );
+    assert!(
+        raw(UnknownValue::unsupported_syntax("Foo<"))
+            != raw(UnknownValue::unsupported_syntax("Bar<")),
+        "distinct raw text keys apart"
+    );
+}
+
+fn import_type(graph: &SemanticGraphStore, importer: Option<&str>) -> SemanticNodeId {
+    use crate::semantic_query::NodeScopeId;
+    let data = SemanticNodeData::new_import_type(
+        Arc::from("./m"),
+        Arc::from([Arc::<str>::from("G")]),
+        Arc::from(Vec::new()),
+        false,
+    );
+    match importer {
+        None => graph.intern_node(data),
+        Some(canonical) => graph.intern_node_with_scope(
+            data,
+            NodeScopeId::File {
+                canonical_id: Arc::from(canonical),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: [3u8; 16],
+                local_scope: None,
+            },
+        ),
+    }
+}
+
+/// An import-type carrier keys the importing source unit with its
+/// specifier (the whole resolver input), so one spelling written in two
+/// files, which can name two modules, keys as two identities, and the same
+/// import keys alike in every store.
+#[test]
+fn import_types_key_their_importing_unit_with_the_specifier() {
+    let graph = SemanticGraphStore::new();
+    let from_a = stable_key_for_node(&graph, import_type(&graph, Some("/src/a.ts")));
+    let from_nested = stable_key_for_node(&graph, import_type(&graph, Some("/src/lib/b.ts")));
+    let unscoped = stable_key_for_node(&graph, import_type(&graph, None));
+    assert!(
+        from_a != from_nested,
+        "one specifier from two importing units keys apart"
+    );
+    assert!(
+        unscoped != from_a && unscoped != from_nested,
+        "an unscoped carrier is not the import of any file"
+    );
+    let elsewhere = SemanticGraphStore::new();
+    pad(&elsewhere, 3);
+    assert!(
+        stable_key_for_node(&elsewhere, import_type(&elsewhere, Some("/src/a.ts"))) == from_a,
+        "the same import keys alike in another store"
+    );
+}
+
+/// No encoding in the stable-key module is Rust `Debug` text: a `Debug`
+/// form is not a versioned schema, and it prints fields (a diagnostic
+/// provenance, an arena ordinal) that are not identity.
+#[test]
+fn stable_key_encoder_formats_no_debug_text() {
+    let source = include_str!("stable_key.rs");
+    for (index, line) in source.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or_default();
+        assert!(
+            !code.contains(":?") && !code.contains("format!"),
+            "stable_key.rs line {}: `{}` formats text into a key",
+            index + 1,
+            line.trim()
+        );
+    }
+}
+
+/// `import("<specifier>").G` written in `importer`.
+fn import_type_spelled(
+    graph: &SemanticGraphStore,
+    importer: &str,
+    specifier: &str,
+) -> SemanticNodeId {
+    import_type_at(graph, importer, specifier, [3u8; 16])
+}
+
+/// `import("<specifier>").G` written in `importer`, whose content is
+/// `whole_hash`: two hashes of one importer are two arena scopes of one
+/// importing unit.
+fn import_type_at(
+    graph: &SemanticGraphStore,
+    importer: &str,
+    specifier: &str,
+    whole_hash: [u8; 16],
+) -> SemanticNodeId {
+    graph.intern_node_with_scope(
+        SemanticNodeData::new_import_type(
+            Arc::from(specifier),
+            Arc::from([Arc::<str>::from("G")]),
+            Arc::from(Vec::new()),
+            false,
+        ),
+        crate::semantic_query::NodeScopeId::File {
+            canonical_id: Arc::from(importer),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash,
+            local_scope: None,
+        },
+    )
+}
+
+/// Two spellings of one module from one importer — `./a` and `../x/a`
+/// written in `/x/b.ts` both name `/x/a` — should key as one identity. The
+/// key of an unresolved carrier is its importing unit plus its authored
+/// specifier, so today the two key apart and converge only once
+/// demand-time resolution produces the declaration node.
+#[test]
+#[ignore = "import-type identity converges only after resolution; needs an indexing-time resolved-module producer"]
+fn two_spellings_of_one_module_key_alike() {
+    let graph = SemanticGraphStore::new();
+    let direct = import_type_spelled(&graph, "/x/b.ts", "./a");
+    let roundabout = import_type_spelled(&graph, "/x/b.ts", "../x/a");
+    assert!(
+        stable_key_for_node(&graph, direct) == stable_key_for_node(&graph, roundabout),
+        "`./a` and `../x/a` from `/x/b.ts` name one module and key alike"
+    );
+}
+
+/// One spelling written in two importing units can name two modules, so a
+/// union of the two unresolved carriers keeps both arms, directly and nested
+/// in a structure the comparator descends. Measured with tsc 7.0.2
+/// (`--declaration --emitDeclarationOnly`, every `strictNullChecks` x
+/// `noImplicitAny` setting): with `src/m.ts` exporting `G = { a: 1 }`,
+/// `src/lib/m.ts` exporting `G = { b: 2 }`, `src/a.ts` and `src/lib/b.ts`
+/// each exporting a value of `import("./m").G`, and `src/c.ts` exporting
+/// `u = Math.random() ? x : y`, the emitted type is
+/// `import("./m").G | import("./lib/m").G`.
+#[test]
+fn one_spelling_from_two_importers_keeps_two_union_arms() {
+    let graph = SemanticGraphStore::new();
+    let from_a = import_type_spelled(&graph, "/src/a.ts", "./m");
+    let from_lib = import_type_spelled(&graph, "/src/lib/b.ts", "./m");
+    assert_eq!(
+        reduced_union_arms(&graph, from_a, from_lib),
+        2,
+        "`import(\"./m\").G` from two importing units keeps two arms"
+    );
+    assert_eq!(
+        reduced_union_arms(
+            &graph,
+            array_of_node(&graph, from_a),
+            array_of_node(&graph, from_lib)
+        ),
+        2,
+        "`import(\"./m\").G[]` from two importing units keeps two arms"
+    );
+    assert_eq!(
+        structural_identity(&graph, from_a, from_lib),
+        StructuralIdentity::Distinct,
+        "the comparator tells the two importing units apart"
+    );
+}
+
+/// One spelling written in one importing unit is one module: two carriers
+/// of it that sit in two arena scopes of that unit (here, two content
+/// hashes) are one union arm, directly and nested, because the rest of the
+/// scope stays provenance.
+#[test]
+fn one_spelling_from_one_importer_is_one_union_arm() {
+    let graph = SemanticGraphStore::new();
+    let before = import_type_at(&graph, "/src/a.ts", "./m", [3u8; 16]);
+    let after = import_type_at(&graph, "/src/a.ts", "./m", [4u8; 16]);
+    assert_ne!(before, after, "premise: two arena scopes, two nodes");
+    assert_eq!(
+        reduced_union_arms(&graph, before, after),
+        1,
+        "`import(\"./m\").G` from one importing unit is one arm"
+    );
+    assert_eq!(
+        reduced_union_arms(
+            &graph,
+            array_of_node(&graph, before),
+            array_of_node(&graph, after)
+        ),
+        1,
+        "`import(\"./m\").G[]` from one importing unit is one arm"
+    );
+    assert_eq!(
+        structural_identity(&graph, before, after),
+        StructuralIdentity::Equal,
+        "the comparator reads only the importing unit of the scope"
+    );
+}
+
+fn array_of_node(graph: &SemanticGraphStore, element: SemanticNodeId) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::Array {
+        element,
+        readonly: false,
+    })
+}
+
+/// The union reducer's structural comparator verdict on `a` and `b`.
+fn structural_identity(
+    graph: &SemanticGraphStore,
+    a: SemanticNodeId,
+    b: SemanticNodeId,
+) -> StructuralIdentity {
+    let mut evidence = CanonicalEvidence::default();
+    let mut budget = u32::MAX;
+    compare_structural(graph, a, b, &mut evidence, &mut budget)
+}
+
+/// The arm count of the union reducer's answer over `a | b`.
+fn reduced_union_arms(graph: &SemanticGraphStore, a: SemanticNodeId, b: SemanticNodeId) -> usize {
+    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+        graph,
+        &[a, b],
+        crate::semantic_query::NullabilityPolicy::Strict,
+    );
+    union_arms(graph, union.node).len()
+}
+
+/// One generic call signature `<T …>(x: T) => T` over a shared bound-free
+/// binder, with the declaration's own bounds, constness and return carrier.
+fn generic_signature(
+    graph: &SemanticGraphStore,
+    binder: SemanticNodeId,
+    constraint: Option<SemanticNodeId>,
+    default: Option<SemanticNodeId>,
+    is_const: bool,
+    return_carrier: Option<crate::semantic_query::SignatureReturnCarrier>,
+) -> SemanticNodeId {
+    use crate::semantic_query::{
+        FunctionParam, SignatureKind, SignatureReturnCarrier, TypeParamDecl,
+    };
+    graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from([FunctionParam::synthetic(
+            Some(Arc::from("x")),
+            binder,
+            false,
+            false,
+        )]),
+        return_type: binder,
+        type_parameters: Arc::from([TypeParamDecl {
+            name: Arc::from("T"),
+            param: binder,
+            constraint,
+            default,
+            is_const,
+        }]),
+        occurrence: None,
+        return_carrier: return_carrier.unwrap_or(SignatureReturnCarrier::Declared(binder)),
+        signature_span: None,
+        return_type_span: None,
+        predicate: None,
+        is_abstract: false,
+    })
+}
+
+/// A bound-free binder shared by every generic signature in a test.
+fn bound_free_binder(graph: &SemanticGraphStore) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    })
+}
+
+/// Callable keys carry each binder declaration's constraint, default and
+/// constness, and a signature's return carrier: `(<T extends string>(x: T)
+/// => T) | (<T extends number>(x: T) => T)` over one bound-free binder keeps
+/// two keys. The union reducer's comparator rejects every such pair, and a
+/// key-equality collapse after it must never merge what it rejected, in
+/// either input order.
+#[test]
+fn callable_keys_carry_binder_bounds_constness_and_return_carrier() {
+    use crate::semantic_query::SignatureReturnCarrier;
+    use verter_type_expr::facts::FunctionReturnSource;
+    let graph = SemanticGraphStore::new();
+    let binder = bound_free_binder(&graph);
+    let string = prim(&graph, PrimitiveKind::String);
+    let number = prim(&graph, PrimitiveKind::Number);
+    let base = generic_signature(&graph, binder, Some(string), None, false, None);
+    let variants = [
+        generic_signature(&graph, binder, Some(number), None, false, None),
+        generic_signature(&graph, binder, None, None, false, None),
+        generic_signature(&graph, binder, Some(string), Some(string), false, None),
+        generic_signature(&graph, binder, Some(string), None, true, None),
+        generic_signature(
+            &graph,
+            binder,
+            Some(string),
+            None,
+            false,
+            Some(SignatureReturnCarrier::Function(
+                FunctionReturnSource::Absent,
+            )),
+        ),
+    ];
+    for variant in variants {
+        assert_eq!(
+            structural_identity(&graph, base, variant),
+            StructuralIdentity::Distinct,
+            "premise: the comparator rejects the pair"
+        );
+        for (first, second) in [(base, variant), (variant, base)] {
+            assert_eq!(
+                reduced_union_arms(&graph, first, second),
+                2,
+                "a key-equality collapse never merges a pair the comparator rejected"
+            );
+        }
+        assert!(
+            stable_key_for_node(&graph, base) != stable_key_for_node(&graph, variant),
+            "signatures that differ in a binder bound, constness or return carrier key apart"
+        );
+    }
+}
+
+/// A deferred callable's binder declarations key their bounds and constness
+/// exactly as a signature's do.
+#[test]
+fn deferred_callable_keys_carry_binder_bounds_and_constness() {
+    use crate::semantic_query::{
+        DeferredCallable, FunctionParam, SignatureKind, SignatureReturnCarrier, TypeParamDecl,
+    };
+    use verter_type_expr::facts::FunctionReturnSource;
+    let graph = SemanticGraphStore::new();
+    let binder = bound_free_binder(&graph);
+    let string = prim(&graph, PrimitiveKind::String);
+    let number = prim(&graph, PrimitiveKind::Number);
+    let deferred = |constraint, default, is_const| {
+        let key = graph.intern_node(SemanticNodeData::DeferredCallable(
+            DeferredCallable::from_parts_for_tests(
+                SignatureKind::Call,
+                Arc::from([FunctionParam::synthetic(None, binder, false, false)]),
+                Arc::from([TypeParamDecl {
+                    name: Arc::from("T"),
+                    param: binder,
+                    constraint,
+                    default,
+                    is_const,
+                }]),
+                function_occurrence("f", 0),
+                SignatureReturnCarrier::Function(FunctionReturnSource::Absent),
+            ),
+        ));
+        stable_key_for_node(&graph, key)
+    };
+    let base = deferred(Some(string), None, false);
+    for variant in [
+        deferred(Some(number), None, false),
+        deferred(None, None, false),
+        deferred(Some(string), Some(string), false),
+        deferred(Some(string), None, true),
+    ] {
+        assert!(
+            base != variant,
+            "deferred callables that differ in a binder bound or constness key apart"
+        );
+    }
+}
+
+/// An object whose public properties `names` all hold `value`.
+fn object_of(graph: &SemanticGraphStore, names: &[&str], value: SemanticNodeId) -> SemanticNodeId {
+    use crate::semantic_query::{IndexSignature, SurfaceMember};
+    let members: Vec<SurfaceMember> = names
+        .iter()
+        .map(|name| SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            key: crate::semantic_query::AuthoredPropertyKey::string(*name),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: Default::default(),
+            declaration_origin: None,
+        })
+        .collect();
+    graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        members: Arc::from(members.into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }))
+}
+
+/// The key of `depth` nested objects, each holding the next under every
+/// one of `names`, around `number`.
+fn nested_object_key_len(names: &[&str], depth: usize) -> usize {
+    let graph = SemanticGraphStore::new();
+    let mut node = prim(&graph, PrimitiveKind::Number);
+    for _ in 0..depth {
+        node = object_of(&graph, names, node);
+    }
+    stable_key_for_node(&graph, node).exact().len()
+}
+
+/// A key is linear in the structure it encodes, however often a subtree is
+/// shared: `{ p: { p: … } }` reaches each level through its member entry
+/// and its derived positive member, and `{ a: X, b: X }` reaches `X` twice,
+/// so an encoding that writes every occurrence doubles per level.
+#[test]
+fn shared_subtrees_keep_keys_linear_in_depth() {
+    for names in [&["p"][..], &["a", "b"][..]] {
+        for depth in [18usize, 400] {
+            let bytes = nested_object_key_len(names, depth);
+            assert!(
+                bytes <= 1024 * depth,
+                "{names:?} nested {depth} deep keys in {bytes} bytes, not linear in depth"
+            );
+        }
+    }
+}
+
+/// Sharing is decided by structure, never by node identity: a subtree held
+/// twice through one node and the same subtree built twice as two nodes
+/// (here, in two arena scopes) give one key, and the key refers back to
+/// the first copy either way.
+#[test]
+fn shared_subtrees_are_decided_by_structure_not_node_identity() {
+    let graph = SemanticGraphStore::new();
+    let deep = |scope: &str| {
+        let mut node = graph.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::Number),
+            crate::semantic_query::NodeScopeId::File {
+                canonical_id: Arc::from(scope),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: [5u8; 16],
+                local_scope: None,
+            },
+        );
+        for _ in 0..12 {
+            node = object_of(&graph, &["p"], node);
+        }
+        node
+    };
+    let one = deep("/one.ts");
+    let other = deep("/other.ts");
+    assert_ne!(one, other, "premise: two nodes of one structure");
+    let shared = object_of(&graph, &["a", "b"], one);
+    let separate = {
+        use crate::semantic_query::{IndexSignature, SurfaceMember};
+        let member = |name: &str, value| SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: Default::default(),
+            declaration_origin: None,
+        };
+        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+            members: Arc::from([member("a", one), member("b", other)]),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }))
+    };
+    assert_ne!(shared, separate, "premise: two object nodes");
+    let key = stable_key_for_node(&graph, shared);
+    assert!(
+        key == stable_key_for_node(&graph, separate),
+        "one structure keys alike whether its repeated subtree is one node or two"
+    );
+    let reference = [1u8, 7, 3];
+    assert!(
+        key.exact().windows(3).any(|window| window == reference),
+        "the repeated subtree is written once and referred back to"
+    );
+}
+
+/// Ten thousand nested objects, each reaching the next twice, encode on a
+/// 1 MiB thread in a key linear in the depth.
+#[test]
+fn ten_thousand_shared_levels_encode_linearly_on_a_one_mebibyte_thread() {
+    const DEPTH: usize = 10_000;
+    let bytes = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| nested_object_key_len(&["p"], DEPTH))
+        .expect("spawn the 1 MiB encoder thread")
+        .join()
+        .expect("the encoder completes on a 1 MiB stack");
+    assert!(
+        bytes <= 1024 * DEPTH,
+        "{DEPTH} shared levels key in {bytes} bytes"
+    );
+}
+
+/// `(x: <param>) => 0` with no authored occurrence, whose parameter is or is
+/// not written as a literal type.
+fn literal_param_signature(
+    graph: &SemanticGraphStore,
+    param: SemanticNodeId,
+    declared_literal: bool,
+) -> SemanticNodeId {
+    use crate::semantic_query::{FunctionParam, SignatureKind, SignatureReturnCarrier};
+    let zero = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(0.0)));
+    graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from([FunctionParam {
+            declared_literal,
+            ..FunctionParam::synthetic(Some(Arc::from("x")), param, false, false)
+        }]),
+        return_type: zero,
+        type_parameters: Arc::from(Vec::new()),
+        occurrence: None,
+        return_carrier: SignatureReturnCarrier::Declared(zero),
+        signature_span: None,
+        return_type_span: None,
+        predicate: None,
+        is_abstract: false,
+    })
+}
+
+/// A parameter written as a literal type makes a signature specialized
+/// (overload priority reads it), so `((x: "a") => 0) | ((x: T) => 0)` with
+/// `T = "a"` keeps both signatures whichever arrives first.
+#[test]
+fn union_reducer_keeps_a_literal_specialized_signature_apart() {
+    let graph = SemanticGraphStore::new();
+    let a = lit_str(&graph, "a");
+    let written_literal = literal_param_signature(&graph, a, true);
+    let instantiated = literal_param_signature(&graph, a, false);
+    assert_eq!(
+        structural_identity(&graph, written_literal, instantiated),
+        StructuralIdentity::Distinct,
+        "the comparator tells a literal-declared parameter apart"
+    );
+    for (first, second) in [
+        (written_literal, instantiated),
+        (instantiated, written_literal),
+    ] {
+        assert_eq!(
+            reduced_union_arms(&graph, first, second),
+            2,
+            "both signatures survive in either input order"
+        );
+    }
+}
+
+/// `{ [K in keyof T]: V }` over a type variable (homomorphic) and the same
+/// recipe over concrete keys evaluate differently, so a union keeps both,
+/// with few arms and with enough child-bearing arms to bucket them.
+#[test]
+fn union_reducer_keeps_homomorphic_and_concrete_mappings_apart() {
+    use crate::semantic_query::{MapperKey, MapperKind, OptionalityMod, ReadonlyMod};
+    let graph = SemanticGraphStore::new();
+    let source = bound_free_binder(&graph);
+    let key_space = graph.intern_node(SemanticNodeData::KeyOf { base: source });
+    let parameter = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let value = prim(&graph, PrimitiveKind::Number);
+    let mapped = |over_type_variable| {
+        graph.intern_node(SemanticNodeData::Mapped {
+            source,
+            mapper: MapperKey {
+                parameter_node: parameter,
+                key_space,
+                value_expr: value,
+                optionality: OptionalityMod::Keep,
+                readonly: ReadonlyMod::Keep,
+                name_remap: None,
+                kind: MapperKind::Computed,
+                over_type_variable,
+            },
+        })
+    };
+    let homomorphic = mapped(true);
+    let concrete = mapped(false);
+    assert_eq!(
+        structural_identity(&graph, homomorphic, concrete),
+        StructuralIdentity::Distinct,
+        "the comparator tells the two mappings apart"
+    );
+    let bystanders: Vec<SemanticNodeId> = (0..7)
+        .map(|index| {
+            let element = lit_str(&graph, &format!("bystander-{index}"));
+            graph.intern_node(SemanticNodeData::Array {
+                element,
+                readonly: false,
+            })
+        })
+        .collect();
+    for extra in [&[][..], &bystanders[..]] {
+        for pair in [[homomorphic, concrete], [concrete, homomorphic]] {
+            let mut members = pair.to_vec();
+            members.extend_from_slice(extra);
+            let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+                &graph,
+                &members,
+                crate::semantic_query::NullabilityPolicy::Strict,
+            );
+            let arms = union_arms(&graph, union.node);
+            assert!(
+                arms.contains(&homomorphic) && arms.contains(&concrete),
+                "both mappings survive beside {} other arms",
+                extra.len()
+            );
+        }
+    }
 }

@@ -792,6 +792,30 @@ pub mod signature_kernel_bench_support {
             (result, trace)
         }
 
+        thread_local! {
+            static CANCEL_AT_FAMILY: RefCell<Option<(verter_scheduler::cancellation::CancellationToken, usize)>> =
+                const { RefCell::new(None) };
+        }
+
+        /// Cancel `token` as the `nth` query family (1-based) opens on this
+        /// thread, while the returned guard lives: the poll that follows the
+        /// family's opening — the connected demand's entry at that query
+        /// boundary — is the first to observe it. A test cancels a request at
+        /// a chosen point of its work this way, without a second thread.
+        pub fn cancel_at_family_entry(
+            token: verter_scheduler::cancellation::CancellationToken,
+            nth: usize,
+        ) -> impl Drop {
+            struct Disarm;
+            impl Drop for Disarm {
+                fn drop(&mut self) {
+                    CANCEL_AT_FAMILY.with(|cell| cell.borrow_mut().take());
+                }
+            }
+            CANCEL_AT_FAMILY.with(|cell| *cell.borrow_mut() = Some((token, nth.max(1))));
+            Disarm
+        }
+
         /// An open query family; closing it restores the enclosing one.
         pub(crate) struct FamilyFrame {
             recorded: bool,
@@ -800,6 +824,16 @@ pub mod signature_kernel_bench_support {
         /// Open `family` as the innermost query family until the returned
         /// frame drops.
         pub(crate) fn enter_family(family: SemanticQueryKeyTag) -> FamilyFrame {
+            CANCEL_AT_FAMILY.with(|cell| {
+                let mut slot = cell.borrow_mut();
+                if let Some((token, remaining)) = slot.as_mut() {
+                    *remaining = remaining.saturating_sub(1);
+                    if *remaining == 0 {
+                        token.cancel();
+                        *slot = None;
+                    }
+                }
+            });
             let recorded = ACTIVE.with(|cell| {
                 let mut slot = cell.borrow_mut();
                 let Some(state) = slot.as_mut() else {

@@ -12,7 +12,10 @@
 //!    `Signature.signature_span` / `return_type_span`, `FunctionParam.span`)
 //!    — two arms that differ only by where they were written are ONE
 //!    constituent, so `T | T = T` fires for object arms produced by
-//!    distinct `return` statements. Scope-bearing semantic PAYLOAD fields
+//!    distinct `return` statements. The one exception is an `ImportType`
+//!    carrier, whose specifier resolves against the canonical file of its
+//!    scope: that file is identity, so one spelling written in two files
+//!    stays two constituents. Scope-bearing semantic PAYLOAD fields
 //!    (`BareRef` scope, declaration identity — `declaration_origin`
 //!    included — value roots, infer-binder identity, signature occurrence)
 //!    remain identity, and declaration-site INTERNING is untouched: spans
@@ -1234,10 +1237,9 @@ fn canonicalize_with(
             if candidate == m {
                 continue 'tier1;
             }
-            if graph
-                .node_data(candidate)
-                .is_some_and(|cand| *cand == *data)
-            {
+            if graph.node_data(candidate).is_some_and(|cand| {
+                *cand == *data && same_importing_unit(graph, candidate, m, &data)
+            }) {
                 // Content-identical cross-scope duplicate — discarded. The
                 // payload-equality claim rests on the SHARED CHILD ids, so
                 // the discarded arm's transitive structure roots enter the
@@ -1403,14 +1405,6 @@ fn canonicalize_with(
     //    — never skip-eligible.
     if is_union {
         crate::semantic_query::stable_key::sort_union_members_by_stable_key(graph, &mut kept);
-        // An over-deep arm cannot be proven equal to anything within the
-        // encoder's depth budget: keep every arm and refuse canonical warm
-        // admission rather than collapsing on the shared marker.
-        if kept.iter().any(|id| {
-            !crate::semantic_query::stable_key::stable_key_for_node(graph, *id).is_complete()
-        }) {
-            evidence.incomplete = true;
-        }
         kept.dedup_by(|a, b| crate::semantic_query::stable_key::provably_equal(graph, *a, *b));
     } else {
         // Intersection preserves construction order. First-occurrence
@@ -2346,6 +2340,7 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
                 param.name.hash(hasher);
                 param.optional.hash(hasher);
                 param.rest.hash(hasher);
+                param.declared_literal.hash(hasher);
             }
             type_parameters.len().hash(hasher);
             for decl in type_parameters.iter() {
@@ -2536,12 +2531,38 @@ fn nullable_beside_object_type(
         })
 }
 
-/// The scope-insensitive structural comparator. See the module docs for the
-/// identity contract. Iterative bisimulation: a worklist of node-id pairs, a
-/// visited-pair set (a revisited pair is assumed equal — the coinductive
-/// cycle rule), and a caller-owned work budget shared across one
-/// canonicalization. Every inspected node's file root is recorded on
-/// `evidence` — including nodes of a comparison that ends `Distinct`.
+/// Whether two nodes of one payload kind share the importing unit that
+/// kind's identity needs. The arena scope is provenance for every node kind
+/// — two arms written in two places are one constituent — except an
+/// import-type carrier: its specifier resolves against the logical source
+/// unit it is scoped to, so one spelling written in two files can name two
+/// modules. Only that unit (the scope's canonical file) is compared; the rest
+/// of the scope stays provenance.
+fn same_importing_unit(
+    graph: &SemanticGraphStore,
+    x: SemanticNodeId,
+    y: SemanticNodeId,
+    data: &SemanticNodeData,
+) -> bool {
+    if !matches!(data, SemanticNodeData::ImportType(_)) {
+        return true;
+    }
+    let unit = |node| {
+        graph
+            .node_scope(node)
+            .as_ref()
+            .and_then(NodeScopeId::canonical_file)
+    };
+    unit(x) == unit(y)
+}
+
+/// The scope-insensitive structural comparator (an import-type carrier's
+/// importing unit excepted). See the module docs for the identity contract.
+/// Iterative bisimulation: a worklist of node-id pairs, a visited-pair set
+/// (a revisited pair is assumed equal — the coinductive cycle rule), and a
+/// caller-owned work budget shared across one canonicalization. Every
+/// inspected node's file root is recorded on `evidence` — including nodes
+/// of a comparison that ends `Distinct`.
 pub(crate) fn compare_structural(
     graph: &SemanticGraphStore,
     a: SemanticNodeId,
@@ -2574,6 +2595,9 @@ pub(crate) fn compare_structural(
         };
         evidence.record_file_root(graph, x);
         evidence.record_file_root(graph, y);
+        if !same_importing_unit(graph, x, y, &dx) {
+            return StructuralIdentity::Distinct;
+        }
         // Fast path: payload-equal (child ids included) — identical subtrees
         // by arena content identity, no descent needed.
         if dx == dy {
@@ -2856,7 +2880,12 @@ fn compare_shallow(
                 mapper: mb,
             },
         ) => {
-            if ma.optionality != mb.optionality || ma.readonly != mb.readonly || ma.kind != mb.kind
+            // A homomorphic mapping passes a primitive source through where a
+            // concrete-key mapping enumerates its properties.
+            if ma.optionality != mb.optionality
+                || ma.readonly != mb.readonly
+                || ma.kind != mb.kind
+                || ma.over_type_variable != mb.over_type_variable
             {
                 return false;
             }
@@ -3065,8 +3094,14 @@ fn compare_shallow(
                 }
                 _ => return false,
             }
+            // A parameter written as a literal type makes the signature a
+            // specialized one, which overload priority reads.
             for (fa, fb) in pa.iter().zip(pb.iter()) {
-                if fa.name != fb.name || fa.optional != fb.optional || fa.rest != fb.rest {
+                if fa.name != fb.name
+                    || fa.optional != fb.optional
+                    || fa.rest != fb.rest
+                    || fa.declared_literal != fb.declared_literal
+                {
                     return false;
                 }
                 work.push((fa.ty, fb.ty));

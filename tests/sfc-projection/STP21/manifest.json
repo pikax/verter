@@ -1,0 +1,38 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP21",
+  "kind": "implementation",
+  "products": ["EventTransportPlan", "EventAliasRelation", "ListenerConsumerSet"],
+  "mandatoryCases": [
+    "STP21-event-alias",
+    "STP21-model-key",
+    "STP21-static-handler",
+    "STP21-modifier",
+    "STP21-dynamic-name",
+    "STP21-collision"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP21/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP21/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP21/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP21/probes/tsconfig.json",
+    "hoverNeedle": "stp21HoverTarget",
+    "definitionNeedle": "stp21DefinitionTarget",
+    "expectedNegativeCode": 2322,
+    "expectedHoverType": "number",
+    "expectedInstanceMembers": ["$props"]
+  },
+  "cases": [
+    {"id": "STP21-event-alias", "disposition": "accept", "twins": ["kebab-and-camel-share-on-save-item"]},
+    {"id": "STP21-model-key", "disposition": "accept", "twins": ["update-model-value-keeps-event-identity"]},
+    {"id": "STP21-static-handler", "disposition": "reject", "twins": ["static-on-save-is-not-a-handler"]},
+    {"id": "STP21-modifier", "disposition": "accept", "twins": ["event-options-preserve-listener-contract"]},
+    {"id": "STP21-dynamic-name", "disposition": "accept", "twins": ["finite-name-union-checks-every-key"]},
+    {"id": "STP21-collision", "disposition": "reject", "twins": ["colliding-listener-consumers-all-remain-checked"]}
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP21 --engine all --require-all --json",
+  "test": "cargo test -p verter_compiler --lib ide::vue_projection::event_keys",
+  "runtimeCorrectness": true,
+  "notes": "EventTransportPlan derives event identity, raw listener-key aliases and all listener consumers from the admitted projection plan. It preserves finite dynamic name unions and listener-object openness without treating bound :on-* props as @event directives. Vue IDE routing remains dormant until STP58 activation."
+}

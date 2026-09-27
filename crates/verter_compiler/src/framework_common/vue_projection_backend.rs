@@ -36,7 +36,9 @@ use crate::framework_common::FrameworkParseArtifact;
 use crate::ide::vue_projection::attribute_operations::project_attribute_operations;
 use crate::ide::vue_projection::binder_capture::{capture_binder_plan, BinderCapturePlan};
 use crate::ide::vue_projection::binding_views::{project_binding_views, BindingViewsProjection};
+use crate::ide::vue_projection::component_resolution::project_component_resolution;
 use crate::ide::vue_projection::component_use::project_component_uses;
+use crate::ide::vue_projection::event_keys::project_event_transport;
 use crate::ide::vue_projection::generic_interop::project_advanced_generic_uses;
 use crate::ide::vue_projection::options_api::project_options_pair;
 use crate::ide::vue_projection::props::{caller_and_setup_from_blocks, project_props};
@@ -67,6 +69,12 @@ pub use crate::ide::vue_projection::props::{
     CallerAndSetupPropsContract, PropCheckObligation, PropsProjection, SpreadCertaintyPolicy,
 };
 
+/// Component resolution and dynamic correlation products consumed by the
+/// qualified Vue projection before atomic activation.
+pub use crate::ide::vue_projection::component_resolution::{
+    ComponentResolutionObservation, ComponentResolutionProjection, ComponentSource,
+    DynamicComponentUseContract, ResolutionSpecializationKey, DYNAMIC_USE_PRELUDE,
+};
 /// Component-use products: the acceptance surface of
 /// [`VueProjectionBackend::component_uses`]. Re-exported here (rather than
 /// through `ide`, which is crate-internal) so qualification harnesses and
@@ -77,6 +85,15 @@ pub use crate::ide::vue_projection::component_use::{
     InferenceTransaction, MemberValue, ObservationKind, SpecializationKey,
     SpecializedUseObservation, TransactionMember, ValidationCheck, USE_CONSTRUCTOR, USE_LISTENER,
     USE_MODEL, USE_PRELUDE, USE_PROP, USE_SLOT_PROPS, WITNESS_PREFIX,
+};
+
+/// Event transport products: the acceptance surface of
+/// [`VueProjectionBackend::event_transport`]. Event identity and raw
+/// listener-key spelling stay separate so future type and rename consumers
+/// share the same admitted-plan facts.
+pub use crate::ide::vue_projection::event_keys::{
+    EventAliasRelation, EventName, EventTransportPlan, ListenerConsumer, ListenerConsumerSet,
+    ListenerKey,
 };
 
 /// Advanced generic use and foreign component contract products: the
@@ -286,6 +303,54 @@ impl VueProjectionBackend {
         let plan = self.projection_plan(source, artifact, canonical_id);
         let attributes = project_attribute_operations(&plan, parsed, source);
         Ok(project_component_uses(&plan, &attributes))
+    }
+
+    /// Resolve component expressions against the admitted plan and the
+    /// script projection's binding inventory. TypeScript checks the emitted
+    /// values; absent global declarations remain `unknown`. `custom_elements`
+    /// must be the prefixes selected for this parsed artifact.
+    pub fn component_resolution(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        canonical_id: &str,
+        custom_elements: Option<&[String]>,
+    ) -> Result<ComponentResolutionProjection, SetupProjectionRefusal> {
+        let script = self.script_projection(source, artifact)?;
+        let parsed = VueCarrierCompiler
+            .parsed_sfc(artifact)
+            .ok_or(SetupProjectionRefusal::MissingParse)?;
+        let plan = self.projection_plan(source, artifact, canonical_id);
+        let attributes = project_attribute_operations(&plan, parsed, source);
+        let uses = project_component_uses(&plan, &attributes);
+        Ok(project_component_resolution(
+            &plan,
+            &uses,
+            &script,
+            canonical_id,
+            custom_elements,
+        ))
+    }
+
+    /// Event names, aliases, modifiers and listener collision ownership for
+    /// every component use of the admitted parse. This derives from the
+    /// exact same projection plan and ordered attribute products as use
+    /// inference. It is dormant until Vue atomic activation.
+    pub fn event_transport(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        canonical_id: &str,
+    ) -> Result<EventTransportPlan, SetupProjectionRefusal> {
+        let parsed = VueCarrierCompiler
+            .parsed_sfc(artifact)
+            .ok_or(SetupProjectionRefusal::MissingParse)?;
+        if artifact.carrier_source().as_ref() != source {
+            return Err(SetupProjectionRefusal::MissingParse);
+        }
+        let plan = self.projection_plan(source, artifact, canonical_id);
+        let attributes = project_attribute_operations(&plan, parsed, source);
+        Ok(project_event_transport(&plan, &attributes))
     }
 
     /// Every component use of the admitted parse placed in one scope over

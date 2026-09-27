@@ -1472,7 +1472,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ..
             } => {
                 let mapper_display_name: Arc<str> = Arc::from(parameter.as_str());
-                let mapper_decl = DeclIdentity::from_scope(scope, Arc::from("<mapper-param>"));
+                let mapper_decl = DeclIdentity::from_scope(
+                    scope,
+                    crate::mapper_binder_registry::mapper_binder_decl_name(
+                        source,
+                        value,
+                        *optional,
+                        *readonly,
+                        name_type.as_ref(),
+                    ),
+                );
                 // The mapper binder ordinal comes from the host-owned
                 // registry — the SAME identity authority the reducing
                 // lowering entry consults — so two lowerings of the same

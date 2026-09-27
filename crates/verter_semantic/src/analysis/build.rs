@@ -362,7 +362,31 @@ pub fn build_script_analysis_with_scope_from_program_with_providers_and_owners(
     (snapshot, candidates)
 }
 
+/// The analysis reads the program through recursions of its own (the
+/// module-reference collector, the binding and call extractors), each
+/// spending native stack once per level of the syntax it reads, so it runs
+/// under the program's stack containment, as oxc's own walks do.
 fn build_script_analysis_inner(
+    content: &str,
+    source_type: SourceType,
+    program: &Program<'_>,
+    scope: AnalysisScope,
+    owners: &TopLevelOwnerTable,
+    parse_errors: bool,
+) -> ScriptAnalysisSnapshot {
+    verter_parser::oxc_parse::with_program_stack(program, || {
+        build_script_analysis_on_its_stack(
+            content,
+            source_type,
+            program,
+            scope,
+            owners,
+            parse_errors,
+        )
+    })
+}
+
+fn build_script_analysis_on_its_stack(
     content: &str,
     source_type: SourceType,
     program: &Program<'_>,

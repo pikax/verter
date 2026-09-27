@@ -1,0 +1,47 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP32",
+  "kind": "implementation",
+  "products": ["ComponentResolutionObservation", "DynamicComponentUseContract"],
+  "mandatoryCases": [
+    "STP32-dynamic-correlated",
+    "STP32-async",
+    "STP32-recursive",
+    "STP32-global",
+    "STP32-namespace",
+    "STP32-missing"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP32/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP32/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP32/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP32/probes/tsconfig.json",
+    "hoverNeedle": "stp32HoverTarget",
+    "definitionNeedle": "stp32DefinitionTarget",
+    "expectedHoverType": "number",
+    "expectedInstanceType": "CardInstance",
+    "expectedNegativeCode": 2345,
+    "allowedNegativeCodes": [18046, 2339, 2322],
+    "negativeAnchors": [
+      {"id": "STP32-dynamic-correlated", "code": 2345, "messageIncludes": "WrongChoice"},
+      {"id": "STP32-dynamic-union", "code": 2345, "messageIncludes": "HiddenUnion"},
+      {"id": "STP32-dynamic-never", "code": 2345, "messageIncludes": "component: never"},
+      {"id": "STP32-async", "code": 2322, "messageIncludes": "boolean' is not assignable to type 'string"},
+      {"id": "STP32-async-generic", "code": 2322, "messageIncludes": "number' is not assignable to type 'string"},
+      {"id": "STP32-missing", "code": 18046, "messageIncludes": "MissingThing"},
+      {"id": "STP32-missing-nav", "code": 2339, "messageIncludes": "MissingThing"}
+    ]
+  },
+  "cases": [
+    {"id": "STP32-dynamic-correlated", "disposition": "accept", "twins": ["matching-branch-accepted", "crossed-branch-rejected"]},
+    {"id": "STP32-async", "disposition": "accept", "twins": ["vue-async-wrapper-retains-public-props"]},
+    {"id": "STP32-recursive", "disposition": "accept", "twins": ["self-name-uses-public-constructor"]},
+    {"id": "STP32-global", "disposition": "accept", "twins": ["augmentation-member-and-navigation"]},
+    {"id": "STP32-namespace", "disposition": "accept", "twins": ["barrel-namespace-preserves-member"]},
+    {"id": "STP32-missing", "disposition": "reject", "twins": ["absent-pascal-name-remains-unknown"]}
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP32 --engine all --require-all --json",
+  "test": "cargo test -p verter_compiler --lib ide::vue_projection::component_resolution_tests",
+  "runtimeCorrectness": true
+}
