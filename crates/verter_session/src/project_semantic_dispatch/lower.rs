@@ -2173,6 +2173,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // distinct fingerprints. See
                 // [`crate::mapper_binder_registry`].
                 let mapper_decl_name = crate::mapper_binder_registry::mapper_binder_decl_name(
+                    graph,
                     source,
                     value,
                     *optional,

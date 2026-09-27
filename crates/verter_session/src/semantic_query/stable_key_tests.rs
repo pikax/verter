@@ -1483,3 +1483,179 @@ fn union_reducer_keeps_homomorphic_and_concrete_mappings_apart() {
         }
     }
 }
+
+/// `() => number` whose return carrier names the declared return type,
+/// given as `carrier`.
+fn nullary_signature(
+    graph: &SemanticGraphStore,
+    return_type: SemanticNodeId,
+    carrier: SemanticNodeId,
+) -> SemanticNodeId {
+    use crate::semantic_query::{SignatureKind, SignatureReturnCarrier};
+    graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from(Vec::new()),
+        return_type,
+        type_parameters: Arc::from(Vec::new()),
+        occurrence: None,
+        return_carrier: SignatureReturnCarrier::Declared(carrier),
+        signature_span: None,
+        return_type_span: None,
+        predicate: None,
+        is_abstract: false,
+    })
+}
+
+/// A signature's key depends on its return carrier's structure, never on
+/// whether the carrier is the same node as the return type or an equal
+/// node interned apart.
+#[test]
+fn a_return_carrier_keys_by_structure_not_node_sharing() {
+    let graph = SemanticGraphStore::new();
+    let number = prim(&graph, PrimitiveKind::Number);
+    let number_elsewhere = graph.intern_node_with_scope(
+        SemanticNodeData::Primitive(PrimitiveKind::Number),
+        crate::semantic_query::NodeScopeId::File {
+            canonical_id: Arc::from("/elsewhere.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: [6u8; 16],
+            local_scope: None,
+        },
+    );
+    assert_ne!(
+        number, number_elsewhere,
+        "premise: two nodes of one structure"
+    );
+    let shared = nullary_signature(&graph, number, number);
+    let apart = nullary_signature(&graph, number, number_elsewhere);
+    assert!(
+        stable_key_for_node(&graph, shared) == stable_key_for_node(&graph, apart),
+        "one return carrier structure keys alike however it is shared"
+    );
+    let string = prim(&graph, PrimitiveKind::String);
+    assert!(
+        stable_key_for_node(&graph, shared)
+            != stable_key_for_node(&graph, nullary_signature(&graph, number, string)),
+        "a carrier of another structure keys apart"
+    );
+}
+
+/// A mapped binder's name, for a mapping `{ [K in "a"]: <synthetic slot
+/// binding> }` whose binding's backing value is `number`, lowered after
+/// `padding` unrelated literals.
+fn slot_binding_mapper_name(padding: usize) -> Arc<str> {
+    use verter_type_expr::{
+        MappedModifier, SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr,
+    };
+    let graph = SemanticGraphStore::new();
+    pad(&graph, padding);
+    let backing = prim(&graph, PrimitiveKind::Number);
+    let source = Arc::new(TypeExpr::Literal(LiteralValue::String("a".into())));
+    let value = Arc::new(TypeExpr::SyntheticSlotBinding(Arc::new(
+        SyntheticCarrierKey {
+            scope_canonical_id: Arc::from("/c.vue"),
+            surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
+            slot_name: Some(Arc::from("default")),
+            binding_name: Arc::from("item"),
+            value_node: backing.0,
+        },
+    )));
+    crate::mapper_binder_registry::mapper_binder_decl_name(
+        &graph,
+        &source,
+        &value,
+        MappedModifier::None,
+        MappedModifier::None,
+        None,
+    )
+}
+
+/// A mapped binder's name never carries an arena ordinal: a synthetic slot
+/// binding in the mapping contributes its logical identity and its backing
+/// value's structure, so interning an unrelated literal first leaves the
+/// name, and every key that holds the binder, unchanged.
+#[test]
+fn mapped_binder_names_do_not_depend_on_arena_ordinals() {
+    assert_eq!(slot_binding_mapper_name(0), slot_binding_mapper_name(1));
+}
+
+/// The classification work of one key: frames opened and ancestor pairs
+/// copied into placements.
+fn classification_work(graph: &SemanticGraphStore, node: SemanticNodeId) -> (u64, u64) {
+    use crate::semantic_query::stable_key::CLASSIFICATION_WORK;
+    CLASSIFICATION_WORK.with(|work| work.set((0, 0)));
+    let _ = stable_key_for_node(graph, node);
+    CLASSIFICATION_WORK.with(std::cell::Cell::get)
+}
+
+/// A strongly connected diamond chain: `A(i) = [B(i), C(i)]`,
+/// `B(i) = A(i + 1)[]`, `C(i) = readonly A(i + 1)[]`, and `A(n) = A(0)[]`.
+/// Returns `A(0)` and the node count.
+fn diamond_ring(graph: &SemanticGraphStore, diamonds: usize) -> (SemanticNodeId, usize) {
+    let base = graph.node_count() as u64;
+    let first = SemanticNodeId(base + 3 * diamonds as u64);
+    let mut next = graph.intern_node(SemanticNodeData::Array {
+        element: first,
+        readonly: false,
+    });
+    for _ in 0..diamonds {
+        let b = graph.intern_node(SemanticNodeData::Array {
+            element: next,
+            readonly: false,
+        });
+        let c = graph.intern_node(SemanticNodeData::Array {
+            element: next,
+            readonly: true,
+        });
+        let element = |value| crate::semantic_query::TupleElement {
+            label: None,
+            value,
+            optional: false,
+            rest: false,
+        };
+        next = graph.intern_node(SemanticNodeData::Tuple {
+            elements: Arc::from([element(b), element(c)]),
+            readonly: false,
+        });
+    }
+    assert_eq!(next, first, "the fixture closes the ring at A(0)");
+    (first, 3 * diamonds + 1)
+}
+
+/// A ring of `length` arrays: each node's element is the next, the last's
+/// the first.
+fn array_ring(graph: &SemanticGraphStore, length: usize) -> SemanticNodeId {
+    let base = graph.node_count() as u64;
+    let first = SemanticNodeId(base + length as u64 - 1);
+    let mut next = first;
+    for _ in 0..length {
+        let node = graph.intern_node(SemanticNodeData::Array {
+            element: next,
+            readonly: false,
+        });
+        next = node;
+    }
+    assert_eq!(next, first, "the fixture closes the ring");
+    first
+}
+
+/// Classifying a strongly connected component is linear in its size:
+/// reconverging paths inside it are not enumerated, and a long ring copies
+/// no ancestor path per node.
+#[test]
+#[ignore = "cyclic stable-key classification enumerates the paths inside a strongly connected component"]
+fn cyclic_classification_is_linear_in_the_component() {
+    let graph = SemanticGraphStore::new();
+    let (diamond, nodes) = diamond_ring(&graph, 14);
+    let (frames, _) = classification_work(&graph, diamond);
+    assert!(
+        frames <= 4 * nodes as u64,
+        "a {nodes}-node diamond ring opens {frames} classification frames"
+    );
+    let ring = array_ring(&graph, 10_000);
+    let (frames, copied) = classification_work(&graph, ring);
+    assert!(
+        frames <= 4 * 10_000 && copied <= 4 * 10_000,
+        "a 10000-node ring opens {frames} frames and copies {copied} ancestor pairs"
+    );
+}

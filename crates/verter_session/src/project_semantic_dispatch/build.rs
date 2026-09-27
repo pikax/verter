@@ -1871,18 +1871,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
             _ => return false,
         };
-        let Some((_, _, _, prepared)) = self.effective_prepared_value_decl(
-            &identity.canonical_id,
-            identity.owner,
-            &identity.decl_name,
-        ) else {
-            return false;
-        };
-        matches!(
-            &prepared.type_annotation.literal_freshness,
-            DeclaredLiteralFreshness::WideningMembers { instance, .. }
-                if instance.iter().any(|widening| widening.as_str() == member)
-        )
+        // The member's declaration decides: the receiver's own, else the
+        // nearest base class or interface that declares it (`class K2
+        // extends K {}` reads `K`'s `r`).
+        let ancestry = self.class_heritage_ancestry(&identity);
+        self.deposit_operand_self_roots(&ancestry.observed);
+        for declaration in std::iter::once(&identity).chain(ancestry.ancestors.iter()) {
+            let widens = self
+                .effective_prepared_value_decl(
+                    &declaration.canonical_id,
+                    declaration.owner,
+                    &declaration.decl_name,
+                )
+                .is_some_and(|(_, _, _, prepared)| {
+                    matches!(
+                        &prepared.type_annotation.literal_freshness,
+                        DeclaredLiteralFreshness::WideningMembers { instance, .. }
+                            if instance.iter().any(|widening| widening.as_str() == member)
+                    )
+                });
+            if widens {
+                return true;
+            }
+            let declares = self
+                .ctx
+                .prepared_type_decl_return_only(
+                    &declaration.canonical_id,
+                    declaration.owner,
+                    &declaration.decl_name,
+                )
+                .is_some_and(|prepared| {
+                    prepared
+                        .member_index
+                        .keys()
+                        .any(|key| key.as_string() == Some(member))
+                });
+            if declares {
+                return false;
+            }
+        }
+        false
     }
 
     /// Whether a read of the value `path` names, in `canonical`'s `owner`

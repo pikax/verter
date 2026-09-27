@@ -159,6 +159,13 @@ enum Hole {
     /// An unordered child collection: its member keys sorted and
     /// deduplicated by exact bytes, written as a `u16` count and each key.
     Set(Vec<SemanticNodeId>),
+    /// A child written, after its `lead` bytes, only when its structure
+    /// differs from the child of the earlier single-child hole `same_as`.
+    Unless {
+        child: SemanticNodeId,
+        same_as: usize,
+        lead: Vec<u8>,
+    },
 }
 
 /// One node's encoding with its children left as holes. Scalar fields are
@@ -224,12 +231,26 @@ impl Recipe {
         self.holes.push((self.buf.len(), Hole::Set(members)));
     }
 
+    /// A child written, after `lead`, only when its structure differs from
+    /// the child of the earlier single-child hole `same_as` (a hole index).
+    fn child_unless_same(&mut self, child: SemanticNodeId, same_as: usize, lead: &[u8]) {
+        self.holes.push((
+            self.buf.len(),
+            Hole::Unless {
+                child,
+                same_as,
+                lead: lead.to_vec(),
+            },
+        ));
+    }
+
     /// Every child node, in hole order.
     fn children(&self) -> Vec<SemanticNodeId> {
         let mut children = Vec::new();
         for (_, hole) in &self.holes {
             match hole {
                 Hole::Child(child) => children.push(*child),
+                Hole::Unless { child, .. } => children.push(*child),
                 Hole::Set(members) => children.extend_from_slice(members),
             }
         }
@@ -338,6 +359,14 @@ pub fn stable_key_for_node(graph: &SemanticGraphStore, id: SemanticNodeId) -> St
     let mut table = ClassTable::new(graph);
     let root = table.classify(id);
     StableKey::from_exact(table.write(root))
+}
+
+// Test-only: classification frames opened and ancestor pairs copied into
+// placements on this thread.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CLASSIFICATION_WORK: std::cell::Cell<(u64, u64)> =
+        const { std::cell::Cell::new((0, 0)) };
 }
 
 /// Shortest written-out subtree a key refers back to rather than repeats.
@@ -538,7 +567,7 @@ impl<'g> ClassTable<'g> {
                         }
                     },
                 },
-                Some(Hole::Child(child)) => {
+                Some(Hole::Child(child) | Hole::Unless { child, .. }) => {
                     frame.next_hole += 1;
                     *child
                 }
@@ -625,6 +654,11 @@ impl<'g> ClassTable<'g> {
             .entry(component)
             .or_default()
             .push((id, depth));
+        #[cfg(test)]
+        CLASSIFICATION_WORK.with(|work| {
+            let (frames, copied) = work.get();
+            work.set((frames + 1, copied + placement.open.len() as u64));
+        });
         self.frames.push(OpenFrame {
             node: id,
             component,
@@ -648,16 +682,34 @@ impl<'g> ClassTable<'g> {
         let mut lit: Vec<u8> = Vec::new();
         let mut parts: Vec<Part> = Vec::new();
         let mut written = 0;
-        for ((at, _), fill) in recipe.holes.iter().zip(filled) {
+        let one = |filled: &[Filled], hole: usize| match filled.get(hole) {
+            Some(Filled::One(class)) => Some(*class),
+            _ => None,
+        };
+        let mut kept: Vec<Filled> = Vec::with_capacity(filled.len());
+        for ((at, hole), fill) in recipe.holes.iter().zip(filled) {
             push_lit(&mut lit, &mut parts, &recipe.buf[written..*at]);
             written = *at;
             match fill {
-                Filled::One(class) => parts.push(Part::Child(class)),
+                Filled::One(class) => {
+                    match hole {
+                        Hole::Unless { same_as, lead, .. } => {
+                            if one(&kept, *same_as) != Some(class) {
+                                push_lit(&mut lit, &mut parts, lead);
+                                parts.push(Part::Child(class));
+                            }
+                        }
+                        _ => parts.push(Part::Child(class)),
+                    }
+                    kept.push(Filled::One(class));
+                    continue;
+                }
                 Filled::Set(mut members) => {
                     members.sort_by(|a, b| self.compare(*a, *b));
                     members.dedup();
                     push_lit(&mut lit, &mut parts, &(members.len() as u16).to_le_bytes());
-                    parts.extend(members.into_iter().map(Part::Child));
+                    parts.extend(members.iter().copied().map(Part::Child));
+                    kept.push(Filled::Set(members));
                 }
             }
         }
@@ -1224,6 +1276,7 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
                 SignatureKind::Construct => 2,
             });
             encode_params(&mut enc, params);
+            let return_hole = enc.holes.len();
             enc.child(*return_type);
             encode_type_parameters(&mut enc, type_parameters);
             match occurrence {
@@ -1255,13 +1308,18 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
                 }
             }
             // The return carrier is a trailing section too, present only
-            // when it is not the declared return type itself: the common
-            // signature keeps its key bytes, and the section's leading tag
-            // (never a predicate subject tag) keeps the two sections apart.
-            if !matches!(return_carrier, SignatureReturnCarrier::Declared(node) if node == return_type)
-            {
-                enc.u8(3);
-                encode_return_carrier(&mut enc, return_carrier);
+            // when it is not structurally the declared return type: the
+            // common signature keeps its key bytes, whichever node its
+            // carrier names, and the section's leading tag (never a
+            // predicate subject tag) keeps the two sections apart.
+            match return_carrier {
+                SignatureReturnCarrier::Declared(node) => {
+                    enc.child_unless_same(*node, return_hole, &[3, 1]);
+                }
+                SignatureReturnCarrier::Function(_) => {
+                    enc.u8(3);
+                    encode_return_carrier(&mut enc, return_carrier);
+                }
             }
         }
         SemanticNodeData::Object(surface) => {
