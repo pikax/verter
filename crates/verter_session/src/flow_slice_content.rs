@@ -3510,16 +3510,22 @@ pub(crate) fn build_flow_slice_content(
     // through that block's scope BEFORE the top level — the same lexical
     // rule under which the function index binds a namespace-qualified
     // direct-call target over the file-global one.
-    let descent = entry.locator.descent.to_vec();
-    let namespace_owned = descent
-        .iter()
-        .any(|step| matches!(step, FunctionDescentStep::NamespaceMember { .. }));
+    //
+    // The receiver rules below read a descent of one or two steps; a longer
+    // one is not copied (copying every nested function's whole descent cost
+    // the square of the nesting).
+    let namespace_owned = entry.locator.descent.has_namespace_member();
     let namespace_scopes = if namespace_owned {
         enclosing_namespace_scopes(
             program,
             entry.locator.contributor.contributor_index as usize,
-            &descent,
+            &entry.locator.descent.to_vec(),
         )
+    } else {
+        Vec::new()
+    };
+    let descent = if entry.locator.descent.len() <= 2 {
+        entry.locator.descent.to_vec()
     } else {
         Vec::new()
     };

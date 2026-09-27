@@ -825,6 +825,17 @@ Recorded plainly so no reader mistakes absence for a pass:
   functions in place fails the second, and dropping their reads'
   resolution the first.
 
+* **A function's descent is read, not copied or walked.** The slice
+  content build copied a nested function's whole descent (its locator's
+  path from its contributing statement) to test two receiver rules and
+  one namespace rule, and hashing a descent (a function key's, on every
+  index lookup) walked the path: work the square of the nesting. A
+  descent now carries its path's hash and whether any step enters a
+  namespace block, folded as each step is added, and the content build
+  copies a descent only where a rule reads it (two steps, or a
+  namespace-owned function). `function_program_tests.rs` →
+  `descents_carry_their_hash_and_namespace_steps`.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the

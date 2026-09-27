@@ -125,6 +125,11 @@ pub struct FunctionDescent(Option<Arc<DescentLink>>);
 struct DescentLink {
     step: FunctionDescentStep,
     len: usize,
+    /// The whole descent's hash, folded from its parent's and this step:
+    /// hashing a descent reads it rather than walking the path.
+    hash: u64,
+    /// Whether any step of the whole descent enters a namespace block.
+    namespace_member: bool,
     parent: FunctionDescent,
 }
 
@@ -138,11 +143,29 @@ impl FunctionDescent {
     /// This descent extended by `step`, sharing this one.
     #[must_use]
     pub fn then(&self, step: FunctionDescentStep) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        self.path_hash().hash(&mut hasher);
+        step.hash(&mut hasher);
         Self(Some(Arc::new(DescentLink {
             step,
             len: self.len() + 1,
+            hash: hasher.finish(),
+            namespace_member: self.has_namespace_member()
+                || matches!(step, FunctionDescentStep::NamespaceMember { .. }),
             parent: self.clone(),
         })))
+    }
+
+    /// Whether any step of this descent enters a namespace block, read
+    /// without walking the path.
+    pub fn has_namespace_member(&self) -> bool {
+        self.0.as_ref().is_some_and(|link| link.namespace_member)
+    }
+
+    /// The hash of the whole path (0 for the empty descent).
+    fn path_hash(&self) -> u64 {
+        self.0.as_ref().map_or(0, |link| link.hash)
     }
 
     pub fn len(&self) -> usize {
@@ -216,9 +239,7 @@ impl Eq for FunctionDescent {}
 impl std::hash::Hash for FunctionDescent {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.len().hash(state);
-        for link in self.links() {
-            link.step.hash(state);
-        }
+        self.path_hash().hash(state);
     }
 }
 

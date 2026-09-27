@@ -1729,3 +1729,37 @@ fn nested_function_hashes_fold_each_function_once() {
         "each hundred nested functions fold the same expressions: {folded:?}"
     );
 }
+
+/// A descent carries its whole path's hash and whether any step enters a
+/// namespace block, folded as each step is added: descents built apart
+/// with the same steps hash alike, one that differs in any step (the first
+/// included) does not, and a namespace step anywhere is seen from every
+/// extension.
+#[test]
+fn descents_carry_their_hash_and_namespace_steps() {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    let build = |first: FunctionDescentStep| {
+        (0..10_000u32).fold(FunctionDescent::new().then(first), |descent, ordinal| {
+            descent.then(FunctionDescentStep::NestedCallable { ordinal })
+        })
+    };
+    let hash = |descent: &FunctionDescent| {
+        let mut hasher = rustc_hash::FxBuildHasher.build_hasher();
+        descent.hash(&mut hasher);
+        hasher.finish()
+    };
+    let namespaced = build(FunctionDescentStep::NamespaceMember {
+        statement_ordinal: 0,
+    });
+    let again = build(FunctionDescentStep::NamespaceMember {
+        statement_ordinal: 0,
+    });
+    let other = build(FunctionDescentStep::BodyStatement {
+        statement_ordinal: 0,
+    });
+    assert_eq!(namespaced, again);
+    assert_eq!(hash(&namespaced), hash(&again));
+    assert_ne!(hash(&namespaced), hash(&other));
+    assert!(namespaced.has_namespace_member());
+    assert!(!other.has_namespace_member());
+}
