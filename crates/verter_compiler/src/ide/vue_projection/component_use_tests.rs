@@ -322,11 +322,13 @@ fn component_use_statement_handler_with_trailing_line_comment_closes_its_block()
         )));
     let rendered: String = projection.witnesses.iter().map(|w| w.render()).collect();
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, &rendered, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, &rendered, oxc_span::SourceType::ts())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "rendered uses must parse: {:?}\n{rendered}",
-        parsed.errors
+        parsed.diagnostics
     );
 }
 
