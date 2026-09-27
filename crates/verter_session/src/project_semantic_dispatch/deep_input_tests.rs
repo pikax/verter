@@ -425,3 +425,20 @@ export const v = b{};
     };
     assert_eq!(chain(DEPTH), chain(3));
 }
+
+/// The source parse identity a content-addressed key names is derived once
+/// per artifact: the derivations a nest's evaluation makes do not grow with
+/// its depth (deriving it per nested function hashed the whole source once
+/// per function, the square of the nesting).
+#[test]
+fn a_nest_derives_its_source_parse_identity_a_fixed_number_of_times() {
+    let derivations = |depth: usize| {
+        let before = crate::file_artifact_store::source_parse_identity_derivations_for_tests();
+        assert_eq!(
+            mismatches(&arrows(depth), &[(ARROW_PROBE, "1")]),
+            Vec::<String>::new()
+        );
+        crate::file_artifact_store::source_parse_identity_derivations_for_tests() - before
+    };
+    assert_eq!(derivations(20), derivations(200));
+}

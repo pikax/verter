@@ -5069,14 +5069,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // a constant. A serving artifact whose exact parse identity cannot
         // be recomputed fails closed: no content-addressed key may name a
         // source it cannot verify.
-        let Some(source_key) = crate::file_artifact_store::FileArtifactKey::for_source_identity(
-            Arc::from(canonical),
-            indexed.whole_hash,
-            indexed.raw_source.as_ref(),
-            indexed.file_language.clone(),
-            indexed.framework_parse.as_deref(),
-            indexed.parse_env_hash,
-        ) else {
+        let Some(parse_key) = indexed.source_parse_key() else {
             return Err(FlowSliceDemandSiteError {
                 failure: FlowReturnFailure::Unresolved,
                 self_roots,
@@ -5089,8 +5082,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             flow_body_stable_hash: entry.flow_body_stable_hash,
             flow_body_exact_hash,
             parse_env_hash: key.context.parse_env_hash,
-            parse_key: source_key.parse_key,
-            file_language: source_key.file_language_id,
+            parse_key,
+            file_language: indexed.file_language.clone(),
             build_toolchain_fingerprint:
                 crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
         };

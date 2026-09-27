@@ -228,18 +228,10 @@ impl FlowBodySkeletonSource for RetainedSnapshotSkeletonSource {
         // from the served `IndexedReady` through the ONE canonical artifact
         // identity — a key naming another parse key or language row is a
         // typed miss, even at equal body hashes.
-        let Some(source_key) = crate::file_artifact_store::FileArtifactKey::for_source_identity(
-            Arc::clone(&key.canonical_id),
-            indexed.whole_hash,
-            indexed.raw_source.as_ref(),
-            indexed.file_language.clone(),
-            indexed.framework_parse.as_deref(),
-            indexed.parse_env_hash,
-        ) else {
+        let Some(parse_key) = indexed.source_parse_key() else {
             return Ok(None);
         };
-        if source_key.parse_key != key.parse_key || source_key.file_language_id != key.file_language
-        {
+        if parse_key != key.parse_key || indexed.file_language != key.file_language {
             return Ok(None);
         }
         let Some(prepared) = decl_bodies.function_flow_structure(entry)? else {
