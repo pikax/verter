@@ -105,19 +105,91 @@ fn a_static_constructing_its_own_class_is_its_instance_type() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `b = this.a + 1` is `number` and `c = [this.a]` is `number[]`: a property
-/// initializer reads `this` as the class instance. Wrong-but-clean: the lane
-/// answers `any` / `any[]`.
+/// Class fields whose initializers read `this`: the instance's fields
+/// (declared before or after, annotated or inferred), itself, a method, an
+/// accessor and a private field, a static reading the class, a cycle, and
+/// calls over `this`.
+const THIS_READS: &str = r##"
+declare function id<T>(x: T): T;
+class Init { a = 1; b = this.a + 1; c = [this.a]; }
+class Use { b = this.a + 1; a = 1; }
+class Self { s = this; t = this.m(); m() { return "x"; } }
+class Circ { p = this.q; q = this.p; }
+class Ann { a: string = "s"; b = this.a; }
+class St { static a = 1; static b = this.a; }
+class Acc { get g() { return 1; } h = this.g; }
+class Priv { #p = 1; q = this.#p; }
+class T2 { a = 1; b = id(this.a); c = id(this); static s = 1; static t = id(this.s); }
+"##;
+
+/// The checker's answers for [`THIS_READS`]: an instance field initializer
+/// reads `this` as the class instance — a field declared after it too
+/// (TS2729, still typed) — and a static one reads the class; two fields
+/// reading each other are `any` (TS7022 under `noImplicitAny`).
 ///
-/// What the lane gives:
-/// - `Init['b']`: the checker answers `number`; the lane measured `any`.
-/// - `Init['c']`: the checker answers `number[]`; the lane measured `any[]`.
+/// Measured on TypeScript 7.0.2 (`--target es2022`), alike under every
+/// setting.
+const THIS_READ_ROWS: &[(&str, &str)] = &[
+    ("Init['b']", "number"),
+    ("Init['c']", "number[]"),
+    ("Use['b']", "number"),
+    ("Self['t']", "string"),
+    ("Circ['p']", "any"),
+    ("Ann['b']", "string"),
+    ("(typeof St)['b']", "number"),
+    ("Acc['h']", "number"),
+    ("Priv['q']", "number"),
+    ("T2['b']", "number"),
+    ("T2['c']", "T2"),
+    ("(typeof T2)['t']", "number"),
+];
+
+/// A class field whose initializer reads `this` takes the type the checker
+/// gives it ([`THIS_READ_ROWS`]).
+///
+/// What the lane gives: each row reduced to a partial demand, or a miss
+/// degraded by UnresolvedValue for a static — never a published answer. A
+/// declared class's field initializer lowers without a receiver, so the
+/// field is outside the indexed expression domain.
 #[test]
-#[ignore = "a field initializer reading this.<field> takes that field's type"]
-fn wrong_clean_a_field_initializer_reads_this() {
-    let matrix = Matrix::new(MEMBERS);
-    let failures = matrix.types(&[("Init['b']", "number"), ("Init['c']", "number[]")]);
+#[ignore = "a field initializer reading this reads the class instance or constructor type"]
+fn a_field_initializer_reads_this() {
+    let matrix = Matrix::new(THIS_READS);
+    let failures = matrix.types(THIS_READ_ROWS);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// No field whose initializer reads `this` publishes a complete,
+/// undegraded answer the checker does not give: until the lane reads the
+/// receiver, each is a gap.
+///
+/// Mutation: lowering such an initializer syntactically, as any other
+/// field's, publishes `Init['b']` as a clean `any` and `T2['b']` as a
+/// clean `unknown`.
+#[test]
+fn a_field_initializer_reading_this_is_never_a_clean_wrong_answer() {
+    let matrix = Matrix::new(THIS_READS);
+    let rows: Vec<(Read<'_>, Vec<&str>)> = THIS_READ_ROWS
+        .iter()
+        .map(|(probe, answer)| (Read::Type(probe), vec![*answer; 4]))
+        .collect();
+    let wrong_clean: Vec<String> = rows
+        .iter()
+        .zip(matrix.verdicts(&rows))
+        .flat_map(|((read, _), verdicts)| {
+            verdicts
+                .into_iter()
+                .filter(|verdict| !verdict.matched && verdict.class == "WRONG-CLEAN")
+                .map(move |verdict| format!("{}: {}", read_text(read), verdict.lane))
+        })
+        .collect();
+    assert!(wrong_clean.is_empty(), "{}", wrong_clean.join("\n"));
+}
+
+fn read_text<'a>(read: &Read<'a>) -> &'a str {
+    match read {
+        Read::Type(text) | Read::Return(text) => text,
+    }
 }
 
 /// `get v() { return this.#v; }` beside `#v = 0` is `number`.

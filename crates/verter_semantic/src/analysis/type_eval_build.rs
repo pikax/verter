@@ -1757,11 +1757,15 @@ pub(crate) fn class_heritage_value_name(class_name: &str) -> String {
 
 /// The synthetic value declaration a class field reads its type through,
 /// when the field's initializer is an expression whose type derives from
-/// a call (`static origin = new Pt()`): its value reads through the indexed
-/// program expression at the initializer, as a declarator initializer's
-/// does. `None` for a field with an annotation, without an initializer, with
-/// a function value (served at its own member position), with an
-/// authoritative assertion, or without a static name.
+/// a call (`static origin = new Pt()`) or reads `this` (`b = this.a + 1`):
+/// its value reads through the indexed program expression at the
+/// initializer, as a declarator initializer's does. The checker types a
+/// `this` read through the class's instance or constructor type, which no
+/// syntactic inference knows, so such an initializer is outside the indexed
+/// expression domain there: a gap, never a guessed `any`. `None` for a field
+/// with an annotation, without an initializer, with a function value
+/// (served at its own member position), with an authoritative assertion,
+/// or without a static name.
 pub(crate) fn class_field_value_name(
     class_name: &str,
     prop: &oxc_ast::ast::PropertyDefinition<'_>,
@@ -1774,7 +1778,7 @@ pub(crate) fn class_field_value_name(
     if matches!(
         value,
         Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-    ) || !value_type_derives_from_a_call(value, source)
+    ) || !(value_type_derives_from_a_call(value, source) || value_reads_this(value, source))
         || has_authoritative_value_assertion(value)
     {
         return None;
@@ -7993,6 +7997,33 @@ fn lower_indexed_explicit_type_arguments(
 /// either.
 pub fn value_inference_fabricates_a_call(expr: &Expression<'_>, source: &str) -> bool {
     !has_authoritative_value_assertion(expr) && value_type_derives_from_a_call(expr, source)
+}
+
+/// Whether a value expression reads `this` — the `this` of its own
+/// position, so neither a nested function's nor a nested class's (an
+/// arrow function's `this` is its position's).
+pub(crate) fn value_reads_this(expr: &Expression<'_>, source: &str) -> bool {
+    #[derive(Default)]
+    struct ThisProbe(bool);
+
+    impl<'a> Visit<'a> for ThisProbe {
+        fn visit_this_expression(&mut self, _this: &oxc_ast::ast::ThisExpression) {
+            self.0 = true;
+        }
+
+        fn visit_function(
+            &mut self,
+            _function: &oxc_ast::ast::Function<'a>,
+            _flags: oxc_syntax::scope::ScopeFlags,
+        ) {
+        }
+
+        fn visit_class(&mut self, _class: &oxc_ast::ast::Class<'a>) {}
+    }
+
+    let mut probe = ThisProbe::default();
+    verter_parser::oxc_parse::with_span_stack(source, expr.span(), || probe.visit_expression(expr));
+    probe.0
 }
 
 fn value_type_derives_from_a_call(expr: &Expression<'_>, source: &str) -> bool {

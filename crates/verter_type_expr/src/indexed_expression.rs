@@ -11,7 +11,8 @@ pub enum IndexedValueExpression {
     Value(TypeExpr),
     /// A direct semantic call/construct expression.
     Call(IndexedValueCall),
-    /// A call-bearing compound outside the indexed expression domain.
+    /// An expression outside the indexed expression domain: a
+    /// call-bearing compound, or a class field initializer reading `this`.
     UnsupportedCall { point: u32 },
     /// The template strings a tagged template passes as its first
     /// argument: a value of the GLOBAL `TemplateStringsArray` type,
