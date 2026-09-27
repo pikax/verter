@@ -2017,3 +2017,109 @@ fn a_tripped_demand_discovers_no_further_callee() {
         retry_matches_fresh(&host, &format!("after a cancellation at family {nth}"));
     }
 }
+
+/// A cancellation landing anywhere in a request leaves the host so that a
+/// retry answers exactly what a fresh host answers. The request is the
+/// public audited, cancellable flow-return query of a witness over four
+/// sibling eight-level chains. It is cancelled at a spread of points: at
+/// the Nth query boundary, deterministically, for N from the first up to
+/// past the request's end, and after wall-clock delays spread over one
+/// uncancelled cold request, from a second thread. Every cancelled
+/// request answers `Cancelled` or, when it finished before the
+/// cancellation landed, exactly the fresh answer; every retry under a
+/// fresh token on the same host answers exactly the fresh answer.
+#[test]
+fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
+    use crate::host_flow_return_audit::FlowReturnError;
+    use verter_scheduler::cancellation::CancellationToken;
+
+    let source = sibling_chains(4, 8);
+    let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(PATH),
+            owner: TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from("witness"),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    // The answer a request gives: the projected return type of a clean
+    // value, or a description of anything else.
+    #[derive(Debug, PartialEq)]
+    enum Answer {
+        Clean(TypeExpr),
+        Cancelled,
+        Other(String),
+    }
+    let answer = |host: &Arc<VerterHost>, token: CancellationToken| {
+        let carrier = host.get_flow_return_type_with_audit_cancellable(
+            &identity,
+            crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            token,
+        );
+        match carrier.as_result() {
+            Ok(result) if result.degradation().is_none() => host
+                .project_node_to_type_expr_for_test(result.return_type())
+                .map_or_else(|| Answer::Other("unprojected".into()), Answer::Clean),
+            Ok(result) => Answer::Other(format!("degraded {:?}", result.degradation())),
+            Err(FlowReturnError::Cancelled) => Answer::Cancelled,
+            Err(other) => Answer::Other(format!("{other:?}")),
+        }
+    };
+    let fresh_host = host_with(&[(PATH, source.as_str())]);
+    let started = std::time::Instant::now();
+    let fresh = answer(&fresh_host, CancellationToken::new());
+    let cold = started.elapsed();
+    assert!(
+        matches!(fresh, Answer::Clean(_)),
+        "a fresh host answers clean: {fresh:?}"
+    );
+
+    let mut cancelled = 0;
+    let check = |host: &Arc<VerterHost>, got: Answer, label: &str| {
+        assert!(
+            got == Answer::Cancelled || got == fresh,
+            "{label}: a cancelled request answers Cancelled or the fresh answer, got {got:?}"
+        );
+        let retry = answer(host, CancellationToken::new());
+        assert_eq!(
+            retry, fresh,
+            "{label}: the retry answers what a fresh host answers"
+        );
+        got == Answer::Cancelled
+    };
+
+    // Deterministic: cancelled as the Nth query family opens.
+    for nth in [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610] {
+        let host = host_with(&[(PATH, source.as_str())]);
+        let token = CancellationToken::new();
+        let got = {
+            let _cancel =
+                crate::for_tests::signature_kernel_bench_support::cancel_trace::cancel_at_family_entry(
+                    token.clone(),
+                    nth,
+                );
+            answer(&host, token)
+        };
+        cancelled += usize::from(check(&host, got, &format!("family {nth}")));
+    }
+
+    // Wall clock: cancelled from another thread after a delay.
+    for percent in [0u32, 5, 10, 25, 50, 75, 90, 110] {
+        let host = host_with(&[(PATH, source.as_str())]);
+        let token = CancellationToken::new();
+        let delay = cold * percent / 100;
+        let canceller = {
+            let token = token.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                token.cancel();
+            })
+        };
+        let got = answer(&host, token);
+        canceller.join().expect("the canceller finishes");
+        cancelled += usize::from(check(&host, got, &format!("{percent}% of a cold request")));
+    }
+    assert!(cancelled > 0, "some cancellation landed inside a request");
+}
