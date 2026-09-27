@@ -1,0 +1,80 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP19",
+  "kind": "implementation",
+  "products": ["AdvancedGenericUseProjection", "ForeignComponentContractAdapter"],
+  "mandatoryCases": [
+    "STP19-explicit",
+    "STP19-higher-rank",
+    "STP19-forward",
+    "STP19-overloads",
+    "STP19-foreign",
+    "STP19-erasure",
+    "STP19-instantiation-alias"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP19/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP19/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP19/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP19/probes/tsconfig.json",
+    "hoverNeedle": "stp19HoverTarget",
+    "definitionNeedle": "stp19DefinitionTarget",
+    "expectedNegativeCode": 2322,
+    "expectedHoverType": "number[]",
+    "expectedInstanceType": "__VerterPublicInstance<Row, \"id\", []>"
+  },
+  "cases": [
+    {
+      "id": "STP19-explicit",
+      "disposition": "accept",
+      "twins": ["explicit-alias-fixes-every-channel", "violated-explicit-argument-at-the-argument"]
+    },
+    {
+      "id": "STP19-higher-rank",
+      "disposition": "accept",
+      "twins": ["slot-function-keeps-its-own-binder", "generic-arrow-prop-kept-verbatim"]
+    },
+    {
+      "id": "STP19-forward",
+      "disposition": "accept",
+      "twins": ["parent-binder-scopes-every-use", "use-scope-drops-the-parent-binder"]
+    },
+    {
+      "id": "STP19-overloads",
+      "disposition": "accept",
+      "twins": [
+        "six-construct-overloads-preserved",
+        "fixed-single-signature-adapter",
+        "open-catch-all-replaces-earlier-overloads",
+        "call-overloads-collapse-to-the-last",
+        "call-overloads-tolerate-attributes",
+        "generic-construct-overload-reopens-catch-all",
+        "generic-call-overload-drops-read-overloads"
+      ]
+    },
+    {
+      "id": "STP19-foreign",
+      "disposition": "accept",
+      "twins": [
+        "options-api-props-from-published-instance",
+        "functional-call-signature-consumed",
+        "open-argument-constructor-widened"
+      ]
+    },
+    {
+      "id": "STP19-erasure",
+      "disposition": "reject",
+      "twins": ["fabricated-witness-for-unavailable-use", "adapter-result-fabricates-any"]
+    },
+    {
+      "id": "STP19-instantiation-alias",
+      "disposition": "accept",
+      "twins": ["renamed-reexport-and-namespace-alias", "incompatible-alias-props-fail"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP19 --engine all --require-all --json",
+  "test": "cargo test -p verter_compiler --lib ide::vue_projection::generic_interop",
+  "runtimeCorrectness": true,
+  "notes": "Advanced generic binders and foreign component interoperability. Each component use is constructed through the foreign component contract adapter: the component's exact contract (a typed constructor with every construct overload and binder, an Options API constructor rebuilt from its published $props, a functional component through its own call signature, and a constructor ending in an open catch-all or an overloaded callable rebuilt signature by signature in declaration order, each rebuilt call overload taking exactly its declared props; a generic signature the walk cannot pass keeps every signature read up to it and never reopens an open catch-all) intersected with an attribute-tolerant fallback signature, so TypeScript's own overload resolution selects the signature with no fixed overload count. Every use of a parent is placed in one scope over the parent's authored generic binder, so forwarded parameters stay parameters. Vue IDE routing stays on project_ide; this node exposes a dormant VueProjectionBackend::advanced_generic_uses. STP58 owns atomic Vue activation."
+}

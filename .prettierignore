@@ -27,3 +27,17 @@ tests/sfc-projection/STP12/probes/generated/JSDocGeneric.vue.verter.js.d.ts
 # tests, so formatting them would disconnect the probes from actual compiler
 # output.
 tests/sfc-projection/STP16/probes/components/
+
+# Component-use probe fixtures — the parent probes contain the component-use
+# product's rendered projections and the child component ends with the
+# public-constructor product's rendered declaration, byte for byte, pinned by
+# the component-use Rust tests, so formatting them would disconnect the probes
+# from actual compiler output.
+tests/sfc-projection/STP18/probes/
+
+# Advanced generic use probe fixtures — the parent probes contain the advanced
+# generic use product's rendered projections and the child component ends
+# with the public-constructor product's rendered declaration, byte for byte,
+# pinned by the advanced generic use Rust tests, so formatting them would
+# disconnect the probes from actual compiler output.
+tests/sfc-projection/STP19/probes/

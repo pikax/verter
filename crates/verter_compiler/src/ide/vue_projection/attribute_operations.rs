@@ -770,7 +770,7 @@ fn consumer_channels(key: &str) -> Vec<ConsumerChannel> {
 }
 
 /// Runtime `isReservedProp`.
-fn is_reserved(key: &str) -> bool {
+pub(crate) fn is_reserved(key: &str) -> bool {
     matches!(
         key,
         "" | "key"
