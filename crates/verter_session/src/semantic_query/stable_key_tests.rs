@@ -1539,3 +1539,42 @@ fn a_return_carrier_keys_by_structure_not_node_sharing() {
         "a carrier of another structure keys apart"
     );
 }
+
+/// A mapped binder's name, for a mapping `{ [K in "a"]: <synthetic slot
+/// binding> }` whose binding's backing value is `number`, lowered after
+/// `padding` unrelated literals.
+fn slot_binding_mapper_name(padding: usize) -> Arc<str> {
+    use verter_type_expr::{
+        MappedModifier, SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr,
+    };
+    let graph = SemanticGraphStore::new();
+    pad(&graph, padding);
+    let backing = prim(&graph, PrimitiveKind::Number);
+    let source = Arc::new(TypeExpr::Literal(LiteralValue::String("a".into())));
+    let value = Arc::new(TypeExpr::SyntheticSlotBinding(Arc::new(
+        SyntheticCarrierKey {
+            scope_canonical_id: Arc::from("/c.vue"),
+            surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
+            slot_name: Some(Arc::from("default")),
+            binding_name: Arc::from("item"),
+            value_node: backing.0,
+        },
+    )));
+    crate::mapper_binder_registry::mapper_binder_decl_name(
+        &graph,
+        &source,
+        &value,
+        MappedModifier::None,
+        MappedModifier::None,
+        None,
+    )
+}
+
+/// A mapped binder's name never carries an arena ordinal: a synthetic slot
+/// binding in the mapping contributes its logical identity and its backing
+/// value's structure, so interning an unrelated literal first leaves the
+/// name, and every key that holds the binder, unchanged.
+#[test]
+fn mapped_binder_names_do_not_depend_on_arena_ordinals() {
+    assert_eq!(slot_binding_mapper_name(0), slot_binding_mapper_name(1));
+}
