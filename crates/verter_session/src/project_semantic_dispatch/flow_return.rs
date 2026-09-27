@@ -9443,6 +9443,34 @@ enum RegionEvalStep<'r> {
     Done((Result<Vec<FlowContribution>, FlowReturnFailure>, bool)),
 }
 
+/// An array literal's evaluation in progress, stepped by
+/// [`FlowEvaluator::array_eval_step`]: the element join (or tuple) built so
+/// far and the next element.
+struct ArrayEvalFrame<'e> {
+    elements: &'e [crate::flow_slice_content::SliceArrayElement],
+    const_asserted: bool,
+    contextual: Option<SemanticNodeId>,
+    tupled: bool,
+    /// `(reduction operand, widening_nullish)` per element position of
+    /// the join.
+    parts: Vec<(ReductionArm, bool)>,
+    /// The tuple element lists, as published and unwidened, when tupled.
+    tuple: Vec<crate::semantic_query::TupleElement>,
+    tuple_view: Vec<crate::semantic_query::TupleElement>,
+    spread_seen: bool,
+    next: usize,
+    /// The holds before the element the literal waits on.
+    holds_before: usize,
+}
+
+/// What an array literal's evaluation needs next.
+enum ArrayEvalStep<'e> {
+    /// The value of this element (or spread source).
+    Descend(&'e crate::flow_slice_content::SliceExpr),
+    /// Nothing: the literal's value.
+    Done(Positional<SemanticNodeId>),
+}
+
 /// An object literal's evaluation in progress, stepped by
 /// [`FlowEvaluator::object_eval_step`]: what [`FlowEvaluator::eval_object_literal`]
 /// keeps across its members, the next entry, and the child it waits on.
@@ -10595,49 +10623,89 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         const_asserted: bool,
         contextual: Option<SemanticNodeId>,
     ) -> Positional<SemanticNodeId> {
-        use crate::flow_slice_content::SliceArrayElement;
-        let graph = self.dispatch.graph();
-        let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-        let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
-        // `(reduction operand, widening_nullish)` per element position of
-        // the join, or the tuple element lists (as published and
-        // unwidened) under `as const`.
-        let mut parts: Vec<(ReductionArm, bool)> = Vec::with_capacity(elements.len());
-        let mut tuple: Vec<crate::semantic_query::TupleElement> = Vec::new();
-        let mut tuple_view: Vec<crate::semantic_query::TupleElement> = Vec::new();
+        // Each element evaluates in the order the literal lists them; a
+        // nested literal steps from [`Self::eval_expr`]'s stack
+        // ([`ArrayEvalFrame`]).
+        let mut frame = self.array_eval_frame(elements, const_asserted, contextual);
+        let mut delivered = None;
+        loop {
+            match self.array_eval_step(&mut frame, delivered.take()) {
+                ArrayEvalStep::Done(value) => return value,
+                ArrayEvalStep::Descend(child) => delivered = Some(self.eval_expr(child)),
+            }
+        }
+    }
+
+    /// An array literal's evaluation, before its first element.
+    fn array_eval_frame<'e>(
+        &mut self,
+        elements: &'e [crate::flow_slice_content::SliceArrayElement],
+        const_asserted: bool,
+        contextual: Option<SemanticNodeId>,
+    ) -> ArrayEvalFrame<'e> {
         // A tuple context builds the tuple of the element values: the
         // `as const` path with mutable elements.
         let tuple_context = !const_asserted
             && contextual.is_some_and(|contextual| self.is_tuple_context(contextual));
-        let tupled = const_asserted || tuple_context;
-        let mut spread_seen = false;
-        for (position, element) in elements.iter().enumerate() {
+        ArrayEvalFrame {
+            elements,
+            const_asserted,
+            contextual,
+            tupled: const_asserted || tuple_context,
+            parts: Vec::with_capacity(elements.len()),
+            tuple: Vec::new(),
+            tuple_view: Vec::new(),
+            spread_seen: false,
+            next: 0,
+            holds_before: 0,
+        }
+    }
+
+    /// Continue an array literal with `delivered`, the value of the element
+    /// it asked for last: the next element whose value evaluates from the
+    /// caller's stack, or the literal's value. An element typed under a
+    /// contextual element type evaluates in place.
+    fn array_eval_step<'e>(
+        &mut self,
+        frame: &mut ArrayEvalFrame<'e>,
+        mut delivered: Option<Positional<SemanticNodeId>>,
+    ) -> ArrayEvalStep<'e> {
+        use crate::flow_slice_content::SliceArrayElement;
+        let graph = self.dispatch.graph();
+        let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+        while let Some(element) = frame.elements.get(frame.next) {
+            let position = frame.next;
             match element {
                 SliceArrayElement::Value {
                     value,
                     freshness,
                     pre_widening,
                 } => {
-                    let element_context = contextual.and_then(|contextual| {
-                        self.contextual_element_type(contextual, position, spread_seen)
+                    let element_context = frame.contextual.and_then(|contextual| {
+                        self.contextual_element_type(contextual, position, frame.spread_seen)
                     });
-                    let holds_before = self.holds.len();
-                    let outcome = match element_context {
-                        Some(element_context) => {
+                    let outcome = match (delivered.take(), element_context) {
+                        (Some(outcome), _) => outcome,
+                        (None, Some(element_context)) => {
+                            frame.holds_before = self.holds.len();
                             self.eval_in_context(value, pre_widening.as_deref(), element_context)
                         }
-                        None => self.eval_expr(value),
+                        (None, None) => {
+                            frame.holds_before = self.holds.len();
+                            return ArrayEvalStep::Descend(value);
+                        }
                     };
-                    let node = self.settle_composite_part(outcome, holds_before);
+                    let node = self.settle_composite_part(outcome, frame.holds_before);
                     let widening_nullish = self.widening_nullish_value(value, freshness);
-                    if tupled {
+                    if frame.tupled {
                         let element = crate::semantic_query::TupleElement {
                             label: None,
                             value: if widening_nullish { any } else { node },
                             optional: false,
                             rest: false,
                         };
-                        tuple_view.push(crate::semantic_query::TupleElement {
+                        frame.tuple_view.push(crate::semantic_query::TupleElement {
                             value: if widening_nullish {
                                 node
                             } else {
@@ -10645,9 +10713,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             },
                             ..element.clone()
                         });
-                        tuple.push(element);
+                        frame.tuple.push(element);
                     } else if widening_nullish {
-                        parts.push((ReductionArm::plain(node), true));
+                        frame.parts.push((ReductionArm::plain(node), true));
                     } else {
                         let read = self.widen_value_position_read(value, node);
                         let read = if element_context.is_none() {
@@ -10655,11 +10723,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         } else {
                             read
                         };
-                        parts.push((self.reduction_arm(value, read), false));
+                        frame.parts.push((self.reduction_arm(value, read), false));
                     }
                 }
                 SliceArrayElement::Elision => {
-                    if tupled {
+                    if frame.tupled {
                         let element = crate::semantic_query::TupleElement {
                             label: None,
                             value: if self.nullability.is_strict() {
@@ -10670,24 +10738,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             optional: false,
                             rest: false,
                         };
-                        tuple_view.push(crate::semantic_query::TupleElement {
+                        frame.tuple_view.push(crate::semantic_query::TupleElement {
                             value: undefined,
                             ..element.clone()
                         });
-                        tuple.push(element);
+                        frame.tuple.push(element);
                     } else {
-                        parts.push((ReductionArm::plain(undefined), true));
+                        frame.parts.push((ReductionArm::plain(undefined), true));
                     }
                 }
                 SliceArrayElement::Spread { source } => {
-                    spread_seen = true;
-                    let holds_before = self.holds.len();
-                    let outcome = self.eval_expr(source);
-                    self.holds.truncate(holds_before);
-                    let Positional::Value(source) = outcome else {
-                        return Positional::Unmodeled;
+                    frame.spread_seen = true;
+                    let Some(outcome) = delivered.take() else {
+                        frame.holds_before = self.holds.len();
+                        return ArrayEvalStep::Descend(source);
                     };
-                    if tupled {
+                    self.holds.truncate(frame.holds_before);
+                    let Positional::Value(source) = outcome else {
+                        return ArrayEvalStep::Done(Positional::Unmodeled);
+                    };
+                    if frame.tupled {
                         // A tuple source splices its elements in, labels
                         // and optionality kept; an optional one reads
                         // `| undefined` under `strictNullChecks` (the
@@ -10701,8 +10771,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     optional: false,
                                     rest: true,
                                 };
-                                tuple_view.push(element.clone());
-                                tuple.push(element);
+                                frame.tuple_view.push(element.clone());
+                                frame.tuple.push(element);
                             }
                             Some(SemanticNodeData::Tuple { elements, .. }) => {
                                 for element in elements.iter() {
@@ -10710,25 +10780,40 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     if element.optional && self.nullability.is_strict() {
                                         element.value = self.union(&[element.value, undefined]);
                                     }
-                                    tuple_view.push(element.clone());
-                                    tuple.push(element);
+                                    frame.tuple_view.push(element.clone());
+                                    frame.tuple.push(element);
                                 }
                             }
-                            _ => return Positional::Unmodeled,
+                            _ => return ArrayEvalStep::Done(Positional::Unmodeled),
                         }
+                        frame.next += 1;
                         continue;
                     }
                     let Some(spread) = self.spread_element_types(source) else {
-                        return Positional::Unmodeled;
+                        return ArrayEvalStep::Done(Positional::Unmodeled);
                     };
-                    parts.extend(
+                    frame.parts.extend(
                         spread
                             .into_iter()
                             .map(|node| (ReductionArm::plain(node), false)),
                     );
                 }
             }
+            frame.next += 1;
         }
+        ArrayEvalStep::Done(self.array_eval_finish(frame))
+    }
+
+    /// An array literal's value once every element has evaluated.
+    fn array_eval_finish(&mut self, frame: &mut ArrayEvalFrame<'_>) -> Positional<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+        let const_asserted = frame.const_asserted;
+        let tupled = frame.tupled;
+        let tuple = std::mem::take(&mut frame.tuple);
+        let tuple_view = std::mem::take(&mut frame.tuple_view);
+        let mut parts = std::mem::take(&mut frame.parts);
         if tupled {
             let intern_tuple = |elements: &[crate::semantic_query::TupleElement]| match self
                 .dispatch
@@ -23063,7 +23148,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 types: Vec<SemanticNodeId>,
             },
             /// An object literal waiting on the child it asked for last.
-            Object(ObjectEvalFrame<'e>),
+            Object(Box<ObjectEvalFrame<'e>>),
             /// A branch join (see [`FlowEvaluator::eval_expr_unerased`]'s
             /// `Union` arm) whose arm `reduction_arms.len()` evaluates
             /// under its guard's overlay, taken off at `mark`.
@@ -23074,8 +23159,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 holds_before: usize,
                 mark: NarrowingSnapshot,
             },
+            /// An array literal waiting on the element it asked for last.
+            Array(Box<ArrayEvalFrame<'e>>),
             /// A call waiting on its callee operand ([`call_stack`]).
-            CallOperand(CallInFlight<'e>),
+            CallOperand(Box<CallInFlight<'e>>),
             /// A call waiting on a lowered argument its executor route
             /// asked for ([`call_stack`]).
             CallArgument(Box<CallArgumentWait<'e>>),
@@ -23128,7 +23215,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     match self.object_eval_step(&mut frame, None) {
                         ObjectEvalStep::Done(value) => value,
                         ObjectEvalStep::Descend(child) => {
-                            waiting.push(Waiting::Object(frame));
+                            waiting.push(Waiting::Object(Box::new(frame)));
+                            waiting.push(Waiting::Erase);
+                            current = child;
+                            continue;
+                        }
+                    }
+                }
+                SliceExpr::Array {
+                    elements,
+                    const_asserted,
+                } => {
+                    let mut frame = self.array_eval_frame(elements, *const_asserted, None);
+                    match self.array_eval_step(&mut frame, None) {
+                        ArrayEvalStep::Done(value) => value,
+                        ArrayEvalStep::Descend(child) => {
+                            waiting.push(Waiting::Array(Box::new(frame)));
                             waiting.push(Waiting::Erase);
                             current = child;
                             continue;
@@ -23242,6 +23344,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             self.unwidened_views.insert(node, view);
                         }
                         value = Positional::Value(node);
+                    }
+                    Some(Waiting::Array(mut frame)) => {
+                        match self.array_eval_step(&mut frame, Some(value)) {
+                            ArrayEvalStep::Done(done) => value = done,
+                            ArrayEvalStep::Descend(child) => {
+                                waiting.push(Waiting::Array(frame));
+                                waiting.push(Waiting::Erase);
+                                current = child;
+                                break;
+                            }
+                        }
                     }
                     Some(Waiting::CallOperand(flight)) => {
                         match self.resume_call_operand(flight, value) {

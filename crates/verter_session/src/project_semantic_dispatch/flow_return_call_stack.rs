@@ -66,7 +66,7 @@ pub(super) struct CallArgumentWait<'e> {
 /// What a call begun from the stack needs next.
 pub(super) enum CallStep<'e> {
     /// Its callee operand's value.
-    Operand(CallInFlight<'e>, &'e SliceExpr),
+    Operand(Box<CallInFlight<'e>>, &'e SliceExpr),
     /// A lowered argument's value, for its executor route.
     Argument(Box<CallArgumentWait<'e>>),
     /// Nothing: the call's value.
@@ -143,7 +143,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             },
         };
         match call_operand(call) {
-            Some(operand) => CallStep::Operand(flight, operand),
+            Some(operand) => CallStep::Operand(Box::new(flight), operand),
             None => self.drive_call(flight),
         }
     }
@@ -151,11 +151,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Continue a call with its callee operand's value.
     pub(super) fn resume_call_operand<'e>(
         &mut self,
-        mut flight: CallInFlight<'e>,
+        mut flight: Box<CallInFlight<'e>>,
         value: Positional<SemanticNodeId>,
     ) -> CallStep<'e> {
         flight.drive.operand = Some(value);
-        self.drive_call(flight)
+        self.drive_call(*flight)
     }
 
     /// Continue a call with the value of the lowered argument its executor

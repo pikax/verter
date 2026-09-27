@@ -763,6 +763,24 @@ Recorded plainly so no reader mistakes absence for a pass:
   `a_template_nested_10000_deep_projects_on_a_small_stack` projects it, on
   a 1 MiB thread; restoring any of the four recursions overflows it.
 
+* **Array literals evaluate from the evaluator's explicit stack.** The
+  evaluator evaluated an array literal's elements and spread sources by
+  recursing into `eval_expr`: nested array literals overflowed a 1 MiB
+  caller from about 35 levels, unoptimized, below the 64 levels the
+  semantic inference depth budget admits them structurally. An array
+  literal is now a frame of `eval_expr`'s stack (`ArrayEvalFrame`), each
+  element evaluated from the stack in order (an element typed under a
+  contextual element type still evaluates in place), and the frames the
+  stack holds for object literals, array literals and calls are boxed so
+  the evaluator's own frame stays at about 5 KiB. `deep_input_tests.rs`
+  answers 64 nested array literals on a 1 MiB caller (TypeScript 7.0.2's
+  `1` for `ReturnType<typeof pf> extends unknown[] ? 1 : 2`); evaluating
+  the elements in place overflows it. At 10,000 levels the literal
+  exceeds that inference depth budget, so the return is its typed budget
+  failure; it returns on the production stacks. The same file answers
+  10,000 nested type arguments (`1`) and returns the typed budget failure
+  of a 10,000-deep `keyof` chain.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the

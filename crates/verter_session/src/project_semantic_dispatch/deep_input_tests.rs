@@ -245,3 +245,102 @@ fn calls_nested_10000_deep_answer_on_production_stacks() {
         Vec::<String>::new()
     );
 }
+
+/// A depth whose nested array literals the semantic inference depth budget
+/// (64 levels) admits.
+const ARRAYS_UNDER_THE_INFERENCE_BUDGET: usize = 64;
+
+fn arrays(depth: usize) -> String {
+    returning(wrap(depth, "[", "]"))
+}
+
+const ARRAY_PROBE: &str = "ReturnType<typeof pf> extends unknown[] ? 1 : 2";
+
+/// Array literals nested 64 deep evaluate from the evaluator's stack (an
+/// array literal is a frame of it, each element evaluated from the stack).
+#[test]
+fn arrays_nested_64_deep_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(arrays(ARRAYS_UNDER_THE_INFERENCE_BUDGET), ARRAY_PROBE, "1"),
+        Vec::<String>::new()
+    );
+}
+
+/// Array literals nested 10,000 deep return on the production stacks (the
+/// semantic inference depth budget admits 64 levels, so the return is its
+/// typed budget failure).
+#[test]
+fn arrays_nested_10000_deep_return_on_production_stacks() {
+    assert!(!returns_on_a_small_stack(arrays(DEPTH)));
+}
+
+#[test]
+#[ignore = "the semantic inference depth budget admits no 10,000 nested array literals"]
+fn arrays_nested_10000_deep_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(arrays(DEPTH), ARRAY_PROBE, "1"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn type_arguments_nested_10000_deep_answer_on_production_stacks() {
+    let source = format!(
+        "interface Box<T> {{ v: T }}\ntype D = {};\n",
+        wrap(DEPTH, "Box<", ">")
+    );
+    assert_eq!(
+        mismatches_on_a_small_stack(source, "D extends Box<unknown> ? 1 : 2", "1"),
+        Vec::<String>::new()
+    );
+}
+
+fn keyof_chain(depth: usize) -> String {
+    format!("type D = {}{{ v: 1 }};\n", "keyof ".repeat(depth))
+}
+
+const KEYOF_PROBE: &str = "D extends string | number | symbol ? 1 : 2";
+
+/// A `keyof` chain 10,000 deep returns on the production stacks (its
+/// resolution exceeds the connected-demand work budget, so the return is
+/// its typed budget failure).
+#[test]
+fn keyof_chains_10000_deep_return_on_production_stacks() {
+    let source = format!(
+        "{}export function pf() {{ return null as unknown as ({KEYOF_PROBE}); }}\n",
+        keyof_chain(DEPTH)
+    );
+    assert!(!returns_on_a_small_stack(source));
+}
+
+#[test]
+#[ignore = "the connected-demand work budget admits no 10,000-deep keyof chain"]
+fn keyof_chains_10000_deep_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(keyof_chain(DEPTH), KEYOF_PROBE, "1"),
+        Vec::<String>::new()
+    );
+}
+
+fn arrows(depth: usize) -> String {
+    returning(format!("{}1", "() => ".repeat(depth)))
+}
+
+const ARROW_PROBE: &str = "ReturnType<typeof pf> extends Function ? 1 : 2";
+
+#[test]
+fn arrows_nested_10_deep_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(arrows(10), ARROW_PROBE, "1"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+#[ignore = "a nested function value's body evaluates on the caller's native stack, about 53 KiB per level unoptimized"]
+fn arrows_nested_10000_deep_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(arrows(DEPTH), ARROW_PROBE, "1"),
+        Vec::<String>::new()
+    );
+}
