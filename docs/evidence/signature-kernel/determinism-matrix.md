@@ -120,10 +120,15 @@ row's identity claim is weaker than its `inputs` column reads:
 |---|---|
 | `ImportType` | The encoder consumes the resolver's inputs — the importing logical source unit and the authored specifier — not the resolved module logical identity. One spelling written in two files keys as two identities; two spellings of one module key apart until the carrier resolves, because key construction never resolves a module (§5.4). See "Unresolved import-type identity" below. |
 
-The encoder walks an explicit frame stack: every finite structure gets its
-complete key at any depth, a true cycle ends at a back-reference to its open
-frame's level, and no key is incomplete. `Eq`, `Ord` and `Hash` all read the
-same `(fingerprint, exact)` pair.
+The encoder works on heap stacks, never the native stack: every finite
+structure gets its complete key at any depth, a true cycle ends at a
+back-reference to its open frame's level, and no key is incomplete. A key is
+linear in the structure it describes: a subtree longer than
+`SHARED_SUBTREE_MIN_BYTES` (256) that equals one already written earlier in
+the key is written as a reference to it. Sharing is decided by structure, never
+by node identity, so equal structures keep equal keys however their subtrees
+are shared. `Eq`, `Ord` and `Hash` all read the same `(fingerprint, exact)`
+pair.
 
 ### Encoding revisions under `VerterStableV1`
 
@@ -145,6 +150,7 @@ discovery order, and they are registered here rather than changed silently:
 | `TypeParam` mapped binder | the `<mapper-param>` sentinel name and the registry ordinal, handed out in discovery order | the binding mapping's identity (a 128-bit digest over its exact source, value, name-type and modifier structure) as the declaration name; the ordinal is not encoded |
 | `Signature` and `DeferredCallable` binder declarations | each declaration's name and binder only | the name, the binder, the constraint and default (presence and keys) and the `const` modifier |
 | `Signature` return carrier | not encoded | a trailing section, present only when the carrier is not the declared return type itself |
+| Repeated subtree longer than 256 bytes | written in full at every occurrence, doubling per level of sharing | written once; each later occurrence is a `RECURSIVE` sub-tag 3 reference numbering shared subtrees in the order they finish being written |
 
 Every other encoding, and with it every existing union order over those
 variants, is byte-identical.

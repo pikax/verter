@@ -5,8 +5,11 @@
 //! `(fingerprint, exact key)`. Comparators never force bodies, resolve
 //! names, run relations, instantiate, or reduce unions.
 
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::rc::Rc;
 use std::sync::Arc;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::semantic_query::composite::CompositeOriginCategory;
 use crate::semantic_query::{
@@ -96,6 +99,9 @@ pub mod subtag {
     pub const OBJECT_SPREAD: u8 = 10;
     pub const DEFERRED_CALLABLE: u8 = 11;
     pub const RAW_FALLBACK: u8 = 12;
+    // Recursive references. Sub-tag 2 was the retired depth-exhausted marker.
+    pub const BACK_REFERENCE: u8 = 1;
+    pub const SHARED_SUBTREE: u8 = 3;
 }
 
 /// Exact key plus versioned fingerprint. Order is the whole pair
@@ -217,6 +223,18 @@ impl Recipe {
     fn child_set(&mut self, members: Vec<SemanticNodeId>) {
         self.holes.push((self.buf.len(), Hole::Set(members)));
     }
+
+    /// Every child node, in hole order.
+    fn children(&self) -> Vec<SemanticNodeId> {
+        let mut children = Vec::new();
+        for (_, hole) in &self.holes {
+            match hole {
+                Hole::Child(child) => children.push(*child),
+                Hole::Set(members) => children.extend_from_slice(members),
+            }
+        }
+        children
+    }
 }
 
 fn primitive_subtag(kind: PrimitiveKind) -> u8 {
@@ -298,153 +316,609 @@ fn encode_scope_id(enc: &mut Recipe, scope: &ScopeId) {
     enc.bytes(&scope.binder_scope_id.structural_hash);
 }
 
-/// Encode a node. The walk is iterative over an explicit frame stack, so a
-/// finite structure of any depth gets its complete key and the encoder
-/// never recurses natively. A child already open on the walk's path is a
-/// true cycle: it encodes as a back-reference to that frame's level (its
-/// distance from this walk's root), never a node id, so recursion
-/// terminates deterministically.
+/// Encode a node.
+///
+/// The key is the node's exact structure written out, with two rules that
+/// keep it finite and linear in the graph it describes:
+///
+/// * a child already open on the path from the root is a true cycle and
+///   encodes as a back-reference to that frame's level, never a node id;
+/// * a subtree whose written-out form is longer than
+///   [`SHARED_SUBTREE_MIN_BYTES`] and equal to one already written earlier
+///   in the key encodes as a reference to that earlier subtree.
+///
+/// Both rules are functions of the structure alone, so equal structures
+/// get equal keys and distinct structures distinct ones, at any depth and
+/// however often a subtree is shared. A key with no repeated subtree over
+/// that length writes every subtree in full. The encoder works in two
+/// passes over heap stacks and never recurses natively: it first reduces
+/// the reachable structure to a table of distinct subtrees (classes), then
+/// writes the root's class.
 pub fn stable_key_for_node(graph: &SemanticGraphStore, id: SemanticNodeId) -> StableKey {
-    let mut walk = KeyWalk {
-        graph,
-        out: Vec::with_capacity(64),
-        frames: Vec::new(),
-        open: HashMap::new(),
-    };
-    walk.enter(id, 0);
-    walk.run();
-    StableKey::from_exact(walk.out)
+    let mut table = ClassTable::new(graph);
+    let root = table.classify(id);
+    StableKey::from_exact(table.write(root))
 }
 
-/// One node open on the walk's path.
-struct Frame {
+/// Shortest written-out subtree a key refers back to rather than repeats.
+/// A reference costs seven bytes; shorter subtrees are written each time.
+pub const SHARED_SUBTREE_MIN_BYTES: u64 = 256;
+
+type ClassId = u32;
+
+/// One piece of a class's written-out form.
+#[derive(Clone, Copy)]
+enum Part {
+    /// Literal bytes, a range of the class's `lit`.
+    Lit(u32, u32),
+    /// A child subtree, written as its length and its bytes.
+    Child(ClassId),
+}
+
+/// One distinct subtree: its literal bytes and child classes, in order.
+struct Class {
+    lit: Vec<u8>,
+    parts: Vec<Part>,
+    /// Length of the subtree written out in full, every occurrence inline
+    /// (saturating).
+    full_len: u64,
+    /// Whether a cycle back-reference occurs anywhere inside.
+    has_back_refs: bool,
+}
+
+/// The placement a subtree containing back-references was classified at:
+/// its depth, and the open frames of its own strongly connected component
+/// (the only ancestors it can reach back to) with their levels.
+#[derive(PartialEq, Eq, Hash)]
+struct Placement {
     node: SemanticNodeId,
-    recipe: Recipe,
-    /// Bytes of `recipe.buf` already written to the output.
-    written: usize,
-    /// The next hole to fill.
+    depth: u32,
+    open: Box<[(SemanticNodeId, u32)]>,
+}
+
+/// A child a frame has classified, per hole.
+enum Filled {
+    One(ClassId),
+    Set(Vec<ClassId>),
+}
+
+/// One node open on the classification path.
+struct OpenFrame {
+    node: SemanticNodeId,
+    component: u32,
+    recipe: Rc<Recipe>,
     next_hole: usize,
-    /// Offset of this node's first byte in the output.
-    start: usize,
-    /// The set hole being filled, while one is open.
-    set: Option<SetFill>,
+    filled: Vec<Filled>,
+    /// The set hole being filled: its next member and the classes so far.
+    set: Option<(usize, Vec<ClassId>)>,
+    placement: Placement,
 }
 
-/// An unordered child collection whose member keys are being collected.
-struct SetFill {
-    members: Vec<SemanticNodeId>,
-    next: usize,
-    keys: Vec<Vec<u8>>,
+/// Tarjan's working state.
+#[derive(Default)]
+struct Tarjan {
+    index: FxHashMap<SemanticNodeId, u32>,
+    low: FxHashMap<SemanticNodeId, u32>,
+    on_stack: FxHashSet<SemanticNodeId>,
+    stack: Vec<SemanticNodeId>,
+    calls: Vec<(SemanticNodeId, Vec<SemanticNodeId>, usize)>,
+    next_index: u32,
+    next_component: u32,
 }
 
-/// The iterative encoder: every open node is a heap frame, and every key is
-/// written straight into one output buffer.
-struct KeyWalk<'g> {
+/// Classification state for one key. It lives for one key computation and
+/// is dropped with it.
+struct ClassTable<'g> {
     graph: &'g SemanticGraphStore,
-    out: Vec<u8>,
-    frames: Vec<Frame>,
-    /// Each node open on the path, with its frame level.
-    open: HashMap<SemanticNodeId, u32>,
+    classes: Vec<Class>,
+    interned: FxHashMap<Box<[u8]>, ClassId>,
+    /// Each reachable node's recipe; `None` for a node with no payload.
+    recipes: FxHashMap<SemanticNodeId, Option<Rc<Recipe>>>,
+    /// Each reachable node's strongly connected component.
+    components: FxHashMap<SemanticNodeId, u32>,
+    /// Classes of subtrees with no back-reference: the same at every
+    /// occurrence of their node.
+    unplaced: FxHashMap<SemanticNodeId, ClassId>,
+    /// Classes of subtrees with back-references, by placement.
+    placed: FxHashMap<Placement, ClassId>,
+    order: FxHashMap<(ClassId, ClassId), Ordering>,
+    frames: Vec<OpenFrame>,
+    /// Each open node's level.
+    open: FxHashMap<SemanticNodeId, u32>,
+    /// Open nodes per component, in path order, with their levels.
+    open_by_component: FxHashMap<u32, Vec<(SemanticNodeId, u32)>>,
 }
 
-impl KeyWalk<'_> {
-    /// Begin the key of `id` at output offset `start`: a back-reference or
-    /// an absent node is written at once, anything else opens a frame.
-    fn enter(&mut self, id: SemanticNodeId, start: usize) {
-        if let Some(&level) = self.open.get(&id) {
-            let mut enc = Recipe::new();
-            enc.header(category::RECURSIVE, 1);
-            enc.u32(level);
-            self.out.extend_from_slice(&enc.buf);
-            self.deliver(start);
-            return;
+impl<'g> ClassTable<'g> {
+    fn new(graph: &'g SemanticGraphStore) -> Self {
+        Self {
+            graph,
+            classes: Vec::new(),
+            interned: FxHashMap::default(),
+            recipes: FxHashMap::default(),
+            components: FxHashMap::default(),
+            unplaced: FxHashMap::default(),
+            placed: FxHashMap::default(),
+            order: FxHashMap::default(),
+            frames: Vec::new(),
+            open: FxHashMap::default(),
+            open_by_component: FxHashMap::default(),
         }
-        let Some(data) = self.graph.node_data(id) else {
-            let mut enc = Recipe::new();
-            enc.header(category::INTRINSIC, subtag::OPAQUE);
-            enc.u8(0xff);
-            self.out.extend_from_slice(&enc.buf);
-            self.deliver(start);
-            return;
-        };
-        self.open.insert(id, self.frames.len() as u32);
-        self.frames.push(Frame {
-            node: id,
-            recipe: encode_data(self.graph, id, &data),
-            written: 0,
-            next_hole: 0,
-            start,
-            set: None,
-        });
     }
 
-    /// Hand the finished key at `start..` to the enclosing frame: a set
-    /// member is kept aside for sorting, a single child gets its length.
-    fn deliver(&mut self, start: usize) {
+    fn recipe(&mut self, id: SemanticNodeId) -> Option<Rc<Recipe>> {
+        if let Some(recipe) = self.recipes.get(&id) {
+            return recipe.clone();
+        }
+        let recipe = self
+            .graph
+            .node_data(id)
+            .map(|data| Rc::new(encode_data(self.graph, id, &data)));
+        self.recipes.insert(id, recipe.clone());
+        recipe
+    }
+
+    /// Tarjan's strongly connected components over the structure reachable
+    /// from `root`, on an explicit stack.
+    fn assign_components(&mut self, root: SemanticNodeId) {
+        let mut state = Tarjan::default();
+        self.tarjan_visit(root, &mut state);
+        while let Some(top) = state.calls.last_mut() {
+            let node = top.0;
+            if let Some(&child) = top.1.get(top.2) {
+                top.2 += 1;
+                if !state.index.contains_key(&child) {
+                    self.tarjan_visit(child, &mut state);
+                } else if state.on_stack.contains(&child) {
+                    let reach = state.index[&child].min(state.low[&node]);
+                    state.low.insert(node, reach);
+                }
+                continue;
+            }
+            state.calls.pop();
+            if let Some(parent) = state.calls.last().map(|call| call.0) {
+                let reach = state.low[&node].min(state.low[&parent]);
+                state.low.insert(parent, reach);
+            }
+            if state.low[&node] == state.index[&node] {
+                while let Some(member) = state.stack.pop() {
+                    state.on_stack.remove(&member);
+                    self.components.insert(member, state.next_component);
+                    if member == node {
+                        break;
+                    }
+                }
+                state.next_component += 1;
+            }
+        }
+    }
+
+    fn tarjan_visit(&mut self, node: SemanticNodeId, state: &mut Tarjan) {
+        state.index.insert(node, state.next_index);
+        state.low.insert(node, state.next_index);
+        state.next_index += 1;
+        state.stack.push(node);
+        state.on_stack.insert(node);
+        let children = self
+            .recipe(node)
+            .map(|recipe| recipe.children())
+            .unwrap_or_default();
+        state.calls.push((node, children, 0));
+    }
+
+    /// Reduce the structure reachable from `root` to classes and return the
+    /// root's.
+    fn classify(&mut self, root: SemanticNodeId) -> ClassId {
+        self.assign_components(root);
+        if let Some(class) = self.enter(root) {
+            return class;
+        }
+        loop {
+            let Some(frame) = self.frames.last_mut() else {
+                unreachable!("the root frame completes with a class");
+            };
+            let recipe = Rc::clone(&frame.recipe);
+            let next = match recipe.holes.get(frame.next_hole).map(|(_, hole)| hole) {
+                Some(Hole::Set(members)) => match &mut frame.set {
+                    None => {
+                        frame.set = Some((0, Vec::new()));
+                        continue;
+                    }
+                    Some((next, _)) => match members.get(*next) {
+                        Some(&member) => {
+                            *next += 1;
+                            member
+                        }
+                        None => {
+                            if let Some((_, classes)) = frame.set.take() {
+                                frame.filled.push(Filled::Set(classes));
+                            }
+                            frame.next_hole += 1;
+                            continue;
+                        }
+                    },
+                },
+                Some(Hole::Child(child)) => {
+                    frame.next_hole += 1;
+                    *child
+                }
+                None => {
+                    if let Some(class) = self.complete() {
+                        return class;
+                    }
+                    continue;
+                }
+            };
+            if let Some(class) = self.enter(next) {
+                self.deliver(class);
+            }
+        }
+    }
+
+    /// Close the innermost frame: build and remember its class, and hand it
+    /// to the enclosing frame, or return it when the root closes.
+    fn complete(&mut self) -> Option<ClassId> {
+        let frame = self.frames.pop()?;
+        self.open.remove(&frame.node);
+        if let Some(open) = self.open_by_component.get_mut(&frame.component) {
+            open.pop();
+        }
+        let class = self.build(&frame.recipe, frame.filled);
+        if self.classes[class as usize].has_back_refs {
+            self.placed.insert(frame.placement, class);
+        } else {
+            self.unplaced.insert(frame.node, class);
+        }
+        if self.frames.is_empty() {
+            return Some(class);
+        }
+        self.deliver(class);
+        None
+    }
+
+    /// Hand a classified child to the enclosing frame.
+    fn deliver(&mut self, class: ClassId) {
         let Some(parent) = self.frames.last_mut() else {
             return;
         };
         match &mut parent.set {
-            Some(set) => set.keys.push(self.out.split_off(start)),
-            None => {
-                let len = (self.out.len() - start) as u32;
-                self.out[start - 4..start].copy_from_slice(&len.to_le_bytes());
+            Some((_, classes)) => classes.push(class),
+            None => parent.filled.push(Filled::One(class)),
+        }
+    }
+
+    /// Begin classifying `id`: a back-reference, an absent node or an
+    /// already classified subtree answers at once; anything else opens a
+    /// frame.
+    fn enter(&mut self, id: SemanticNodeId) -> Option<ClassId> {
+        if let Some(&level) = self.open.get(&id) {
+            let mut enc = Recipe::new();
+            enc.header(category::RECURSIVE, subtag::BACK_REFERENCE);
+            enc.u32(level);
+            return Some(self.leaf(enc.buf, true));
+        }
+        let Some(recipe) = self.recipe(id) else {
+            let mut enc = Recipe::new();
+            enc.header(category::INTRINSIC, subtag::OPAQUE);
+            enc.u8(0xff);
+            return Some(self.leaf(enc.buf, false));
+        };
+        if let Some(&class) = self.unplaced.get(&id) {
+            return Some(class);
+        }
+        let component = self.components.get(&id).copied().unwrap_or(u32::MAX);
+        let depth = self.frames.len() as u32;
+        let placement = Placement {
+            node: id,
+            depth,
+            open: self
+                .open_by_component
+                .get(&component)
+                .map(|open| open.clone().into_boxed_slice())
+                .unwrap_or_default(),
+        };
+        if let Some(&class) = self.placed.get(&placement) {
+            return Some(class);
+        }
+        self.open.insert(id, depth);
+        self.open_by_component
+            .entry(component)
+            .or_default()
+            .push((id, depth));
+        self.frames.push(OpenFrame {
+            node: id,
+            component,
+            recipe,
+            next_hole: 0,
+            filled: Vec::new(),
+            set: None,
+            placement,
+        });
+        None
+    }
+
+    fn leaf(&mut self, lit: Vec<u8>, back_ref: bool) -> ClassId {
+        let len = lit.len() as u32;
+        self.intern(lit, vec![Part::Lit(0, len)], back_ref)
+    }
+
+    /// The class of a completed frame: its recipe with every hole filled,
+    /// set members in their canonical order without repeats.
+    fn build(&mut self, recipe: &Recipe, filled: Vec<Filled>) -> ClassId {
+        let mut lit: Vec<u8> = Vec::new();
+        let mut parts: Vec<Part> = Vec::new();
+        let mut written = 0;
+        for ((at, _), fill) in recipe.holes.iter().zip(filled) {
+            push_lit(&mut lit, &mut parts, &recipe.buf[written..*at]);
+            written = *at;
+            match fill {
+                Filled::One(class) => parts.push(Part::Child(class)),
+                Filled::Set(mut members) => {
+                    members.sort_by(|a, b| self.compare(*a, *b));
+                    members.dedup();
+                    push_lit(&mut lit, &mut parts, &(members.len() as u16).to_le_bytes());
+                    parts.extend(members.into_iter().map(Part::Child));
+                }
+            }
+        }
+        push_lit(&mut lit, &mut parts, &recipe.buf[written..]);
+        self.intern(lit, parts, false)
+    }
+
+    fn intern(&mut self, lit: Vec<u8>, parts: Vec<Part>, back_ref: bool) -> ClassId {
+        let mut repr = Vec::with_capacity(lit.len() + parts.len() * 5);
+        for part in &parts {
+            match *part {
+                Part::Lit(start, end) => {
+                    repr.push(0);
+                    repr.extend_from_slice(&(end - start).to_le_bytes());
+                    repr.extend_from_slice(&lit[start as usize..end as usize]);
+                }
+                Part::Child(class) => {
+                    repr.push(1);
+                    repr.extend_from_slice(&class.to_le_bytes());
+                }
+            }
+        }
+        if let Some(&class) = self.interned.get(repr.as_slice()) {
+            return class;
+        }
+        let mut full_len = 0u64;
+        let mut has_back_refs = back_ref;
+        for part in &parts {
+            match *part {
+                Part::Lit(start, end) => {
+                    full_len = full_len.saturating_add(u64::from(end - start));
+                }
+                Part::Child(class) => {
+                    let child = &self.classes[class as usize];
+                    full_len = full_len
+                        .saturating_add(length_prefix(child.full_len).1 as u64)
+                        .saturating_add(child.full_len);
+                    has_back_refs |= child.has_back_refs;
+                }
+            }
+        }
+        let class = self.classes.len() as ClassId;
+        self.classes.push(Class {
+            lit,
+            parts,
+            full_len,
+            has_back_refs,
+        });
+        self.interned.insert(repr.into_boxed_slice(), class);
+        class
+    }
+
+    /// The canonical order of two classes: their written-out-in-full byte
+    /// streams, compared lexicographically. Equal children at one offset
+    /// are skipped whole; only the first differing path is descended.
+    fn compare(&mut self, a: ClassId, b: ClassId) -> Ordering {
+        if a == b {
+            return Ordering::Equal;
+        }
+        if let Some(&order) = self.order.get(&(a, b)) {
+            return order;
+        }
+        let mut left = FullStream::new(a);
+        let mut right = FullStream::new(b);
+        let order = loop {
+            match (left.peek(&self.classes), right.peek(&self.classes)) {
+                (Event::End, Event::End) => break Ordering::Equal,
+                (Event::End, _) => break Ordering::Less,
+                (_, Event::End) => break Ordering::Greater,
+                (Event::Child(x), Event::Child(y)) if x == y => {
+                    left.skip();
+                    right.skip();
+                }
+                (Event::Child(x), _) => left.descend(x, &self.classes),
+                (_, Event::Child(y)) => right.descend(y, &self.classes),
+                (Event::Byte(x), Event::Byte(y)) => {
+                    if x != y {
+                        break x.cmp(&y);
+                    }
+                    left.advance();
+                    right.advance();
+                }
+            }
+        };
+        self.order.insert((a, b), order);
+        self.order.insert((b, a), order.reverse());
+        order
+    }
+
+    /// Write `root`'s class: every subtree in full the first time, and a
+    /// reference to that first time whenever an equal subtree longer than
+    /// [`SHARED_SUBTREE_MIN_BYTES`] recurs. References number the shared
+    /// subtrees in the order they finish being written.
+    fn write(&self, root: ClassId) -> Vec<u8> {
+        struct Writing {
+            class: ClassId,
+            part: usize,
+            length_slot: Option<usize>,
+        }
+        let patch = |out: &mut Vec<u8>, slot: usize| {
+            let len = (out.len() - slot - 4) as u32;
+            out[slot..slot + 4].copy_from_slice(&len.to_le_bytes());
+        };
+        let mut out: Vec<u8> = Vec::with_capacity(64);
+        let mut written: FxHashMap<ClassId, u32> = FxHashMap::default();
+        let mut stack = vec![Writing {
+            class: root,
+            part: 0,
+            length_slot: None,
+        }];
+        while let Some(top) = stack.last_mut() {
+            let class = &self.classes[top.class as usize];
+            let part = class.parts.get(top.part).copied();
+            if part.is_some() {
+                top.part += 1;
+            }
+            match part {
+                Some(Part::Lit(start, end)) => {
+                    out.extend_from_slice(&class.lit[start as usize..end as usize]);
+                }
+                Some(Part::Child(child)) => {
+                    let slot = out.len();
+                    out.extend_from_slice(&[0; 4]);
+                    match written.get(&child) {
+                        Some(&index) => {
+                            let mut enc = Recipe::new();
+                            enc.header(category::RECURSIVE, subtag::SHARED_SUBTREE);
+                            enc.u32(index);
+                            out.extend_from_slice(&enc.buf);
+                            patch(&mut out, slot);
+                        }
+                        None => stack.push(Writing {
+                            class: child,
+                            part: 0,
+                            length_slot: Some(slot),
+                        }),
+                    }
+                }
+                None => {
+                    let Some(done) = stack.pop() else {
+                        break;
+                    };
+                    if self.classes[done.class as usize].full_len > SHARED_SUBTREE_MIN_BYTES {
+                        let index = written.len() as u32;
+                        written.insert(done.class, index);
+                    }
+                    if let Some(slot) = done.length_slot {
+                        patch(&mut out, slot);
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Append literal bytes, merging them into a trailing literal part.
+fn push_lit(lit: &mut Vec<u8>, parts: &mut Vec<Part>, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let start = lit.len() as u32;
+    lit.extend_from_slice(bytes);
+    let end = lit.len() as u32;
+    match parts.last_mut() {
+        Some(Part::Lit(_, last_end)) if *last_end == start => *last_end = end,
+        _ => parts.push(Part::Lit(start, end)),
+    }
+}
+
+/// The length prefix of a subtree written out in full: four little-endian
+/// bytes, or, from `u32::MAX` up, four `0xFF` bytes and eight
+/// little-endian bytes, so every length has one prefix.
+fn length_prefix(full_len: u64) -> ([u8; 12], usize) {
+    let mut prefix = [0u8; 12];
+    match u32::try_from(full_len) {
+        Ok(short) if short != u32::MAX => {
+            prefix[..4].copy_from_slice(&short.to_le_bytes());
+            (prefix, 4)
+        }
+        _ => {
+            prefix[..4].copy_from_slice(&[0xFF; 4]);
+            prefix[4..].copy_from_slice(&full_len.to_le_bytes());
+            (prefix, 12)
+        }
+    }
+}
+
+/// What a [`FullStream`] shows next.
+enum Event {
+    Byte(u8),
+    /// A child subtree begins (before its length prefix).
+    Child(ClassId),
+    End,
+}
+
+/// A class's written-out-in-full byte stream, expanded on demand.
+struct FullStream {
+    /// Open classes with their next part and the offset within it.
+    stack: Vec<(ClassId, usize, u32)>,
+    /// A pending length prefix: its bytes, its length and how much of it is
+    /// consumed.
+    prefix: ([u8; 12], usize, usize),
+}
+
+impl FullStream {
+    fn new(class: ClassId) -> Self {
+        Self {
+            stack: vec![(class, 0, 0)],
+            prefix: ([0; 12], 0, 0),
+        }
+    }
+
+    fn peek(&mut self, classes: &[Class]) -> Event {
+        let (bytes, len, at) = self.prefix;
+        if at < len {
+            return Event::Byte(bytes[at]);
+        }
+        loop {
+            let Some(top) = self.stack.last_mut() else {
+                return Event::End;
+            };
+            let class = &classes[top.0 as usize];
+            match class.parts.get(top.1).copied() {
+                None => {
+                    self.stack.pop();
+                }
+                Some(Part::Lit(start, end)) => {
+                    if start + top.2 < end {
+                        return Event::Byte(class.lit[(start + top.2) as usize]);
+                    }
+                    top.1 += 1;
+                    top.2 = 0;
+                }
+                Some(Part::Child(child)) => return Event::Child(child),
             }
         }
     }
 
-    fn run(&mut self) {
-        while let Some(frame) = self.frames.last_mut() {
-            if let Some(set) = &mut frame.set {
-                if let Some(&member) = set.members.get(set.next) {
-                    set.next += 1;
-                    let start = self.out.len();
-                    self.enter(member, start);
-                    continue;
-                }
-                let mut keys = std::mem::take(&mut set.keys);
-                frame.set = None;
-                keys.sort();
-                keys.dedup();
-                self.out
-                    .extend_from_slice(&(keys.len() as u16).to_le_bytes());
-                for key in keys {
-                    self.out
-                        .extend_from_slice(&(key.len() as u32).to_le_bytes());
-                    self.out.extend_from_slice(&key);
-                }
-                continue;
-            }
-            if let Some((at, hole)) = frame.recipe.holes.get_mut(frame.next_hole) {
-                frame.next_hole += 1;
-                self.out
-                    .extend_from_slice(&frame.recipe.buf[frame.written..*at]);
-                frame.written = *at;
-                match hole {
-                    Hole::Child(child) => {
-                        let child = *child;
-                        self.out.extend_from_slice(&[0; 4]);
-                        let start = self.out.len();
-                        self.enter(child, start);
-                    }
-                    Hole::Set(members) => {
-                        frame.set = Some(SetFill {
-                            members: std::mem::take(members),
-                            next: 0,
-                            keys: Vec::new(),
-                        });
-                    }
-                }
-                continue;
-            }
-            self.out
-                .extend_from_slice(&frame.recipe.buf[frame.written..]);
-            let Some(frame) = self.frames.pop() else {
-                break;
-            };
-            self.open.remove(&frame.node);
-            self.deliver(frame.start);
+    fn advance(&mut self) {
+        let (_, len, at) = &mut self.prefix;
+        if *at < *len {
+            *at += 1;
+        } else if let Some(top) = self.stack.last_mut() {
+            top.2 += 1;
         }
+    }
+
+    /// Step over the child at the cursor.
+    fn skip(&mut self) {
+        if let Some(top) = self.stack.last_mut() {
+            top.1 += 1;
+        }
+    }
+
+    /// Step into the child at the cursor: its length prefix, then its bytes.
+    fn descend(&mut self, child: ClassId, classes: &[Class]) {
+        self.skip();
+        let (prefix, len) = length_prefix(classes[child as usize].full_len);
+        self.prefix = (prefix, len, 0);
+        self.stack.push((child, 0, 0));
     }
 }
 

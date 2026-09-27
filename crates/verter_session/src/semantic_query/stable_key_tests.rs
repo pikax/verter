@@ -1225,3 +1225,142 @@ fn deferred_callable_keys_carry_binder_bounds_and_constness() {
         );
     }
 }
+
+/// An object whose public properties `names` all hold `value`.
+fn object_of(graph: &SemanticGraphStore, names: &[&str], value: SemanticNodeId) -> SemanticNodeId {
+    use crate::semantic_query::{IndexSignature, SurfaceMember};
+    let members: Vec<SurfaceMember> = names
+        .iter()
+        .map(|name| SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            key: crate::semantic_query::AuthoredPropertyKey::string(*name),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: Default::default(),
+            declaration_origin: None,
+        })
+        .collect();
+    graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        members: Arc::from(members.into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }))
+}
+
+/// The key of `depth` nested objects, each holding the next under every
+/// one of `names`, around `number`.
+fn nested_object_key_len(names: &[&str], depth: usize) -> usize {
+    let graph = SemanticGraphStore::new();
+    let mut node = prim(&graph, PrimitiveKind::Number);
+    for _ in 0..depth {
+        node = object_of(&graph, names, node);
+    }
+    stable_key_for_node(&graph, node).exact().len()
+}
+
+/// A key is linear in the structure it encodes, however often a subtree is
+/// shared: `{ p: { p: … } }` reaches each level through its member entry
+/// and its derived positive member, and `{ a: X, b: X }` reaches `X` twice,
+/// so an encoding that writes every occurrence doubles per level.
+#[test]
+fn shared_subtrees_keep_keys_linear_in_depth() {
+    for names in [&["p"][..], &["a", "b"][..]] {
+        for depth in [18usize, 400] {
+            let bytes = nested_object_key_len(names, depth);
+            assert!(
+                bytes <= 1024 * depth,
+                "{names:?} nested {depth} deep keys in {bytes} bytes, not linear in depth"
+            );
+        }
+    }
+}
+
+/// Sharing is decided by structure, never by node identity: a subtree held
+/// twice through one node and the same subtree built twice as two nodes
+/// (here, in two arena scopes) give one key, and the key refers back to
+/// the first copy either way.
+#[test]
+fn shared_subtrees_are_decided_by_structure_not_node_identity() {
+    let graph = SemanticGraphStore::new();
+    let deep = |scope: &str| {
+        let mut node = graph.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::Number),
+            crate::semantic_query::NodeScopeId::File {
+                canonical_id: Arc::from(scope),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: [5u8; 16],
+                local_scope: None,
+            },
+        );
+        for _ in 0..12 {
+            node = object_of(&graph, &["p"], node);
+        }
+        node
+    };
+    let one = deep("/one.ts");
+    let other = deep("/other.ts");
+    assert_ne!(one, other, "premise: two nodes of one structure");
+    let shared = object_of(&graph, &["a", "b"], one);
+    let separate = {
+        use crate::semantic_query::{IndexSignature, SurfaceMember};
+        let member = |name: &str, value| SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: Default::default(),
+            declaration_origin: None,
+        };
+        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+            members: Arc::from([member("a", one), member("b", other)]),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }))
+    };
+    assert_ne!(shared, separate, "premise: two object nodes");
+    let key = stable_key_for_node(&graph, shared);
+    assert!(
+        key == stable_key_for_node(&graph, separate),
+        "one structure keys alike whether its repeated subtree is one node or two"
+    );
+    let reference = [1u8, 7, 3];
+    assert!(
+        key.exact().windows(3).any(|window| window == reference),
+        "the repeated subtree is written once and referred back to"
+    );
+}
+
+/// Ten thousand nested objects, each reaching the next twice, encode on a
+/// 1 MiB thread in a key linear in the depth.
+#[test]
+fn ten_thousand_shared_levels_encode_linearly_on_a_one_mebibyte_thread() {
+    const DEPTH: usize = 10_000;
+    let bytes = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| nested_object_key_len(&["p"], DEPTH))
+        .expect("spawn the 1 MiB encoder thread")
+        .join()
+        .expect("the encoder completes on a 1 MiB stack");
+    assert!(
+        bytes <= 1024 * DEPTH,
+        "{DEPTH} shared levels key in {bytes} bytes"
+    );
+}
