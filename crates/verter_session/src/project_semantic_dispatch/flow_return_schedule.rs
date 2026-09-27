@@ -363,6 +363,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Discover `key`'s callees and push it on both stacks.
     fn push_discovered(&self, run: &mut ScheduleRun, key: FlowReturnKey, forced: bool) {
+        #[cfg(test)]
+        DISCOVERIES.set(DISCOVERIES.get() + 1);
         let index = run.next_index;
         run.next_index += 1;
         let callees = self.discover_flow_return_callees(&key);
@@ -400,6 +402,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         top.nests = true;
                         // A callee a probe recorded is forced in turn.
                         let forced = top.next > top.predicted;
+                        // Discovery charges no work, so the walk reads the
+                        // trip and the cancellation before each callee it
+                        // discovers: a cancelled demand stops here rather
+                        // than discovering the rest of the chain first.
+                        if self.connected_demand().work_available().is_err() {
+                            self.abandon(run);
+                            return false;
+                        }
                         self.push_discovered(run, callee, forced);
                     }
                 }
@@ -1563,6 +1573,14 @@ fn nested_in_another_call(span: verter_span::Span, calls: &[verter_span::Span]) 
 #[cfg(test)]
 std::thread_local! {
     static SCHEDULE_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Callees the schedule discovered on this thread.
+    static DISCOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: the callees the schedule has discovered on this thread.
+#[cfg(test)]
+pub(crate) fn flow_return_discoveries_for_tests() -> usize {
+    DISCOVERIES.get()
 }
 
 #[cfg(test)]

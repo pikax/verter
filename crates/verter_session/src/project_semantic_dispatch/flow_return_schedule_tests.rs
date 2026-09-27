@@ -1869,3 +1869,62 @@ fn assert_same_name_generic_chain_answers(
         );
     }
 }
+
+/// `siblings` independent generic chains `levels` calls long, and a witness
+/// returning one field per chain.
+fn sibling_chains(siblings: usize, levels: usize) -> String {
+    let mut source = String::new();
+    for s in 0..siblings {
+        source.push_str(&format!(
+            "export function s{s}c0<T>(x: T) {{ return {{ v: x, tag: \"s{s}\" as const }}; }}\n"
+        ));
+        for level in 1..levels {
+            let previous = level - 1;
+            source.push_str(&format!(
+                "export function s{s}c{level}<T>(x: T) {{ return s{s}c{previous}(x); }}\n"
+            ));
+        }
+    }
+    source.push_str("export function witness(v: number) {\n  return {\n");
+    for s in 0..siblings {
+        source.push_str(&format!("    f{s}: s{s}c{}(v),\n", levels - 1));
+    }
+    source.push_str("  };\n}\n");
+    source
+}
+
+/// The schedule's discovery walk charges no work, so it reads the trip
+/// and the cancellation before each callee it discovers: once the demand
+/// trips — on the work rail here, on a cancellation in the same way —
+/// the walk discovers nothing more. It used to discover every remaining
+/// sibling chain before its first evaluation met the trip, so the work
+/// after a cancellation grew with the rest of the request (the
+/// cancellation probe measured that walk as a fifth of a cancelled
+/// request's time after its first poll).
+#[test]
+fn a_tripped_demand_discovers_no_further_callee() {
+    const SIBLINGS: usize = 4;
+    const LEVELS: usize = 8;
+    let discovered_under = |work: usize| {
+        let host = host_with(&[(PATH, sibling_chains(SIBLINGS, LEVELS).as_str())]);
+        with_dispatch(&host, |dispatch| {
+            dispatch.set_connected_limits_for_tests(work, MAX_CONNECTED_QUERY_DEPTH);
+            let key = key_of(dispatch, PATH, "witness");
+            let discoveries = crate::project_semantic_dispatch::flow_return::schedule::flow_return_discoveries_for_tests;
+            let before = discoveries();
+            let _ = eval_key_on(&host, dispatch, key);
+            discoveries() - before
+        })
+    };
+    // Untripped, the walk discovers every chain.
+    assert_eq!(
+        discovered_under(MAX_CONNECTED_PROJECTION_WORK),
+        SIBLINGS * LEVELS
+    );
+    // Tripped inside the first chain: no second chain is discovered.
+    let tripped = discovered_under(3);
+    assert!(
+        tripped < 2 * LEVELS,
+        "a tripped walk discovered {tripped} callees, a whole further chain"
+    );
+}
