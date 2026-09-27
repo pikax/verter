@@ -873,3 +873,58 @@ fn a_union_argument_matches_a_fixed_member_by_the_checkers_identity() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Calls through a rigid type parameter and through local overloads.
+const RIGID_AND_LOCAL_OVERLOADS: &str = r##"
+declare class Box2<U> { put<T>(x: T, y: U | string): T; }
+export function rigidArgument<U>(b: Box2<U>, u: U) { return b.put(1, u); }
+export function localOverloads<U>(u: U) { function k(x: string): 1; function k(x: number): 2; function k(x: any): any { return x; } return k("s"); }
+export function localGenericOverloads<U>(u: U) { function k<T>(x: T, y: U | string): "first"; function k(x: unknown, y: unknown): "second"; function k(x: any, y: any): any { return x; } const v = "a" as "a" | "b"; return k(1, v); }
+"##;
+
+/// The rows of local overloaded functions, with the checker's answers:
+/// the call resolves over the overload signatures, never the
+/// implementation's (`1` and `"first"`). Measured on TypeScript 7.0.2, alike
+/// under all four settings.
+const LOCAL_OVERLOAD_ROWS: [(&str, &str); 2] = [
+    ("localOverloads", "1"),
+    ("localGenericOverloads", "\"first\""),
+];
+
+/// Each local-overload row that does not read the checker's answer, only
+/// those the lane publishes clean when `clean_only`.
+fn local_overload_misses(clean_only: bool) -> Vec<String> {
+    let matrix = Matrix::new(RIGID_AND_LOCAL_OVERLOADS);
+    let rows: Vec<(Read<'_>, Vec<&str>)> = LOCAL_OVERLOAD_ROWS
+        .iter()
+        .map(|(function, answer)| (Read::Return(function), vec![*answer; 4]))
+        .collect();
+    LOCAL_OVERLOAD_ROWS
+        .iter()
+        .zip(matrix.verdicts(&rows))
+        .flat_map(|((function, _), verdicts)| {
+            verdicts
+                .into_iter()
+                .filter(|verdict| !verdict.matched && (!clean_only || verdict.class != "GAP"))
+                .map(move |verdict| format!("`{function}`: {}", verdict.lane))
+        })
+        .collect()
+}
+
+/// A local function with overload signatures is never called through its
+/// implementation's signature (whose `any` return the checker never
+/// exposes): the call degrades rather than publishing `any`.
+#[test]
+fn a_local_overloaded_function_is_never_called_through_its_implementation() {
+    let wrong = local_overload_misses(true);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// What the lane gives: each row degrades (the overloaded local function
+/// has no modelled value).
+#[test]
+#[ignore = "a local overloaded function resolves the call over its overload signatures"]
+fn a_local_overloaded_function_resolves_over_its_overloads() {
+    let failures = local_overload_misses(false);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
