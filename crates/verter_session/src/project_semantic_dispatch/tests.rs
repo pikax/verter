@@ -13255,18 +13255,15 @@ fn solver_error_publishes_as_opaque_query_error() {
 
 /// Lowering two distinct mapped types in the same file must produce
 /// two binders with distinct `(decl, param_index)` identity tuples.
-/// If both binders defaulted to `param_index: 0` + `decl_name:
-/// "<mapper-param>"`, their identity tuples would be identical and
-/// structural dedup would alias them, collapsing two
-/// semantically-distinct binders into one `SemanticNodeId`. A
-/// per-dispatcher / per-owning-scope ordinal keeps them distinct.
+/// If both binders shared one declaration name and index, their identity
+/// tuples would be identical and structural dedup would alias them,
+/// collapsing two semantically-distinct binders into one `SemanticNodeId`.
+/// The mapping-identity declaration name and the per-file ordinal keep
+/// them distinct.
 ///
-/// Discrimination strategy: the test walks the arena, collects
-/// every interned `TypeParam` with `decl_name == "<mapper-param>"`,
-/// and asserts that the collected identity tuples are all distinct.
-/// Without per-scope ordinals every mapped binder would be `(file,
-/// hash, "<mapper-param>", param_index=0)` and any two mapped binders
-/// would duplicate; the ordinals make the tuples distinct.
+/// Discrimination strategy: the test walks the arena, collects every
+/// interned mapped-binder `TypeParam`, and asserts that the collected
+/// identity tuples are all distinct.
 #[test]
 fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
     let host = host();
@@ -13329,7 +13326,7 @@ fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
                 decl, param_index, ..
             } = data.as_ref()
             {
-                if decl.decl_name.as_ref() == "<mapper-param>" {
+                if crate::mapper_binder_registry::is_mapper_binder_decl_name(&decl.decl_name) {
                     mapper_binder_identities.push((decl.clone(), *param_index));
                 }
             }
@@ -13348,6 +13345,78 @@ fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
              (decl, param_index) tuples; two binders share: {ident:?}",
         );
     }
+}
+
+/// A mapped binder's stable key names its mapping, never the order in which
+/// the file's mappers were first lowered: resolving and instantiating `A`
+/// then `B` in one host, and `B` then `A` in another, gives every mapped
+/// shell over each value type the same keys.
+#[test]
+fn mapped_binder_keys_do_not_depend_on_lowering_order() {
+    use crate::semantic_query::stable_key::stable_key_for_node;
+    let keys = |order: [(&'static str, SemanticNodeId); 2], host: &VerterHost| {
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        for (name, argument) in order {
+            let _ = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+                "/w/two_mapped.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                name,
+            )));
+            let _ = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    decl_identity(host, "/w/two_mapped.ts", name),
+                    Arc::from(vec![argument].into_boxed_slice()),
+                    crate::semantic_query::InstantiateContext::non_file(
+                        crate::semantic_query::ProjectionReductionContext::published(
+                            ProjectionMode::Expanded,
+                        ),
+                        Default::default(),
+                        crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    ),
+                ),
+            ));
+        }
+        // Every mapped shell whose value is a primitive, keyed by that
+        // value's kind.
+        let mut keys = std::collections::BTreeSet::new();
+        for id in 0u64..(graph.node_count() as u64) {
+            let node = SemanticNodeId(id);
+            if let Some(SemanticNodeData::Mapped { mapper, .. }) = graph.node_data(node).as_deref()
+            {
+                if let Some(SemanticNodeData::Primitive(kind)) =
+                    graph.node_data(mapper.value_expr).as_deref()
+                {
+                    keys.insert((format!("{kind:?}"), stable_key_for_node(&graph, node)));
+                }
+            }
+        }
+        keys
+    };
+    let run = |a_first: bool| {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/w/two_mapped.ts",
+            "export type A<T> = { [K in keyof T]: number }\nexport type B<U> = { [K in keyof U]: string }",
+        );
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let a = ("A", primitive(&graph, PrimitiveKind::Boolean));
+        let b = ("B", primitive(&graph, PrimitiveKind::Boolean));
+        keys(if a_first { [a, b] } else { [b, a] }, &host)
+    };
+    let forward = run(true);
+    let reverse = run(false);
+    assert!(
+        forward.iter().any(|(kind, _)| kind == "Number")
+            && forward.iter().any(|(kind, _)| kind == "String"),
+        "premise: both mapped shells are interned, got {} keys",
+        forward.len()
+    );
+    assert!(
+        forward == reverse,
+        "each mapped shell keys alike whichever mapper was lowered first"
+    );
 }
 
 /// Substitute-rebuild arms must preserve the origin scope. A plain

@@ -2154,9 +2154,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // enclosing `[K in S]` binding; treat its declaration
                 // as the mapped-type shell itself. The scope's
                 // `canonical_id` + `whole_hash` identifies the file;
-                // `decl_name = "<mapper-param>"` is a sentinel that
-                // distinguishes mapper parameters from user-declared
-                // interface / type-alias parameters.
+                // `decl_name` is the mapping's reproducible identity
+                // (`mapper_binder_decl_name`), which distinguishes mapper
+                // parameters from user-declared interface / type-alias
+                // parameters and names the binder in its stable key.
                 //
                 // `param_index` is assigned from the host-owned
                 // [`MapperBinderRegistry`](crate::mapper_binder_registry)
@@ -2171,12 +2172,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // same scope still get distinct ordinals via
                 // distinct fingerprints. See
                 // [`crate::mapper_binder_registry`].
+                let mapper_decl_name = crate::mapper_binder_registry::mapper_binder_decl_name(
+                    source,
+                    value,
+                    *optional,
+                    *readonly,
+                    name_type.as_ref(),
+                );
                 let mapper_decl = match scope {
                     NodeScopeId::Global => DeclIdentity {
                         canonical_id: Arc::from(""),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         whole_hash: HashValue::default(),
-                        decl_name: Arc::from("<mapper-param>"),
+                        decl_name: Arc::clone(&mapper_decl_name),
                     },
                     NodeScopeId::File {
                         canonical_id,
@@ -2187,7 +2195,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         canonical_id: Arc::clone(canonical_id),
                         owner: *owner,
                         whole_hash: *whole_hash,
-                        decl_name: Arc::from("<mapper-param>"),
+                        decl_name: Arc::clone(&mapper_decl_name),
                     },
                 };
                 // Fix: resolve the `param_index` ordinal

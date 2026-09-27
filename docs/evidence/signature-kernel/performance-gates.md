@@ -478,9 +478,9 @@ Recorded plainly so no reader mistakes absence for a pass:
   (under the 2 MiB default test stack), 709 KiB and 586 KiB optimized
   (`opt-level = 3`), flat from 100 to 400 levels — under the 1 MiB stack
   of `verter_wasm` (wasm32's linker default; no override is configured),
-  the 2 MiB default of the tokio blocking pool, and the 8 MiB of the LSP
-  serve thread, the host CPU pool, the scheduler's I/O and CPU workers and
-  the declaration-lowering workers.
+  the 2 MiB default of the tokio blocking and rayon CPU pools and the
+  scheduler's I/O and CPU workers, and the 8 MiB of the LSP serve thread,
+  the host CPU pool and the declaration-lowering workers.
 
 * **A long logical chain applies a quadratic count of guards and
   evaluates without a native level per operand.** Each operand of `a && b
@@ -527,24 +527,26 @@ Recorded plainly so no reader mistakes absence for a pass:
   outgrows the budget from about 420 operands
   (`a_2000_operand_and_chain_answers_the_checkers_type`, skipped).
 
-* **The scheduler's workers parse on 8 MiB stacks.** The oxc parser, the
-  syntax-tree clone the semantic builder reads (`clone_in`) and the
-  semantic builder recurse once per nesting level and carry no depth guard
-  of their own, and they run on the scheduler worker that loads a file.
-  Those workers (`verter-io-*`, `verter-cpu-*`) ran on the platform default
-  of 2 MiB, where a 700-deep `Box<…<1>…>` (2.0 MiB of `clone_in` on the
-  I/O worker, unoptimized) or a 2,000-operand `&&` chain overflowed a
-  worker and aborted the process. They now reserve 8 MiB
-  (`WORKER_STACK_BYTES`, `verter_scheduler/src/pool.rs`), the stack of the
-  LSP serve thread, the host CPU pool and the declaration-lowering workers;
-  a reservation costs address space, not memory. `type_syntax_depth_tests.rs`
-  → `a_700_deep_nested_generic_application_parses_on_a_scheduler_worker`
+* **The scheduler's workers parse on the platform's default stack.** The
+  oxc parser, the syntax-tree clone the semantic builder reads
+  (`clone_in`) and the semantic builder recurse once per nesting level and
+  carry no depth guard of their own, and they run on the scheduler worker
+  that loads a file (`verter-io-*`, `verter-cpu-*`, on the platform
+  default of 2 MiB). Each runs under `verter_parser::oxc_parse`'s
+  containment, on a stack segment sized from the source when the worker's
+  own stack is short (`oxc-deep-parse.md`), so the workers need no larger
+  stack of their own. The script analysis's own recursions over the
+  program (the module-reference collector, the binding extractors) run
+  under the same containment: a module constant of 10,000 nested calls
+  overflowed a 2 MiB I/O worker in the collector and now returns
+  (`deep_input_tests.rs` →
+  `module_calls_nested_10000_deep_return_on_production_stacks`).
+  `type_syntax_depth_tests.rs` →
+  `a_700_deep_nested_generic_application_parses_on_a_scheduler_worker`
   answers the checker's `"v"` for `keyof D` and `1` for `D extends
-  Box<unknown> ? 1 : 2` (at 2 MiB it overflows `verter-io-0`). The parser
-  itself still refuses nothing: on the 8 MiB I/O worker it overflows at
-  about 2,200 nested type arguments and 5,000 nested parentheses
-  (unoptimized), where TypeScript 7.0.2 answers at 10,000 of either
-  (`"v"` and `1` for the `Box` nesting, `1` for `(((…1…)))`, each in under
+  Box<unknown> ? 1 : 2` on the default workers. TypeScript 7.0.2 answers
+  at 10,000 nested type arguments or parentheses (`"v"` and `1` for the
+  `Box` nesting, `1` for `(((…1…)))`, each in under
   2 s). The slice lowering of a returned value (`Lowerer::lower_expr`,
   on the declaration-lowering workers) re-entered itself once per
   parenthesis, about 15 KiB per level unoptimized, and overflowed the 8 MiB
@@ -566,18 +568,23 @@ Recorded plainly so no reader mistakes absence for a pass:
   `verter_parser::oxc_parse::Parser`, a drop-in that parses exactly what
   oxc parses: a linear scan bounds the syntax tree's depth from above and
   the parse gets 9 KiB per level of it (twice the costliest measured level
-  of the parse or of oxc's walks over its tree), in place when the thread has it and on a `stacker` segment
-  otherwise. No source is refused and no depth is imposed.
+  of the parse or of oxc's walks over its tree), in place when the thread
+  has it and otherwise on a stack segment that reserves that size and
+  commits what the parse touches. Where a stack can grow no depth is
+  imposed; a segment that cannot be reserved returns the typed
+  `verter(stack-unavailable)` diagnostic and an empty program.
   `oxc_parse/tests.rs` parses ten forms 10,000 deep and an unclosed
   200,000-deep nest on a 1 MiB thread (with the parse in place, or with a
   per-level stack below what oxc spends, it overflows), and
   `no_crate_parses_around_the_guard` fails on a direct
-  `oxc_parser::Parser`. The scan costs about a third of the parse (8.1 ms
-  against 6.1 ms for `lib.dom.d.ts`, optimized); a source short enough
-  that every byte could be a level skips it. `stacker` cannot grow the
-  stack on wasm32, where the module's stack (1 MiB, wasm32's linker default)
-  bounds the parse. oxc's walks over the tree run under the same
-  containment (below).
+  `oxc_parser::Parser`. The scan costs about a third of the parse (1.8 ms
+  against 5.8 ms for `lib.dom.d.ts`, optimized); a source short enough
+  that every byte could be a level skips it. On wasm32 the engine's own
+  call stack, which nothing grows, bounds the parse: a source nesting past
+  `WASM_ENGINE_NESTING` (313 levels, from V8's 984 KiB default stack and
+  the measured 1,188 bytes of the costliest level) returns the same typed
+  diagnostic. oxc's walks over the tree run under the same containment
+  (below).
 
 * **A class expression raises one instance per level.** The lane's graph
   of `class { m() { return class { … } } }` nested `n` deep is linear

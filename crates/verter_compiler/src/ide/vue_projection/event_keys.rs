@@ -418,12 +418,16 @@ fn dynamic_name_facts(expression: &str) -> DynamicNameFacts {
             open: true,
         };
     }
-    let mut candidates = Vec::new();
-    collect_event_literals(&parsed, &mut candidates);
-    DynamicNameFacts {
-        open: !event_name_branches_closed(&parsed),
-        candidates,
-    }
+    // Both walks recurse once per nested branch, parenthesis or
+    // assertion: they run on the stack the expression's nesting can need.
+    verter_parser::oxc_parse::with_source_stack(expression, || {
+        let mut candidates = Vec::new();
+        collect_event_literals(&parsed, &mut candidates);
+        DynamicNameFacts {
+            open: !event_name_branches_closed(&parsed),
+            candidates,
+        }
+    })
 }
 
 /// Source outside the parsed expression is trivia when it is whitespace,
@@ -602,5 +606,29 @@ mod spelling_tests {
         let quoted = dynamic_name_facts("mode === \"edit\" ? \"save\" : \"create\"");
         assert!(!quoted.open);
         assert_eq!(quoted.candidates, ["save", "create"]);
+    }
+
+    /// A dynamic name nesting 10,000 conditionals or parentheses deep reads
+    /// its candidates on a 1 MiB thread: its branches are walked under the
+    /// parse's stack containment.
+    #[test]
+    fn a_deeply_nested_dynamic_name_reads_on_a_small_stack() {
+        let facts = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(|| {
+                let conditionals = format!("{}'last'", "cond ? 'save' : ".repeat(10_000));
+                let parentheses = format!("{}'save'{}", "(".repeat(10_000), ")".repeat(10_000));
+                (
+                    dynamic_name_facts(&conditionals),
+                    dynamic_name_facts(&parentheses),
+                )
+            })
+            .expect("spawn the reading thread")
+            .join()
+            .expect("the names read");
+        assert!(!facts.0.open);
+        assert_eq!(facts.0.candidates, ["save", "last"]);
+        assert!(!facts.1.open);
+        assert_eq!(facts.1.candidates, ["save"]);
     }
 }

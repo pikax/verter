@@ -714,7 +714,16 @@ fn lower_node(
             ..
         } => {
             let mapper_display_name: Arc<str> = Arc::from(parameter.as_str());
-            let mapper_decl = DeclIdentity::from_scope(scope, Arc::from("<mapper-param>"));
+            let mapper_decl = DeclIdentity::from_scope(
+                scope,
+                crate::mapper_binder_registry::mapper_binder_decl_name(
+                    source,
+                    value,
+                    *optional,
+                    *readonly,
+                    name_type.as_ref(),
+                ),
+            );
             let parameter_node = graph.intern_node_with_scope(
                 SemanticNodeData::TypeParam {
                     decl: mapper_decl,

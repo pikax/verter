@@ -13,6 +13,18 @@
 //! prints the statement count and the error count; when oxc's recursive
 //! descent exhausts the thread's stack the process aborts with
 //! `thread 'oxc-parse' has overflowed its stack`.
+//!
+//! A `<stack-MiB>` of 0 parses on the calling thread, which is how the
+//! WebAssembly build runs (it has no threads):
+//!
+//! ```text
+//! cargo build -p verter_parser --example oxc_deep_parse --release --target wasm32-wasip1
+//! node examples/oxc_deep_parse_wasi.mjs <form> <depth>
+//! ```
+//!
+//! There the module's 1 MiB shadow stack and the engine's call stack bound
+//! the recursion: past them the host throws `RangeError: Maximum call
+//! stack size exceeded` or traps with `memory access out of bounds`.
 
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
@@ -47,17 +59,24 @@ fn main() {
     let depth: usize = depth.parse().expect("a depth");
     let stack: usize = stack.parse().expect("a stack size in MiB");
     let source = source(form, depth);
-    let (statements, errors) = std::thread::Builder::new()
-        .name("oxc-parse".to_string())
-        .stack_size(stack * 1024 * 1024)
-        .spawn(move || {
-            let allocator = Allocator::default();
-            let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
-            (parsed.program.body.len(), parsed.diagnostics.len())
-        })
-        .expect("spawn the parsing thread")
-        .join()
-        .expect("the parse returns");
+    let parse = move || {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
+        (parsed.program.body.len(), parsed.diagnostics.len())
+    };
+    // A stack of 0 parses on the calling thread: a WebAssembly module's
+    // (`--target wasm32-wasip1`, run by a WASI host), which has no threads.
+    let (statements, errors) = if stack == 0 {
+        parse()
+    } else {
+        std::thread::Builder::new()
+            .name("oxc-parse".to_string())
+            .stack_size(stack * 1024 * 1024)
+            .spawn(parse)
+            .expect("spawn the parsing thread")
+            .join()
+            .expect("the parse returns")
+    };
     println!(
         "oxc_parser 0.151.0 form={form} depth={depth} stack={stack}MiB: parsed, {statements} statements, {errors} errors"
     );

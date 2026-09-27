@@ -1081,3 +1081,405 @@ fn reduced_union_arms(graph: &SemanticGraphStore, a: SemanticNodeId, b: Semantic
     );
     union_arms(graph, union.node).len()
 }
+
+/// One generic call signature `<T …>(x: T) => T` over a shared bound-free
+/// binder, with the declaration's own bounds, constness and return carrier.
+fn generic_signature(
+    graph: &SemanticGraphStore,
+    binder: SemanticNodeId,
+    constraint: Option<SemanticNodeId>,
+    default: Option<SemanticNodeId>,
+    is_const: bool,
+    return_carrier: Option<crate::semantic_query::SignatureReturnCarrier>,
+) -> SemanticNodeId {
+    use crate::semantic_query::{
+        FunctionParam, SignatureKind, SignatureReturnCarrier, TypeParamDecl,
+    };
+    graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from([FunctionParam::synthetic(
+            Some(Arc::from("x")),
+            binder,
+            false,
+            false,
+        )]),
+        return_type: binder,
+        type_parameters: Arc::from([TypeParamDecl {
+            name: Arc::from("T"),
+            param: binder,
+            constraint,
+            default,
+            is_const,
+        }]),
+        occurrence: None,
+        return_carrier: return_carrier.unwrap_or(SignatureReturnCarrier::Declared(binder)),
+        signature_span: None,
+        return_type_span: None,
+        predicate: None,
+        is_abstract: false,
+    })
+}
+
+/// A bound-free binder shared by every generic signature in a test.
+fn bound_free_binder(graph: &SemanticGraphStore) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    })
+}
+
+/// Callable keys carry each binder declaration's constraint, default and
+/// constness, and a signature's return carrier: `(<T extends string>(x: T)
+/// => T) | (<T extends number>(x: T) => T)` over one bound-free binder keeps
+/// two keys. The union reducer's comparator rejects every such pair, and a
+/// key-equality collapse after it must never merge what it rejected, in
+/// either input order.
+#[test]
+fn callable_keys_carry_binder_bounds_constness_and_return_carrier() {
+    use crate::semantic_query::SignatureReturnCarrier;
+    use verter_type_expr::facts::FunctionReturnSource;
+    let graph = SemanticGraphStore::new();
+    let binder = bound_free_binder(&graph);
+    let string = prim(&graph, PrimitiveKind::String);
+    let number = prim(&graph, PrimitiveKind::Number);
+    let base = generic_signature(&graph, binder, Some(string), None, false, None);
+    let variants = [
+        generic_signature(&graph, binder, Some(number), None, false, None),
+        generic_signature(&graph, binder, None, None, false, None),
+        generic_signature(&graph, binder, Some(string), Some(string), false, None),
+        generic_signature(&graph, binder, Some(string), None, true, None),
+        generic_signature(
+            &graph,
+            binder,
+            Some(string),
+            None,
+            false,
+            Some(SignatureReturnCarrier::Function(
+                FunctionReturnSource::Absent,
+            )),
+        ),
+    ];
+    for variant in variants {
+        assert_eq!(
+            structural_identity(&graph, base, variant),
+            StructuralIdentity::Distinct,
+            "premise: the comparator rejects the pair"
+        );
+        for (first, second) in [(base, variant), (variant, base)] {
+            assert_eq!(
+                reduced_union_arms(&graph, first, second),
+                2,
+                "a key-equality collapse never merges a pair the comparator rejected"
+            );
+        }
+        assert!(
+            stable_key_for_node(&graph, base) != stable_key_for_node(&graph, variant),
+            "signatures that differ in a binder bound, constness or return carrier key apart"
+        );
+    }
+}
+
+/// A deferred callable's binder declarations key their bounds and constness
+/// exactly as a signature's do.
+#[test]
+fn deferred_callable_keys_carry_binder_bounds_and_constness() {
+    use crate::semantic_query::{
+        DeferredCallable, FunctionParam, SignatureKind, SignatureReturnCarrier, TypeParamDecl,
+    };
+    use verter_type_expr::facts::FunctionReturnSource;
+    let graph = SemanticGraphStore::new();
+    let binder = bound_free_binder(&graph);
+    let string = prim(&graph, PrimitiveKind::String);
+    let number = prim(&graph, PrimitiveKind::Number);
+    let deferred = |constraint, default, is_const| {
+        let key = graph.intern_node(SemanticNodeData::DeferredCallable(
+            DeferredCallable::from_parts_for_tests(
+                SignatureKind::Call,
+                Arc::from([FunctionParam::synthetic(None, binder, false, false)]),
+                Arc::from([TypeParamDecl {
+                    name: Arc::from("T"),
+                    param: binder,
+                    constraint,
+                    default,
+                    is_const,
+                }]),
+                function_occurrence("f", 0),
+                SignatureReturnCarrier::Function(FunctionReturnSource::Absent),
+            ),
+        ));
+        stable_key_for_node(&graph, key)
+    };
+    let base = deferred(Some(string), None, false);
+    for variant in [
+        deferred(Some(number), None, false),
+        deferred(None, None, false),
+        deferred(Some(string), Some(string), false),
+        deferred(Some(string), None, true),
+    ] {
+        assert!(
+            base != variant,
+            "deferred callables that differ in a binder bound or constness key apart"
+        );
+    }
+}
+
+/// An object whose public properties `names` all hold `value`.
+fn object_of(graph: &SemanticGraphStore, names: &[&str], value: SemanticNodeId) -> SemanticNodeId {
+    use crate::semantic_query::{IndexSignature, SurfaceMember};
+    let members: Vec<SurfaceMember> = names
+        .iter()
+        .map(|name| SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            key: crate::semantic_query::AuthoredPropertyKey::string(*name),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: Default::default(),
+            declaration_origin: None,
+        })
+        .collect();
+    graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        members: Arc::from(members.into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }))
+}
+
+/// The key of `depth` nested objects, each holding the next under every
+/// one of `names`, around `number`.
+fn nested_object_key_len(names: &[&str], depth: usize) -> usize {
+    let graph = SemanticGraphStore::new();
+    let mut node = prim(&graph, PrimitiveKind::Number);
+    for _ in 0..depth {
+        node = object_of(&graph, names, node);
+    }
+    stable_key_for_node(&graph, node).exact().len()
+}
+
+/// A key is linear in the structure it encodes, however often a subtree is
+/// shared: `{ p: { p: … } }` reaches each level through its member entry
+/// and its derived positive member, and `{ a: X, b: X }` reaches `X` twice,
+/// so an encoding that writes every occurrence doubles per level.
+#[test]
+fn shared_subtrees_keep_keys_linear_in_depth() {
+    for names in [&["p"][..], &["a", "b"][..]] {
+        for depth in [18usize, 400] {
+            let bytes = nested_object_key_len(names, depth);
+            assert!(
+                bytes <= 1024 * depth,
+                "{names:?} nested {depth} deep keys in {bytes} bytes, not linear in depth"
+            );
+        }
+    }
+}
+
+/// Sharing is decided by structure, never by node identity: a subtree held
+/// twice through one node and the same subtree built twice as two nodes
+/// (here, in two arena scopes) give one key, and the key refers back to
+/// the first copy either way.
+#[test]
+fn shared_subtrees_are_decided_by_structure_not_node_identity() {
+    let graph = SemanticGraphStore::new();
+    let deep = |scope: &str| {
+        let mut node = graph.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::Number),
+            crate::semantic_query::NodeScopeId::File {
+                canonical_id: Arc::from(scope),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: [5u8; 16],
+                local_scope: None,
+            },
+        );
+        for _ in 0..12 {
+            node = object_of(&graph, &["p"], node);
+        }
+        node
+    };
+    let one = deep("/one.ts");
+    let other = deep("/other.ts");
+    assert_ne!(one, other, "premise: two nodes of one structure");
+    let shared = object_of(&graph, &["a", "b"], one);
+    let separate = {
+        use crate::semantic_query::{IndexSignature, SurfaceMember};
+        let member = |name: &str, value| SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: Default::default(),
+            declaration_origin: None,
+        };
+        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+            members: Arc::from([member("a", one), member("b", other)]),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }))
+    };
+    assert_ne!(shared, separate, "premise: two object nodes");
+    let key = stable_key_for_node(&graph, shared);
+    assert!(
+        key == stable_key_for_node(&graph, separate),
+        "one structure keys alike whether its repeated subtree is one node or two"
+    );
+    let reference = [1u8, 7, 3];
+    assert!(
+        key.exact().windows(3).any(|window| window == reference),
+        "the repeated subtree is written once and referred back to"
+    );
+}
+
+/// Ten thousand nested objects, each reaching the next twice, encode on a
+/// 1 MiB thread in a key linear in the depth.
+#[test]
+fn ten_thousand_shared_levels_encode_linearly_on_a_one_mebibyte_thread() {
+    const DEPTH: usize = 10_000;
+    let bytes = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| nested_object_key_len(&["p"], DEPTH))
+        .expect("spawn the 1 MiB encoder thread")
+        .join()
+        .expect("the encoder completes on a 1 MiB stack");
+    assert!(
+        bytes <= 1024 * DEPTH,
+        "{DEPTH} shared levels key in {bytes} bytes"
+    );
+}
+
+/// `(x: <param>) => 0` with no authored occurrence, whose parameter is or is
+/// not written as a literal type.
+fn literal_param_signature(
+    graph: &SemanticGraphStore,
+    param: SemanticNodeId,
+    declared_literal: bool,
+) -> SemanticNodeId {
+    use crate::semantic_query::{FunctionParam, SignatureKind, SignatureReturnCarrier};
+    let zero = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(0.0)));
+    graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from([FunctionParam {
+            declared_literal,
+            ..FunctionParam::synthetic(Some(Arc::from("x")), param, false, false)
+        }]),
+        return_type: zero,
+        type_parameters: Arc::from(Vec::new()),
+        occurrence: None,
+        return_carrier: SignatureReturnCarrier::Declared(zero),
+        signature_span: None,
+        return_type_span: None,
+        predicate: None,
+        is_abstract: false,
+    })
+}
+
+/// A parameter written as a literal type makes a signature specialized
+/// (overload priority reads it), so `((x: "a") => 0) | ((x: T) => 0)` with
+/// `T = "a"` keeps both signatures whichever arrives first.
+#[test]
+fn union_reducer_keeps_a_literal_specialized_signature_apart() {
+    let graph = SemanticGraphStore::new();
+    let a = lit_str(&graph, "a");
+    let written_literal = literal_param_signature(&graph, a, true);
+    let instantiated = literal_param_signature(&graph, a, false);
+    assert_eq!(
+        structural_identity(&graph, written_literal, instantiated),
+        StructuralIdentity::Distinct,
+        "the comparator tells a literal-declared parameter apart"
+    );
+    for (first, second) in [
+        (written_literal, instantiated),
+        (instantiated, written_literal),
+    ] {
+        assert_eq!(
+            reduced_union_arms(&graph, first, second),
+            2,
+            "both signatures survive in either input order"
+        );
+    }
+}
+
+/// `{ [K in keyof T]: V }` over a type variable (homomorphic) and the same
+/// recipe over concrete keys evaluate differently, so a union keeps both,
+/// with few arms and with enough child-bearing arms to bucket them.
+#[test]
+fn union_reducer_keeps_homomorphic_and_concrete_mappings_apart() {
+    use crate::semantic_query::{MapperKey, MapperKind, OptionalityMod, ReadonlyMod};
+    let graph = SemanticGraphStore::new();
+    let source = bound_free_binder(&graph);
+    let key_space = graph.intern_node(SemanticNodeData::KeyOf { base: source });
+    let parameter = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let value = prim(&graph, PrimitiveKind::Number);
+    let mapped = |over_type_variable| {
+        graph.intern_node(SemanticNodeData::Mapped {
+            source,
+            mapper: MapperKey {
+                parameter_node: parameter,
+                key_space,
+                value_expr: value,
+                optionality: OptionalityMod::Keep,
+                readonly: ReadonlyMod::Keep,
+                name_remap: None,
+                kind: MapperKind::Computed,
+                over_type_variable,
+            },
+        })
+    };
+    let homomorphic = mapped(true);
+    let concrete = mapped(false);
+    assert_eq!(
+        structural_identity(&graph, homomorphic, concrete),
+        StructuralIdentity::Distinct,
+        "the comparator tells the two mappings apart"
+    );
+    let bystanders: Vec<SemanticNodeId> = (0..7)
+        .map(|index| {
+            let element = lit_str(&graph, &format!("bystander-{index}"));
+            graph.intern_node(SemanticNodeData::Array {
+                element,
+                readonly: false,
+            })
+        })
+        .collect();
+    for extra in [&[][..], &bystanders[..]] {
+        for pair in [[homomorphic, concrete], [concrete, homomorphic]] {
+            let mut members = pair.to_vec();
+            members.extend_from_slice(extra);
+            let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+                &graph,
+                &members,
+                crate::semantic_query::NullabilityPolicy::Strict,
+            );
+            let arms = union_arms(&graph, union.node);
+            assert!(
+                arms.contains(&homomorphic) && arms.contains(&concrete),
+                "both mappings survive beside {} other arms",
+                extra.len()
+            );
+        }
+    }
+}
