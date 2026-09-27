@@ -291,15 +291,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let products = self.products.clone();
             let narrowings = self.narrowings_since(&eval.narrow_mark);
             self.restore_narrowings(eval.narrow_mark.clone());
-            return self.finish_if(eval, (products, true, narrowings));
+            return self.finish_if(&mut eval, (products, true, narrowings));
         };
         eval.consequent = Some(consequent);
-        self.finish_if(eval, (products, falls, narrowings))
+        self.finish_if(&mut eval, (products, falls, narrowings))
     }
 
     fn finish_if<'r>(
         &mut self,
-        mut eval: Box<IfEval<'r>>,
+        eval: &mut IfEval<'r>,
         (alternate_products, alternate_falls, alternate_narrowings): ArmEnd,
     ) -> BranchStep<'r> {
         let (consequent_products, consequent_falls, consequent_narrowings) = eval
