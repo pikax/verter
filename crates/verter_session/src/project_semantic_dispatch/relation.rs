@@ -11125,7 +11125,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let bivariant = {
             let txn = self.dispatch_txn.borrow();
             let strict = txn.relation.strict.unwrap_or(StrictFamilyConfig::TS_STRICT);
-            (method_target || !strict.strict_function_types) && !self.subtype_mode()
+            method_target || !strict.strict_function_types
         };
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),

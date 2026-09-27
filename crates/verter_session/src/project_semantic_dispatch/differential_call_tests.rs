@@ -818,3 +818,39 @@ fn a_union_rebuilt_around_a_reduced_operator_keeps_the_nullability_algebra() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Overloads whose first candidate relates through a method parameter, and
+/// arguments inferred against a union parameter's fixed members.
+const OVERLOADS_AND_UNION_MEMBERS: &str = r##"
+declare function pick(v: { m(x: string | number): void }): "wide";
+declare function pick(v: {}): "fallback";
+declare function pickP(v: { m: (x: string | number) => void }): "wide";
+declare function pickP(v: {}): "fallback";
+declare const a: { m(x: string): void };
+export function oMethod() { return pick(a); }
+export function oProperty() { return pickP(a); }
+declare function inferObject<T>(x: T | { a: unknown }): T;
+declare const anyObject: { a: any } | 1;
+declare const unknownObject: { a: unknown } | 1;
+export function uAny() { return inferObject(anyObject); }
+export function uUnknown() { return inferObject(unknownObject); }
+declare function inferBoolean<T>(x: T | boolean): T;
+declare function inferTrue<T>(x: T | true): T;
+declare const trueOrOne: true | 1;
+declare const booleanOrOne: boolean | 1;
+export function uTrue() { return inferBoolean(trueOrOne); }
+export function uBoolean() { return inferBoolean(booleanOrOne); }
+export function uFalse() { return inferTrue(booleanOrOne); }
+"##;
+
+/// A method member keeps its bivariant parameters in every overload pass,
+/// the subtype pass included, so `{ m(x: string): void }` selects the
+/// method candidate (`"wide"`) while a function-typed property stays
+/// contravariant (`"fallback"`). Measured on TypeScript 7.0.2, alike under
+/// all four settings.
+#[test]
+fn a_method_parameter_stays_bivariant_in_the_overload_subtype_pass() {
+    let matrix = Matrix::new(OVERLOADS_AND_UNION_MEMBERS);
+    let failures = matrix.returns(&[("oMethod", "\"wide\""), ("oProperty", "\"fallback\"")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
