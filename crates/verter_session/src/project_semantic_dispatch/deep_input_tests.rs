@@ -442,3 +442,18 @@ fn a_nest_derives_its_source_parse_identity_a_fixed_number_of_times() {
     };
     assert_eq!(derivations(20), derivations(200));
 }
+
+/// A destructuring declarator nested 10,000 patterns deep lowers, binds and
+/// drops from explicit stacks. Every element of an `any` source is `any`:
+/// TypeScript 7.0.2 answers `1`, under every setting.
+#[test]
+fn destructuring_patterns_nested_10000_deep_answer_on_production_stacks() {
+    let source = format!(
+        "export function pf(x: any) {{ const {} = x; return v; }}\n",
+        format!("{}v{}", "{ v: ".repeat(DEPTH), " }".repeat(DEPTH))
+    );
+    assert_eq!(
+        mismatches_on_a_small_stack(source, "0 extends (1 & ReturnType<typeof pf>) ? 1 : 2", "1"),
+        Vec::<String>::new()
+    );
+}

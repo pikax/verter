@@ -7465,188 +7465,226 @@ fn loop_carried_subjects(
             }
         }
     }
+    // The region's statements, patterns and expressions walk from an
+    // explicit stack in the order a recursive walk visits them (each
+    // item's parts pushed last first): a region or pattern nested in
+    // another costs no native level.
+    //
     // A destructuring pattern: a declaration's bindings (`kind`) are
     // declared afresh, except a `var`'s, which the pattern writes as an
     // assignment pattern (`kind` `None`) writes its targets; its
     // defaults and computed keys evaluate on the way.
-    fn walk_pattern(
-        pattern: &crate::flow_slice_content::SlicePattern,
-        kind: Option<crate::flow_slice_content::SliceBindingKind>,
+    enum Walk<'r> {
+        Region(&'r SliceRegion),
+        Pattern(
+            &'r crate::flow_slice_content::SlicePattern,
+            Option<crate::flow_slice_content::SliceBindingKind>,
+        ),
+        Expression(&'r SliceExpr),
+        Written(FlowProductSubject),
+        Declared(FlowProductSubject),
+    }
+    fn walk(
+        first: Walk<'_>,
         written: &mut Vec<FlowProductSubject>,
         declared: &mut Vec<FlowProductSubject>,
     ) {
         use crate::flow_slice_content::{SliceBindingKind, SlicePattern, SlicePatternKey};
-        let declares = matches!(kind, Some(kind) if kind != SliceBindingKind::Var);
-        let bind = |binding,
-                    written: &mut Vec<FlowProductSubject>,
-                    declared: &mut Vec<FlowProductSubject>| {
-            if declares {
-                declared.push(FlowProductSubject::Local(binding));
-            } else {
-                written.push(FlowProductSubject::Local(binding));
+        let mut stack = vec![first];
+        let mut parts: Vec<Walk<'_>> = Vec::new();
+        while let Some(item) = stack.pop() {
+            match item {
+                Walk::Expression(expr) => expression(expr, written),
+                Walk::Written(subject) => written.push(subject),
+                Walk::Declared(subject) => declared.push(subject),
+                Walk::Pattern(pattern, kind) => {
+                    let declares = matches!(kind, Some(kind) if kind != SliceBindingKind::Var);
+                    let bind = |binding| {
+                        if declares {
+                            Walk::Declared(FlowProductSubject::Local(binding))
+                        } else {
+                            Walk::Written(FlowProductSubject::Local(binding))
+                        }
+                    };
+                    match pattern {
+                        SlicePattern::Binding { binding, .. } => parts.push(bind(*binding)),
+                        SlicePattern::Target { target, .. } => {
+                            parts.push(Walk::Written(narrow_root_subject(&target.root)))
+                        }
+                        SlicePattern::Object { properties, rest } => {
+                            for (key, element) in properties.iter() {
+                                if let SlicePatternKey::Computed(value) = key {
+                                    parts.push(Walk::Expression(value));
+                                }
+                                if let Some(default) = element.default.as_ref() {
+                                    parts.push(Walk::Expression(default));
+                                }
+                                parts.push(Walk::Pattern(&element.pattern, kind));
+                            }
+                            if let Some((rest, _)) = rest {
+                                parts.push(bind(*rest));
+                            }
+                        }
+                        SlicePattern::Array { elements, rest } => {
+                            for element in elements.iter().flatten() {
+                                if let Some(default) = element.default.as_ref() {
+                                    parts.push(Walk::Expression(default));
+                                }
+                                parts.push(Walk::Pattern(&element.pattern, kind));
+                            }
+                            if let Some((rest, _)) = rest {
+                                parts.push(bind(*rest));
+                            }
+                        }
+                    }
+                }
+                Walk::Region(region) => {
+                    for statement in region.statements.iter() {
+                        match statement {
+                            SliceStatement::Return { argument, .. }
+                            | SliceStatement::Yield { argument, .. } => {
+                                if let Some(argument) = argument {
+                                    parts.push(Walk::Expression(argument));
+                                }
+                            }
+                            SliceStatement::If {
+                                consequent,
+                                alternate,
+                                ..
+                            } => {
+                                parts.push(Walk::Region(consequent));
+                                if let Some(alternate) = alternate {
+                                    parts.push(Walk::Region(alternate));
+                                }
+                            }
+                            SliceStatement::Assignment { target, value, .. } => {
+                                parts.push(Walk::Expression(value));
+                                parts.push(Walk::Written(narrow_root_subject(&target.root)));
+                            }
+                            SliceStatement::CompoundAssignment { target, .. } => {
+                                parts.push(Walk::Written(narrow_root_subject(&target.root)));
+                            }
+                            // A member write narrows a member path of its root: the
+                            // root's head carries that path's narrowing joined with the
+                            // back edges.
+                            SliceStatement::MemberWrite { target, write, .. } => {
+                                if let crate::flow_slice_content::SliceMemberWrite::Assign {
+                                    value,
+                                    ..
+                                } = write
+                                {
+                                    parts.push(Walk::Expression(value));
+                                }
+                                parts.push(Walk::Written(narrow_root_subject(&target.root)));
+                            }
+                            SliceStatement::DestructureAssign { pattern, value, .. } => {
+                                parts.push(Walk::Expression(value));
+                                parts.push(Walk::Pattern(pattern, None));
+                            }
+                            SliceStatement::Destructure {
+                                pattern,
+                                kind,
+                                init,
+                                ..
+                            } => {
+                                if let Some(init) = init {
+                                    parts.push(Walk::Expression(init));
+                                }
+                                parts.push(Walk::Pattern(pattern, Some(*kind)));
+                            }
+                            SliceStatement::EvolvingArray(operation) => {
+                                for operand in operation.operands() {
+                                    parts.push(Walk::Expression(operand));
+                                }
+                                parts.push(Walk::Written(operation.binding.clone()));
+                            }
+                            SliceStatement::Binding {
+                                binding,
+                                init,
+                                kind,
+                                ..
+                            } => {
+                                if let Some(init) = init {
+                                    parts.push(Walk::Expression(init));
+                                }
+                                // A `var` is function-scoped: its declarator writes the
+                                // one binding every iteration and the code after the
+                                // loop share.
+                                if *kind == SliceBindingKind::Var {
+                                    parts.push(Walk::Written(FlowProductSubject::Local(*binding)));
+                                } else {
+                                    parts.push(Walk::Declared(FlowProductSubject::Local(*binding)));
+                                }
+                            }
+                            SliceStatement::Block(body) => parts.push(Walk::Region(body)),
+                            SliceStatement::Labeled { body, .. } => parts.push(Walk::Region(body)),
+                            SliceStatement::Loop(inner) => {
+                                parts.push(Walk::Region(&inner.init));
+                                if let Some(element) = inner.element.as_ref() {
+                                    parts.push(Walk::Expression(&element.iterable));
+                                    if let Some(bound) = element.binding.as_ref() {
+                                        parts.push(Walk::Declared(FlowProductSubject::Local(
+                                            bound.binding,
+                                        )));
+                                    }
+                                    if let Some((element_pattern, kind)) = element.pattern.as_ref()
+                                    {
+                                        parts.push(Walk::Pattern(element_pattern, Some(*kind)));
+                                    }
+                                }
+                                parts.push(Walk::Region(&inner.test_effects));
+                                parts.push(Walk::Region(&inner.body));
+                                parts.push(Walk::Region(&inner.update));
+                            }
+                            SliceStatement::Switch { cases, .. } => {
+                                for case in cases.iter() {
+                                    parts.push(Walk::Region(&case.region));
+                                }
+                            }
+                            SliceStatement::Try {
+                                block,
+                                catch,
+                                finally,
+                                ..
+                            } => {
+                                parts.push(Walk::Region(block));
+                                if let Some(catch) = catch {
+                                    parts.push(Walk::Region(&catch.region));
+                                }
+                                if let Some(finally) = finally {
+                                    parts.push(Walk::Region(finally));
+                                }
+                            }
+                            // Unreachable statements reach no live state.
+                            SliceStatement::Gap(_)
+                            | SliceStatement::Assertion { .. }
+                            | SliceStatement::CallEffect { .. }
+                            | SliceStatement::CalleeEffect { .. }
+                            | SliceStatement::Break { .. }
+                            | SliceStatement::Continue { .. }
+                            | SliceStatement::Unreachable(_)
+                            | SliceStatement::Throw
+                            | SliceStatement::ThrowPoint
+                            | SliceStatement::TransparentLoop
+                            | SliceStatement::DivergentLoop
+                            | SliceStatement::Unsupported(_) => {}
+                        }
+                    }
+                }
             }
+            stack.extend(parts.drain(..).rev());
+        }
+    }
+    let walk_pattern = |pattern,
+                        kind,
+                        written: &mut Vec<FlowProductSubject>,
+                        declared: &mut Vec<FlowProductSubject>| {
+        walk(Walk::Pattern(pattern, kind), written, declared)
+    };
+    let walk_region =
+        |region, written: &mut Vec<FlowProductSubject>, declared: &mut Vec<FlowProductSubject>| {
+            walk(Walk::Region(region), written, declared)
         };
-        match pattern {
-            SlicePattern::Binding { binding, .. } => bind(*binding, written, declared),
-            SlicePattern::Target { target, .. } => written.push(narrow_root_subject(&target.root)),
-            SlicePattern::Object { properties, rest } => {
-                for (key, element) in properties.iter() {
-                    if let SlicePatternKey::Computed(value) = key {
-                        expression(value, written);
-                    }
-                    if let Some(default) = element.default.as_ref() {
-                        expression(default, written);
-                    }
-                    walk_pattern(&element.pattern, kind, written, declared);
-                }
-                if let Some((rest, _)) = rest {
-                    bind(*rest, written, declared);
-                }
-            }
-            SlicePattern::Array { elements, rest } => {
-                for element in elements.iter().flatten() {
-                    if let Some(default) = element.default.as_ref() {
-                        expression(default, written);
-                    }
-                    walk_pattern(&element.pattern, kind, written, declared);
-                }
-                if let Some((rest, _)) = rest {
-                    bind(*rest, written, declared);
-                }
-            }
-        }
-    }
-    fn walk_region(
-        region: &SliceRegion,
-        written: &mut Vec<FlowProductSubject>,
-        declared: &mut Vec<FlowProductSubject>,
-    ) {
-        for statement in region.statements.iter() {
-            match statement {
-                SliceStatement::Return { argument, .. }
-                | SliceStatement::Yield { argument, .. } => {
-                    if let Some(argument) = argument {
-                        expression(argument, written);
-                    }
-                }
-                SliceStatement::If {
-                    consequent,
-                    alternate,
-                    ..
-                } => {
-                    walk_region(consequent, written, declared);
-                    if let Some(alternate) = alternate {
-                        walk_region(alternate, written, declared);
-                    }
-                }
-                SliceStatement::Assignment { target, value, .. } => {
-                    expression(value, written);
-                    written.push(narrow_root_subject(&target.root));
-                }
-                SliceStatement::CompoundAssignment { target, .. } => {
-                    written.push(narrow_root_subject(&target.root));
-                }
-                // A member write narrows a member path of its root: the
-                // root's head carries that path's narrowing joined with the
-                // back edges.
-                SliceStatement::MemberWrite { target, write, .. } => {
-                    if let crate::flow_slice_content::SliceMemberWrite::Assign { value, .. } = write
-                    {
-                        expression(value, written);
-                    }
-                    written.push(narrow_root_subject(&target.root));
-                }
-                SliceStatement::DestructureAssign { pattern, value, .. } => {
-                    expression(value, written);
-                    walk_pattern(pattern, None, written, declared);
-                }
-                SliceStatement::Destructure {
-                    pattern,
-                    kind,
-                    init,
-                    ..
-                } => {
-                    if let Some(init) = init {
-                        expression(init, written);
-                    }
-                    walk_pattern(pattern, Some(*kind), written, declared);
-                }
-                SliceStatement::EvolvingArray(operation) => {
-                    for operand in operation.operands() {
-                        expression(operand, written);
-                    }
-                    written.push(operation.binding.clone());
-                }
-                SliceStatement::Binding {
-                    binding,
-                    init,
-                    kind,
-                    ..
-                } => {
-                    if let Some(init) = init {
-                        expression(init, written);
-                    }
-                    // A `var` is function-scoped: its declarator writes the
-                    // one binding every iteration and the code after the
-                    // loop share.
-                    if *kind == crate::flow_slice_content::SliceBindingKind::Var {
-                        written.push(FlowProductSubject::Local(*binding));
-                    } else {
-                        declared.push(FlowProductSubject::Local(*binding));
-                    }
-                }
-                SliceStatement::Block(body) => walk_region(body, written, declared),
-                SliceStatement::Labeled { body, .. } => walk_region(body, written, declared),
-                SliceStatement::Loop(inner) => {
-                    walk_region(&inner.init, written, declared);
-                    if let Some(element) = inner.element.as_ref() {
-                        expression(&element.iterable, written);
-                        if let Some(bound) = element.binding.as_ref() {
-                            declared.push(FlowProductSubject::Local(bound.binding));
-                        }
-                        if let Some((element_pattern, kind)) = element.pattern.as_ref() {
-                            walk_pattern(element_pattern, Some(*kind), written, declared);
-                        }
-                    }
-                    walk_region(&inner.test_effects, written, declared);
-                    walk_region(&inner.body, written, declared);
-                    walk_region(&inner.update, written, declared);
-                }
-                SliceStatement::Switch { cases, .. } => {
-                    for case in cases.iter() {
-                        walk_region(&case.region, written, declared);
-                    }
-                }
-                SliceStatement::Try {
-                    block,
-                    catch,
-                    finally,
-                    ..
-                } => {
-                    walk_region(block, written, declared);
-                    if let Some(catch) = catch {
-                        walk_region(&catch.region, written, declared);
-                    }
-                    if let Some(finally) = finally {
-                        walk_region(finally, written, declared);
-                    }
-                }
-                // Unreachable statements reach no live state.
-                SliceStatement::Gap(_)
-                | SliceStatement::Assertion { .. }
-                | SliceStatement::CallEffect { .. }
-                | SliceStatement::CalleeEffect { .. }
-                | SliceStatement::Break { .. }
-                | SliceStatement::Continue { .. }
-                | SliceStatement::Unreachable(_)
-                | SliceStatement::Throw
-                | SliceStatement::ThrowPoint
-                | SliceStatement::TransparentLoop
-                | SliceStatement::DivergentLoop
-                | SliceStatement::Unsupported(_) => {}
-            }
-        }
-    }
     let mut written = Vec::new();
     let mut declared = Vec::new();
     if let Some(bound) = lowered

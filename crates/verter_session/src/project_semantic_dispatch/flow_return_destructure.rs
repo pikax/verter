@@ -188,60 +188,140 @@ impl FlowEvaluator<'_, '_> {
         kind: SliceBindingKind,
         annotated: bool,
     ) {
-        match pattern {
-            SlicePattern::Binding { binding, .. } => {
-                self.bind_pattern_binding(*binding, parent, kind)
-            }
-            SlicePattern::Target { target, .. } => {
-                let Some(definition) = self.pattern_write_definition else {
-                    return;
-                };
-                match parent.node {
-                    Some(node) => {
-                        self.apply_write(target, node, false, definition, false, false);
+        // A pattern nested in a pattern binds from an explicit stack of the
+        // patterns whose elements are being bound, each element in turn and
+        // the rest after them: a pattern nested in a pattern costs no native
+        // level.
+        enum Frame<'p> {
+            Object {
+                properties: &'p [(SlicePatternKey, SlicePatternElement)],
+                rest: &'p Option<(
+                    SkeletonBindingId,
+                    verter_semantic::analysis::flow::FrameSpan,
+                )>,
+                parent: Option<SemanticNodeId>,
+                next: usize,
+                keys: Vec<Option<Arc<str>>>,
+            },
+            Array {
+                elements: &'p [Option<SlicePatternElement>],
+                rest: &'p Option<(
+                    SkeletonBindingId,
+                    verter_semantic::analysis::flow::FrameSpan,
+                )>,
+                parent: Option<SemanticNodeId>,
+                next: usize,
+            },
+        }
+        let mut frames: Vec<Frame<'_>> = Vec::new();
+        let mut next = Some((pattern, parent));
+        loop {
+            if let Some((pattern, parent)) = next.take() {
+                match pattern {
+                    SlicePattern::Binding { binding, .. } => {
+                        self.bind_pattern_binding(*binding, parent, kind)
                     }
-                    None => {
-                        let marker = super::super::flow_return_callee::unmodeled_position_marker(
-                            self.dispatch,
+                    SlicePattern::Target { target, .. } => {
+                        if let Some(definition) = self.pattern_write_definition {
+                            match parent.node {
+                                Some(node) => {
+                                    self.apply_write(target, node, false, definition, false, false);
+                                }
+                                None => {
+                                    let marker =
+                                        super::super::flow_return_callee::unmodeled_position_marker(
+                                            self.dispatch,
+                                        );
+                                    self.apply_write(
+                                        target, marker, true, definition, false, false,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    SlicePattern::Object { properties, rest } => frames.push(Frame::Object {
+                        properties,
+                        rest,
+                        parent: parent.node,
+                        next: 0,
+                        keys: Vec::with_capacity(properties.len()),
+                    }),
+                    SlicePattern::Array { elements, rest } => frames.push(Frame::Array {
+                        elements,
+                        rest,
+                        parent: parent.node,
+                        next: 0,
+                    }),
+                }
+            }
+            let Some(frame) = frames.last_mut() else {
+                return;
+            };
+            match frame {
+                Frame::Object {
+                    properties,
+                    rest,
+                    parent,
+                    next: index,
+                    keys,
+                } => {
+                    if let Some((key, element)) = properties.get(*index) {
+                        *index += 1;
+                        let name = self.pattern_key_name(key);
+                        let member = match (*parent, name.as_ref()) {
+                            (Some(parent), Some(name)) => self.pattern_property(parent, name),
+                            _ => None,
+                        };
+                        keys.push(name);
+                        let value = self.pattern_element_value(
+                            element,
+                            ElementValue::of(member),
+                            annotated,
                         );
-                        self.apply_write(target, marker, true, definition, false, false);
+                        next = Some((&element.pattern, value));
+                        continue;
+                    }
+                    let (rest, parent, keys) = (*rest, *parent, std::mem::take(keys));
+                    frames.pop();
+                    if let Some((rest, _)) = rest {
+                        let value = match (parent, keys.into_iter().collect::<Option<Vec<_>>>()) {
+                            (Some(parent), Some(keys)) => self.object_rest_type(parent, &keys),
+                            _ => None,
+                        };
+                        self.bind_pattern_binding(*rest, ElementValue::of(value), kind);
                     }
                 }
-            }
-            SlicePattern::Object { properties, rest } => {
-                let mut keys: Vec<Option<Arc<str>>> = Vec::with_capacity(properties.len());
-                for (key, element) in properties.iter() {
-                    let name = self.pattern_key_name(key);
-                    let member = match (parent.node, name.as_ref()) {
-                        (Some(parent), Some(name)) => self.pattern_property(parent, name),
-                        _ => None,
-                    };
-                    keys.push(name);
-                    self.bind_pattern_element(element, ElementValue::of(member), kind, annotated);
-                }
-                if let Some((rest, _)) = rest {
-                    let value = match (parent.node, keys.into_iter().collect::<Option<Vec<_>>>()) {
-                        (Some(parent), Some(keys)) => self.object_rest_type(parent, &keys),
-                        _ => None,
-                    };
-                    self.bind_pattern_binding(*rest, ElementValue::of(value), kind);
-                }
-            }
-            SlicePattern::Array { elements, rest } => {
-                for (index, element) in elements.iter().enumerate() {
-                    let Some(element) = element else {
+                Frame::Array {
+                    elements,
+                    rest,
+                    parent,
+                    next: index,
+                } => {
+                    while let Some(element) = elements.get(*index) {
+                        *index += 1;
+                        let Some(element) = element else {
+                            continue;
+                        };
+                        let member =
+                            parent.and_then(|parent| self.pattern_position(parent, *index - 1));
+                        let value = self.pattern_element_value(
+                            element,
+                            ElementValue::of(member),
+                            annotated,
+                        );
+                        next = Some((&element.pattern, value));
+                        break;
+                    }
+                    if next.is_some() {
                         continue;
-                    };
-                    let member = parent
-                        .node
-                        .and_then(|parent| self.pattern_position(parent, index));
-                    self.bind_pattern_element(element, ElementValue::of(member), kind, annotated);
-                }
-                if let Some((rest, _)) = rest {
-                    let value = parent
-                        .node
-                        .and_then(|parent| self.array_rest_type(parent, elements.len()));
-                    self.bind_pattern_binding(*rest, ElementValue::of(value), kind);
+                    }
+                    let (elements, rest, parent) = (*elements, *rest, *parent);
+                    frames.pop();
+                    if let Some((rest, _)) = rest {
+                        let value =
+                            parent.and_then(|parent| self.array_rest_type(parent, elements.len()));
+                        self.bind_pattern_binding(*rest, ElementValue::of(value), kind);
+                    }
                 }
             }
         }
@@ -257,7 +337,18 @@ impl FlowEvaluator<'_, '_> {
         kind: SliceBindingKind,
         annotated: bool,
     ) {
-        let value = match (&element.default, member.node) {
+        let value = self.pattern_element_value(element, member, annotated);
+        self.bind_pattern(&element.pattern, value, kind, annotated);
+    }
+
+    /// The value one element's pattern binds: [`Self::bind_pattern_element`]'s.
+    fn pattern_element_value(
+        &mut self,
+        element: &SlicePatternElement,
+        member: ElementValue,
+        annotated: bool,
+    ) -> ElementValue {
+        match (&element.default, member.node) {
             (Some(default), member_node) => {
                 let holds_before = self.holds.len();
                 let outcome = self.eval_expr(default);
@@ -289,8 +380,7 @@ impl FlowEvaluator<'_, '_> {
                 }
             }
             (None, _) => member,
-        };
-        self.bind_pattern(&element.pattern, value, kind, annotated);
+        }
     }
 
     /// Bind one pattern identifier: a `const` keeps the fresh literals it
