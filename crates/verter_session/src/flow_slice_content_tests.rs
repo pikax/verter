@@ -4757,9 +4757,12 @@ fn locator_miss_is_typed_none() {
     );
 
     let mut bad_descent = entry.clone();
-    bad_descent.locator.descent = Arc::from([FunctionDescentStep::VariableInitializer {
-        declarator_ordinal: 99,
-    }]);
+    bad_descent.locator.descent =
+        verter_semantic::analysis::function_program::FunctionDescent::new().then(
+            FunctionDescentStep::VariableInitializer {
+                declarator_ordinal: 99,
+            },
+        );
     assert!(
         memo.flow_slice_content(
             &bad_descent,

@@ -578,6 +578,27 @@ Recorded plainly so no reader mistakes absence for a pass:
   or the `!` classification overflows the worker, and restoring the
   derived drop overflows the test thread.
 
+* **Nested callables index from an explicit stack, on shared locators.**
+  The function index discovered a callable nested in a callable's body by
+  recursing through its entry build, 13.9 MB for 10,000 nested arrows
+  optimized, and each nested callable's locator copied its parent's whole
+  descent and added a step, so a nest `n` deep held `n²/2` steps (the
+  10,000-deep nest's locators alone took hundreds of megabytes).
+  `discover_nested_positions` now walks the nest from an explicit stack of
+  the bodies it is in (depth first, each callable's own nested callables
+  before its next sibling, so every ordinal and key is as before), and a
+  locator's descent is a `FunctionDescent`: a path that shares every prefix
+  with its enclosing functions' descents, so each locator adds one step.
+  Its equality, hash and drop walk the path from a loop.
+  `function_program_tests.rs` →
+  `callables_nested_10000_deep_index_on_a_small_stack` indexes 10,000
+  nested arrows on a 1 MiB thread, unoptimized, and checks every nested
+  locator extends its parent's descent by one shared step; restoring the
+  recursion overflows the thread, and copying the parent's descent fails
+  the sharing check. The index still hashes each function's body with its
+  nested bodies in it, so indexing the nest takes time quadratic in its
+  depth (about a minute unoptimized at 10,000).
+
 * **Operator chains evaluate from explicit stacks.** The flow evaluator
   evaluated a `!`, a non-null assertion and an arithmetic operator by
   evaluating its operands recursively, 8.7 MB for a 10,000-deep `!` chain

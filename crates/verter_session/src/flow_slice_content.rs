@@ -3280,16 +3280,15 @@ pub(crate) fn build_flow_slice_content(
     // through that block's scope BEFORE the top level — the same lexical
     // rule under which the function index binds a namespace-qualified
     // direct-call target over the file-global one.
-    let namespace_owned = entry
-        .locator
-        .descent
+    let descent = entry.locator.descent.to_vec();
+    let namespace_owned = descent
         .iter()
         .any(|step| matches!(step, FunctionDescentStep::NamespaceMember { .. }));
     let namespace_scopes = if namespace_owned {
         enclosing_namespace_scopes(
             program,
             entry.locator.contributor.contributor_index as usize,
-            &entry.locator.descent,
+            &descent,
         )
     } else {
         Vec::new()
@@ -3444,7 +3443,7 @@ pub(crate) fn build_flow_slice_content(
     // checker can type, so its `this` is `any`.
     let untyped_declaration_this = resolved.enclosing_this.is_none()
         && matches!(
-            entry.locator.descent.as_ref(),
+            descent.as_slice(),
             [FunctionDescentStep::FunctionDeclaration]
         )
         && matches!(
@@ -3471,14 +3470,14 @@ pub(crate) fn build_flow_slice_content(
                     SliceThis::Static {
                         class,
                         contributor: matches!(
-                            entry.locator.descent.as_ref(),
+                            descent.as_slice(),
                             [FunctionDescentStep::ClassMember { .. }]
                         )
                         .then_some(entry.locator.contributor.contributor_index),
                     }
                 }
                 verter_semantic::analysis::function_program::EnclosingThis::ObjectLiteral => {
-                    match entry.locator.descent.as_ref() {
+                    match descent.as_slice() {
                         [FunctionDescentStep::VariableInitializer { declarator_ordinal }, FunctionDescentStep::ObjectMember { .. }] => {
                             SliceThis::Value {
                                 value: class,
