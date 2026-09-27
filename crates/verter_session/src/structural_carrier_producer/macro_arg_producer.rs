@@ -717,6 +717,7 @@ fn lower_node(
             let mapper_decl = DeclIdentity::from_scope(
                 scope,
                 crate::mapper_binder_registry::mapper_binder_decl_name(
+                    graph,
                     source,
                     value,
                     *optional,

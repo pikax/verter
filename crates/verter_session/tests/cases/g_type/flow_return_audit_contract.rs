@@ -641,3 +641,48 @@ fn caller_cancellation_answers_cancelled_on_both_registration_arms() {
         assert_eq!(served(&retried), served(&plain));
     }
 }
+
+/// A request whose token was cancelled before it started answers
+/// `Cancelled` even when its answer is warm: the warm read is part of the
+/// request's work, and a pre-start cancellation cancels all of it. The
+/// shared warm entry stays: an uncancelled request afterwards is served
+/// from it, with no cold evaluation.
+///
+/// Discrimination: against a tree that serves the warm read before any
+/// cancellation check, the pre-cancelled request answers the clean warm
+/// value.
+#[test]
+fn a_pre_cancelled_request_answers_cancelled_over_a_warm_answer() {
+    use verter_scheduler::cancellation::CancellationToken;
+    let host = build_host(false);
+    let ident = identity(CANONICAL, "makeThing");
+    let cold = host.get_flow_return_type_with_audit(&ident, whole());
+    assert!(cold.as_result().is_ok(), "cold prime must resolve");
+    let warm = host.get_flow_return_type_with_audit(&ident, whole());
+    assert!(warm.audit().from_cache, "the answer is warm");
+
+    let token = CancellationToken::new();
+    token.cancel();
+    let cancelled = host.get_flow_return_type_with_audit_cancellable(&ident, whole(), token);
+    assert!(
+        matches!(cancelled.as_result(), Err(FlowReturnError::Cancelled)),
+        "a pre-cancelled request answers Cancelled over a warm answer, got {:?}",
+        cancelled.as_result().map(|result| result.degradation())
+    );
+
+    let after =
+        host.get_flow_return_type_with_audit_cancellable(&ident, whole(), CancellationToken::new());
+    assert!(after.as_result().is_ok(), "an uncancelled request answers");
+    assert!(
+        after.audit().from_cache,
+        "the shared warm entry survives the cancelled request"
+    );
+    assert_eq!(
+        after
+            .audit()
+            .flow_return_inference_payload()
+            .expect("flow payload")
+            .cold_computes,
+        0
+    );
+}

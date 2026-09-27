@@ -214,7 +214,12 @@ impl VerterHost {
         // churn surface the typed `UnstableState` error rather than
         // answering from superseded state.
         let request_start = Instant::now();
-        let outcome: Result<Arc<FlowReturnResult>, FlowReturnError> =
+        let outcome: Result<Arc<FlowReturnResult>, FlowReturnError> = if ctx.is_cancelled() {
+            // A request cancelled before it starts runs none of its work —
+            // a warm read included, which checks no cancellation — and
+            // answers `Cancelled`; the shared memo is left as it was.
+            Err(FlowReturnError::Cancelled)
+        } else {
             match crate::typeinfo::current_store_view_for_query(self) {
                 Some(current_view) => {
                     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -246,7 +251,8 @@ impl VerterHost {
                 None => Err(FlowReturnError::UnstableState {
                     attempts: crate::typeinfo::TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS as u8,
                 }),
-            };
+            }
+        };
         #[cfg(feature = "test-support")]
         crate::for_tests::signature_kernel_bench_support::cancel_trace::mark("released");
         // A cancelled request's incomplete answer IS the cancellation: the
