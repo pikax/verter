@@ -53,6 +53,7 @@ mod hash_cons_memos;
 mod inflight;
 mod interner;
 mod member_index;
+mod observability;
 mod origin_edges;
 mod prepared;
 mod relation_memo;

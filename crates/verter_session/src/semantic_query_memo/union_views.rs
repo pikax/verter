@@ -49,6 +49,13 @@ pub(super) struct UnionViews {
     admitted: VecDeque<SemanticUnionMembersKey>,
 }
 
+impl UnionViews {
+    /// Views kept (retention observability).
+    pub(super) fn len(&self) -> usize {
+        self.views.len()
+    }
+}
+
 impl std::fmt::Debug for UnionViews {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UnionViews")
