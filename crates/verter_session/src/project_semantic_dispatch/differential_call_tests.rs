@@ -794,3 +794,27 @@ fn an_argument_a_fixed_union_member_matches_infers_below_a_direct_inference() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Declared returns whose union holds an operator the instantiation closes.
+const NULLABLE_INSTANTIATED_OPERATORS: &str = r##"
+declare function g<T>(x: T): keyof { a: 1 } | T;
+export function r1() { return g<undefined>(undefined); }
+export function r2() { return g<null>(null); }
+declare function h<T>(x: T): { v: { a: 1 }["a"] | T };
+export function r3() { return h<null>(null); }
+"##;
+
+/// A union rebuilt around a reduced operator keeps the settings' `null` /
+/// `undefined` algebra: `keyof { a: 1 } | T` at `T := undefined` is `"a" |
+/// undefined` with `strictNullChecks` and `"a"` without it. Measured on
+/// TypeScript 7.0.2.
+#[test]
+fn a_union_rebuilt_around_a_reduced_operator_keeps_the_nullability_algebra() {
+    let matrix = Matrix::new(NULLABLE_INSTANTIATED_OPERATORS);
+    let failures = matrix.nullness(&[
+        (Read::Return("r1"), "\"a\" | undefined", "\"a\""),
+        (Read::Return("r2"), "\"a\" | null", "\"a\""),
+        (Read::Return("r3"), "{ v: 1 | null; }", "{ v: 1; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
