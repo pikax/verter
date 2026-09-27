@@ -1491,6 +1491,79 @@ impl GatedLeaf {
     }
 }
 
+/// A statement nests without bound (a block in a block, an `if` in an
+/// arm), and the derived drop glue would drop a nest a native level per
+/// level. Dropping moves the statements of the regions a statement solely
+/// owns onto an explicit stack first, so a nest however deep drops from this
+/// loop. A region behind a shared `Arc` another owner still holds is left
+/// to that owner.
+impl Drop for SliceStatement {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        self.take_nested_statements(&mut pending);
+        while let Some(mut statement) = pending.pop() {
+            statement.take_nested_statements(&mut pending);
+        }
+    }
+}
+
+impl SliceStatement {
+    /// Move the statements of the regions this statement solely owns onto
+    /// `out`, leaving [`SliceStatement::Throw`] in their place.
+    fn take_nested_statements(&mut self, out: &mut Vec<SliceStatement>) {
+        fn take(region: &mut SliceRegion, out: &mut Vec<SliceStatement>) {
+            if let Some(statements) = Arc::get_mut(&mut region.statements) {
+                for statement in statements.iter_mut() {
+                    out.push(std::mem::replace(statement, SliceStatement::Throw));
+                }
+            }
+        }
+        match self {
+            SliceStatement::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                take(consequent, out);
+                if let Some(alternate) = alternate {
+                    take(alternate, out);
+                }
+            }
+            SliceStatement::Block(region) => take(region, out),
+            SliceStatement::Loop(lowered) => {
+                take(&mut lowered.init, out);
+                take(&mut lowered.test_effects, out);
+                take(&mut lowered.body, out);
+                take(&mut lowered.update, out);
+            }
+            SliceStatement::Unreachable(region) => take(region, out),
+            SliceStatement::Switch { cases, .. } => {
+                if let Some(cases) = Arc::get_mut(cases) {
+                    for case in cases.iter_mut() {
+                        take(&mut case.region, out);
+                    }
+                }
+            }
+            SliceStatement::Try {
+                block,
+                catch,
+                finally,
+                ..
+            } => {
+                take(block, out);
+                if let Some(catch) = catch {
+                    take(&mut catch.region, out);
+                }
+                if let Some(finally) = finally {
+                    take(finally, out);
+                }
+            }
+            SliceStatement::Labeled { body, .. } => take(body, out),
+            _ => {}
+        }
+    }
+}
+
 /// A slice expression nests without bound (an operand of an operand, a
 /// member value of a member value), and the derived drop glue would drop it
 /// a native level per level. Dropping moves each expression's owned
@@ -1625,6 +1698,74 @@ impl OperatorShape {
             }
         }
     }
+}
+
+/// An object literal's lowering in progress, stepped by
+/// [`Lowerer::object_step`]: the entries lowered so far, the next
+/// property, and the child the literal waits on.
+struct ObjectFrame<'e, 'x> {
+    object: &'e oxc_ast::ast::ObjectExpression<'x>,
+    whole: &'e Expression<'x>,
+    mode: ExprMode,
+    policy: ObjectMemberPolicy,
+    entries: Vec<SliceObjectEntry>,
+    next: usize,
+    awaiting: ObjectAwait<'e, 'x>,
+}
+
+impl<'e, 'x> ObjectFrame<'e, 'x> {
+    fn new(
+        object: &'e oxc_ast::ast::ObjectExpression<'x>,
+        whole: &'e Expression<'x>,
+        mode: ExprMode,
+        policy: ObjectMemberPolicy,
+    ) -> Self {
+        Self {
+            object,
+            whole,
+            mode,
+            policy,
+            entries: Vec::with_capacity(object.properties.len()),
+            next: 0,
+            awaiting: ObjectAwait::Nothing,
+        }
+    }
+}
+
+/// The child an [`ObjectFrame`] waits on, with what its member keeps
+/// meanwhile.
+enum ObjectAwait<'e, 'x> {
+    Nothing,
+    /// A spread's source.
+    Spread,
+    /// A computed key, before its member's value.
+    Key {
+        value: &'e Expression<'x>,
+        kind: ObjectEntryKind,
+        property: &'e oxc_ast::ast::ObjectProperty<'x>,
+    },
+    /// A data member's value.
+    Value {
+        key: SliceObjectKey,
+        method_kind: Option<verter_type_expr::ObjectMethodKind>,
+        spans: verter_type_expr::MemberSpans,
+        widen_member: bool,
+    },
+}
+
+/// What an [`ObjectFrame`] needs next: a child lowered (in the const
+/// context, or as any value), or nothing — its value.
+enum ObjectStep<'e, 'x> {
+    Descend(&'e Expression<'x>, ExprMode, bool),
+    Done(Box<SliceExpr>),
+}
+
+/// A conditional's lowering waiting on its branches (see
+/// [`Lowerer::conditional_start`]).
+struct ConditionalStart {
+    guard: SliceGuard,
+    test_assertions: Vec<SliceStatement>,
+    active_guard_base: usize,
 }
 
 /// One expression of the slice content.
@@ -4953,6 +5094,35 @@ fn pure_optional_member_root_identifier<'a>(
 /// is NOT fresh (the checker's own early-return-guard shapes keep their
 /// literal unions), so only leaf arms widen. A fresh `!x` literal is a
 /// leaf too.
+/// Whether [`widen_mutable_slot_literals`] changes `value`, read off its
+/// top without comparing the value it would produce (a comparison would
+/// walk a nested value through every level it nests).
+fn widens_mutable_slot_literals(value: &SliceExpr) -> bool {
+    let is_literal_leaf =
+        |value: &SliceExpr| matches!(value, SliceExpr::Type(GatedLeaf(TypeExpr::Literal(_), _)));
+    let mut value = value;
+    loop {
+        return match value {
+            SliceExpr::Type(_) => is_literal_leaf(value),
+            SliceExpr::Not { widen, .. }
+            | SliceExpr::Logical { widen, .. }
+            | SliceExpr::Assignment { widen, .. } => !widen,
+            SliceExpr::Sequence { value: inner, .. } => {
+                value = inner;
+                continue;
+            }
+            SliceExpr::Union { arms, .. } => arms.iter().any(|arm| match arm {
+                SliceExpr::Type(_) => is_literal_leaf(arm),
+                SliceExpr::Not { widen, .. }
+                | SliceExpr::Logical { widen, .. }
+                | SliceExpr::Assignment { widen, .. } => !widen,
+                _ => false,
+            }),
+            _ => false,
+        };
+    }
+}
+
 fn widen_mutable_slot_literals(mut value: SliceExpr) -> SliceExpr {
     match &mut value {
         SliceExpr::Type(leaf) => {
@@ -6010,6 +6180,28 @@ struct LoweredLoop {
     /// The loop can complete normally: its test can fail, it iterates a
     /// value, or a `break` targets it.
     completes: bool,
+}
+
+/// A region's lowering in progress (see [`Lowerer::lower_region`]): the
+/// statements lowered so far and what the region carries past them.
+struct RegionLowerFrame<'s, 'x> {
+    statements: &'s [Statement<'x>],
+    next: usize,
+    enclosing_followed_by_return: SuffixReturn,
+    out: Vec<SliceStatement>,
+    can_fall_through: bool,
+    hit_unsupported: bool,
+    may_break: Vec<SliceBreakTarget>,
+    /// Where the block statement the frame is suspended at begins in
+    /// `out`.
+    block_statement_start: usize,
+}
+
+/// What a region's lowering needs next: a block's region lowered, or
+/// nothing — its lowering.
+enum RegionLowerStep<'s, 'x> {
+    EnterBlock(&'s [Statement<'x>]),
+    Done(LoweredRegion),
 }
 
 struct LoweredRegion {
@@ -7937,12 +8129,80 @@ impl<'a> Lowerer<'a> {
     /// construct takes the typed `AbruptCompletion` gap at the region's
     /// head instead.
     fn lower_region(&mut self, statements: &[Statement<'_>]) -> LoweredRegion {
-        let enclosing_followed_by_return = self.current_statement_followed_by_return;
-        let mut out: Vec<SliceStatement> = Vec::new();
-        let mut can_fall_through = true;
-        let mut hit_unsupported = false;
-        let mut may_break: Vec<SliceBreakTarget> = Vec::new();
-        for (index, statement) in statements.iter().enumerate() {
+        // A block nested in a block costs no native level: each region
+        // being lowered is a frame of an explicit stack, and a block
+        // statement suspends its region's frame until the block's own
+        // region is lowered.
+        let mut frames = vec![self.region_lower_frame(statements)];
+        let mut delivered = None;
+        loop {
+            let frame = frames.last_mut().expect("the region being lowered");
+            match self.lower_region_steps(frame, delivered.take()) {
+                RegionLowerStep::EnterBlock(body) => {
+                    let child = self.region_lower_frame(body);
+                    frames.push(child);
+                }
+                RegionLowerStep::Done(lowered) => {
+                    frames.pop();
+                    if frames.is_empty() {
+                        return lowered;
+                    }
+                    delivered = Some(lowered);
+                }
+            }
+        }
+    }
+
+    /// A region's lowering, begun under the statement enclosing it.
+    fn region_lower_frame<'s, 'x>(
+        &self,
+        statements: &'s [Statement<'x>],
+    ) -> RegionLowerFrame<'s, 'x> {
+        RegionLowerFrame {
+            statements,
+            next: 0,
+            enclosing_followed_by_return: self.current_statement_followed_by_return,
+            out: Vec::new(),
+            can_fall_through: true,
+            hit_unsupported: false,
+            may_break: Vec::new(),
+            block_statement_start: 0,
+        }
+    }
+
+    /// Lower a region's statements until one is a block (whose region the
+    /// caller lowers next, delivering it back) or the region ends.
+    fn lower_region_steps<'s, 'x>(
+        &mut self,
+        frame: &mut RegionLowerFrame<'s, 'x>,
+        delivered: Option<LoweredRegion>,
+    ) -> RegionLowerStep<'s, 'x> {
+        let statements = frame.statements;
+        let enclosing_followed_by_return = frame.enclosing_followed_by_return;
+        let mut out = std::mem::take(&mut frame.out);
+        let mut can_fall_through = frame.can_fall_through;
+        let mut hit_unsupported = frame.hit_unsupported;
+        let mut may_break = std::mem::take(&mut frame.may_break);
+        if let Some(child) = delivered {
+            can_fall_through = child
+                .region
+                .can_fall_through
+                .reaches_end(CompletionDischarge::RegionComposition);
+            hit_unsupported = child.hit_unsupported;
+            // A block absorbs no `break` — an exit targeting an
+            // enclosing switch / labeled statement passes through.
+            may_break.extend(child.may_break);
+            out.push(SliceStatement::Block(child.region));
+            self.finish_region_statement(
+                frame.block_statement_start,
+                &mut out,
+                hit_unsupported,
+                &mut can_fall_through,
+            );
+        }
+        while let Some(statement) = statements.get(frame.next) {
+            let index = frame.next;
+            frame.next += 1;
             if !can_fall_through {
                 if !hit_unsupported
                     && unreachable_statements_contribute(&self.walks, &statements[index..])
@@ -8014,16 +8274,14 @@ impl<'a> Lowerer<'a> {
                     can_fall_through = false;
                 }
                 Statement::BlockStatement(block) => {
-                    let child = self.lower_region(&block.body);
-                    can_fall_through = child
-                        .region
-                        .can_fall_through
-                        .reaches_end(CompletionDischarge::RegionComposition);
-                    hit_unsupported = child.hit_unsupported;
-                    // A block absorbs no `break` — an exit targeting an
-                    // enclosing switch / labeled statement passes through.
-                    may_break.extend(child.may_break);
-                    out.push(SliceStatement::Block(child.region));
+                    // The block's region lowers next, from the caller's
+                    // stack; this region resumes past the statement with it.
+                    frame.out = out;
+                    frame.can_fall_through = can_fall_through;
+                    frame.hit_unsupported = hit_unsupported;
+                    frame.may_break = may_break;
+                    frame.block_statement_start = statement_start;
+                    return RegionLowerStep::EnterBlock(&block.body);
                 }
                 Statement::IfStatement(if_stmt) if discarded_value_holds_write(&if_stmt.test) => {
                     let lowered = self.lower_if_with_test_writes(if_stmt);
@@ -8745,23 +9003,15 @@ impl<'a> Lowerer<'a> {
                 | Statement::TSGlobalDeclaration(_)
                 | Statement::TSImportEqualsDeclaration(_) => {}
             }
-            // A ternary test lowered INSIDE this statement carried a
-            // control call this half could neither certify nor evidence:
-            // the typed guard-narrowing gap lands AHEAD of the statement,
-            // so a terminal statement (a `return` of the ternary) cannot
-            // strand it unreachable.
-            if std::mem::take(&mut self.control_test_gap) {
-                out.insert(
-                    statement_start,
-                    SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
-                );
-            }
-            if hit_unsupported {
-                can_fall_through = false;
-            }
+            self.finish_region_statement(
+                statement_start,
+                &mut out,
+                hit_unsupported,
+                &mut can_fall_through,
+            );
         }
         self.current_statement_followed_by_return = enclosing_followed_by_return;
-        LoweredRegion {
+        RegionLowerStep::Done(LoweredRegion {
             region: SliceRegion {
                 statements: Arc::from(out.into_boxed_slice()),
                 can_fall_through: NormalCompletion::minted(
@@ -8771,6 +9021,30 @@ impl<'a> Lowerer<'a> {
             },
             hit_unsupported,
             may_break,
+        })
+    }
+
+    /// The end of one statement of a region's lowering.
+    fn finish_region_statement(
+        &mut self,
+        statement_start: usize,
+        out: &mut Vec<SliceStatement>,
+        hit_unsupported: bool,
+        can_fall_through: &mut bool,
+    ) {
+        // A ternary test lowered INSIDE this statement carried a
+        // control call this half could neither certify nor evidence:
+        // the typed guard-narrowing gap lands AHEAD of the statement,
+        // so a terminal statement (a `return` of the ternary) cannot
+        // strand it unreachable.
+        if std::mem::take(&mut self.control_test_gap) {
+            out.insert(
+                statement_start,
+                SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+            );
+        }
+        if hit_unsupported {
+            *can_fall_through = false;
         }
     }
 
@@ -14008,9 +14282,20 @@ impl<'a> Lowerer<'a> {
         // operand nested in an operand costs no native level. So does a
         // value-transparent wrapper (a parenthesis), which lowers as its
         // operand.
+        // A conditional lowers its two branches from the same stack, under
+        // the guard bindings its test extends until both are lowered
+        // (`Task::Branches` takes them off).
+        //
+        // An object literal lowers as a frame of the same stack
+        // (`Task::Object`), which resumes with each child it asks for: a
+        // member value nested in a member value costs no native level.
         enum Task<'e, 'a> {
             Lower(&'e Expression<'a>, ExprMode),
+            /// [`Lowerer::lower_in_const_context`]'s lowering.
+            LowerConst(&'e Expression<'a>, ExprMode),
             Build(OperatorShape),
+            Branches(ConditionalStart),
+            Object(ObjectFrame<'e, 'a>),
         }
         let mut tasks = vec![Task::Lower(expr, mode)];
         let mut values: Vec<SliceExpr> = Vec::new();
@@ -14031,6 +14316,19 @@ impl<'a> Lowerer<'a> {
                         }
                         continue;
                     }
+                    if let Expression::ConditionalExpression(conditional) =
+                        unwrap_parenthesized(expr)
+                    {
+                        let start = self.conditional_start(conditional);
+                        tasks.push(Task::Branches(start));
+                        tasks.push(Task::Lower(&conditional.alternate, mode));
+                        tasks.push(Task::Lower(&conditional.consequent, mode));
+                        continue;
+                    }
+                    if let Some((object, whole, policy)) = self.object_literal_lowering(expr) {
+                        tasks.push(Task::Object(ObjectFrame::new(object, whole, mode, policy)));
+                        continue;
+                    }
                     let mut transparent = None;
                     let value = self.lower_expr_level(expr, mode, &mut transparent);
                     match transparent {
@@ -14042,11 +14340,113 @@ impl<'a> Lowerer<'a> {
                     let value = shape.build(&mut values);
                     values.push(value);
                 }
+                Task::LowerConst(expr, mode) => {
+                    if let Some(template) = self.lower_const_template(expr) {
+                        values.push(template);
+                        continue;
+                    }
+                    match value_descent(unwrap_parenthesized(expr)) {
+                        ValueDescent::Object(object) => tasks.push(Task::Object(ObjectFrame::new(
+                            object,
+                            expr,
+                            mode,
+                            ObjectMemberPolicy::ConstAssert,
+                        ))),
+                        ValueDescent::Array(array) => values
+                            .push(self.lower_array_literal(array, ObjectMemberPolicy::ConstAssert)),
+                        _ => tasks.push(Task::Lower(expr, mode)),
+                    }
+                }
+                Task::Object(mut frame) => {
+                    let delivered = (!matches!(frame.awaiting, ObjectAwait::Nothing))
+                        .then(|| values.pop().expect("the child the literal asked for"));
+                    match self.object_step(&mut frame, delivered) {
+                        ObjectStep::Done(value) => values.push(*value),
+                        ObjectStep::Descend(child, child_mode, const_context) => {
+                            tasks.push(Task::Object(frame));
+                            tasks.push(if const_context {
+                                Task::LowerConst(child, child_mode)
+                            } else {
+                                Task::Lower(child, child_mode)
+                            });
+                        }
+                    }
+                }
+                Task::Branches(start) => {
+                    let alternate = values.pop().expect("the alternate");
+                    let consequent = values.pop().expect("the consequent");
+                    let value = self.conditional_finish(start, consequent, alternate);
+                    values.push(value);
+                }
             }
         }
         values
             .pop()
             .expect("the expression's value is the one value left")
+    }
+
+    /// A conditional's lowering up to its branches: its guard, the entered
+    /// `asserts` calls of its test, and its guard bindings made active for
+    /// the branches (see [`Self::conditional_finish`]).
+    fn conditional_start(
+        &mut self,
+        conditional: &oxc_ast::ast::ConditionalExpression<'_>,
+    ) -> ConditionalStart {
+        let guard = self.lower_guard(&conditional.test);
+        // The ternary's TEST is a control position exactly as the `if`
+        // twin's: only its provably result-independent calls are decided
+        // above; an unprovable one flags the enclosing statement's
+        // guard-narrowing gap. An entered `asserts` call in it narrows once
+        // the test has run, ahead of both arms.
+        let test_assertions = self.collecting_entered_assertions(|this| {
+            if this.record_control_position_calls(&conditional.test) {
+                this.control_test_gap = true;
+            }
+        });
+        // The ternary's arms are GUARDED exactly as the `if` statement's
+        // are: a closure created inside one reads a capture's guarded
+        // narrowing only when the capture is extended into it. The two
+        // control spellings must reach the closure-capture rail with the
+        // same active guard set, or the same source degrades under `if` and
+        // seals clean under `?:`.
+        let active_guard_base = self.active_guard_bindings.len();
+        let guard_bindings = self.guard_bindings(&guard, conditional.test.span());
+        self.active_guard_bindings
+            .extend(guard_bindings.iter().copied());
+        ConditionalStart {
+            guard,
+            test_assertions,
+            active_guard_base,
+        }
+    }
+
+    /// A conditional over its lowered branches: its value is their union
+    /// under its guard, after its test's entered assertions.
+    fn conditional_finish(
+        &mut self,
+        start: ConditionalStart,
+        consequent: SliceExpr,
+        alternate: SliceExpr,
+    ) -> SliceExpr {
+        let ConditionalStart {
+            guard,
+            test_assertions,
+            active_guard_base,
+        } = start;
+        self.active_guard_bindings.truncate(active_guard_base);
+        let union = SliceExpr::Union {
+            arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
+            guard,
+        };
+        if test_assertions.is_empty() {
+            union
+        } else {
+            SliceExpr::Sequence {
+                before: Arc::from(test_assertions.into_boxed_slice()),
+                value: Box::new(union),
+                after: None,
+            }
+        }
     }
 
     /// The operands of an operator form [`Self::lower_operator_form`] builds
@@ -14563,45 +14963,13 @@ impl<'a> Lowerer<'a> {
                     // own binders intact, its overload group unconsulted,
                     // warm.
                     ValueDescent::Branches(conditional) => {
-                        let guard = self.lower_guard(&conditional.test);
-                        // The ternary's TEST is a control position exactly as
-                        // the `if` twin's: only its provably result-independent
-                        // calls are decided above; an unprovable one flags the
-                        // enclosing statement's guard-narrowing gap. An
-                        // entered `asserts` call in it narrows once the test
-                        // has run, ahead of both arms.
-                        let test_assertions = self.collecting_entered_assertions(|this| {
-                            if this.record_control_position_calls(&conditional.test) {
-                                this.control_test_gap = true;
-                            }
-                        });
-                        // The ternary's arms are GUARDED exactly as the `if`
-                        // statement's are: a closure created inside one
-                        // reads a capture's guarded narrowing only when the
-                        // capture is extended into it. The two control
-                        // spellings must reach the closure-capture rail with
-                        // the same active guard set, or the same source
-                        // degrades under `if` and seals clean under `?:`.
-                        let active_guard_base = self.active_guard_bindings.len();
-                        let guard_bindings = self.guard_bindings(&guard, conditional.test.span());
-                        self.active_guard_bindings
-                            .extend(guard_bindings.iter().copied());
+                        // [`Self::lower_expr`] lowers a conditional's
+                        // branches from its own stack before it reaches
+                        // here; the same halves lower it in place.
+                        let start = self.conditional_start(conditional);
                         let consequent = self.lower_expr(&conditional.consequent, mode);
                         let alternate = self.lower_expr(&conditional.alternate, mode);
-                        self.active_guard_bindings.truncate(active_guard_base);
-                        let union = SliceExpr::Union {
-                            arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
-                            guard,
-                        };
-                        if test_assertions.is_empty() {
-                            union
-                        } else {
-                            SliceExpr::Sequence {
-                                before: Arc::from(test_assertions.into_boxed_slice()),
-                                value: Box::new(union),
-                                after: None,
-                            }
-                        }
+                        self.conditional_finish(start, consequent, alternate)
                     }
                     // A CALL POSITION with no structural arm (`f?.()`,
                     // `(0, f?.())`, `z = f()`). The
@@ -15023,12 +15391,11 @@ impl<'a> Lowerer<'a> {
                     expression,
                     self.source,
                 );
-            let (value, pre_widening) = if pinned {
+            let (value, pre_widening) = if pinned || !widens_mutable_slot_literals(&value) {
                 (value, None)
             } else {
                 let widened = widen_mutable_slot_literals(value.clone());
-                let pre_widening = (widened != value).then(|| Box::new(value));
-                (widened, pre_widening)
+                (widened, Some(Box::new(value)))
             };
             elements.push(SliceArrayElement::Value {
                 value,
@@ -15243,9 +15610,98 @@ impl<'a> Lowerer<'a> {
         mode: ExprMode,
         policy: ObjectMemberPolicy,
     ) -> SliceExpr {
-        let mut entries = Vec::with_capacity(object.properties.len());
-        let mut structural = true;
-        for property in &object.properties {
+        // [`Self::lower_expr`] steps an object literal from its own stack;
+        // here the same steps run with each member value lowered in place.
+        let mut frame = ObjectFrame::new(object, whole, mode, policy);
+        let mut delivered = None;
+        loop {
+            match self.object_step(&mut frame, delivered.take()) {
+                ObjectStep::Done(value) => return *value,
+                ObjectStep::Descend(expression, mode, const_context) => {
+                    delivered = Some(if const_context {
+                        self.lower_in_const_context(expression, mode)
+                    } else {
+                        self.lower_expr(expression, mode)
+                    });
+                }
+            }
+        }
+    }
+
+    /// The object literal [`Self::lower_expr`] lowers as a frame of its
+    /// stack, with the expression that carries it and its member policy:
+    /// the literal itself (widening its members), or a type carrier over
+    /// one whose policy decides its members' literals. `None` for every
+    /// other expression — the same decisions [`Self::lower_expr_level`]
+    /// reaches the literal through (no arm before its fall-through takes
+    /// either form, and neither is a `void` write, an operator form, an
+    /// assignment or a call-rooted member path).
+    fn object_literal_lowering<'e, 'x>(
+        &self,
+        expr: &'e Expression<'x>,
+    ) -> Option<(
+        &'e oxc_ast::ast::ObjectExpression<'x>,
+        &'e Expression<'x>,
+        ObjectMemberPolicy,
+    )> {
+        match value_descent(expr) {
+            ValueDescent::Object(object) => Some((object, expr, ObjectMemberPolicy::Widen)),
+            ValueDescent::TypeCarrier(inner) => {
+                if matches!(
+                    value_descent(unwrap_parenthesized(inner)),
+                    ValueDescent::Object(_) | ValueDescent::Array(_)
+                ) && satisfies_target(expr).is_some()
+                {
+                    return None;
+                }
+                let policy = member_literal_policy(expr, self.source)?;
+                match value_descent(inner) {
+                    ValueDescent::Object(object) => Some((object, expr, policy)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Step an object literal's lowering until it needs a child lowered
+    /// (a spread source, a computed key or a member value) or is done,
+    /// with the child it asked for last `delivered`.
+    fn object_step<'e, 'x>(
+        &mut self,
+        frame: &mut ObjectFrame<'e, 'x>,
+        delivered: Option<SliceExpr>,
+    ) -> ObjectStep<'e, 'x> {
+        if let Some(value) = delivered {
+            match std::mem::replace(&mut frame.awaiting, ObjectAwait::Nothing) {
+                ObjectAwait::Nothing => unreachable!("a value delivered to no request"),
+                ObjectAwait::Spread => frame.entries.push(SliceObjectEntry::Spread {
+                    source: Box::new(value),
+                }),
+                ObjectAwait::Key {
+                    value: value_expression,
+                    kind,
+                    property,
+                } => {
+                    let key = SliceObjectKey::Computed {
+                        value: Box::new(value),
+                    };
+                    if let Some(step) =
+                        self.object_member_step(frame, key, value_expression, kind, property)
+                    {
+                        return step;
+                    }
+                }
+                ObjectAwait::Value {
+                    key,
+                    method_kind,
+                    spans,
+                    widen_member,
+                } => self.push_object_value(frame, key, method_kind, spans, widen_member, value),
+            }
+        }
+        while let Some(property) = frame.object.properties.get(frame.next) {
+            frame.next += 1;
             let (key, value_expression, kind, p) = match object_entry_descent(property) {
                 ObjectEntryDescent::Spread { source } => {
                     // The spread SOURCE is an ordinary selected value
@@ -15253,16 +15709,15 @@ impl<'a> Lowerer<'a> {
                     // `Elided` carrier a member value does, so a
                     // planner/content selection mismatch stays visible
                     // rather than silently contributing nothing.
-                    let source = if self.value_span_selected(source.span()) {
-                        self.lower_expr(source, mode)
-                    } else {
-                        // The elided spread source still RUNS: scan its
-                        // effects with the unmodeled-position discipline.
-                        self.scan_unmodeled_position_effects(source);
-                        SliceExpr::Elided
-                    };
-                    entries.push(SliceObjectEntry::Spread {
-                        source: Box::new(source),
+                    if self.value_span_selected(source.span()) {
+                        frame.awaiting = ObjectAwait::Spread;
+                        return ObjectStep::Descend(source, frame.mode, false);
+                    }
+                    // The elided spread source still RUNS: scan its
+                    // effects with the unmodeled-position discipline.
+                    self.scan_unmodeled_position_effects(source);
+                    frame.entries.push(SliceObjectEntry::Spread {
+                        source: Box::new(SliceExpr::Elided),
                     });
                     continue;
                 }
@@ -15282,37 +15737,66 @@ impl<'a> Lowerer<'a> {
                 // literal key lands here too: `{ 1: x }`'s authored text
                 // is not its property name, and the canonical name is its
                 // NUMBER's, which only the value knows.
-                ObjectEntryKey::Computed(expression) => SliceObjectKey::Computed {
-                    value: Box::new(self.lower_expr(expression, mode)),
-                },
+                ObjectEntryKey::Computed(expression) => {
+                    frame.awaiting = ObjectAwait::Key {
+                        value: value_expression,
+                        kind,
+                        property: p,
+                    };
+                    return ObjectStep::Descend(expression, frame.mode, false);
+                }
                 // A private name is a key form neither half models, and
                 // unlike a computed key it has no value to resolve.
                 ObjectEntryKey::Unmodeled => {
-                    structural = false;
-                    break;
+                    return ObjectStep::Done(Box::new(self.lower_leaf(frame.whole, frame.mode)));
                 }
             };
-            let method_kind = match kind {
-                ObjectEntryKind::Init => None,
-                ObjectEntryKind::Method => Some(verter_type_expr::ObjectMethodKind::Method),
-                ObjectEntryKind::Get => Some(verter_type_expr::ObjectMethodKind::Get),
-                ObjectEntryKind::Set => Some(verter_type_expr::ObjectMethodKind::Set),
-            };
-            let spans = verter_type_expr::MemberSpans {
-                declaration: Some(p.span.into()),
-                name: Some(p.key.span().into()),
-                type_annotation: None,
-            };
-            // A member value OUTSIDE the demand selection never
-            // lowers — the elided sibling rides the typed carrier
-            // (present in the member LIST so missing-member
-            // detection stays static, content-free forever). The value
-            // still RUNS at the object literal's evaluation, so its
-            // effects take the same fail-closed scan every elided
-            // position gets.
-            if !self.value_span_selected(value_expression.span()) {
-                self.scan_unmodeled_position_effects(value_expression);
-                entries.push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
+            if let Some(step) = self.object_member_step(frame, key, value_expression, kind, p) {
+                return step;
+            }
+        }
+        ObjectStep::Done(Box::new(SliceExpr::Object {
+            entries: Arc::from(std::mem::take(&mut frame.entries).into_boxed_slice()),
+            offset: frame.object.span.start,
+        }))
+    }
+
+    /// One member of an object literal past its key: its entry pushed, or
+    /// the step it takes — its value to lower, or the whole literal's leaf
+    /// lowering when the member is a form the structural lowering does not
+    /// model.
+    fn object_member_step<'e, 'x>(
+        &mut self,
+        frame: &mut ObjectFrame<'e, 'x>,
+        key: SliceObjectKey,
+        value_expression: &'e Expression<'x>,
+        kind: ObjectEntryKind,
+        p: &'e oxc_ast::ast::ObjectProperty<'x>,
+    ) -> Option<ObjectStep<'e, 'x>> {
+        let policy = frame.policy;
+        let method_kind = match kind {
+            ObjectEntryKind::Init => None,
+            ObjectEntryKind::Method => Some(verter_type_expr::ObjectMethodKind::Method),
+            ObjectEntryKind::Get => Some(verter_type_expr::ObjectMethodKind::Get),
+            ObjectEntryKind::Set => Some(verter_type_expr::ObjectMethodKind::Set),
+        };
+        let spans = verter_type_expr::MemberSpans {
+            declaration: Some(p.span.into()),
+            name: Some(p.key.span().into()),
+            type_annotation: None,
+        };
+        // A member value OUTSIDE the demand selection never
+        // lowers — the elided sibling rides the typed carrier
+        // (present in the member LIST so missing-member
+        // detection stays static, content-free forever). The value
+        // still RUNS at the object literal's evaluation, so its
+        // effects take the same fail-closed scan every elided
+        // position gets.
+        if !self.value_span_selected(value_expression.span()) {
+            self.scan_unmodeled_position_effects(value_expression);
+            frame
+                .entries
+                .push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
                     key,
                     value: SliceExpr::Elided,
                     assignment_value: None,
@@ -15322,48 +15806,51 @@ impl<'a> Lowerer<'a> {
                     spans,
                     accessor_annotated: false,
                 })));
-                continue;
-            }
-            // A method / accessor member with a body is a nested
-            // function value (its return evaluates inline through
-            // the same flow machinery); a method without a body
-            // keeps the whole-literal leaf lowering.
-            if method_kind.is_some() {
-                let accessor_annotated = match (method_kind, value_expression) {
-                    (
-                        Some(verter_type_expr::ObjectMethodKind::Get),
-                        Expression::FunctionExpression(func),
-                    ) => func.return_type.is_some(),
-                    (
-                        Some(verter_type_expr::ObjectMethodKind::Set),
-                        Expression::FunctionExpression(func),
-                    ) => func
-                        .params
-                        .items
-                        .first()
-                        .is_some_and(|param| param.type_annotation.is_some()),
-                    _ => false,
-                };
-                let value = match value_expression {
-                    Expression::FunctionExpression(func) => {
-                        // A method or accessor of the literal runs against
-                        // the object the literal builds.
-                        self.member_this = Some(Some(if self.no_implicit_this {
-                            SliceThis::Receiver
-                        } else {
-                            SliceThis::Untyped
-                        }));
-                        self.lower_nested_function(&FunctionNode::Function(func))
-                    }
-                    Expression::ArrowFunctionExpression(arrow) => {
-                        self.lower_nested_function(&FunctionNode::Arrow(arrow))
-                    }
-                    _ => {
-                        structural = false;
-                        break;
-                    }
-                };
-                entries.push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
+            return None;
+        }
+        // A method / accessor member with a body is a nested
+        // function value (its return evaluates inline through
+        // the same flow machinery); a method without a body
+        // keeps the whole-literal leaf lowering.
+        if method_kind.is_some() {
+            let accessor_annotated = match (method_kind, value_expression) {
+                (
+                    Some(verter_type_expr::ObjectMethodKind::Get),
+                    Expression::FunctionExpression(func),
+                ) => func.return_type.is_some(),
+                (
+                    Some(verter_type_expr::ObjectMethodKind::Set),
+                    Expression::FunctionExpression(func),
+                ) => func
+                    .params
+                    .items
+                    .first()
+                    .is_some_and(|param| param.type_annotation.is_some()),
+                _ => false,
+            };
+            let value = match value_expression {
+                Expression::FunctionExpression(func) => {
+                    // A method or accessor of the literal runs against
+                    // the object the literal builds.
+                    self.member_this = Some(Some(if self.no_implicit_this {
+                        SliceThis::Receiver
+                    } else {
+                        SliceThis::Untyped
+                    }));
+                    self.lower_nested_function(&FunctionNode::Function(func))
+                }
+                Expression::ArrowFunctionExpression(arrow) => {
+                    self.lower_nested_function(&FunctionNode::Arrow(arrow))
+                }
+                _ => {
+                    return Some(ObjectStep::Done(Box::new(
+                        self.lower_leaf(frame.whole, frame.mode),
+                    )))
+                }
+            };
+            frame
+                .entries
+                .push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
                     key,
                     value,
                     assignment_value: None,
@@ -15376,27 +15863,29 @@ impl<'a> Lowerer<'a> {
                     spans,
                     accessor_annotated,
                 })));
-                continue;
-            }
-            // `strictNullChecks` off: a bare `null` / `undefined` /
-            // `void` member is the widening nullable type, which the
-            // literal's widening turns into `any` under every member
-            // policy (`{ a: null } as const` is `{ readonly a: any }`).
-            // The value still RUNS: a `void (x = v)` applies its write,
-            // and a call inside `void f()` takes the same scan an elided
-            // position does.
-            if !self.nullability.is_strict() && expr_is_widening_nullish(value_expression) {
-                let value = match self.modeled_void_write(value_expression) {
-                    Some(write) => SliceExpr::Void {
-                        operand: Box::new(write),
-                        value: Box::new(SliceExpr::SemanticAny),
-                    },
-                    None => {
-                        self.scan_unmodeled_position_effects(value_expression);
-                        SliceExpr::SemanticAny
-                    }
-                };
-                entries.push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
+            return None;
+        }
+        // `strictNullChecks` off: a bare `null` / `undefined` /
+        // `void` member is the widening nullable type, which the
+        // literal's widening turns into `any` under every member
+        // policy (`{ a: null } as const` is `{ readonly a: any }`).
+        // The value still RUNS: a `void (x = v)` applies its write,
+        // and a call inside `void f()` takes the same scan an elided
+        // position does.
+        if !self.nullability.is_strict() && expr_is_widening_nullish(value_expression) {
+            let value = match self.modeled_void_write(value_expression) {
+                Some(write) => SliceExpr::Void {
+                    operand: Box::new(write),
+                    value: Box::new(SliceExpr::SemanticAny),
+                },
+                None => {
+                    self.scan_unmodeled_position_effects(value_expression);
+                    SliceExpr::SemanticAny
+                }
+            };
+            frame
+                .entries
+                .push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
                     key,
                     value,
                     assignment_value: None,
@@ -15409,66 +15898,90 @@ impl<'a> Lowerer<'a> {
                     spans,
                     accessor_annotated: false,
                 })));
-                continue;
+            return None;
+        }
+        // An object-literal member's fresh literal ALWAYS
+        // widens to its primitive (the member slot is
+        // mutable), in every enclosing position — tsc's
+        // object-literal property widening rule. A per-member
+        // `as const` (`{ tag: "x" as const }`) pins that one
+        // member's literal, and an ENCLOSING `as const` pins
+        // every member's — which is what `policy` carries.
+        let widen_member = policy.widens_member_literals()
+            && !verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
+                value_expression,
+                self.source,
+            );
+        // A class expression a static key holds is named after the key
+        // (`{ K: class {} }` is the checker's `K`); every other value of
+        // an `as const` literal lowers in the const context.
+        match &key {
+            SliceObjectKey::Static(name)
+                if matches!(value_expression, Expression::ClassExpression(_)) =>
+            {
+                let name = Arc::clone(name);
+                let value = self.lower_assigned_value(value_expression, &name, frame.mode);
+                self.push_object_value(frame, key, method_kind, spans, widen_member, value);
+                None
             }
-            // An object-literal member's fresh literal ALWAYS
-            // widens to its primitive (the member slot is
-            // mutable), in every enclosing position — tsc's
-            // object-literal property widening rule. A per-member
-            // `as const` (`{ tag: "x" as const }`) pins that one
-            // member's literal, and an ENCLOSING `as const` pins
-            // every member's — which is what `policy` carries.
-            let widen_member = policy.widens_member_literals()
-                && !verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
-                    value_expression,
-                    self.source,
-                );
-            // A class expression a static key holds is named after the key
-            // (`{ K: class {} }` is the checker's `K`); every other value of
-            // an `as const` literal lowers in the const context.
-            let value = match &key {
-                SliceObjectKey::Static(name)
-                    if matches!(value_expression, Expression::ClassExpression(_)) =>
-                {
-                    let name = Arc::clone(name);
-                    self.lower_assigned_value(value_expression, &name, mode)
-                }
-                // A const-asserted member keeps its literal in every
-                // position, a mutable declaration's initializer included.
-                _ if policy == ObjectMemberPolicy::ConstAssert => self.lower_in_const_context(
+            // A const-asserted member keeps its literal in every
+            // position, a mutable declaration's initializer included.
+            _ if policy == ObjectMemberPolicy::ConstAssert => {
+                frame.awaiting = ObjectAwait::Value {
+                    key,
+                    method_kind,
+                    spans,
+                    widen_member,
+                };
+                Some(ObjectStep::Descend(
                     value_expression,
                     ExprMode::BindingInit {
                         preserve_literal: true,
                     },
-                ),
-                _ => self.lower_expr(value_expression, mode),
-            };
+                    true,
+                ))
+            }
+            _ => {
+                frame.awaiting = ObjectAwait::Value {
+                    key,
+                    method_kind,
+                    spans,
+                    widen_member,
+                };
+                Some(ObjectStep::Descend(value_expression, frame.mode, false))
+            }
+        }
+    }
+
+    /// An object literal's data member over its lowered value, widened as
+    /// its slot demands.
+    fn push_object_value(
+        &mut self,
+        frame: &mut ObjectFrame<'_, '_>,
+        key: SliceObjectKey,
+        method_kind: Option<verter_type_expr::ObjectMethodKind>,
+        spans: verter_type_expr::MemberSpans,
+        widen_member: bool,
+        value: SliceExpr,
+    ) {
+        let (value, assignment_value) = if widen_member && widens_mutable_slot_literals(&value) {
             let assignment_value = value.clone();
-            let value = if widen_member {
-                widen_mutable_slot_literals(value)
-            } else {
-                value
-            };
-            let assignment_value = (assignment_value != value).then_some(assignment_value);
-            entries.push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
+            (widen_mutable_slot_literals(value), Some(assignment_value))
+        } else {
+            (value, None)
+        };
+        frame
+            .entries
+            .push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
                 key,
                 value,
                 assignment_value,
                 unwidened: None,
                 method_kind,
-                readonly: policy.readonly(),
+                readonly: frame.policy.readonly(),
                 spans,
                 accessor_annotated: false,
             })));
-        }
-        if structural {
-            SliceExpr::Object {
-                entries: Arc::from(entries.into_boxed_slice()),
-                offset: object.span.start,
-            }
-        } else {
-            self.lower_leaf(whole, mode)
-        }
     }
 
     /// Lower a NESTED function node (a function / arrow expression or an

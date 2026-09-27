@@ -4212,6 +4212,8 @@ mod conditional_indexed_check_tests;
 #[cfg(test)]
 mod const_literal_widening_tests;
 #[cfg(test)]
+mod deep_input_tests;
+#[cfg(test)]
 mod differential_call_tests;
 #[cfg(test)]
 mod differential_class_tests;

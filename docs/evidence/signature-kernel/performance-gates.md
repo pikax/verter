@@ -620,6 +620,36 @@ Recorded plainly so no reader mistakes absence for a pass:
   or the `!` classification overflows the worker, and restoring the
   derived drop overflows the test thread.
 
+* **Nested conditionals, object literals and blocks lower and evaluate
+  from explicit stacks.** The slice lowering lowered a conditional's
+  branches, an object literal's member values and a block's statements
+  by recursing into them, and the evaluator evaluated them the same way:
+  the declaration-lowering worker overflowed on between 300 and 1,000 nested
+  conditionals and 300 nested object literals or blocks, and the 1 MiB
+  caller on fewer. A conditional and an object literal are now frames of
+  `lower_expr`'s task stack and of `eval_expr`'s (an object literal steps
+  to each child it needs, a spread source, a computed key, a member value
+  or its unwidened view, and resumes with it; a return's conditional reads
+  its arms from a stack of the guard overlays it enters), and a block
+  statement suspends its region's frame on `lower_region`'s and
+  `eval_region`'s stacks until the block's region completes. Beside them,
+  the assignment-span and hoisted-`var` region walks run from stacks, a
+  member's literal widening decides from the member's top instead of
+  comparing the widened value with the unwidened one (which walked the
+  whole nest at every level), and `SliceStatement`'s `Drop` moves the
+  statements of the regions it solely owns onto a stack.
+  `deep_input_tests.rs` answers 1,000 nested conditionals (returned, and
+  as a member's value), 3,000 nested object literals and 3,000 nested
+  blocks on a 1 MiB caller with 8 MiB workers, unoptimized, with
+  TypeScript 7.0.2's answers (`1 | 2`, `number`, `"v"`, `number`);
+  restoring any of the recursions (the conditional lowering, the member
+  conditional's evaluation, the return's arm walk, the object lowering or
+  evaluation, the block lowering or evaluation) or the derived statement
+  drop overflows a worker or the caller. At 10,000 levels the three forms'
+  demand slices exceed the flow-slice plan budget (4,096 selected nodes),
+  so they return a typed budget failure; they return it on the production
+  stacks.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the
