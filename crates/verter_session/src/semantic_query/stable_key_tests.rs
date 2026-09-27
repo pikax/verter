@@ -529,3 +529,63 @@ fn ten_thousand_levels_encode_on_a_one_mebibyte_thread() {
         "every level is in the key ({bytes} bytes for {DEPTH} levels)"
     );
 }
+
+fn std_hash(key: &StableKey) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// `Eq`, `Ord` and `Hash` agree on every pair of keys: `a.cmp(b)` is
+/// `Equal` exactly when `a == b`, the order is antisymmetric and
+/// transitive, and equal keys hash alike. The adversaries are an encoded
+/// key deeper than 256 levels beside its byte-identical rebuild, equal
+/// prefixes, the empty key, and forced full fingerprint collisions: equal
+/// fingerprints over distinct bytes, and equal bytes under distinct
+/// fingerprints.
+#[test]
+fn stable_key_equality_order_and_hash_agree_on_every_pair() {
+    use std::cmp::Ordering;
+    let graph = SemanticGraphStore::new();
+    let deep = stable_key_for_node(
+        &graph,
+        array_chain(&graph, PAST_256_LEVELS, PrimitiveKind::Number),
+    );
+    let keys = [
+        deep.clone(),
+        StableKey::from_exact(deep.exact().to_vec()),
+        StableKey::from_exact(Vec::new()),
+        StableKey::from_exact(b"aa".to_vec()),
+        StableKey::from_exact(b"aaa".to_vec()),
+        StableKey::with_forced_fingerprint(Vec::new(), 7),
+        StableKey::with_forced_fingerprint(b"aa".to_vec(), 7),
+        StableKey::with_forced_fingerprint(b"aaa".to_vec(), 7),
+        StableKey::with_forced_fingerprint(b"ab".to_vec(), 7),
+        StableKey::with_forced_fingerprint(b"aa".to_vec(), 8),
+        StableKey::with_forced_fingerprint(deep.exact().to_vec(), deep.fingerprint()),
+    ];
+    assert!(
+        keys[0] == keys[1] && keys[0].cmp(&keys[1]) == Ordering::Equal,
+        "an encoded key equals its byte-identical rebuild under both relations"
+    );
+    for a in &keys {
+        for b in &keys {
+            assert_eq!(
+                a.cmp(b) == Ordering::Equal,
+                a == b,
+                "Ord and Eq disagree on {a:?} / {b:?}"
+            );
+            assert_eq!(a.partial_cmp(b), Some(a.cmp(b)));
+            assert_eq!(a.cmp(b), b.cmp(a).reverse(), "antisymmetry");
+            if a == b {
+                assert_eq!(std_hash(a), std_hash(b), "equal keys hash alike");
+            }
+            for c in &keys {
+                if a <= b && b <= c {
+                    assert!(a <= c, "transitivity over {a:?} <= {b:?} <= {c:?}");
+                }
+            }
+        }
+    }
+}

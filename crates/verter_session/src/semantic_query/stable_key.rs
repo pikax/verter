@@ -5,7 +5,6 @@
 //! `(fingerprint, exact key)`. Comparators never force bodies, resolve
 //! names, run relations, instantiate, or reduce unions.
 
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -91,12 +90,13 @@ pub mod subtag {
     pub const RAW_FALLBACK: u8 = 12;
 }
 
-/// Exact key plus versioned fingerprint. Order is the whole pair.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+/// Exact key plus versioned fingerprint. Order is the whole pair
+/// `(fingerprint, exact)` and equality is over the same two fields, so two
+/// keys compare `Equal` exactly when they are equal.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct StableKey {
     fingerprint: u64,
     exact: Vec<u8>,
-    complete: bool,
 }
 
 impl StableKey {
@@ -106,7 +106,6 @@ impl StableKey {
         Self {
             fingerprint: fingerprint_v1(&exact),
             exact,
-            complete: true,
         }
     }
 
@@ -114,11 +113,7 @@ impl StableKey {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn with_forced_fingerprint(exact: Vec<u8>, fingerprint: u64) -> Self {
-        Self {
-            fingerprint,
-            exact,
-            complete: true,
-        }
+        Self { fingerprint, exact }
     }
 
     #[must_use]
@@ -129,27 +124,6 @@ impl StableKey {
     #[must_use]
     pub fn exact(&self) -> &[u8] {
         &self.exact
-    }
-
-    /// Whether the key encodes its whole structure. The walk has no depth
-    /// cutoff, so every key it publishes is complete.
-    #[must_use]
-    pub fn is_complete(&self) -> bool {
-        self.complete
-    }
-}
-
-impl Ord for StableKey {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.fingerprint
-            .cmp(&other.fingerprint)
-            .then_with(|| self.exact.cmp(&other.exact))
-    }
-}
-
-impl PartialOrd for StableKey {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
     }
 }
 
@@ -1083,12 +1057,12 @@ pub fn sort_by_stable_key(graph: &SemanticGraphStore, members: &mut [SemanticNod
     members.sort_by_cached_key(|id| stable_key_for_node(graph, *id));
 }
 
-/// Stable-key equality that may license a collapse: BOTH keys must be
-/// complete and equal.
+/// Stable-key equality, which may license a collapse: every key encodes
+/// its whole structure, so equal keys name one encoded structure.
 pub fn provably_equal(graph: &SemanticGraphStore, a: SemanticNodeId, b: SemanticNodeId) -> bool {
     let key_a = stable_key_for_node(graph, a);
     let key_b = stable_key_for_node(graph, b);
-    key_a.is_complete() && key_b.is_complete() && key_a == key_b
+    key_a == key_b
 }
 
 /// Union-set canonicalization: sort by stable key and drop repeated node ids.

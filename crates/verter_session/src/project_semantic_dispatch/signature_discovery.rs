@@ -134,9 +134,6 @@ impl DiscoveryTypes for GraphTypes<'_, '_> {
         let graph = self.dispatch.graph();
         let ka = crate::semantic_query::stable_key::stable_key_for_node(graph, na);
         let kb = crate::semantic_query::stable_key::stable_key_for_node(graph, nb);
-        if !ka.is_complete() || !kb.is_complete() {
-            return None;
-        }
         Some(ka == kb)
     }
 
@@ -771,14 +768,6 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             ),
             None => {
                 let key = crate::semantic_query::stable_key::stable_key_for_node(graph, node);
-                // Only a complete key proves which binder space a rootless
-                // signature's binders live in. A signature with no binders
-                // mints no binder token, so an over-deep structure still
-                // publishes: two of them sharing the depth-exhausted key
-                // share an EMPTY space, which identifies nothing.
-                if !key.is_complete() && !type_parameters.is_empty() {
-                    return unsettled();
-                }
                 let fingerprint = key.fingerprint();
                 (
                     space_key_of(&fingerprint),
