@@ -1858,10 +1858,9 @@ future_cross_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_vv16_calls_union_of_dynamic_component_factories,
     "VV16",
-    "typeinfo currently does not infer a union of callable values and then call each function arm for dynamic component patterns; keep as the future VV16 dynamic-component contract",
     |expr| {
         let TypeExpr::Union(types) = expr else {
             panic!("expected object union, got {expr:?}");
