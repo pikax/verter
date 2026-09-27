@@ -7254,30 +7254,33 @@ enum IndexedValueStep<'a> {
 /// explicit stack: a call nested in an argument of a call (`f(f(f(1)))`) or
 /// in a receiver (`a.m().m()`) costs no native level. The nested records
 /// report no read roots, exactly as their recursive lowering did.
-fn lower_nested_indexed_calls(
-    first: IndexedCallNode<'_>,
-    source: &str,
-) -> IndexedValueExpression {
+fn lower_nested_indexed_calls(first: IndexedCallNode<'_>, source: &str) -> IndexedValueExpression {
     enum Task<'a> {
         Value(&'a Expression<'a>, MemberLiteralPolicy),
         Build(IndexedCallNode<'a>),
     }
     fn push_node<'a>(node: IndexedCallNode<'a>, tasks: &mut Vec<Task<'a>>) {
         tasks.push(Task::Build(node));
-        let (callee, arguments): (Option<&'a Expression<'a>>, Vec<&'a Expression<'a>>) =
-            match node {
-                IndexedCallNode::Call(call) => (
-                    Some(&call.callee),
-                    call.arguments.iter().map(indexed_argument_expression).collect(),
-                ),
-                IndexedCallNode::New(call) => (
-                    Some(&call.callee),
-                    call.arguments.iter().map(indexed_argument_expression).collect(),
-                ),
-                IndexedCallNode::Tagged(tagged) => {
-                    (Some(&tagged.tag), tagged.quasi.expressions.iter().collect())
-                }
-            };
+        let (callee, arguments): (Option<&'a Expression<'a>>, Vec<&'a Expression<'a>>) = match node
+        {
+            IndexedCallNode::Call(call) => (
+                Some(&call.callee),
+                call.arguments
+                    .iter()
+                    .map(indexed_argument_expression)
+                    .collect(),
+            ),
+            IndexedCallNode::New(call) => (
+                Some(&call.callee),
+                call.arguments
+                    .iter()
+                    .map(indexed_argument_expression)
+                    .collect(),
+            ),
+            IndexedCallNode::Tagged(tagged) => {
+                (Some(&tagged.tag), tagged.quasi.expressions.iter().collect())
+            }
+        };
         for argument in arguments.into_iter().rev() {
             tasks.push(Task::Value(argument, MemberLiteralPolicy::Argument));
         }
@@ -7311,9 +7314,7 @@ fn lower_nested_indexed_calls(
 }
 
 /// The expression one call or `new` argument passes (a spread's operand).
-fn indexed_argument_expression<'a>(
-    argument: &'a oxc_ast::ast::Argument<'a>,
-) -> &'a Expression<'a> {
+fn indexed_argument_expression<'a>(argument: &'a oxc_ast::ast::Argument<'a>) -> &'a Expression<'a> {
     match argument {
         oxc_ast::ast::Argument::SpreadElement(spread) => &spread.argument,
         argument => argument.to_expression(),

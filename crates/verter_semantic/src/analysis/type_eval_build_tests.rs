@@ -2833,13 +2833,12 @@ fn indexed_call_with_observed_roots(
     };
     let ordinary = lower_indexed_call_expression(&call, source);
     let mut roots = Vec::new();
-    let observed =
-        lower_indexed_call_expression_with_read_roots(
-            &call,
-            source,
-            &mut |site, root| roots.push((site, root)),
-            &[],
-        );
+    let observed = lower_indexed_call_expression_with_read_roots(
+        &call,
+        source,
+        &mut |site, root| roots.push((site, root)),
+        &[],
+    );
     assert_eq!(
         observed, ordinary,
         "observing roots must preserve all IR: {source}"

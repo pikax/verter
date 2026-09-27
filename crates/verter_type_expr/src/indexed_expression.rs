@@ -87,7 +87,8 @@ impl IndexedValueCall {
         fn take(expression: &mut IndexedValueExpression, out: &mut Vec<IndexedValueCall>) {
             if matches!(expression, IndexedValueExpression::Call(_)) {
                 let placeholder = IndexedValueExpression::TemplateStrings { point: 0 };
-                if let IndexedValueExpression::Call(call) = std::mem::replace(expression, placeholder)
+                if let IndexedValueExpression::Call(call) =
+                    std::mem::replace(expression, placeholder)
                 {
                     out.push(call);
                 }

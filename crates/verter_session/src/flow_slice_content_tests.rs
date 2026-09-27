@@ -6039,4 +6039,3 @@ fn operator_chains_10000_deep_lower_on_the_worker_stack() {
         );
     }
 }
-
