@@ -124,6 +124,188 @@ fn every_form_nested_10000_deep_walks_on_a_small_stack() {
     }
 }
 
+/// Sources nesting `depth` deep through syntax whose nesting no bracket
+/// shows, or behind text the scan skips: each form's name, source type
+/// and source, which oxc parses without an error.
+fn forms_nested_past_the_brackets(depth: usize) -> Vec<(&'static str, SourceType, String)> {
+    let ts = SourceType::ts();
+    let tsx = SourceType::tsx();
+    let chain = ".a".repeat(depth);
+    let parens = format!("{}1{}", "(".repeat(depth), ")".repeat(depth));
+    let ors = vec!["a"; depth + 1].join(" | ");
+    let boxes = format!("{}A{}", "Box<A, ".repeat(depth), ">".repeat(depth));
+    let labels = (0..depth).map(|i| format!("l{i}: ")).collect::<String>();
+    vec![
+        ("if", ts, format!("{}x;", "if (a) ".repeat(depth))),
+        ("label", ts, format!("{labels}x;")),
+        (
+            "do",
+            ts,
+            format!("{}x;{}", "do ".repeat(depth), " while (a);".repeat(depth)),
+        ),
+        (
+            "else if",
+            ts,
+            format!("{}x;", "if (a) x;\nelse ".repeat(depth)),
+        ),
+        (
+            "function body after a return type",
+            ts,
+            format!("function f(): T {{ return {ors} }}"),
+        ),
+        (
+            "arrow body after a return type",
+            ts,
+            format!("const f = (x): T => {ors};"),
+        ),
+        ("type arguments of a call", ts, format!("f<{boxes}>();")),
+        (
+            "type parameter constraint",
+            ts,
+            format!("function f<T extends {boxes}>() {{}}"),
+        ),
+        ("JSX member name", tsx, format!("const v = <a{chain} />;")),
+        (
+            "JSX type arguments",
+            tsx,
+            format!("const v = <C<{boxes}> />;"),
+        ),
+        (
+            "JSX attribute element holding a quote",
+            tsx,
+            format!("const v = <a b=<b>it's</b> c={{{parens}}} />;"),
+        ),
+        (
+            "regular expression class",
+            ts,
+            format!("r = /[///]/; v = x{chain};"),
+        ),
+        (
+            "string line continuation",
+            ts,
+            format!("s = 'a\\\r\n'; v = {parens};"),
+        ),
+        ("comment ended by CR", ts, format!("// c\rv = {parens};")),
+        (
+            "HTML-like comment",
+            ts,
+            format!("x = 1 <!-- `\nv = {parens};\n// `"),
+        ),
+        (
+            "keyword property name",
+            ts,
+            format!("v = x.if(b) / x{chain};"),
+        ),
+        ("identifier `as`", ts, format!("v = as / x{chain};")),
+        (
+            "object literal divided",
+            ts,
+            format!("export default {{}} / x{chain};"),
+        ),
+        (
+            "function expression divided",
+            ts,
+            format!("v = function () {{}} / x{chain};"),
+        ),
+        (
+            "identifier `await`",
+            SourceType::cjs(),
+            format!("v = await / x{chain};"),
+        ),
+        (
+            "no-break spaces",
+            ts,
+            format!("v = {}x;", "typeof\u{a0}".repeat(depth)),
+        ),
+        (
+            "no-break space before a regular expression",
+            ts,
+            format!("function f() {{ return\u{a0}/[`]/ }}\nv = {parens};\n// `"),
+        ),
+    ]
+}
+
+/// The environment variable naming the form of
+/// [`forms_nested_past_the_brackets`] a child run of
+/// [`every_form_nested_past_the_brackets_parses_and_walks_on_a_small_stack`]
+/// parses and walks.
+const DEEP_FORM_CHILD: &str = "VERTER_DEEP_FORM_CHILD";
+
+/// Every form of [`forms_nested_past_the_brackets`], 10,000 deep, parses and
+/// walks on a 1 MiB thread: the scan bounds syntax that nests with no
+/// bracket, and text it skips ends where oxc ends it, so the parse and
+/// oxc's walks run on a stack the source sizes. Each form runs in a child
+/// process, so a form the scan under-counts overflows its child, which the
+/// test names, rather than this process.
+#[test]
+fn every_form_nested_past_the_brackets_parses_and_walks_on_a_small_stack() {
+    use oxc_allocator::CloneIn;
+    use oxc_ast_visit::Visit;
+    use oxc_span::GetSpan;
+    #[derive(Default)]
+    struct Count(usize);
+    impl<'a> Visit<'a> for Count {
+        fn enter_node(&mut self, _kind: oxc_ast::AstKind<'a>) {
+            self.0 += 1;
+        }
+    }
+    if let Some(name) = std::env::var_os(DEEP_FORM_CHILD) {
+        let (_, source_type, source) = forms_nested_past_the_brackets(10_000)
+            .into_iter()
+            .find(|(form, _, _)| *form == name)
+            .expect("a form of the list");
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                let allocator = Allocator::default();
+                let parsed = Parser::new(&allocator, &source, source_type).parse();
+                assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+                let program = &parsed.program;
+                let clones = Allocator::default();
+                super::with_program_stack(program, || program.clone_in(&clones));
+                let mut whole = Count::default();
+                super::with_program_stack(program, || whole.visit_program(program));
+                let walks = super::ProgramWalkStack::new(program);
+                for statement in &program.body {
+                    let mut node = Count::default();
+                    walks.with_node_stack(statement.span(), || node.visit_statement(statement));
+                }
+            })
+            .expect("spawn the walking thread")
+            .join()
+            .expect("the parse and walks return");
+        println!("{DEEP_FORM_CHILD}: parsed and walked");
+        return;
+    }
+    let failures: Vec<String> = forms_nested_past_the_brackets(10_000)
+        .into_iter()
+        .filter_map(|(form, _, _)| {
+            let output =
+                std::process::Command::new(std::env::current_exe().expect("this test binary"))
+                    .args([
+                        "--exact",
+                        "oxc_parse::tests::every_form_nested_past_the_brackets_parses_and_walks_on_a_small_stack",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(DEEP_FORM_CHILD, form)
+                    .output()
+                    .expect("run the form in a child process");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let walked = String::from_utf8_lossy(&output.stdout)
+                .contains(&format!("{DEEP_FORM_CHILD}: parsed and walked"));
+            (!output.status.success() || !walked).then(|| {
+                let reason = stderr
+                    .lines()
+                    .find(|line| line.contains("overflowed") || line.contains("panicked"))
+                    .unwrap_or("");
+                format!("{form}: {:?} {reason}", output.status)
+            })
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// An unclosed nest parses to its syntax error, not an overflow: each open
 /// bracket is one level and one byte, oxc's costliest per byte.
 #[test]
@@ -277,6 +459,470 @@ fn a_numeric_literal_ends_at_its_token_boundary() {
     assert_eq!(ts("x = 1.5e+10"), 1);
     assert_eq!(ts("x = 0x1f_ffn"), 1);
     assert_eq!(ts("x = 1_000.25"), 1);
+}
+
+/// The cases of `cases` (a name, a source type, a source and how deeply
+/// its syntax nests) whose scan bound is shallower than their nesting.
+fn under_counted(cases: Vec<(&str, SourceType, String, u32)>) -> Vec<String> {
+    cases
+        .into_iter()
+        .filter_map(|(name, source_type, source, nests)| {
+            let bound = depth(&source, source_type);
+            (bound < nests).then(|| format!("{name}: bound {bound} under {nests}"))
+        })
+        .collect()
+}
+
+const N: usize = 300;
+
+/// A statement nested as the body of a braceless `if`, `while`, `for`,
+/// `with`, `do`, `else` or label nests one level per head, though no
+/// bracket encloses it, and an `else` continues its `if` past the `;` that
+/// ends the `if`'s body.
+#[test]
+fn braceless_statement_bodies_nest() {
+    let n = N as u32;
+    let script = SourceType::cjs();
+    let labels = (0..N).map(|i| format!("l{i}: ")).collect::<String>();
+    let failures = under_counted(vec![
+        (
+            "if",
+            SourceType::ts(),
+            format!("{}x;", "if (a) ".repeat(N)),
+            n,
+        ),
+        (
+            "if, one per line",
+            SourceType::ts(),
+            format!("{}x;", "if (a)\n".repeat(N)),
+            n,
+        ),
+        (
+            "while",
+            SourceType::ts(),
+            format!("{}x;", "while (a) ".repeat(N)),
+            n,
+        ),
+        (
+            "for",
+            SourceType::ts(),
+            format!("{}x;", "for (;;) ".repeat(N)),
+            n,
+        ),
+        ("with", script, format!("{}x;", "with (a) ".repeat(N)), n),
+        ("label", SourceType::ts(), format!("{labels}x;"), n),
+        (
+            "do",
+            SourceType::ts(),
+            format!("{}x;{}", "do ".repeat(N), " while (a);".repeat(N)),
+            n,
+        ),
+        (
+            "else if, bodies ended by `;`",
+            SourceType::ts(),
+            format!("{}x;", "if (a) x;\nelse ".repeat(N)),
+            n,
+        ),
+        (
+            "else if, comma bodies",
+            SourceType::ts(),
+            format!("{}x;", "if (a) x, y;\nelse ".repeat(N)),
+            n,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A function's body, and an arrow's expression body, after a return type
+/// annotation are expressions: their `|`, `&` and `>` nest as operators and
+/// their line breaks end statements as a script's do.
+#[test]
+fn a_body_after_a_return_type_is_an_expression() {
+    let n = N as u32;
+    let ors = vec!["a"; N + 1].join(" | ");
+    let greater = vec!["a"; N + 1].join(" > ");
+    let lines = vec!["a"; N + 1].join("\n+ ");
+    let failures = under_counted(vec![
+        (
+            "function body",
+            SourceType::ts(),
+            format!("function f(): T {{ return {ors} }}"),
+            n,
+        ),
+        (
+            "method body",
+            SourceType::ts(),
+            format!("class C {{ m(): T {{ return {ors} }} }}"),
+            n,
+        ),
+        (
+            "object method body",
+            SourceType::ts(),
+            format!("const o = {{ m(): T {{ return {ors} }} }}"),
+            n,
+        ),
+        (
+            "arrow expression body",
+            SourceType::ts(),
+            format!("const f = (x): T => {ors}"),
+            n,
+        ),
+        (
+            "arrow comparison body",
+            SourceType::ts(),
+            format!("const f = (x): T => {greater}"),
+            n,
+        ),
+        (
+            "arrow body across lines",
+            SourceType::ts(),
+            format!("const f = (x): T => {lines}"),
+            n,
+        ),
+        (
+            "after a function expression's body",
+            SourceType::ts(),
+            format!("x = function (): T {{}} | {ors}"),
+            n,
+        ),
+        (
+            "tsx arrow body",
+            SourceType::tsx(),
+            format!("const f = (x): T => {ors}"),
+            n,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A `<` in an expression may open type arguments or parameters, whose
+/// commas separate nested siblings of one list: a comma does not start
+/// the chain over while a `<` of its segment is open.
+#[test]
+fn type_arguments_in_an_expression_nest_across_their_commas() {
+    let n = N as u32;
+    let nested = format!("{}A{}", "Box<A, ".repeat(N), ">".repeat(N));
+    let failures = under_counted(vec![
+        ("call", SourceType::ts(), format!("f<{nested}>();"), n),
+        ("new", SourceType::ts(), format!("new Map<{nested}>();"), n),
+        ("as", SourceType::ts(), format!("x as {nested};"), n),
+        (
+            "function type parameter",
+            SourceType::ts(),
+            format!("function f<T extends {nested}>() {{}}"),
+            n,
+        ),
+        (
+            "class type parameter",
+            SourceType::ts(),
+            format!("class C<T extends {nested}> {{}}"),
+            n,
+        ),
+        (
+            "interface type parameter",
+            SourceType::ts(),
+            format!("interface I<T extends {nested}> {{}}"),
+            n,
+        ),
+        (
+            "alias type parameter",
+            SourceType::ts(),
+            format!("type A<T extends {nested}> = T;"),
+            n,
+        ),
+        (
+            "heritage",
+            SourceType::ts(),
+            format!("class C extends B<{nested}> {{}}"),
+            n,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A JSX element's name nests once per member access, its type arguments
+/// as a type's do, an element given as an attribute's value under the
+/// element, and a tag's comments and whitespace are skipped.
+#[test]
+fn jsx_names_type_arguments_and_attribute_elements_nest() {
+    let n = N as u32;
+    let tsx = SourceType::tsx();
+    let nested = format!("{}A{}", "Box<A, ".repeat(N), ">".repeat(N));
+    let parens = format!("{}1{}", "(".repeat(N), ")".repeat(N));
+    let failures = under_counted(vec![
+        (
+            "member name",
+            tsx,
+            format!("const v = <a{} />;", ".a".repeat(N)),
+            n,
+        ),
+        (
+            "member closing name",
+            tsx,
+            format!("const v = <a{0}></a{0}>;", ".a".repeat(N)),
+            n,
+        ),
+        (
+            "type arguments",
+            tsx,
+            format!("const v = <C<{nested}> />;"),
+            n,
+        ),
+        (
+            "attribute element",
+            tsx,
+            format!("const v = {}{};", "<a b=".repeat(N), " />".repeat(N)),
+            n,
+        ),
+        (
+            "space after `<`",
+            tsx,
+            format!("const v = {}x{};", "< div>".repeat(N), "</div>".repeat(N)),
+            n,
+        ),
+        (
+            "comment in a tag",
+            tsx,
+            format!(
+                "const v = {}x{};",
+                "<div /* > */ a={1}>".repeat(N),
+                "</div>".repeat(N)
+            ),
+            n,
+        ),
+        (
+            "attribute element holding a quote",
+            tsx,
+            format!("const v = <a b=<b>it's</b> c={{{parens}}} />;"),
+            n,
+        ),
+        (
+            "space after `<` before text holding a quote",
+            tsx,
+            format!("const v = < div>it's {{{parens}}}</div>;"),
+            n,
+        ),
+        (
+            "comment holding a quote in a tag",
+            tsx,
+            format!("const v = <div /* it's */>{{{parens}}}</div>;"),
+            n,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// What the scan skips as a string, comment, regular expression or
+/// template text ends where the lexical grammar ends it, so the code after
+/// it is scanned: a `/` inside a regular expression's class, a string's
+/// `\` before a CRLF line break, a line comment ended by a CR or a
+/// U+2028, and an HTML-like comment outside a module.
+#[test]
+fn skipped_text_ends_at_its_token_boundary() {
+    let n = N as u32;
+    let chain = ".a".repeat(N);
+    let parens = format!("{}1{}", "(".repeat(N), ")".repeat(N));
+    let failures = under_counted(vec![
+        (
+            "regular expression class holding `//`",
+            SourceType::ts(),
+            format!("r = /[///]/; v = x{chain};"),
+            n,
+        ),
+        (
+            "string line continuation before CRLF",
+            SourceType::ts(),
+            format!("s = 'a\\\r\n'; v = {parens};"),
+            n,
+        ),
+        (
+            "line comment ended by CR",
+            SourceType::ts(),
+            format!("// c\rv = {parens};"),
+            n,
+        ),
+        (
+            "line comment ended by U+2028",
+            SourceType::ts(),
+            format!("// c\u{2028}v = {parens};"),
+            n,
+        ),
+        (
+            "HTML-like comment holding a backtick",
+            SourceType::ts(),
+            format!("x = 1 <!-- `\nv = {parens};\n// `"),
+            n,
+        ),
+        (
+            "HTML-like close comment holding a backtick",
+            SourceType::cjs(),
+            format!("x = 1\n--> `\nv = {parens};\n// `"),
+            n,
+        ),
+        (
+            "nested template holes",
+            SourceType::ts(),
+            format!("v = {}1{};", "`${".repeat(N), "}`".repeat(N)),
+            n,
+        ),
+        (
+            "tagged template chain",
+            SourceType::ts(),
+            format!("v = t{};", "``".repeat(N)),
+            n,
+        ),
+        (
+            "brackets in strings and comments",
+            SourceType::ts(),
+            format!("v = '(((' + /* ((( */ \"[[[\" + x{chain};"),
+            n,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Where the previous token decides whether `/` divides or starts a
+/// regular expression, a keyword read as a property name, an identifier
+/// spelled like a type operator and an object literal's `}` divide; where
+/// the token alone cannot decide (`await`, `yield` and `of` may be
+/// identifiers, and the scan does not always tell a function or class
+/// expression's body from a declaration's), the rest of the source is
+/// bounded by its length.
+#[test]
+fn a_division_is_not_read_as_a_regular_expression() {
+    let n = N as u32;
+    let chain = ".a".repeat(N);
+    let failures = under_counted(vec![
+        (
+            "keyword as a property name",
+            SourceType::ts(),
+            format!("v = x.if(b) / x{chain};"),
+            n,
+        ),
+        (
+            "keyword as a private name",
+            SourceType::ts(),
+            format!("class C {{ m() {{ v = this.#if(b) / x{chain}; }} }}"),
+            n,
+        ),
+        (
+            "identifier `as`",
+            SourceType::ts(),
+            format!("v = as / x{chain};"),
+            n,
+        ),
+        (
+            "identifier `keyof`",
+            SourceType::ts(),
+            format!("v = keyof / x{chain};"),
+            n,
+        ),
+        (
+            "object literal default export",
+            SourceType::ts(),
+            format!("export default {{}} / x{chain};"),
+            n,
+        ),
+        (
+            "object literal member",
+            SourceType::ts(),
+            format!("v = {{ a: {{}} / x{chain} }};"),
+            n,
+        ),
+        (
+            "function expression",
+            SourceType::ts(),
+            format!("v = function () {{}} / x{chain};"),
+            n,
+        ),
+        (
+            "class expression",
+            SourceType::ts(),
+            format!("v = class {{}} / x{chain};"),
+            n,
+        ),
+        (
+            "identifier `await`",
+            SourceType::cjs(),
+            format!("v = await / x{chain};"),
+            n,
+        ),
+        (
+            "identifier `yield`",
+            SourceType::cjs(),
+            format!("v = yield / x{chain};"),
+            n,
+        ),
+        (
+            "identifier `of`",
+            SourceType::ts(),
+            format!("v = of / x{chain};"),
+            n,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Where the previous token decides whether `/` divides, the rest of the
+/// source keeps its own depth: an object literal a module exports by
+/// default, a keyword read as a property name and a declaration's body
+/// each decide it.
+#[test]
+fn a_decided_slash_keeps_the_rest_of_the_source_shallow() {
+    let rest = "x;\n".repeat(1_000);
+    for decided in [
+        "export default {} / 2;",
+        "v = { a: {} / 2 };",
+        "v = x.of / 2;",
+        "v = x.await / 2;",
+        "function f() {}\n/re/.test(x);",
+        "class C { m() {} }\n/re/.test(x);",
+        "if (a) {}\n/re/.test(x);",
+    ] {
+        assert!(ts(&format!("{decided}\n{rest}")) < 10, "{decided}");
+    }
+}
+
+/// A non-ASCII space or line terminator separates tokens as an ASCII one
+/// does: `typeof\u{a0}typeof\u{a0}x` is two prefix operators, not one
+/// identifier, and a regular expression after `return\u{a0}` is one.
+#[test]
+fn unicode_spaces_separate_tokens() {
+    let n = N as u32;
+    let parens = format!("{}1{}", "(".repeat(N), ")".repeat(N));
+    let failures = under_counted(vec![
+        (
+            "no-break space",
+            SourceType::ts(),
+            format!("v = {}x;", "typeof\u{a0}".repeat(N)),
+            n,
+        ),
+        (
+            "ideographic space",
+            SourceType::ts(),
+            format!("v = {}x;", "typeof\u{3000}".repeat(N)),
+            n,
+        ),
+        (
+            "byte order mark",
+            SourceType::ts(),
+            format!("v = {}x;", "typeof\u{feff}".repeat(N)),
+            n,
+        ),
+        (
+            "line separator",
+            SourceType::ts(),
+            format!("v = {}x;", "typeof\u{2028}".repeat(N)),
+            n,
+        ),
+        (
+            "no-break space before a regular expression",
+            SourceType::ts(),
+            format!("function f() {{ return\u{a0}/[`]/ }}\nv = {parens};\n// `"),
+            n,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
