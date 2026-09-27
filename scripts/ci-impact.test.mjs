@@ -12,7 +12,8 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -28,6 +29,7 @@ import {
   composeLaneGates,
   formatGithubOutput,
   isCiInert,
+  main,
   ownedFilesFromFilterOutputs,
 } from "./ci-impact.mjs";
 import { buildWorkspaceIndex } from "./lib/crate-graph.mjs";
@@ -350,6 +352,47 @@ test("ownedFilesFromFilterOutputs unions every filter's file list except the cat
     "scripts/jetbrains-gate.mjs",
   ]);
   assert.throws(() => ownedFilesFromFilterOutputs({ x_files: "not json" }), /not a JSON file list/);
+});
+
+test("main reads a large change's filter outputs from a file, never the environment", () => {
+  // 600 changed files, each owned by every filter: past the kernel's 128 KiB
+  // per-string limit an environment variable could carry.
+  const files = Array.from({ length: 600 }, (_, i) => `crates/c${i}/src/a-long-module-name-${i}.rs`);
+  const outputs = { any: "true", any_files: JSON.stringify(files) };
+  const filters = new Set(Object.values(LANE_GATES).flatMap((spec) => spec.filters ?? []));
+  for (const filter of filters) {
+    outputs[filter] = "true";
+    outputs[`${filter}_files`] = JSON.stringify(files);
+  }
+  const text = JSON.stringify(outputs);
+  assert.ok(text.length > 128 * 1024, `fixture is ${text.length} bytes`);
+  const dir = mkdtempSync(join(tmpdir(), "ci-impact-"));
+  const outputsPath = join(dir, "filter-outputs.json");
+  const githubOutput = join(dir, "github-output");
+  writeFileSync(outputsPath, text);
+  writeFileSync(githubOutput, "");
+  const code = main(
+    [
+      "--filter-outputs",
+      outputsPath,
+      "--metadata",
+      join(dir, "no-metadata.json"),
+      "--github-output",
+      githubOutput,
+    ],
+    {},
+    dir,
+  );
+  assert.equal(code, 0);
+  const lines = readFileSync(githubOutput, "utf8").trim().split("\n");
+  assert.ok(lines.includes("gate_rust=true"), lines.join("\n"));
+  assert.ok(lines.includes("impact_full=true"), lines.join("\n"));
+});
+
+test("the lane-gate step hands the filter outputs over in a file", () => {
+  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+  assert.ok(!/CI_IMPACT_(FILTER_OUTPUTS|CHANGED_FILES)_JSON:/.test(workflow));
+  assert.match(workflow, /ci-impact\.mjs --filter-outputs /);
 });
 
 test("formatGithubOutput emits one gate line per gate plus the fallback flag", () => {

@@ -362,12 +362,18 @@ jobs:
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
+      # The filter outputs carry every filter's file list; a large change
+      # passed through the environment exceeds the kernel's per-string limit
+      # ("Argument list too long") and the step cannot start, so they are
+      # handed over in a file. A quoted heredoc keeps the shell off the JSON.
       - name: Compose the lane gates from the path filters and the crate graph
         id: gates
-        env:
-          CI_IMPACT_CHANGED_FILES_JSON: ${{ steps.filter.outputs.any_files }}
-          CI_IMPACT_FILTER_OUTPUTS_JSON: ${{ toJSON(steps.filter.outputs) }}
-        run: node scripts/ci-impact.mjs --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+        run: |
+          cat > "$RUNNER_TEMP/ci-impact-filter-outputs.json" <<'CI_IMPACT_FILTER_OUTPUTS'
+          ${{ toJSON(steps.filter.outputs) }}
+          CI_IMPACT_FILTER_OUTPUTS
+          node scripts/ci-impact.mjs --filter-outputs "$RUNNER_TEMP/ci-impact-filter-outputs.json" \
+            --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
   # `dtolnay/rust-toolchain@1.97.1` (not `@stable`) in every job below, and in

@@ -39,9 +39,14 @@
  * exists (the provider selectors, the compile-contract owners), so the test
  * authority and the selection authority cannot drift apart.
  *
- * Usage (CI):
- *   CI_IMPACT_CHANGED_FILES_JSON='[...]' CI_IMPACT_FILTER_OUTPUTS_JSON='{...}' \
- *     node scripts/ci-impact.mjs --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+ * Usage (CI): the paths-filter outputs (their `any_files` is the changed-file
+ * list) are read from a FILE. Every filter's file list rides in them, and a
+ * large change (hundreds of files) passed through the environment exceeds the
+ * kernel's per-string limit, so the step could not even start:
+ *   node scripts/ci-impact.mjs --filter-outputs "$RUNNER_TEMP/filter-outputs.json" \
+ *     --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+ * (`CI_IMPACT_CHANGED_FILES_JSON` / `CI_IMPACT_FILTER_OUTPUTS_JSON` in the
+ * environment are still read, for small local runs.)
  * Usage (local, impact lanes only; files no crate owns count as unowned):
  *   node scripts/ci-impact.mjs --range origin/main..HEAD
  */
@@ -426,14 +431,25 @@ export function main(argv = process.argv.slice(2), env = process.env, cwd = proc
   const githubOutput = argValue(argv, "--github-output");
   const summaryPath = argValue(argv, "--summary");
   const metadataPath = argValue(argv, "--metadata");
+  const filterOutputsPath = argValue(argv, "--filter-outputs");
+
+  const filterOutputs = filterOutputsPath
+    ? JSON.parse(readFileSync(resolve(cwd, filterOutputsPath), "utf8"))
+    : env.CI_IMPACT_FILTER_OUTPUTS_JSON
+      ? JSON.parse(env.CI_IMPACT_FILTER_OUTPUTS_JSON)
+      : null;
 
   let changedFiles;
   if (range) {
     changedFiles = changedFilesFromRange(cwd, range);
   } else if (env.CI_IMPACT_CHANGED_FILES_JSON) {
     changedFiles = JSON.parse(env.CI_IMPACT_CHANGED_FILES_JSON);
+  } else if (filterOutputs && typeof filterOutputs.any_files === "string") {
+    changedFiles = JSON.parse(filterOutputs.any_files);
   } else {
-    process.stderr.write("ci-impact: pass --range <rev>..<rev> or CI_IMPACT_CHANGED_FILES_JSON\n");
+    process.stderr.write(
+      "ci-impact: pass --range <rev>..<rev>, --filter-outputs <file> or CI_IMPACT_CHANGED_FILES_JSON\n",
+    );
     return 2;
   }
   if (!Array.isArray(changedFiles) || !changedFiles.every((f) => typeof f === "string")) {
@@ -442,9 +458,6 @@ export function main(argv = process.argv.slice(2), env = process.env, cwd = proc
   }
   changedFiles = changedFiles.map((f) => f.replace(/\\/g, "/"));
 
-  const filterOutputs = env.CI_IMPACT_FILTER_OUTPUTS_JSON
-    ? JSON.parse(env.CI_IMPACT_FILTER_OUTPUTS_JSON)
-    : null;
   const ownedFiles = filterOutputs ? ownedFilesFromFilterOutputs(filterOutputs) : null;
 
   let impact;
