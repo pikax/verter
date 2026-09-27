@@ -223,3 +223,68 @@ fn mutually_dependent_variances_answer_alike_in_either_order() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Each type parameter's variance is its own: an annotated parameter keeps
+/// its annotation beside an unannotated one, whose variance is measured.
+///
+/// Measured: over `interface Mixed<in out T, U> { value: T; other: U }`,
+/// `[Mixed<1, string>] extends [Mixed<number, string>] ? 1 : 2` is `2`
+/// (`T` is invariant), `[Mixed<number, 'a'>] extends [Mixed<number,
+/// string>]` is `1` and `[Mixed<number, string>] extends [Mixed<number,
+/// 'a'>]` is `2` (`U` is measured covariant); over `interface MixedIn<in
+/// T, U> { value: (x: T) => void; other: U }`, `[MixedIn<number, 'a'>]
+/// extends [MixedIn<1, string>]` is `1` and `[MixedIn<1, 'a'>] extends
+/// [MixedIn<number, string>]` is `2`; over `type MixedAlias<in out T, U> =
+/// { value: T; other: U }`, `[MixedAlias<1, string>] extends
+/// [MixedAlias<number, string>]` is `2` and `[MixedAlias<number, 'a'>]
+/// extends [MixedAlias<number, string>]` is `1`; over `interface
+/// MixedRec<in out T, U> { value: T; next: MixedRec<T, [U]>; other: U }`,
+/// `[MixedRec<number, 'a'>] extends [MixedRec<number, string>]` is `1` and
+/// `[MixedRec<1, 'a'>] extends [MixedRec<number, string>]` is `2`.
+#[test]
+fn an_annotated_parameter_keeps_its_variance_beside_a_measured_one() {
+    assert_answers(
+        "interface Mixed<in out T, U> { value: T; other: U }\n\
+         interface MixedIn<in T, U> { value: (x: T) => void; other: U }\n\
+         type MixedAlias<in out T, U> = { value: T; other: U };\n\
+         interface MixedRec<in out T, U> { value: T; next: MixedRec<T, [U]>; other: U }\n",
+        &[
+            (
+                "[Mixed<1, string>] extends [Mixed<number, string>] ? 1 : 2",
+                "2",
+            ),
+            (
+                "[Mixed<number, 'a'>] extends [Mixed<number, string>] ? 1 : 2",
+                "1",
+            ),
+            (
+                "[Mixed<number, string>] extends [Mixed<number, 'a'>] ? 1 : 2",
+                "2",
+            ),
+            (
+                "[MixedIn<number, 'a'>] extends [MixedIn<1, string>] ? 1 : 2",
+                "1",
+            ),
+            (
+                "[MixedIn<1, 'a'>] extends [MixedIn<number, string>] ? 1 : 2",
+                "2",
+            ),
+            (
+                "[MixedAlias<1, string>] extends [MixedAlias<number, string>] ? 1 : 2",
+                "2",
+            ),
+            (
+                "[MixedAlias<number, 'a'>] extends [MixedAlias<number, string>] ? 1 : 2",
+                "1",
+            ),
+            (
+                "[MixedRec<number, 'a'>] extends [MixedRec<number, string>] ? 1 : 2",
+                "1",
+            ),
+            (
+                "[MixedRec<1, 'a'>] extends [MixedRec<number, string>] ? 1 : 2",
+                "2",
+            ),
+        ],
+    );
+}

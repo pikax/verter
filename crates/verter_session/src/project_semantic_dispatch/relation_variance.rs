@@ -258,9 +258,6 @@ impl ProjectSemanticDispatch<'_> {
         if prepared.kind == TypeDeclKind::Alias && annotated.iter().all(Option::is_none) {
             return None;
         }
-        if annotated.iter().any(Option::is_some) && annotated.iter().any(Option::is_none) {
-            return None;
-        }
         if annotated.iter().any(Option::is_none) {
             if let Some(result) = self.variance_in_progress(declaration) {
                 return Some(DeclarationVariance::InProgress(result));
