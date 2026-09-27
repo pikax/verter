@@ -675,9 +675,9 @@ fn each_flags_argument(code: &str) -> u32 {
         verter_parser::oxc_parse::Parser::new(&allocator, code, oxc_span::SourceType::mjs())
             .parse();
     assert!(
-        !parsed.panicked && parsed.errors.is_empty(),
+        !parsed.fatal_error && parsed.diagnostics.is_empty(),
         "the emitted module does not parse, so no structural reading is possible: {:?}",
-        parsed.errors
+        parsed.diagnostics
     );
 
     // The LOCAL name the module bound the client runtime namespace to. Resolved

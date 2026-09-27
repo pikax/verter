@@ -781,6 +781,140 @@ Recorded plainly so no reader mistakes absence for a pass:
   10,000 nested type arguments (`1`) and returns the typed budget failure
   of a 10,000-deep `keyof` chain.
 
+* **A function's walks are contained by its own syntax, on one scan of its
+  program.** Every walk of a function's syntax sized its stack from the
+  node's text: a nested function's text holds every function nested in
+  it, so each one's containment scanned that text again (the skeleton
+  builder's walk, the slice lowering's pattern walk) or took a stack
+  segment sized for the whole program (the function index's discovery
+  walks, each growing a new segment), and a program walked by many walk
+  stacks scanned itself once per stack. A 3,000-deep nest of arrow
+  functions scanned 19.7 MB and grew 14,300 stack segments, costing
+  4.2 s and the square of the depth. Now a parsed program keeps its one
+  scan for every walk stack over it (`ProgramWalkStack::sharing`), the
+  function index's discovery runs inside one containment sized for the
+  program (`ProgramWalkStack::within`), inside which every walk runs in
+  place, and a walk that never enters a nested function's body (the
+  skeleton builder, the pattern collector) is sized from the function's
+  text with those bodies taken out (`with_own_syntax_stack`).
+  `verter_parser`'s `oxc_parse/tests.rs` → `walk_stacks_sharing_a_program_scan_it_once`,
+  `walks_within_a_program_containment_run_in_place` and
+  `own_syntax_takes_the_nested_bodies_out`.
+
+* **Function hashes fold each nested function once.** A function's
+  stable hash folded its whole syntax, every function nested in it
+  included, and its exact hash hashed its whole text: a nest of
+  functions hashed every nested function again for every function
+  around it (3,000 nested arrows: 724 ms folding and 458 ms hashing text,
+  the square of the depth; 10,000 took most of a minute to index,
+  unoptimized). The index now hashes a function after the functions
+  nested in it: a nested function is folded into the one around it from
+  its SHAPE (its own bindings as ordinals, the names it reads from
+  around it as indices) and those names as the enclosing function
+  resolves them, and the exact hash replaces each nested function's text
+  with its exact hash and length. Two functions fold alike exactly when
+  their syntax did before (the same alpha-normalization, a nested
+  function's reads of the enclosing function's bindings included), and
+  a function with no nested function hashes its text as before.
+  `function_program_tests.rs` →
+  `nested_function_hashes_fold_into_the_function_around_them` (identical
+  fingerprints for one source, a nested edit reaching every enclosing
+  hash, a renamed read binding keeping it, the read binding's ordinal
+  staying in it) and `nested_function_hashes_fold_each_function_once`
+  (the expressions folded grow linearly with the nest); folding nested
+  functions in place fails the second, and dropping their reads'
+  resolution the first.
+
+* **A function's descent is read, not copied or walked.** The slice
+  content build copied a nested function's whole descent (its locator's
+  path from its contributing statement) to test two receiver rules and
+  one namespace rule, and hashing a descent (a function key's, on every
+  index lookup) walked the path: work the square of the nesting. A
+  descent now carries its path's hash and whether any step enters a
+  namespace block, folded as each step is added, and the content build
+  copies a descent only where a rule reads it (two steps, or a
+  namespace-owned function). `function_program_tests.rs` →
+  `descents_carry_their_hash_and_namespace_steps`.
+
+* **Nested function values evaluate from a stack of evaluators.** A
+  nested function value's signature is composed from its body's
+  evaluation by an evaluator of its own, and the evaluator evaluated
+  that body inside its own evaluation: about 53 KiB of native stack per
+  nested function, unoptimized (`eval_region_statements` 23 KiB,
+  `eval_nested_function_signature` 16 KiB, `eval_expr` 11 KiB), so 12 to
+  15 nested arrows overflowed a 1 MiB caller — wasm's fixed stack. Now
+  `eval_region` drives a stack of evaluators (`flow_return_nested.rs`): a
+  return statement whose argument reaches a nested function value
+  suspends its region (the argument's expression run and the region's
+  frames stay on their stacks); the function is prepared on the
+  evaluator that suspended, its own evaluator is pushed with its body's
+  region run, and when that completes the evaluator is popped, the
+  signature composed on its parent and the parent's region resumed with
+  it. What a nested evaluator borrows (its parameters, binder
+  environment and slice content) is owned by the drive's arena and
+  released when the evaluator is popped, and the frames around it are a
+  shared chain, so no evaluator borrows a native frame of the one
+  around it and the native stack a nest takes no longer depends on its
+  depth. A nested function value elsewhere (an initializer, a call's
+  argument) is prepared, driven and finished where it sits, its returns
+  driven from the stack again. `deep_input_tests.rs` →
+  `arrows_nested_10000_deep_answer_on_production_stacks` answers
+  TypeScript 7.0.2's `1` for `ReturnType<typeof pf> extends Function ?
+  1 : 2` over 10,000 nested arrows on a 1 MiB caller, in about 21 s
+  unoptimized; evaluating the return's nested function in place
+  overflows it. The work per nested function still grows with the
+  nest's depth where a nested evaluation's input basis keeps its
+  parent's full canonical bytes (collision-safe identity equality).
+
+* **Binding usages collect from an explicit stack.** The script
+  analysis's usage collector (`build.rs`'s `collect_usages_in_statement`
+  and the expression and assignment-target walks it recursed through)
+  took a native level per nested expression, so a module constant
+  initialized by nested calls (`const v = f(f(…f(1)…))`) overflowed its
+  thread at 10,000 levels. It now runs from an explicit stack
+  (`collect_usages`, one `UsageWork` per node, each node's parts pushed
+  last first and a shadowing scope opened and closed around the parts it
+  covers, in the recursive walk's order). With the recursive walk
+  restored, `deep_input_tests.rs` →
+  `module_calls_nested_10000_deep_return_on_production_stacks` overflows.
+
+* **A member of a call derives from a call at once.** Whether a value's
+  type derives from a call (`value_type_derives_from_a_call`) was
+  answered by a contained walk of the whole expression, and it is asked
+  of each link of a receiver chain (`b.m().m()…`), so the chain cost the
+  square of its length: 10,000 links at module level took about 25 s
+  unoptimized. A member read, a parenthesis or a non-null assertion is
+  what its object is, so the probe reads down those to the first other
+  node and answers at a call, `new` or tagged template without a walk;
+  the same chain reads in 85 ms
+  (`module_receiver_chains_10000_deep_read_on_production_stacks`).
+
+* **Call expressions are found from an explicit stack.** The function
+  index's call walker (`for_each_call_expression_root`) recursed through
+  its statement, expression, argument and assignment-target walks, one
+  native level per nested node, so a receiver chain 10,000 links long
+  (`return b.m().m()…`) overflowed the declaration-lowering thread. It
+  now walks one `Work` per node from an explicit stack, children pushed
+  last first and a call fired when it is reached, in the recursive
+  walk's pre-order. `deep_input_tests.rs` →
+  `receiver_chains_10000_deep_return_on_production_stacks` returns what
+  three links return on a 1 MiB caller; with the recursive walker
+  restored it overflows.
+
+* **Indexed values evaluate from an explicit stack.** An inferred
+  declaration's indexed value (`evaluate_indexed_value`) evaluated a
+  call's callee, receiver and arguments by recursing, a native level per
+  nested call. It now keeps the calls waiting on a value on an explicit
+  stack (`indexed_value_leaf` evaluates a non-call, `resolve_indexed_call`
+  resolves a call over its evaluated parts), in the same order, a call
+  ending where its callee or an argument has no value. `deep_input_tests.rs`
+  → `module_calls_nested_1000_deep_answer_on_production_stacks` answers
+  TypeScript 7.0.2's `1` for 1,000 nested generic calls at module level,
+  and `module_calls_nested_10000_deep_return_on_production_stacks` returns
+  on a 1 MiB caller for 10,000 read in a function (its calls' resolutions
+  exceed the connected-demand work budget, a typed failure); with the
+  recursive evaluation restored it overflows.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the

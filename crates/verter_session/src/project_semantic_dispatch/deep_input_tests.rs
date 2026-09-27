@@ -336,11 +336,92 @@ fn arrows_nested_10_deep_answer_on_production_stacks() {
     );
 }
 
+/// Arrow functions nested 10,000 deep: each body's return reaches the next
+/// function value, which its own evaluator evaluates from the drive's
+/// stack of evaluators (`flow_return_nested`), not inside the one around
+/// it.
 #[test]
-#[ignore = "a nested function value's body evaluates on the caller's native stack, about 53 KiB per level unoptimized"]
 fn arrows_nested_10000_deep_answer_on_production_stacks() {
     assert_eq!(
         mismatches_on_a_small_stack(arrows(DEPTH), ARROW_PROBE, "1"),
         Vec::<String>::new()
     );
+}
+
+/// A module constant initialized by nested generic calls: its value
+/// evaluates the calls' indexed records from an explicit stack, and the
+/// module's binding usages collect from one.
+fn module_calls(depth: usize, read_in_a_function: bool) -> String {
+    let calls = format!("{}1{}", "f(".repeat(depth), ")".repeat(depth));
+    if read_in_a_function {
+        format!(
+            "function f<T>(v: T): T {{ return v; }}
+const v = {calls};
+export function pf() {{ return v; }}
+"
+        )
+    } else {
+        format!(
+            "function f<T>(v: T): T {{ return v; }}
+export const v = {calls};
+"
+        )
+    }
+}
+
+#[test]
+fn module_calls_nested_1000_deep_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(module_calls(1_000, false), "typeof v", "1"),
+        Vec::<String>::new()
+    );
+}
+
+/// A module constant initialized by 10,000 nested calls, read in a
+/// function, returns on the production stacks (its calls' resolutions
+/// exceed the connected-demand work budget, so the return is its typed
+/// failure).
+#[test]
+fn module_calls_nested_10000_deep_return_on_production_stacks() {
+    assert!(!returns_on_a_small_stack(module_calls(DEPTH, true)));
+}
+
+/// A receiver chain, `b.m().m()…`: its calls are walked from an explicit
+/// stack. 10,000 links return what three links return, on the production
+/// stacks (a member call on a member call's result is an unmodeled
+/// position either way).
+#[test]
+fn receiver_chains_10000_deep_return_on_production_stacks() {
+    let chain = |depth: usize| {
+        let source = format!(
+            "interface B {{ m(): B; }}
+export function pf(b: B) {{ return b{}; }}
+",
+            ".m()".repeat(depth)
+        );
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || degradation_in(Default::default(), &source, "pf"))
+            .expect("spawn the probing thread")
+            .join()
+            .expect("the return evaluates")
+    };
+    assert_eq!(chain(DEPTH), chain(3));
+}
+
+/// A module constant initialized by a receiver chain 10,000 links long
+/// reads as one three links long does, on the production stacks.
+#[test]
+fn module_receiver_chains_10000_deep_read_on_production_stacks() {
+    let chain = |depth: usize| {
+        let source = format!(
+            "interface B {{ m(): B; }}
+declare const b: B;
+export const v = b{};
+",
+            ".m()".repeat(depth)
+        );
+        mismatches_on_a_small_stack(source, "typeof v", "B")
+    };
+    assert_eq!(chain(DEPTH), chain(3));
 }

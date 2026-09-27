@@ -1397,11 +1397,103 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expression: &verter_type_expr::IndexedValueExpression,
         hold_flow_result: bool,
     ) -> Option<IndexedValue> {
-        use verter_type_expr::{IndexedValueCallKind, IndexedValueExpression};
+        // A call's callee, receiver and arguments evaluate from an explicit
+        // stack of the calls waiting on them, in that order, a call ending
+        // at a callee or argument with no value: a call nested in an
+        // argument or a receiver (`f(f(f(1)))`, `b.m().m()`) costs no
+        // native level.
+        struct Waiting<'e> {
+            call: &'e verter_type_expr::IndexedValueCall,
+            hold_flow_result: bool,
+            callee: Option<crate::semantic_query::SemanticNodeId>,
+            receiver: Option<Option<crate::semantic_query::SemanticNodeId>>,
+            args: Vec<crate::semantic_query::CallArgKey>,
+        }
+        let mut waiting: Vec<Waiting<'_>> = Vec::new();
+        let (mut current, mut hold) = (expression, hold_flow_result);
+        loop {
+            let mut value = match self.indexed_value_leaf(canonical, owner, current) {
+                Ok(value) => value,
+                Err(call) => {
+                    waiting.push(Waiting {
+                        call,
+                        hold_flow_result: hold,
+                        callee: None,
+                        receiver: None,
+                        args: Vec::with_capacity(call.args.len()),
+                    });
+                    (current, hold) = (&call.callee, false);
+                    continue;
+                }
+            };
+            loop {
+                let Some(top) = waiting.last_mut() else {
+                    return value;
+                };
+                let call = top.call;
+                if top.callee.is_none() {
+                    let Some(callee) = value else {
+                        waiting.pop();
+                        value = None;
+                        continue;
+                    };
+                    top.callee = Some(callee.node);
+                    if let Some(receiver) = call.receiver.as_deref() {
+                        (current, hold) = (receiver, false);
+                        break;
+                    }
+                    top.receiver = Some(None);
+                } else if top.receiver.is_none() {
+                    top.receiver = Some(value.map(|receiver| receiver.node));
+                } else {
+                    let Some(argument_value) = value else {
+                        waiting.pop();
+                        value = None;
+                        continue;
+                    };
+                    let argument = &call.args[top.args.len()];
+                    top.args.push(crate::semantic_query::CallArgKey::Eager {
+                        ty: argument_value.node,
+                        spread: argument.spread,
+                        context_sensitive: argument.context_sensitive,
+                        const_view: None,
+                        literal_mode: indexed_argument_literal_mode(
+                            argument.literal_mode,
+                            argument_value.fresh,
+                        ),
+                    });
+                }
+                if let Some(argument) = call.args.get(top.args.len()) {
+                    (current, hold) = (&argument.expression, false);
+                    break;
+                }
+                let finished = waiting.pop().expect("the call on top");
+                value = self.resolve_indexed_call(
+                    canonical,
+                    owner,
+                    finished.call,
+                    finished.callee.expect("a resolved call has a callee"),
+                    finished.receiver.flatten(),
+                    finished.args,
+                    finished.hold_flow_result,
+                );
+            }
+        }
+    }
+
+    /// One indexed expression evaluated, unless it is a call, whose
+    /// children [`Self::evaluate_indexed_value`] evaluates first.
+    fn indexed_value_leaf<'e>(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &'e verter_type_expr::IndexedValueExpression,
+    ) -> Result<Option<IndexedValue>, &'e verter_type_expr::IndexedValueCall> {
+        use verter_type_expr::IndexedValueExpression;
         let regular = |node: Option<crate::semantic_query::SemanticNodeId>| {
             node.map(|node| IndexedValue { node, fresh: false })
         };
-        match expression {
+        Ok(match expression {
             IndexedValueExpression::Value(value) => {
                 regular(self.lower_type_expr_in_owner_scope_with_mode(
                     canonical,
@@ -1417,72 +1509,59 @@ impl<'a> ProjectSemanticDispatch<'a> {
             IndexedValueExpression::TemplateStrings { .. } => {
                 regular(self.global_template_strings_array(canonical, owner))
             }
-            IndexedValueExpression::Call(call) => {
-                let callee = self.evaluate_indexed_value_expression_node_inner(
+            IndexedValueExpression::Call(call) => return Err(call),
+        })
+    }
+
+    /// Resolve one indexed call over its evaluated callee, receiver and
+    /// arguments.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_indexed_call(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        call: &verter_type_expr::IndexedValueCall,
+        callee: crate::semantic_query::SemanticNodeId,
+        receiver: Option<crate::semantic_query::SemanticNodeId>,
+        args: Vec<crate::semantic_query::CallArgKey>,
+        hold_flow_result: bool,
+    ) -> Option<IndexedValue> {
+        use verter_type_expr::IndexedValueCallKind;
+        let explicit_type_args = call
+            .explicit_type_args
+            .iter()
+            .map(|argument| {
+                self.lower_type_expr_in_owner_scope_with_mode(
                     canonical,
                     owner,
-                    &call.callee,
-                    false,
-                )?;
-                let receiver = call.receiver.as_deref().and_then(|receiver| {
-                    self.evaluate_indexed_value_expression_node_inner(
-                        canonical, owner, receiver, false,
-                    )
-                });
-                let mut args = Vec::with_capacity(call.args.len());
-                for argument in call.args.iter() {
-                    let value =
-                        self.evaluate_indexed_value(canonical, owner, &argument.expression, false)?;
-                    args.push(crate::semantic_query::CallArgKey::Eager {
-                        ty: value.node,
-                        spread: argument.spread,
-                        context_sensitive: argument.context_sensitive,
-                        const_view: None,
-                        literal_mode: indexed_argument_literal_mode(
-                            argument.literal_mode,
-                            value.fresh,
-                        ),
-                    });
-                }
-                let explicit_type_args = call
-                    .explicit_type_args
-                    .iter()
-                    .map(|argument| {
-                        self.lower_type_expr_in_owner_scope_with_mode(
-                            canonical,
-                            owner,
-                            argument,
-                            crate::semantic_query::ProjectionMode::Navigate,
-                        )
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                let (result, held) = self.execute_indexed_resolve_call_with_flow_hold(
-                    crate::semantic_query::ResolveCallKey {
-                        point: crate::semantic_query::ProgramPointId {
-                            canonical_id: Arc::from(canonical),
-                            offset: call.point,
-                        },
-                        callee,
-                        kind: match call.kind {
-                            IndexedValueCallKind::Call => crate::semantic_query::CallKind::Call,
-                            IndexedValueCallKind::Construct => {
-                                crate::semantic_query::CallKind::Construct
-                            }
-                        },
-                        receiver,
-                        args: Arc::from(args.into_boxed_slice()),
-                        explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
-                        flow: crate::semantic_query::FlowNarrowingKey::empty(),
-                        context: self.resolve_call_context_for(canonical),
-                    },
-                    hold_flow_result,
-                );
-                if result.is_none() && !held {
-                    crate::request_context::mark_request_result_partial();
-                }
-                result
-            }
+                    argument,
+                    crate::semantic_query::ProjectionMode::Navigate,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let (result, held) = self.execute_indexed_resolve_call_with_flow_hold(
+            crate::semantic_query::ResolveCallKey {
+                point: crate::semantic_query::ProgramPointId {
+                    canonical_id: Arc::from(canonical),
+                    offset: call.point,
+                },
+                callee,
+                kind: match call.kind {
+                    IndexedValueCallKind::Call => crate::semantic_query::CallKind::Call,
+                    IndexedValueCallKind::Construct => crate::semantic_query::CallKind::Construct,
+                },
+                receiver,
+                args: Arc::from(args.into_boxed_slice()),
+                explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
+                flow: crate::semantic_query::FlowNarrowingKey::empty(),
+                context: self.resolve_call_context_for(canonical),
+            },
+            hold_flow_result,
+        );
+        if result.is_none() && !held {
+            crate::request_context::mark_request_result_partial();
         }
+        result
     }
 
     /// Consume an inferred declaration's indexed semantic expression source.
@@ -5539,7 +5618,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             params: &params,
             param_names: &ir.params,
             binder_env: &binder_env,
-            enclosing_frames: &[],
+            enclosing_frames: EnclosingFrames::default(),
             bindings: Arc::clone(&ir.bindings),
             skeleton: Arc::clone(&skeleton),
             flow_graph: Arc::clone(&bound.bundle().graph),
@@ -8287,6 +8366,9 @@ mod class_expression;
 
 #[path = "flow_return_call_stack.rs"]
 mod call_stack;
+#[path = "flow_return_nested.rs"]
+mod nested;
+use nested::{NestedChildParts, NestedDemand, NestedSignatureStep};
 #[path = "flow_return_operators.rs"]
 mod operators;
 use call_stack::{CallArgumentWait, CallDrive, CallInFlight, CallStep};
@@ -8354,11 +8436,7 @@ struct FlowEvaluator<'d, 'b> {
     /// The function's OWN binder environment (parameters + body leaves
     /// lower under it).
     binder_env: &'b FlowBinderEnv,
-    enclosing_frames: &'b [(
-        verter_semantic::analysis::function_program::FunctionProgramKey,
-        &'b FlowBinderEnv,
-        FlowProductStore,
-    )],
+    enclosing_frames: EnclosingFrames<'b>,
     /// The frame's binding-NAME resolution authority: the one place an
     /// authored name becomes a typed [`FlowProductSubject`]. It holds
     /// names, never semantic state, and its two scope layers are two
@@ -9335,6 +9413,116 @@ enum Positional<T> {
 
 /// The outcome of stripping the nullish (`null` / `undefined`) arms of
 /// one optional-member link's base union.
+/// A form of [`FlowEvaluator::run_expr`]'s explicit stack waiting on the
+/// value of the child it asked for.
+enum Waiting<'e> {
+    Erase,
+    Not {
+        widen: bool,
+    },
+    NonNull,
+    Arithmetic {
+        operator: crate::flow_slice_content::SliceArithmetic,
+        operands: &'e [crate::flow_slice_content::SliceExpr],
+        types: Vec<SemanticNodeId>,
+    },
+    /// An object literal waiting on the child it asked for last.
+    Object(Box<ObjectEvalFrame<'e>>),
+    /// A branch join (see [`FlowEvaluator::eval_expr_unerased`]'s
+    /// `Union` arm) whose arm `reduction_arms.len()` evaluates
+    /// under its guard's overlay, taken off at `mark`.
+    Union {
+        arms: &'e [crate::flow_slice_content::SliceExpr],
+        guard: &'e crate::flow_slice_content::SliceGuard,
+        reduction_arms: Vec<ReductionArm>,
+        holds_before: usize,
+        mark: NarrowingSnapshot,
+    },
+    /// An array literal waiting on the element it asked for last.
+    Array(Box<ArrayEvalFrame<'e>>),
+    /// A call waiting on its callee operand ([`call_stack`]).
+    CallOperand(Box<CallInFlight<'e>>),
+    /// A call waiting on a lowered argument its executor route
+    /// asked for ([`call_stack`]).
+    CallArgument(Box<CallArgumentWait<'e>>),
+}
+
+/// [`FlowEvaluator::run_expr`]'s explicit stack: the forms waiting on a
+/// child's value, and the child to evaluate next.
+struct ExprRun<'e> {
+    waiting: Vec<Waiting<'e>>,
+    current: &'e crate::flow_slice_content::SliceExpr,
+}
+
+impl<'e> ExprRun<'e> {
+    fn new(expr: &'e crate::flow_slice_content::SliceExpr) -> Self {
+        Self {
+            waiting: vec![Waiting::Erase],
+            current: expr,
+        }
+    }
+}
+
+/// What an expression run needs next.
+enum ExprProgress<'e> {
+    /// Nothing: the expression's value.
+    Done(Positional<SemanticNodeId>),
+    /// The value of a nested function value (see `flow_return_nested`).
+    Nested(NestedDemand<'e>),
+}
+
+/// The frames around a nested function's evaluator, innermost first. A
+/// nested function's chain is its enclosing frame's chain with that frame
+/// added, sharing the rest: copying the whole chain for every nested
+/// function (and dropping it again) cost the square of the nesting.
+#[derive(Clone, Default)]
+struct EnclosingFrames<'b>(Option<std::rc::Rc<EnclosingFrame<'b>>>);
+
+/// One frame around a nested function's evaluator.
+struct EnclosingFrame<'b> {
+    function: verter_semantic::analysis::function_program::FunctionProgramKey,
+    binder_env: &'b FlowBinderEnv,
+    products: FlowProductStore,
+    outer: EnclosingFrames<'b>,
+}
+
+impl<'b> EnclosingFrames<'b> {
+    /// This chain with `function`'s frame added innermost.
+    fn with(
+        &self,
+        function: verter_semantic::analysis::function_program::FunctionProgramKey,
+        binder_env: &'b FlowBinderEnv,
+        products: FlowProductStore,
+    ) -> Self {
+        Self(Some(std::rc::Rc::new(EnclosingFrame {
+            function,
+            binder_env,
+            products,
+            outer: self.clone(),
+        })))
+    }
+
+    /// The frames, innermost first.
+    fn iter(&self) -> impl Iterator<Item = &EnclosingFrame<'b>> {
+        std::iter::successors(self.0.as_deref(), |frame| frame.outer.0.as_deref())
+    }
+}
+
+/// A chain drops from this loop, each frame no other chain shares taken
+/// off in turn: dropping it frame inside frame would take a native level
+/// per enclosing function.
+impl Drop for EnclosingFrames<'_> {
+    fn drop(&mut self) {
+        let mut next = self.0.take();
+        while let Some(frame) = next {
+            next = match std::rc::Rc::try_unwrap(frame) {
+                Ok(mut frame) => frame.outer.0.take(),
+                Err(_) => None,
+            };
+        }
+    }
+}
+
 /// A region's evaluation in progress (see [`FlowEvaluator::eval_region`]):
 /// the contributions and path liveness so far, the next statement, and the
 /// scope bases of the block statement it is suspended at.
@@ -9344,13 +9532,50 @@ struct RegionEvalFrame<'r> {
     contributors: Vec<FlowContribution>,
     path_alive: bool,
     block_bases: Option<(usize, usize, usize, usize)>,
+    /// The return statement suspended at a nested function value in its
+    /// argument.
+    pending_return: Option<Box<PendingReturn<'r>>>,
 }
 
-/// What a region's evaluation needs next: a block's region evaluated, or
-/// nothing — its outcome.
+/// A return statement whose argument's evaluation is suspended at a nested
+/// function value: what its contribution is built from once the argument
+/// has a value.
+struct PendingReturn<'r> {
+    expr: &'r crate::flow_slice_content::SliceExpr,
+    freshness: &'r crate::flow_slice_content::SliceFreshness,
+    predicate_test: &'r Option<crate::flow_slice_content::ReturnPredicateTest>,
+    bare_literal: bool,
+    fresh_literal: bool,
+    holds_before: usize,
+    run: ExprRun<'r>,
+}
+
+/// What a region's evaluation needs next: a block's region evaluated, the
+/// value of a nested function value, or nothing — its outcome.
 enum RegionEvalStep<'r> {
     EnterBlock(&'r crate::flow_slice_content::SliceRegion),
+    Nested(NestedDemand<'r>),
     Done((Result<Vec<FlowContribution>, FlowReturnFailure>, bool)),
+}
+
+/// What a suspended region's evaluation resumes with.
+enum RegionDelivery {
+    /// The outcome of the block it entered.
+    Block((Result<Vec<FlowContribution>, FlowReturnFailure>, bool)),
+    /// The value of the nested function value it suspended at.
+    Nested(SemanticNodeId),
+}
+
+/// A region's evaluation from an explicit stack of the regions being
+/// evaluated (a block inside a block).
+struct RegionRun<'r> {
+    frames: Vec<RegionEvalFrame<'r>>,
+}
+
+/// What a region run needs next.
+enum RegionProgress<'r> {
+    Done((Result<Vec<FlowContribution>, FlowReturnFailure>, bool)),
+    Nested(NestedDemand<'r>),
 }
 
 /// An array literal's evaluation in progress, stepped by
@@ -19944,23 +20169,35 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// the walk itself, never reconstructed from the plan — so the
     /// execution witness can only claim a selection whose derived
     /// content this run actually walked to completion.
-    fn eval_region(
+    /// Begin a region's evaluation.
+    fn start_region_run<'r>(
         &mut self,
-        region: &crate::flow_slice_content::SliceRegion,
-    ) -> (Result<Vec<FlowContribution>, FlowReturnFailure>, bool) {
-        // A block nested in a block costs no native level: each region
-        // being evaluated is a frame of an explicit stack, and a block
-        // statement suspends its region's frame until the block's own
-        // region is evaluated.
-        let mut frames = vec![self.region_eval_frame(region)];
-        let mut delivered = None;
+        region: &'r crate::flow_slice_content::SliceRegion,
+    ) -> RegionRun<'r> {
+        RegionRun {
+            frames: vec![self.region_eval_frame(region)],
+        }
+    }
+
+    /// Continue a region's evaluation with `delivered`: a block nested in
+    /// a block costs no native level (each region being evaluated is a
+    /// frame of the run, and a block statement suspends its region's frame
+    /// until the block's own region is evaluated), and a return statement
+    /// suspended at a nested function value suspends the run for the
+    /// caller to evaluate the function ([`Self::eval_region`]).
+    fn run_region<'r>(
+        &mut self,
+        run: &mut RegionRun<'r>,
+        mut delivered: Option<RegionDelivery>,
+    ) -> RegionProgress<'r> {
         loop {
-            let frame = frames.last_mut().expect("the region being evaluated");
+            let frame = run.frames.last_mut().expect("the region being evaluated");
             match self.eval_region_statements(frame, delivered.take()) {
                 RegionEvalStep::EnterBlock(block) => {
                     let child = self.region_eval_frame(block);
-                    frames.push(child);
+                    run.frames.push(child);
                 }
+                RegionEvalStep::Nested(demand) => return RegionProgress::Nested(demand),
                 RegionEvalStep::Done(outcome) => {
                     match &outcome.0 {
                         Ok(_) => {
@@ -19969,11 +20206,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                         Err(_) => self.executed_walk.aborted = true,
                     }
-                    frames.pop();
-                    if frames.is_empty() {
-                        return outcome;
+                    run.frames.pop();
+                    if run.frames.is_empty() {
+                        return RegionProgress::Done(outcome);
                     }
-                    delivered = Some(outcome);
+                    delivered = Some(RegionDelivery::Block(outcome));
                 }
             }
         }
@@ -19992,6 +20229,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             contributors: Vec::new(),
             path_alive: true,
             block_bases: None,
+            pending_return: None,
         }
     }
 
@@ -20000,7 +20238,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn eval_region_statements<'r>(
         &mut self,
         frame: &mut RegionEvalFrame<'r>,
-        delivered: Option<(Result<Vec<FlowContribution>, FlowReturnFailure>, bool)>,
+        delivered: Option<RegionDelivery>,
     ) -> RegionEvalStep<'r> {
         let region = frame.region;
         let mut contributors = std::mem::take(&mut frame.contributors);
@@ -20011,7 +20249,46 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // evaluate. The returned fall-through is the lowering's flag
         // ANDed with this — the override only ever narrows downward.
         let mut path_alive = frame.path_alive;
-        if let Some((result, block_falls)) = delivered {
+        if let Some(RegionDelivery::Nested(node)) = delivered {
+            let mut pending = frame
+                .pending_return
+                .take()
+                .expect("the return the region is suspended at");
+            match self.run_expr(&mut pending.run, Some(Positional::Value(node)), true) {
+                ExprProgress::Nested(demand) => {
+                    frame.pending_return = Some(pending);
+                    frame.contributors = contributors;
+                    frame.path_alive = path_alive;
+                    return RegionEvalStep::Nested(demand);
+                }
+                ExprProgress::Done(outcome) => {
+                    let PendingReturn {
+                        expr,
+                        freshness,
+                        predicate_test,
+                        bare_literal,
+                        fresh_literal,
+                        holds_before,
+                        ..
+                    } = *pending;
+                    let evaluated = self.settle(outcome).map(|node| {
+                        let fresh_values = self.position_fresh_values(expr, node, bare_literal);
+                        (node, fresh_values)
+                    });
+                    if let Some(contribution) = self.return_contribution(
+                        expr,
+                        freshness,
+                        predicate_test.as_ref(),
+                        evaluated,
+                        fresh_literal,
+                        holds_before,
+                    ) {
+                        contributors.push(contribution);
+                    }
+                    self.capture_return_edge();
+                }
+            }
+        } else if let Some(RegionDelivery::Block((result, block_falls))) = delivered {
             let (shadow_base, break_base, return_base, throw_base) = frame
                 .block_bases
                 .take()
@@ -20267,7 +20544,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     });
                                     let outcome = match contextual {
                                         Some(node) => Positional::Value(node),
-                                        None => self.eval_expr(expr),
+                                        None => {
+                                            let mut run = ExprRun::new(expr);
+                                            match self.run_expr(&mut run, None, true) {
+                                                ExprProgress::Done(outcome) => outcome,
+                                                ExprProgress::Nested(demand) => {
+                                                    frame.pending_return =
+                                                        Some(Box::new(PendingReturn {
+                                                            expr,
+                                                            freshness,
+                                                            predicate_test,
+                                                            bare_literal,
+                                                            fresh_literal,
+                                                            holds_before,
+                                                            run,
+                                                        }));
+                                                    frame.contributors = contributors;
+                                                    frame.path_alive = path_alive;
+                                                    return RegionEvalStep::Nested(demand);
+                                                }
+                                            }
+                                        }
                                     };
                                     self.settle(outcome).map(|node| {
                                         let fresh_values =
@@ -20276,34 +20573,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     })
                                 }
                             };
-                            if let Some((node, fresh_values)) = evaluated {
-                                fresh_literal |= self.holds.len() > holds_before;
-                                fresh_literal |= self.reads_widening_declaration(expr, node);
-                                // A COMPLETED call that closed on a
-                                // WHOLE-return fresh literal feeds the
-                                // same join — matched by its authored
-                                // call-site span, never by the interned
-                                // literal value, so a sibling arm's
-                                // authored pin of the same value is never
-                                // fresh. A union-carried fresh deposit
-                                // stays pinned at the return position (the
-                                // checker widens it only at value
-                                // positions).
-                                fresh_literal |= self
-                                    .fresh_call_return_for(expr, node)
-                                    .is_some_and(|call| call.values.contains(&node))
-                                    || self.fresh_narrowed_literal(expr, node) == Some(node)
-                                    || self.operator_fresh_values(expr, node).contains(&node);
-                                if let Some(test) = predicate_test {
-                                    self.infer_return_predicate(test, node);
-                                }
-                                contributors.push(FlowContribution {
-                                    node,
-                                    arm: self.reduction_arm(expr, node),
-                                    fresh_literal,
-                                    fresh_values,
-                                    widening_nullish: self.widening_nullish_value(expr, freshness),
-                                });
+                            if let Some(contribution) = self.return_contribution(
+                                expr,
+                                freshness,
+                                predicate_test.as_ref(),
+                                evaluated,
+                                fresh_literal,
+                                holds_before,
+                            ) {
+                                contributors.push(contribution);
                             }
                         }
                         None => {
@@ -21892,6 +22170,47 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         ))
     }
 
+    /// The contribution a return statement makes once its argument's value
+    /// is `evaluated` (with its fresh values), or none when it has none.
+    fn return_contribution(
+        &mut self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+        predicate_test: Option<&crate::flow_slice_content::ReturnPredicateTest>,
+        evaluated: Option<(SemanticNodeId, Vec<SemanticNodeId>)>,
+        mut fresh_literal: bool,
+        holds_before: usize,
+    ) -> Option<FlowContribution> {
+        let (node, fresh_values) = evaluated?;
+        fresh_literal |= self.holds.len() > holds_before;
+        fresh_literal |= self.reads_widening_declaration(expr, node);
+        // A COMPLETED call that closed on a
+        // WHOLE-return fresh literal feeds the
+        // same join — matched by its authored
+        // call-site span, never by the interned
+        // literal value, so a sibling arm's
+        // authored pin of the same value is never
+        // fresh. A union-carried fresh deposit
+        // stays pinned at the return position (the
+        // checker widens it only at value
+        // positions).
+        fresh_literal |= self
+            .fresh_call_return_for(expr, node)
+            .is_some_and(|call| call.values.contains(&node))
+            || self.fresh_narrowed_literal(expr, node) == Some(node)
+            || self.operator_fresh_values(expr, node).contains(&node);
+        if let Some(test) = predicate_test {
+            self.infer_return_predicate(test, node);
+        }
+        Some(FlowContribution {
+            node,
+            arm: self.reduction_arm(expr, node),
+            fresh_literal,
+            fresh_values,
+            widening_nullish: self.widening_nullish_value(expr, freshness),
+        })
+    }
+
     /// Seed the authored type authority of selected `var` declarations before
     /// executing the frame. The declaration is hoisted for assignment
     /// checking, while its initializer (if any) and its runtime reaching value
@@ -21963,162 +22282,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Evaluate a nested function value's signature: bind its OWN type
-    /// parameters in scope (the SAME binder environment the root
-    /// evaluation uses), lower its parameters, evaluate its body in a
-    /// fresh frame seeded with the CAPTURED enclosing bindings (holds the
-    /// nested evaluation met ride the outer frame's hold set), and
-    /// compose the `Signature` node.
-    ///
-    /// Closure capture uses the selected graph's exact captured identities.
-    /// Each input comes from the enclosing continuation at the function
-    /// value's own position. The child has its own indexed graph, input
-    /// basis, and execution capability; its local bindings cannot alias an
-    /// enclosing slot merely because their names or numeric IDs match.
-    fn eval_nested_function(
-        &mut self,
-        function: &verter_semantic::analysis::function_program::FunctionProgramKey,
-        context: &Arc<crate::flow_slice_content::NestedFlowContext>,
-        has_declared_return: bool,
-        outer_env: &FlowBinderEnv,
-        extended_captures: &[verter_semantic::analysis::flow::SkeletonBindingId],
-        declared_evolving_captures: &[verter_semantic::analysis::function_program::FlowBindingIdentity],
-        contextual: Option<&ContextualSignature>,
-    ) -> SemanticNodeId {
-        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
-            anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from(self.canonical),
-                owner: function.declaration.owner,
-                symbol: Arc::clone(&function.declaration.name),
-                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-            },
-            function_part: function.part.clone(),
-            overload_ordinal: function.overload_ordinal,
-        };
-        let key = self.dispatch.flow_return_key_for(&identity);
-        let prepared = (|| {
-            let site = self.dispatch.flow_slice_demand_site(&key).ok()?;
-            let flow_slice = self.dispatch.ctx.project_type_store().flow_slice();
-            let index = site
-                .indexed
-                .shallow_state
-                .decl_bodies()
-                .function_program_index();
-            let entry = index.get(function)?.entry();
-            let skeleton = flow_slice.skeleton_for(&site.slice_key_function, self.dispatch.ctx)?;
-            let bound = flow_slice.bound_graph_for(&site.slice_key_function)?;
-            let planned_and_selection = if has_declared_return {
-                None
-            } else {
-                let crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(planned) =
-                    crate::cache_runtime::lookup(
-                        flow_slice.hash_node(),
-                        site.slice_key.clone(),
-                        self.dispatch.ctx,
-                    )?
-                else {
-                    return None;
-                };
-                let lowered = crate::cache_runtime::lookup(
-                    flow_slice.lowered_node(),
-                    crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey {
-                        hash_key: site.slice_key.clone(),
-                        slice_hash: planned.hash(),
-                    },
-                    self.dispatch.ctx,
-                )?;
-                Some((
-                    planned,
-                    crate::flow_slice_content::FlowSliceSelection::from_slice_ir(&lowered),
-                ))
-            };
-            let content = site
-                .indexed
-                .shallow_state
-                .decl_bodies()
-                .flow_slice_content_with_context(
-                    entry,
-                    planned_and_selection
-                        .as_ref()
-                        .map(|(_, selection)| selection.clone()),
-                    &bound,
-                    Some(Arc::clone(context)),
-                    self.policy(),
-                )?;
-            Some((
-                content,
-                skeleton,
-                bound,
-                planned_and_selection.map(|(planned, _)| planned),
-                entry.span.start,
-            ))
-        })();
-        let Some((content, skeleton, bound, planned, anchor)) = prepared else {
-            self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
-            return self.unmodeled_position();
-        };
-        if content.budget_failure.is_some() {
-            self.record_degradation(
-                crate::semantic_query::FlowReturnDegradation::UnmodeledPosition,
-            );
-            return self.unmodeled_position();
-        }
-        // A return read again while it is being resolved (a local
-        // function reached from its own body other than as a bare tail
-        // call, or mutually recursive declarations) is the checker's
-        // circular return: every return from the re-entered one inward is
-        // `any` (`getReturnTypeOfSignature` when `popTypeResolution`
-        // fails). A declared return is never resolved from the body.
-        let reentered = self
-            .resolving_functions
-            .borrow()
-            .iter()
-            .position(|(resolving, _)| resolving == function);
-        if let Some(position) = reentered {
-            for (_, circular) in self.resolving_functions.borrow_mut()[position..].iter_mut() {
-                *circular = true;
-            }
-        }
-        let circular = reentered.is_some() && content.declared_return.is_none();
-        if !circular {
-            self.resolving_functions
-                .borrow_mut()
-                .push((function.clone(), false));
-        }
-        let signature = self.eval_nested_function_signature(
-            &content.params,
-            &content.type_parameters,
-            context,
-            declared_evolving_captures,
-            content.declared_return.as_ref(),
-            content.declared_predicate.as_ref(),
-            &content.body,
-            &content.call_arguments,
-            content.can_fall_through,
-            content.empty_completion,
-            &content.bindings,
-            skeleton,
-            bound,
-            planned.as_deref(),
-            anchor,
-            &key,
-            outer_env,
-            extended_captures,
-            circular,
-            contextual,
-        );
-        let found_circular = !circular
-            && self
-                .resolving_functions
-                .borrow_mut()
-                .pop()
-                .is_some_and(|(_, circular)| circular);
-        if found_circular && content.declared_return.is_none() {
-            return self.signature_returning_any(signature);
-        }
-        signature
-    }
-
     /// `signature` with its return (and any predicate beside it) replaced by
     /// `any` — a nested function whose return was read while it was being
     /// resolved.
@@ -22155,12 +22318,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let products = if &locator.declaration.defining_function == self.bindings.function() {
             self.products.clone()
         } else {
-            self.enclosing_frames
-                .iter()
-                .rev()
-                .find_map(|(function, _, products)| {
-                    (function == &locator.declaration.defining_function).then(|| products.clone())
-                })?
+            self.enclosing_frames.iter().find_map(|frame| {
+                (frame.function == locator.declaration.defining_function)
+                    .then(|| frame.products.clone())
+            })?
         };
         let subject = FlowProductSubject::Local(locator.local_declaration()?);
         products
@@ -22176,12 +22337,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let binder_env = if &locator.declaration.defining_function == self.bindings.function() {
             Some(self.binder_env)
         } else {
-            self.enclosing_frames
-                .iter()
-                .rev()
-                .find_map(|(function, env, _)| {
-                    (function == &locator.declaration.defining_function).then_some(*env)
-                })
+            self.enclosing_frames.iter().find_map(|frame| {
+                (frame.function == locator.declaration.defining_function)
+                    .then_some(frame.binder_env)
+            })
         };
         let Some(binder_env) = binder_env else {
             self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
@@ -22223,7 +22382,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         Some(node)
     }
 
-    fn eval_nested_function_signature(
+    fn nested_signature_prefix(
         &mut self,
         nested_params: &[crate::flow_slice_content::SliceParam],
         type_parameters: &[crate::flow_slice_content::SliceTypeParam],
@@ -22231,15 +22390,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         declared_evolving_captures: &[verter_semantic::analysis::function_program::FlowBindingIdentity],
         declared_return: Option<&crate::flow_slice_content::GatedType>,
         declared_predicate: Option<&crate::flow_slice_content::SlicePredicate>,
-        body: &crate::flow_slice_content::SliceRegion,
-        call_arguments: &Arc<
-            rustc_hash::FxHashMap<
-                verter_span::Span,
-                Arc<[crate::flow_slice_content::SliceCallArgument]>,
-            >,
-        >,
-        can_fall_through: NormalCompletion,
-        empty_completion: crate::flow_slice_content::EmptyCompletion,
         bindings: &Arc<FlowBindingMap>,
         skeleton: Arc<FunctionBodySkeleton>,
         bound: crate::cache_runtime::flow_slice_node::BoundFlowGraph,
@@ -22250,7 +22400,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         extended_captures: &[verter_semantic::analysis::flow::SkeletonBindingId],
         circular: bool,
         contextual: Option<&ContextualSignature>,
-    ) -> SemanticNodeId {
+    ) -> NestedSignatureStep {
         let graph = self.dispatch.graph();
         // The nested function's OWN type parameters are binders in scope
         // for the parameter / return lowering (a `<T>(x: T) => x` keeps
@@ -22403,7 +22553,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     target,
                 )
             });
-            return graph.intern_node(SemanticNodeData::Signature {
+            return NestedSignatureStep::Done(graph.intern_node(SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Call,
                 params: Arc::from(signature_params.into_boxed_slice()),
                 return_type,
@@ -22417,13 +22567,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ),
                 predicate,
                 is_abstract: false,
-            });
+            }));
         }
         // A return read while it is being resolved is `any`; its body is
         // not evaluated again.
         if circular {
             let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-            return graph.intern_node(SemanticNodeData::Signature {
+            return NestedSignatureStep::Done(graph.intern_node(SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Call,
                 params: Arc::from(signature_params.into_boxed_slice()),
                 return_type: any,
@@ -22434,10 +22584,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(any),
                 predicate: None,
                 is_abstract: false,
-            });
+            }));
         }
         let Some(planned) = planned else {
-            return self.unmodeled_position();
+            return NestedSignatureStep::Done(self.unmodeled_position());
         };
         let inputs = FlowProductInputs::for_bound_graph(&bound);
         // Prepare exactly the selected input values before sealing their basis.
@@ -22716,7 +22866,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             super::flow_solve::prepare_flow_execution(&request, &bound, planned)
         else {
             self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
-            return self.unmodeled_position();
+            return NestedSignatureStep::Done(self.unmodeled_position());
         };
         let plan = match super::flow_solve::build_flow_demand_plan_from_execution(
             Arc::clone(&execution_selection),
@@ -22737,11 +22887,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             FlowProductBudget::for_execution_selection(&execution_selection),
         ) else {
             self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
-            return self.unmodeled_position();
+            return NestedSignatureStep::Done(self.unmodeled_position());
         };
         let Ok(mut captured_products) = FlowProductStore::new(execution, &bound) else {
             self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
-            return self.unmodeled_position();
+            return NestedSignatureStep::Done(self.unmodeled_position());
         };
         let mut declared_capture_types = rustc_hash::FxHashMap::default();
         let extended_capture_identities: rustc_hash::FxHashSet<_> = capture_inputs
@@ -22776,298 +22926,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             &bound,
             &execution_selection,
         );
-        let nested_holds;
-        let mut enclosing_frames = self.enclosing_frames.to_vec();
-        enclosing_frames.push((
-            self.bindings.function().clone(),
-            self.binder_env,
-            self.products.clone(),
-        ));
-        let nested_degradation;
-        let nested_observations;
-        let nested_yield_contributions;
-        let nested_inferred_predicate;
-        let (contributors, nested_body_falls_through) = {
-            let mut nested_evaluator = FlowEvaluator {
-                dispatch: self.dispatch,
-                call_arguments: Arc::clone(call_arguments),
-                self_slot: None,
-                resolving_functions: std::rc::Rc::clone(&self.resolving_functions),
-                canonical: self.canonical,
-                owner: self.owner,
-                nullability: self.nullability,
-                no_implicit_any: self.no_implicit_any,
-                use_unknown_in_catch_variables: self.use_unknown_in_catch_variables,
-                no_implicit_this: self.no_implicit_this,
-                params: &params,
-                param_names: nested_params,
-                binder_env: &binder_env,
-                enclosing_frames: &enclosing_frames,
-                bindings: Arc::clone(bindings),
-                skeleton: Arc::clone(&skeleton),
-                flow_graph: Arc::clone(&bound.bundle().graph),
-                execution_selection,
-                plan,
-                anchor,
-                products: captured_products,
-                narrowing_writes: Vec::new(),
-                observations: BodyCompletionObservations::none(),
-                // A nested function value always evaluates its WHOLE
-                // return (its signature's return type) — the member
-                // filter is a top-level demand axis.
-                member_filter: None,
-                holds: Vec::new(),
-                yield_contributions: Vec::new(),
-                degradation: None,
-                pending_statement_gap: None,
-                pattern_write_definition: None,
-                correlated_groups: Vec::new(),
-                guard_aliases: rustc_hash::FxHashMap::default(),
-                auto_typed_locals: rustc_hash::FxHashSet::default(),
-                inferred_declared_locals: rustc_hash::FxHashMap::default(),
-                declared_capture_types,
-                extended_capture_identities,
-                evolving_locals: rustc_hash::FxHashSet::default(),
-                circular_inferred: rustc_hash::FxHashSet::default(),
-                unwidened_views: rustc_hash::FxHashMap::default(),
-                regular_right_operands: rustc_hash::FxHashSet::default(),
-                declared_return: None,
-                call_fresh_literal_returns: Vec::new(),
-                break_exits: Vec::new(),
-                return_edges: Vec::new(),
-                throw_points: Vec::new(),
-                collect_throw_points: false,
-                scope_shadows: Vec::new(),
-                call_evidence: Vec::new(),
-                call_drive: None,
-                expression_write_nodes: rustc_hash::FxHashMap::default(),
-                capture_write_lookahead: rustc_hash::FxHashMap::default(),
-                executed_walk: ExecutedSliceWalk::default(),
-                heritage_self_roots: Vec::new(),
-                inferred_predicate: None,
-                checker_diagnostics: Vec::new(),
-                declared_reads: false,
-                // A class expression member (or an arrow it creates) runs
-                // against the receiver the class binds.
-                receiver: matches!(
-                    capture_context.this(),
-                    Some(crate::flow_slice_content::SliceThis::Receiver)
-                )
-                .then(|| self.receiver.clone())
-                .flatten(),
-            };
-            nested_evaluator.seed_hoisted_var_declarations(body);
-            let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
-            nested_evaluator.promote_pending_statement_gap();
-            nested_yield_contributions = std::mem::take(&mut nested_evaluator.yield_contributions);
-            nested_inferred_predicate = nested_evaluator.inferred_predicate;
-            #[cfg(test)]
-            if self
-                .dispatch
-                .ctx
-                .host_for_fact_tracer_install()
-                .flow_fault_injection
-                .short_nested_execution_ledger
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                nested_evaluator.executed_walk.aborted = true;
-            }
-            nested_holds = nested_evaluator.holds.clone();
-            let finished = nested_evaluator
-                .products
-                .finish(nested_evaluator.plan.as_deref())
-                .and_then(|evidence| {
-                    #[cfg(test)]
-                    let evidence = if self.dispatch.ctx.host_for_fact_tracer_install().flow_fault_injection
-                        .drop_binding_domain_product.load(std::sync::atomic::Ordering::Relaxed) {
-                        None
-                    } else { evidence };
-                    let Some(plan) = nested_evaluator.plan.as_deref() else {
-                        return Ok(evidence);
-                    };
-                    use super::dispatch_txn::flow_obligation_state::FlowObligationBasis;
-                    let products_complete = plan.obligation_specs().iter().all(|spec| {
-                        let subject = match spec.basis() {
-                            // A local function declaration's value is the
-                            // declaration itself: it has no slot product.
-                            FlowObligationBasis::Binding { slot, .. }
-                                if binding_is_local_function_declaration(
-                                    &slot.binding,
-                                    &nested_evaluator.skeleton,
-                                ) =>
-                            {
-                                return true;
-                            }
-                            FlowObligationBasis::Binding { slot, .. } => Some(slot.binding.clone()),
-                            FlowObligationBasis::CapturedBinding { node, identity, demand, .. } => {
-                                let completed = nested_evaluator.executed_walk
-                                    .completed_selection(plan.structural_selection())
-                                    .is_some_and(|selection| selection.is_selected(*node));
-                                if !completed {
-                                    return false;
-                                }
-                                if *demand == super::dispatch_txn::flow_obligation_state::FlowCaptureDemand::Effect {
-                                    return true;
-                                }
-                                Some(
-                                nested_evaluator
-                                    .bindings
-                                    .local(identity)
-                                    .map(FlowProductSubject::Local)
-                                    .unwrap_or_else(|| {
-                                        FlowProductSubject::Captured(identity.clone())
-                                    }),
-                                )
-                            },
-                            _ => return true,
-                        };
-                        subject.is_some_and(|subject| {
-                            binding_product_evidence(
-                                &subject,
-                                evidence.as_ref(),
-                                &nested_evaluator.products,
-                                plan,
-                            )
-                        })
-                    });
-                    if products_complete {
-                        Ok(evidence)
-                    } else {
-                        Err(FlowProductFailure::Gap(
-                            crate::semantic_query::FlowGap::UnmodeledExpression,
-                        ))
-                    }
-                });
-            if let Err(failure) = finished {
-                if matches!(failure, FlowProductFailure::BudgetExceeded(_)) {
-                    self.products.execution.borrow_mut().failure = Some(failure);
-                }
-                nested_evaluator.record_degradation(
-                    crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
-                );
-            }
-            nested_degradation = nested_evaluator.degradation;
-            nested_observations = nested_evaluator.observations;
-            self.holds.append(&mut nested_evaluator.holds);
-            // A call the NESTED body evaluated is still an evaluated call
-            // of this evaluation run: the evidence rides the enclosing
-            // ledger exactly as the nested holds do — and so does the
-            // nested walk (a nested abort shortens THIS run's ledger).
-            self.call_evidence
-                .append(&mut nested_evaluator.call_evidence);
-            self.executed_walk.absorb(nested_evaluator.executed_walk);
-            // A heritage hop the NESTED body's `instanceof` narrowing read
-            // is still a cross-file observation of THIS run: it rides the
-            // enclosing self-roots exactly as the nested holds do.
-            for root in nested_evaluator.heritage_self_roots.drain(..) {
-                if !self.heritage_self_roots.contains(&root) {
-                    self.heritage_self_roots.push(root);
-                }
-            }
-            // A nested body's calls are calls of THIS function's text:
-            // their diagnostics ride this frame's value.
-            for diagnostic in nested_evaluator.checker_diagnostics.drain(..) {
-                self.record_checker_diagnostic(diagnostic);
-            }
-            (outcome, nested_body_falls_through)
-        };
-        // A degraded nested body degrades the enclosing value that
-        // embeds its signature.
-        if let Some(degradation) = nested_degradation {
-            self.record_degradation(degradation);
-        }
-        // A nested body's OWN frame-level failure — an unmodelled control
-        // surface, an empty hold-only cycle — is a fact about the NESTED
-        // function's return position, not about the frame that embeds its
-        // signature. Propagating it outward is what deleted
-        // `{ label: "x", go: (n) => { while (…) { return n } return 0 } }`
-        // whole, where the checker publishes
-        // `{ label: string; go: (n: number) => number }`. The signature
-        // survives with its parameters intact and the typed marker in its
-        // RETURN position.
-        //
-        // A nested function value's body is its own join; its holds ride
-        // the OUTER frame's component, so no fixed point closes here and
-        // the freshness bit has no later consumer.
-        let mut predicate = None;
-        // The one fresh literal every contributor of the body return is.
-        let lone_fresh_literal = contributors.as_ref().ok().and_then(|contributors| {
-            let (first, rest) = contributors.split_first()?;
-            (contributors
-                .iter()
-                .all(|contribution| contribution.fresh_literal)
-                && rest
-                    .iter()
-                    .all(|contribution| contribution.node == first.node))
-            .then_some(first.node)
-        });
-        let return_type = match contributors.and_then(|contributors| {
-            self.dispatch.join_flow_return_contributors(
-                contributors,
-                NormalCompletion::minted(
-                    can_fall_through.reaches_end(CompletionDischarge::EvaluatorRegionWalk)
-                        && nested_body_falls_through,
-                    CompletionConstruction::NestedBodyRefinement,
-                ),
-                nested_observations,
-                &nested_holds,
-                nested_degradation,
-                empty_completion,
-                self.nullability,
-            )
-        }) {
-            // The nested signature's return IS the function-kind-wrapped
-            // body join (an async arrow's type is `() => Promise<T>`), so
-            // the wrap attaches and MATERIALIZES here — the nested body has
-            // no equation fixed point of its own ("no fixed point closes
-            // here"), and the signature consumes the node directly. A
-            // predicate inferred from the body rides beside that return.
-            Ok((result, _fresh_seed)) => {
-                let result = self
-                    .dispatch
-                    .attach_inferred_predicate(result, nested_inferred_predicate);
-                predicate = result.inferred_predicate();
-                let wrapped = self.dispatch.materialize_flow_return_wrap(
-                    self.dispatch.attach_function_kind_wrap(
-                        result,
-                        skeleton.kind,
-                        &nested_yield_contributions,
-                        &binder_env,
-                        self.nullability,
-                    ),
-                );
-                wrapped.return_type()
-            }
-            Err(_) => self.unmodeled_position(),
-        };
-        // A body return that is one fresh literal widens, unless the
-        // contextual return is a literal context for it
-        // (`getWidenedLiteralLikeTypeForContextualReturnTypeIfNeeded`):
-        // `(v) => 1` passed for `(v: string) => T` with `T extends number`
-        // returns `1`.
-        let return_type = match (contextual, lone_fresh_literal) {
-            (Some(contextual), Some(literal))
-                if self.literal_of_contextual_type(literal, contextual.return_type) =>
-            {
-                literal
-            }
-            _ => return_type,
-        };
-        graph.intern_node(SemanticNodeData::Signature {
-            kind: crate::semantic_query::SignatureKind::Call,
-            params: Arc::from(signature_params.into_boxed_slice()),
-            return_type,
-            type_parameters: Arc::from(type_param_decls.into_boxed_slice()),
-            signature_span: None,
-            return_type_span: None,
-            // A nested function value's synthesized signature has no
-            // authored occurrence anchor and no served position: the
-            // return carrier is the interned node itself.
-            occurrence: None,
-            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
-            predicate,
-            is_abstract: false,
-        })
+        NestedSignatureStep::Child(Box::new(NestedChildParts {
+            params,
+            signature_params,
+            type_param_decls,
+            binder_env,
+            captured_products,
+            declared_capture_types,
+            extended_capture_identities,
+            execution_selection,
+            plan,
+            bound,
+            skeleton,
+        }))
     }
 
     /// The CALLEE's own type-parameter clause at a direct-call site.
@@ -23232,139 +23103,151 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         expr: &crate::flow_slice_content::SliceExpr,
     ) -> Positional<SemanticNodeId> {
-        use crate::flow_slice_content::{SliceArithmetic, SliceExpr};
+        let mut run = ExprRun::new(expr);
+        match self.run_expr(&mut run, None, false) {
+            ExprProgress::Done(value) => value,
+            ExprProgress::Nested(_) => {
+                unreachable!("an expression evaluated in place never suspends")
+            }
+        }
+    }
+
+    /// [`Self::eval_expr`] from `run`'s explicit stack, with `delivered` the
+    /// value of the nested function value it suspended at. With `suspend`, a
+    /// nested function value anywhere on the stack suspends the run
+    /// ([`ExprProgress::Nested`]) for the caller to evaluate it
+    /// (`flow_return_nested`); without, it evaluates in place.
+    fn run_expr<'e>(
+        &mut self,
+        run: &mut ExprRun<'e>,
+        mut delivered: Option<Positional<SemanticNodeId>>,
+        suspend: bool,
+    ) -> ExprProgress<'e> {
+        use crate::flow_slice_content::SliceExpr;
         // An operator form's operands (a `!`, a non-null assertion, an
         // arithmetic operator's operands) and a conditional's branches
         // evaluate from an explicit stack of the forms waiting on them, each
         // one's value erased as its own [`Self::eval_expr`] would erase it:
         // an operand nested in an operand costs no native level. Every other
         // form evaluates through [`Self::eval_expr_unerased`].
-        enum Waiting<'e> {
-            Erase,
-            Not {
-                widen: bool,
-            },
-            NonNull,
-            Arithmetic {
-                operator: SliceArithmetic,
-                operands: &'e [SliceExpr],
-                types: Vec<SemanticNodeId>,
-            },
-            /// An object literal waiting on the child it asked for last.
-            Object(Box<ObjectEvalFrame<'e>>),
-            /// A branch join (see [`FlowEvaluator::eval_expr_unerased`]'s
-            /// `Union` arm) whose arm `reduction_arms.len()` evaluates
-            /// under its guard's overlay, taken off at `mark`.
-            Union {
-                arms: &'e [SliceExpr],
-                guard: &'e crate::flow_slice_content::SliceGuard,
-                reduction_arms: Vec<ReductionArm>,
-                holds_before: usize,
-                mark: NarrowingSnapshot,
-            },
-            /// An array literal waiting on the element it asked for last.
-            Array(Box<ArrayEvalFrame<'e>>),
-            /// A call waiting on its callee operand ([`call_stack`]).
-            CallOperand(Box<CallInFlight<'e>>),
-            /// A call waiting on a lowered argument its executor route
-            /// asked for ([`call_stack`]).
-            CallArgument(Box<CallArgumentWait<'e>>),
-        }
-        let mut waiting = vec![Waiting::Erase];
-        let mut current = expr;
         loop {
-            let mut value = match current {
-                SliceExpr::Not { operand, widen } => {
-                    waiting.push(Waiting::Not { widen: *widen });
-                    waiting.push(Waiting::Erase);
-                    current = operand;
-                    continue;
-                }
-                SliceExpr::NonNull { operand } => {
-                    waiting.push(Waiting::NonNull);
-                    waiting.push(Waiting::Erase);
-                    current = operand;
-                    continue;
-                }
-                SliceExpr::Arithmetic { operator, operands } if !operands.is_empty() => {
-                    waiting.push(Waiting::Arithmetic {
-                        operator: *operator,
-                        operands,
-                        types: Vec::with_capacity(operands.len()),
-                    });
-                    waiting.push(Waiting::Erase);
-                    current = &operands[0];
-                    continue;
-                }
-                SliceExpr::Union { arms, guard }
-                    if !arms.is_empty() && !union_branches_change_reaching_values(arms) =>
-                {
-                    let holds_before = self.holds.len();
-                    let mark = self.narrowing_snapshot();
-                    self.apply_guard_scoped(guard, true);
-                    waiting.push(Waiting::Union {
-                        arms,
-                        guard,
-                        reduction_arms: Vec::with_capacity(arms.len()),
-                        holds_before,
-                        mark,
-                    });
-                    waiting.push(Waiting::Erase);
-                    current = &arms[0];
-                    continue;
-                }
-                SliceExpr::Object { entries, offset } => {
-                    let mut frame = self.object_eval_frame(entries, *offset, false, None);
-                    match self.object_eval_step(&mut frame, None) {
-                        ObjectEvalStep::Done(value) => value,
-                        ObjectEvalStep::Descend(child) => {
-                            waiting.push(Waiting::Object(Box::new(frame)));
-                            waiting.push(Waiting::Erase);
-                            current = child;
-                            continue;
+            let current = run.current;
+            let mut value = match delivered.take() {
+                Some(value) => value,
+                None => match current {
+                    SliceExpr::Not { operand, widen } => {
+                        run.waiting.push(Waiting::Not { widen: *widen });
+                        run.waiting.push(Waiting::Erase);
+                        run.current = operand;
+                        continue;
+                    }
+                    SliceExpr::NonNull { operand } => {
+                        run.waiting.push(Waiting::NonNull);
+                        run.waiting.push(Waiting::Erase);
+                        run.current = operand;
+                        continue;
+                    }
+                    SliceExpr::Arithmetic { operator, operands } if !operands.is_empty() => {
+                        run.waiting.push(Waiting::Arithmetic {
+                            operator: *operator,
+                            operands,
+                            types: Vec::with_capacity(operands.len()),
+                        });
+                        run.waiting.push(Waiting::Erase);
+                        run.current = &operands[0];
+                        continue;
+                    }
+                    SliceExpr::Union { arms, guard }
+                        if !arms.is_empty() && !union_branches_change_reaching_values(arms) =>
+                    {
+                        let holds_before = self.holds.len();
+                        let mark = self.narrowing_snapshot();
+                        self.apply_guard_scoped(guard, true);
+                        run.waiting.push(Waiting::Union {
+                            arms,
+                            guard,
+                            reduction_arms: Vec::with_capacity(arms.len()),
+                            holds_before,
+                            mark,
+                        });
+                        run.waiting.push(Waiting::Erase);
+                        run.current = &arms[0];
+                        continue;
+                    }
+                    SliceExpr::Object { entries, offset } => {
+                        let mut frame = self.object_eval_frame(entries, *offset, false, None);
+                        match self.object_eval_step(&mut frame, None) {
+                            ObjectEvalStep::Done(value) => value,
+                            ObjectEvalStep::Descend(child) => {
+                                run.waiting.push(Waiting::Object(Box::new(frame)));
+                                run.waiting.push(Waiting::Erase);
+                                run.current = child;
+                                continue;
+                            }
                         }
                     }
-                }
-                SliceExpr::Array {
-                    elements,
-                    const_asserted,
-                } => {
-                    let mut frame = self.array_eval_frame(elements, *const_asserted, None);
-                    match self.array_eval_step(&mut frame, None) {
-                        ArrayEvalStep::Done(value) => value,
-                        ArrayEvalStep::Descend(child) => {
-                            waiting.push(Waiting::Array(Box::new(frame)));
-                            waiting.push(Waiting::Erase);
-                            current = child;
-                            continue;
+                    SliceExpr::Array {
+                        elements,
+                        const_asserted,
+                    } => {
+                        let mut frame = self.array_eval_frame(elements, *const_asserted, None);
+                        match self.array_eval_step(&mut frame, None) {
+                            ArrayEvalStep::Done(value) => value,
+                            ArrayEvalStep::Descend(child) => {
+                                run.waiting.push(Waiting::Array(Box::new(frame)));
+                                run.waiting.push(Waiting::Erase);
+                                run.current = child;
+                                continue;
+                            }
                         }
                     }
-                }
-                // EVERY call form, through the ONE call sink, from this
-                // stack: its callee operand and the lowered arguments its
-                // executor route types evaluate here ([`call_stack`]).
-                SliceExpr::Call(call, site, arguments) => {
-                    match self.begin_call(call, *site, arguments) {
-                        CallStep::Done(value) => value,
-                        CallStep::Operand(flight, operand) => {
-                            waiting.push(Waiting::CallOperand(flight));
-                            waiting.push(Waiting::Erase);
-                            current = operand;
-                            continue;
-                        }
-                        CallStep::Argument(wait) => {
-                            current = wait.lowered;
-                            waiting.push(Waiting::CallArgument(wait));
-                            waiting.push(Waiting::Erase);
-                            continue;
+                    // EVERY call form, through the ONE call sink, from this
+                    // stack: its callee operand and the lowered arguments its
+                    // executor route types evaluate here ([`call_stack`]).
+                    SliceExpr::Call(call, site, arguments) => {
+                        match self.begin_call(call, *site, arguments) {
+                            CallStep::Done(value) => value,
+                            CallStep::Operand(flight, operand) => {
+                                run.waiting.push(Waiting::CallOperand(flight));
+                                run.waiting.push(Waiting::Erase);
+                                run.current = operand;
+                                continue;
+                            }
+                            CallStep::Argument(wait) => {
+                                run.current = wait.lowered;
+                                run.waiting.push(Waiting::CallArgument(wait));
+                                run.waiting.push(Waiting::Erase);
+                                continue;
+                            }
                         }
                     }
-                }
-                other => self.eval_expr_unerased(other),
+                    // A nested function value suspends the run when the caller
+                    // evaluates nested bodies from its own stack.
+                    SliceExpr::NestedFunctionValue {
+                        function,
+                        context,
+                        has_declared_return,
+                        gap,
+                        declared_evolving_captures,
+                        extended_captures,
+                    } if suspend => {
+                        if let Some(gap) = gap {
+                            self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
+                        }
+                        return ExprProgress::Nested(NestedDemand {
+                            function,
+                            context,
+                            has_declared_return: *has_declared_return,
+                            extended_captures,
+                            declared_evolving_captures,
+                        });
+                    }
+                    other => self.eval_expr_unerased(other),
+                },
             };
             loop {
-                match waiting.pop() {
-                    None => return value,
+                match run.waiting.pop() {
+                    None => return ExprProgress::Done(value),
                     Some(Waiting::Erase) => {
                         if let Positional::Value(node) = value {
                             value = Positional::Value(
@@ -23394,13 +23277,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         };
                         types.push(node);
                         if let Some(next) = operands.get(types.len()) {
-                            waiting.push(Waiting::Arithmetic {
+                            run.waiting.push(Waiting::Arithmetic {
                                 operator,
                                 operands,
                                 types,
                             });
-                            waiting.push(Waiting::Erase);
-                            current = next;
+                            run.waiting.push(Waiting::Erase);
+                            run.current = next;
                             break;
                         }
                         value = self.finish_arithmetic(operator, &types);
@@ -23409,9 +23292,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         match self.object_eval_step(&mut frame, Some(value)) {
                             ObjectEvalStep::Done(done) => value = done,
                             ObjectEvalStep::Descend(child) => {
-                                waiting.push(Waiting::Object(frame));
-                                waiting.push(Waiting::Erase);
-                                current = child;
+                                run.waiting.push(Waiting::Object(frame));
+                                run.waiting.push(Waiting::Erase);
+                                run.current = child;
                                 break;
                             }
                         }
@@ -23431,15 +23314,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             let holds_before = self.holds.len();
                             let mark = self.narrowing_snapshot();
                             self.apply_guard_scoped(guard, false);
-                            waiting.push(Waiting::Union {
+                            run.waiting.push(Waiting::Union {
                                 arms,
                                 guard,
                                 reduction_arms,
                                 holds_before,
                                 mark,
                             });
-                            waiting.push(Waiting::Erase);
-                            current = next;
+                            run.waiting.push(Waiting::Erase);
+                            run.current = next;
                             break;
                         }
                         let (node, view) = self.reduced_union(reduction_arms);
@@ -23452,9 +23335,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         match self.array_eval_step(&mut frame, Some(value)) {
                             ArrayEvalStep::Done(done) => value = done,
                             ArrayEvalStep::Descend(child) => {
-                                waiting.push(Waiting::Array(frame));
-                                waiting.push(Waiting::Erase);
-                                current = child;
+                                run.waiting.push(Waiting::Array(frame));
+                                run.waiting.push(Waiting::Erase);
+                                run.current = child;
                                 break;
                             }
                         }
@@ -23463,9 +23346,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         match self.resume_call_operand(*flight, value) {
                             CallStep::Done(done) => value = done,
                             CallStep::Argument(wait) => {
-                                current = wait.lowered;
-                                waiting.push(Waiting::CallArgument(wait));
-                                waiting.push(Waiting::Erase);
+                                run.current = wait.lowered;
+                                run.waiting.push(Waiting::CallArgument(wait));
+                                run.waiting.push(Waiting::Erase);
                                 break;
                             }
                             CallStep::Operand(..) => {
@@ -23477,9 +23360,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         match self.resume_call_argument(*wait, value) {
                             CallStep::Done(done) => value = done,
                             CallStep::Argument(wait) => {
-                                current = wait.lowered;
-                                waiting.push(Waiting::CallArgument(wait));
-                                waiting.push(Waiting::Erase);
+                                run.current = wait.lowered;
+                                run.waiting.push(Waiting::CallArgument(wait));
+                                run.waiting.push(Waiting::Erase);
                                 break;
                             }
                             CallStep::Operand(..) => {

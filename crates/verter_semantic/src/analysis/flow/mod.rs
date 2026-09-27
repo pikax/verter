@@ -1130,6 +1130,29 @@ pub fn build_indexed_function_body_skeleton(
     prepare_function_body_skeleton(skeleton, entry)
 }
 
+/// [`build_indexed_function_body_skeleton`] for a function whose directly
+/// nested functions' bodies are at `nested_bodies`: the build never enters
+/// them, so its stack is sized from the function's own syntax, where sizing
+/// it from the whole function's text cost every enclosing function a scan
+/// of every function nested in it.
+pub fn build_indexed_function_body_skeleton_in(
+    source: &FunctionBodySource<'_, '_>,
+    source_text: &str,
+    nested_bodies: &[verter_span::Span],
+    entry: &FunctionProgramEntry,
+) -> Result<PreparedFunctionBodySkeleton, FlowBindingMapError> {
+    // The build walks the function's parameters and body.
+    let function = oxc_span::Span::new(source.anchor, source.body_span.end);
+    let nested = nested_bodies
+        .iter()
+        .map(|body| oxc_span::Span::new(body.start, body.end));
+    let skeleton =
+        verter_parser::oxc_parse::with_own_syntax_stack(source_text, function, nested, || {
+            build_body_skeleton_contained(source, Some(entry))
+        });
+    prepare_function_body_skeleton(skeleton, entry)
+}
+
 /// Resolve the authored access occurrences against one exact indexed inventory.
 /// The map is returned with the skeleton so the graph bundle can publish both.
 fn prepare_function_body_skeleton(
