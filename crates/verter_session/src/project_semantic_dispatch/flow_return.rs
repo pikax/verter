@@ -3493,6 +3493,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // from the SAME provenance mint the carrier and the evaluation
             // outcome bear — never a cache-candidate axis.
             input_basis: verter_identity::identity::InputBasisId::from_canonical(&provenance),
+            ancestry: super::flow_solve::FlowInputAncestry::default(),
             resources,
             additional_requirements: Arc::from([]),
         };
@@ -5516,6 +5517,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     input_basis: verter_identity::identity::InputBasisId::from_canonical(
                         &provenance,
                     ),
+                    ancestry: super::flow_solve::FlowInputAncestry::default(),
                     resources: super::flow_solve::FlowResourcePolicy::default(),
                     additional_requirements: Arc::from([]),
                 };
@@ -8335,16 +8337,19 @@ impl super::flow_products::FlowSemanticAlgebra for ObservedFlowAlgebra<'_> {
 
 /// The child observation includes its actual parameter and selected capture
 /// inputs. The demand's separate graph/query basis owns binding identities.
+/// The parent is named by its digest; its whole basis rides the demand's
+/// ancestry ([`super::flow_solve::FlowInputAncestry`]), which keeps the
+/// identity exact without a copy of the parent's bytes at every level.
 struct NestedFlowInputBasis<'a> {
-    parent: &'a verter_identity::identity::InputBasisId,
+    parent: verter_identity::encoding::CanonicalDigest,
     parameters: &'a [SemanticNodeId],
     captures: &'a [Vec<u8>],
 }
 
 impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
-    const DOMAIN_TAG: &'static str = "verter.session.flow.nested_inputs.v1";
+    const DOMAIN_TAG: &'static str = "verter.session.flow.nested_inputs.v2";
     fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
-        e.field_bytes(1, self.parent.canonical_bytes());
+        e.field_bytes(1, self.parent.as_bytes());
         for parameter in self.parameters {
             e.field_u64(2, parameter.0);
         }
@@ -22847,11 +22852,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
             input_basis: verter_identity::identity::InputBasisId::from_canonical(
                 &NestedFlowInputBasis {
-                    parent: &self.execution_selection.basis().input_basis,
+                    parent: self.execution_selection.basis().input_basis.digest(),
                     parameters: &params,
                     captures: &capture_basis,
                 },
             ),
+            ancestry: self
+                .execution_selection
+                .basis()
+                .ancestry
+                .with(self.execution_selection.basis().input_basis.clone()),
             resources: self.execution_selection.resources(),
             additional_requirements: Arc::from([]),
         };
@@ -25365,5 +25375,84 @@ mod narrowing_ledger_tests {
         let window = [NarrowingLedgerEntry::Cleared { root: param(0) }];
         assert!(standing_narrowings(&window).is_empty());
         assert!(standing_narrowings(&[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod nested_input_basis_tests {
+    use super::super::flow_solve::FlowInputAncestry;
+    use super::NestedFlowInputBasis;
+    use crate::semantic_query::SemanticNodeId;
+    use verter_identity::encoding::CanonicalDigest;
+    use verter_identity::identity::InputBasisId;
+
+    /// The bases of a nest `depth` levels deep, innermost last, and the
+    /// ancestry of the innermost.
+    fn nest(root: &[u8], depth: usize) -> (Vec<InputBasisId>, FlowInputAncestry) {
+        let mut bases = Vec::with_capacity(depth);
+        let mut ancestry = FlowInputAncestry::default();
+        let mut parent = CanonicalDigest::of_bytes(root);
+        for level in 0..depth {
+            let basis = InputBasisId::from_canonical(&NestedFlowInputBasis {
+                parent,
+                parameters: &[SemanticNodeId(level as u64)],
+                captures: &[],
+            });
+            if let Some(previous) = bases.last() {
+                ancestry = ancestry.with(InputBasisId::clone(previous));
+            }
+            parent = basis.digest();
+            bases.push(basis);
+        }
+        (bases, ancestry)
+    }
+
+    /// A nested evaluation's basis names its parent by digest, so its
+    /// canonical bytes are as long 1,000 levels down as one level down
+    /// (embedding the parent's bytes grew them with the nest: the square of
+    /// the nesting across it).
+    #[test]
+    fn a_nested_basis_is_one_size_at_every_level() {
+        let (bases, _) = nest(b"root", 1_000);
+        let first = bases[0].canonical_bytes().len();
+        assert!(bases
+            .iter()
+            .all(|basis| basis.canonical_bytes().len() == first));
+    }
+
+    /// The parent's whole basis rides the demand's ancestry: two ancestries
+    /// built apart are equal level by level, and one whose nest differs
+    /// above the parent is not.
+    #[test]
+    fn an_ancestry_compares_every_enclosing_basis() {
+        let (_, left) = nest(b"root", 50);
+        let (_, same) = nest(b"root", 50);
+        let (_, other_root) = nest(b"other", 50);
+        let (_, shorter) = nest(b"root", 49);
+        assert!(left == same);
+        assert!(left != other_root);
+        assert!(left != shorter);
+    }
+
+    /// An ancestry is as long as its nest and drops from a loop: 100,000
+    /// levels release on a 64 KiB thread.
+    #[test]
+    fn a_deep_ancestry_drops_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(64 << 10)
+            .spawn(|| {
+                let basis = InputBasisId::from_canonical(&NestedFlowInputBasis {
+                    parent: CanonicalDigest::of_bytes(b"root"),
+                    parameters: &[],
+                    captures: &[],
+                });
+                let ancestry = (0..100_000).fold(FlowInputAncestry::default(), |ancestry, _| {
+                    ancestry.with(InputBasisId::clone(&basis))
+                });
+                drop(ancestry);
+            })
+            .expect("spawn the dropping thread")
+            .join()
+            .expect("the ancestry drops");
     }
 }

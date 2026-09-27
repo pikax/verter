@@ -134,6 +134,7 @@ fn flow_demand_basis_for_member(
         .expect("a trivial source derives a parse identity")
         .1;
     FlowDemandBasis {
+        ancestry: Default::default(),
         graph_body: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
             canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
             function: verter_semantic::analysis::function_program::FunctionProgramKey {
