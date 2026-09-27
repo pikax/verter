@@ -191,17 +191,16 @@ the projector resolves only one Navigate hop at the payload's head. A
 published observation can therefore contain an unresolved import type, and a
 union of two spellings inside one is observable as two arms.
 
-**Related comparator defect.** The reverse case is wrong in the union
-reducer, not in the key. One spelling written in two importing units can name
-two modules; tsc 7.0.2 keeps both (`u = Math.random() ? x : y` over values of
+**One spelling from two importers.** One spelling written in two importing
+units can name two modules; tsc 7.0.2 keeps both (`u = Math.random() ? x : y` over values of
 `import("./m").G` from `src/a.ts` and `src/lib/b.ts`, with `src/m.ts` and
 `src/lib/m.ts` declaring different `G`, declares
 `u: import("./m").G | import("./lib/m").G` under every setting). The stable
-keys differ, but the structural comparator excludes the arena scope, which is
-where the carrier's importing unit lives, so `intern_ordered_union` merges the
-two arms. The ignored
-`stable_key_tests::one_spelling_from_two_importers_keeps_two_union_arms`
-reproduces it.
+keys differ, and the union reducer keeps both arms: its structural comparator
+treats the arena scope as provenance for every node kind except an import-type
+carrier, whose scope's canonical file is identity (the rest of that scope stays
+provenance). `stable_key_tests::one_spelling_from_two_importers_keeps_two_union_arms`
+and `one_spelling_from_one_importer_is_one_union_arm` pin both directions.
 
 ### Successor proposal: an indexing-time resolved-module producer
 
