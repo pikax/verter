@@ -5759,3 +5759,129 @@ fn client_capabilities_advertise_the_workspace_configuration_channel() {
          inlay-hint preferences over this channel"
     );
 }
+
+fn published_diagnostic(message: &str) -> TypeDiagnostic {
+    TypeDiagnostic {
+        message: message.into(),
+        severity: TypeDiagnosticSeverity::Error,
+        start: 0,
+        end: 1,
+        code: Some("2322".into()),
+        tags: Vec::new(),
+        related_information: Vec::new(),
+    }
+}
+
+/// A `publishDiagnostics` batch the read loop captured content for BEFORE a
+/// close cannot repopulate the cache AFTER it, nor land on the document's next
+/// incarnation.
+///
+/// Discriminating: the read loop captured the registered content under the
+/// contents lock, released it, and inserted the parsed batch afterwards, while
+/// the close forgot the cached diagnostics without fencing that admission — so
+/// a batch in flight across the close inserted an entry for a closed document
+/// that nothing would forget again (one per document path for the life of the
+/// engine), and one in flight across a close/reopen served diagnostics of the
+/// previous incarnation.
+#[tokio::test]
+async fn diagnostics_captured_before_a_close_never_outlive_it() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let path = "/w/Closing.vue.tsx";
+    let raw_uri = TsgoTypeProvider::path_to_uri(path);
+    let source = "const a: number = 'x';\n";
+    provider.open_file(path, source).await.unwrap();
+    drained_notifications(&mut stdin_rx);
+
+    // The read loop reads a batch and captures the content it parses against...
+    let in_flight = registered_content_for_uri(&*provider.contents.lock().await, &raw_uri)
+        .expect("the open document's content is registered");
+    // ...and the close completes before the batch is admitted.
+    provider.close_file(path).await.unwrap();
+    assert_eq!(
+        drained_notifications(&mut stdin_rx).len(),
+        1,
+        "one didClose"
+    );
+    assert!(
+        !admit_published_diagnostics(
+            &provider.contents,
+            &provider.diagnostics_cache,
+            &raw_uri,
+            &in_flight,
+            normalize_file_uri(&raw_uri),
+            vec![published_diagnostic("computed before the close")],
+        )
+        .await,
+        "a batch computed against a closed incarnation is refused"
+    );
+    assert!(provider.diagnostics_cache.lock().await.is_empty());
+
+    // A reopen with the SAME bytes is a new incarnation: the stale batch still
+    // cannot land on it.
+    provider.open_file(path, source).await.unwrap();
+    assert!(
+        !admit_published_diagnostics(
+            &provider.contents,
+            &provider.diagnostics_cache,
+            &raw_uri,
+            &in_flight,
+            normalize_file_uri(&raw_uri),
+            vec![published_diagnostic("computed before the close")],
+        )
+        .await,
+        "a batch computed against the previous incarnation is refused"
+    );
+    assert!(provider.diagnostics_cache.lock().await.is_empty());
+
+    // A batch read against the live incarnation is admitted, and the next
+    // close forgets it.
+    let live = registered_content_for_uri(&*provider.contents.lock().await, &raw_uri)
+        .expect("the reopened document's content is registered");
+    assert!(
+        admit_published_diagnostics(
+            &provider.contents,
+            &provider.diagnostics_cache,
+            &raw_uri,
+            &live,
+            normalize_file_uri(&raw_uri),
+            vec![published_diagnostic("current")],
+        )
+        .await
+    );
+    assert_eq!(provider.diagnostics_cache.lock().await.len(), 1);
+    provider.close_file(path).await.unwrap();
+    assert!(provider.diagnostics_cache.lock().await.is_empty());
+}
+
+/// The same fence holds for content the child was never told about: a close
+/// with no recorded open sends NO frame, releases the content and still
+/// refuses a batch captured before it.
+#[tokio::test]
+async fn diagnostics_captured_before_a_frameless_close_never_outlive_it() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let path = "/w/CachedOnly.vue.tsx";
+    let raw_uri = TsgoTypeProvider::path_to_uri(path);
+    provider
+        .load_file(path, "export const cached = 1;\n")
+        .await
+        .unwrap();
+    let in_flight = registered_content_for_uri(&*provider.contents.lock().await, &raw_uri)
+        .expect("load_file registers the content");
+    provider.close_file(path).await.unwrap();
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "a close with no recorded open sends nothing"
+    );
+    assert!(
+        !admit_published_diagnostics(
+            &provider.contents,
+            &provider.diagnostics_cache,
+            &raw_uri,
+            &in_flight,
+            normalize_file_uri(&raw_uri),
+            vec![published_diagnostic("computed before the close")],
+        )
+        .await
+    );
+    assert!(provider.diagnostics_cache.lock().await.is_empty());
+}
