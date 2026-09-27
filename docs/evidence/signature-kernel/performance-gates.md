@@ -580,11 +580,12 @@ Recorded plainly so no reader mistakes absence for a pass:
   `oxc_parser::Parser`. The scan costs about a third of the parse (1.8 ms
   against 5.8 ms for `lib.dom.d.ts`, optimized); a source short enough
   that every byte could be a level skips it. On wasm32 the engine's own
-  call stack, which nothing grows, bounds the parse: a source nesting past
-  `WASM_ENGINE_NESTING` (313 levels, from V8's 984 KiB default stack and
-  the measured 1,188 bytes of the costliest level) returns the same typed
-  diagnostic. oxc's walks over the tree run under the same containment
-  (below).
+  call stack, which nothing grows, bounds the parse under a measured
+  runtime safety profile of the engine, not a limit of the language: a
+  source nesting past `V8_DEFAULT_STACK_PROFILE` (V8's 984 KiB default
+  stack, oxc 0.151.0, the release build; 313 levels of the scan's bound)
+  returns the same typed diagnostic. oxc's walks over the tree run under
+  the same containment (below).
 
 * **A class expression raises one instance per level.** The lane's graph
   of `class { m() { return class { … } } }` nested `n` deep is linear

@@ -1909,3 +1909,248 @@ fn a_covered_walk_under_a_region_past_the_lease_does_not_reenter_the_lease() {
     assert_eq!(walked, 2);
     assert_eq!(reserved, 3, "the lease, the deeper walk, the walk under it");
 }
+
+/// The oxc syntax types a function recursing over the syntax tree takes by
+/// reference.
+const OXC_SYNTAX_TYPES: [&str; 31] = [
+    "Expression",
+    "Statement",
+    "TSType",
+    "BindingPattern",
+    "ChainElement",
+    "Argument",
+    "ArrayExpressionElement",
+    "ObjectPropertyKind",
+    "PropertyKey",
+    "AssignmentTarget",
+    "SimpleAssignmentTarget",
+    "TSTypeName",
+    "JSXElement",
+    "JSXChild",
+    "Declaration",
+    "ForStatementLeft",
+    "FunctionBody",
+    "Class",
+    "ClassElement",
+    "TSSignature",
+    "Program",
+    "BindingPatternKind",
+    "AssignmentTargetMaybeDefault",
+    "JSXExpression",
+    "TemplateLiteral",
+    "ObjectExpression",
+    "CallExpression",
+    "ArrowFunctionExpression",
+    "Function",
+    "JSXAttributeItem",
+    "TSTypeParameterInstantiation",
+];
+
+/// Whether a function's parameters take oxc syntax by reference: `&T<`,
+/// `&'a T<`, `&mut T<`, `&oxc_ast::ast::T<`.
+fn takes_oxc_syntax(parameters: &str) -> bool {
+    OXC_SYNTAX_TYPES.iter().any(|name| {
+        parameters
+            .match_indices(&format!("{name}<"))
+            .any(|(at, _)| {
+                let before = &parameters[..at];
+                if before
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    return false;
+                }
+                let mut before = before.trim_end();
+                before = before
+                    .strip_suffix("oxc_ast::ast::")
+                    .unwrap_or(before)
+                    .trim_end();
+                before = before.strip_suffix("mut").unwrap_or(before).trim_end();
+                if let Some(tick) = before.rfind('\'') {
+                    if before[tick + 1..]
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        before = before[..tick].trim_end();
+                    }
+                }
+                before.ends_with('&')
+            })
+    })
+}
+
+/// Whether `body` calls the function `name`: `name(`, `self.name(` or
+/// `Self::name(`, not a method of that name on another value.
+fn calls_itself(body: &str, name: &str) -> bool {
+    body.match_indices(name).any(|(at, _)| {
+        let after = body[at + name.len()..].trim_start();
+        if !after.starts_with('(') {
+            return false;
+        }
+        let before = &body[..at];
+        if before.ends_with("self.") || before.ends_with("Self::") {
+            return true;
+        }
+        !before
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == ':')
+    })
+}
+
+/// Every function in `code` that takes oxc syntax by reference and calls
+/// itself: its name.
+fn self_recursions_over_oxc_syntax(code: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (at, _) in code.match_indices("fn ") {
+        if code[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        let rest = &code[at + 3..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        let Some(open) = rest.find('(') else {
+            continue;
+        };
+        let mut depth = 0usize;
+        let mut close = None;
+        for (offset, c) in rest[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            continue;
+        };
+        if !takes_oxc_syntax(&rest[open..close]) {
+            continue;
+        }
+        let Some(body_open) = rest[close..].find(['{', ';']).map(|offset| close + offset) else {
+            continue;
+        };
+        if rest.as_bytes()[body_open] == b';' {
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut body_end = rest.len();
+        for (offset, c) in rest[body_open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = body_open + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if calls_itself(&rest[body_open + 1..body_end], &name) {
+            found.push(name);
+        }
+    }
+    found
+}
+
+/// Verter's own functions that recurse over oxc syntax spend native stack
+/// once per level of it, as oxc's walks do, but no containment guard sees
+/// them: they belong on explicit work stacks. The census in
+/// `hand_written_recursions.txt` lists the ones that do (a function over
+/// oxc syntax that calls itself directly; mutual recursion is not found);
+/// a new one fails here. Move it to an explicit stack, or, when its depth
+/// is bounded by something other than the source's nesting, list it with
+/// that bound. An entry that no longer recurses is removed from the list.
+#[test]
+fn hand_written_recursions_over_oxc_syntax_do_not_grow() {
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the crates directory");
+    let mut live = std::collections::BTreeSet::new();
+    let mut stack = Vec::new();
+    for entry in std::fs::read_dir(crates)
+        .expect("read the crates directory")
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "verter_bench" {
+            continue;
+        }
+        stack.push(entry.path().join("src"));
+    }
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "tests" && !name.ends_with("_tests") {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !name.ends_with(".rs")
+                || name == "tests.rs"
+                || name.ends_with("_tests.rs")
+                || name == "test_support.rs"
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read a source file");
+            let mut code = String::from_utf8_lossy(&code_only(&source)).into_owned();
+            if let Some(end) = code.find("#[cfg(test)]\nmod ") {
+                code.truncate(end);
+            }
+            let relative = path
+                .strip_prefix(crates)
+                .expect("under the crates directory")
+                .to_string_lossy()
+                .replace('\\', "/");
+            for function in self_recursions_over_oxc_syntax(&code) {
+                live.insert(format!("{relative} {function}"));
+            }
+        }
+    }
+    let recorded: std::collections::BTreeSet<String> = include_str!("hand_written_recursions.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| line.split(" #").next().unwrap_or(line).trim().to_string())
+        .collect();
+    let new: Vec<_> = live.difference(&recorded).collect();
+    let gone: Vec<_> = recorded.difference(&live).collect();
+    assert!(
+        new.is_empty() && gone.is_empty(),
+        "new recursions over oxc syntax (walk them from an explicit stack):\n{}\n\
+         listed recursions that no longer recurse (remove them from \
+         hand_written_recursions.txt):\n{}",
+        new.iter()
+            .map(|entry| entry.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        gone.iter()
+            .map(|entry| entry.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
