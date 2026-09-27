@@ -836,6 +836,36 @@ Recorded plainly so no reader mistakes absence for a pass:
   namespace-owned function). `function_program_tests.rs` →
   `descents_carry_their_hash_and_namespace_steps`.
 
+* **Nested function values evaluate from a stack of evaluators.** A
+  nested function value's signature is composed from its body's
+  evaluation by an evaluator of its own, and the evaluator evaluated
+  that body inside its own evaluation: about 53 KiB of native stack per
+  nested function, unoptimized (`eval_region_statements` 23 KiB,
+  `eval_nested_function_signature` 16 KiB, `eval_expr` 11 KiB), so 12 to
+  15 nested arrows overflowed a 1 MiB caller — wasm's fixed stack. Now
+  `eval_region` drives a stack of evaluators (`flow_return_nested.rs`): a
+  return statement whose argument reaches a nested function value
+  suspends its region (the argument's expression run and the region's
+  frames stay on their stacks); the function is prepared on the
+  evaluator that suspended, its own evaluator is pushed with its body's
+  region run, and when that completes the evaluator is popped, the
+  signature composed on its parent and the parent's region resumed with
+  it. What a nested evaluator borrows (its parameters, binder
+  environment and slice content) is owned by the drive's arena and
+  released when the evaluator is popped, and the frames around it are a
+  shared chain, so no evaluator borrows a native frame of the one
+  around it and the native stack a nest takes no longer depends on its
+  depth. A nested function value elsewhere (an initializer, a call's
+  argument) is prepared, driven and finished where it sits, its returns
+  driven from the stack again. `deep_input_tests.rs` →
+  `arrows_nested_10000_deep_answer_on_production_stacks` answers
+  TypeScript 7.0.2's `1` for `ReturnType<typeof pf> extends Function ?
+  1 : 2` over 10,000 nested arrows on a 1 MiB caller, in about 21 s
+  unoptimized; evaluating the return's nested function in place
+  overflows it. The work per nested function still grows with the
+  nest's depth where a nested evaluation's input basis keeps its
+  parent's full canonical bytes (collision-safe identity equality).
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the

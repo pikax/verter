@@ -10,6 +10,7 @@ use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SignatureKind};
 
 /// The contextual signature a function value is checked under: the type at
 /// each parameter position and the contextual return type.
+#[derive(Clone)]
 pub(super) struct ContextualSignature {
     /// The contextual signature's non-rest parameter types, in order.
     parameters: Vec<SemanticNodeId>,

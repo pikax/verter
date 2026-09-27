@@ -336,8 +336,11 @@ fn arrows_nested_10_deep_answer_on_production_stacks() {
     );
 }
 
+/// Arrow functions nested 10,000 deep: each body's return reaches the next
+/// function value, which its own evaluator evaluates from the drive's
+/// stack of evaluators (`flow_return_nested`), not inside the one around
+/// it.
 #[test]
-#[ignore = "a nested function value's body evaluates on the caller's native stack, about 53 KiB per level unoptimized"]
 fn arrows_nested_10000_deep_answer_on_production_stacks() {
     assert_eq!(
         mismatches_on_a_small_stack(arrows(DEPTH), ARROW_PROBE, "1"),
