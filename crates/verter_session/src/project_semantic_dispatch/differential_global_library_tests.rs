@@ -501,3 +501,30 @@ fn a_map_size_read_reads_as_the_checker_reads_it() {
     let failures = matrix.returns(&[("mSize", "number")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Tuples whose optional elements the `Array` wrapper reads.
+const OPTIONAL_TUPLE_WRAPPERS: &str = r##"
+export function tOptionalForEach() { return null! as Parameters<Parameters<[number?]["forEach"]>[0]>[0]; }
+export function tOptionalMap() { return null! as Parameters<Parameters<[number, string?]["map"]>[0]>[0]; }
+"##;
+
+/// A tuple's `Array` wrapper reads each optional element as the tuple's
+/// indexed access reads it: `[number?]`'s `forEach` callback takes `number |
+/// undefined` with `strictNullChecks` and `number` without it.
+#[test]
+fn a_tuple_wrapper_reads_an_optional_element_with_its_undefined() {
+    let matrix = Matrix::new(OPTIONAL_TUPLE_WRAPPERS).lib(GLOBALS_LIB);
+    let failures = matrix.nullness(&[
+        (
+            Read::Return("tOptionalForEach"),
+            "number | undefined",
+            "number",
+        ),
+        (
+            Read::Return("tOptionalMap"),
+            "string | number | undefined",
+            "string | number",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
