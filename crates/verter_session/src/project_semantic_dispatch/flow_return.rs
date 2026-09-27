@@ -9610,6 +9610,11 @@ struct RegionEvalFrame<'r> {
     /// to a `never`-returning function the lowering does not see): the
     /// checker aggregates every return there. It closes with the region.
     dead_tail: Option<Box<DeadPath>>,
+    /// The region's path died at a call to a `never`-returning function:
+    /// past it every reference reads its declared type (the checker reads a
+    /// reference past such a call as it reads one on an unreachable node),
+    /// where past an exhaustive `switch` it reads the no-matching-case edge.
+    dead_at_never_call: bool,
 }
 
 /// A statement suspended at a nested function value in its expression.
@@ -19817,9 +19822,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                         Err(_) => self.executed_walk.aborted = true,
                     }
-                    run.frames.pop();
-                    if run.frames.is_empty() {
+                    let finished = run.frames.pop().expect("the region evaluated");
+                    let Some(enclosing) = run.frames.last_mut() else {
                         return RegionProgress::Done(outcome);
+                    };
+                    // A block statement whose path died at a `never`-returning
+                    // call ends the enclosing path there too.
+                    if !outcome.1
+                        && finished.dead_at_never_call
+                        && matches!(enclosing.entered, Some(Entered::Block(_)))
+                    {
+                        enclosing.dead_at_never_call = true;
                     }
                     delivered = Some(RegionDelivery::Block(outcome));
                 }
@@ -19842,6 +19855,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             entered: None,
             pending: None,
             dead_tail: None,
+            dead_at_never_call: false,
         }
     }
 
@@ -20168,7 +20182,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 )
                 && frame.dead_tail.is_none()
             {
-                frame.dead_tail = Some(Box::new(self.open_dead_path(false)));
+                let declared_reads = frame.dead_at_never_call;
+                frame.dead_tail = Some(Box::new(self.open_dead_path(declared_reads)));
             }
             self.executed_walk.statements_executed =
                 self.executed_walk.statements_executed.saturating_add(1);
@@ -21132,6 +21147,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 crate::flow_slice_content::SliceStatement::CallEffect { callee, site } => {
                     if !self.settle_call_effect(callee, *site) {
                         path_alive = false;
+                        frame.dead_at_never_call = true;
                     }
                 }
                 crate::flow_slice_content::SliceStatement::Assertion { subject, target } => {
@@ -21158,6 +21174,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         CalleeStatementEffect::Resolved(node) => {
                             if !self.settle_effects_signature(Some(node), *site) {
                                 path_alive = false;
+                                frame.dead_at_never_call = true;
                             }
                         }
                         CalleeStatementEffect::Assertion { parameter, target } => {

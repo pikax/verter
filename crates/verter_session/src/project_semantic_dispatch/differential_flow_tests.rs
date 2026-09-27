@@ -609,6 +609,7 @@ export function nNarrowed(y: string | number) { if (typeof y === "string") { fai
 export function nMethodNarrowed(y: string | number) { if (typeof y === "string") { o.fail(); return y; } return true; }
 export function nLocal(y: string | number) { let w = y; fail(); return w; }
 export function nNarrowLet(y: string | number) { let w: string | number = 1; fail(); return w; }
+export function nStop(x: string | number, stop: { fail(): never }) { if (typeof x === "string") { stop.fail(); return x; } return 1; }
 "##;
 
 /// The checker aggregates every `return` in the body, the ones past a path
@@ -645,16 +646,8 @@ fn returns_past_a_path_the_checker_proves_dead_contribute() {
         ("nNarrowed", "string | number | true"),
         ("nLocal", "string | number"),
         ("nNarrowLet", "string | number"),
+        ("nMethodNarrowed", "string | number | true"),
+        ("nStop", "string | number"),
     ]);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-/// A reference narrowed before a call to a `never`-returning METHOD reads
-/// its declared type past the call, as past a `never`-returning function.
-#[test]
-#[ignore = "a reference narrowed before a never-returning method call reads its narrowed type past the call"]
-fn a_reference_past_a_never_returning_method_call_reads_its_declared_type() {
-    let matrix = Matrix::new(PAST_DEAD_PATH);
-    let failures = matrix.returns(&[("nMethodNarrowed", "string | number | true")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
