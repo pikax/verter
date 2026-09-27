@@ -1014,20 +1014,6 @@ async fn deliver_document_sync(
     Ok(mode)
 }
 
-/// Deliver a `didClose` for `path` and retire the ledger entry ONLY once the
-/// transport has accepted the frame.
-///
-/// A refused `didClose` leaves the entry in place, which is the accurate record:
-/// the child still holds the document open, so the next sync must keep treating it
-/// as open rather than replaying a `didOpen` over a live buffer.
-///
-/// **The ledger owns this choice too.** `versions` is the open set, exactly as it
-/// is for [`deliver_document_sync`]: a path with no row is a document the child
-/// does not hold — its publication was refused, or it has already been retracted.
-/// A `didClose` for such a path is not a far-side no-op; tsgo PANICS with
-/// "overlay not found for closed file", the engine dies, and the restart re-reads
-/// the whole workspace while every open document waits. So a close with no
-/// recorded open sends NO frame and only releases the local content cache.
 /// A closed document's cached diagnostics are stale the moment it closes
 /// (the next open republishes), so the cache forgets them; without this the
 /// cache keeps one entry per document ever opened for the life of the
@@ -1044,10 +1030,28 @@ async fn forget_cached_diagnostics(
         .retain(|uri, _| normalize_file_uri(uri) != closed);
 }
 
+/// Deliver a `didClose` for `path` and retire the ledger entry ONLY once the
+/// transport has accepted the frame.
+///
+/// A refused `didClose` leaves the entry in place, which is the accurate record:
+/// the child still holds the document open, so the next sync must keep treating it
+/// as open rather than replaying a `didOpen` over a live buffer.
+///
+/// **The ledger owns this choice too.** `versions` is the open set, exactly as it
+/// is for [`deliver_document_sync`]: a path with no row is a document the child
+/// does not hold — its publication was refused, or it has already been retracted.
+/// A `didClose` for such a path is not a far-side no-op; tsgo PANICS with
+/// "overlay not found for closed file", the engine dies, and the restart re-reads
+/// the whole workspace while every open document waits. So a close with no
+/// recorded open sends NO frame and only releases the local content cache.
+///
+/// Every close — delivered, frameless or refused — forgets the document's cached
+/// diagnostics (see [`forget_cached_diagnostics`]).
 async fn deliver_document_close(
     transport: &LspTransport,
     versions: &Mutex<HashMap<String, i32>>,
     contents: &Mutex<HashMap<String, Arc<str>>>,
+    diagnostics_cache: &Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
     path: &str,
     priority: ProviderPriority,
 ) -> Result<(), TypeProviderError> {
@@ -1056,6 +1060,10 @@ async fn deliver_document_close(
     let mut contents_guard = contents.lock().await;
     // ONE document identity for BOTH ledger maps — see [`contents_key`].
     let document_key = contents_key(path);
+    // Forgotten while the contents lock is held through the content's
+    // retirement below, so no diagnostics admission can land in between (see
+    // [`admit_diagnostics_for_incarnation`]).
+    forget_cached_diagnostics(diagnostics_cache, path).await;
 
     if !versions_guard.contains_key(&document_key) {
         contents_guard.remove(&document_key);
@@ -1253,29 +1261,13 @@ async fn read_loop(
                         // match our path_to_uri keys (literal colon, original case).
                         let uri = normalize_file_uri(raw_uri);
                         // Look up the file content so we can resolve LSP positions
-                        // to byte offsets. The content cache is keyed by file path, so
-                        // convert the URI first; on a case-insensitive filesystem
-                        // (Windows / default macOS) fall back to a case-folded match so
-                        // a case-variant key still resolves.
-                        let content = {
-                            let path = uri_to_file_path(raw_uri);
-                            let cache = contents_cache.lock().await;
-                            // Exact match first, then — only on a case-insensitive
-                            // filesystem — a folded match through the single shared
-                            // FS-identity policy (`verter_span::path`), so the case
-                            // policy never diverges per OS at this call site.
-                            cache.get(&path).cloned().or_else(|| {
-                                if verter_span::path::fs_is_case_insensitive() {
-                                    cache
-                                        .iter()
-                                        .find(|(k, _)| verter_span::path::fs_paths_equal(k, &path))
-                                        .map(|(_, v)| v.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                        };
-                        if let Some(content) = content.as_deref() {
+                        // to byte offsets. The batch is admitted only if this
+                        // incarnation is still registered once it is parsed (see
+                        // `admit_diagnostics_for_incarnation`).
+                        let content =
+                            registered_content_for_uri(&*contents_cache.lock().await, raw_uri);
+                        if let Some(incarnation) = content {
+                            let content = incarnation.as_ref();
                             let diag_file = uri_to_file_path(raw_uri);
                             // One index for the whole publish batch: every
                             // diagnostic's start, end and related spans convert
@@ -1301,7 +1293,15 @@ async fn read_loop(
                                 uri,
                                 diags.len()
                             );
-                            diagnostics_cache.lock().await.insert(uri, diags);
+                            admit_published_diagnostics(
+                                &contents_cache,
+                                &diagnostics_cache,
+                                raw_uri,
+                                &incarnation,
+                                uri,
+                                diags,
+                            )
+                            .await;
                         } else {
                             // File not in our cache (tsconfig, node_modules, etc.) — skip
                             tracing::trace!(
@@ -1324,6 +1324,81 @@ async fn read_loop(
             }
         }
     }
+}
+
+/// The content registered for the document the engine's `raw_uri` names.
+///
+/// The content cache is keyed by file path, so the URI is converted first; on a
+/// case-insensitive filesystem (Windows / default macOS) a case-variant key still
+/// resolves: exact match first, then a folded match through the single shared
+/// FS-identity policy (`verter_span::path`), so the case policy never diverges
+/// per OS at this call site.
+fn registered_content_for_uri(
+    cache: &HashMap<String, Arc<str>>,
+    raw_uri: &str,
+) -> Option<Arc<str>> {
+    let path = uri_to_file_path(raw_uri);
+    cache.get(&path).cloned().or_else(|| {
+        if verter_span::path::fs_is_case_insensitive() {
+            cache
+                .iter()
+                .find(|(k, _)| verter_span::path::fs_paths_equal(k, &path))
+                .map(|(_, v)| v.clone())
+        } else {
+            None
+        }
+    })
+}
+
+/// Cache a `publishDiagnostics` batch computed against `incarnation`, the
+/// content registered for `raw_uri` when the batch was read — ONLY while that
+/// incarnation is still the registered one. Says whether it was cached.
+async fn admit_published_diagnostics(
+    contents_cache: &Mutex<HashMap<String, Arc<str>>>,
+    diagnostics_cache: &Mutex<HashMap<String, Vec<TypeDiagnostic>>>,
+    raw_uri: &str,
+    incarnation: &Arc<str>,
+    uri: String,
+    diagnostics: Vec<TypeDiagnostic>,
+) -> bool {
+    admit_diagnostics_for_incarnation(
+        contents_cache,
+        diagnostics_cache,
+        |contents| registered_content_for_uri(contents, raw_uri),
+        incarnation,
+        uri,
+        diagnostics,
+    )
+    .await
+}
+
+/// The diagnostics-admission fence shared by the push and pull paths.
+///
+/// Every sync registers a fresh content `Arc` and every close retires it, so
+/// the registered `Arc` IS the document's incarnation. The identity check and
+/// the insertion hold the contents lock, which [`deliver_document_close`] holds
+/// from forgetting the document's diagnostics through retiring its content. A
+/// batch read before a close therefore either lands first and is forgotten by
+/// it, or finds its incarnation retired (or replaced by a reopen) and is
+/// dropped: it can never repopulate the cache for a closed document, nor serve
+/// the previous incarnation's diagnostics after a reopen. Checking the content
+/// when the batch is read and inserting after releasing the lock — what the
+/// read loop did — leaves exactly that window open.
+async fn admit_diagnostics_for_incarnation(
+    contents_cache: &Mutex<HashMap<String, Arc<str>>>,
+    diagnostics_cache: &Mutex<HashMap<String, Vec<TypeDiagnostic>>>,
+    registered: impl FnOnce(&HashMap<String, Arc<str>>) -> Option<Arc<str>>,
+    incarnation: &Arc<str>,
+    uri: String,
+    diagnostics: Vec<TypeDiagnostic>,
+) -> bool {
+    let contents = contents_cache.lock().await;
+    if !registered(&contents).is_some_and(|current| Arc::ptr_eq(&current, incarnation)) {
+        return false;
+    }
+    diagnostics_cache.lock().await.insert(uri, diagnostics);
+    drop(contents);
+    true
 }
 
 /// Parse a single LSP Diagnostic JSON value into a `TypeDiagnostic`.
@@ -2430,10 +2505,19 @@ impl TsgoTypeProvider {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        self.diagnostics_cache
-            .lock()
-            .await
-            .insert(normalize_file_uri(&uri), diagnostics.clone());
+        // Cached under the same incarnation fence as pushed batches: a pull
+        // answered across a close must not outlive it.
+        if let Some(incarnation) = content.as_ref() {
+            admit_diagnostics_for_incarnation(
+                &self.contents,
+                &self.diagnostics_cache,
+                |contents| contents.get(&contents_key(path)).cloned(),
+                incarnation,
+                normalize_file_uri(&uri),
+                diagnostics.clone(),
+            )
+            .await;
+        }
         Ok(diagnostics)
     }
 
@@ -2502,11 +2586,11 @@ impl TsgoTypeProvider {
         let contents_cache = Arc::clone(&self.contents);
         let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
         Box::pin(async move {
-            forget_cached_diagnostics(&diagnostics_cache, &path_owned).await;
             deliver_document_close(
                 &transport,
                 &versions,
                 &contents_cache,
+                &diagnostics_cache,
                 &path_owned,
                 priority,
             )
@@ -2804,11 +2888,11 @@ impl TypeProvider for TsgoTypeProvider {
                 "tsgo_close_file",
                 format!("path={} uri={}", path_owned, uri),
                 async {
-                    forget_cached_diagnostics(&diagnostics_cache, &path_owned).await;
                     deliver_document_close(
                         &transport,
                         &versions,
                         &contents_cache,
+                        &diagnostics_cache,
                         &path_owned,
                         ProviderPriority::Interactive,
                     )
