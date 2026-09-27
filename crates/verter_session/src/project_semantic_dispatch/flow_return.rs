@@ -7080,7 +7080,7 @@ fn slice_expr_reads_frame(expr: &crate::flow_slice_content::SliceExpr) -> bool {
                 }
         }
         SliceExpr::Object { entries, .. } => entries.iter().any(|entry| match entry {
-            SliceObjectEntry::Spread { source } => slice_expr_reads_frame(source),
+            SliceObjectEntry::Spread { source, .. } => slice_expr_reads_frame(source),
             SliceObjectEntry::Member(member) => slice_expr_reads_frame(&member.value),
         }),
         SliceExpr::Array { elements, .. } => elements.iter().any(|element| match element {
@@ -7155,7 +7155,7 @@ fn expression_effect_tree(
             SliceExpr::Object { entries, .. } => {
                 for entry in entries.iter() {
                     match entry {
-                        SliceObjectEntry::Spread { source } => children.push(source),
+                        SliceObjectEntry::Spread { source, .. } => children.push(source),
                         SliceObjectEntry::Member(member) => {
                             if let SliceObjectKey::Computed { value, .. } = &member.key {
                                 children.push(value);
@@ -9408,9 +9408,10 @@ struct ObjectEvalFrame<'e> {
 /// meanwhile.
 enum ObjectEvalAwait<'e> {
     Nothing,
-    /// A spread's source.
+    /// A spread's source, and whether its properties copy `readonly`.
     Spread {
         holds_before: usize,
+        readonly: bool,
     },
     /// A data member's value.
     Value {
@@ -9663,7 +9664,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if let Some(outcome) = delivered {
             match std::mem::replace(&mut frame.awaiting, ObjectEvalAwait::Nothing) {
                 ObjectEvalAwait::Nothing => unreachable!("an outcome delivered to no request"),
-                ObjectEvalAwait::Spread { holds_before } => {
+                ObjectEvalAwait::Spread {
+                    holds_before,
+                    readonly,
+                } => {
                     self.holds.truncate(holds_before);
                     let Positional::Value(operand) = outcome else {
                         return self.object_eval_abandon(frame);
@@ -9676,11 +9680,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             )
                         },
                     ));
-                    frame
-                        .effects
-                        .push(crate::semantic_query::ObjectConstructionEffect::Spread(
-                            operand,
-                        ));
+                    // A const context copies the source's properties
+                    // `readonly`, which a spread's own copy drops: they enter
+                    // as the literal's own readonly properties.
+                    match readonly.then(|| self.readonly_spread_members(operand)) {
+                        Some(Some(members)) => {
+                            frame.effects.extend(members.iter().map(
+                                super::object_spread_program_lowering::direct_effect_from_member,
+                            ))
+                        }
+                        _ => frame.effects.push(
+                            crate::semantic_query::ObjectConstructionEffect::Spread(operand),
+                        ),
+                    }
                 }
                 ObjectEvalAwait::Value {
                     member,
@@ -9753,7 +9765,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
             let member = match entry {
-                crate::flow_slice_content::SliceObjectEntry::Spread { source } => {
+                crate::flow_slice_content::SliceObjectEntry::Spread { source, readonly } => {
                     // A spread SOURCE this frame cannot evaluate is not a
                     // fact about ONE member — it is a fact about the
                     // surface's KEY SET, and an object surface has no way
@@ -9771,6 +9783,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // member either, so it fails the literal closed.
                     frame.awaiting = ObjectEvalAwait::Spread {
                         holds_before: self.holds.len(),
+                        readonly: *readonly,
                     };
                     return ObjectEvalStep::Descend(source);
                 }
@@ -9930,6 +9943,46 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
     /// An object literal failing closed: its receiver given back, and the
     /// literal the unmodelled position.
+    /// A const-context spread's source properties, each `readonly`
+    /// (`getSpreadType` under `inConstContext`). `None` for a source that
+    /// is no object surface of properties alone, which keeps the spread
+    /// behind the typed expression gap.
+    fn readonly_spread_members(
+        &mut self,
+        operand: SemanticNodeId,
+    ) -> Option<Vec<crate::semantic_query::SurfaceMember>> {
+        let resolved = match self.dispatch.unwrap_identity_carrier_for_relation(operand) {
+            super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
+            super::relation::IdentityCarrierUnwrap::Unresolvable => operand,
+        };
+        let surface = match self.dispatch.graph().node_data(resolved).as_deref() {
+            Some(SemanticNodeData::Object(surface))
+                if surface.index_signatures.is_empty()
+                    && surface.call_signatures.is_empty()
+                    && surface.construct_signatures.is_empty() =>
+            {
+                surface.clone()
+            }
+            _ => {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::UnmodeledExpression,
+                ));
+                return None;
+            }
+        };
+        Some(
+            surface
+                .positive_members()
+                .iter()
+                .map(|member| crate::semantic_query::SurfaceMember {
+                    readonly: true,
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::SpreadTainted,
+                    ..member.clone()
+                })
+                .collect(),
+        )
+    }
+
     fn object_eval_abandon<'e>(&mut self, frame: &mut ObjectEvalFrame<'e>) -> ObjectEvalStep<'e> {
         self.receiver = frame
             .enclosing_receiver

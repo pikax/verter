@@ -1132,6 +1132,14 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "3ad9839b4051425accfd869e7414c75a56b798c9a9e66901fca444583151b9cb",
     ),
     (
+        "B03_as_const_call",
+        "0c6c96908cd1fd03ecde940f14c1d72ef317a12842f2a0d11d5411e8db90eebf",
+    ),
+    (
+        "B04_as_const_spread_only",
+        "e56087c67a873bbeed1842b47bc7fda4189bed7d5d327447084d73a24a4b430b",
+    ),
+    (
         "B05_satisfies_object",
         "ce1fe7fb18011f8f6b005f043d99849dd54574c7e743b943280db5346919c674",
     ),
@@ -1150,6 +1158,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "B09_numeric_key_ident",
         "11944c4c0aaa48a63a2c6828de3b8f5b924dda5229f16550138529221680b94d",
+    ),
+    (
+        "B10_as_const_ident",
+        "c6bf05a6989852f0195adc0c13a71f73964a60c0d7cbb9f601936785c9b99275",
     ),
     (
         "C01_intersection_clean",
@@ -3864,15 +3876,15 @@ mod corpus_suite {
             ),
             (
                 "B03_as_const_call",
-                "checker prints `{ readonly label: string; readonly n: 1; }`; the renderer prints `ObjectSpreadProgram`; the composed surface carries `readonly: false` on the spread-tainted `label` — the KnownOwed divergence itself",
+                "checker prints `{ readonly label: string; readonly n: 1; }`; the renderer prints `ObjectSpreadProgram` — the semantic comparison composes the program through the public spread-projection consumer",
             ),
             (
                 "B04_as_const_spread_only",
-                "checker prints `{ readonly label: string; }`; the renderer prints `ObjectSpreadProgram`; the composed surface carries `readonly: false` — the KnownOwed divergence itself",
+                "checker prints `{ readonly label: string; }`; the renderer prints `ObjectSpreadProgram` — the semantic comparison composes the program through the public spread-projection consumer",
             ),
             (
                 "B10_as_const_ident",
-                "checker prints `{ readonly label: string; readonly n: 1; }`; the renderer prints `ObjectSpreadProgram`; the composed surface carries `readonly: false` on the spread-tainted `label` — the KnownOwed divergence itself",
+                "checker prints `{ readonly label: string; readonly n: 1; }`; the renderer prints `ObjectSpreadProgram` — the semantic comparison composes the program through the public spread-projection consumer",
             ),
             (
                 "E03_spread_array",
@@ -5430,13 +5442,6 @@ const OPEN_DEBTS: &[&str] = &[
     "G08_emits_undeclared_spread",
     "E01_spread_any",
     "E03_spread_array",
-    // ── `as const` SPREAD MODIFIER LOSS (D14 deep pins) ─────────────────
-    // The enclosing `as const` reaches the fresh members but is lost on
-    // the spread-tainted members; the full-depth pins flip when the
-    // spread composition applies the modifier.
-    "B03_as_const_call",
-    "B04_as_const_spread_only",
-    "B10_as_const_ident",
     // ── NARROWING ────────────────────────────────────────────────────
     "N55_in_operator_nonliteral_key",
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
@@ -5554,8 +5559,10 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // matching, 6 parked. The return join's object literals take the
     // checker's union normal-form cross members, so X10 and X27 publish the
     // checker's type, degraded only by the `type: null` their `T |
-    // undefined` members take: 84 matching, 4 parked.
-    (Owner::U6ValueInference, 93, 84, 4),
+    // undefined` members take: 84 matching, 4 parked. A const context
+    // copies a spread's members `readonly`, so B03, B04 and B10 match the
+    // checker: 87 matching, 1 parked.
+    (Owner::U6ValueInference, 93, 87, 1),
     // Loops iterate to the checker's fixed point: D05's return-bearing loop
     // is the substrate's, and the N52–N54 downstream narrows and X82's
     // loop break crossing an abrupt finally match the checker. A capture

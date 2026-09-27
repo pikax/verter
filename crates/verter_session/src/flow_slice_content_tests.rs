@@ -4501,7 +4501,8 @@ fn object_return_lowers_a_spread_entry_structurally() {
             node.body.statements
         );
     };
-    let [SliceObjectEntry::Spread { source }, SliceObjectEntry::Member(member)] = entries.as_ref()
+    let [SliceObjectEntry::Spread { source, .. }, SliceObjectEntry::Member(member)] =
+        entries.as_ref()
     else {
         panic!("the spread entry precedes the direct member in source order: {entries:?}");
     };
@@ -4555,7 +4556,7 @@ fn member_demand_selects_the_spread_source_and_elides_the_unrelated_sibling() {
             node.body.statements
         );
     };
-    let [SliceObjectEntry::Spread { source: spread }, SliceObjectEntry::Member(member)] =
+    let [SliceObjectEntry::Spread { source: spread, .. }, SliceObjectEntry::Member(member)] =
         entries.as_ref()
     else {
         panic!("the spread entry precedes the direct member: {entries:?}");
@@ -4584,7 +4585,7 @@ fn member_demand_selects_the_spread_source_and_elides_the_unrelated_sibling() {
             node.body.statements
         );
     };
-    let [SliceObjectEntry::Spread { source: spread }, SliceObjectEntry::Member(member)] =
+    let [SliceObjectEntry::Spread { source: spread, .. }, SliceObjectEntry::Member(member)] =
         entries.as_ref()
     else {
         panic!("the spread entry precedes the direct member: {entries:?}");
@@ -4633,7 +4634,8 @@ fn object_return_spread_of_a_frame_binding_reads_the_frame_binding() {
             node.body.statements
         );
     };
-    let [SliceObjectEntry::Spread { source }, SliceObjectEntry::Member(member)] = entries.as_ref()
+    let [SliceObjectEntry::Spread { source, .. }, SliceObjectEntry::Member(member)] =
+        entries.as_ref()
     else {
         panic!("the spread entry precedes the direct member in source order: {entries:?}");
     };

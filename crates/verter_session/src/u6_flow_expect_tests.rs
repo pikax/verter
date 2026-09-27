@@ -4578,24 +4578,23 @@ mod expectation_controls {
                 );
             },
         );
-        // The `readonly` clause on B03's program — the recorded
-        // KnownOwed divergence is exactly this clause.
+        // The `readonly` clause on B03's program: the const context copies
+        // the spread-tainted member `readonly` beside the literal's own.
         with_flow_node(
             "function base() { return { label: \"x\" } }\nfunction makeProps() { return { \
              ...base(), n: 1 } as const }",
             "makeProps",
             |dispatch, node| {
                 assert!(
-                    accepts(dispatch, node, "{ label: string; readonly n: 1; }"),
-                    "precondition: the composed facts accept their exact print (label is NOT \
-                     readonly, n IS) — measured {}",
+                    accepts(dispatch, node, "{ readonly label: string; readonly n: 1; }"),
+                    "precondition: the composed facts accept their exact print (label and n \
+                     are both readonly) — measured {}",
                     render_node(dispatch, node, 0)
                 );
                 assert!(
-                    !accepts(dispatch, node, "{ readonly label: string; readonly n: 1; }"),
-                    "the `as const` readonly the spread-tainted member loses must be REJECTED — \
-                     this is B03's recorded divergence, so a match here means the surface was \
-                     repaired and the row needs re-pinning"
+                    !accepts(dispatch, node, "{ label: string; readonly n: 1; }"),
+                    "a `readonly` modifier the composed fact carries must not be dropped — the \
+                     readonly clause"
                 );
             },
         );

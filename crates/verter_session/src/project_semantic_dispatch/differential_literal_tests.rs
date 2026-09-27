@@ -136,6 +136,7 @@ export function cSpreadConst() { const base = { a: 1 } as const; return { ...bas
 export function cSpreadParam(o: { a: string }) { return { ...o, b: 1 }; }
 export function cSpreadOverride(o: { a: string }) { return { ...o, a: 1 }; }
 export function cSpreadOptional(o: { a?: string }) { return { ...o }; }
+export function cSpreadConstParam(o: { a: string; c?: number }) { return { ...o, b: 2 } as const; }
 export function cArrSpread() { const t = [1, 2] as const; return [...t, 3]; }
 export function cArrSpreadConst() { const t = [1, 2] as const; return [...t, 3] as const; }
 export function cBool() { return true as const; }
@@ -230,17 +231,18 @@ fn an_object_spread_of_a_const_object_is_its_merged_object() {
 }
 
 /// `{ ...base, b: 2 } as const` is `{ readonly a: 1; readonly b: 2; }`: a
-/// spread in a const context copies its source's properties `readonly`.
-/// Wrong-but-clean: the lane keeps the spread properties mutable.
-///
-/// What the lane gives:
-/// - `cSpreadConst`: the checker answers `{ readonly a: 1; readonly b: 2; }`;
-///   the lane measured `{ a: 1; readonly b: 2; }`.
+/// spread in a const context copies its source's properties `readonly`, an
+/// optional one staying optional.
 #[test]
-#[ignore = "a spread in a const context copies its source's properties readonly"]
-fn wrong_clean_a_const_spread_copies_its_properties_readonly() {
+fn a_const_spread_copies_its_properties_readonly() {
     let matrix = Matrix::new(AS_CONST);
-    let failures = matrix.returns(&[("cSpreadConst", "{ readonly a: 1; readonly b: 2; }")]);
+    let failures = matrix.returns(&[
+        ("cSpreadConst", "{ readonly a: 1; readonly b: 2; }"),
+        (
+            "cSpreadConstParam",
+            "{ readonly a: string; readonly c?: number; readonly b: 2; }",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

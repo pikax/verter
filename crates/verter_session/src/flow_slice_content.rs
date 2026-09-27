@@ -1621,7 +1621,7 @@ impl SliceExpr {
                                     take(value, out);
                                 }
                             }
-                            SliceObjectEntry::Spread { source } => take(source, out),
+                            SliceObjectEntry::Spread { source, .. } => take(source, out),
                         }
                     }
                 }
@@ -2859,6 +2859,9 @@ pub enum SliceObjectEntry {
     Spread {
         /// The spread source's lowered value.
         source: Box<SliceExpr>,
+        /// Whether the literal is in a const context, which copies the
+        /// source's properties `readonly`.
+        readonly: bool,
     },
 }
 
@@ -16143,6 +16146,7 @@ impl<'a> Lowerer<'a> {
                 ObjectAwait::Nothing => unreachable!("a value delivered to no request"),
                 ObjectAwait::Spread => frame.entries.push(SliceObjectEntry::Spread {
                     source: Box::new(value),
+                    readonly: frame.policy == ObjectMemberPolicy::ConstAssert,
                 }),
                 ObjectAwait::Key {
                     value: value_expression,
@@ -16184,6 +16188,7 @@ impl<'a> Lowerer<'a> {
                     self.scan_unmodeled_position_effects(source);
                     frame.entries.push(SliceObjectEntry::Spread {
                         source: Box::new(SliceExpr::Elided),
+                        readonly: frame.policy == ObjectMemberPolicy::ConstAssert,
                     });
                     continue;
                 }

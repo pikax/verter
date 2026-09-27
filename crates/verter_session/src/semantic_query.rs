@@ -4172,7 +4172,9 @@ pub struct SurfaceMember {
     /// index-signature checking, union relation, and signature relation ignore
     /// it. `NonLiteral` for every annotation / declaration / synthesized
     /// origin; only direct object-literal materialization mints `FreshOwn`,
-    /// and only the shared spread materializer mints `SpreadTainted`.
+    /// and only a spread's copy of its source (the shared spread
+    /// materializer, and a const-context spread's readonly copy) mints
+    /// `SpreadTainted`.
     pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
 }
 

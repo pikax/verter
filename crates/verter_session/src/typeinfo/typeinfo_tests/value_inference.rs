@@ -399,17 +399,12 @@ export type TOpenComputed = ReturnType<typeof mOpenComputed>;
         as_const["n"].readonly,
         "and marks the literal's own member `readonly`"
     );
-    // KNOWN DIVERGENCE, asserted so it cannot drift unnoticed: the checker
-    // marks the SPREAD-contributed member `readonly` too, and this
-    // substrate does not — the spread program merges the source's members
-    // with the source's own modifiers. That is the existing
-    // spread-path `readonly` gap reached by one more shape, not a new
-    // class; the member set and every member TYPE are exact.
+    // The const context copies the SPREAD-contributed member `readonly`
+    // too, as the checker does.
     assert!(
-        !as_const["label"].readonly,
-        "the spread-contributed member does NOT yet take the enclosing `as const`'s \
-         `readonly` (checker: `readonly label: string`) — flip this assertion when the \
-         spread path carries the modifier"
+        as_const["label"].readonly,
+        "the spread-contributed member takes the enclosing `as const`'s `readonly` \
+         (checker: `readonly label: string`)"
     );
 
     let as_const_only = object_props(&resolve("TAsConstOnly"));
