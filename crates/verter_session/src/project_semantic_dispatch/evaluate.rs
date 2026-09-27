@@ -453,6 +453,11 @@ struct CompositeReduction {
     next: usize,
     views: Vec<SemanticNodeId>,
     named_unions: Vec<(SemanticNodeId, Vec<SemanticNodeId>)>,
+    /// Whether the result keeps the names the checker prints as a union's
+    /// origin (`U0 | 2`): only at the altitude a type is printed at. A
+    /// demand that resolves declarations reads the type set itself (`0 |
+    /// 1 | 2`), which is what every member a consumer reads must be.
+    keep_origin: bool,
     waiting: Option<ArmWait>,
     /// The typed completeness of the demands the reduction read: a name
     /// whose demand did not complete leaves the composite as written, and
@@ -2143,7 +2148,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         node: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
-        let reduction = self.begin_composite(node)?;
+        let reduction = self.begin_composite(node, false)?;
         match self.drive_structural_fact_demands(DemandFrame::Composite(reduction)) {
             DrivenRoot::Composite(reduced) => reduced,
             DrivenRoot::Demand(_) => unreachable!("a composite root finishes as a composite"),
@@ -2191,7 +2196,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     if composite.is_none() {
                         // A chain that did not settle is not reduced.
                         let started = if settled.exit_reasons.is_none() {
-                            let started = self.begin_composite(settled.n);
+                            let started =
+                                self.begin_composite(settled.n, !settled.resolve_declaration_refs);
                             if started.is_none()
                                 && self.carrier_normalizing.borrow().contains(&settled.n)
                             {
@@ -2336,7 +2342,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// arms stays as written — the re-entry reads the same
     /// `carrier_normalizing` record the carrier normalizer keeps, never a
     /// depth limit). A started reduction is on that record until it is done.
-    fn begin_composite(&self, node: SemanticNodeId) -> Option<CompositeReduction> {
+    fn begin_composite(
+        &self,
+        node: SemanticNodeId,
+        keep_origin: bool,
+    ) -> Option<CompositeReduction> {
         use crate::semantic_query::composite::CompositeOriginCategory as Category;
         let (arms, is_union) = match self.graph().node_data(node)?.as_ref() {
             SemanticNodeData::Union(members) => (members.members_arc(), true),
@@ -2365,6 +2375,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             next: 0,
             views: Vec::with_capacity(capacity),
             named_unions: Vec::new(),
+            keep_origin,
             waiting: None,
             completeness: ResultCompleteness::Complete,
         })
@@ -2518,6 +2529,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => vec![reduced],
         };
+        if !reduction.keep_origin {
+            return (reduced != node).then_some(reduced);
+        }
         // The checker's union origin: the named unions, when they do not
         // overlap and the reduction kept every member they name.
         let in_named = |member: &SemanticNodeId| {
