@@ -7893,6 +7893,24 @@ fn value_type_derives_from_a_call(expr: &Expression<'_>, source: &str) -> bool {
         }
     }
 
+    // A member read, a parenthesis or a non-null assertion is what its
+    // object is (the probe walks nothing else of it): the object answers,
+    // read down the chain here. A member of a call (`b.m().m().m`, the
+    // callee of a receiver chain) answers at once, not after a
+    // containment scan of the whole chain's text for every link.
+    let mut expr = expr;
+    loop {
+        expr = match expr {
+            Expression::StaticMemberExpression(member) => &member.object,
+            Expression::PrivateFieldExpression(member) => &member.object,
+            Expression::ParenthesizedExpression(paren) => &paren.expression,
+            Expression::TSNonNullExpression(non_null) => &non_null.expression,
+            Expression::CallExpression(_)
+            | Expression::NewExpression(_)
+            | Expression::TaggedTemplateExpression(_) => return true,
+            _ => break,
+        };
+    }
     let mut probe = CallProbe::default();
     verter_parser::oxc_parse::with_span_stack(source, expr.span(), || probe.visit_expression(expr));
     probe.0

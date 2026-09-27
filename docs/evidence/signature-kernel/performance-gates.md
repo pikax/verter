@@ -878,6 +878,17 @@ Recorded plainly so no reader mistakes absence for a pass:
   restored, `deep_input_tests.rs` →
   `module_calls_nested_10000_deep_return_on_production_stacks` overflows.
 
+* **A member of a call derives from a call at once.** Whether a value's
+  type derives from a call (`value_type_derives_from_a_call`) was
+  answered by a contained walk of the whole expression, and it is asked
+  of each link of a receiver chain (`b.m().m()…`), so the chain cost the
+  square of its length: 10,000 links at module level took about 25 s
+  unoptimized. A member read, a parenthesis or a non-null assertion is
+  what its object is, so the probe reads down those to the first other
+  node and answers at a call, `new` or tagged template without a walk;
+  the same chain reads in 85 ms
+  (`module_receiver_chains_10000_deep_read_on_production_stacks`).
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the
