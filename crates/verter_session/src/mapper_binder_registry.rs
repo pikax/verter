@@ -177,11 +177,16 @@ const MAPPER_BINDER_DECL_PREFIX: &str = "<mapper-param ";
 ///
 /// It is a 128-bit digest over the exact, platform-stable hash-event stream
 /// of the mapping's modifiers, optional name type, source and value — the
-/// same structure [`MapperFingerprint`] reads. Two mappings of one shape in
-/// one file name one binder, exactly as the registry merges them; the
+/// structure [`MapperFingerprint`] reads, with every leaf by its logical
+/// identity: a synthetic slot binding contributes its scope, role, slot and
+/// bound name and its backing value's stable key, never the arena ordinal
+/// the storage fingerprint hashes. It reads the graph only to key that
+/// backing value, so a query-free producer can mint it. Two mappings of one
+/// shape in one file name one binder, exactly as the registry merges them; the
 /// registry's `param_index` stays an interning ordinal handed out in
 /// discovery order and is never part of a binder's stable identity.
 pub(crate) fn mapper_binder_decl_name(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
     source: &Arc<TypeExpr>,
     value: &Arc<TypeExpr>,
     optional: MappedModifier,
@@ -189,20 +194,21 @@ pub(crate) fn mapper_binder_decl_name(
     name_type: Option<&Arc<TypeExpr>>,
 ) -> Arc<str> {
     let mut events = crate::semantic_query::ExactHashEventRecorder::default();
+    let mut leaves = IdentityLeaves { graph };
     b"MapperBinderIdentity::v1".hash(&mut events);
     encode_modifier(optional).hash(&mut events);
     encode_modifier(readonly).hash(&mut events);
     match name_type {
         Some(name_type) => {
             1u8.hash(&mut events);
-            hash_type_expr_structurally(name_type, &mut events);
+            walk_type_expr(name_type, &mut events, &mut leaves);
         }
         None => 0u8.hash(&mut events),
     }
     b"|source|".hash(&mut events);
-    hash_type_expr_structurally(source, &mut events);
+    walk_type_expr(source, &mut events, &mut leaves);
     b"|value|".hash(&mut events);
-    hash_type_expr_structurally(value, &mut events);
+    walk_type_expr(value, &mut events, &mut leaves);
     let digest = xxhash_rust::xxh3::xxh3_128(&events.into_bytes());
     Arc::from(format!("{MAPPER_BINDER_DECL_PREFIX}{digest:032x}>"))
 }
@@ -242,6 +248,112 @@ fn encode_modifier(m: MappedModifier) -> u8 {
 /// guard's anonymous-shape discriminator) reuse it rather than growing a
 /// second walker that could diverge.
 pub(crate) fn hash_type_expr_structurally<H: Hasher>(root: &TypeExpr, hasher: &mut H) {
+    walk_type_expr(root, hasher, &mut StorageLeaves);
+}
+
+/// How the walk folds the three leaves whose storage form is not a logical
+/// identity: a synthetic slot binding's backing value (an arena ordinal), a
+/// `typeof` value reference and a property key (whose derived hashes fold
+/// any nested type expression, ordinal included).
+trait LeafPolicy<H: Hasher> {
+    fn synthetic_value(&mut self, value_node: u64, hasher: &mut H);
+    fn value_ref<'a>(
+        &mut self,
+        value_ref: &'a verter_type_expr::ValueRef,
+        hasher: &mut H,
+        worklist: &mut Vec<&'a TypeExpr>,
+    );
+    fn property_key<'a>(
+        &mut self,
+        key: &'a verter_type_expr::TypeAuthoredPropertyKey,
+        hasher: &mut H,
+        worklist: &mut Vec<&'a TypeExpr>,
+    );
+}
+
+/// The storage fingerprint: each leaf by its derived hash, ordinals included.
+struct StorageLeaves;
+
+impl<H: Hasher> LeafPolicy<H> for StorageLeaves {
+    fn synthetic_value(&mut self, value_node: u64, hasher: &mut H) {
+        value_node.hash(hasher);
+    }
+
+    fn value_ref<'a>(
+        &mut self,
+        value_ref: &'a verter_type_expr::ValueRef,
+        hasher: &mut H,
+        _: &mut Vec<&'a TypeExpr>,
+    ) {
+        value_ref.hash(hasher);
+    }
+
+    fn property_key<'a>(
+        &mut self,
+        key: &'a verter_type_expr::TypeAuthoredPropertyKey,
+        hasher: &mut H,
+        _: &mut Vec<&'a TypeExpr>,
+    ) {
+        key.hash(hasher);
+    }
+}
+
+/// A binder's logical identity: a synthetic slot binding's backing value
+/// by its stable key, and nested type expressions walked structurally.
+struct IdentityLeaves<'g> {
+    graph: &'g crate::semantic_query_memo::SemanticGraphStore,
+}
+
+impl<H: Hasher> LeafPolicy<H> for IdentityLeaves<'_> {
+    fn synthetic_value(&mut self, value_node: u64, hasher: &mut H) {
+        let key = crate::semantic_query::stable_key::stable_key_for_node(
+            self.graph,
+            crate::semantic_query::SemanticNodeId(value_node),
+        );
+        key.exact().hash(hasher);
+    }
+
+    fn value_ref<'a>(
+        &mut self,
+        value_ref: &'a verter_type_expr::ValueRef,
+        hasher: &mut H,
+        worklist: &mut Vec<&'a TypeExpr>,
+    ) {
+        value_ref.path.hash(hasher);
+        (value_ref.type_args.len() as u64).hash(hasher);
+        worklist.extend(value_ref.type_args.iter());
+    }
+
+    fn property_key<'a>(
+        &mut self,
+        key: &'a verter_type_expr::TypeAuthoredPropertyKey,
+        hasher: &mut H,
+        worklist: &mut Vec<&'a TypeExpr>,
+    ) {
+        use verter_type_expr::AuthoredPropertyKey;
+        match key {
+            AuthoredPropertyKey::String(name) => {
+                0u8.hash(hasher);
+                name.hash(hasher);
+            }
+            AuthoredPropertyKey::Number(index) => {
+                1u8.hash(hasher);
+                index.get().hash(hasher);
+            }
+            AuthoredPropertyKey::UniqueSymbol(identity) => {
+                2u8.hash(hasher);
+                identity.hash(hasher);
+            }
+            AuthoredPropertyKey::Computed(expr) => {
+                3u8.hash(hasher);
+                worklist.push(expr);
+            }
+        }
+    }
+}
+
+/// The one structural `TypeExpr` walk, with its leaves folded by `leaves`.
+fn walk_type_expr<H: Hasher, P: LeafPolicy<H>>(root: &TypeExpr, hasher: &mut H, leaves: &mut P) {
     // Worklist of references into the live `TypeExpr` graph.
     // We push every node's children here so the loop visits the
     // whole subtree without recursing. Borrow-checker note: all
@@ -304,7 +416,7 @@ pub(crate) fn hash_type_expr_structurally<H: Hasher>(root: &TypeExpr, hasher: &m
                 6u8.hash(hasher);
                 (obj.properties.len() as u64).hash(hasher);
                 for member in obj.properties.iter() {
-                    hash_object_member(member, hasher, &mut worklist);
+                    hash_object_member(member, hasher, &mut worklist, leaves);
                 }
             }
             TypeExpr::Function(func) => {
@@ -366,8 +478,7 @@ pub(crate) fn hash_type_expr_structurally<H: Hasher>(root: &TypeExpr, hasher: &m
             }
             TypeExpr::TypeOf(value_ref) => {
                 11u8.hash(hasher);
-                // ValueRef derives Hash via the type itself.
-                value_ref.hash(hasher);
+                leaves.value_ref(value_ref, hasher, &mut worklist);
             }
             TypeExpr::IndexedAccess { object, index } => {
                 12u8.hash(hasher);
@@ -455,7 +566,7 @@ pub(crate) fn hash_type_expr_structurally<H: Hasher>(root: &TypeExpr, hasher: &m
                 encode_synthetic_surface(carrier.surface_kind).hash(hasher);
                 carrier.slot_name.hash(hasher);
                 carrier.binding_name.hash(hasher);
-                carrier.value_node.hash(hasher);
+                leaves.synthetic_value(carrier.value_node, hasher);
             }
             TypeExpr::Unknown(value) => {
                 21u8.hash(hasher);
@@ -487,15 +598,16 @@ pub(crate) fn hash_type_expr_structurally<H: Hasher>(root: &TypeExpr, hasher: &m
     }
 }
 
-fn hash_object_member<'a, H: Hasher>(
+fn hash_object_member<'a, H: Hasher, P: LeafPolicy<H>>(
     member: &'a ObjectMember,
     hasher: &mut H,
     worklist: &mut Vec<&'a TypeExpr>,
+    leaves: &mut P,
 ) {
     match member {
         ObjectMember::Property(p) => {
             0u8.hash(hasher);
-            p.key.hash(hasher);
+            leaves.property_key(&p.key, hasher, worklist);
             (p.optional as u8).hash(hasher);
             (p.readonly as u8).hash(hasher);
             hash_member_visibility(p.visibility, hasher);
@@ -518,7 +630,7 @@ fn hash_object_member<'a, H: Hasher>(
         }
         ObjectMember::Method(m) => {
             4u8.hash(hasher);
-            m.key.hash(hasher);
+            leaves.property_key(&m.key, hasher, worklist);
             (m.optional as u8).hash(hasher);
             hash_member_visibility(m.visibility, hasher);
             hash_function_expr(&m.function, hasher, worklist);
