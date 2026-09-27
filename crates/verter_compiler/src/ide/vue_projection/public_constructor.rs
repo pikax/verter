@@ -837,7 +837,7 @@ fn parse_block<'a>(
     let grammar = grammar_of(block.lang)?;
     let content = allocator.alloc_str(block.content);
     let parsed = Parser::new(allocator, content, grammar.source_type()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(SetupProjectionRefusal::SyntaxErrors { setup });
     }
     Ok(allocator.alloc(parsed.program))
@@ -891,17 +891,19 @@ fn provider_statements(program: &Program<'_>, content: &str) -> Vec<String> {
             | Statement::ExportAllDeclaration(_)
             | Statement::ExportDefaultDeclaration(_)
             | Statement::TSExportAssignment(_)
-            | Statement::TSNamespaceExportDeclaration(_) => None,
-            Statement::ExportNamedDeclaration(export) => export
-                .declaration
-                .as_ref()
+            | Statement::TSNamespaceExportDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_) => None,
+            Statement::ExportDeclaration(export) => Some(&export.declaration)
                 .filter(|declaration| !declaration.declare())
                 .map(|declaration| text(declaration.span())),
             other => match other.as_declaration() {
                 Some(declaration) if declaration.declare() => None,
-                Some(Declaration::TSModuleDeclaration(_) | Declaration::TSGlobalDeclaration(_)) => {
-                    None
-                }
+                Some(
+                    Declaration::TSExternalModuleDeclaration(_)
+                    | Declaration::TSNamespaceDeclaration(_)
+                    | Declaration::TSGlobalDeclaration(_),
+                ) => None,
                 _ => Some(text(other.span())),
             },
         })
@@ -922,7 +924,7 @@ impl<'a> LocalTypes<'a> {
         for program in self.programs.iter().flatten() {
             for statement in &program.body {
                 let declaration = match statement {
-                    Statement::ExportNamedDeclaration(export) => export.declaration.as_ref(),
+                    Statement::ExportDeclaration(export) => Some(&export.declaration),
                     other => other.as_declaration(),
                 };
                 let requirement = match declaration {

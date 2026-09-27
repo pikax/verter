@@ -59,7 +59,7 @@
     "crate": "boxcar",
     "version": "0.2.14",
     "msrv": "1.72.0",
-    "workspace_msrv": "1.92",
+    "workspace_msrv": "1.96",
     "targets": [
       "native",
       "wasm32-unknown-unknown"

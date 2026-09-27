@@ -15,7 +15,7 @@ fn index_for(source: &str) -> DeclHeaderIndex {
 
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!ret.panicked, "fixture must parse");
+    assert!(!ret.fatal_error, "fixture must parse");
     build_decl_header_index(&ret.program, source)
 }
 
@@ -35,7 +35,7 @@ namespace Ns { export class C { value!: string } }
 "#;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let module = TopLevelOwnerId::module(0);
     let instance = TopLevelOwnerId::instance(0);
     let owners = TopLevelOwnerTable::try_from_statement_owners(
@@ -95,7 +95,7 @@ export default interface InstanceDefault { instance: number }
 "#;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let module = TopLevelOwnerId::module(0);
     let instance = TopLevelOwnerId::instance(0);
     let owners = TopLevelOwnerTable::try_from_statement_owners(
@@ -248,7 +248,7 @@ fn assert_name_parity(source: &str) {
 fn assert_name_parity_as(source: &str, source_type: oxc_span::SourceType) -> DeclHeaderIndex {
     let allocator = oxc_allocator::Allocator::default();
     let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
-    assert!(!ret.panicked, "fixture must parse");
+    assert!(!ret.fatal_error, "fixture must parse");
     let env = build_eval_env(
         &ret.program,
         source,
@@ -454,7 +454,7 @@ interface Child extends Shared {}
 "#;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let module = TopLevelOwnerId::module(0);
     let instance = TopLevelOwnerId::instance(0);
     let owners = TopLevelOwnerTable::try_from_statement_owners(

@@ -23,10 +23,11 @@ use oxc_ast::ast::{
     ArrowFunctionExpression, BinaryOperator, BindingPattern, Class, ClassElement, Declaration,
     ExportDefaultDeclarationKind, Expression, FormalParameters, Function, MethodDefinition,
     MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, Program, PropertyKey, PropertyKind,
-    Statement, TSAccessibility, TSEnumDeclaration, TSInterfaceDeclaration, TSModuleBlock,
-    TSModuleDeclaration, TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature,
-    TSThisParameter, TSType, TSTypeAliasDeclaration, TSTypeOperatorOperator,
-    TSTypeParameterDeclaration, UnaryOperator, VariableDeclarationKind, VariableDeclarator,
+    Statement, TSAccessibility, TSEnumDeclaration, TSExternalModuleDeclaration,
+    TSInterfaceDeclaration, TSModuleBlock, TSNamespaceDeclaration, TSNamespaceDeclarationBody,
+    TSSignature, TSThisParameter, TSType, TSTypeAliasDeclaration, TSTypeName,
+    TSTypeOperatorOperator, TSTypeParameterDeclaration, UnaryOperator, VariableDeclarationKind,
+    VariableDeclarator,
 };
 use oxc_ast_visit::Visit;
 use oxc_span::GetSpan;
@@ -564,8 +565,11 @@ fn collect_statement_parts(
                 decl.id.name.to_string(),
             ));
         }
-        Statement::TSModuleDeclaration(module) => {
+        Statement::TSNamespaceDeclaration(module) => {
             collect_module_declaration(module, source, out, None, declaration_file);
+        }
+        Statement::TSExternalModuleDeclaration(module) => {
+            collect_external_module_declaration(module, source, out);
         }
         Statement::TSGlobalDeclaration(global) => {
             collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
@@ -588,10 +592,9 @@ fn collect_statement_parts(
                 }
             }
         }
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(ref decl) = export.declaration {
-                collect_from_declaration(decl, source, declaration_file, out);
-            }
+        Statement::ExportDeclaration(export) => {
+            let decl = &export.declaration;
+            collect_from_declaration(decl, source, declaration_file, out);
         }
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
@@ -934,8 +937,11 @@ fn collect_from_declaration(
                 iface.id.name.to_string(),
             ));
         }
-        Declaration::TSModuleDeclaration(module) => {
+        Declaration::TSNamespaceDeclaration(module) => {
             collect_module_declaration(module, source, out, None, declaration_file);
+        }
+        Declaration::TSExternalModuleDeclaration(module) => {
+            collect_external_module_declaration(module, source, out);
         }
         Declaration::TSGlobalDeclaration(global) => {
             collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
@@ -1778,6 +1784,19 @@ pub(crate) fn class_field_value_name(
     Some(format!("{class_name}:{side}:{key}"))
 }
 
+/// [`heritage_expression_name`] for an interface heritage clause's type name
+/// (`A`, `A.B.C`); a `this`-rooted name has none.
+pub(crate) fn heritage_type_name(name: &TSTypeName<'_>) -> Option<String> {
+    match name {
+        TSTypeName::IdentifierReference(identifier) => Some(identifier.name.to_string()),
+        TSTypeName::QualifiedName(qualified) => {
+            let left = heritage_type_name(&qualified.left)?;
+            Some(format!("{left}.{}", qualified.right.name))
+        }
+        TSTypeName::ThisExpression(_) => None,
+    }
+}
+
 pub(crate) fn heritage_expression_name(expression: &Expression<'_>) -> Option<String> {
     match expression {
         Expression::Identifier(identifier) => Some(identifier.name.to_string()),
@@ -1820,7 +1839,7 @@ fn lower_named_interface_parts(
         // the own-member object pushed after the loop.
         let mut parts = Vec::with_capacity(decl.extends.len() + 1);
         for heritage in &decl.extends {
-            let Some(base_name) = heritage_expression_name(&heritage.expression) else {
+            let Some(base_name) = heritage_type_name(&heritage.type_name) else {
                 continue;
             };
             let base_args: Vec<TypeExpr> = heritage
@@ -1876,12 +1895,10 @@ fn unique_symbol_members_of_interface_body(decl: &TSInterfaceDeclaration<'_>) ->
 /// declaration file, or inside a `declare namespace`. An ambient namespace
 /// body without an export declaration is an export context — it exports each
 /// member, written `export` or not.
-fn collect_module_declaration(
-    decl: &TSModuleDeclaration<'_>,
+fn collect_external_module_declaration(
+    decl: &TSExternalModuleDeclaration<'_>,
     source: &str,
     out: &mut LoweredStatementParts,
-    prefix: Option<&str>,
-    ambient: bool,
 ) {
     // `declare module "<specifier>" { ... }` — an AMBIENT MODULE AUGMENTATION,
     // NOT a file-scope namespace. Its inner declarations augment the surface of
@@ -1890,31 +1907,32 @@ fn collect_module_declaration(
     // are retained in the augmentation-scope inventory keyed by the raw
     // specifier — never the file's top-level `type_symbols`. (A string-literal
     // name only ever wraps a single `TSModuleBlock`, never a nested module.)
-    if let TSModuleDeclarationName::StringLiteral(spec) = &decl.id {
-        if let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = decl.body.as_ref() {
-            collect_augmentation_block(
-                block,
-                source,
-                out,
-                AugmentationScopeKind::Module(spec.value.to_string()),
-            );
-        }
-        return;
+    if let Some(block) = decl.body.as_ref() {
+        collect_augmentation_block(
+            block,
+            source,
+            out,
+            AugmentationScopeKind::Module(decl.id.value.to_string()),
+        );
     }
+}
 
-    let Some(module_name) = qualified_module_name(prefix, &decl.id) else {
-        return;
-    };
-    let Some(body) = decl.body.as_ref() else {
-        return;
-    };
+/// The identifier-named half of [`collect_external_module_declaration`].
+fn collect_module_declaration(
+    decl: &TSNamespaceDeclaration<'_>,
+    source: &str,
+    out: &mut LoweredStatementParts,
+    prefix: Option<&str>,
+    ambient: bool,
+) {
+    let module_name = qualified_module_name(prefix, &decl.id);
     let ambient = ambient || decl.declare;
 
-    match body {
-        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+    match &decl.body {
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
             collect_module_declaration(inner, source, out, Some(module_name.as_str()), ambient);
         }
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
             let implicit_export = ambient && !statements_have_export_declarations(&block.body);
             for stmt in &block.body {
                 collect_namespaced_statement(
@@ -1957,10 +1975,9 @@ fn collect_augmentation_block(
                     lower_named_type_alias_parts(alias, source, name),
                 ));
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(decl) = export.declaration.as_ref() {
-                    collect_augmentation_declaration(decl, source, out, &scope);
-                }
+            Statement::ExportDeclaration(export) => {
+                let decl = &export.declaration;
+                collect_augmentation_declaration(decl, source, out, &scope);
             }
             // Value-space declarations (`const`/`let`/`var`, `function`,
             // `class`) augment the target module's VALUE surface. Reuse the
@@ -1982,7 +1999,7 @@ fn collect_augmentation_block(
             // name)` and APPENDS, a repeated `declare global { namespace JSX {
             // ... } }` block folds into the same ordered group and the existing
             // `MergedDecl` peer-merge stitch unions the surfaces.
-            Statement::TSModuleDeclaration(module) => {
+            Statement::TSNamespaceDeclaration(module) => {
                 collect_augmentation_module_declaration(module, source, out, &scope, None);
             }
             _ => {}
@@ -2021,7 +2038,7 @@ fn collect_augmentation_declaration(
             collect_from_declaration(decl, source, true, &mut inner);
             move_value_parts_into_augmentation(inner, out, scope);
         }
-        Declaration::TSModuleDeclaration(module) => {
+        Declaration::TSNamespaceDeclaration(module) => {
             collect_augmentation_module_declaration(module, source, out, scope, None);
         }
         _ => {}
@@ -2044,7 +2061,7 @@ fn collect_augmentation_declaration(
 /// identifier-name branch (which routes a file-scope namespace's members to
 /// the file-scope parts under the same qualified names).
 fn collect_augmentation_module_declaration(
-    decl: &TSModuleDeclaration<'_>,
+    decl: &TSNamespaceDeclaration<'_>,
     source: &str,
     out: &mut LoweredStatementParts,
     scope: &AugmentationScopeKind,
@@ -2053,14 +2070,9 @@ fn collect_augmentation_module_declaration(
     // A string-literal module name (`declare module "X"`) nested inside another
     // augmentation block is not a namespace-member contributor; only
     // identifier-named namespaces (`namespace JSX`) qualify members here.
-    let Some(namespace) = qualified_module_name(prefix, &decl.id) else {
-        return;
-    };
-    let Some(body) = decl.body.as_ref() else {
-        return;
-    };
-    match body {
-        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+    let namespace = qualified_module_name(prefix, &decl.id);
+    match &decl.body {
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
             collect_augmentation_module_declaration(
                 inner,
                 source,
@@ -2069,7 +2081,7 @@ fn collect_augmentation_module_declaration(
                 Some(namespace.as_str()),
             );
         }
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
             let implicit_export = !statements_have_export_declarations(&block.body);
             for stmt in &block.body {
                 collect_namespaced_statement_into_augmentation(
@@ -2117,19 +2129,16 @@ fn collect_namespaced_statement_into_augmentation(
                 ),
             ));
         }
-        Statement::TSModuleDeclaration(module) => {
+        Statement::TSNamespaceDeclaration(module) => {
             collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
         }
         // An augmentation block is ambient, so a namespace body inside it
         // without an export declaration exports every member, written
         // `export` or not (an ambient namespace in
         // `collect_namespaced_statement`).
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(ref decl) = export.declaration {
-                collect_namespaced_declaration_into_augmentation(
-                    decl, source, out, namespace, scope,
-                );
-            }
+        Statement::ExportDeclaration(export) => {
+            let decl = &export.declaration;
+            collect_namespaced_declaration_into_augmentation(decl, source, out, namespace, scope);
         }
         Statement::VariableDeclaration(var_decl) if implicit_export => {
             for declarator in &var_decl.declarations {
@@ -2181,7 +2190,7 @@ fn collect_namespaced_declaration_into_augmentation(
                 ),
             ));
         }
-        Declaration::TSModuleDeclaration(module) => {
+        Declaration::TSNamespaceDeclaration(module) => {
             collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
         }
         Declaration::VariableDeclaration(var_decl) => {
@@ -2300,8 +2309,11 @@ fn collect_namespaced_statement(
                 );
             }
         }
-        Statement::TSModuleDeclaration(module) => {
+        Statement::TSNamespaceDeclaration(module) => {
             collect_module_declaration(module, source, out, Some(namespace), ambient);
+        }
+        Statement::TSExternalModuleDeclaration(module) => {
+            collect_external_module_declaration(module, source, out);
         }
         // A namespace's enum registers under its qualified name, exported
         // or not, as a class does: the header index records which a
@@ -2322,10 +2334,9 @@ fn collect_namespaced_statement(
         // `collect_namespaced_declaration`) registers a qualified value member
         // such as `N.VERSION` — and a namespace body that is an export
         // context exports every member, written `export` or not.
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(ref decl) = export.declaration {
-                collect_namespaced_declaration(decl, source, out, namespace, ambient);
-            }
+        Statement::ExportDeclaration(export) => {
+            let decl = &export.declaration;
+            collect_namespaced_declaration(decl, source, out, namespace, ambient);
         }
         Statement::VariableDeclaration(var_decl) if implicit_export => {
             for declarator in &var_decl.declarations {
@@ -2377,8 +2388,11 @@ fn collect_namespaced_declaration(
                 );
             }
         }
-        Declaration::TSModuleDeclaration(module) => {
+        Declaration::TSNamespaceDeclaration(module) => {
             collect_module_declaration(module, source, out, Some(namespace), ambient);
+        }
+        Declaration::TSExternalModuleDeclaration(module) => {
+            collect_external_module_declaration(module, source, out);
         }
         Declaration::TSEnumDeclaration(enum_decl) => {
             collect_enum(
@@ -2409,13 +2423,10 @@ fn collect_namespaced_declaration(
     }
 }
 
-fn qualified_module_name(prefix: Option<&str>, id: &TSModuleDeclarationName<'_>) -> Option<String> {
-    match id {
-        TSModuleDeclarationName::Identifier(id) => Some(match prefix {
-            Some(prefix) => qualified_name(prefix, &id.name),
-            None => id.name.to_string(),
-        }),
-        TSModuleDeclarationName::StringLiteral(_) => None,
+fn qualified_module_name(prefix: Option<&str>, id: &oxc_ast::ast::BindingIdentifier<'_>) -> String {
+    match prefix {
+        Some(prefix) => qualified_name(prefix, &id.name),
+        None => id.name.to_string(),
     }
 }
 
@@ -3024,8 +3035,9 @@ fn collect_named_class(
     // A heritage EXPRESSION the facts cannot name reads its value through a
     // synthetic value declaration indexed at the expression.
     let heritage_expression = decl
-        .super_class
+        .heritage
         .as_ref()
+        .map(|heritage| &heritage.expression)
         .filter(|heritage| heritage_expression_name(heritage).is_none());
     if let Some(heritage) = heritage_expression {
         out.value_decls.push(LoweredValueDeclParts {
@@ -3044,7 +3056,7 @@ fn collect_named_class(
             literal_freshness: DeclaredLiteralFreshness::Regular,
         });
     }
-    let base_name = match decl.super_class.as_ref() {
+    let base_name = match decl.heritage.as_ref().map(|heritage| &heritage.expression) {
         Some(heritage) => {
             heritage_expression_name(heritage).or_else(|| Some(class_heritage_value_name(&name)))
         }
@@ -3053,8 +3065,9 @@ fn collect_named_class(
     let body = match base_name {
         Some(base_name) => {
             let base_args: Vec<TypeExpr> = decl
-                .super_type_arguments
+                .heritage
                 .as_ref()
+                .and_then(|heritage| heritage.type_arguments.as_ref())
                 .map(|tp| tp.params.iter().map(|p| lower_ts_type(p, source)).collect())
                 .unwrap_or_default();
             let base_ref = if base_args.is_empty() {
@@ -3515,15 +3528,10 @@ fn apply_svelte_rune_initializer_inference(
 ) {
     let variable = match stmt {
         Statement::VariableDeclaration(variable) => Some(variable.as_ref()),
-        Statement::ExportNamedDeclaration(export) => {
-            export
-                .declaration
-                .as_ref()
-                .and_then(|declaration| match declaration {
-                    Declaration::VariableDeclaration(variable) => Some(variable.as_ref()),
-                    _ => None,
-                })
-        }
+        Statement::ExportDeclaration(export) => match &export.declaration {
+            Declaration::VariableDeclaration(variable) => Some(variable.as_ref()),
+            _ => None,
+        },
         _ => None,
     };
     let Some(variable) = variable else {
@@ -3906,9 +3914,9 @@ fn lower_class_expression_value(
 ) -> Option<LoweredValueDeclParts> {
     if class.type_parameters.is_some()
         || class
-            .super_class
+            .heritage
             .as_ref()
-            .is_some_and(|heritage| heritage_expression_name(heritage).is_none())
+            .is_some_and(|heritage| heritage_expression_name(&heritage.expression).is_none())
     {
         return None;
     }
@@ -4817,22 +4825,14 @@ fn extract_arrow_signature_with_budget(
             lower_return_annotation(&return_type.type_annotation, source);
         predicate = authored_predicate;
         Some(return_type)
-    } else if arrow.expression {
-        arrow
-            .body
-            .statements
-            .first()
-            .and_then(|statement| match statement {
-                Statement::ExpressionStatement(expression) => Some(infer_expression_type_ctx(
-                    &expression.expression,
-                    source,
-                    MemberLiteralPolicy::Widen,
-                    budget,
-                    depth + 1,
-                )),
-                _ => None,
-            })
-            .transpose()?
+    } else if let Some(expression) = arrow.get_expression() {
+        Some(infer_expression_type_ctx(
+            expression,
+            source,
+            MemberLiteralPolicy::Widen,
+            budget,
+            depth + 1,
+        )?)
     } else {
         None
     };
@@ -6294,19 +6294,12 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
             ))
         }
         TSSignature::TSIndexSignature(idx) => {
-            let (key_name, key_type, key_span) = if let Some(param) = idx.parameters.first() {
-                (
-                    param.name.to_string(),
-                    lower_ts_type(&param.type_annotation.type_annotation, source),
-                    Some(param.span.into()),
-                )
-            } else {
-                (
-                    "key".to_string(),
-                    TypeExpr::Primitive(PrimitiveName::String),
-                    None,
-                )
-            };
+            let param = &idx.parameter;
+            let (key_name, key_type, key_span) = (
+                param.name.to_string(),
+                lower_ts_type(&param.type_annotation.type_annotation, source),
+                Some(param.span.into()),
+            );
             let value_type = lower_ts_type(&idx.type_annotation.type_annotation, source);
             let spans = IndexSignatureSpans {
                 declaration: Some(idx.span.into()),

@@ -262,9 +262,9 @@ mod tests {
             verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
                 .parse();
         assert!(
-            parsed.errors.is_empty(),
+            parsed.diagnostics.is_empty(),
             "fixture must parse: {:?}",
-            parsed.errors
+            parsed.diagnostics
         );
         let vue: FxHashSet<String> = ["toRef", "toRefs", "useSlots"]
             .iter()

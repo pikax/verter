@@ -173,7 +173,7 @@ pub(super) fn scan_await_positions(text: &str) -> Vec<AwaitPosition> {
     let parsed = Parser::new(&allocator, text, source_type).parse();
     // A fragment that does not parse cleanly yields no diagnostics (fail-open) —
     // the projection's own validity does not depend on this heuristic.
-    if parsed.panicked {
+    if parsed.fatal_error {
         return Vec::new();
     }
     let mut collector = AwaitCollector {

@@ -217,10 +217,8 @@ fn collect_unsafe_root_names(program: &Program<'_>, out: &mut rustc_hash::FxHash
             }
             // A legacy `export let` prop (official `prop`/`bindable_prop` kind):
             // a template call / member rooted at it opens the component frame.
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(oxc_ast::ast::Declaration::VariableDeclaration(decl)) =
-                    &export.declaration
-                {
+            Statement::ExportDeclaration(export) => {
+                if let oxc_ast::ast::Declaration::VariableDeclaration(decl) = &export.declaration {
                     if decl.kind == oxc_ast::ast::VariableDeclarationKind::Let {
                         for d in &decl.declarations {
                             let mut names = Vec::new();

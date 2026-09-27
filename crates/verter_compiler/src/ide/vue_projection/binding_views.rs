@@ -1050,7 +1050,7 @@ impl<'a> Visit<'a> for ScriptReferenceScan {
 fn parse_reference_snippet<'a>(allocator: &'a Allocator, snippet: &'a str) -> Option<Program<'a>> {
     for source_type in [SourceType::ts(), SourceType::tsx()] {
         let parsed = Parser::new(allocator, snippet, source_type.with_module(true)).parse();
-        if !parsed.panicked && parsed.errors.is_empty() {
+        if !parsed.fatal_error && parsed.diagnostics.is_empty() {
             return Some(parsed.program);
         }
     }
@@ -1966,7 +1966,7 @@ pub fn project_binding_views(
         let source_type = setup_source_type(block.lang)?;
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, block.content, source_type).parse();
-        if parsed.panicked || !parsed.errors.is_empty() {
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() {
             return Err(SetupProjectionRefusal::SyntaxErrors { setup: true });
         }
         let program = &parsed.program;

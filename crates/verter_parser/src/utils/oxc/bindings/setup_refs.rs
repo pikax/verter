@@ -349,11 +349,7 @@ impl<'a, 'b> SetupRefCollector<'a, 'b> {
                 }
             }
             Statement::TSEnumDeclaration(e) => self.declare_name(e.id.name.as_str()),
-            Statement::TSModuleDeclaration(m) => {
-                if let TSModuleDeclarationName::Identifier(id) = &m.id {
-                    self.declare_name(id.name.as_str());
-                }
-            }
+            Statement::TSNamespaceDeclaration(m) => self.declare_name(m.id.name.as_str()),
             Statement::ImportDeclaration(import) => {
                 if let Some(specifiers) = &import.specifiers {
                     for spec in specifiers {
@@ -366,10 +362,8 @@ impl<'a, 'b> SetupRefCollector<'a, 'b> {
                     }
                 }
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(decl) = &export.declaration {
-                    self.declare_declaration_binding(decl);
-                }
+            Statement::ExportDeclaration(export) => {
+                self.declare_declaration_binding(&export.declaration);
             }
             _ => {}
         }
@@ -393,11 +387,7 @@ impl<'a, 'b> SetupRefCollector<'a, 'b> {
                 }
             }
             Declaration::TSEnumDeclaration(e) => self.declare_name(e.id.name.as_str()),
-            Declaration::TSModuleDeclaration(m) => {
-                if let TSModuleDeclarationName::Identifier(id) = &m.id {
-                    self.declare_name(id.name.as_str());
-                }
-            }
+            Declaration::TSNamespaceDeclaration(m) => self.declare_name(m.id.name.as_str()),
             _ => {}
         }
     }
@@ -462,7 +452,9 @@ impl<'a, 'b> Visit<'a> for SetupRefCollector<'a, 'b> {
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
         self.scopes.push(FxHashSet::default());
         self.declare_params(&it.params);
-        self.declare_block_bindings(&it.body.statements);
+        if let Some(body) = it.get_function_body() {
+            self.declare_block_bindings(&body.statements);
+        }
         walk::walk_arrow_function_expression(self, it);
         self.scopes.pop();
     }
@@ -625,7 +617,11 @@ mod tests {
     fn refs(source: &str, names: &[&str]) -> FxHashSet<String> {
         let alloc = Allocator::default();
         let ret = Parser::new(&alloc, source, SourceType::tsx()).parse();
-        assert!(ret.errors.is_empty(), "parse errors: {:?}", ret.errors);
+        assert!(
+            ret.diagnostics.is_empty(),
+            "parse errors: {:?}",
+            ret.diagnostics
+        );
         let set: FxHashSet<&str> = names.iter().copied().collect();
         collect_setup_binding_refs(&ret.program, &set)
             .into_iter()
@@ -838,7 +834,11 @@ mod tests {
         let alloc = Allocator::default();
         let src = "const dep = 1;\nconst el = <div>{dep}</div>;";
         let ret = Parser::new(&alloc, src, SourceType::tsx()).parse();
-        assert!(ret.errors.is_empty(), "parse errors: {:?}", ret.errors);
+        assert!(
+            ret.diagnostics.is_empty(),
+            "parse errors: {:?}",
+            ret.diagnostics
+        );
         let set: FxHashSet<&str> = ["dep", "el"].into_iter().collect();
         let r: FxHashSet<String> = collect_setup_binding_refs(&ret.program, &set)
             .into_iter()

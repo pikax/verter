@@ -400,7 +400,7 @@ pub(super) fn extract_props_annotation(script: &str) -> Option<PropsAnnotation> 
     }
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, script, SourceType::tsx()).parse();
-    if parsed.panicked {
+    if parsed.fatal_error {
         return None;
     }
     let mut collector = PropsRuneCollector {

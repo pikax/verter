@@ -823,17 +823,10 @@ fn lower_ts_signature<'b, 'a>(
             Some(ObjectMember::CallSignature(func))
         }
         TSSignature::TSIndexSignature(idx) => {
-            let (key_name, key_type, key_span) = if let Some(param) = idx.parameters.first() {
-                let name = param.name.to_string();
-                let ty = lower(&param.type_annotation.type_annotation);
-                (name, ty, Some(param.span.into()))
-            } else {
-                (
-                    "key".to_string(),
-                    TypeExpr::Primitive(PrimitiveName::String),
-                    None,
-                )
-            };
+            let param = &idx.parameter;
+            let key_name = param.name.to_string();
+            let key_type = lower(&param.type_annotation.type_annotation);
+            let key_span = Some(param.span.into());
 
             let value_type = lower(&idx.type_annotation.type_annotation);
             let spans = IndexSignatureSpans {

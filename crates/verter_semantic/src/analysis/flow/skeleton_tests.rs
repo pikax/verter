@@ -14,9 +14,9 @@ fn parse_and_build<T>(
     let source_type = oxc_span::SourceType::ts();
     let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
     assert!(
-        ret.errors.is_empty(),
+        ret.diagnostics.is_empty(),
         "fixture must parse: {:?}",
-        ret.errors
+        ret.diagnostics
     );
     let body_source = select(&ret.program);
     check(build_function_body_skeleton(&body_source, source))
@@ -63,7 +63,7 @@ fn indexed_structure_of(source: &str) -> PreparedFunctionBodySkeleton {
     let parsed =
         verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
             .parse();
-    assert!(parsed.errors.is_empty());
+    assert!(parsed.diagnostics.is_empty());
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index =
         build_function_program_index(&parsed.program, source, &owners, Arc::from("/graph.ts"));
@@ -221,7 +221,7 @@ fn indexed_skeleton_retains_exact_nested_capture_paths_and_runtime_aliases() {
     let parsed =
         verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
             .parse();
-    assert!(parsed.errors.is_empty());
+    assert!(parsed.diagnostics.is_empty());
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index =
         build_function_program_index(&parsed.program, source, &owners, Arc::from("/capture.ts"));
@@ -301,7 +301,7 @@ fn prepared_graph_does_not_resolve_free_parameter_inputs_as_body_bindings() {
         let parsed =
             verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
                 .parse();
-        assert!(parsed.errors.is_empty());
+        assert!(parsed.diagnostics.is_empty());
         let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
         let index = build_function_program_index(
             &parsed.program,
@@ -360,7 +360,7 @@ fn indexed_skeleton_retains_write_only_capture_subjects_without_value_reads() {
         let parsed =
             verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
                 .parse();
-        assert!(parsed.errors.is_empty());
+        assert!(parsed.diagnostics.is_empty());
         let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
         let index = build_function_program_index(
             &parsed.program,
@@ -916,7 +916,7 @@ fn prepared_class_occurrences_distinguish_outer_free_and_static_local_bindings()
     let parsed =
         verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
             .parse();
-    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let (index, nodes) = build_function_program_index_with_nodes(
         &parsed.program,
@@ -993,7 +993,7 @@ fn runtime_shape_preserves_parameter_var_and_pattern_alias_boundaries() {
     let parsed =
         verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
             .parse();
-    assert!(parsed.errors.is_empty());
+    assert!(parsed.diagnostics.is_empty());
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index =
         build_function_program_index(&parsed.program, source, &owners, Arc::from("/runtime.ts"));

@@ -34,23 +34,23 @@ use crate::analysis::types::*;
 /// counts. Type aliases (`type AppConfig = ...`) are not interfaces
 /// and are excluded — the AppConfig override surface only merges
 /// across `interface` declarations.
-fn module_declaration_declares_interface_app_config(decl: &TSModuleDeclaration<'_>) -> bool {
-    let Some(body) = decl.body.as_ref() else {
-        return false;
-    };
-    match body {
-        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
-            module_declaration_declares_interface_app_config(inner)
+fn namespace_declaration_declares_interface_app_config(decl: &TSNamespaceDeclaration<'_>) -> bool {
+    match &decl.body {
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
+            namespace_declaration_declares_interface_app_config(inner)
         }
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
-            for stmt in &block.body {
-                if statement_declares_interface_app_config(stmt) {
-                    return true;
-                }
-            }
-            false
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+            module_block_declares_interface_app_config(block)
         }
     }
+}
+
+/// [`namespace_declaration_declares_interface_app_config`] for a `declare
+/// module "x"` declaration, whose body is optional.
+fn external_module_declares_interface_app_config(decl: &TSExternalModuleDeclaration<'_>) -> bool {
+    decl.body
+        .as_ref()
+        .is_some_and(|block| module_block_declares_interface_app_config(block))
 }
 
 /// Walk a `TSModuleBlock` looking for any `TSInterfaceDeclaration`
@@ -73,14 +73,15 @@ fn module_block_declares_interface_app_config(block: &TSModuleBlock<'_>) -> bool
 fn statement_declares_interface_app_config(stmt: &Statement<'_>) -> bool {
     match stmt {
         Statement::TSInterfaceDeclaration(iface) => iface.id.name.as_str() == "AppConfig",
-        Statement::ExportNamedDeclaration(export) => match &export.declaration {
-            Some(Declaration::TSInterfaceDeclaration(iface)) => {
-                iface.id.name.as_str() == "AppConfig"
+        Statement::ExportDeclaration(export) => match &export.declaration {
+            Declaration::TSInterfaceDeclaration(iface) => iface.id.name.as_str() == "AppConfig",
+            Declaration::TSNamespaceDeclaration(module) => {
+                namespace_declaration_declares_interface_app_config(module)
             }
-            Some(Declaration::TSModuleDeclaration(module)) => {
-                module_declaration_declares_interface_app_config(module)
+            Declaration::TSExternalModuleDeclaration(module) => {
+                external_module_declares_interface_app_config(module)
             }
-            Some(Declaration::TSGlobalDeclaration(global)) => {
+            Declaration::TSGlobalDeclaration(global) => {
                 module_block_declares_interface_app_config(&global.body)
             }
             _ => false,
@@ -91,8 +92,11 @@ fn statement_declares_interface_app_config(stmt: &Statement<'_>) -> bool {
             }
             _ => false,
         },
-        Statement::TSModuleDeclaration(module) => {
-            module_declaration_declares_interface_app_config(module)
+        Statement::TSNamespaceDeclaration(module) => {
+            namespace_declaration_declares_interface_app_config(module)
+        }
+        Statement::TSExternalModuleDeclaration(module) => {
+            external_module_declares_interface_app_config(module)
         }
         Statement::TSGlobalDeclaration(global) => {
             module_block_declares_interface_app_config(&global.body)
@@ -231,7 +235,7 @@ pub fn build_script_analysis_with_scope(
         ..ParseOptions::default()
     });
     let result = parser.parse();
-    if result.panicked {
+    if result.fatal_error {
         return ScriptAnalysisSnapshot::default();
     }
 
@@ -241,7 +245,7 @@ pub fn build_script_analysis_with_scope(
         source_type,
         program,
         scope,
-        !result.errors.is_empty(),
+        !result.diagnostics.is_empty(),
     )
 }
 
@@ -414,20 +418,21 @@ fn build_script_analysis_inner(
                 imports.push(analyzed);
             }
 
-            Statement::ExportNamedDeclaration(decl) => {
-                if let Some(source) = &decl.source {
-                    module_references.push(build_static_module_reference(
-                        ModuleReferenceSyntax::ExportFrom,
-                        ModuleReferenceSemantics::Import,
-                        decl.export_kind.is_type(),
-                        decl.span.into(),
-                        source.span.into(),
-                        content,
-                        source.value.as_str(),
-                    ));
-                }
+            Statement::ExportFromDeclaration(decl) => {
+                let source = &decl.source;
+                module_references.push(build_static_module_reference(
+                    ModuleReferenceSyntax::ExportFrom,
+                    ModuleReferenceSemantics::Import,
+                    decl.export_kind.is_type(),
+                    decl.span.into(),
+                    source.span.into(),
+                    content,
+                    source.value.as_str(),
+                ));
+            }
 
-                if let Some(Declaration::VariableDeclaration(var_decl)) = &decl.declaration {
+            Statement::ExportDeclaration(decl) => {
+                if let Declaration::VariableDeclaration(var_decl) = &decl.declaration {
                     for vd in &var_decl.declarations {
                         if let Some(ref init) = vd.init {
                             let binding_name = match &vd.id {
@@ -829,19 +834,20 @@ fn build_script_ingress_only(
                     declaration.source.value.as_str(),
                 ));
             }
-            Statement::ExportNamedDeclaration(declaration) => {
-                if let Some(source) = &declaration.source {
-                    module_references.push(build_static_module_reference(
-                        ModuleReferenceSyntax::ExportFrom,
-                        ModuleReferenceSemantics::Import,
-                        declaration.export_kind.is_type(),
-                        declaration.span.into(),
-                        source.span.into(),
-                        content,
-                        source.value.as_str(),
-                    ));
-                }
-                if let Some(Declaration::VariableDeclaration(variable)) = &declaration.declaration {
+            Statement::ExportFromDeclaration(declaration) => {
+                let source = &declaration.source;
+                module_references.push(build_static_module_reference(
+                    ModuleReferenceSyntax::ExportFrom,
+                    ModuleReferenceSemantics::Import,
+                    declaration.export_kind.is_type(),
+                    declaration.span.into(),
+                    source.span.into(),
+                    content,
+                    source.value.as_str(),
+                ));
+            }
+            Statement::ExportDeclaration(declaration) => {
+                if let Declaration::VariableDeclaration(variable) = &declaration.declaration {
                     collect_ingress_variable_initializers(
                         variable,
                         content,
@@ -937,7 +943,7 @@ pub fn build_export_signatures(
         ..ParseOptions::default()
     });
     let result = parser.parse();
-    if result.panicked {
+    if result.fatal_error {
         return Vec::new();
     }
 
@@ -1597,9 +1603,7 @@ fn async_component_loader_specifier(arg: &Expression<'_>) -> Option<String> {
         // Arrow loader: `() => import('X')` (expression body) or
         // `() => { return import('X') }` (block body). The two body shapes are
         // NOT interchangeable — see `arrow_body_import_specifier`.
-        Expression::ArrowFunctionExpression(arrow) => {
-            arrow_body_import_specifier(arrow.expression, &arrow.body)
-        }
+        Expression::ArrowFunctionExpression(arrow) => arrow_body_import_specifier(&arrow.body),
         // `function () { return import('X') }` — always a block body, so only a
         // `return` of the import counts.
         Expression::FunctionExpression(func) => {
@@ -1665,19 +1669,11 @@ fn async_component_loader_specifier(arg: &Expression<'_>) -> Option<String> {
 ///     never a bare `import('X')` expression statement.
 ///
 /// Unwraps `await`/parentheses; typed-IR only.
-fn arrow_body_import_specifier(
-    is_expression_body: bool,
-    body: &FunctionBody<'_>,
-) -> Option<String> {
-    if is_expression_body {
-        return body.statements.iter().find_map(|stmt| match stmt {
-            Statement::ExpressionStatement(expr_stmt) => {
-                import_expression_specifier(&expr_stmt.expression)
-            }
-            _ => None,
-        });
+fn arrow_body_import_specifier(body: &ArrowFunctionBody<'_>) -> Option<String> {
+    match body {
+        ArrowFunctionBody::FunctionBody(body) => block_body_return_import(body),
+        body => body.as_expression().and_then(import_expression_specifier),
     }
-    block_body_return_import(body)
 }
 
 /// Find a `return import('literal')` in a block body. A bare `import('literal')`
@@ -2138,42 +2134,41 @@ fn analyze_exported_functions(
     for stmt in &program.body {
         match stmt {
             // export function foo() { ... }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(decl) = &export.declaration {
-                    match decl {
-                        Declaration::FunctionDeclaration(func) => {
-                            if let Some(ref id) = func.id {
-                                out.push(analyze_single_function(
-                                    content,
-                                    &id.name,
-                                    false,
-                                    func.r#async,
-                                    &func.params,
-                                    func.body.as_deref(),
-                                    import_map,
-                                ));
-                            }
+            Statement::ExportDeclaration(export) => {
+                let decl = &export.declaration;
+                match decl {
+                    Declaration::FunctionDeclaration(func) => {
+                        if let Some(ref id) = func.id {
+                            out.push(analyze_single_function(
+                                content,
+                                &id.name,
+                                false,
+                                func.r#async,
+                                &func.params,
+                                func.body.as_deref(),
+                                import_map,
+                            ));
                         }
-                        // export const foo = () => { ... }
-                        Declaration::VariableDeclaration(var_decl) => {
-                            for decl in &var_decl.declarations {
-                                if let BindingPattern::BindingIdentifier(id) = &decl.id {
-                                    if let Some(init) = &decl.init {
-                                        if let Some(func) =
-                                            extract_function_from_expr(content, init, import_map)
-                                        {
-                                            out.push(AnalyzedExportedFunction {
-                                                name: id.name.to_string(),
-                                                is_default: false,
-                                                ..func
-                                            });
-                                        }
+                    }
+                    // export const foo = () => { ... }
+                    Declaration::VariableDeclaration(var_decl) => {
+                        for decl in &var_decl.declarations {
+                            if let BindingPattern::BindingIdentifier(id) = &decl.id {
+                                if let Some(init) = &decl.init {
+                                    if let Some(func) =
+                                        extract_function_from_expr(content, init, import_map)
+                                    {
+                                        out.push(AnalyzedExportedFunction {
+                                            name: id.name.to_string(),
+                                            is_default: false,
+                                            ..func
+                                        });
                                     }
                                 }
                             }
                         }
-                        _ => {}
                     }
+                    _ => {}
                 }
             }
             // export default function() { ... }
@@ -2245,12 +2240,13 @@ fn analyze_arrow_function(
 ) -> AnalyzedExportedFunction {
     let extracted_params = extract_function_params(content, &arrow.params);
 
-    // Arrow functions in OXC always have a FunctionBody.
-    // Expression arrows have a single ExpressionStatement in the body.
-    let body: &FunctionBody<'_> = &arrow.body;
-
     let composable = if is_composable_name(name) {
-        Some(build_composable_info(name, Some(body), import_map))
+        Some(match &arrow.body {
+            ArrowFunctionBody::FunctionBody(body) => {
+                build_composable_info(name, Some(body), import_map)
+            }
+            body => build_expression_body_composable_info(name, body.as_expression(), import_map),
+        })
     } else {
         None
     };
@@ -2542,6 +2538,38 @@ fn build_composable_info(
         has_watchers,
         internal_reactive_state,
         return_shape,
+    }
+}
+
+/// [`build_composable_info`] for an expression-bodied arrow: its one expression
+/// is scanned as an expression statement, and it has no return statement.
+fn build_expression_body_composable_info(
+    name: &str,
+    expression: Option<&Expression<'_>>,
+    import_map: &ImportBindingMap,
+) -> ComposableInfo {
+    let mut lifecycle_hooks = Vec::new();
+    let mut has_provide = false;
+    let mut has_inject = false;
+    let mut has_watchers = false;
+    if let Some(expression) = expression {
+        scan_expr_for_vue_call(
+            expression,
+            import_map,
+            &mut lifecycle_hooks,
+            &mut has_provide,
+            &mut has_inject,
+            &mut has_watchers,
+        );
+    }
+    ComposableInfo {
+        name: name.to_string(),
+        lifecycle_hooks,
+        has_provide,
+        has_inject,
+        has_watchers,
+        internal_reactive_state: Vec::new(),
+        return_shape: ComposableReturn::Unknown,
     }
 }
 
@@ -3008,11 +3036,9 @@ fn collect_declaration_entries(
                     }
                 })
                 .collect(),
-            Statement::ExportNamedDeclaration(export) => export
-                .declaration
-                .as_ref()
-                .map(|decl| extract_from_declaration(content, decl))
-                .unwrap_or_default(),
+            Statement::ExportDeclaration(export) => {
+                extract_from_declaration(content, &export.declaration)
+            }
             Statement::ExportDefaultDeclaration(export) => match &export.declaration {
                 ExportDefaultDeclarationKind::TSInterfaceDeclaration(d) => {
                     vec![entry_from_span(
@@ -3248,9 +3274,18 @@ fn scan_stmt_for_macros(stmt: &Statement<'_>, offset: u32, out: &mut Vec<NestedM
 /// Once inside a nested scope, any macro call is invalid.
 fn scan_expr_for_nested_scopes(expr: &Expression<'_>, offset: u32, out: &mut Vec<NestedMacroCall>) {
     match expr {
-        Expression::ArrowFunctionExpression(arrow) => {
-            scan_stmts_for_macros(&arrow.body.statements, offset, out);
-        }
+        Expression::ArrowFunctionExpression(arrow) => match &arrow.body {
+            ArrowFunctionBody::FunctionBody(body) => {
+                scan_stmts_for_macros(&body.statements, offset, out);
+            }
+            // An expression body is scanned as its one expression statement.
+            body => {
+                if let Some(expression) = body.as_expression() {
+                    check_expr_for_macro_call(expression, offset, out);
+                    scan_expr_for_nested_scopes(expression, offset, out);
+                }
+            }
+        },
         Expression::FunctionExpression(func) => {
             if let Some(body) = &func.body {
                 scan_stmts_for_macros(&body.statements, offset, out);
@@ -3587,14 +3622,17 @@ fn collect_usages_in_statement(
         Statement::FunctionDeclaration(_) | Statement::ClassDeclaration(_) => {}
         // Skip: import/export declarations are already handled by first pass
         Statement::ImportDeclaration(_)
+        | Statement::ExportDeclaration(_)
         | Statement::ExportNamedDeclaration(_)
+        | Statement::ExportFromDeclaration(_)
         | Statement::ExportDefaultDeclaration(_)
         | Statement::ExportAllDeclaration(_) => {}
         // Skip type declarations
         Statement::TSTypeAliasDeclaration(_)
         | Statement::TSInterfaceDeclaration(_)
         | Statement::TSEnumDeclaration(_)
-        | Statement::TSModuleDeclaration(_) => {}
+        | Statement::TSExternalModuleDeclaration(_)
+        | Statement::TSNamespaceDeclaration(_) => {}
         _ => {}
     }
 }
@@ -3955,16 +3993,31 @@ fn collect_usages_in_expression(
                 collect_pattern_names(&param.pattern, &mut fn_bindings);
             }
             shadow_stack.push(fn_bindings);
-            // Expression body: single statement is an ExpressionStatement
-            // Block body: multiple statements
-            for s in &arrow.body.statements {
-                collect_usages_in_statement(
-                    s,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                );
+            match &arrow.body {
+                ArrowFunctionBody::FunctionBody(body) => {
+                    for s in &body.statements {
+                        collect_usages_in_statement(
+                            s,
+                            binding_names,
+                            binding_spans,
+                            occurrences,
+                            shadow_stack,
+                        );
+                    }
+                }
+                // An expression body is walked as its one expression statement.
+                body => {
+                    if let Some(expression) = body.as_expression() {
+                        collect_usages_in_expression(
+                            expression,
+                            binding_names,
+                            binding_spans,
+                            occurrences,
+                            shadow_stack,
+                            UsageContext::Value,
+                        );
+                    }
+                }
             }
             shadow_stack.pop();
         }
@@ -4513,8 +4566,23 @@ fn extract_object_keys(expr: &Expression<'_>, keys: &mut Vec<String>) {
 /// Extract keys from the return object of an arrow function body.
 ///
 /// Handles `() => ({ key1: val1, key2: val2 })`.
-fn extract_return_object_keys(body: &FunctionBody<'_>, keys: &mut Vec<String>) {
-    // For `() => ({...})`, the body has a single ExpressionStatement with parenthesized object
+fn extract_return_object_keys(body: &ArrowFunctionBody<'_>, keys: &mut Vec<String>) {
+    let body = match body {
+        ArrowFunctionBody::FunctionBody(body) => body,
+        // For `() => ({...})`, the body is the parenthesized object
+        body => {
+            if let Some(expr) = body.as_expression() {
+                // Handle parenthesized expression: `({...})`
+                let inner = match expr {
+                    Expression::ParenthesizedExpression(paren) => &paren.expression,
+                    other => other,
+                };
+                extract_object_keys(inner, keys);
+            }
+            return;
+        }
+    };
+    // A block holding a single ExpressionStatement with a parenthesized object
     if body.statements.len() == 1 {
         if let Statement::ExpressionStatement(stmt) = &body.statements[0] {
             let expr = &stmt.expression;

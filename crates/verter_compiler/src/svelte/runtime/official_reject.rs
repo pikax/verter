@@ -904,10 +904,10 @@ fn scan_runes_mode_legacy_script_constructs(
     let program = reparse_module(&alloc, instance)?;
     for stmt in &program.body {
         match stmt {
-            Statement::ExportNamedDeclaration(export)
+            Statement::ExportDeclaration(export)
                 if matches!(
                     export.declaration,
-                    Some(oxc_ast::ast::Declaration::VariableDeclaration(ref decl))
+                    oxc_ast::ast::Declaration::VariableDeclaration(ref decl)
                         if decl.kind == oxc_ast::ast::VariableDeclarationKind::Let
                 ) =>
             {
@@ -1253,8 +1253,8 @@ impl<'a> oxc_ast_visit::Visit<'a> for InspectTracePlacementScan {
         self.scopes.push(super::expr::arrow_scope_names(it));
         // Only a BLOCK-bodied arrow has a function BODY; a concise (expression) body
         // is an EXPRESSION position — never legal. (An arrow is never a generator.)
-        if !it.r#expression {
-            self.allow_first_statement(&it.body.statements);
+        if let Some(body) = it.get_function_body() {
+            self.allow_first_statement(&body.statements);
         }
         oxc_ast_visit::walk::walk_arrow_function_expression(self, it);
         self.scopes.pop();

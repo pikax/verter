@@ -934,16 +934,12 @@ fn collect_prop_refs(
             for param in &arrow.params.items {
                 collect_binding_pattern_names(&param.pattern, &mut inner_shadowed);
             }
-            if arrow.expression {
+            if let Some(expression) = arrow.get_expression() {
                 // Expression body: `(x) => x + 1`
-                if let Some(oxc_ast::ast::Statement::ExpressionStatement(es)) =
-                    arrow.body.statements.first()
-                {
-                    collect_prop_refs(&es.expression, prop_names, out, &inner_shadowed);
-                }
-            } else {
+                collect_prop_refs(expression, prop_names, out, &inner_shadowed);
+            } else if let Some(body) = arrow.get_function_body() {
                 // Block body — not typical for template expressions, but handle it
-                for stmt in &arrow.body.statements {
+                for stmt in &body.statements {
                     if let oxc_ast::ast::Statement::ExpressionStatement(es) = stmt {
                         collect_prop_refs(&es.expression, prop_names, out, &inner_shadowed);
                     } else if let oxc_ast::ast::Statement::ReturnStatement(rs) = stmt {

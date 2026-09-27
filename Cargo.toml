@@ -14,7 +14,7 @@ resolver = "2"
 version = "0.0.1-beta.5"
 edition = "2021"
 # Consumer-facing MSRV floor, set by transitive deps in
-# `[workspace.dependencies]`: `oxc_*` 0.126 requires rustc 1.92.
+# `[workspace.dependencies]`: `oxc_*` 0.151 requires rustc 1.96.
 #
 # DELIBERATELY looser than `rust-toolchain.toml`, and a separate claim. That
 # file pins the DEVELOPMENT toolchain this repo is built and tested with; this
@@ -23,7 +23,7 @@ edition = "2021"
 # `.stderr` fixtures, which are never compiled by a consumer, so it does not
 # drag this floor up with it.
 # Bumping the pin does NOT imply bumping this value.
-rust-version = "1.92"
+rust-version = "1.96"
 license = "MIT"
 authors = ["pikax"]
 repository = "https://github.com/pikax/verter"
@@ -31,14 +31,14 @@ homepage = "https://verterjs.dev/"
 
 [workspace.dependencies]
 blake3 = "1.5"
-oxc_allocator = "0.126.0"
-oxc_ast = "0.126.0"
-oxc_ast_visit = "0.126.0"
-oxc_parser = "0.126.0"
-oxc_semantic = "0.126.0"
-oxc_span = "0.126.0"
-oxc_str = "0.126.0"
-oxc_syntax = "0.126.0"
+oxc_allocator = "0.151.0"
+oxc_ast = "0.151.0"
+oxc_ast_visit = "0.151.0"
+oxc_parser = "0.151.0"
+oxc_semantic = "0.151.0"
+oxc_span = "0.151.0"
+oxc_str = "0.151.0"
+oxc_syntax = "0.151.0"
 rayon = "1.12"
 rustc-hash = "2.1.2"
 self_cell = "1.2.2"

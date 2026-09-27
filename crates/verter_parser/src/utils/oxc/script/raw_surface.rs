@@ -261,11 +261,7 @@ pub fn capture_statement_surfaces(stmt: &Statement<'_>) -> Vec<CapturedSurface> 
         Statement::TSEnumDeclaration(enum_decl) => vec![capture_enum(enum_decl)],
         Statement::FunctionDeclaration(func) => capture_function(func).into_iter().collect(),
         Statement::VariableDeclaration(var_decl) => capture_variables(var_decl),
-        Statement::ExportNamedDeclaration(export) => export
-            .declaration
-            .as_ref()
-            .map(capture_declaration_surfaces)
-            .unwrap_or_default(),
+        Statement::ExportDeclaration(export) => capture_declaration_surfaces(&export.declaration),
         _ => Vec::new(),
     }
 }

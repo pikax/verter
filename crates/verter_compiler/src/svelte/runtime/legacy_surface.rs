@@ -132,10 +132,10 @@ pub(super) fn refuse_runes_mode_legacy_script_constructs(
     };
     for stmt in &program.body {
         match stmt {
-            Statement::ExportNamedDeclaration(export)
+            Statement::ExportDeclaration(export)
                 if matches!(
                     export.declaration,
-                    Some(oxc_ast::ast::Declaration::VariableDeclaration(ref decl))
+                    oxc_ast::ast::Declaration::VariableDeclaration(ref decl)
                         if decl.kind == oxc_ast::ast::VariableDeclarationKind::Let
                 ) =>
             {

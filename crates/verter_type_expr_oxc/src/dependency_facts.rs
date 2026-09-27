@@ -232,14 +232,14 @@ impl<'a> TypeDependencyCollector<'a> {
         }
     }
 
-    fn record_expression_path(
+    fn record_type_name_path(
         &mut self,
-        expression: &Expression<'_>,
+        name: &TSTypeName<'_>,
         context: StructuralDependencyContext,
     ) {
-        let fact = dependency_path_from_expression(expression);
-        let path_context = match expression {
-            Expression::Identifier(_) => context,
+        let fact = dependency_path_from_type_name(name);
+        let path_context = match name {
+            TSTypeName::IdentifierReference(_) => context,
             _ => StructuralDependencyContext::CarrierOnly,
         };
         self.record(fact, path_context);
@@ -314,13 +314,11 @@ impl<'a> TypeDependencyCollector<'a> {
         }
     }
 
-    fn visit_index_parameters(&mut self, parameters: &[TSIndexSignatureName<'_>]) {
-        for parameter in parameters {
-            self.visit_type(
-                &parameter.type_annotation.type_annotation,
-                StructuralDependencyContext::CarrierOnly,
-            );
-        }
+    fn visit_index_parameter(&mut self, parameter: &TSIndexSignatureName<'_>) {
+        self.visit_type(
+            &parameter.type_annotation.type_annotation,
+            StructuralDependencyContext::CarrierOnly,
+        );
     }
 
     fn visit_signatures(&mut self, members: &[TSSignature<'_>], carrier_only: bool) {
@@ -378,7 +376,7 @@ impl<'a> TypeDependencyCollector<'a> {
                     }
                 }
                 TSSignature::TSIndexSignature(index) => {
-                    self.visit_index_parameters(&index.parameters);
+                    self.visit_index_parameter(&index.parameter);
                     self.visit_type(&index.type_annotation.type_annotation, leaf_context)
                 }
                 TSSignature::TSConstructSignatureDeclaration(constructor) => {
@@ -584,7 +582,7 @@ impl<'a> TypeDependencyCollector<'a> {
         heritage: &[TSInterfaceHeritage<'_>],
     ) {
         for base in heritage {
-            self.record_expression_path(&base.expression, StructuralDependencyContext::Root);
+            self.record_type_name_path(&base.type_name, StructuralDependencyContext::Root);
             if let Some(arguments) = &base.type_arguments {
                 for argument in &arguments.params {
                     self.visit_type(argument, StructuralDependencyContext::Root);
@@ -598,7 +596,8 @@ impl<'a> TypeDependencyCollector<'a> {
         if let Some(parameters) = &class.type_parameters {
             self.visit_type_parameters_for_carrier(parameters);
         }
-        if let Some(base) = &class.super_class {
+        if let Some(heritage) = &class.heritage {
+            let base = &heritage.expression;
             let value_path = dependency_path_from_expression(base);
             if let Some(path) = &value_path {
                 self.value_positions.insert(path.clone());
@@ -611,7 +610,7 @@ impl<'a> TypeDependencyCollector<'a> {
                 _ => StructuralDependencyContext::CarrierOnly,
             };
             self.record(value_path, path_context);
-            if let Some(arguments) = &class.super_type_arguments {
+            if let Some(arguments) = &heritage.type_arguments {
                 for argument in &arguments.params {
                     self.visit_type(argument, StructuralDependencyContext::Root);
                 }
@@ -680,7 +679,7 @@ impl<'a> TypeDependencyCollector<'a> {
                     }
                 }
                 ClassElement::TSIndexSignature(index) => {
-                    self.visit_index_parameters(&index.parameters);
+                    self.visit_index_parameter(&index.parameter);
                     self.visit_type(
                         &index.type_annotation.type_annotation,
                         StructuralDependencyContext::LeafProperty,

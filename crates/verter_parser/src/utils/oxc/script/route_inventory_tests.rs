@@ -28,7 +28,11 @@ fn module_identity_comes_from_top_level_syntax_even_without_route_rows() {
         ("if (ok) /; export {}/.test(x); export {};", true),
     ] {
         let parsed = parse(source);
-        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
         assert_eq!(
             build_script_route_inventory(&parsed.program).has_module_syntax,
             expected,
@@ -58,7 +62,7 @@ export = NS
 type Hidden = { ignored: true }
 "#;
     let parsed = parse(source);
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let inventory = build_script_route_inventory(&parsed.program);
     let owner = TopLevelOwnerId::ordinary_file();
 
@@ -262,7 +266,7 @@ fn default_export_surfaces_route_through_the_default_symbol() {
         ),
     ] {
         let parsed = parse(source);
-        assert!(!parsed.panicked, "fixture must parse: {source}");
+        assert!(!parsed.fatal_error, "fixture must parse: {source}");
 
         let inventory = build_script_route_inventory(&parsed.program);
         assert_eq!(
@@ -285,7 +289,11 @@ fn parse_as(source: &str, source_type: SourceType) -> oxc_parser::ParserReturn<'
 
 fn exported_names(source: &str, source_type: SourceType) -> Vec<String> {
     let parsed = parse_as(source, source_type);
-    assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "{source}: {:?}",
+        parsed.diagnostics
+    );
     let mut names: Vec<String> = build_script_route_inventory(&parsed.program)
         .local_exports
         .into_iter()
@@ -318,7 +326,7 @@ fn a_declaration_file_module_without_export_declarations_exports_every_declarati
 fn an_import_assignment_is_an_import_route() {
     let parsed =
         parse("import N = require('./n');\nimport type T = require('./t');\nimport Q = N.Q;\n");
-    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let imports = build_script_route_inventory(&parsed.program).imports;
     assert_eq!(
         imports

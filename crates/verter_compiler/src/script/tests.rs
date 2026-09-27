@@ -1115,10 +1115,10 @@ fn macro_output_is_valid_js() {
     let parser_result =
         verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "macro output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 }
 
@@ -1151,10 +1151,10 @@ fn output_is_valid_js() {
     let parser_result =
         verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 }
 
@@ -1384,10 +1384,10 @@ fn e2e_complex_sfc_valid_js() {
     let parser_result =
         verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "complex SFC should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 
     // Verify key structural elements
@@ -1484,10 +1484,10 @@ fn e2e_inline_mode_valid_js() {
     let parser_result =
         verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "inline mode output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 
     // No return statement in inline mode
@@ -1557,10 +1557,10 @@ fn multiple_imports_all_hoisted() {
     let parser_result =
         verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 }
 
@@ -1601,10 +1601,10 @@ fn multiple_define_model_deduplicates_imports() {
     let parser_result =
         verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "multiple defineModel output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 
     // All three models should be replaced
@@ -1739,10 +1739,10 @@ withDefaults(defineProps<{
     let parser_result =
         verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "withDefaults with method shorthand should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 }
 
@@ -1761,10 +1761,10 @@ fn assert_valid_js(output: &str) {
         verter_parser::oxc_parse::Parser::new(&js_alloc, output, oxc_span::SourceType::mjs())
             .parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "force-js output must be valid JavaScript.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 }
 

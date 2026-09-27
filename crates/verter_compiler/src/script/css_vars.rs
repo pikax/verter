@@ -147,7 +147,7 @@ fn resolve_complex_css_var_expr(
     let source_type = SourceType::tsx();
     let parser_ret = Parser::new(&alloc, &wrapper, source_type).parse();
 
-    if !parser_ret.errors.is_empty() || parser_ret.program.body.is_empty() {
+    if !parser_ret.diagnostics.is_empty() || parser_ret.program.body.is_empty() {
         return expr.to_string();
     }
 

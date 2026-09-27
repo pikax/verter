@@ -137,7 +137,10 @@ pub fn adjust_expression_spans(expr: &mut Expression<'_>, offset: u32) {
         Expression::Super(sup) => {
             adjust_span(&mut sup.span, offset);
         }
-        Expression::MetaProperty(meta) => {
+        Expression::ImportMeta(meta) => {
+            adjust_span(&mut meta.span, offset);
+        }
+        Expression::NewTarget(meta) => {
             adjust_span(&mut meta.span, offset);
         }
         // FunctionExpression, ClassExpression, etc. are less common in v-for/v-slot
@@ -372,18 +375,19 @@ fn adjust_arrow_function_expression_spans(arrow: &mut ArrowFunctionExpression<'_
         adjust_span(&mut rt.span, offset);
     }
     adjust_formal_parameters_spans(&mut arrow.params, offset);
-    adjust_span(&mut arrow.body.span, offset);
-    if arrow.expression {
-        // Expression body: (x) => x + 1
-        if let Some(oxc_ast::ast::Statement::ExpressionStatement(stmt)) =
-            arrow.body.statements.first_mut()
-        {
-            adjust_expression_spans(&mut stmt.expression, offset);
+    match &mut arrow.body {
+        oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) => {
+            // Block body: (x) => { return x + 1; }
+            adjust_span(&mut body.span, offset);
+            for stmt in &mut body.statements {
+                adjust_statement_spans(stmt, offset);
+            }
         }
-    } else {
-        // Block body: (x) => { return x + 1; }
-        for stmt in &mut arrow.body.statements {
-            adjust_statement_spans(stmt, offset);
+        body => {
+            // Expression body: (x) => x + 1
+            if let Some(expression) = body.as_expression_mut() {
+                adjust_expression_spans(expression, offset);
+            }
         }
     }
 }
@@ -838,19 +842,26 @@ fn adjust_statement_spans(stmt: &mut Statement<'_>, offset: u32) {
                 }
             }
         }
+        Statement::ExportDeclaration(decl) => {
+            adjust_span(&mut decl.span, offset);
+            adjust_declaration_spans(&mut decl.declaration, offset);
+        }
         Statement::ExportNamedDeclaration(decl) => {
             adjust_span(&mut decl.span, offset);
-            if let Some(d) = &mut decl.declaration {
-                adjust_declaration_spans(d, offset);
-            }
             for spec in &mut decl.specifiers {
                 adjust_span(&mut spec.span, offset);
                 adjust_span(spec.local.span_mut(), offset);
                 adjust_span(spec.exported.span_mut(), offset);
             }
-            if let Some(source) = &mut decl.source {
-                adjust_span(&mut source.span, offset);
+        }
+        Statement::ExportFromDeclaration(decl) => {
+            adjust_span(&mut decl.span, offset);
+            for spec in &mut decl.specifiers {
+                adjust_span(&mut spec.span, offset);
+                adjust_span(spec.local.span_mut(), offset);
+                adjust_span(spec.exported.span_mut(), offset);
             }
+            adjust_span(&mut decl.source.span, offset);
         }
 
         // ---- TypeScript declarations ----
@@ -872,7 +883,10 @@ fn adjust_statement_spans(stmt: &mut Statement<'_>, offset: u32) {
                 }
             }
         }
-        Statement::TSModuleDeclaration(d) => {
+        Statement::TSExternalModuleDeclaration(d) => {
+            adjust_span(&mut d.span, offset);
+        }
+        Statement::TSNamespaceDeclaration(d) => {
             adjust_span(&mut d.span, offset);
         }
         Statement::TSImportEqualsDeclaration(d) => {
@@ -964,14 +978,18 @@ fn adjust_class_spans(class: &mut oxc_ast::ast::Class<'_>, offset: u32) {
     if let Some(tp) = &mut class.type_parameters {
         adjust_span(&mut tp.span, offset);
     }
-    if let Some(sta) = &mut class.super_type_arguments {
+    if let Some(sta) = class
+        .heritage
+        .as_mut()
+        .and_then(|h| h.type_arguments.as_mut())
+    {
         adjust_span(&mut sta.span, offset);
     }
     for impl_clause in &mut class.implements {
         adjust_span(&mut impl_clause.span, offset);
     }
-    if let Some(super_class) = &mut class.super_class {
-        adjust_expression_spans(super_class, offset);
+    if let Some(heritage) = &mut class.heritage {
+        adjust_expression_spans(&mut heritage.expression, offset);
     }
     adjust_span(&mut class.body.span, offset);
     for element in &mut class.body.body {
@@ -1049,7 +1067,10 @@ fn adjust_declaration_spans(decl: &mut oxc_ast::ast::Declaration<'_>, offset: u3
                 }
             }
         }
-        oxc_ast::ast::Declaration::TSModuleDeclaration(d) => {
+        oxc_ast::ast::Declaration::TSExternalModuleDeclaration(d) => {
+            adjust_span(&mut d.span, offset);
+        }
+        oxc_ast::ast::Declaration::TSNamespaceDeclaration(d) => {
             adjust_span(&mut d.span, offset);
         }
         oxc_ast::ast::Declaration::TSGlobalDeclaration(d) => {
@@ -1075,16 +1096,13 @@ pub fn adjust_diagnostics_spans(errors: &mut [oxc_diagnostics::OxcDiagnostic], o
     if offset == 0 {
         return;
     }
-    let offset_usize = offset as usize;
     for diag in errors.iter_mut() {
-        if let Some(labels) = &mut diag.labels {
-            for label in labels.iter_mut() {
-                *label = oxc_diagnostics::LabeledSpan::new(
-                    label.label().map(|s| s.to_string()),
-                    label.offset() + offset_usize,
-                    label.len(),
-                );
-            }
+        for label in diag.labels.iter_mut() {
+            *label = oxc_diagnostics::LabeledSpan::new(
+                label.label().map(|s| s.to_string()),
+                label.offset() + offset,
+                label.len(),
+            );
         }
     }
 }

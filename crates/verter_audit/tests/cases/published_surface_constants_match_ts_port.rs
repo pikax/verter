@@ -84,9 +84,9 @@ fn extract_string_array_consts(
     let source_type = SourceType::ts();
     let parsed = Parser::new(&allocator, source, source_type).parse();
     assert!(
-        !parsed.panicked,
+        !parsed.fatal_error,
         "OXC parser panicked while reading {path_for_diagnostics:?}; errors: {:?}",
-        parsed.errors
+        parsed.diagnostics
     );
     let mut out = Vec::new();
     collect_program_string_array_consts(&parsed.program, &mut out, path_for_diagnostics);
@@ -106,7 +106,7 @@ fn extract_string_array_consts_lenient(
     let allocator = Allocator::default();
     let source_type = SourceType::ts();
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -131,11 +131,11 @@ fn collect_program_string_array_consts(
 fn export_named_var_decl<'a, 'b>(
     statement: &'b Statement<'a>,
 ) -> Option<&'b VariableDeclaration<'a>> {
-    let Statement::ExportNamedDeclaration(export) = statement else {
+    let Statement::ExportDeclaration(export) = statement else {
         return None;
     };
     match &export.declaration {
-        Some(Declaration::VariableDeclaration(decl)) => Some(decl.as_ref()),
+        Declaration::VariableDeclaration(decl) => Some(decl.as_ref()),
         _ => None,
     }
 }

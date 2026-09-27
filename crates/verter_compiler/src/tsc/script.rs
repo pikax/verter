@@ -2521,12 +2521,9 @@ fn local_declaration_node<'a>(statement: &'a Statement<'a>) -> Option<LocalDecla
             Declaration::TSInterfaceDeclaration(decl) => {
                 Some(LocalDeclarationNode::Exact(decl.id.name.as_str()))
             }
-            Declaration::TSModuleDeclaration(decl) => match &decl.id {
-                TSModuleDeclarationName::Identifier(id) => {
-                    Some(LocalDeclarationNode::Exact(id.name.as_str()))
-                }
-                TSModuleDeclarationName::StringLiteral(_) => None,
-            },
+            Declaration::TSNamespaceDeclaration(decl) => {
+                Some(LocalDeclarationNode::Exact(decl.id.name.as_str()))
+            }
             Declaration::ClassDeclaration(class) => Some(LocalDeclarationNode::Class(class)),
             Declaration::TSEnumDeclaration(ts_enum) => Some(LocalDeclarationNode::Enum(ts_enum)),
             _ => None,
@@ -2540,17 +2537,12 @@ fn local_declaration_node<'a>(statement: &'a Statement<'a>) -> Option<LocalDecla
         Statement::TSInterfaceDeclaration(decl) => {
             Some(LocalDeclarationNode::Exact(decl.id.name.as_str()))
         }
-        Statement::TSModuleDeclaration(decl) => match &decl.id {
-            TSModuleDeclarationName::Identifier(id) => {
-                Some(LocalDeclarationNode::Exact(id.name.as_str()))
-            }
-            TSModuleDeclarationName::StringLiteral(_) => None,
-        },
+        Statement::TSNamespaceDeclaration(decl) => {
+            Some(LocalDeclarationNode::Exact(decl.id.name.as_str()))
+        }
         Statement::ClassDeclaration(class) => Some(LocalDeclarationNode::Class(class)),
         Statement::TSEnumDeclaration(ts_enum) => Some(LocalDeclarationNode::Enum(ts_enum)),
-        Statement::ExportNamedDeclaration(export) => {
-            export.declaration.as_ref().and_then(from_declaration)
-        }
+        Statement::ExportDeclaration(export) => from_declaration(&export.declaration),
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
             ExportDefaultDeclarationKind::TSInterfaceDeclaration(decl) => {
                 Some(LocalDeclarationNode::Exact(decl.id.name.as_str()))
@@ -2662,9 +2654,9 @@ fn unsupported_class_shape(class: &Class<'_>) -> Option<TscDeclarationShapeReaso
         return Some(TscDeclarationShapeReason::ClassDecorator);
     }
     if class
-        .super_class
+        .heritage
         .as_ref()
-        .is_some_and(|super_class| !matches!(super_class, Expression::Identifier(_)))
+        .is_some_and(|heritage| !matches!(heritage.expression, Expression::Identifier(_)))
     {
         return Some(TscDeclarationShapeReason::ComplexClassHeritage);
     }
@@ -2733,9 +2725,9 @@ fn build_class_declaration_plan(
 ) -> Option<ClassDeclarationPlan> {
     if !class.decorators.is_empty()
         || class
-            .super_class
+            .heritage
             .as_ref()
-            .is_some_and(|super_class| !matches!(super_class, Expression::Identifier(_)))
+            .is_some_and(|heritage| !matches!(heritage.expression, Expression::Identifier(_)))
     {
         return None;
     }
@@ -3442,7 +3434,7 @@ fn parse_raw_attrs_type(type_text: &str, source_range: Span) -> AttrsTypeParseOu
             reason: TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
         };
     };
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return AttrsTypeParseOutcome::Invalid {
             subject: TscFailureSubject::ScriptSetupAttrs { source_range },
             reason: TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,

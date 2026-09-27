@@ -13,6 +13,7 @@
 use oxc_ast::ast::{BindingPattern, Expression, Program, Statement};
 use oxc_ast_visit::Visit;
 use rustc_hash::FxHashMap;
+use verter_parser::utils::oxc::script::export_parts::NamedExportParts;
 
 use super::expr::{
     collect_pattern_names, expr_is_proxiable, init_is_proxiable, is_bindable_call,
@@ -194,10 +195,10 @@ pub(super) fn prepare_legacy_export_prop_bindings(
         return;
     };
     for stmt in &program.body {
-        let Statement::ExportNamedDeclaration(export) = stmt else {
+        let Statement::ExportDeclaration(export) = stmt else {
             continue;
         };
-        let Some(oxc_ast::ast::Declaration::VariableDeclaration(decl)) = &export.declaration else {
+        let oxc_ast::ast::Declaration::VariableDeclaration(decl) = &export.declaration else {
             continue;
         };
         if decl.kind != oxc_ast::ast::VariableDeclarationKind::Let {
@@ -382,9 +383,14 @@ pub fn instance_forces_definite_legacy(program: &Program<'_>) -> bool {
     for stmt in &program.body {
         match stmt {
             Statement::LabeledStatement(_) => return true,
-            Statement::ExportNamedDeclaration(export) => {
+            Statement::ExportDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_) => {
+                let Some(export) = NamedExportParts::of_statement(stmt) else {
+                    continue;
+                };
                 if let Some(oxc_ast::ast::Declaration::VariableDeclaration(decl)) =
-                    &export.declaration
+                    export.declaration
                 {
                     if decl.kind == oxc_ast::ast::VariableDeclarationKind::Let {
                         return true;

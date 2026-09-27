@@ -114,10 +114,50 @@ pub fn process_import<'a>(
 
 /// Process a named export declaration and return a ScriptExport item
 pub fn process_named_export<'a>(export: &ExportNamedDeclaration<'a>) -> ScriptExport<'a> {
+    process_export_parts(
+        export.span,
+        &export.specifiers,
+        None,
+        None,
+        export.export_kind.is_type(),
+    )
+}
+
+/// Process a declaration export (`export const foo = 1`) and return a
+/// ScriptExport item
+pub fn process_declaration_export<'a>(export: &ExportDeclaration<'a>) -> ScriptExport<'a> {
+    process_export_parts(
+        export.span,
+        &[],
+        Some(&export.declaration),
+        None,
+        export.export_kind().is_type(),
+    )
+}
+
+/// Process a named re-export (`export { a } from 'foo'`) and return a
+/// ScriptExport item
+pub fn process_from_export<'a>(export: &ExportFromDeclaration<'a>) -> ScriptExport<'a> {
+    process_export_parts(
+        export.span,
+        &export.specifiers,
+        None,
+        Some(&export.source),
+        export.export_kind.is_type(),
+    )
+}
+
+fn process_export_parts<'a>(
+    span: oxc_span::Span,
+    specifiers: &[ExportSpecifier<'a>],
+    declaration: Option<&Declaration<'a>>,
+    source: Option<&StringLiteral<'a>>,
+    is_type_only: bool,
+) -> ScriptExport<'a> {
     let mut bindings = Vec::new();
 
     // Extract bindings from export specifiers: export { a, b as c }
-    for spec in &export.specifiers {
+    for spec in specifiers {
         // Use exported name (the name visible outside)
         let name = match &spec.exported {
             ModuleExportName::IdentifierName(id) => id.name.as_str(),
@@ -135,16 +175,16 @@ pub fn process_named_export<'a>(export: &ExportNamedDeclaration<'a>) -> ScriptEx
     }
 
     // Handle declaration exports: export const foo = 1
-    if let Some(decl) = &export.declaration {
+    if let Some(decl) = declaration {
         extract_declaration_bindings(decl, &mut bindings);
     }
 
     ScriptExport {
-        span: Span::from(export.span),
+        span: Span::from(span),
         bindings,
-        source: export.source.as_ref().map(|s| s.value.as_str()),
-        source_span: export.source.as_ref().map(|s| Span::from(s.span)),
-        is_type_only: export.export_kind.is_type(),
+        source: source.map(|s| s.value.as_str()),
+        source_span: source.map(|s| Span::from(s.span)),
+        is_type_only,
     }
 }
 
@@ -217,7 +257,8 @@ fn extract_declaration_bindings<'a>(decl: &Declaration<'a>, bindings: &mut Vec<S
         Declaration::TSTypeAliasDeclaration(_)
         | Declaration::TSInterfaceDeclaration(_)
         | Declaration::TSEnumDeclaration(_)
-        | Declaration::TSModuleDeclaration(_)
+        | Declaration::TSExternalModuleDeclaration(_)
+        | Declaration::TSNamespaceDeclaration(_)
         | Declaration::TSImportEqualsDeclaration(_)
         | Declaration::TSGlobalDeclaration(_) => {}
     }
@@ -280,8 +321,14 @@ pub fn try_process_export<'a>(
     ctx: &ScriptParseContext<'a>,
 ) -> Option<ScriptItem<'a>> {
     match stmt {
+        Statement::ExportDeclaration(export) => {
+            Some(ScriptItem::Export(process_declaration_export(export)))
+        }
         Statement::ExportNamedDeclaration(export) => {
             Some(ScriptItem::Export(process_named_export(export)))
+        }
+        Statement::ExportFromDeclaration(export) => {
+            Some(ScriptItem::Export(process_from_export(export)))
         }
         Statement::ExportAllDeclaration(export) => {
             Some(ScriptItem::Export(process_all_export(export, ctx)))

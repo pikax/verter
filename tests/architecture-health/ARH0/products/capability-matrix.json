@@ -65,7 +65,7 @@
       "capability": "rust-parser-substrate",
       "status": "implemented",
       "engine": "oxc",
-      "version": "0.126.0",
+      "version": "0.151.0",
       "versionSource": "Cargo.toml",
       "consumers": [
         "crates/verter_parser",

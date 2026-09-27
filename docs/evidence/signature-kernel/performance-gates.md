@@ -513,17 +513,17 @@ Recorded plainly so no reader mistakes absence for a pass:
   stack there is its re-parse of the file (4.0 MiB at 2,000).
 
 * **oxc's parse runs on a stack its source cannot exhaust.** oxc_parser
-  0.126's recursive descent has no depth limit and aborts the process when
+  0.151's recursive descent has no depth limit and aborts the process when
   a thread's stack runs out, before returning an AST: on an 8 MiB stack at
-  4,512 nested type arguments or object literals and 5,664 parentheses
-  (optimized), 2,272 and 3,424 unoptimized
+  3,500 nested object literals, 4,781 type arguments and 4,093 parentheses
+  (optimized), 2,484, 2,671 and 2,859 unoptimized
   (`docs/evidence/signature-kernel/oxc-deep-parse.md`, reproduced by
   `crates/verter_parser/examples/oxc_deep_parse.rs` with nothing of
   Verter's). Every production parse goes through
   `verter_parser::oxc_parse::Parser`, a drop-in that parses exactly what
   oxc parses: a linear scan bounds the syntax tree's depth from above and
-  the parse gets 8 KiB per level of it (twice oxc's costliest measured
-  level), in place when the thread has it and on a `stacker` segment
+  the parse gets 9 KiB per level of it (twice the costliest measured level
+  of the parse or of oxc's walks over its tree), in place when the thread has it and on a `stacker` segment
   otherwise. No source is refused and no depth is imposed.
   `oxc_parse/tests.rs` parses ten forms 10,000 deep and an unclosed
   200,000-deep nest on a 1 MiB thread (with the parse in place, or with a
@@ -533,9 +533,8 @@ Recorded plainly so no reader mistakes absence for a pass:
   against 6.1 ms for `lib.dom.d.ts`, optimized); a source short enough
   that every byte could be a level skips it. `stacker` cannot grow the
   stack on wasm32, where the module's stack (1 MiB, wasm32's linker default)
-  bounds the parse. What runs
-  after the parse (the syntax-tree clone, the semantic builder and
-  Verter's own passes) still recurses per level in places.
+  bounds the parse. oxc's walks over the tree run under the same
+  containment (below).
 
 * **A class expression raises one instance per level.** The lane's graph
   of `class { m() { return class { … } } }` nested `n` deep is linear
@@ -621,7 +620,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   10,000-deep `!` chain took 13.7 MB on the unoptimized IO worker
   (`root_binding_index`'s binding clone), past its 8 MiB. Every walk entry
   now runs under one of `verter_parser::oxc_parse`'s containments, sized
-  the way the parse is (8 KiB per level of the nesting scan's bound plus
+  the way the parse is (9 KiB per level of the nesting scan's bound plus
   512 KiB, in place when the thread has it, on a stack segment otherwise):
   `with_program_stack` for a whole program, `ProgramWalkStack` for the
   many node walks one program's consumer makes (its program scanned at

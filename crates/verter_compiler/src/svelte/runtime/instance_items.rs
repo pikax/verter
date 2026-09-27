@@ -15,6 +15,7 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{BindingPattern, Comment, Expression, Statement, VariableDeclarationKind};
 use oxc_span::GetSpan;
+use verter_parser::utils::oxc::script::export_parts::NamedExportParts;
 
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::expr::{
@@ -498,7 +499,15 @@ fn classify_instance_statement(
         // class` are the `$$exports` component-export surface with their OWN
         // fail-closed identity (any mode); every other export form keeps its
         // precise fail-closed residual.
-        Statement::ExportNamedDeclaration(export) => classify_export_statement(export, legacy),
+        Statement::ExportDeclaration(export) => {
+            classify_export_statement(NamedExportParts::of_declaration(export), legacy)
+        }
+        Statement::ExportNamedDeclaration(export) => {
+            classify_export_statement(NamedExportParts::of_named(export), legacy)
+        }
+        Statement::ExportFromDeclaration(export) => {
+            classify_export_statement(NamedExportParts::of_from(export), legacy)
+        }
         // Functions used by bind/store/event fast paths retain a dedicated carrier;
         // other ordinary functions fall back to the canonical general carrier.
         Statement::FunctionDeclaration(func) => classify_function_declaration(
@@ -596,7 +605,8 @@ fn classify_instance_statement(
         // These TypeScript constructs produce runtime values and cannot be erased;
         // fail closed with their precise construct identity.
         Statement::TSEnumDeclaration(_)
-        | Statement::TSModuleDeclaration(_)
+        | Statement::TSExternalModuleDeclaration(_)
+        | Statement::TSNamespaceDeclaration(_)
         | Statement::TSImportEqualsDeclaration(_) => {
             Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
                 construct: top_level_statement_label(stmt),
@@ -673,7 +683,7 @@ fn ordinary_variable_declaration(decl: &oxc_ast::ast::VariableDeclaration<'_>) -
 /// - A specifier list (`export { a }`) / any other named-export form → the
 ///   generic export residual.
 fn classify_export_statement(
-    export: &oxc_ast::ast::ExportNamedDeclaration<'_>,
+    export: NamedExportParts<'_, '_>,
     legacy: &LegacyScriptFacts,
 ) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
     use oxc_ast::ast::Declaration;
@@ -681,7 +691,7 @@ fn classify_export_statement(
     let refuse = |construct: &'static str| {
         Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, span })
     };
-    match &export.declaration {
+    match export.declaration {
         Some(Declaration::VariableDeclaration(decl)) => match decl.kind {
             VariableDeclarationKind::Let => {
                 if !legacy.legacy_mode {
@@ -1381,13 +1391,17 @@ fn top_level_statement_label(stmt: &Statement<'_>) -> &'static str {
         Statement::FunctionDeclaration(_) => "function",
         Statement::ClassDeclaration(_) => "class",
         Statement::TSEnumDeclaration(_) => "enum",
-        Statement::TSModuleDeclaration(_) => "namespace",
+        Statement::TSExternalModuleDeclaration(_) | Statement::TSNamespaceDeclaration(_) => {
+            "namespace"
+        }
         Statement::TSInterfaceDeclaration(_) => "interface",
         Statement::TSTypeAliasDeclaration(_) => "type alias",
         Statement::TSImportEqualsDeclaration(_) => "import-equals",
         Statement::LabeledStatement(_) => "$: label",
         Statement::ImportDeclaration(_) => "import",
-        Statement::ExportNamedDeclaration(_)
+        Statement::ExportDeclaration(_)
+        | Statement::ExportNamedDeclaration(_)
+        | Statement::ExportFromDeclaration(_)
         | Statement::ExportAllDeclaration(_)
         | Statement::ExportDefaultDeclaration(_) => "export",
         Statement::ExpressionStatement(_) => "expression statement",

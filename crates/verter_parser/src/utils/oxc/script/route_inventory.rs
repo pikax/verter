@@ -7,7 +7,7 @@
 
 use oxc_ast::ast::{
     BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression,
-    ImportDeclarationSpecifier, ImportOrExportKind, Program, Statement, TSModuleDeclarationName,
+    ImportDeclarationSpecifier, ImportOrExportKind, Program, Statement,
 };
 use verter_type_expr::TopLevelOwnerId;
 
@@ -204,7 +204,7 @@ where
 #[must_use]
 pub fn statements_have_export_declarations(statements: &[Statement<'_>]) -> bool {
     statements.iter().any(|statement| match statement {
-        Statement::ExportNamedDeclaration(declaration) => declaration.declaration.is_none(),
+        Statement::ExportNamedDeclaration(_) | Statement::ExportFromDeclaration(_) => true,
         Statement::ExportAllDeclaration(_) | Statement::TSExportAssignment(_) => true,
         Statement::ExportDefaultDeclaration(declaration) => {
             declaration.declaration.as_expression().is_some()
@@ -234,7 +234,9 @@ where
         inventory.has_module_syntax |= matches!(
             statement,
             Statement::ImportDeclaration(_)
+                | Statement::ExportDeclaration(_)
                 | Statement::ExportNamedDeclaration(_)
+                | Statement::ExportFromDeclaration(_)
                 | Statement::ExportDefaultDeclaration(_)
                 | Statement::ExportAllDeclaration(_)
                 | Statement::TSExportAssignment(_)
@@ -319,26 +321,25 @@ where
                     });
                 }
             }
-            Statement::ExportNamedDeclaration(declaration) => {
-                if let Some(source) = &declaration.source {
-                    for specifier in &declaration.specifiers {
-                        inventory.reexports.push(ScriptReexportRoute {
-                            owner,
-                            exported: specifier.exported.name().to_string(),
-                            source: source.value.to_string(),
-                            imported: specifier.local.name().to_string(),
-                            capability: if declaration.export_kind == ImportOrExportKind::Type
-                                || specifier.export_kind == ImportOrExportKind::Type
-                            {
-                                RouteCapability::TypeOnly
-                            } else {
-                                RouteCapability::TypeAndValue
-                            },
-                        });
-                    }
-                    continue;
+            Statement::ExportFromDeclaration(declaration) => {
+                let source = &declaration.source;
+                for specifier in &declaration.specifiers {
+                    inventory.reexports.push(ScriptReexportRoute {
+                        owner,
+                        exported: specifier.exported.name().to_string(),
+                        source: source.value.to_string(),
+                        imported: specifier.local.name().to_string(),
+                        capability: if declaration.export_kind == ImportOrExportKind::Type
+                            || specifier.export_kind == ImportOrExportKind::Type
+                        {
+                            RouteCapability::TypeOnly
+                        } else {
+                            RouteCapability::TypeAndValue
+                        },
+                    });
                 }
-
+            }
+            Statement::ExportNamedDeclaration(declaration) => {
                 for specifier in &declaration.specifiers {
                     inventory.local_exports.push(ScriptLocalExportRoute {
                         owner,
@@ -353,9 +354,13 @@ where
                         },
                     });
                 }
-                if let Some(declaration) = &declaration.declaration {
-                    record_exported_declaration(declaration, owner, &mut inventory.local_exports);
-                }
+            }
+            Statement::ExportDeclaration(declaration) => {
+                record_exported_declaration(
+                    &declaration.declaration,
+                    owner,
+                    &mut inventory.local_exports,
+                );
             }
             Statement::ExportAllDeclaration(declaration) => {
                 inventory.wildcard_reexports.push(ScriptWildcardRoute {
@@ -441,10 +446,8 @@ fn record_exported_declaration(
                 }
             }
         }
-        Declaration::TSModuleDeclaration(declaration) => {
-            if let TSModuleDeclarationName::Identifier(identifier) = &declaration.id {
-                record(identifier.name.as_str(), RouteCapability::TypeAndValue);
-            }
+        Declaration::TSNamespaceDeclaration(declaration) => {
+            record(declaration.id.name.as_str(), RouteCapability::TypeAndValue);
         }
         _ => {}
     }

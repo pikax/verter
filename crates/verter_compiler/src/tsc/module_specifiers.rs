@@ -115,7 +115,7 @@ pub fn quote_module_specifier(specifier: &str, quote: char) -> String {
 pub fn collect_module_specifier_spans(source: &str) -> Option<Vec<ModuleSpecifierSpan>> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return None;
     }
     let mut collector = SpecifierCollector {
@@ -189,11 +189,9 @@ impl<'a> Visit<'a> for SpecifierCollector<'_> {
         oxc_ast_visit::walk::walk_import_declaration(self, decl);
     }
 
-    fn visit_export_named_declaration(&mut self, decl: &ExportNamedDeclaration<'a>) {
-        if let Some(source) = decl.source.as_ref() {
-            self.record(source);
-        }
-        oxc_ast_visit::walk::walk_export_named_declaration(self, decl);
+    fn visit_export_from_declaration(&mut self, decl: &ExportFromDeclaration<'a>) {
+        self.record(&decl.source);
+        oxc_ast_visit::walk::walk_export_from_declaration(self, decl);
     }
 
     fn visit_export_all_declaration(&mut self, decl: &ExportAllDeclaration<'a>) {

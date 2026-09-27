@@ -578,7 +578,10 @@ function handleClick(event) {}
     let (code, _) = gen_tsx_script(source);
     let allocator = oxc_allocator::Allocator::default();
     let parsed = Parser::new(&allocator, &code, SourceType::tsx()).parse();
-    assert!(parsed.errors.is_empty(), "generated TSX must parse cleanly");
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "generated TSX must parse cleanly"
+    );
     let mut facts = HandlerFacts::default();
     facts.visit_program(&parsed.program);
     assert!(facts.found, "the authored handler remains in the carrier");
@@ -640,7 +643,10 @@ function handleEvent(event) {}
     let (code, _) = gen_tsx_script(source);
     let allocator = oxc_allocator::Allocator::default();
     let parsed = Parser::new(&allocator, &code, SourceType::tsx()).parse();
-    assert!(parsed.errors.is_empty(), "generated TSX must parse cleanly");
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "generated TSX must parse cleanly"
+    );
     let mut facts = HandlerFacts::default();
     facts.visit_program(&parsed.program);
     assert!(facts.found, "the authored handler remains in the carrier");

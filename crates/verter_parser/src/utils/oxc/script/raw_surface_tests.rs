@@ -12,7 +12,7 @@ use verter_type_expr::MemberVisibility;
 fn capture_all(src: &str) -> Vec<CapturedSurface> {
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, src, SourceType::ts()).parse();
-    assert!(!ret.panicked, "fixture must parse: {src}");
+    assert!(!ret.fatal_error, "fixture must parse: {src}");
     let captured: Vec<CapturedSurface> = ret
         .program
         .body

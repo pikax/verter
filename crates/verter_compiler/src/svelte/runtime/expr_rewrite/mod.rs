@@ -515,7 +515,7 @@ fn rewrite_expression_dialect(
         ExprDialect::PlainJs => SourceType::mjs(),
     };
     let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         // A fragment that does not parse is a refusal — never emit it verbatim.
         return Err(UnsupportedSvelteRuntimeSurface::DestructuringWrite {
             span: VerterSpan::new(0, 0),

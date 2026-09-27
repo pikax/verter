@@ -44,14 +44,14 @@ pub fn parse_top_level_exports(canonical_id: &str, source: &str) -> Result<Vec<A
         SourceType::ts()
     };
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    if parsed.panicked {
+    if parsed.fatal_error {
         return Err("parser panicked".to_string());
     }
-    if !parsed.errors.is_empty() {
+    if !parsed.diagnostics.is_empty() {
         // Lib parse failures are surfaced with the first error message.
         return Err(format!(
             "parse error: {}",
-            parsed.errors[0].message.as_ref()
+            parsed.diagnostics[0].message.as_ref()
         ));
     }
 
@@ -91,24 +91,19 @@ fn collect_from_statement(
                 }
             }
         }
-        Statement::TSModuleDeclaration(decl) => {
+        Statement::TSNamespaceDeclaration(decl) => {
             // `declare module "x" { ... }` and `namespace X { ... }` — only
             // record the bound name. Body contents are not traversed (lazy
             // session-side parse handles those).
-            match &decl.id {
-                oxc_ast::ast::TSModuleDeclarationName::Identifier(id) => {
-                    push(out, seen, id.name.as_str())
-                }
-                oxc_ast::ast::TSModuleDeclarationName::StringLiteral(_) => {}
-            }
+            push(out, seen, decl.id.name.as_str())
         }
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(decl) = &export.declaration {
-                collect_from_declaration(decl, out, seen);
-            }
-            // Skip `specifiers` (re-exports) — they reference imported names,
-            // not top-level local declarations.
+        Statement::TSExternalModuleDeclaration(_) => {}
+        Statement::ExportDeclaration(export) => {
+            collect_from_declaration(&export.declaration, out, seen);
         }
+        // Skip `specifiers` (re-exports) — they reference imported names,
+        // not top-level local declarations.
+        Statement::ExportNamedDeclaration(_) | Statement::ExportFromDeclaration(_) => {}
         Statement::ExportDefaultDeclaration(_) => {
             // Default exports have no stable name to index on — skip.
         }
@@ -145,11 +140,8 @@ fn collect_from_declaration(
                 }
             }
         }
-        Declaration::TSModuleDeclaration(decl) => {
-            if let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &decl.id {
-                push(out, seen, id.name.as_str());
-            }
-        }
+        Declaration::TSNamespaceDeclaration(decl) => push(out, seen, decl.id.name.as_str()),
+        Declaration::TSExternalModuleDeclaration(_) => {}
         Declaration::TSImportEqualsDeclaration(_) => {}
         // `declare global { ... }` blocks — body is not traversed; the
         // global names declared inside surface through `.d.ts`-style

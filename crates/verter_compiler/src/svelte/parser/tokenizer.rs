@@ -70,7 +70,7 @@ fn valid_binding_pattern(source: &str, grammar: ScriptBodyGrammar) -> bool {
     let alloc = Allocator::default();
     let wrapped = format!("const {source} = null;");
     let parsed = Parser::new(&alloc, &wrapped, template_source_type(grammar)).parse();
-    !parsed.panicked && parsed.errors.is_empty()
+    !parsed.fatal_error && parsed.diagnostics.is_empty()
 }
 
 /// Whether an unclosed top-level `<style>` block's raw CSS content ends at a

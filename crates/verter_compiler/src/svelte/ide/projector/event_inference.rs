@@ -46,7 +46,7 @@ pub(super) fn apply_event_handler_param_inference(
     let body = &source[content.start as usize..content.end as usize];
     let allocator = oxc_allocator::Allocator::default();
     let parsed_script = Parser::new(&allocator, body, SourceType::ts()).parse();
-    if !parsed_script.errors.is_empty() {
+    if !parsed_script.diagnostics.is_empty() {
         return;
     }
     for statement in &parsed_script.program.body {
@@ -54,8 +54,8 @@ pub(super) fn apply_event_handler_param_inference(
             Statement::FunctionDeclaration(function) => {
                 annotate_function(function, &hints, source, content.start, out);
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::FunctionDeclaration(function)) = &export.declaration {
+            Statement::ExportDeclaration(export) => {
+                if let Declaration::FunctionDeclaration(function) = &export.declaration {
                     annotate_function(function, &hints, source, content.start, out);
                 }
             }

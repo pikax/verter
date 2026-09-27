@@ -1800,9 +1800,9 @@ let count = $state(0);
         )
         .parse();
         assert!(
-            parsed.errors.is_empty(),
+            parsed.diagnostics.is_empty(),
             "the JavaScript carrier must be syntactically valid JSX:\n{:?}\n{}",
-            parsed.errors,
+            parsed.diagnostics,
             out.code
         );
         assert!(

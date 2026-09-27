@@ -425,10 +425,9 @@ impl TemplateRefScriptScanner {
             Statement::FunctionDeclaration(func) => {
                 self.visit_function(func, source);
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(declaration) = &export.declaration {
-                    self.visit_declaration(declaration, source);
-                }
+            Statement::ExportDeclaration(export) => {
+                let declaration = &export.declaration;
+                self.visit_declaration(declaration, source);
             }
             Statement::ExportDefaultDeclaration(export) => match &export.declaration {
                 ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
@@ -598,8 +597,13 @@ impl TemplateRefScriptScanner {
                 }
             }
             Expression::ArrowFunctionExpression(arrow) => {
-                for stmt in &arrow.body.statements {
-                    self.visit_statement(stmt, source);
+                if let Some(expression) = arrow.get_expression() {
+                    // An expression body visits as its one expression statement.
+                    self.visit_expression(expression, source);
+                } else if let Some(body) = arrow.get_function_body() {
+                    for stmt in &body.statements {
+                        self.visit_statement(stmt, source);
+                    }
                 }
             }
             Expression::FunctionExpression(func) => {

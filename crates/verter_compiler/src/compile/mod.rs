@@ -475,20 +475,19 @@ fn push_oxc_error(
     diagnostics: &mut Vec<Diagnostic>,
     compile_failures: &mut Vec<CompileDiagnostic>,
 ) {
-    let span = error.labels.as_ref().and_then(|labels| {
-        labels
-            .iter()
-            .find(|label| label.primary())
-            .or_else(|| labels.first())
-            .and_then(|label| {
-                let start = u32::try_from(label.offset()).ok()?;
-                let end = u32::try_from(label.offset().checked_add(label.len())?).ok()?;
-                ((end as usize) <= source.len()
-                    && source.is_char_boundary(start as usize)
-                    && source.is_char_boundary(end as usize))
-                .then_some(crate::common::Span::new(start, end))
-            })
-    });
+    let labels = &error.labels;
+    let span = labels
+        .iter()
+        .find(|label| label.primary())
+        .or_else(|| labels.first())
+        .and_then(|label| {
+            let start = label.offset();
+            let end = label.offset().checked_add(label.len())?;
+            ((end as usize) <= source.len()
+                && source.is_char_boundary(start as usize)
+                && source.is_char_boundary(end as usize))
+            .then_some(crate::common::Span::new(start, end))
+        });
     if let Some(span) = span {
         diagnostics.push(
             Diagnostic::warning("template", CompilerErrorCode::XInvalidExpression, span)

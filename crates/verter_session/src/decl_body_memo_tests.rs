@@ -788,7 +788,7 @@ declare module "ext" {
         oxc_span::SourceType::ts(),
     )
     .parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let header_index = verter_semantic::analysis::decl_headers::build_decl_header_index(
         &parsed.program,
         ALL_DECL_KINDS,

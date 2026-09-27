@@ -3382,22 +3382,17 @@ fn collect_augmentation_statement_dependencies(
     owner: TopLevelOwnerId,
     out: &mut FxHashMap<(AugmentationScopeKind, DeclBindingKey), DeclDependencyFacts>,
 ) {
-    use oxc_ast::ast::{Statement, TSModuleDeclarationBody, TSModuleDeclarationName};
+    use oxc_ast::ast::Statement;
     let (scope, body): (AugmentationScopeKind, &[oxc_ast::ast::Statement<'_>]) = match stmt {
         // `declare global { … }` is its own statement variant.
         Statement::TSGlobalDeclaration(global) => {
             (AugmentationScopeKind::Global, &global.body.body)
         }
-        Statement::TSModuleDeclaration(module) => {
-            let scope = match &module.id {
-                TSModuleDeclarationName::StringLiteral(spec) => {
-                    AugmentationScopeKind::Module(spec.value.to_string())
-                }
-                // An identifier namespace is NOT an augmentation scope — its
-                // inner decls key under qualified `Ns.Name` file-scope records.
-                TSModuleDeclarationName::Identifier(_) => return,
-            };
-            let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = module.body.as_ref() else {
+        // An identifier namespace is NOT an augmentation scope — its inner
+        // decls key under qualified `Ns.Name` file-scope records.
+        Statement::TSExternalModuleDeclaration(module) => {
+            let scope = AugmentationScopeKind::Module(module.id.value.to_string());
+            let Some(block) = module.body.as_ref() else {
                 return;
             };
             (scope, &block.body)

@@ -37,15 +37,16 @@ mod nesting;
 
 pub use nesting::Nesting;
 
-/// The most native stack oxc 0.126's parser, or a walk of oxc's over what
-/// it parsed, spends per level of
-/// [`nesting`]'s bound, with twice the margin: measured with
-/// `examples/oxc_deep_parse.rs` on an unoptimized build (the larger frames),
-/// a parse level takes at most about 3.7 KiB (a nested type argument, which
-/// the scan counts once; a parenthesis, bracket or template hole 2.5 KiB, a
-/// `!` 0.6 KiB), and an optimized build about half of that. A walk spends
-/// less: `clone_in`, the deepest of them, about 1.4 KiB a `!`.
-pub const PARSE_STACK_BYTES_PER_LEVEL: usize = 8 * 1024;
+/// The most native stack oxc 0.151's parser, or a walk of oxc's over what
+/// it parsed, spends per level of [`nesting`]'s bound, with twice the
+/// margin. Measured on an unoptimized build (the larger frames): a parse
+/// level takes at most about 3.4 KiB (an object literal's; a type argument
+/// 3.2 KiB, a parenthesis 3.0 KiB, a `!` 0.2 KiB), `clone_in`, the
+/// costliest walk, 4.4 KiB (an object literal's or a type argument's), the
+/// semantic builder 1.1 KiB and a `Visit` walk 0.6 KiB; an optimized build
+/// spends at most 2.4 KiB (`examples/oxc_deep_parse.rs` in this crate,
+/// `examples/oxc_deep_walk.rs` in `verter_semantic`).
+pub const PARSE_STACK_BYTES_PER_LEVEL: usize = 9 * 1024;
 
 /// Stack the parse needs besides its per-level recursion.
 const PARSE_STACK_BASE_BYTES: usize = 512 * 1024;
@@ -188,16 +189,20 @@ pub fn with_nesting_stack<R>(nesting: Nesting, walk: impl FnOnce() -> R) -> R {
 /// `oxc_parser::Parser`, parsing on a stack its source cannot exhaust.
 pub struct Parser<'a, C: ParserConfig = NoTokensParserConfig> {
     inner: oxc_parser::Parser<'a, C>,
+    allocator: &'a Allocator,
     source_text: &'a str,
     source_type: SourceType,
+    options: ParseOptions,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(allocator: &'a Allocator, source_text: &'a str, source_type: SourceType) -> Self {
         Self {
             inner: oxc_parser::Parser::new(allocator, source_text, source_type),
+            allocator,
             source_text,
             source_type,
+            options: ParseOptions::default(),
         }
     }
 }
@@ -207,6 +212,7 @@ impl<'a, C: ParserConfig> Parser<'a, C> {
     pub fn with_options(self, options: ParseOptions) -> Self {
         Self {
             inner: self.inner.with_options(options),
+            options,
             ..self
         }
     }
@@ -215,8 +221,10 @@ impl<'a, C: ParserConfig> Parser<'a, C> {
     pub fn with_config<D: ParserConfig>(self, config: D) -> Parser<'a, D> {
         Parser {
             inner: self.inner.with_config(config),
+            allocator: self.allocator,
             source_text: self.source_text,
             source_type: self.source_type,
+            options: self.options,
         }
     }
 
@@ -226,19 +234,55 @@ impl<'a, C: ParserConfig> Parser<'a, C> {
             inner,
             source_text,
             source_type,
+            ..
         } = self;
         with_ast_stack(source_text, source_type, move || inner.parse())
     }
 
-    /// Parse the source as one expression.
+    /// Parse the source as one expression: the expression at its start, as
+    /// oxc parsed it before 0.151, leaving any content after it to the
+    /// caller. oxc 0.151's `parse_expression` instead rejects a source with
+    /// content after the expression — a lone `Unexpected token` at that
+    /// content — so that case parses the source before the token.
     pub fn parse_expression(self) -> Result<Expression<'a>, Vec<OxcDiagnostic>> {
         let Self {
             inner,
+            allocator,
             source_text,
             source_type,
+            options,
         } = self;
-        with_ast_stack(source_text, source_type, move || inner.parse_expression())
+        with_ast_stack(source_text, source_type, move || {
+            let diagnostics = match inner.parse_expression() {
+                Ok(expression) => return Ok(expression),
+                Err(diagnostics) => diagnostics,
+            };
+            match trailing_content_start(source_text, &diagnostics) {
+                Some(end) => oxc_parser::Parser::new(allocator, &source_text[..end], source_type)
+                    .with_options(options)
+                    .parse_expression()
+                    .map_err(Vec::from),
+                None => Err(diagnostics.into_vec()),
+            }
+        })
     }
+}
+
+/// Where the content after a parsed expression starts, when `diagnostics`
+/// is oxc's rejection of that content alone: one `Unexpected token` at it.
+fn trailing_content_start(source_text: &str, diagnostics: &[OxcDiagnostic]) -> Option<usize> {
+    let [diagnostic] = diagnostics else {
+        return None;
+    };
+    let [label] = diagnostic.labels.as_slice() else {
+        return None;
+    };
+    let start = label.offset() as usize;
+    (diagnostic.message == "Unexpected token"
+        && start > 0
+        && start < source_text.len()
+        && source_text.is_char_boundary(start))
+    .then_some(start)
 }
 
 #[cfg(test)]

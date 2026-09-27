@@ -53,12 +53,12 @@ fn main() {
         .spawn(move || {
             let allocator = Allocator::default();
             let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
-            (parsed.program.body.len(), parsed.errors.len())
+            (parsed.program.body.len(), parsed.diagnostics.len())
         })
         .expect("spawn the parsing thread")
         .join()
         .expect("the parse returns");
     println!(
-        "oxc_parser 0.126.0 form={form} depth={depth} stack={stack}MiB: parsed, {statements} statements, {errors} errors"
+        "oxc_parser 0.151.0 form={form} depth={depth} stack={stack}MiB: parsed, {statements} statements, {errors} errors"
     );
 }

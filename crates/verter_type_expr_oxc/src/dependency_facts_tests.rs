@@ -17,7 +17,7 @@ fn type_path_collection_preserves_qualified_segments() {
         SourceType::ts(),
     )
     .parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let Statement::TSTypeAliasDeclaration(alias) = &parsed.program.body[0] else {
         panic!("type alias");
     };
@@ -44,7 +44,7 @@ interface Subject<T extends Bound = Default> extends NS.Base<Arg> {
         SourceType::ts(),
     )
     .parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let Statement::TSInterfaceDeclaration(interface) = &parsed.program.body[0] else {
         panic!("interface");
     };
@@ -88,7 +88,7 @@ class Payload {
         SourceType::ts(),
     )
     .parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let Statement::ClassDeclaration(class) = &parsed.program.body[0] else {
         panic!("class");
     };
@@ -128,7 +128,7 @@ fn class_collection_fails_closed_for_unaddressable_value_positions() {
         SourceType::ts(),
     )
     .parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let Statement::ClassDeclaration(class) = &parsed.program.body[0] else {
         panic!("class");
     };
@@ -154,11 +154,11 @@ fn exported_declaration_ast_shape_remains_supported_by_wrapper_callers() {
         SourceType::ts(),
     )
     .parse();
-    assert!(!parsed.panicked, "fixture must parse");
-    let Statement::ExportNamedDeclaration(export) = &parsed.program.body[0] else {
+    assert!(!parsed.fatal_error, "fixture must parse");
+    let Statement::ExportDeclaration(export) = &parsed.program.body[0] else {
         panic!("export");
     };
-    let Some(Declaration::TSInterfaceDeclaration(interface)) = export.declaration.as_ref() else {
+    let Declaration::TSInterfaceDeclaration(interface) = &export.declaration else {
         panic!("exported interface");
     };
 

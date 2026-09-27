@@ -931,7 +931,7 @@ pub fn parse_script_module<'a>(
         crate::svelte::parser::ScriptBodyGrammar::Ts => SourceType::ts(),
     };
     let parsed = Parser::new(alloc, alloc.alloc_str(text), source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return None;
     }
     Some(parsed.program)
@@ -951,7 +951,7 @@ pub fn reparse_module<'a>(alloc: &'a Allocator, text: &str) -> Option<Program<'a
     // A panic OR a non-empty error set means the AST is partial / unreliable —
     // never feed it into rune / mode / state analysis. The caller fails open or
     // records a diagnostic rather than analyzing a torn parse.
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return None;
     }
     Some(parsed.program)
@@ -1669,8 +1669,10 @@ pub(super) fn arrow_scope_names(
     arrow: &ArrowFunctionExpression<'_>,
 ) -> rustc_hash::FxHashSet<String> {
     let mut names = param_names(&arrow.params);
-    collect_direct_decls(&arrow.body.statements, &mut names);
-    collect_var_hoists(&arrow.body.statements, &mut names);
+    if let Some(body) = arrow.get_function_body() {
+        collect_direct_decls(&body.statements, &mut names);
+        collect_var_hoists(&body.statements, &mut names);
+    }
     names
 }
 
@@ -1700,10 +1702,9 @@ pub(super) fn collect_direct_decls(
             // name(s) at this same scope. `export default` is not a component-valid
             // form, and a type-only export (`export type` / `export interface`) binds
             // no value name — both are erased by [`record_declaration_names`].
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(decl) = &export.declaration {
-                    record_declaration_names(decl, out);
-                }
+            Statement::ExportDeclaration(export) => {
+                let decl = &export.declaration;
+                record_declaration_names(decl, out);
             }
             _ => {}
         }
@@ -1842,7 +1843,7 @@ pub(crate) fn parse_pattern(pattern_text: &str) -> Result<ParsedPattern, ()> {
     let alloc = Allocator::default();
     let wrapped = format!("const [{pattern_text}] = null as any;");
     let parsed = Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(());
     }
     let mut names = Vec::new();
@@ -1918,7 +1919,7 @@ pub(crate) fn parse_let_alias_identifier(value_text: &str) -> Option<String> {
     let alloc = Allocator::default();
     let wrapped = format!("const {value_text} = null as any;");
     let parsed = Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return None;
     }
     let mut decls = parsed.program.body.iter().filter_map(|stmt| match stmt {
@@ -1994,7 +1995,7 @@ pub(crate) fn parse_declarators(
     let alloc = Allocator::default();
     let wrapped = format!("{prefix}{inner_text};");
     let parsed = Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(());
     }
     let prefix_len = prefix.len() as u32;
@@ -2041,7 +2042,7 @@ pub(crate) fn parse_debug_identifier_spans(inner_text: &str) -> Result<Vec<Debug
     // text (`a, b;` → the `ExpressionStatement`'s `SequenceExpression` elements).
     let wrapped = format!("{inner_text};");
     let parsed = Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(());
     }
     for stmt in &parsed.program.body {
@@ -2632,7 +2633,7 @@ pub(crate) fn collect_expr_references_in<'a>(
     // (`count + 1`, `() => count++`, `box.a`) parses as a module statement.
     let wrapped = alloc.alloc_str(&format!("({text})"));
     let parsed = Parser::new(alloc, wrapped, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(());
     }
     let mut collector = ExprReferenceCollector {

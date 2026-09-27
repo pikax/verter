@@ -122,7 +122,7 @@ impl BindTargetFact {
     pub fn from_source(alloc: &Allocator, source: &str) -> Self {
         let wrapped = format!("({source})");
         let parsed = Parser::new(alloc, alloc.alloc_str(&wrapped), SourceType::tsx()).parse();
-        if parsed.panicked || !parsed.errors.is_empty() {
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() {
             return Self::default();
         }
         let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
@@ -467,7 +467,7 @@ fn parse_plain_svelte_function_pair(alloc: &Allocator, source: &str) -> Option<(
     let wrapped = format!("({source})");
     // (1) Parse as PLAIN Svelte JS. A parse error / panic fails closed.
     let parsed = Parser::new(alloc, alloc.alloc_str(&wrapped), SourceType::mjs()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return None;
     }
     let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
@@ -544,25 +544,28 @@ struct StrictOfficialDeltaScan {
 
 impl<'a> oxc_ast_visit::Visit<'a> for StrictOfficialDeltaScan {
     fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
-        // Wildcard-free destructure (anti-regrowth — see the type doc).
+        // Wildcard-free destructure (anti-regrowth — see the type doc); oxc
+        // 0.151 marks its AST structs non-exhaustive, hence the trailing `..`.
         let oxc_ast::ast::Class {
             node_id: _,
+            scope_id: _, // internal
             span: _,
-            r#type: _,            // ClassDeclaration | ClassExpression — both plain JS
-            decorators,           // OFFICIAL-DELTA: decorators are not plain ES (Acorn rejects)
-            id: _,                // class name — plain JS
-            type_parameters,      // TS-only (`class C<T>`)
-            super_class: _,       // `extends <expr>` — plain JS (walked below)
-            super_type_arguments, // TS-only (`extends B<T>`)
-            implements,           // TS-only (`implements I`)
-            body: _,              // class body — plain JS (walked below)
-            r#abstract,           // TS-only (`abstract class`)
-            declare,              // TS-only (`declare class`)
-            scope_id: _,          // internal
+            r#type: _,       // ClassDeclaration | ClassExpression — both plain JS
+            decorators,      // OFFICIAL-DELTA: decorators are not plain ES (Acorn rejects)
+            id: _,           // class name — plain JS
+            type_parameters, // TS-only (`class C<T>`)
+            heritage,        // `extends <expr>` plain JS (walked below); its `<T>` TS-only
+            implements,      // TS-only (`implements I`)
+            body: _,         // class body — plain JS (walked below)
+            r#abstract,      // TS-only (`abstract class`)
+            declare,         // TS-only (`declare class`)
+            ..
         } = it;
         if !decorators.is_empty()
             || type_parameters.is_some()
-            || super_type_arguments.is_some()
+            || heritage
+                .as_ref()
+                .is_some_and(|heritage| heritage.type_arguments.is_some())
             || !implements.is_empty()
             || *r#abstract
             || *declare
@@ -574,7 +577,8 @@ impl<'a> oxc_ast_visit::Visit<'a> for StrictOfficialDeltaScan {
 
     fn visit_property_definition(&mut self, it: &oxc_ast::ast::PropertyDefinition<'a>) {
         use oxc_ast::ast::PropertyDefinitionType;
-        // Wildcard-free destructure (anti-regrowth — see the type doc).
+        // Wildcard-free destructure (anti-regrowth — see the type doc); oxc
+        // 0.151 marks its AST structs non-exhaustive, hence the trailing `..`.
         let oxc_ast::ast::PropertyDefinition {
             node_id: _,
             span: _,
@@ -591,6 +595,7 @@ impl<'a> oxc_ast_visit::Visit<'a> for StrictOfficialDeltaScan {
             definite,        // TS-only (`x!` member marker — NOT an expression `!`)
             readonly,        // TS-only (`readonly x`)
             accessibility,   // TS-only (`public`/`private`/`protected`)
+            ..
         } = it;
         if *r#type == PropertyDefinitionType::TSAbstractPropertyDefinition
             || !decorators.is_empty()
@@ -609,7 +614,8 @@ impl<'a> oxc_ast_visit::Visit<'a> for StrictOfficialDeltaScan {
 
     fn visit_method_definition(&mut self, it: &oxc_ast::ast::MethodDefinition<'a>) {
         use oxc_ast::ast::MethodDefinitionType;
-        // Wildcard-free destructure (anti-regrowth — see the type doc).
+        // Wildcard-free destructure (anti-regrowth — see the type doc); oxc
+        // 0.151 marks its AST structs non-exhaustive, hence the trailing `..`.
         let oxc_ast::ast::MethodDefinition {
             node_id: _,
             span: _,
@@ -623,6 +629,7 @@ impl<'a> oxc_ast_visit::Visit<'a> for StrictOfficialDeltaScan {
             r#override,    // TS-only (`override m()`)
             optional,      // TS-only (`m?()`)
             accessibility, // TS-only
+            ..
         } = it;
         if *r#type == MethodDefinitionType::TSAbstractMethodDefinition
             || !decorators.is_empty()
@@ -652,7 +659,8 @@ impl<'a> oxc_ast_visit::Visit<'a> for StrictOfficialDeltaScan {
         // field (`optional`/`readonly`/`accessibility`/`override`/`decorators`/
         // `type_annotation`) is a plain-`.svelte` parse error in official; the plain
         // `pattern` (DEFAULT `x = 1` via `initializer`, REST `...x`, DESTRUCTURE `{a}`)
-        // is plain JS and is NOT flagged.
+        // is plain JS and is NOT flagged. oxc 0.151 marks its AST structs
+        // non-exhaustive, hence the trailing `..`.
         let oxc_ast::ast::FormalParameter {
             node_id: _,
             span: _,
@@ -664,6 +672,7 @@ impl<'a> oxc_ast_visit::Visit<'a> for StrictOfficialDeltaScan {
             accessibility,   // TS-only (param-property)
             readonly,        // TS-only (param-property)
             r#override,      // TS-only (param-property)
+            ..
         } = it;
         if !decorators.is_empty()
             || type_annotation.is_some()

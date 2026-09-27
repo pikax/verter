@@ -406,11 +406,10 @@ impl PropsDeclaratorPlan {
         let proxy_inits = super::state_scan::collect_proxy_inits(&program);
         let mut members = Vec::new();
         for stmt in &program.body {
-            let Statement::ExportNamedDeclaration(export) = stmt else {
+            let Statement::ExportDeclaration(export) = stmt else {
                 continue;
             };
-            let Some(oxc_ast::ast::Declaration::VariableDeclaration(decl)) = &export.declaration
-            else {
+            let oxc_ast::ast::Declaration::VariableDeclaration(decl) = &export.declaration else {
                 continue;
             };
             if decl.kind != oxc_ast::ast::VariableDeclarationKind::Let {

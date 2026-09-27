@@ -8,7 +8,7 @@ use super::*;
 fn parse_and_extract(alloc: &Allocator, source: &str) -> Vec<AnalyzedMacro> {
     let parser = Parser::new(alloc, source, SourceType::ts()).with_options(ParseOptions::default());
     let result = parser.parse();
-    assert!(!result.panicked, "failed to parse: {source}");
+    assert!(!result.fatal_error, "failed to parse: {source}");
     analyze_macros_from_program(&result.program, source)
 }
 
@@ -18,7 +18,7 @@ fn parse_type_refs(type_annotation: &str) -> Vec<String> {
     let alloc = Allocator::new();
     let parser = Parser::new(&alloc, &code, SourceType::ts()).with_options(ParseOptions::default());
     let result = parser.parse();
-    assert!(!result.panicked, "failed to parse: {}", code);
+    assert!(!result.fatal_error, "failed to parse: {}", code);
 
     // In OXC 0.112, type annotations are on VariableDeclarator, not BindingPattern
     for stmt in &result.program.body {
@@ -134,7 +134,7 @@ fn parse_macros(code: &str) -> Vec<AnalyzedMacro> {
     let alloc = Allocator::new();
     let parser = Parser::new(&alloc, code, SourceType::ts()).with_options(ParseOptions::default());
     let result = parser.parse();
-    assert!(!result.panicked, "failed to parse: {}", code);
+    assert!(!result.fatal_error, "failed to parse: {}", code);
     analyze_macros_from_program(&result.program, code)
 }
 
@@ -2663,7 +2663,7 @@ mod field_payload_deref_replay {
         let parser =
             Parser::new(&alloc, source, SourceType::ts()).with_options(ParseOptions::default());
         let result = parser.parse();
-        assert!(!result.panicked, "failed to parse: {source}");
+        assert!(!result.fatal_error, "failed to parse: {source}");
         lower_macro_field_payload_at(&result.program, source, macro_index, field_index)
     }
 
@@ -2826,7 +2826,7 @@ mod locator_only_macro_replay {
         let source = "const String = 1;\ndefineProps({ label: String });";
         let alloc = Allocator::new();
         let parsed = parse_source(&alloc, source);
-        assert!(!parsed.panicked, "fixture must parse: {source}");
+        assert!(!parsed.fatal_error, "fixture must parse: {source}");
         let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
 
         // Force the recovered-parse degenerate index: every constructor is
@@ -2913,7 +2913,7 @@ mod locator_only_macro_replay {
         let source = "defineProps<{ count: number }>();";
         let alloc = Allocator::new();
         let parsed = parse_source(&alloc, source);
-        assert!(!parsed.panicked, "fixture must parse: {source}");
+        assert!(!parsed.fatal_error, "fixture must parse: {source}");
         reset_test_build_count();
         let lowering = lower_macro_field_payload_at(&parsed.program, source, 0, 0);
         assert_eq!(

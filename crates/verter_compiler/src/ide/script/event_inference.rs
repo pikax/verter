@@ -50,8 +50,8 @@ pub(super) fn apply_event_handler_param_inference(
                     out,
                 );
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::FunctionDeclaration(func)) = &export.declaration {
+            Statement::ExportDeclaration(export) => {
+                if let Declaration::FunctionDeclaration(func) = &export.declaration {
                     maybe_annotate_function_params(
                         func,
                         &handler_type_hints,

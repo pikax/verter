@@ -425,13 +425,13 @@ pub(crate) fn final_module_parse_errors(code: &str, dialect: FragmentDialect) ->
 fn oxc_parse_errors(code: &str, source_type: SourceType) -> Option<String> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, code, source_type).parse();
-    if parsed.panicked {
+    if parsed.fatal_error {
         return Some("parser panicked".to_string());
     }
-    if !parsed.errors.is_empty() {
+    if !parsed.diagnostics.is_empty() {
         return Some(
             parsed
-                .errors
+                .diagnostics
                 .iter()
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()

@@ -73,7 +73,7 @@ pub(super) fn mixed_chunk_fold(
     let alloc = Allocator::default();
     let wrapped = format!("({expr_source})");
     let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         // A torn parse cannot prove anything — stay a plain live interpolation (the caller
         // already routes a torn chunk through the live rewriter).
         return ChunkFold::Live { ledger: None };
@@ -222,7 +222,7 @@ pub(super) fn mixed_chunk_nullish_wrap(
     let alloc = Allocator::default();
     let wrapped = format!("({expr_source})");
     let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         // A torn parse cannot prove definedness — default to the safe `?? ''` (official's
         // behavior for any non-statically-defined value).
         return NullishCoalesce::Bare;

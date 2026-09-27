@@ -11,7 +11,7 @@ fn parse_on_a_small_stack(source: String) -> (usize, usize) {
         .spawn(move || {
             let allocator = Allocator::default();
             let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
-            (parsed.program.body.len(), parsed.errors.len())
+            (parsed.program.body.len(), parsed.diagnostics.len())
         })
         .expect("spawn the parsing thread")
         .join()
@@ -20,8 +20,8 @@ fn parse_on_a_small_stack(source: String) -> (usize, usize) {
 
 /// Every way syntax nests, 10,000 levels deep, parses on a 1 MiB thread:
 /// the parse runs on a stack its source's length cannot exhaust. oxc's own
-/// parser overflows a 1 MiB stack from 274 (`Box<…>`, unoptimized) to
-/// 3,712 (`!`, optimized) levels
+/// parser overflows a 1 MiB stack from 298 (an object literal, unoptimized) to
+/// 9,000 (`!`, optimized) levels
 /// (`docs/evidence/signature-kernel/oxc-deep-parse.md`).
 #[test]
 fn every_form_nested_10000_deep_parses_on_a_small_stack() {
@@ -373,7 +373,7 @@ fn oxc_parses_10000_nested_type_arguments_on_an_8_mib_thread() -> bool {
             let source = format!("type D = {}1{};", "Box<".repeat(10_000), ">".repeat(10_000));
             let allocator = Allocator::default();
             let parsed = oxc_parser::Parser::new(&allocator, &source, SourceType::ts()).parse();
-            !parsed.panicked && parsed.errors.is_empty()
+            !parsed.fatal_error && parsed.diagnostics.is_empty()
         })
         .expect("spawn the parsing thread")
         .join()

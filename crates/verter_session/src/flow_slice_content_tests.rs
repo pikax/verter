@@ -505,7 +505,7 @@ fn selected_annotation_descent_inspects_logarithmic_siblings() {
     let parsed =
         verter_parser::oxc_parse::Parser::new(&allocator, &source, oxc_span::SourceType::ts())
             .parse();
-    assert!(parsed.errors.is_empty());
+    assert!(parsed.diagnostics.is_empty());
     let reads = Cell::new(0);
     let siblings: Vec<_> = parsed
         .program

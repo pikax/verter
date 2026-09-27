@@ -209,14 +209,14 @@ pub(crate) fn build_source_digest(
 pub(crate) fn find_decl_span(source: &str, name: &str, space: SymbolSpace) -> Option<(u32, u32)> {
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
-    if ret.panicked {
+    if ret.fatal_error {
         return None;
     }
     for stmt in &ret.program.body {
         // A top-level declaration is either a bare declaration statement or one
         // wrapped in `export { ... }` / `export default`. Unwrap both.
         let decl: Option<&Declaration> = match stmt {
-            Statement::ExportNamedDeclaration(e) => e.declaration.as_ref(),
+            Statement::ExportDeclaration(e) => Some(&e.declaration),
             other => other.as_declaration(),
         };
         let Some(decl) = decl else { continue };

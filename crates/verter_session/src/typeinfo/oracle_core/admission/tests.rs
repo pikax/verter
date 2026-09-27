@@ -31,7 +31,7 @@ fn lower(rhs: &str) -> TypeExpr {
     let allocator = Allocator::default();
     let src = format!("type __T = {rhs};");
     let ret = Parser::new(&allocator, &src, SourceType::ts()).parse();
-    assert!(!ret.panicked, "parse failed for `{rhs}`");
+    assert!(!ret.fatal_error, "parse failed for `{rhs}`");
     let alias = ret
         .program
         .body
@@ -304,7 +304,7 @@ fn strict_lowering_drop_counter() {
         let allocator = Allocator::default();
         let src = format!("type __T = {rhs};");
         let ret = Parser::new(&allocator, &src, SourceType::ts()).parse();
-        assert!(!ret.panicked, "parse failed for `{rhs}`");
+        assert!(!ret.fatal_error, "parse failed for `{rhs}`");
         let alias = ret
             .program
             .body

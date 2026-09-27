@@ -186,7 +186,7 @@ pub fn collect_statement_dependency_names(
                 )]
             })
             .unwrap_or_default(),
-        Statement::TSModuleDeclaration(module) => {
+        Statement::TSNamespaceDeclaration(module) => {
             // An identifier namespace registers its inner type declarations
             // under qualified `Ns.Name` keys (matching `lower_top_level_
             // statement`'s `extract_module_declaration`); a string-literal
@@ -197,11 +197,9 @@ pub fn collect_statement_dependency_names(
             collect_module_dependencies(module, owner, None, &mut out);
             out
         }
-        Statement::ExportNamedDeclaration(export) => export
-            .declaration
-            .as_ref()
-            .map(|declaration| collect_declaration_dependencies(declaration, owner))
-            .unwrap_or_default(),
+        Statement::ExportDeclaration(export) => {
+            collect_declaration_dependencies(&export.declaration, owner)
+        }
         Statement::ExportDefaultDeclaration(export_default) => match &export_default.declaration {
             // The default class lowers under BOTH its declared name and the
             // `default` alias (see `alias_default_export_type_symbol`), so
@@ -255,26 +253,21 @@ pub fn collect_statement_dependency_names(
 /// A string-literal ambient module (augmentation scope) contributes
 /// nothing here.
 fn collect_module_dependencies(
-    module: &TSModuleDeclaration<'_>,
+    module: &TSNamespaceDeclaration<'_>,
     owner: TopLevelOwnerId,
     parent: Option<&DeclarationPath>,
     out: &mut Vec<(DeclarationPath, DeclDependencyNames)>,
 ) {
-    let namespace = match &module.id {
-        TSModuleDeclarationName::Identifier(id) => parent.map_or_else(
-            || DeclarationPath::root(DeclBindingKey::new(owner, id.name.as_str())),
-            |parent| parent.appended(id.name.as_str()),
-        ),
-        TSModuleDeclarationName::StringLiteral(_) => return,
-    };
-    let Some(body) = module.body.as_ref() else {
-        return;
-    };
-    match body {
-        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+    let id = &module.id;
+    let namespace = parent.map_or_else(
+        || DeclarationPath::root(DeclBindingKey::new(owner, id.name.as_str())),
+        |parent| parent.appended(id.name.as_str()),
+    );
+    match &module.body {
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
             collect_module_dependencies(inner, owner, Some(&namespace), out);
         }
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
             for stmt in &block.body {
                 collect_namespaced_statement_dependencies(stmt, &namespace, out);
             }
@@ -308,13 +301,11 @@ fn collect_namespaced_statement_dependencies(
                 ));
             }
         }
-        Statement::TSModuleDeclaration(module) => {
+        Statement::TSNamespaceDeclaration(module) => {
             collect_module_dependencies(module, namespace.root.owner, Some(namespace), out);
         }
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(decl) = export.declaration.as_ref() {
-                collect_namespaced_declaration_dependencies(decl, namespace, out);
-            }
+        Statement::ExportDeclaration(export) => {
+            collect_namespaced_declaration_dependencies(&export.declaration, namespace, out);
         }
         _ => {}
     }
@@ -346,7 +337,7 @@ fn collect_namespaced_declaration_dependencies(
                 ));
             }
         }
-        Declaration::TSModuleDeclaration(module) => {
+        Declaration::TSNamespaceDeclaration(module) => {
             collect_module_dependencies(module, namespace.root.owner, Some(namespace), out);
         }
         _ => {}
@@ -376,7 +367,7 @@ fn collect_declaration_dependencies(
                 )]
             })
             .unwrap_or_default(),
-        Declaration::TSModuleDeclaration(module) => {
+        Declaration::TSNamespaceDeclaration(module) => {
             // `export namespace N { … }` — collect its inner type
             // declarations under qualified `N.Name` keys.
             let mut out = Vec::new();

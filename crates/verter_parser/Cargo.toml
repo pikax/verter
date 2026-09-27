@@ -38,7 +38,7 @@ oxc_parser = { workspace = true }
 stacker = "0.1.25"
 oxc_span = { workspace = true }
 oxc_syntax = { workspace = true }
-oxc_diagnostics = "0.126.0"
+oxc_diagnostics = "0.151.0"
 bumpalo = { version = "3.20.3", features = ["collections"] }
 serde = { workspace = true }
 phf = { version = "0.13.1", features = ["macros"] }

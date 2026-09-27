@@ -152,9 +152,9 @@ mod tests {
         let alloc = Allocator::default();
         let parsed = Parser::new(&alloc, &out, SourceType::mjs()).parse();
         assert!(
-            !parsed.panicked && parsed.errors.is_empty(),
+            !parsed.fatal_error && parsed.diagnostics.is_empty(),
             "an import specifier containing a quote must emit parseable JS, got:\n{out}\nerrors: {:?}",
-            parsed.errors
+            parsed.diagnostics
         );
         // The specifier's quote + backslash are backslash-escaped (the JS serializer),
         // not raw bytes that close the string.

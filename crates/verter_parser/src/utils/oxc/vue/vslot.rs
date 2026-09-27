@@ -1044,8 +1044,7 @@ mod tests {
             .errors
             .as_ref()
             .and_then(|e| e.first())
-            .and_then(|d| d.labels.as_ref())
-            .and_then(|l| l.first())
+            .and_then(|d| d.labels.first())
             .map(|l| l.offset())
             .expect("raw malformed parse must produce a labelled diagnostic");
 
@@ -1062,12 +1061,11 @@ mod tests {
             .errors
             .as_ref()
             .and_then(|e| e.first())
-            .and_then(|d| d.labels.as_ref())
-            .and_then(|l| l.first())
+            .and_then(|d| d.labels.first())
             .map(|l| l.offset())
             .expect("sliced malformed parse must produce a labelled diagnostic");
 
-        assert_eq!(sliced_off, raw_off + slice_start as usize);
+        assert_eq!(sliced_off, raw_off + slice_start);
     }
 
     /// A global-named identifier in a v-slot default-value (`{ row = Map }`) is

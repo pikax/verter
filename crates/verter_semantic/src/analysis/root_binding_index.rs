@@ -64,7 +64,7 @@
 
 use oxc_allocator::{Allocator, CloneIn};
 use oxc_ast::ast::*;
-use oxc_ast::{AstBuilder, NONE};
+use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, Visit, VisitMut};
 use oxc_semantic::{ReferenceId, ScopeId, Scoping, SemanticBuilder, SymbolFlags, SymbolId};
 use oxc_span::{GetSpan, SourceType};
@@ -476,8 +476,8 @@ fn bind_clone(
 ) -> BuiltState {
     let ast = AstBuilder::new(allocator);
 
-    let mut root_body = ast.vec();
-    let mut wrapper_body_stmts = ast.vec();
+    let mut root_body = oxc_allocator::Vec::new_in(&ast);
+    let mut wrapper_body_stmts = oxc_allocator::Vec::new_in(&ast);
     // One entry per ORIGINAL top-level statement that lands at Program root
     // (import or not), recording its own authored owner. Statements are
     // sibling AST nodes, so their spans never overlap — a bound symbol's
@@ -498,8 +498,8 @@ fn bind_clone(
         }
     }
 
-    let mut root_directives = ast.vec();
-    let mut wrapper_directives = ast.vec();
+    let mut root_directives = oxc_allocator::Vec::new_in(&ast);
+    let mut wrapper_directives = oxc_allocator::Vec::new_in(&ast);
     for directive in &program.directives {
         let cloned = directive.clone_in(allocator);
         let owner = owners.owner_of_span(directive.span.into());
@@ -517,37 +517,44 @@ fn bind_clone(
     if has_wrapper_content {
         let synthetic_span = oxc_span::Span::new(0, 0);
         let function_body =
-            ast.alloc_function_body(synthetic_span, wrapper_directives, wrapper_body_stmts);
-        let params = ast.alloc_formal_parameters(
+            FunctionBody::boxed(synthetic_span, wrapper_directives, wrapper_body_stmts, &ast);
+        let params = FormalParameters::boxed(
             synthetic_span,
             FormalParameterKind::FormalParameter,
-            ast.vec(),
-            NONE,
+            oxc_allocator::Vec::new_in(&ast),
+            None,
+            &ast,
         );
-        let wrapper_expr = ast.expression_function(
+        let wrapper_expr = Expression::new_function_expression(
             synthetic_span,
             FunctionType::FunctionExpression,
             None,
             false,
             false,
             false,
-            NONE,
-            NONE,
+            None,
+            None,
             params,
-            NONE,
+            None,
             Some(function_body),
+            &ast,
         );
-        root_body.push(ast.statement_expression(synthetic_span, wrapper_expr));
+        root_body.push(Statement::new_expression_statement(
+            synthetic_span,
+            wrapper_expr,
+            &ast,
+        ));
     }
 
-    let mut clone = ast.program(
+    let mut clone = Program::new(
         program.span,
         program.source_type,
         program.source_text,
-        ast.vec(),
+        oxc_allocator::Vec::new_in(&ast),
         None,
         root_directives,
         root_body,
+        &ast,
     );
 
     RuntimeSurvivalProjection::new(allocator, ErasureDelta::vue()).visit_program(&mut clone);

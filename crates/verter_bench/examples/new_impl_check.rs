@@ -293,8 +293,8 @@ fn main() {
                             _ => SourceType::mjs(),
                         };
                         let parsed = Parser::new(&alloc, &script.code, source_type).parse();
-                        if !parsed.errors.is_empty() {
-                            let first_err = parsed.errors[0].to_string();
+                        if !parsed.diagnostics.is_empty() {
+                            let first_err = parsed.diagnostics[0].to_string();
                             errors.push(ErrorKind::ScriptParseError(first_err));
                         }
                     }
@@ -314,8 +314,8 @@ fn main() {
                         // Wrap template code to make it parseable as a module
                         let wrapped = format!("import {{ }} from \"vue\";\n{}", template.code);
                         let parsed = Parser::new(&alloc, &wrapped, source_type).parse();
-                        if !parsed.errors.is_empty() {
-                            let first_err = parsed.errors[0].to_string();
+                        if !parsed.diagnostics.is_empty() {
+                            let first_err = parsed.diagnostics[0].to_string();
                             errors.push(ErrorKind::TemplateParseError(first_err));
                         }
                     }

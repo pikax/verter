@@ -11,9 +11,9 @@ fn index_of(source: &str) -> FunctionProgramIndex {
     let source_type = oxc_span::SourceType::ts();
     let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
     assert!(
-        ret.errors.is_empty(),
+        ret.diagnostics.is_empty(),
         "fixture must parse: {:?}",
-        ret.errors
+        ret.diagnostics
     );
     let owners = TopLevelOwnerTable::ordinary_file(ret.program.body.len());
     build_function_program_index(&ret.program, source, &owners, Arc::from("/test.ts"))
@@ -1349,9 +1349,9 @@ namespace N {
     let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
         .parse();
     assert!(
-        ret.errors.is_empty(),
+        ret.diagnostics.is_empty(),
         "fixture must parse: {:?}",
-        ret.errors
+        ret.diagnostics
     );
     let owners = TopLevelOwnerTable::ordinary_file(ret.program.body.len());
     let index = build_function_program_index(&ret.program, source, &owners, Arc::from("/test.ts"));
@@ -1476,7 +1476,7 @@ fn retained_function_addresses_preserve_exact_locator_metadata() {
     let parsed =
         verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
             .parse();
-    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let (index, nodes) = build_function_program_index_with_nodes(
         &parsed.program,

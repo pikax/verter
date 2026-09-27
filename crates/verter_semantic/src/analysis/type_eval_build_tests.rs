@@ -36,7 +36,7 @@ fn svelte_runes_statement(source: &str) -> crate::analysis::type_eval_build::Low
     let parsed =
         verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
             .parse();
-    assert!(!parsed.panicked, "fixture must parse: {source}");
+    assert!(!parsed.fatal_error, "fixture must parse: {source}");
     let statement = parsed.program.body.first().expect("one statement fixture");
     crate::analysis::type_eval_build::lower_svelte_runes_statement_parts(statement, source)
 }
@@ -56,7 +56,7 @@ namespace Ns { export class C { value!: string } }
 "#;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let module = TopLevelOwnerId::module(0);
     let instance = TopLevelOwnerId::instance(0);
     let owners = TopLevelOwnerTable::try_from_statement_owners(
@@ -1188,7 +1188,7 @@ fn header_index_for(source: &str) -> crate::analysis::decl_headers::DeclHeaderIn
 
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!ret.panicked, "fixture must parse");
+    assert!(!ret.fatal_error, "fixture must parse");
     crate::analysis::decl_headers::build_decl_header_index(&ret.program, source)
 }
 

@@ -503,10 +503,10 @@ fn extract_program_result<'a>(
 ) -> BindingExtractionResult<'a> {
     let parsed = Parser::new(alloc, source, SourceType::tsx()).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "fixture must parse: {source:?} → {:?}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>()

@@ -421,7 +421,7 @@ fn parse_block<'a>(
     let grammar = grammar_of(block.lang)?;
     let content = allocator.alloc_str(block.content);
     let parsed = Parser::new(allocator, content, grammar.source_type()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(SetupProjectionRefusal::SyntaxErrors { setup });
     }
     Ok(allocator.alloc(parsed.program))
@@ -533,10 +533,9 @@ fn index_block<'a>(
                     });
                 }
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(declaration) = &export.declaration {
-                    record_declaration(program, declaration, true, from_setup, base, declarations);
-                }
+            Statement::ExportDeclaration(export) => {
+                let declaration = &export.declaration;
+                record_declaration(program, declaration, true, from_setup, base, declarations);
             }
             other => {
                 if let Some(declaration) = other.as_declaration() {
@@ -886,11 +885,15 @@ impl RefCollector {
         if let Some(parameters) = &class.type_parameters {
             self.visit_ts_type_parameter_declaration(parameters);
         }
-        if let Some(arguments) = &class.super_type_arguments {
+        if let Some(arguments) = class
+            .heritage
+            .as_ref()
+            .and_then(|heritage| heritage.type_arguments.as_ref())
+        {
             self.visit_ts_type_parameter_instantiation(arguments);
         }
-        if let Some(super_class) = &class.super_class {
-            if let Some((name, span)) = leftmost_expression_identifier(super_class) {
+        if let Some(heritage) = &class.heritage {
+            if let Some((name, span)) = leftmost_expression_identifier(&heritage.expression) {
                 self.note(name, DependencySpace::Value, span);
             }
         }
@@ -1030,7 +1033,7 @@ impl<'a> Visit<'a> for RefCollector {
     }
 
     fn visit_ts_interface_heritage(&mut self, it: &TSInterfaceHeritage<'a>) {
-        if let Some((name, span)) = leftmost_expression_identifier(&it.expression) {
+        if let Some((name, span)) = leftmost_type_name(&it.type_name) {
             self.note(name, DependencySpace::Type, span);
         }
         if let Some(arguments) = &it.type_arguments {

@@ -300,7 +300,7 @@ fn analyze_script_scope(alloc: &Allocator, source: &str) -> Option<ScriptScopeFa
     });
     // FAIL-CLOSED: a semantic-analysis error on an otherwise-parsed script refuses,
     // rather than feeding a partial scope tree into the name deconfliction.
-    if !built.errors.is_empty() {
+    if !built.diagnostics.is_empty() {
         return None;
     }
     let scoping = built.semantic.scoping();

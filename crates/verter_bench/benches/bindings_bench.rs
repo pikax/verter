@@ -307,7 +307,7 @@ fn bench_program_extraction(c: &mut Criterion) {
                     let source_type = SourceType::tsx();
                     let parser = Parser::new(&allocator, program, source_type);
                     let result = parser.parse();
-                    if result.errors.is_empty() {
+                    if result.diagnostics.is_empty() {
                         let ctx = BindingContext::new(0);
                         let extraction =
                             extract_bindings_from_program(black_box(&result.program), program, ctx);
@@ -331,7 +331,7 @@ fn bench_program_extraction(c: &mut Criterion) {
                     let source_type = SourceType::tsx();
                     let parser = Parser::new(&allocator, program, source_type);
                     let result = parser.parse();
-                    if result.errors.is_empty() {
+                    if result.diagnostics.is_empty() {
                         let ctx = BindingContext::new(0);
                         let extraction =
                             extract_bindings_from_program(black_box(&result.program), program, ctx);
@@ -355,7 +355,7 @@ fn bench_program_extraction(c: &mut Criterion) {
                     let source_type = SourceType::tsx();
                     let parser = Parser::new(&allocator, program, source_type);
                     let result = parser.parse();
-                    if result.errors.is_empty() {
+                    if result.diagnostics.is_empty() {
                         let ctx = BindingContext::new(0);
                         let extraction =
                             extract_bindings_from_program(black_box(&result.program), program, ctx);

@@ -185,16 +185,16 @@ fn collect_instance_store_bases(statement: &Statement<'_>, out: &mut FxHashSet<S
                 admit_store_base(id.name.as_str(), out);
             }
         }
-        Statement::ExportNamedDeclaration(export) => match &export.declaration {
-            Some(Declaration::VariableDeclaration(declaration)) => {
+        Statement::ExportDeclaration(export) => match &export.declaration {
+            Declaration::VariableDeclaration(declaration) => {
                 collect_variable_store_bases(declaration, out);
             }
-            Some(Declaration::FunctionDeclaration(function)) => {
+            Declaration::FunctionDeclaration(function) => {
                 if let Some(id) = &function.id {
                     admit_store_base(id.name.as_str(), out);
                 }
             }
-            Some(Declaration::ClassDeclaration(class)) => {
+            Declaration::ClassDeclaration(class) => {
                 if let Some(id) = &class.id {
                     admit_store_base(id.name.as_str(), out);
                 }
@@ -375,8 +375,10 @@ fn function_scope_names(function: &Function<'_>) -> FxHashSet<String> {
 
 fn arrow_scope_names(arrow: &ArrowFunctionExpression<'_>) -> FxHashSet<String> {
     let mut names = parameter_names(&arrow.params);
-    collect_direct_decls(&arrow.body.statements, &mut names);
-    collect_var_hoists(&arrow.body.statements, &mut names);
+    if let Some(body) = arrow.get_function_body() {
+        collect_direct_decls(&body.statements, &mut names);
+        collect_var_hoists(&body.statements, &mut names);
+    }
     names
 }
 
@@ -432,10 +434,8 @@ fn collect_direct_decl(statement: &Statement<'_>, out: &mut FxHashSet<String>) {
         }
         Statement::FunctionDeclaration(function) => record_function_id(function, out),
         Statement::ClassDeclaration(class) => record_class_id(class, out),
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(declaration) = &export.declaration {
-                record_declaration_names(declaration, out);
-            }
+        Statement::ExportDeclaration(export) => {
+            record_declaration_names(&export.declaration, out);
         }
         _ => {}
     }

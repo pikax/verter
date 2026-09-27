@@ -37,6 +37,7 @@ use oxc_ast::ast::{
     PropertyKey, Statement, TSSignature, TSType, TSTypeName, VariableDeclarator,
 };
 use oxc_span::GetSpan;
+use verter_parser::utils::oxc::script::export_parts::NamedExportParts;
 
 use verter_language::{FrameworkAdapterId, LanguageId};
 use verter_no_typeexpr::NoTypeExpr;
@@ -897,7 +898,12 @@ fn capture_svelte_candidates(
                 collect_snippet_imports(import, &mut out.snippet_imports);
                 collect_snippet_import_bindings(import, &mut snippet_import_bindings);
             }
-            Statement::ExportNamedDeclaration(export) => {
+            Statement::ExportDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_) => {
+                let Some(export) = NamedExportParts::of_statement(stmt) else {
+                    continue;
+                };
                 // A whole-statement type-only export (`export type { Foo }` /
                 // `export type Foo = ...`) is NOT a runtime instance member — it
                 // carries no value binding, so it must never surface as an EXPOSE
@@ -912,7 +918,7 @@ fn capture_svelte_candidates(
                 if !in_module_block && !in_instance_block {
                     continue;
                 }
-                if let Some(decl) = &export.declaration {
+                if let Some(decl) = export.declaration {
                     // In the INSTANCE block a legacy `export let` / `export var`
                     // is a PROP, NOT an instance-script EXPOSE member, so it must
                     // not enter `instance_exports` (it is captured separately as a
@@ -949,7 +955,7 @@ fn capture_svelte_candidates(
                         }
                     }
                 }
-                for spec in &export.specifiers {
+                for spec in export.specifiers {
                     // An inline `type` specifier (`export { type Bar, baz }`) is a
                     // type-only re-export — not a runtime instance member. Drop it
                     // (the sibling value specifiers in the same statement stay).
@@ -1013,7 +1019,7 @@ fn capture_svelte_candidates(
                 // them). An exported `$props()` declarator is already yielded
                 // by the shared ordinal walk above (same instance-only gate).
                 if in_instance_block && !runes_mode {
-                    if let Some(decl) = &export.declaration {
+                    if let Some(decl) = export.declaration {
                         capture_legacy_export_let(decl, &mut out, true);
                     }
                 }
@@ -1231,20 +1237,20 @@ fn collect_prop_kind_local_names(
                     &mut expose_names,
                 );
             }
-            Statement::ExportNamedDeclaration(export) => {
+            Statement::ExportDeclaration(export) => {
                 let instance = is_instance(export.span.start);
                 match &export.declaration {
-                    Some(Declaration::VariableDeclaration(var)) => {
+                    Declaration::VariableDeclaration(var) => {
                         record_var(var, instance, &mut prop_names, &mut expose_names);
                     }
                     // An INSTANCE function / class declaration is an EXPOSE member
                     // — subtract its name from the prop set (region-scoped).
-                    Some(Declaration::FunctionDeclaration(func)) if instance => {
+                    Declaration::FunctionDeclaration(func) if instance => {
                         if let Some(id) = &func.id {
                             expose_names.insert(id.name.as_str().to_string());
                         }
                     }
-                    Some(Declaration::ClassDeclaration(class)) if instance => {
+                    Declaration::ClassDeclaration(class) if instance => {
                         if let Some(id) = &class.id {
                             expose_names.insert(id.name.as_str().to_string());
                         }

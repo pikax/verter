@@ -6,6 +6,7 @@
 
 use oxc_ast::ast::*;
 use oxc_span::GetSpan;
+use verter_parser::utils::oxc::script::export_parts::NamedExportParts;
 
 use crate::code_transform::CodeTransform;
 
@@ -279,7 +280,10 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
             Statement::TSInterfaceDeclaration(d) => {
                 self.remove(d.span.start, d.span.end);
             }
-            Statement::TSModuleDeclaration(d) => {
+            Statement::TSExternalModuleDeclaration(d) => {
+                self.remove(d.span.start, d.span.end);
+            }
+            Statement::TSNamespaceDeclaration(d) => {
                 self.remove(d.span.start, d.span.end);
             }
             Statement::TSEnumDeclaration(d) => {
@@ -289,8 +293,14 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
             Statement::ImportDeclaration(import) => {
                 self.visit_import_declaration(import);
             }
+            Statement::ExportDeclaration(export) => {
+                self.visit_export_named(NamedExportParts::of_declaration(export));
+            }
             Statement::ExportNamedDeclaration(export) => {
-                self.visit_export_named(export);
+                self.visit_export_named(NamedExportParts::of_named(export));
+            }
+            Statement::ExportFromDeclaration(export) => {
+                self.visit_export_named(NamedExportParts::of_from(export));
             }
             Statement::ExportDefaultDeclaration(export) => match &export.declaration {
                 ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
@@ -349,7 +359,10 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
             Declaration::TSInterfaceDeclaration(d) => {
                 self.remove(d.span.start, d.span.end);
             }
-            Declaration::TSModuleDeclaration(d) => {
+            Declaration::TSExternalModuleDeclaration(d) => {
+                self.remove(d.span.start, d.span.end);
+            }
+            Declaration::TSNamespaceDeclaration(d) => {
                 self.remove(d.span.start, d.span.end);
             }
             Declaration::TSEnumDeclaration(d) => {
@@ -447,7 +460,12 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
                     self.remove(rt.span.start, rt.span.end);
                 }
                 self.visit_formal_parameters(&arrow.params);
-                self.visit_block(&arrow.body.statements);
+                if let Some(expression) = arrow.get_expression() {
+                    // An expression body visits as its one expression statement.
+                    self.visit_expression(expression);
+                } else if let Some(body) = arrow.get_function_body() {
+                    self.visit_block(&body.statements);
+                }
             }
             Expression::FunctionExpression(func) => {
                 self.visit_function(func);
@@ -843,7 +861,11 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
         if let Some(tp) = &class.type_parameters {
             self.remove(tp.span.start, tp.span.end);
         }
-        if let Some(sta) = &class.super_type_arguments {
+        if let Some(sta) = class
+            .heritage
+            .as_ref()
+            .and_then(|heritage| heritage.type_arguments.as_ref())
+        {
             self.remove(sta.span.start, sta.span.end);
         }
 
@@ -855,9 +877,15 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
                 let last = &implements[implements.len() - 1];
 
                 // Find where to search for `implements` keyword
-                let search_start = if let Some(sta) = &class.super_type_arguments {
+                let search_start = if let Some(sta) = class
+                    .heritage
+                    .as_ref()
+                    .and_then(|heritage| heritage.type_arguments.as_ref())
+                {
                     sta.span.end
-                } else if let Some(sc) = &class.super_class {
+                } else if let Some(sc) =
+                    class.heritage.as_ref().map(|heritage| &heritage.expression)
+                {
                     sc.span().end
                 } else if let Some(tp) = &class.type_parameters {
                     tp.span.end
@@ -878,7 +906,7 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
             }
         }
 
-        if let Some(sc) = &class.super_class {
+        if let Some(sc) = class.heritage.as_ref().map(|heritage| &heritage.expression) {
             self.visit_expression(sc);
         }
 
@@ -1074,7 +1102,7 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
         }
     }
 
-    fn visit_export_named(&mut self, export: &ExportNamedDeclaration) {
+    fn visit_export_named(&mut self, export: NamedExportParts<'_, '_>) {
         if export.export_kind.is_type() {
             self.remove(export.span.start, export.span.end);
             return;
@@ -1084,7 +1112,7 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
         // Remove the whole `export … function f(): T;` (incl. the `export`
         // keyword and trailing `;`) — stripping only the inner function span
         // leaves a dangling `export ;`.
-        if let Some(Declaration::FunctionDeclaration(func)) = &export.declaration {
+        if let Some(Declaration::FunctionDeclaration(func)) = export.declaration {
             if func.body.is_none() {
                 self.remove_with_trailing_semi(export.span.start, export.span.end);
                 return;
@@ -1095,7 +1123,7 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
         // IIFE. A bare `export var E; …` inside a setup() wrapper is invalid JS,
         // and Vue disallows `export` in <script setup>; the enum stays a
         // module-local runtime value.
-        if let Some(Declaration::TSEnumDeclaration(ts_enum)) = &export.declaration {
+        if let Some(Declaration::TSEnumDeclaration(ts_enum)) = export.declaration {
             if export.span.start < ts_enum.span.start {
                 self.remove(export.span.start, ts_enum.span.start);
             }
@@ -1135,7 +1163,7 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
             }
         }
 
-        if let Some(decl) = &export.declaration {
+        if let Some(decl) = export.declaration {
             self.visit_declaration(decl);
         }
     }

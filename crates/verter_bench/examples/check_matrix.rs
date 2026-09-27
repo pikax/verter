@@ -121,22 +121,22 @@ fn compare_js(vue_code: &str, verter_code: &str) -> CompareResult {
     let vue_parsed = Parser::new(&alloc_v, vue_code, source_type).parse();
     let verter_parsed = Parser::new(&alloc_o, verter_code, source_type).parse();
 
-    if !vue_parsed.errors.is_empty() {
+    if !vue_parsed.diagnostics.is_empty() {
         return CompareResult::ParseError {
             side: "vue".into(),
             error: vue_parsed
-                .errors
+                .diagnostics
                 .iter()
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
                 .join("; "),
         };
     }
-    if !verter_parsed.errors.is_empty() {
+    if !verter_parsed.diagnostics.is_empty() {
         return CompareResult::ParseError {
             side: "verter".into(),
             error: verter_parsed
-                .errors
+                .diagnostics
                 .iter()
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()

@@ -913,7 +913,7 @@
       "evidence": [
         "documented: docs/guide/architecture.md module map (framework-neutral parser)",
         "graph: fan-in 4",
-        "documented: capability matrix names it consumer of rust-parser-substrate (oxc 0.126.0)"
+        "documented: capability matrix names it consumer of rust-parser-substrate (oxc 0.151.0)"
       ]
     },
     {

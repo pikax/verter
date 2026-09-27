@@ -3104,21 +3104,18 @@ fn namespace_block_of<'s, 'a>(
     statement: &'s Statement<'a>,
 ) -> Option<(&'s str, &'s oxc_ast::ast::TSModuleBlock<'a>)> {
     let module = match statement {
-        Statement::TSModuleDeclaration(module) => module,
-        Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
-            oxc_ast::ast::Declaration::TSModuleDeclaration(module) => module,
+        Statement::TSNamespaceDeclaration(module) => module,
+        Statement::ExportDeclaration(export) => match &export.declaration {
+            oxc_ast::ast::Declaration::TSNamespaceDeclaration(module) => module,
             _ => return None,
         },
         _ => return None,
     };
-    let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &module.id else {
-        return None;
-    };
-    match module.body.as_ref()? {
-        oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block) => {
-            Some((id.name.as_str(), block))
+    match &module.body {
+        oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+            Some((module.id.name.as_str(), block))
         }
-        oxc_ast::ast::TSModuleDeclarationBody::TSModuleDeclaration(_) => None,
+        oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => None,
     }
 }
 
@@ -3143,10 +3140,7 @@ fn namespace_statement_value_names<'s>(statement: &'s Statement<'_>) -> (Vec<&'s
                 class.id.iter().map(|id| id.name.as_str()).collect()
             }
             Declaration::TSEnumDeclaration(declaration) => vec![declaration.id.name.as_str()],
-            Declaration::TSModuleDeclaration(module) => match &module.id {
-                oxc_ast::ast::TSModuleDeclarationName::Identifier(id) => vec![id.name.as_str()],
-                oxc_ast::ast::TSModuleDeclarationName::StringLiteral(_) => Vec::new(),
-            },
+            Declaration::TSNamespaceDeclaration(module) => vec![module.id.name.as_str()],
             Declaration::TSImportEqualsDeclaration(declaration) => {
                 vec![declaration.id.name.as_str()]
             }
@@ -3154,14 +3148,10 @@ fn namespace_statement_value_names<'s>(statement: &'s Statement<'_>) -> (Vec<&'s
         }
     }
     match statement {
-        Statement::ExportNamedDeclaration(export) => (
-            export
-                .declaration
-                .as_ref()
-                .map(declaration_names)
-                .unwrap_or_default(),
-            true,
-        ),
+        Statement::ExportDeclaration(export) => (declaration_names(&export.declaration), true),
+        Statement::ExportNamedDeclaration(_) | Statement::ExportFromDeclaration(_) => {
+            (Vec::new(), true)
+        }
         other => (
             other
                 .as_declaration()
@@ -3428,7 +3418,7 @@ pub(crate) fn build_flow_slice_content(
             modelled_patterns: Arc::new(modelled_pattern_bindings(
                 program,
                 &node.params().items,
-                &body.statements,
+                body,
                 &bindings,
                 anchor,
             )),
@@ -3565,14 +3555,17 @@ pub(crate) fn build_flow_slice_content(
         },
     };
     if selection.is_some() {
-        lowerer.unsafe_invoked_closure_effects =
-            lowerer.index_unsafe_invoked_closure_effects(&body.statements);
+        lowerer.unsafe_invoked_closure_effects = lowerer.index_unsafe_invoked_closure_effects(body);
         lowerer.nested_free_writes = lowerer.build_nested_free_writes();
         lowerer.record_parameter_pattern_aliases(&node.params().items);
-        collect_assignment_extent_statements(
-            &body.statements,
-            &mut lowerer.assignment_extent_statements,
-        );
+        match body.expression() {
+            // An expression body is the one expression statement it was.
+            Some(expression) => lowerer.assignment_extent_statements.push(expression.span()),
+            None => collect_assignment_extent_statements(
+                body.statements(),
+                &mut lowerer.assignment_extent_statements,
+            ),
+        }
     }
     let region = if selection.is_none() {
         SliceRegion {
@@ -3582,15 +3575,10 @@ pub(crate) fn build_flow_slice_content(
                 CompletionConstruction::SynthesizedRegion,
             ),
         }
-    } else if node.is_expression_body() {
-        // An expression-bodied arrow's body is one synthesized expression
-        // statement; it lowers to a single `return` of the expression (the
-        // expression cannot fall through).
-        let statement = body.statements.first()?;
-        let Statement::ExpressionStatement(expression) = statement else {
-            return None;
-        };
-        if lowerer.span_contains_unsafe_invoked_closure(expression.expression.span()) {
+    } else if let Some(expression) = body.expression() {
+        // An expression-bodied arrow's body lowers to a single `return` of
+        // the expression (the expression cannot fall through).
+        if lowerer.span_contains_unsafe_invoked_closure(expression.span()) {
             SliceRegion {
                 statements: Arc::from([SliceStatement::Unsupported(
                     SliceUnsupported::InvokedClosureEffect,
@@ -3601,16 +3589,15 @@ pub(crate) fn build_flow_slice_content(
                 ),
             }
         } else {
-            let freshness = expression_freshness(&expression.expression);
-            let (argument, predicate_test) =
-                if lowerer.value_span_selected(expression.expression.span()) {
-                    (
-                        lowerer.lower_expr(&expression.expression, ExprMode::Return),
-                        lowerer.return_predicate_test(&expression.expression),
-                    )
-                } else {
-                    (SliceExpr::Elided, None)
-                };
+            let freshness = expression_freshness(expression);
+            let (argument, predicate_test) = if lowerer.value_span_selected(expression.span()) {
+                (
+                    lowerer.lower_expr(expression, ExprMode::Return),
+                    lowerer.return_predicate_test(expression),
+                )
+            } else {
+                (SliceExpr::Elided, None)
+            };
             // An expression body has no statement loop to drain the
             // ternary-test gap into: it lands ahead of the synthesized
             // `return` here.
@@ -3634,13 +3621,13 @@ pub(crate) fn build_flow_slice_content(
             }
         }
     } else {
-        let region = lowerer.lower_region(&body.statements).region;
+        let region = lowerer.lower_region(body.statements()).region;
         // Only a statement-position `yield x` / `yield;` contributes to
         // the yield join. A yield anywhere else (`const r = yield x`,
         // `f(yield x)`, a delegating `yield*`) still yields, so a body
         // holding one has no complete yield type: the region carries the
         // typed gap ahead of its statements.
-        if body_has_unmodeled_yield(&lowerer.walks, &body.statements) {
+        if body_has_unmodeled_yield(&lowerer.walks, body.statements()) {
             let mut statements = Vec::with_capacity(region.statements.len() + 1);
             statements.push(SliceStatement::Gap(
                 crate::semantic_query::FlowGap::UnmodeledExpression,
@@ -3800,7 +3787,9 @@ fn program_has_module_syntax(program: &Program<'_>) -> bool {
         Statement::ImportDeclaration(_)
         | Statement::ExportAllDeclaration(_)
         | Statement::ExportDefaultDeclaration(_)
+        | Statement::ExportDeclaration(_)
         | Statement::ExportNamedDeclaration(_)
+        | Statement::ExportFromDeclaration(_)
         | Statement::TSExportAssignment(_) => true,
         Statement::TSImportEqualsDeclaration(import) => matches!(
             import.module_reference,
@@ -4125,7 +4114,7 @@ fn param_pattern_is_flat(pattern: &BindingPattern<'_>) -> bool {
 fn modelled_pattern_bindings(
     program: &Program<'_>,
     params: &oxc_allocator::Vec<'_, oxc_ast::ast::FormalParameter<'_>>,
-    statements: &[Statement<'_>],
+    body: verter_semantic::analysis::function_program::FunctionBodyRef<'_>,
     bindings: &verter_semantic::analysis::flow::FlowBindingMap,
     anchor: u32,
 ) -> FxHashSet<SkeletonBindingId> {
@@ -4189,9 +4178,14 @@ fn modelled_pattern_bindings(
             }
         }
     }
-    for statement in statements {
+    for statement in body.statements() {
         verter_semantic::analysis::walk_stack::with_node_stack(program, statement.span(), || {
             collector.visit_statement(statement)
+        });
+    }
+    if let Some(expression) = body.expression() {
+        verter_semantic::analysis::walk_stack::with_node_stack(program, expression.span(), || {
+            collector.visit_expression(expression)
         });
     }
     collector.out
@@ -4883,7 +4877,8 @@ fn optional_chain_discarded_expr_has_no_syntactic_effect(
                 | Expression::StringLiteral(_)
                 | Expression::TemplateLiteral(_)
                 | Expression::Identifier(_)
-                | Expression::MetaProperty(_)
+                | Expression::ImportMeta(_)
+                | Expression::NewTarget(_)
                 | Expression::Super(_)
                 | Expression::ArrayExpression(_)
                 | Expression::ArrowFunctionExpression(_)
@@ -7328,24 +7323,34 @@ impl<'a> Lowerer<'a> {
 
     fn index_unsafe_invoked_closure_effects(
         &self,
-        statements: &[Statement<'_>],
+        body: verter_semantic::analysis::function_program::FunctionBodyRef<'_>,
     ) -> FxHashSet<FrameSpan> {
         let mut unsafe_calls = FxHashSet::default();
-        for statement in statements {
+        let mut record = |call: &oxc_ast::ast::CallExpression<'_>| {
+            let call_span = self.rebase(call.span);
+            let node = match unwrap_parenthesized(&call.callee) {
+                Expression::FunctionExpression(function) => FunctionNode::Function(function),
+                Expression::ArrowFunctionExpression(arrow) => FunctionNode::Arrow(arrow),
+                _ => return,
+            };
+            if self.nested_function_transfers_downstream_slot(&node, call_span) {
+                unsafe_calls.insert(call_span);
+            }
+        };
+        for statement in body.statements() {
             for_each_call_expression(std::slice::from_ref(statement), |call| {
-                let call_span = self.rebase(call.span);
-                if self.span_is_in_literal_dead_branch(statement, call_span) {
+                if self.span_is_in_literal_dead_branch(statement, self.rebase(call.span)) {
                     return;
                 }
-                let node = match unwrap_parenthesized(&call.callee) {
-                    Expression::FunctionExpression(function) => FunctionNode::Function(function),
-                    Expression::ArrowFunctionExpression(arrow) => FunctionNode::Arrow(arrow),
-                    _ => return,
-                };
-                if self.nested_function_transfers_downstream_slot(&node, call_span) {
-                    unsafe_calls.insert(call_span);
-                }
+                record(call);
             });
+        }
+        // An expression body is one expression statement: no dead branch.
+        if let Some(expression) = body.expression() {
+            verter_semantic::analysis::function_program::for_each_call_expression_in_expression(
+                expression,
+                &mut record,
+            );
         }
         unsafe_calls
     }
@@ -8667,7 +8672,9 @@ impl<'a> Lowerer<'a> {
                 Statement::ImportDeclaration(_)
                 | Statement::ExportAllDeclaration(_)
                 | Statement::ExportDefaultDeclaration(_)
+                | Statement::ExportDeclaration(_)
                 | Statement::ExportNamedDeclaration(_)
+                | Statement::ExportFromDeclaration(_)
                 | Statement::TSExportAssignment(_)
                 | Statement::TSNamespaceExportDeclaration(_) => {
                     out.push(SliceStatement::Unsupported(
@@ -8722,18 +8729,14 @@ impl<'a> Lowerer<'a> {
                 // contribution, no content statement) — EXCEPT the
                 // executable declarations: a non-ambient namespace body
                 // RUNS its statements at this statement.
-                Statement::TSModuleDeclaration(module) => {
-                    // A string-named `module "…"` block is an ambient
-                    // module augmentation: it evaluates nothing.
-                    if !module.declare
-                        && matches!(
-                            module.id,
-                            oxc_ast::ast::TSModuleDeclarationName::Identifier(_)
-                        )
-                    {
+                Statement::TSNamespaceDeclaration(module) => {
+                    if !module.declare {
                         self.scan_module_declaration_effects(module);
                     }
                 }
+                // A string-named `module "…"` block is an ambient module
+                // augmentation: it evaluates nothing.
+                Statement::TSExternalModuleDeclaration(_) => {}
                 Statement::DebuggerStatement(_)
                 | Statement::EmptyStatement(_)
                 | Statement::FunctionDeclaration(_)
@@ -11182,10 +11185,7 @@ impl<'a> Lowerer<'a> {
         let mut other = false;
         for statement in &self.program.body {
             let declaration = match statement {
-                Statement::ExportNamedDeclaration(export) => match &export.declaration {
-                    Some(declaration) => declaration,
-                    None => continue,
-                },
+                Statement::ExportDeclaration(export) => &export.declaration,
                 Statement::ImportDeclaration(import) => {
                     other |= import.specifiers.iter().flatten().any(|specifier| {
                         let local = match specifier {
@@ -11235,10 +11235,10 @@ impl<'a> Lowerer<'a> {
                 // A namespace of the name merges with a function of it; a
                 // `declare global` block declares globals this module-local
                 // binding shadows.
-                Declaration::TSModuleDeclaration(module) => {
-                    other |= matches!(&module.id,
-                        oxc_ast::ast::TSModuleDeclarationName::Identifier(id) if id.name.as_str() == name);
+                Declaration::TSNamespaceDeclaration(module) => {
+                    other |= module.id.name.as_str() == name;
                 }
+                Declaration::TSExternalModuleDeclaration(_) => {}
                 Declaration::TSGlobalDeclaration(_) => {}
                 Declaration::TSImportEqualsDeclaration(declaration) => {
                     other |= declaration.id.name.as_str() == name;
@@ -11279,10 +11279,7 @@ impl<'a> Lowerer<'a> {
         let mut overloads: Vec<bool> = Vec::new();
         for statement in &self.program.body {
             let declaration = match statement {
-                Statement::ExportNamedDeclaration(export) => match &export.declaration {
-                    Some(declaration) => declaration,
-                    None => continue,
-                },
+                Statement::ExportDeclaration(export) => &export.declaration,
                 statement => match statement.as_declaration() {
                     Some(declaration) => declaration,
                     None => continue,
@@ -11441,7 +11438,12 @@ impl<'a> Lowerer<'a> {
         if !own_side_plain {
             return false;
         }
-        match class.super_class.as_ref().map(unwrap_parenthesized) {
+        match class
+            .heritage
+            .as_ref()
+            .map(|heritage| &heritage.expression)
+            .map(unwrap_parenthesized)
+        {
             None => true,
             Some(Expression::Identifier(base)) => {
                 let bases = self.same_file_class_declarations(base.name.as_str());
@@ -11463,8 +11465,8 @@ impl<'a> Lowerer<'a> {
             .iter()
             .filter_map(|statement| match statement {
                 Statement::ClassDeclaration(class) => Some(&**class),
-                Statement::ExportNamedDeclaration(export) => match &export.declaration {
-                    Some(oxc_ast::ast::Declaration::ClassDeclaration(class)) => Some(&**class),
+                Statement::ExportDeclaration(export) => match &export.declaration {
+                    oxc_ast::ast::Declaration::ClassDeclaration(class) => Some(&**class),
                     _ => None,
                 },
                 Statement::ExportDefaultDeclaration(export) => match &export.declaration {
@@ -11490,10 +11492,8 @@ impl<'a> Lowerer<'a> {
             .iter()
             .filter_map(|statement| match statement {
                 Statement::FunctionDeclaration(function) => Some(&**function),
-                Statement::ExportNamedDeclaration(export) => match &export.declaration {
-                    Some(oxc_ast::ast::Declaration::FunctionDeclaration(function)) => {
-                        Some(&**function)
-                    }
+                Statement::ExportDeclaration(export) => match &export.declaration {
+                    oxc_ast::ast::Declaration::FunctionDeclaration(function) => Some(&**function),
                     _ => None,
                 },
                 Statement::ExportDefaultDeclaration(export) => match &export.declaration {
@@ -11522,20 +11522,16 @@ impl<'a> Lowerer<'a> {
     fn top_level_name_is_exported(&self, name: &str) -> bool {
         let names_binding = |expression: &Expression<'_>| matches!(unwrap_parenthesized(expression), Expression::Identifier(id) if id.name.as_str() == name);
         self.program.body.iter().any(|statement| match statement {
-            Statement::ExportNamedDeclaration(export) => {
-                let declares = match &export.declaration {
-                    Some(oxc_ast::ast::Declaration::FunctionDeclaration(function)) => {
-                        function.id.as_ref().map(|id| id.name.as_str()) == Some(name)
-                    }
-                    _ => false,
-                };
-                declares
-                    || (export.source.is_none()
-                        && export
-                            .specifiers
-                            .iter()
-                            .any(|specifier| specifier.local.name().as_str() == name))
-            }
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                oxc_ast::ast::Declaration::FunctionDeclaration(function) => {
+                    function.id.as_ref().map(|id| id.name.as_str()) == Some(name)
+                }
+                _ => false,
+            },
+            Statement::ExportNamedDeclaration(export) => export
+                .specifiers
+                .iter()
+                .any(|specifier| specifier.local.name().as_str() == name),
             Statement::ExportDefaultDeclaration(export) => match &export.declaration {
                 oxc_ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
                     function.id.as_ref().map(|id| id.name.as_str()) == Some(name)
@@ -15566,7 +15562,7 @@ impl<'a> Lowerer<'a> {
         let program: &'a Program<'a> = self.program;
         let declaration = match program.body.get(*contributor as usize)? {
             Statement::VariableDeclaration(declaration) => declaration,
-            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
+            Statement::ExportDeclaration(export) => match &export.declaration {
                 oxc_ast::ast::Declaration::VariableDeclaration(declaration) => declaration,
                 _ => return None,
             },
@@ -15624,7 +15620,7 @@ impl<'a> Lowerer<'a> {
         let program: &'a Program<'a> = self.program;
         let class = match program.body.get(contributor as usize)? {
             Statement::ClassDeclaration(class) => class,
-            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
+            Statement::ExportDeclaration(export) => match &export.declaration {
                 oxc_ast::ast::Declaration::ClassDeclaration(class) => class,
                 _ => return None,
             },
@@ -16291,29 +16287,27 @@ impl<'a> Lowerer<'a> {
     /// own frames), so visible writes keep their ledger verdict and only
     /// class-hidden ones gap. A nested `namespace A.B` chain executes with
     /// its outermost block; an ambient inner declaration runs nothing.
-    fn scan_module_declaration_effects(&mut self, module: &oxc_ast::ast::TSModuleDeclaration<'_>) {
+    fn scan_module_declaration_effects(
+        &mut self,
+        module: &oxc_ast::ast::TSNamespaceDeclaration<'_>,
+    ) {
         let mut scanner = LeafCallScanner::default();
-        let mut body = module.body.as_ref();
-        while let Some(current) = body {
-            match current {
-                oxc_ast::ast::TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
-                    if nested.declare
-                        || !matches!(
-                            nested.id,
-                            oxc_ast::ast::TSModuleDeclarationName::Identifier(_)
-                        )
-                    {
+        let mut body = &module.body;
+        loop {
+            match body {
+                oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(nested) => {
+                    if nested.declare {
                         return;
                     }
-                    body = nested.body.as_ref();
+                    body = &nested.body;
                 }
-                oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block) => {
+                oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => {
                     for statement in &block.body {
                         self.walks.with_node_stack(statement.span(), || {
                             scanner.visit_statement(statement)
                         });
                     }
-                    body = None;
+                    break;
                 }
             }
         }
@@ -16978,6 +16972,27 @@ impl<'a> Visit<'a> for AssignmentExtent {
         }
         walk::walk_statement(self, it);
     }
+
+    // An arrow's expression body is the one expression statement oxc's AST
+    // carried it as before 0.151.
+    fn visit_arrow_function_body(&mut self, it: &oxc_ast::ast::ArrowFunctionBody<'a>) {
+        let Some(expression) = it.as_expression() else {
+            walk::walk_arrow_function_body(self, it);
+            return;
+        };
+        if self.found.is_some() {
+            return;
+        }
+        let span = FrameSpan::rebase(self.anchor, expression.span().into());
+        if !span.contains(self.write) {
+            return;
+        }
+        if span > self.declaration && !span.contains(self.declaration) {
+            self.found = Some(span);
+            return;
+        }
+        self.visit_expression(expression);
+    }
 }
 
 /// A top-level callee whose declaration set this file closes.
@@ -17056,6 +17071,17 @@ impl<'a> Visit<'a> for DeclaredCallEffects {
             return;
         }
         walk::walk_statement(self, it);
+    }
+    // An arrow's expression body is the one expression statement oxc's AST
+    // carried it as before 0.151.
+    fn visit_arrow_function_body(&mut self, it: &oxc_ast::ast::ArrowFunctionBody<'a>) {
+        if let Some(expression) = it.as_expression() {
+            let span = expression.span();
+            if span.end < self.within.start || span.start > self.within.end {
+                return;
+            }
+        }
+        walk::walk_arrow_function_body(self, it);
     }
     fn visit_function(
         &mut self,
@@ -18104,7 +18130,7 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         // write under this visit — heritage included — is skeleton-hidden.
         self.class_nesting += 1;
         self.visit_decorators(&it.decorators);
-        if let Some(super_class) = &it.super_class {
+        if let Some(super_class) = it.heritage.as_ref().map(|heritage| &heritage.expression) {
             self.visit_expression(super_class);
         }
         self.nested_frame_nesting += 1;
@@ -18114,7 +18140,11 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         if let Some(type_parameters) = &it.type_parameters {
             self.visit_ts_type_parameter_declaration(type_parameters);
         }
-        if let Some(super_type_arguments) = &it.super_type_arguments {
+        if let Some(super_type_arguments) = it
+            .heritage
+            .as_ref()
+            .and_then(|heritage| heritage.type_arguments.as_ref())
+        {
             self.visit_ts_type_parameter_instantiation(super_type_arguments);
         }
         self.visit_ts_class_implements_list(&it.implements);

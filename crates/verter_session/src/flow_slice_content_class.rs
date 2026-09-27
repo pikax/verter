@@ -140,31 +140,36 @@ impl<'s> Lowerer<'s> {
         // class site's own footprint, never as sites of their own, so the
         // class value as a whole is what the selection names.
         let selection = self.selection.take();
-        let heritage = class.super_class.as_ref().map(|base| SliceClassHeritage {
-            base: Box::new(self.lower_expr(
-                unwrap_parenthesized(base),
-                ExprMode::BindingInit {
-                    preserve_literal: true,
-                },
-            )),
-            type_arguments: class
-                .super_type_arguments
-                .as_ref()
-                .map(|arguments| {
-                    arguments
-                        .params
-                        .iter()
-                        .map(|argument| {
-                            self.gate(
-                                lower_ts_type(argument, self.source),
-                                argument.span(),
-                                &own_binders,
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_else(|| Arc::from(Vec::new().into_boxed_slice())),
-        });
+        let heritage = class
+            .heritage
+            .as_ref()
+            .map(|heritage| &heritage.expression)
+            .map(|base| SliceClassHeritage {
+                base: Box::new(self.lower_expr(
+                    unwrap_parenthesized(base),
+                    ExprMode::BindingInit {
+                        preserve_literal: true,
+                    },
+                )),
+                type_arguments: class
+                    .heritage
+                    .as_ref()
+                    .and_then(|heritage| heritage.type_arguments.as_ref())
+                    .map(|arguments| {
+                        arguments
+                            .params
+                            .iter()
+                            .map(|argument| {
+                                self.gate(
+                                    lower_ts_type(argument, self.source),
+                                    argument.span(),
+                                    &own_binders,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_else(|| Arc::from(Vec::new().into_boxed_slice())),
+            });
         let mut members: Vec<Option<SliceClassMember>> = Vec::with_capacity(class.body.body.len());
         let mut groups: Vec<MemberGroup<'_>> = Vec::new();
         let mut index_signatures = Vec::new();
@@ -177,9 +182,7 @@ impl<'s> Lowerer<'s> {
                 // member.
                 ClassElement::StaticBlock(_) => {}
                 ClassElement::TSIndexSignature(signature) => {
-                    let Some(parameter) = signature.parameters.first() else {
-                        continue;
-                    };
+                    let parameter = &signature.parameter;
                     let key = &parameter.type_annotation.type_annotation;
                     let value = &signature.type_annotation.type_annotation;
                     index_signatures.push(SliceClassIndexSignature {
@@ -854,7 +857,11 @@ impl<'a> LeafCallScanner<'a> {
         if let Some(type_parameters) = &it.type_parameters {
             self.visit_ts_type_parameter_declaration(type_parameters);
         }
-        if let Some(super_type_arguments) = &it.super_type_arguments {
+        if let Some(super_type_arguments) = it
+            .heritage
+            .as_ref()
+            .and_then(|heritage| heritage.type_arguments.as_ref())
+        {
             self.visit_ts_type_parameter_instantiation(super_type_arguments);
         }
         self.visit_ts_class_implements_list(&it.implements);

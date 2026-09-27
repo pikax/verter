@@ -32,9 +32,9 @@ fn prepared_of(source: &str) -> PreparedFunctionBodySkeleton {
     let source_type = oxc_span::SourceType::ts();
     let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
     assert!(
-        ret.errors.is_empty(),
+        ret.diagnostics.is_empty(),
         "fixture must parse: {:?}",
-        ret.errors
+        ret.diagnostics
     );
     let owners = TopLevelOwnerTable::ordinary_file(ret.program.body.len());
     let index =
@@ -100,7 +100,7 @@ impl FlowBodySkeletonSource for FixtureSkeletonSource {
         let parsed =
             verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
                 .parse();
-        assert!(parsed.errors.is_empty(), "fixture must parse");
+        assert!(parsed.diagnostics.is_empty(), "fixture must parse");
         let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
         let index = build_function_program_index(
             &parsed.program,
@@ -229,7 +229,7 @@ fn enclosing_binding_changes_split_unchanged_child_body_bundles() {
         let parsed =
             verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
                 .parse();
-        assert!(parsed.errors.is_empty());
+        assert!(parsed.diagnostics.is_empty());
         let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
         let index = build_function_program_index(
             &parsed.program,
