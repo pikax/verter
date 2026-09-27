@@ -1038,9 +1038,11 @@ fn degraded_inline_flow_return_never_warms_the_enclosing_call() {
     );
 }
 
-/// The candidate-open cap is runtime state, not key identity: a trip abandons
-/// every session opened by this call and admits no value. Mutation: remove the
-/// open charge or leave a loser staged; the typed outcome/state assertions fail.
+/// The applicability-relation budget is runtime state, not key identity: a
+/// trip abandons every session opened by this call and admits no value. Every
+/// candidate relates its one argument, so one candidate past the budget trips
+/// it. Mutation: remove the relation charge or leave a loser staged; the typed
+/// outcome/state assertions fail.
 #[test]
 fn call_resolution_budget_exceeded_admits_nothing() {
     let host = host();
@@ -1048,7 +1050,7 @@ fn call_resolution_budget_exceeded_admits_nothing() {
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let candidates = (0..65)
+    let candidates = (0..=super::call_resolve::MAX_APPLICABILITY_RELATIONS as u32)
         .map(|ordinal| {
             signature(
                 &dispatch,

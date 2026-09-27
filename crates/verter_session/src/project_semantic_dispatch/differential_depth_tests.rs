@@ -2455,15 +2455,10 @@ fn the_first_of_65_overloads_resolves() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `ov(64)` resolves the 65th overload `(a: 64): "r64"`. The lane gives up with
-/// `UnrepresentableCallee` whenever the match lies past the 64th overload (64
-/// overloads resolve their last).
-///
-/// What the lane gives:
-/// - `useLast`: the checker answers `"r64"`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnrepresentableCallee.
+/// `ov(64)` resolves the 65th overload `(a: 64): "r64"`: the checker tries
+/// every overload, and only the call's relation and inference budgets bound
+/// the work.
 #[test]
-#[ignore = "a call resolves an overload past the sixty-fourth"]
 fn the_sixty_fifth_overload_resolves() {
     let matrix = Matrix::new(OVERLOADS_65);
     let failures = matrix.returns(&[("useLast", "\"r64\"")]);

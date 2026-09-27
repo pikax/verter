@@ -25,8 +25,7 @@ use crate::semantic_query::{
     SignatureReturnCarrier, VariancePhase,
 };
 
-pub(super) const MAX_CANDIDATES_STARTED: usize = 64;
-const MAX_APPLICABILITY_RELATIONS: usize = 1_024;
+pub(super) const MAX_APPLICABILITY_RELATIONS: usize = 1_024;
 const MAX_INFERENCE_DEPOSITS: usize = 1_024;
 /// Recursion bound for the call-boundary deposit walk: top-level union /
 /// intersection constituents plus one-level alias-instantiation
@@ -64,17 +63,11 @@ enum ResolveCallFramePop {
 
 #[derive(Default)]
 pub(super) struct CallResolutionBudget {
-    candidates_started: usize,
     applicability_relations: usize,
     inference_deposits: usize,
 }
 
 impl CallResolutionBudget {
-    fn start_candidate(&mut self) -> bool {
-        self.candidates_started += 1;
-        self.candidates_started <= MAX_CANDIDATES_STARTED
-    }
-
     fn relation(&mut self) -> bool {
         self.applicability_relations += 1;
         self.applicability_relations <= MAX_APPLICABILITY_RELATIONS
@@ -1273,10 +1266,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let Some(raw_candidate) = raw_candidate else {
                     return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
                 };
-                if !budget.start_candidate() {
-                    self.abandon_call_sessions_since(session_watermark);
-                    return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
-                }
                 self.dispatch_txn.borrow_mut().call.applicability = applicability;
                 let verdict = self.check_call_candidate(
                     key,
@@ -1316,10 +1305,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // checker reports. It is checked under assignability, the one pass
         // a single candidate has.
         if let Some((candidate, raw_candidate)) = only_candidate {
-            if !budget.start_candidate() {
-                self.abandon_call_sessions_since(session_watermark);
-                return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
-            }
             self.dispatch_txn.borrow_mut().call.applicability =
                 crate::semantic_query::RelationKind::Assignable;
             let verdict = self.check_call_candidate(
