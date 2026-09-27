@@ -132,7 +132,6 @@ verter_session/src/flow_slice_content.rs annotation_provably_not_never
 verter_session/src/flow_slice_content.rs argument_may_match_a_reference
 verter_session/src/flow_slice_content.rs chain_root_identifier
 verter_session/src/flow_slice_content.rs class_static_side_provably_plain
-verter_session/src/flow_slice_content.rs classify_guard
 verter_session/src/flow_slice_content.rs collect_binding_pattern_names
 verter_session/src/flow_slice_content.rs collect_pattern_identifier_spans
 verter_session/src/flow_slice_content.rs collect_write_targets
@@ -142,7 +141,6 @@ verter_session/src/flow_slice_content.rs expression_root_identifier
 verter_session/src/flow_slice_content.rs free_rooted_value
 verter_session/src/flow_slice_content.rs initializer_carries_a_narrowing
 verter_session/src/flow_slice_content.rs is_equality_value_operand
-verter_session/src/flow_slice_content.rs loop_body_reaches_exit
 verter_session/src/flow_slice_content.rs lower_condition
 verter_session/src/flow_slice_content.rs lower_discarded_effects
 verter_session/src/flow_slice_content.rs lower_test_updates

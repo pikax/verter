@@ -316,8 +316,8 @@ forms that reach it. The dynamic event-name walks of the Vue projection
 walk from explicit stacks too.
 
 A census of the functions over oxc AST types that call themselves
-directly counts 163 left (51 in `verter_semantic`, 38 in `verter_parser`,
-37 in `verter_session`, 35 in `verter_compiler`, 2 in `verter_lsp`);
+directly counts 161 left (51 in `verter_semantic`, 38 in `verter_parser`,
+35 each in `verter_session` and `verter_compiler`, 2 in `verter_lsp`);
 mutual recursion is not counted. Some are bounded by a depth of their
 own, and some run inside a walk's containment. They are tracked, not
 converted: `hand_written_recursions_over_oxc_syntax_do_not_grow` fails on
