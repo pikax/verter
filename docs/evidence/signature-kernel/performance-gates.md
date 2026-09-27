@@ -620,6 +620,22 @@ Recorded plainly so no reader mistakes absence for a pass:
   or the `!` classification overflows the worker, and restoring the
   derived drop overflows the test thread.
 
+* **Route facts walk a declaration body from explicit stacks.** The
+  shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
+  declaration's body recursively: the whole-route walk overflowed the
+  8 MiB declaration-lowering worker on a 10,000-deep `keyof` chain, and the
+  member-path seed enumeration, the type-reference enumeration and the
+  direct-object descents recursed per nested member or parenthesized arm.
+  Each now runs from an explicit stack, children queued last first so every
+  edge comes out in the order the recursive walk emitted it (only childless
+  nodes emit). `route_facts_tests.rs` →
+  `bodies_nested_10000_deep_produce_route_facts_on_a_small_stack` produces
+  the facts of a 10,000-deep `keyof` chain, object nest and parenthesized
+  intersection chain on a 1 MiB thread; walking the children in place
+  overflows it. The object nest's seed edges are one per member path, each
+  with its full path, so their count is linear and their size quadratic in
+  the nest's depth (8 s unoptimized at 10,000).
+
 * **Type dependency facts collect from an explicit stack.** The collector
   of an authored type's dependency paths (`verter_type_expr_oxc`'s
   `dependency_facts`) recursed once per nested type: 8.3 MB on the

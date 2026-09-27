@@ -350,6 +350,26 @@ impl RouteFactProducer<'_> {
         path: Vec<TypePropertyKey>,
         out: &mut Vec<MemberPathSeedEdge>,
     ) {
+        // An object type nests without bound: its member paths are
+        // enumerated from an explicit stack, children queued last first so
+        // the edges come out in the recursive enumeration's order.
+        let mut pending = vec![(prop, path)];
+        while let Some((prop, path)) = pending.pop() {
+            let before = pending.len();
+            self.enumerate_seed_node(prop, path, out, &mut pending);
+            pending[before..].reverse();
+        }
+    }
+
+    /// One member of [`Self::enumerate_seed_edges`]: its edges into `out`,
+    /// its child members, in order, onto `pending`.
+    fn enumerate_seed_node<'p>(
+        &self,
+        prop: &'p ObjectProperty,
+        path: Vec<TypePropertyKey>,
+        out: &mut Vec<MemberPathSeedEdge>,
+        pending: &mut Vec<(&'p ObjectProperty, Vec<TypePropertyKey>)>,
+    ) {
         // Terminal edge: the exact-path seed refs (the legacy
         // `path.len() == 1 → collect_type_refs(prop.ty)` arm). Ref-less
         // terminals produce no edge — observationally identical to the
@@ -390,7 +410,7 @@ impl RouteFactProducer<'_> {
             };
             let mut child_path = path.clone();
             child_path.push(key);
-            self.enumerate_seed_edges(child, child_path, out);
+            pending.push((child, child_path));
         }
     }
 
@@ -424,41 +444,72 @@ impl RouteFactProducer<'_> {
         guard: bool,
         out: &mut Vec<WholeRouteEdgeFact>,
     ) {
+        self.walk_routes(vec![(expr, context, guard)], out);
+    }
+
+    /// Walk `roots` in order, depth first. A type nests without bound, so
+    /// the walk runs from an explicit stack: each node emits its own edges
+    /// (only childless nodes emit) and queues its children, last first, so
+    /// they are walked in the order the recursive walk visited them.
+    fn walk_routes<'e>(
+        &self,
+        roots: Vec<(&'e TypeExpr, WholeRouteContextFact, bool)>,
+        out: &mut Vec<WholeRouteEdgeFact>,
+    ) {
+        let mut pending: Vec<(&'e TypeExpr, WholeRouteContextFact, bool)> =
+            roots.into_iter().rev().collect();
+        let mut children = Vec::new();
+        while let Some((expr, context, guard)) = pending.pop() {
+            self.walk_route_node(expr, context, guard, out, &mut children);
+            pending.extend(children.drain(..).rev());
+        }
+    }
+
+    /// One node of [`Self::walk_routes`]: its edges into `out`, its
+    /// children, in walk order, into `children`.
+    fn walk_route_node<'e>(
+        &self,
+        expr: &'e TypeExpr,
+        context: WholeRouteContextFact,
+        guard: bool,
+        out: &mut Vec<WholeRouteEdgeFact>,
+        children: &mut Vec<(&'e TypeExpr, WholeRouteContextFact, bool)>,
+    ) {
         match expr {
             TypeExpr::Parenthesized(inner) | TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) => {
-                self.walk_whole_route(inner, context, guard, out);
+                children.push((inner, context, guard));
             }
             TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
                 for inner in types.iter() {
-                    self.walk_whole_route(inner, context, guard, out);
+                    children.push((inner, context, guard));
                 }
             }
             TypeExpr::Array { element, .. } => {
-                self.walk_whole_route(element, context, guard, out);
+                children.push((element, context, guard));
             }
             // The operands are genuinely part of the route and may carry refs;
             // the op itself names no declaration and contributes no edge.
             TypeExpr::IntrinsicApplication { arguments, .. } => {
                 for argument in arguments.iter() {
-                    self.walk_whole_route(argument, context, guard, out);
+                    children.push((argument, context, guard));
                 }
             }
             TypeExpr::Tuple { elements, .. } => {
                 for element in elements.iter() {
-                    self.walk_whole_route(&element.ty, context, guard, out);
+                    children.push((&element.ty, context, guard));
                 }
             }
             TypeExpr::Object(obj) => {
                 if matches!(context, WholeRouteContextFact::LeafProperty) {
                     return;
                 }
-                self.walk_object_members(&obj.properties, guard, out);
+                self.object_member_routes(&obj.properties, guard, children);
             }
             TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
                 if matches!(context, WholeRouteContextFact::LeafProperty) {
                     return;
                 }
-                self.walk_function_refs(func, guard, out);
+                self.function_routes(func, guard, children);
             }
             TypeExpr::Ref {
                 name,
@@ -502,7 +553,7 @@ impl RouteFactProducer<'_> {
                     // context, under the guard (a leaf-context walk never
                     // descends here — the produced edges must drop under a
                     // LeafProperty follow).
-                    self.walk_whole_route(&type_arguments[0], context, true, out);
+                    children.push((&type_arguments[0], context, true));
                     return;
                 }
 
@@ -527,7 +578,7 @@ impl RouteFactProducer<'_> {
                 false_type,
             } => {
                 for inner in [check, extends, true_type, false_type] {
-                    self.walk_whole_route(inner, context, guard, out);
+                    children.push((inner, context, guard));
                 }
             }
             TypeExpr::Mapped {
@@ -536,15 +587,15 @@ impl RouteFactProducer<'_> {
                 name_type,
                 ..
             } => {
-                self.walk_whole_route(source, context, guard, out);
-                self.walk_whole_route(value, context, guard, out);
+                children.push((source, context, guard));
+                children.push((value, context, guard));
                 if let Some(name_type) = name_type.as_deref() {
-                    self.walk_whole_route(name_type, context, guard, out);
+                    children.push((name_type, context, guard));
                 }
             }
             TypeExpr::TemplateLiteral { expressions, .. } => {
                 for inner in expressions.iter() {
-                    self.walk_whole_route(inner, context, guard, out);
+                    children.push((inner, context, guard));
                 }
             }
             TypeExpr::TypeOf(value_ref) => {
@@ -575,7 +626,7 @@ impl RouteFactProducer<'_> {
             // remains the deferred read-set follow-up on the legacy walk).
             TypeExpr::ImportType { type_arguments, .. } => {
                 for argument in type_arguments.iter() {
-                    self.walk_whole_route(argument, context, guard, out);
+                    children.push((argument, context, guard));
                 }
             }
             TypeExpr::Primitive(_)
@@ -598,39 +649,36 @@ impl RouteFactProducer<'_> {
         guard: bool,
         out: &mut Vec<WholeRouteEdgeFact>,
     ) {
+        let mut roots = Vec::new();
+        self.object_member_routes(members, guard, &mut roots);
+        self.walk_routes(roots, out);
+    }
+
+    /// [`Self::walk_object_members`]'s roots, in walk order.
+    fn object_member_routes<'m>(
+        &self,
+        members: impl IntoIterator<Item = &'m ObjectMember>,
+        guard: bool,
+        children: &mut Vec<(&'m TypeExpr, WholeRouteContextFact, bool)>,
+    ) {
         for member in members {
             match member {
                 ObjectMember::Property(prop) => {
-                    self.walk_whole_route(
-                        &prop.ty,
-                        WholeRouteContextFact::LeafProperty,
-                        guard,
-                        out,
-                    );
+                    children.push((&prop.ty, WholeRouteContextFact::LeafProperty, guard));
                 }
                 ObjectMember::IndexSignature(sig) => {
-                    self.walk_whole_route(
-                        &sig.value_type,
-                        WholeRouteContextFact::LeafProperty,
-                        guard,
-                        out,
-                    );
+                    children.push((&sig.value_type, WholeRouteContextFact::LeafProperty, guard));
                 }
                 ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                    self.walk_function_refs(func, guard, out);
+                    self.function_routes(func, guard, children);
                 }
                 ObjectMember::Method(method) => {
-                    self.walk_function_refs(&method.function, guard, out);
+                    self.function_routes(&method.function, guard, children);
                 }
                 ObjectMember::Spread(spread) => {
                     // The spread operand's type refs contribute exactly like a
                     // property value: the fold reads the operand's surface.
-                    self.walk_whole_route(
-                        &spread.ty,
-                        WholeRouteContextFact::LeafProperty,
-                        guard,
-                        out,
-                    );
+                    children.push((&spread.ty, WholeRouteContextFact::LeafProperty, guard));
                 }
             }
         }
@@ -638,21 +686,21 @@ impl RouteFactProducer<'_> {
 
     /// Callable positions: parameters + function type-param constraint/default
     /// walk as `CallableParam`; the return type NEVER walks (legacy parity).
-    fn walk_function_refs(
+    fn function_routes<'f>(
         &self,
-        func: &verter_type_expr::FunctionExpr,
+        func: &'f verter_type_expr::FunctionExpr,
         guard: bool,
-        out: &mut Vec<WholeRouteEdgeFact>,
+        children: &mut Vec<(&'f TypeExpr, WholeRouteContextFact, bool)>,
     ) {
         for param in &func.parameters {
-            self.walk_whole_route(&param.ty, WholeRouteContextFact::CallableParam, guard, out);
+            children.push((&param.ty, WholeRouteContextFact::CallableParam, guard));
         }
         for type_param in &func.type_parameters {
             if let Some(constraint) = type_param.constraint.as_deref() {
-                self.walk_whole_route(constraint, WholeRouteContextFact::CallableParam, guard, out);
+                children.push((constraint, WholeRouteContextFact::CallableParam, guard));
             }
             if let Some(default) = type_param.default.as_deref() {
-                self.walk_whole_route(default, WholeRouteContextFact::CallableParam, guard, out);
+                children.push((default, WholeRouteContextFact::CallableParam, guard));
             }
         }
     }
@@ -938,8 +986,11 @@ fn external_ref(
 /// The bare-ref carrier probe: a (paren-transparent) `Ref` with NO type
 /// arguments.
 fn bare_ref_name(expr: &TypeExpr) -> Option<&str> {
+    let mut expr = expr;
+    while let TypeExpr::Parenthesized(inner) = expr {
+        expr = inner;
+    }
     match expr {
-        TypeExpr::Parenthesized(inner) => bare_ref_name(inner),
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -966,62 +1017,68 @@ fn collect_direct_object_properties<'a>(
     out: &mut Vec<&'a ObjectProperty>,
     seen: &mut rustc_hash::FxHashSet<TypePropertyKey>,
 ) {
-    match body {
-        TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                if let ObjectMember::Property(prop) = member {
-                    if let Some(key) = prop.key.cloned_known() {
-                        if seen.insert(key) {
-                            out.push(prop);
+    // Parenthesized and intersection nests descend from an explicit stack,
+    // an intersection's arms reversed, in the recursive descent's order.
+    let mut pending = vec![body];
+    while let Some(body) = pending.pop() {
+        match body {
+            TypeExpr::Object(obj) => {
+                for member in &obj.properties {
+                    if let ObjectMember::Property(prop) = member {
+                        if let Some(key) = prop.key.cloned_known() {
+                            if seen.insert(key) {
+                                out.push(prop);
+                            }
                         }
                     }
                 }
             }
+            TypeExpr::Intersection(parts) => pending.extend(parts.iter()),
+            TypeExpr::Parenthesized(inner) => pending.push(inner),
+            _ => {}
         }
-        TypeExpr::Intersection(parts) => {
-            for part in parts.iter().rev() {
-                collect_direct_object_properties(part, out, seen);
-            }
-        }
-        TypeExpr::Parenthesized(inner) => {
-            collect_direct_object_properties(inner, out, seen);
-        }
-        _ => {}
     }
 }
 
 fn direct_object_has_computed_properties(bodies: &[TypeExpr]) -> bool {
-    bodies.iter().any(|body| match body {
-        TypeExpr::Object(object) => object.properties.iter().any(|member| {
-            matches!(
-                member,
-                ObjectMember::Property(ObjectProperty {
-                    key: AuthoredPropertyKey::Computed(_),
-                    ..
-                })
-            )
-        }),
-        TypeExpr::Intersection(parts) => direct_object_has_computed_properties(parts),
-        TypeExpr::Parenthesized(inner) => {
-            direct_object_has_computed_properties(std::slice::from_ref(inner.as_ref()))
+    let mut pending: Vec<&TypeExpr> = bodies.iter().collect();
+    while let Some(body) = pending.pop() {
+        match body {
+            TypeExpr::Object(object) => {
+                if object.properties.iter().any(|member| {
+                    matches!(
+                        member,
+                        ObjectMember::Property(ObjectProperty {
+                            key: AuthoredPropertyKey::Computed(_),
+                            ..
+                        })
+                    )
+                }) {
+                    return true;
+                }
+            }
+            TypeExpr::Intersection(parts) => pending.extend(parts.iter()),
+            TypeExpr::Parenthesized(inner) => pending.push(inner),
+            _ => {}
         }
-        _ => false,
-    })
+    }
+    false
 }
 
 /// Direct object MEMBERS (all five member kinds, duplicates preserved, FORWARD
 /// intersection descent) — the merged whole-route walk surface (heritage refs
 /// from `extends`/`implements` intersections carry no direct member and drop).
 fn collect_direct_object_members<'a>(body: &'a TypeExpr, out: &mut Vec<&'a ObjectMember>) {
-    match body {
-        TypeExpr::Object(object) => out.extend(object.properties.iter()),
-        TypeExpr::Intersection(parts) => {
-            for part in parts.iter() {
-                collect_direct_object_members(part, out);
-            }
+    // Forward intersection descent from an explicit stack (arms queued last
+    // first).
+    let mut pending = vec![body];
+    while let Some(body) = pending.pop() {
+        match body {
+            TypeExpr::Object(object) => out.extend(object.properties.iter()),
+            TypeExpr::Intersection(parts) => pending.extend(parts.iter().rev()),
+            TypeExpr::Parenthesized(inner) => pending.push(inner),
+            _ => {}
         }
-        TypeExpr::Parenthesized(inner) => collect_direct_object_members(inner, out),
-        _ => {}
     }
 }
 
@@ -1033,92 +1090,79 @@ mod route_facts_tests;
 /// direct references, not transitive) — the producer-side copy of the legacy
 /// seed/member ref enumeration, in identical traversal order.
 pub(crate) fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            out.push(name.to_string());
-            for arg in type_arguments.iter() {
-                collect_type_refs(arg, out);
+    // A type nests without bound: its nested types are enumerated from an
+    // explicit stack, children queued last first so the order is the
+    // recursive enumeration's.
+    let mut pending = vec![expr];
+    let mut children: Vec<&TypeExpr> = Vec::new();
+    while let Some(expr) = pending.pop() {
+        match expr {
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                out.push(name.to_string());
+                children.extend(type_arguments.iter());
             }
-        }
-        TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
-            for m in members.iter() {
-                collect_type_refs(m, out);
+            TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+                children.extend(members.iter());
             }
-        }
-        TypeExpr::Array { element, .. } => collect_type_refs(element, out),
-        // A compiler intrinsic names NO declaration, so it contributes no
-        // type ref of its own — matching `referenced_names` in
-        // `verter_type_expr`. Its operands still enumerate.
-        TypeExpr::IntrinsicApplication { arguments, .. } => {
-            for argument in arguments.iter() {
-                collect_type_refs(argument, out);
-            }
-        }
-        TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                if let ObjectMember::Property(prop) = member {
-                    collect_type_refs(&prop.ty, out);
+            TypeExpr::Array { element, .. } => children.push(element),
+            // A compiler intrinsic names NO declaration, so it contributes no
+            // type ref of its own — matching `referenced_names` in
+            // `verter_type_expr`. Its operands still enumerate.
+            TypeExpr::IntrinsicApplication { arguments, .. } => children.extend(arguments.iter()),
+            TypeExpr::Object(obj) => {
+                for member in &obj.properties {
+                    if let ObjectMember::Property(prop) = member {
+                        children.push(&prop.ty);
+                    }
                 }
             }
-        }
-        TypeExpr::Tuple { elements, .. } => {
-            for el in elements.iter() {
-                collect_type_refs(&el.ty, out);
+            TypeExpr::Tuple { elements, .. } => {
+                children.extend(elements.iter().map(|element| &element.ty));
             }
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            collect_type_refs(object, out);
-            collect_type_refs(index, out);
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            collect_type_refs(check, out);
-            collect_type_refs(extends, out);
-            collect_type_refs(true_type, out);
-            collect_type_refs(false_type, out);
-        }
-        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-            for param in &func.parameters {
-                collect_type_refs(&param.ty, out);
+            TypeExpr::IndexedAccess { object, index } => {
+                children.push(object);
+                children.push(index);
             }
-            if let Some(ref ret) = func.return_type {
-                collect_type_refs(ret, out);
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => children.extend([check, extends, true_type, false_type].map(|arm| &**arm)),
+            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
+                children.extend(func.parameters.iter().map(|param| &param.ty));
+                if let Some(ret) = func.return_type.as_deref() {
+                    children.push(ret);
+                }
+                if let Some(target) = func
+                    .predicate
+                    .as_deref()
+                    .and_then(|predicate| predicate.ty.as_deref())
+                {
+                    children.push(target);
+                }
             }
-            if let Some(target) = func
-                .predicate
-                .as_deref()
-                .and_then(|predicate| predicate.ty.as_deref())
-            {
-                collect_type_refs(target, out);
+            TypeExpr::Mapped { source, value, .. } => {
+                children.push(source);
+                children.push(value);
             }
-        }
-        TypeExpr::Mapped { source, value, .. } => {
-            collect_type_refs(source, out);
-            collect_type_refs(value, out);
-        }
-        TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => {
-            collect_type_refs(inner, out);
-        }
-        TypeExpr::ImportType { type_arguments, .. } => {
-            for arg in type_arguments.iter() {
-                collect_type_refs(arg, out);
+            TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => {
+                children.push(inner);
             }
+            TypeExpr::ImportType { type_arguments, .. } => children.extend(type_arguments.iter()),
+            TypeExpr::TypeOf { .. }
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::TemplateLiteral { .. }
+            | TypeExpr::Unknown(_)
+            | TypeExpr::RecursiveRef { .. }
+            | TypeExpr::SyntheticSlotBinding(_)
+            | TypeExpr::Infer { .. } => {}
         }
-        TypeExpr::TypeOf { .. }
-        | TypeExpr::TypeParameter(_)
-        | TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::TemplateLiteral { .. }
-        | TypeExpr::Unknown(_)
-        | TypeExpr::RecursiveRef { .. }
-        | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::Infer { .. } => {}
+        pending.extend(children.drain(..).rev());
     }
 }
