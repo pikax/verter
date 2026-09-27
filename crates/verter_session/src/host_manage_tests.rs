@@ -19716,3 +19716,87 @@ defineProps<IconProps>()
         closed.registered_sources
     );
 }
+
+/// Cold component-meta publications of a still-open owner under successive
+/// overlay views keep at most the two most recent views, in the resolver's
+/// validated states and in the derived `cached_resolved_meta` mirror alike —
+/// without the owner being edited or closed.
+///
+/// Discriminating: only the legacy-mirror rehydration noted a view before;
+/// the normal cold publication inserted straight into the runtime map and the
+/// mirror kept every `(mode, view_fingerprint)` it was ever handed, so each
+/// overlay of a dependency left one more state per mode for the life of the
+/// owner (five views, five states per mode).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn overlay_views_of_an_open_owner_keep_two_component_meta_views() {
+    use crate::session_view::{OverlaidViewRef, SessionView};
+
+    const OWNER: &str = "/src/Consumer.vue";
+    const DEPENDENCY: &str = "/src/types/icon.ts";
+    let (_ws, host) = activity_gate_fixture();
+    // The fixture resolved the owner once under the base view: one state
+    // per projection mode it publishes.
+    let modes = host.retention_snapshot().component_meta_states;
+    assert!(
+        modes > 0,
+        "fixture: the base resolution admitted its states"
+    );
+    let mirrored_views = |host: &VerterHost| {
+        let entry = host
+            .derived_raw_cache()
+            .get(OWNER)
+            .expect("the owner keeps its derived state while open");
+        let mut per_mode: rustc_hash::FxHashMap<crate::types::ProjectionMode, usize> =
+            rustc_hash::FxHashMap::default();
+        for (mode, _view_fingerprint) in entry.cached_resolved_meta.keys() {
+            *per_mode.entry(*mode).or_default() += 1;
+        }
+        (
+            per_mode.values().copied().max().unwrap_or(0),
+            entry
+                .cached_resolved_meta
+                .keys()
+                .map(|(_, view_fingerprint)| *view_fingerprint)
+                .collect::<std::collections::HashSet<_>>(),
+        )
+    };
+    let tombstones = std::collections::HashSet::new();
+    for variant in 1..=4usize {
+        let source: Arc<str> = Arc::from(format!(
+            "export interface IconProps {{ name: string; size: number; extra{variant}: boolean }}\n"
+        ));
+        let mut overlays = rustc_hash::FxHashMap::default();
+        let mut overlay_hashes = rustc_hash::FxHashMap::default();
+        overlay_hashes.insert(
+            DEPENDENCY.to_string(),
+            crate::hash::hash_16(source.as_bytes()),
+        );
+        overlays.insert(DEPENDENCY.to_string(), source);
+        let view = OverlaidViewRef::new(&host, &overlays, &overlay_hashes, &tombstones);
+        let meta = host
+            .get_component_meta_via_view(OWNER, &view)
+            .expect("overlay component meta resolves");
+        assert!(
+            meta.props
+                .iter()
+                .any(|prop| prop.name == format!("extra{variant}")),
+            "view {variant}: the owner's props follow the overlaid dependency"
+        );
+        let states = host.retention_snapshot().component_meta_states;
+        assert!(
+            states <= 2 * modes,
+            "view {variant}: the resolver keeps at most two views per mode \
+             ({states} states for {modes} modes)"
+        );
+        let (per_mode, views) = mirrored_views(&host);
+        assert!(
+            per_mode <= 2,
+            "view {variant}: the mirror keeps at most two views per mode ({per_mode})"
+        );
+        assert!(
+            views.contains(&view.fingerprint()),
+            "view {variant}: the current view stays mirrored"
+        );
+    }
+}

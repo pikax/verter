@@ -213,7 +213,7 @@ where
     pub component_meta: StableRequestState<ResolutionNodeKey, MetaV>,
     /// View fingerprints admitted most recently per (document, mode), newest
     /// last, [`RECENT_COMPONENT_META_VIEWS`] deep (see
-    /// [`Self::note_component_meta_view`]).
+    /// [`Self::admit_component_meta_view`]).
     recent_component_meta_views:
         parking_lot::Mutex<rustc_hash::FxHashMap<(String, u32), std::collections::VecDeque<u64>>>,
     /// Host-owned prepared declaration bundles, keyed by canonical file ID.
@@ -363,27 +363,37 @@ where
         self.imported_roots.evict_provider(canonical_id);
     }
 
-    /// Take a snapshot of the current counter values.
-    /// Note that `key` is the component-meta state being admitted, and drop
-    /// the states cached for the same document and mode under all but the
-    /// two most recent view fingerprints: the view a request in flight still
-    /// holds is at most one edit old, and an older view can never be asked
-    /// for again. Without this the cache gains a key per edit for the life
-    /// of the host.
-    pub fn note_component_meta_view(&self, key: &ResolutionNodeKey) {
-        let superseded = {
-            let mut recent = self.recent_component_meta_views.lock();
-            let fingerprints = recent
-                .entry((key.symbol_id.clone(), key.behavior_flags))
-                .or_default();
-            if !fingerprints.contains(&key.view_fingerprint) {
-                fingerprints.push_back(key.view_fingerprint);
-            }
-            if fingerprints.len() > RECENT_COMPONENT_META_VIEWS {
-                fingerprints.pop_front()
-            } else {
-                None
-            }
+    /// The ONE admission operation for component-meta states: note `key`'s
+    /// view as the document and mode's newest, admit `state` under `key` when
+    /// given one, drop the states cached under all but the two most recent
+    /// view fingerprints, and run `alongside` (the host's derived-mirror
+    /// update, handed the superseded fingerprint to trim) — all under the
+    /// view bookkeeping lock.
+    ///
+    /// The view a request in flight still holds is at most one view old, and
+    /// an older view can never be asked for again. Without the bound the cache
+    /// gains a key per overlay view for the life of the owner. Holding the
+    /// lock across the insertion is what keeps it: a publisher that noted its
+    /// view, then paused while newer views superseded it, would otherwise
+    /// insert a state no later trim can reach.
+    pub(crate) fn admit_component_meta_view<R>(
+        &self,
+        key: ResolutionNodeKey,
+        state: Option<(Arc<MetaV>, Vec<FactVersionRef>)>,
+        cache_kind: &'static str,
+        alongside: impl FnOnce(Option<u64>) -> R,
+    ) -> (Option<ValidatedFactAdmission<MetaV>>, R) {
+        let mut recent = self.recent_component_meta_views.lock();
+        let fingerprints = recent
+            .entry((key.symbol_id.clone(), key.behavior_flags))
+            .or_default();
+        if !fingerprints.contains(&key.view_fingerprint) {
+            fingerprints.push_back(key.view_fingerprint);
+        }
+        let superseded = if fingerprints.len() > RECENT_COMPONENT_META_VIEWS {
+            fingerprints.pop_front()
+        } else {
+            None
         };
         if let Some(superseded) = superseded {
             self.component_meta.retain(|cached| {
@@ -392,18 +402,25 @@ where
                     || cached.view_fingerprint != superseded
             });
         }
+        let admission = state.and_then(|(value, facts)| {
+            self.component_meta
+                .insert_arc_with_kind(key, value, facts, cache_kind)
+        });
+        let alongside = alongside(superseded);
+        drop(recent);
+        (admission, alongside)
     }
 
     /// Drop the component-meta states cached for `canonical_id` under every
-    /// view fingerprint (a close: none of them can be asked for again), and
-    /// say how many keys went.
+    /// view fingerprint (a close or a deletion: none of them can be asked for
+    /// again), and say how many keys went.
     pub fn release_component_meta_states(&self, canonical_id: &str) -> usize {
-        self.recent_component_meta_views
-            .lock()
-            .retain(|(symbol_id, _), _| symbol_id != canonical_id);
+        let mut recent = self.recent_component_meta_views.lock();
+        recent.retain(|(symbol_id, _), _| symbol_id != canonical_id);
         let before = self.component_meta.len();
         self.component_meta
             .retain(|key| key.symbol_id != canonical_id);
+        drop(recent);
         before - self.component_meta.len()
     }
 
@@ -414,6 +431,7 @@ where
         self.component_meta.len()
     }
 
+    /// Take a snapshot of the current counter values.
     pub fn counter_snapshot(&self) -> crate::resolver_core::ResolverCountersSnapshot {
         self.counters.snapshot()
     }
