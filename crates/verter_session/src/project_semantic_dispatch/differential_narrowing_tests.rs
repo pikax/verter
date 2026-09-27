@@ -564,6 +564,7 @@ declare function assertString(x: unknown): asserts x is string;
 declare function assertTruthy(x: unknown): asserts x;
 declare function isDefined<T>(x: T | undefined | null): x is T;
 declare function isKey<K extends string>(k: K, x: string): x is K;
+declare function isArr<T>(v: T | T[]): v is T[];
 class Box2 { v: string | number = 0; isStr(): this is { v: string } { return typeof this.v === "string"; } }
 const isNum = (x: unknown) => typeof x === "number";
 function isFishInferred(p: Fish | Bird) { return "swim" in p; }
@@ -577,6 +578,9 @@ export function pAssert(x: unknown) { assertString(x); return x; }
 export function pAssertUnion(x: string | number) { assertString(x); return x; }
 export function pAssertTruthy(x: string | undefined) { assertTruthy(x); return x; }
 export function pGenericDefined(x: string | undefined) { if (isDefined(x)) return x; throw 0; }
+export function pGenericElse(x: string | undefined) { if (isDefined(x)) throw 0; return x; }
+export function pGenericArr(x: number | number[]) { if (isArr(x)) return x; throw 0; }
+export function pGenericArrElse(x: number | number[]) { if (isArr(x)) throw 0; return x; }
 export function pGenericKey(x: string) { if (isKey("k", x)) return x; throw 0; }
 export function pThis(b: Box2) { if (b.isStr()) return b; throw 0; }
 export function pThisMember(b: Box2) { if (b.isStr()) return b.v; throw 0; }
@@ -621,17 +625,18 @@ fn predicates_and_assertions_narrow_as_the_checker_narrows() {
 }
 
 /// `isDefined<T>(x: T | undefined | null): x is T` called with `string |
-/// undefined` infers `T = string` and narrows the argument to `string`.
-/// Wrong-but-clean: the lane keeps `string | undefined`.
-///
-/// What the lane gives:
-/// - `pGenericDefined`: the checker answers `string`; the lane measured `string
-///   | undefined` (strict, noImplicitAny off).
+/// undefined` infers `T = string` (the argument's `undefined` matches the
+/// parameter's own `undefined` and is removed before inference) and narrows
+/// the argument to `string`, its false branch to the rest.
 #[test]
-#[ignore = "a generic type predicate narrows by its inferred type argument"]
-fn wrong_clean_a_generic_predicate_narrows_by_its_inferred_argument() {
+fn a_generic_predicate_narrows_by_its_inferred_argument() {
     let matrix = Matrix::new(PREDICATES);
-    let failures = matrix.returns(&[("pGenericDefined", "string")]);
+    let mut failures = matrix.returns(&[
+        ("pGenericDefined", "string"),
+        ("pGenericArr", "number[]"),
+        ("pGenericArrElse", "number"),
+    ]);
+    failures.extend(matrix.nullness(&[(Read::Return("pGenericElse"), "undefined", "never")]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

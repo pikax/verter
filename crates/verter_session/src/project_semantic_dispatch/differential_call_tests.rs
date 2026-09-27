@@ -463,6 +463,16 @@ export function wCallbackReturn() { return run(() => f(f(1))); }
 export function wCallbackLiteralReturn() { return runN(() => f(f(1))); }
 export function wContextualReturn() { const r: () => 1 = () => f(f(1)); return r; }
 export function wImmediate() { return (() => f(f(1)))(); }
+declare function gd<T>(x: T | undefined): T;
+declare function gn<T>(x: T | undefined | null): T;
+export function pDef(x: string | undefined) { return gd(x); }
+export function pDefN(x: string | undefined) { return gn(x); }
+export function pDefNN(x: string | null | undefined) { return gn(x); }
+declare function gsu<T>(x: T | string): T;
+declare function gbo<T>(x: T | { a: 1 }): T;
+export function pDefLit(x: "a" | 1) { return gsu(x); }
+export function pDefObj(x: number | { a: 1 }) { return gbo(x); }
+export function pDefThree(x: string | number | undefined) { return gd(x); }
 export function wUnionLet() { let x = f(h(1)); return x; }
 declare function hn<T extends number>(x: T): T | undefined;
 export function wUnionArray() { return g(h(1)); }
@@ -535,6 +545,12 @@ fn a_generic_call_keeps_or_widens_a_literal_as_the_checker_infers_it() {
         ("wContextual", "1"),
         ("wContextualReturn", "() => 1"),
         ("wImmediate", "number"),
+        ("pDef", "string"),
+        ("pDefN", "string"),
+        ("pDefNN", "string"),
+        ("pDefLit", "1"),
+        ("pDefObj", "number"),
+        ("pDefThree", "string | number"),
         ("wCallbackReturn", "number"),
         ("wCallbackLiteralReturn", "1"),
         ("wModuleArray", "number[]"),

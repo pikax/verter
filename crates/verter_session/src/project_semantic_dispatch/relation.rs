@@ -7549,6 +7549,126 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .then_some(PairStep::Assignable)
     }
 
+    /// The inference a union `source` makes against a union `target` that
+    /// holds exactly one type parameter (the checker's `inferToMultipleTypes`
+    /// with one naked type variable, after `inferFromMatchingTypes`): the
+    /// source members identical to a member of the target that is not the
+    /// parameter — or string and number literals whose base is one
+    /// (`isTypeOrBaseIdenticalTo`) — are removed, and what remains is
+    /// inferred to the parameter as ONE union candidate (`string | number |
+    /// undefined` against `T | undefined` infers `T` as `string | number`);
+    /// when every member matched, the whole source is. `None` when no
+    /// inference session collects or the target is no such union, and the
+    /// members then relate one by one.
+    #[inline(never)]
+    fn union_source_inferred_to_naked_parameter(
+        &self,
+        source: &[SemanticNodeId],
+        target: SemanticNodeId,
+    ) -> Option<(SemanticNodeId, SemanticNodeId)> {
+        self.dispatch_txn.borrow().active_session()?;
+        let graph = self.graph();
+        let target_members: Vec<SemanticNodeId> = match graph.node_data(target).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            _ => return None,
+        };
+        let is_type_parameter = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::TypeParam { .. })
+            )
+        };
+        let (parameters, fixed): (Vec<SemanticNodeId>, Vec<SemanticNodeId>) = target_members
+            .into_iter()
+            .partition(|member| is_type_parameter(*member));
+        let [parameter] = parameters.as_slice() else {
+            return None;
+        };
+        let matched = |member: SemanticNodeId| {
+            fixed.iter().any(|target| {
+                *target == member
+                    || self.structurally_identical_closed(member, *target)
+                    || matches!(
+                        (
+                            graph.node_data(*target).as_deref(),
+                            graph.node_data(member).as_deref(),
+                        ),
+                        (
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::String)),
+                            Some(SemanticNodeData::Literal(LiteralValue::String(_))),
+                        ) | (
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::Number)),
+                            Some(SemanticNodeData::Literal(LiteralValue::Number(_))),
+                        )
+                    )
+            })
+        };
+        let unmatched: Vec<SemanticNodeId> = source
+            .iter()
+            .copied()
+            .filter(|member| !matched(*member))
+            .collect();
+        let inferred = match unmatched.as_slice() {
+            [] => self.intern_normalized_union_or_intersection(source, true),
+            [single] => *single,
+            _ => self.intern_normalized_union_or_intersection(&unmatched, true),
+        };
+        Some((inferred, *parameter))
+    }
+
+    /// Whether two object-like types with no type parameter anywhere in
+    /// them are identical — each a subtype of the other, which for such
+    /// types is the checker's identity (`isTypeIdenticalTo` over two object
+    /// literal types written at different positions).
+    fn structurally_identical_closed(&self, a: SemanticNodeId, b: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        let object_like = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(
+                    SemanticNodeData::Object(_)
+                        | SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Tuple { .. }
+                )
+            )
+        };
+        let closed = |root: SemanticNodeId| {
+            let mut visited: rustc_hash::FxHashSet<SemanticNodeId> =
+                rustc_hash::FxHashSet::default();
+            let mut stack = vec![root];
+            while let Some(node) = stack.pop() {
+                if !visited.insert(node) {
+                    continue;
+                }
+                let Some(data) = graph.node_data(node) else {
+                    return false;
+                };
+                if matches!(
+                    &*data,
+                    SemanticNodeData::TypeParam { .. }
+                        | SemanticNodeData::Infer { .. }
+                        | SemanticNodeData::InferRef { .. }
+                ) {
+                    return false;
+                }
+                let _ = data.for_each_child(|child| stack.push(child));
+            }
+            true
+        };
+        object_like(a)
+            && object_like(b)
+            && closed(a)
+            && closed(b)
+            && matches!(
+                self.execute_relate_pair_kind(a, b, crate::semantic_query::RelationKind::Subtype),
+                super::dispatch_txn::RelationStep::Assignable { .. }
+            )
+            && matches!(
+                self.execute_relate_pair_kind(b, a, crate::semantic_query::RelationKind::Subtype),
+                super::dispatch_txn::RelationStep::Assignable { .. }
+            )
+    }
+
     /// A source against a union target: some member takes it whole, or an
     /// object source splits on its discriminants
     /// (`typeRelatedToDiscriminatedType`).
@@ -8651,6 +8771,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let members = members.members_arc();
             drop(source_data);
             drop(target_data);
+            if let Some((inferred, parameter)) =
+                self.union_source_inferred_to_naked_parameter(&members, target)
+            {
+                work.push(RelateWork::Eval(inferred, parameter));
+                return;
+            }
             distribute_and(work, results, &members, RelateWork::Arm, |m| (*m, target));
             return;
         }
