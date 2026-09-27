@@ -3901,6 +3901,7 @@ fn staged_flow_proof(
         .expect("the SCC fixture derives a parse identity")
         .1;
     let basis = FlowDemandBasis {
+        ancestry: Default::default(),
         graph_body: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
             canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
             function: verter_semantic::analysis::function_program::FunctionProgramKey {

@@ -75,6 +75,84 @@ impl FlowEvaluator<'_, '_> {
         pattern: &SlicePattern,
         parent: Option<SemanticNodeId>,
     ) {
+        // Nested patterns correlate against their own parent member, each
+        // before the pattern holding it: from an explicit stack of the
+        // patterns whose nested patterns are being registered, so a
+        // pattern nested in a pattern costs no native level.
+        struct Frame<'p> {
+            pattern: &'p SlicePattern,
+            parent: Option<SemanticNodeId>,
+            next: usize,
+        }
+        let composite = |pattern: &SlicePattern| {
+            matches!(
+                pattern,
+                SlicePattern::Object { .. } | SlicePattern::Array { .. }
+            )
+        };
+        if !composite(pattern) {
+            return;
+        }
+        let mut stack = vec![Frame {
+            pattern,
+            parent,
+            next: 0,
+        }];
+        while let Some(frame) = stack.last_mut() {
+            let mut nested = None;
+            match frame.pattern {
+                SlicePattern::Object { properties, .. } => {
+                    while let Some((key, element)) = properties.get(frame.next) {
+                        frame.next += 1;
+                        if composite(&element.pattern) {
+                            let member = match (frame.parent, key) {
+                                (Some(parent), SlicePatternKey::Named(name)) => {
+                                    self.pattern_property(parent, name)
+                                }
+                                _ => None,
+                            };
+                            nested = Some((&element.pattern, member));
+                            break;
+                        }
+                    }
+                }
+                SlicePattern::Array { elements, .. } => {
+                    while let Some(element) = elements.get(frame.next) {
+                        let index = frame.next;
+                        frame.next += 1;
+                        let Some(element) = element else { continue };
+                        if composite(&element.pattern) {
+                            let member = frame
+                                .parent
+                                .and_then(|parent| self.pattern_position(parent, index));
+                            nested = Some((&element.pattern, member));
+                            break;
+                        }
+                    }
+                }
+                SlicePattern::Binding { .. } | SlicePattern::Target { .. } => {}
+            }
+            match nested {
+                Some((pattern, parent)) => stack.push(Frame {
+                    pattern,
+                    parent,
+                    next: 0,
+                }),
+                None => {
+                    let frame = stack.pop().expect("the pattern being registered");
+                    self.register_correlated_pattern(frame.pattern, frame.parent);
+                }
+            }
+        }
+    }
+
+    /// Register one pattern's correlated elements, its nested patterns
+    /// registered already.
+    fn register_correlated_pattern(
+        &mut self,
+        pattern: &SlicePattern,
+        parent: Option<SemanticNodeId>,
+    ) {
         let count = match pattern {
             SlicePattern::Object { properties, rest } => {
                 properties.len() + usize::from(rest.is_some())
@@ -82,38 +160,6 @@ impl FlowEvaluator<'_, '_> {
             SlicePattern::Array { elements, rest } => elements.len() + usize::from(rest.is_some()),
             SlicePattern::Binding { .. } | SlicePattern::Target { .. } => return,
         };
-        // Nested patterns correlate against their own parent member.
-        match pattern {
-            SlicePattern::Object { properties, .. } => {
-                for (key, element) in properties.iter() {
-                    if matches!(
-                        element.pattern,
-                        SlicePattern::Object { .. } | SlicePattern::Array { .. }
-                    ) {
-                        let member = match (parent, key) {
-                            (Some(parent), SlicePatternKey::Named(name)) => {
-                                self.pattern_property(parent, name)
-                            }
-                            _ => None,
-                        };
-                        self.register_correlated_patterns(&element.pattern, member);
-                    }
-                }
-            }
-            SlicePattern::Array { elements, .. } => {
-                for (index, element) in elements.iter().enumerate() {
-                    let Some(element) = element else { continue };
-                    if matches!(
-                        element.pattern,
-                        SlicePattern::Object { .. } | SlicePattern::Array { .. }
-                    ) {
-                        let member = parent.and_then(|parent| self.pattern_position(parent, index));
-                        self.register_correlated_patterns(&element.pattern, member);
-                    }
-                }
-            }
-            _ => {}
-        }
         if count < 2 {
             return;
         }
