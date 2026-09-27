@@ -153,8 +153,16 @@ where
     entries: DashMap<FullKey<K>, Arc<StoredSurfaceDto<B>>>,
     /// Per owner file: the content versions it holds, oldest first (see
     /// [`CONTENT_VERSIONS_PER_OWNER`]). Taken AFTER any `entries` shard
-    /// reference is released, never while one is held.
+    /// reference is released, never while one is held; [`Self::insert`]
+    /// takes `entries` shards while holding it (lock order: `owners`, then
+    /// `entries`).
     owners: parking_lot::Mutex<FxHashMap<Arc<str>, OwnerVersions<K>>>,
+    /// Test-only injection point inside [`Self::insert`], parked between the
+    /// owner's version bookkeeping and the `entries` insertion. A race test
+    /// arms it to drive competing publishers deterministically into that gap.
+    /// Per-instance; absent from release builds.
+    #[cfg(test)]
+    admission_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
 impl<K: Clone + PartialEq + Eq + std::hash::Hash> std::fmt::Debug for OwnerVersions<K> {
@@ -173,6 +181,8 @@ where
         Self {
             entries: DashMap::new(),
             owners: parking_lot::Mutex::new(FxHashMap::default()),
+            #[cfg(test)]
+            admission_gate: parking_lot::Mutex::new(None),
         }
     }
 }
@@ -231,9 +241,12 @@ where
 
     /// Record `key` under its owner's version list (making that version the
     /// most recent) and return the keys of any version pushed out of the
-    /// window, for the caller to remove from `entries`.
-    fn record_version(&self, key: &FullKey<K>) -> Vec<FullKey<K>> {
-        let mut owners = self.owners.lock();
+    /// window, for the caller to remove from `entries` before it releases
+    /// `owners`.
+    fn record_version(
+        owners: &mut FxHashMap<Arc<str>, OwnerVersions<K>>,
+        key: &FullKey<K>,
+    ) -> Vec<FullKey<K>> {
         let owner = owners.entry(Arc::clone(&key.canonical)).or_default();
         let version = match owner
             .versions
@@ -266,14 +279,38 @@ where
     /// generation; an unconditional overwrite is therefore required (a
     /// same-generation keep would pin the stale value). Concurrent cold races
     /// compute the same fresh value, so last-writer-wins is value-equivalent.
+    ///
+    /// The version bookkeeping, the insertion and the removal of the versions
+    /// it pushes out run under ONE hold of `owners`. Released in between, a
+    /// publisher that recorded its version and paused could be overtaken by
+    /// newer versions that evict it before its entry exists, then insert an
+    /// entry no version list names — one no later eviction can reach.
     pub fn insert(&self, key: FullKey<K>, entry: StoredSurfaceDto<B>) -> Arc<StoredSurfaceDto<B>> {
         let arc = Arc::new(entry);
-        let evicted = self.record_version(&key);
+        let mut owners = self.owners.lock();
+        let evicted = Self::record_version(&mut owners, &key);
+        self.park_at_admission_gate();
         self.entries.insert(key, Arc::clone(&arc));
         for stale in evicted {
             self.entries.remove(&stale);
         }
+        drop(owners);
         arc
+    }
+
+    /// Park on the armed test-only admission gate (twice: the test's first
+    /// `wait()` confirms the publisher is pinned, its second releases it). A
+    /// no-op in production builds.
+    #[inline]
+    fn park_at_admission_gate(&self) {
+        #[cfg(test)]
+        {
+            let gate = self.admission_gate.lock().clone();
+            if let Some(barrier) = gate {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
     }
 
     /// Number of cached entries (retention observability and the
@@ -521,6 +558,60 @@ mod tests {
         }
         assert!(store.get_with_view(&disk, &live_view, 0).is_some());
         assert_eq!(store.len(), CONTENT_VERSIONS_PER_OWNER);
+    }
+
+    /// A publisher paused between its version bookkeeping and its `entries`
+    /// insertion can never land a version that competing publishers pushed out
+    /// of the owner's window meanwhile.
+    ///
+    /// Discriminating: when `insert` released the owner lock before inserting,
+    /// publisher A recorded version 0 and paused; three newer versions then
+    /// evicted version 0 (whose entry was not there yet to remove); A resumed
+    /// and inserted it — an entry absent from every version list, so no later
+    /// eviction could ever reach it. The test drives exactly that interleaving
+    /// whenever the owner lock is free at A's pause point; with admission
+    /// serialized under the lock, the competitors wait for A instead and evict
+    /// its entry with the version.
+    #[test]
+    fn a_paused_publisher_cannot_orphan_a_version_evicted_meanwhile() {
+        let store: FrameworkSurfaceStore<FixtureKey, u32> = FrameworkSurfaceStore::new();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        *store.admission_gate.lock() = Some(Arc::clone(&barrier));
+        let stale = version_key("/a.vue", 0, 0);
+        std::thread::scope(|scope| {
+            let paused = scope.spawn(|| publish(&store, &stale));
+            // A is pinned between its bookkeeping and its insertion.
+            barrier.wait();
+            *store.admission_gate.lock() = None;
+            let owner_lock_free = store.owners.try_lock().is_some();
+            let competitors = || {
+                for version in 1..=3u8 {
+                    publish(&store, &version_key("/a.vue", version, 0));
+                }
+            };
+            if owner_lock_free {
+                // The unserialized gap: the competitors run to completion
+                // while A is still paused.
+                competitors();
+                barrier.wait();
+                paused.join().expect("paused publisher");
+            } else {
+                let competing = scope.spawn(competitors);
+                barrier.wait();
+                paused.join().expect("paused publisher");
+                competing.join().expect("competing publishers");
+            }
+        });
+        let live_view = crate::resolver_core::PermissiveStoreView;
+        assert!(
+            store.get_with_view(&stale, &live_view, 0).is_none(),
+            "the evicted version's entry must not survive outside the window"
+        );
+        assert_eq!(
+            store.len(),
+            CONTENT_VERSIONS_PER_OWNER,
+            "every resident entry belongs to a version the owner's window holds"
+        );
     }
 
     struct RejectingStoreView;
