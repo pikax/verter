@@ -95,11 +95,11 @@ use type_constructs::{
     emit_helper_imports_with_define_component, emit_type_constructs,
     proven_vue_async_component_bindings, unbound_builtin_components,
 };
+pub(crate) use wrapper::emit_global_component_fallbacks;
 use wrapper::{
-    collect_global_component_fallbacks, directive_accessor_declaration,
-    emit_global_component_fallbacks, emit_minimal_wrapper, instance_declaration,
-    instance_declaration_ambient, instance_probe_line, public_facade_reexport,
-    should_infer_function_types, to_pascal_case, PREFIX,
+    collect_global_component_fallbacks, directive_accessor_declaration, emit_minimal_wrapper,
+    instance_declaration, instance_declaration_ambient, instance_probe_line,
+    public_facade_reexport, should_infer_function_types, to_pascal_case, PREFIX,
 };
 
 pub use type_constructs::{
