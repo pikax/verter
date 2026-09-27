@@ -259,7 +259,6 @@ type Len<T extends readonly unknown[]> = T["length"];
 type NotAny<T> = 0 extends 1 & T ? "any" : "not";
 type Eq<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 type Rev<T extends unknown[]> = T extends [infer H, ...infer R] ? [...Rev<R>, H] : [];
-type InferExt<T> = T extends [infer X extends string] ? X : "nope";
 type Thenish<T> = T extends object & { then(onfulfilled: infer F, ...args: infer _): any } ? F : "none";
 "##;
 
@@ -288,7 +287,6 @@ fn conditional_types_resolve_as_the_checker_resolves_them() {
         ("Len<[1, 2]>", "2"),
         ("NotAny<any>", "\"any\""),
         ("NotAny<string>", "\"not\""),
-        ("InferExt<['s']>", "\"s\""),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -422,17 +420,67 @@ fn the_generic_signature_identity_check_resolves() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `T extends [infer X extends string] ? X : "nope"` over `[1]` is `"nope"`:
-/// the inferred candidate `1` does not satisfy the `infer` constraint.
-/// Wrong-but-clean: the lane answers `1`.
-///
-/// What the lane gives:
-/// - `InferExt<[1]>`: the checker answers `"nope"`; the lane measured `1`.
+/// Conditionals over constrained `infer` placeholders.
+const CONSTRAINED_INFER: &str = r##"
+type InferExt<T> = T extends [infer X extends string] ? X : "nope";
+type T3<S> = S extends `${infer N extends number}px` ? N : "none";
+type T8<S> = S extends `${infer B extends boolean}!` ? B : "none";
+type T9<S> = S extends `${infer N extends 1 | 2}` ? N : "none";
+"##;
+
+/// The checker's reading of a constrained `infer X extends C`, measured on
+/// TypeScript 7.0.2 alike under all four settings: a candidate the
+/// constraint refuses takes the false branch (`InferExt<[1]>` is `"nope"`),
+/// and a template slice parses as a literal of the constraint when it
+/// round-trips (`"12"` is `12`, `"true"` is `true`, `"2"` is `2`); one that
+/// does not (`"1e3"`, `" 1"`) is the constraint, and a slice no member of
+/// the constraint parses (`"3"` against `1 | 2`) takes the false branch.
+const CONSTRAINED_INFER_ROWS: [(&str, &str); 8] = [
+    ("InferExt<[1]>", "\"nope\""),
+    ("InferExt<[\"a\"]>", "\"a\""),
+    ("T3<\"12px\">", "12"),
+    ("T3<\"1e3px\">", "number"),
+    ("T3<\" 1px\">", "number"),
+    ("T8<\"true!\">", "true"),
+    ("T9<\"2\">", "2"),
+    ("T9<\"3\">", "\"none\""),
+];
+
+/// Each constrained-`infer` row that does not read the checker's answer,
+/// only those the lane publishes clean when `clean_only`.
+fn constrained_infer_misses(clean_only: bool) -> Vec<String> {
+    let matrix = Matrix::new(CONSTRAINED_INFER);
+    let rows: Vec<(Read<'_>, Vec<&str>)> = CONSTRAINED_INFER_ROWS
+        .iter()
+        .map(|(text, answer)| (Read::Type(text), vec![*answer; 4]))
+        .collect();
+    CONSTRAINED_INFER_ROWS
+        .iter()
+        .zip(matrix.verdicts(&rows))
+        .flat_map(|((text, _), verdicts)| {
+            verdicts
+                .into_iter()
+                .filter(|verdict| !verdict.matched && (!clean_only || verdict.class != "GAP"))
+                .map(move |verdict| format!("`{text}`: {}", verdict.lane))
+        })
+        .collect()
+}
+
+/// The lane carries no `infer` constraint, so a constrained placeholder, in
+/// a tuple or a template literal pattern, degrades rather than reading as
+/// unconstrained.
 #[test]
-#[ignore = "infer X extends C takes the false branch when the candidate is not a C"]
-fn wrong_clean_an_infer_constraint_filters_the_candidate() {
-    let matrix = Matrix::new(CONDITIONALS);
-    let failures = matrix.types(&[("InferExt<[1]>", "\"nope\"")]);
+fn a_constrained_infer_placeholder_is_never_read_as_unconstrained() {
+    let wrong = constrained_infer_misses(true);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// What the lane gives: each row degrades (the constrained placeholder is
+/// unsupported syntax).
+#[test]
+#[ignore = "infer X extends C filters and parses its candidate by the constraint"]
+fn an_infer_constraint_filters_and_parses_the_candidate() {
+    let failures = constrained_infer_misses(false);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
