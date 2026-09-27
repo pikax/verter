@@ -25,6 +25,22 @@ pub(super) enum Entered<'r> {
     Labeled(Box<LabeledEval<'r>>),
     Try(Box<TryEval<'r>>),
     Loop(Box<LoopEval<'r>>),
+    /// A region no path reaches: the live walk it restores once evaluated.
+    Unreachable(Box<DeadPath>),
+}
+
+/// A walk of statements no live path reaches, open: the live walk's state,
+/// narrowings, edges and read and write modes it restores when it ends.
+/// The checker still aggregates the returns and yields there; nothing the
+/// walk does reaches the live path.
+pub(super) struct DeadPath {
+    state: FlowLayerState,
+    narrowings: NarrowingSnapshot,
+    bases: ScopeBases,
+    declared_reads: bool,
+    dead_writes: bool,
+    /// The length of the dead-written log when the path opened.
+    written: usize,
 }
 
 /// What a branch statement needs next.
@@ -108,6 +124,53 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// Open a dead path at the current state. Its references read their
+    /// declared type when `declared_reads` (the checker answers a
+    /// reference on an unreachable flow node so) and their flow type
+    /// otherwise; every write on it leaves its reference its declared
+    /// type.
+    pub(super) fn open_dead_path(&mut self, declared_reads: bool) -> DeadPath {
+        let dead = DeadPath {
+            state: self.layer_state(),
+            narrowings: self.narrowing_snapshot(),
+            bases: self.scope_bases(),
+            declared_reads: self.declared_reads,
+            dead_writes: self.dead_writes,
+            written: self.dead_written_log.len(),
+        };
+        self.declared_reads |= declared_reads;
+        self.dead_writes = true;
+        dead
+    }
+
+    /// Close `dead`, restoring the live walk it saved.
+    pub(super) fn close_dead_path(&mut self, dead: DeadPath) {
+        self.declared_reads = dead.declared_reads;
+        self.dead_writes = dead.dead_writes;
+        for subject in self.dead_written_log.drain(dead.written..) {
+            self.dead_written.remove(&subject);
+        }
+        self.break_exits.truncate(dead.bases.break_exits);
+        self.return_edges.truncate(dead.bases.return_edges);
+        self.throw_points.truncate(dead.bases.throw_points);
+        self.scope_shadows.truncate(dead.bases.shadow);
+        self.restore_narrowings(dead.narrowings);
+        self.restore_layer_state(dead.state);
+    }
+
+    /// Record a write to `subject` on a dead path.
+    pub(super) fn record_dead_write(&mut self, subject: &FlowProductSubject) {
+        if self.dead_writes && self.dead_written.insert(subject.clone()) {
+            self.dead_written_log.push(subject.clone());
+        }
+    }
+
+    /// Whether a read of `subject` answers its declared type: under
+    /// [`Self::declared_reads`], or once a dead path wrote it.
+    pub(super) fn reads_declared(&self, subject: &FlowProductSubject) -> bool {
+        self.declared_reads || self.dead_written.contains(subject)
+    }
+
     fn close_scope_since(&mut self, bases: ScopeBases) -> Vec<ScopeShadow> {
         self.split_scope_shadows_close_exits(
             bases.shadow,
@@ -146,7 +209,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         outcome: (Result<Vec<FlowContribution>, FlowReturnFailure>, bool),
     ) -> BranchStep<'r> {
         match entered {
-            Entered::Block(_) => unreachable!("a block resumes in its region's walk"),
+            Entered::Block(_) | Entered::Unreachable(_) => {
+                unreachable!("a block resumes in its region's walk")
+            }
             Entered::If(eval) => self.if_arm_done(eval, outcome),
             Entered::Switch(eval) => self.switch_clause_done(eval, outcome),
             Entered::Labeled(eval) => self.labeled_body_done(*eval, outcome),
@@ -528,6 +593,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
     fn finish_switch<'r>(&mut self, mut eval: Box<SwitchEval<'r>>) -> BranchStep<'r> {
         let mut exit_states: Vec<FlowLayerState> = Vec::new();
+        // The no-matching-case edge when only the evaluator proves it dead:
+        // the checker still reads the code past the switch through it.
+        let mut dead_no_match: Option<FlowLayerState> = None;
         if !eval.has_default && !eval.covered {
             if eval.guards.is_empty() {
                 exit_states.push(eval.entry.clone());
@@ -538,9 +606,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 let applied: Vec<(&crate::flow_slice_content::SliceGuard, bool)> =
                     eval.guards.iter().map(|guard| (*guard, false)).collect();
                 let (state, dead) = self.guarded_switch_state(&eval.entry, &applied);
-                if !dead {
+                if dead {
+                    dead_no_match = Some(state);
+                } else {
                     exit_states.push(state);
                 }
+            }
+        } else if !eval.has_default {
+            // The tests cover every arm of the discriminant: on the
+            // no-matching-case edge its reference is `never`.
+            if let Some(subject) = eval.discriminant {
+                let mut state = eval.entry.clone();
+                let never = self
+                    .dispatch
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+                let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
+                    root: subject.root.clone(),
+                    path: Arc::from(
+                        subject.path[..subject.path.len().saturating_sub(1)]
+                            .to_vec()
+                            .into_boxed_slice(),
+                    ),
+                };
+                self.bake_narrow_into_state(&mut state, &parent_subject, never);
+                dead_no_match = Some(state);
             }
         }
         // Lexical bindings declared inside a clause are scoped
@@ -569,9 +659,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.join_states(&incoming, &eval.entry.write_observation)
             }
             // No path leaves the switch normally: the
-            // post-switch state is unreachable; restore the
-            // entry to keep the layers sane.
-            None => eval.entry.clone(),
+            // post-switch state is unreachable. The code past it
+            // reads the dead no-matching-case edge when there is
+            // one (the discriminant `never`, every other reference
+            // as it reached the switch), else the entry, which keeps
+            // the layers sane.
+            None => dead_no_match.unwrap_or_else(|| eval.entry.clone()),
         };
         if reaches {
             self.flag_conditionally_defined_bindings(&mut joined, &exit_states);

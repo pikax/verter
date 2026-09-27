@@ -705,3 +705,50 @@ fn else_if_chains_10000_long_answer_on_production_stacks() {
         Vec::<String>::new()
     );
 }
+
+/// A nest whose return statements the flow-slice plan's return-site budget
+/// (256) admits: the unreachable and dead-path chains below carry one and
+/// two returns per level.
+const UNDER_THE_RETURN_SITE_BUDGET: usize = 120;
+
+/// Unreachable code nested deep, each level a block behind a `return`: each
+/// unreachable region evaluates as a frame of its enclosing region's run.
+/// 10,000 deep the return is the plan's typed budget failure; under the
+/// return-site budget TypeScript 7.0.2 answers `number`, under every
+/// setting.
+#[test]
+fn unreachable_code_nested_10000_deep_returns_on_production_stacks() {
+    let source = |depth: usize| {
+        format!(
+            "export function pf() {{ {}return 1;{} }}\n",
+            "return 1; { ".repeat(depth),
+            " }".repeat(depth)
+        )
+    };
+    assert!(!returns_on_a_small_stack(source(DEPTH)));
+    assert_eq!(
+        mismatches_on_a_small_stack(source(UNDER_THE_RETURN_SITE_BUDGET), RETURN, "number"),
+        Vec::<String>::new()
+    );
+}
+
+/// Code past an exhaustive `switch` nested deep: each region's statements
+/// past the dead path evaluate on its own dead tail, a frame of the run.
+/// 10,000 deep the return is the plan's typed budget failure; under the
+/// return-site budget TypeScript 7.0.2 answers `number`, under every
+/// setting.
+#[test]
+fn code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks() {
+    let source = |depth: usize| {
+        format!(
+            "export function pf(x: \"a\" | \"b\") {{ {}return 1;{} }}\n",
+            "switch (x) { case \"a\": return 1; case \"b\": return 1; } { ".repeat(depth),
+            " }".repeat(depth)
+        )
+    };
+    assert!(!returns_on_a_small_stack(source(DEPTH)));
+    assert_eq!(
+        mismatches_on_a_small_stack(source(UNDER_THE_RETURN_SITE_BUDGET), RETURN, "number"),
+        Vec::<String>::new()
+    );
+}

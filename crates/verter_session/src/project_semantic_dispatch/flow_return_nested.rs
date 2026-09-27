@@ -620,6 +620,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             inferred_predicate: None,
             checker_diagnostics: Vec::new(),
             declared_reads: false,
+            dead_writes: false,
+            dead_written: rustc_hash::FxHashSet::default(),
+            dead_written_log: Vec::new(),
             // A class expression member (or an arrow it creates) runs
             // against the receiver the class binds.
             receiver: matches!(

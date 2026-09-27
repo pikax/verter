@@ -928,6 +928,29 @@ Recorded plainly so no reader mistakes absence for a pass:
   overflowed a 1 MiB caller at 1,000 to 2,000 levels before, and dropping
   a pattern element recursively overflows the latter.
 
+* **Code no path reaches evaluates as frames of the run too.** The
+  checker aggregates every `return` in a body, those past a path it proves
+  dead included. A region the lowering drops past a terminal statement is
+  entered as a frame of the run on a dead path (`DeadPath` in
+  `flow_return_branches.rs`: the live state, narrowings, edges and read
+  mode saved on entry and restored on exit), its references reading their
+  declared types. Statements past a path only the evaluator proves dead
+  (an exhaustive `switch` whose clauses all exit) are no longer skipped:
+  they evaluate on the region's dead tail, reading the no-matching-case
+  edge (the discriminant `never`, every other reference as it reached the
+  `switch`), and a write there leaves its reference its declared type.
+  `differential_flow_tests.rs` →
+  `returns_past_a_path_the_checker_proves_dead_contribute` holds 22 rows
+  measured on TypeScript 7.0.2 under the four settings (`"end" | 1 | 2`
+  past an exhaustive `switch`, where the lane answered `2 | 1`);
+  skipping the tail, reading the `switch` entry state instead of the
+  no-matching-case edge and dropping the dead-write record each fail it.
+  `unreachable_code_nested_10000_deep_returns_on_production_stacks` and
+  `code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks`
+  return the plan's typed budget failure at 10,000 levels on a 1 MiB
+  caller and answer `number` under the 256-return-site budget; evaluating
+  the unreachable region in place overflows the former.
+
 * **A nest's per-function work does not read the nest around it.** Four
   paths repeated work proportional to the nest for every nested function,
   each measured by sampling a 1,000–8,000-level nest of immediately

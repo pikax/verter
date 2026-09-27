@@ -5662,6 +5662,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             inferred_predicate: None,
             checker_diagnostics: Vec::new(),
             declared_reads: false,
+            dead_writes: false,
+            dead_written: rustc_hash::FxHashSet::default(),
+            dead_written_log: Vec::new(),
             receiver: None,
         };
         let holds;
@@ -8413,7 +8416,7 @@ mod branches;
 mod call_stack;
 #[path = "flow_return_nested.rs"]
 mod nested;
-use branches::{BranchStep, Entered};
+use branches::{BranchStep, DeadPath, Entered};
 use nested::{NestedChildParts, NestedDemand, NestedSignatureStep};
 #[path = "flow_return_operators.rs"]
 mod operators;
@@ -8722,6 +8725,18 @@ struct FlowEvaluator<'d, 'b> {
     /// declaration is its own flow container, so no narrowing of the
     /// enclosing frame reaches it (measured on 7.0.2).
     declared_reads: bool,
+    /// Whether a write leaves its reference read at its declared type — on
+    /// while statements past a dead path evaluate (the checker answers an
+    /// assignment on an unreachable flow node with the reference's
+    /// declared type).
+    dead_writes: bool,
+    /// The references written on the open dead paths (see
+    /// [`Self::dead_writes`]). Each dead path removes the ones written
+    /// since it opened when it closes ([`DeadPath`]).
+    dead_written: rustc_hash::FxHashSet<FlowProductSubject>,
+    /// [`Self::dead_written`]'s entries in first-write order: the log a
+    /// closing dead path truncates.
+    dead_written_log: Vec<FlowProductSubject>,
     /// The class-expression instance `this` reads while the class's members
     /// evaluate (see [`class_expression::ClassReceiver`]).
     receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
@@ -9576,6 +9591,11 @@ struct RegionEvalFrame<'r> {
     /// The return statement suspended at a nested function value in its
     /// argument.
     pending: Option<Pending<'r>>,
+    /// The dead path the region's statements past a path only the
+    /// evaluator proves dead evaluate on (an exhaustive `switch`, a call
+    /// to a `never`-returning function the lowering does not see): the
+    /// checker aggregates every return there. It closes with the region.
+    dead_tail: Option<Box<DeadPath>>,
 }
 
 /// A statement suspended at a nested function value in its expression.
@@ -12227,6 +12247,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         degraded: bool,
         definition: Option<verter_semantic::analysis::flow::flow_graph::FlowNodeId>,
     ) {
+        self.record_dead_write(binding);
         self.products.bind_at(
             binding,
             DefiniteAssignmentProduct::assigned()
@@ -12723,6 +12744,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         widening_nullish: bool,
         fresh_literal: bool,
     ) -> SemanticNodeId {
+        if target.path.is_empty() {
+            let subject = match &target.root {
+                crate::flow_slice_content::SliceNarrowRoot::Param { binding, .. } => {
+                    FlowProductSubject::Local(*binding)
+                }
+                crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+                    binding.clone()
+                }
+            };
+            self.record_dead_write(&subject);
+        }
         // A failed RHS carries the explicit unmodelled-position marker. It
         // cannot select a declared constituent; preserving the marker keeps
         // the positional failure visible to every downstream consumer.
@@ -13057,31 +13089,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// Evaluate statements no path reaches for the returns and yields the
-    /// checker still aggregates from them
-    /// ([`crate::flow_slice_content::SliceStatement::Unreachable`]): every
-    /// reference reads its declared type there (the checker answers an
-    /// unreachable flow node with the declared type), and nothing the
-    /// region does — its writes, narrows, jumps and edges — reaches the
-    /// live state.
+    /// checker still aggregates from them (a loop body behind a literal
+    /// `false` test): every reference reads its declared type there (the
+    /// checker answers an unreachable flow node with the declared type),
+    /// and nothing the region does — its writes, narrows, jumps and edges
+    /// — reaches the live state ([`DeadPath`]).
     fn eval_unreachable_region(
         &mut self,
         region: &crate::flow_slice_content::SliceRegion,
     ) -> Result<Vec<FlowContribution>, FlowReturnFailure> {
-        let state = self.layer_state();
-        let narrow_mark = self.narrowing_snapshot();
-        let break_base = self.break_exits.len();
-        let return_base = self.return_edges.len();
-        let throw_base = self.throw_points.len();
-        let shadow_base = self.scope_shadows.len();
-        let enclosing = std::mem::replace(&mut self.declared_reads, true);
+        let dead = self.open_dead_path(true);
         let (result, _) = self.eval_region(region);
-        self.declared_reads = enclosing;
-        self.break_exits.truncate(break_base);
-        self.return_edges.truncate(return_base);
-        self.throw_points.truncate(throw_base);
-        self.scope_shadows.truncate(shadow_base);
-        self.restore_narrowings(narrow_mark);
-        self.restore_layer_state(state);
+        self.close_dead_path(dead);
         result
     }
 
@@ -19769,7 +19788,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     run.frames.push(child);
                 }
                 RegionEvalStep::Nested(demand) => return RegionProgress::Nested(demand),
-                RegionEvalStep::Done(outcome) => {
+                RegionEvalStep::Done(mut outcome) => {
+                    // Statements past a path the evaluator proved dead
+                    // evaluated on a dead path: the region does not
+                    // complete, and the live walk it saved comes back.
+                    if let Some(dead) = run.frames.last_mut().and_then(|f| f.dead_tail.take()) {
+                        self.close_dead_path(*dead);
+                        outcome.1 = false;
+                    }
                     match &outcome.0 {
                         Ok(_) => {
                             self.executed_walk.regions_completed =
@@ -19801,6 +19827,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             path_alive: true,
             entered: None,
             pending: None,
+            dead_tail: None,
         }
     }
 
@@ -20035,6 +20062,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .expect("the statement the region is suspended at");
             let (shadow_base, break_base, return_base, throw_base) = match entered {
                 Entered::Block(bases) => bases,
+                Entered::Unreachable(dead) => {
+                    self.close_dead_path(*dead);
+                    match outcome.0 {
+                        Ok(unreachable_contributors) => {
+                            contributors.extend(unreachable_contributors)
+                        }
+                        Err(failure) => {
+                            return RegionEvalStep::Done((
+                                Err(failure),
+                                region
+                                    .can_fall_through
+                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                            ))
+                        }
+                    }
+                    return self.eval_region_statements_from(frame, contributors, false);
+                }
                 entered => {
                     match self.resume_entered(entered, outcome) {
                         BranchStep::Enter(entered, next) => {
@@ -20097,27 +20141,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let region = frame.region;
         while let Some(statement) = region.statements.get(frame.next) {
             frame.next += 1;
-            if !path_alive {
-                // Statements no path reaches: the checker still aggregates
-                // their returns and yields.
-                if let crate::flow_slice_content::SliceStatement::Unreachable(unreachable) =
-                    statement
-                {
-                    match self.eval_unreachable_region(unreachable) {
-                        Ok(unreachable_contributors) => {
-                            contributors.extend(unreachable_contributors)
-                        }
-                        Err(failure) => {
-                            return RegionEvalStep::Done((
-                                Err(failure),
-                                region
-                                    .can_fall_through
-                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                            ))
-                        }
-                    }
-                }
-                break;
+            // Statements no path reaches: the checker still aggregates their
+            // returns and yields. The lowering drops the ones past a path it
+            // proves dead into a trailing unreachable region (entered below);
+            // the ones past a path only the evaluator proves dead evaluate on
+            // the region's dead tail, each reference reading the state the
+            // dead path left.
+            if !path_alive
+                && !matches!(
+                    statement,
+                    crate::flow_slice_content::SliceStatement::Unreachable(_)
+                )
+                && frame.dead_tail.is_none()
+            {
+                frame.dead_tail = Some(Box::new(self.open_dead_path(false)));
             }
             self.executed_walk.statements_executed =
                 self.executed_walk.statements_executed.saturating_add(1);
@@ -20493,23 +20530,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     path_alive = false;
                 }
                 // The lowering places an unreachable region only after a
-                // statement that ends the path; the evaluator's own path can
-                // only have died earlier, so this arm reads it the same way.
+                // statement that ends the path. Its region evaluates next,
+                // from the caller's stack, on a dead path whose references
+                // read their declared types (the checker answers an
+                // unreachable flow node with the declared type); this region
+                // resumes past it with the path dead.
                 crate::flow_slice_content::SliceStatement::Unreachable(unreachable) => {
-                    match self.eval_unreachable_region(unreachable) {
-                        Ok(unreachable_contributors) => {
-                            contributors.extend(unreachable_contributors)
-                        }
-                        Err(failure) => {
-                            return RegionEvalStep::Done((
-                                Err(failure),
-                                region
-                                    .can_fall_through
-                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
-                            ))
-                        }
-                    }
-                    path_alive = false;
+                    let dead = self.open_dead_path(true);
+                    frame.entered = Some(Entered::Unreachable(Box::new(dead)));
+                    frame.contributors = contributors;
+                    frame.path_alive = false;
+                    return RegionEvalStep::EnterBlock(unreachable);
                 }
                 crate::flow_slice_content::SliceStatement::Loop(lowered) => {
                     let BranchStep::Enter(entered, next) = self.begin_loop(lowered) else {
@@ -22577,7 +22608,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // frame's arity. That is a fact about this REFERENCE, not
             // about the body around it.
             crate::flow_slice_content::SliceExpr::Param { ordinal, binding } => {
-                if self.declared_reads {
+                if self.reads_declared(&FlowProductSubject::Local(*binding)) {
                     return match self.params.get(*ordinal as usize).copied() {
                         Some(node) => Positional::Value(node),
                         None => Positional::Unmodeled,
@@ -22775,7 +22806,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // parameter is still the reaching value.
                 // A declared read answers an annotated binding's annotation
                 // and an unannotated one's reaching value, never a narrow.
-                if self.declared_reads {
+                if self.reads_declared(binding) {
                     if let Some(node) = self.declared_local_read(binding) {
                         return Positional::Value(node);
                     }
