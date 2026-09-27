@@ -1902,36 +1902,118 @@ fn sibling_chains(siblings: usize, levels: usize) -> String {
 
 /// The schedule's discovery walk charges no work, so it reads the trip
 /// and the cancellation before each callee it discovers: once the demand
-/// trips — on the work rail here, on a cancellation in the same way —
-/// the walk discovers nothing more. It used to discover every remaining
-/// sibling chain before its first evaluation met the trip, so the work
-/// after a cancellation grew with the rest of the request (the
-/// cancellation probe measured that walk as a fifth of a cancelled
-/// request's time after its first poll).
+/// trips — on the work rail, or on a cancellation — the walk discovers
+/// nothing more. It used to discover every remaining sibling chain before
+/// its first evaluation met the trip, so the work after a cancellation
+/// grew with the rest of the request (the cancellation probe measured that
+/// walk as a fifth of a cancelled request's time after its first poll).
+///
+/// Each tripped run ends on a typed no-value outcome, admits nothing for
+/// the witness, and leaves the host so that a full-limit, uncancelled
+/// retry on it answers exactly what a fresh host answers.
 #[test]
 fn a_tripped_demand_discovers_no_further_callee() {
+    use crate::semantic_query::{FlowReturnFailure, FlowReturnStep};
+    use verter_type_expr::facts::InferenceUnavailableReason;
+
     const SIBLINGS: usize = 4;
     const LEVELS: usize = 8;
-    let discovered_under = |work: usize| {
-        let host = host_with(&[(PATH, sibling_chains(SIBLINGS, LEVELS).as_str())]);
-        with_dispatch(&host, |dispatch| {
+    let source = sibling_chains(SIBLINGS, LEVELS);
+    let discoveries =
+        crate::project_semantic_dispatch::flow_return::schedule::flow_return_discoveries_for_tests;
+    let fresh = witness_outcome(&source);
+    assert!(
+        matches!(
+            &fresh,
+            Outcome::Value {
+                degradation: None,
+                candidates: 1,
+                ..
+            }
+        ),
+        "the witness answers clean and warms on a fresh host: {fresh:?}"
+    );
+    // One run of the witness on `host` under `work`, optionally cancelled
+    // as the `cancel_at`th query family opens: the step, the callees the
+    // schedule discovered, and the witness's memo candidates.
+    let run = |host: &Arc<VerterHost>, work: usize, cancel_at: Option<usize>| {
+        let context = crate::request_context::RequestContext::new(1, Arc::from(PATH), false, None);
+        let _installed = crate::request_context::RequestContextGuard::install(Arc::clone(&context));
+        let _cancel = cancel_at.map(|nth| {
+            crate::for_tests::signature_kernel_bench_support::cancel_trace::cancel_at_family_entry(
+                context.cancellation_token(),
+                nth,
+            )
+        });
+        with_dispatch(host, |dispatch| {
             dispatch.set_connected_limits_for_tests(work, MAX_CONNECTED_QUERY_DEPTH);
             let key = key_of(dispatch, PATH, "witness");
-            let discoveries = crate::project_semantic_dispatch::flow_return::schedule::flow_return_discoveries_for_tests;
             let before = discoveries();
-            let _ = eval_key_on(&host, dispatch, key);
-            discoveries() - before
+            let step = dispatch.execute_flow_return(key.clone());
+            let discovered = discoveries() - before;
+            let candidates = dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
+            (step, discovered, candidates, context.is_cancelled())
         })
     };
-    // Untripped, the walk discovers every chain.
-    assert_eq!(
-        discovered_under(MAX_CONNECTED_PROJECTION_WORK),
-        SIBLINGS * LEVELS
-    );
-    // Tripped inside the first chain: no second chain is discovered.
-    let tripped = discovered_under(3);
+    // After a tripped run: nothing admitted for the witness, and the
+    // uncancelled full-limit retry on the same host equals a fresh host.
+    let retry_matches_fresh = |host: &Arc<VerterHost>, label: &str| {
+        let retry = with_dispatch(host, |dispatch| {
+            let key = key_of(dispatch, PATH, "witness");
+            eval_key_on(host, dispatch, key)
+        });
+        assert_eq!(
+            retry, fresh,
+            "{label}: the retry answers what a fresh host answers"
+        );
+    };
+
+    // Untripped, the walk discovers every chain and the witness warms.
+    let host = host_with(&[(PATH, source.as_str())]);
+    let (step, discovered, candidates, _) = run(&host, MAX_CONNECTED_PROJECTION_WORK, None);
+    assert!(matches!(step, FlowReturnStep::Complete(_)), "{step:?}");
+    assert_eq!(discovered, SIBLINGS * LEVELS);
+    assert_eq!(candidates, 1);
+
+    // Tripped on the work rail inside the first chain.
+    let host = host_with(&[(PATH, source.as_str())]);
+    let (step, discovered, candidates, _) = run(&host, 3, None);
     assert!(
-        tripped < 2 * LEVELS,
-        "a tripped walk discovered {tripped} callees, a whole further chain"
+        matches!(
+            step,
+            FlowReturnStep::NoValue(FlowReturnFailure::Budget(
+                InferenceUnavailableReason::WorkBudgetExceeded
+            ))
+        ),
+        "a work trip ends on the typed budget failure: {step:?}"
     );
+    assert!(
+        discovered < 2 * LEVELS,
+        "a tripped walk discovered {discovered} callees, a whole further chain"
+    );
+    assert_eq!(candidates, 0, "a tripped witness is never admitted");
+    retry_matches_fresh(&host, "after a work trip");
+
+    // Cancelled at the Nth query boundary, before the demand could finish.
+    for nth in [1, 2, 3, 5, 8] {
+        let host = host_with(&[(PATH, source.as_str())]);
+        let (step, discovered, candidates, cancelled) =
+            run(&host, MAX_CONNECTED_PROJECTION_WORK, Some(nth));
+        assert!(cancelled, "cancelled at family {nth}");
+        assert!(
+            matches!(step, FlowReturnStep::NoValue(_)),
+            "a cancellation at family {nth} ends on a typed no-value outcome: {step:?}"
+        );
+        assert!(
+            discovered < 2 * LEVELS,
+            "cancelled at family {nth}, the walk discovered {discovered} callees"
+        );
+        assert_eq!(
+            candidates, 0,
+            "a cancelled witness is never admitted (family {nth})"
+        );
+        retry_matches_fresh(&host, &format!("after a cancellation at family {nth}"));
+    }
 }
