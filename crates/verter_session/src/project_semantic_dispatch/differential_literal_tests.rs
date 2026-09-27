@@ -50,6 +50,9 @@ export function wTemplateConst() { const t = `a${"b"}`; return t; }
 export function wNegate() { return -1; }
 export function wParenLit() { return (("p")); }
 export function wTypeofLit() { const x = "a"; return typeof x; }
+export function wTypeofLet(x: number) { let t = typeof x; return t; }
+export function wTypeofMember(o: { p: 1 }) { return { k: typeof o.p }; }
+export function wTypeofThis(this: { a: 1 }) { return typeof this.a; }
 export function wNumericSep() { return 1_000; }
 export function wLitMethod() { return "abc" as "abc"; }
 "##;
@@ -93,19 +96,19 @@ fn literals_widen_as_the_checker_widens_them() {
 }
 
 /// `typeof x` in expression position is `"bigint" | "boolean" | "function" |
-/// "number" | "object" | "string" | "symbol" | "undefined"`.
-///
-/// What the lane gives:
-/// - `wTypeofLit`: the checker answers `"bigint" | "boolean" | "function" |
-///   "number" | "object" | "string" | "symbol" | "undefined"`; the lane
-///   measured `<opaque UnmodeledPosition>` degraded by
-///   FlowGap(UnmodeledExpression).
+/// "number" | "object" | "string" | "symbol" | "undefined"`, a regular literal
+/// union no position widens: a `let`, an object member, a read through
+/// `this`.
 #[test]
-#[ignore = "a typeof expression is the union of the typeof result strings"]
 fn a_typeof_expression_is_the_typeof_result_union() {
+    const TYPEOF: &str = "\"bigint\" | \"boolean\" | \"function\" | \"number\" | \"object\" | \"string\" | \"symbol\" | \"undefined\"";
     let matrix = Matrix::new(WIDENING);
+    let member = format!("{{ k: {TYPEOF}; }}");
     let failures = matrix.returns(&[
-        ("wTypeofLit", "\"bigint\" | \"boolean\" | \"function\" | \"number\" | \"object\" | \"string\" | \"symbol\" | \"undefined\""),
+        ("wTypeofLit", TYPEOF),
+        ("wTypeofLet", TYPEOF),
+        ("wTypeofMember", member.as_str()),
+        ("wTypeofThis", TYPEOF),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

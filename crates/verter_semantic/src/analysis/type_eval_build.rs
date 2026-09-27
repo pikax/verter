@@ -5070,6 +5070,38 @@ pub enum NestedNullishLiterals {
     WidenToAny,
 }
 
+/// Whether a `typeof` operand is only read: a name, `this`, a literal, or a
+/// member read of one by a name or a literal key, seen through
+/// parentheses. Any other operand may write or call, and the flow that
+/// evaluates it owns its value.
+fn typeof_operand_only_reads(expression: &Expression<'_>) -> bool {
+    let mut current = expression;
+    loop {
+        match current {
+            Expression::ParenthesizedExpression(parenthesized) => {
+                current = &parenthesized.expression;
+            }
+            Expression::StaticMemberExpression(member) => current = &member.object,
+            Expression::ComputedMemberExpression(member)
+                if matches!(
+                    member.expression,
+                    Expression::StringLiteral(_) | Expression::NumericLiteral(_)
+                ) =>
+            {
+                current = &member.object;
+            }
+            Expression::Identifier(_)
+            | Expression::ThisExpression(_)
+            | Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_)
+            | Expression::BigIntLiteral(_) => return true,
+            _ => return false,
+        }
+    }
+}
+
 /// Whether a value expression is a bare `null` / `undefined` / `void`
 /// value, seen through parentheses and `satisfies` — the checker's
 /// WIDENING nullable type. A conditional is one when both arms are. A type
@@ -5608,6 +5640,29 @@ fn infer_expression_type_ctx_with_read_root(
         // `void x` evaluates its operand and produces `undefined`.
         Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::Void => {
             Ok(TypeExpr::Primitive(PrimitiveName::Undefined))
+        }
+        // `typeof x` over an operand it only reads is the checker's union
+        // of the `typeof` result strings (`typeofType`), a regular literal
+        // union no position widens.
+        Expression::UnaryExpression(unary)
+            if unary.operator == UnaryOperator::Typeof
+                && typeof_operand_only_reads(&unary.argument) =>
+        {
+            Ok(TypeExpr::union(
+                [
+                    "string",
+                    "number",
+                    "bigint",
+                    "boolean",
+                    "symbol",
+                    "undefined",
+                    "object",
+                    "function",
+                ]
+                .into_iter()
+                .map(TypeExpr::string_literal)
+                .collect(),
+            ))
         }
         Expression::ConditionalExpression(cond) => Ok(TypeExpr::union(vec![
             // Both arms contribute to this composite; neither is its whole
