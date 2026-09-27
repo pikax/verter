@@ -399,3 +399,85 @@ fn a_field_constructing_a_self_constructing_class_reads_its_instance_type() {
     let failures = matrix.types(&[("Q6['inst']", "S4")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Class expressions carrying ECMAScript private names: two structurally
+/// identical classes from different expressions, each with a `#private`
+/// field, method or accessor.
+const PRIVATE_BRANDS: &str = r##"
+function a() { return class { #x = 1 }; }
+function b() { return class { #x = 1 }; }
+function c() { return class { #m() { return 1; } }; }
+function d() { return class { #m() { return 1; } }; }
+function e() { return class { get #g() { return 1; } }; }
+function f() { return class { get #g() { return 1; } }; }
+function g() { return class { #x = 1; y = 2 }; }
+type IA = InstanceType<ReturnType<typeof a>>;
+type IB = InstanceType<ReturnType<typeof b>>;
+type IG = InstanceType<ReturnType<typeof g>>;
+"##;
+
+/// A class expression's `#private` field, method or accessor brands its
+/// instance type with its own declaration: two class expressions of the
+/// same shape are unrelated, a class relates to itself, an object without
+/// the brand is not assignable to it, and its public members read as
+/// always.
+///
+/// Measured on TypeScript 7.0.2, alike under every setting.
+///
+/// Mutation: lowering no member for a private name answers `IA extends IB`,
+/// the method and accessor rows, `{} extends IA`, `IG extends IA` and `{ y:
+/// number } extends IG` `1`.
+#[test]
+fn a_class_expressions_private_names_brand_its_instance_type() {
+    let matrix = Matrix::new(PRIVATE_BRANDS);
+    let failures = matrix.types(&[
+        ("IA extends IB ? 1 : 2", "2"),
+        ("IA extends IA ? 1 : 2", "1"),
+        (
+            "InstanceType<ReturnType<typeof c>> extends InstanceType<ReturnType<typeof d>> ? 1 : 2",
+            "2",
+        ),
+        (
+            "InstanceType<ReturnType<typeof e>> extends InstanceType<ReturnType<typeof f>> ? 1 : 2",
+            "2",
+        ),
+        ("{} extends IA ? 1 : 2", "2"),
+        ("IA extends {} ? 1 : 2", "1"),
+        ("IG extends IA ? 1 : 2", "2"),
+        ("{ y: number } extends IG ? 1 : 2", "2"),
+        ("IG['y']", "number"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `keyof` a class expression's instance type is its public keys: `keyof
+/// IA` is `never` and `keyof IG` is `"y"` (a `#private` name is no key).
+///
+/// Measured on TypeScript 7.0.2, alike under every setting.
+///
+/// What the lane gives: `keyof IA` and `keyof IG` unreduced (`keyof IA`,
+/// `keyof InstanceType<ReturnType<…>>`) — `keyof` over a class
+/// expression's instance type stays deferred, with or without a private
+/// name.
+#[test]
+#[ignore = "keyof over a class expression's instance type reduces to its public keys"]
+fn keyof_a_class_expressions_instance_type_is_its_public_keys() {
+    let matrix = Matrix::new(PRIVATE_BRANDS);
+    let failures = matrix.types(&[("keyof IA", "never"), ("keyof IG", "\"y\"")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `[keyof K1] extends [never] ? 1 : 2` over `class K1 { #x = 1 }` is `1`:
+/// the class's only member is private, so its key set is empty.
+///
+/// Measured on TypeScript 7.0.2, alike under every setting.
+///
+/// What the lane gives: `2` — `keyof K1` alone reads `never`, but inside
+/// the checked tuple the conditional does not relate it as `never`.
+#[test]
+#[ignore = "a keyof of a class with only private members relates as never inside a conditional's checked tuple"]
+fn a_keyof_of_only_private_members_relates_as_never() {
+    let matrix = Matrix::new("class K1 { #x = 1 }\n");
+    let failures = matrix.types(&[("[keyof K1] extends [never] ? 1 : 2", "1")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
