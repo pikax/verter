@@ -427,6 +427,12 @@ enum DemandFrame<'g> {
     Demand {
         settled: SettledDemand<'g>,
         composite: Option<CompositeReduction>,
+        /// The name a reduction asked this demand for; `None` for the root.
+        name: Option<SemanticNodeId>,
+        /// Whether the demand met a composite already being reduced
+        /// further down (a re-entry left it as written): its outcome
+        /// depends on where it ran, so it is not reused.
+        reentered: bool,
     },
     /// A composite reduction asked for on its own (only ever the root).
     Composite(CompositeReduction),
@@ -448,6 +454,10 @@ struct CompositeReduction {
     views: Vec<SemanticNodeId>,
     named_unions: Vec<(SemanticNodeId, Vec<SemanticNodeId>)>,
     waiting: Option<ArmWait>,
+    /// The typed completeness of the demands the reduction read: a name
+    /// whose demand did not complete leaves the composite as written, and
+    /// its partial reasons with it.
+    completeness: ResultCompleteness,
 }
 
 /// What a suspended composite reduction waits for.
@@ -466,8 +476,9 @@ enum ArmWait {
 enum CompositeStep {
     /// The demand of this name, at structural transit.
     Demand(SemanticNodeId),
-    /// The reduced node, or `None` when the composite stays as written.
-    Done(Option<SemanticNodeId>),
+    /// The reduced node, or `None` when the composite stays as written,
+    /// and the completeness of the demands it read.
+    Done(Option<SemanticNodeId>, ResultCompleteness),
 }
 
 /// The walk over the members of the resolved union a named arm stands for,
@@ -479,6 +490,8 @@ struct MembersWalk {
     read: rustc_hash::FxHashSet<SemanticNodeId>,
     pending: Vec<MemberStep>,
     awaiting: Option<SemanticNodeId>,
+    /// The partial reasons of a name whose demand did not complete.
+    partial: Option<PartialReasonSet>,
 }
 
 enum MemberStep {
@@ -494,6 +507,17 @@ enum MembersStep {
     Done(Option<Vec<SemanticNodeId>>),
 }
 
+impl CompositeReduction {
+    /// Merge the partial reasons of a finished members walk.
+    fn take_walk_partial(&mut self, walk: &MembersWalk) {
+        if let Some(reasons) = walk.partial {
+            self.completeness = self
+                .completeness
+                .merge(ResultCompleteness::partial(reasons));
+        }
+    }
+}
+
 impl MembersWalk {
     /// The walk over `union`, the resolved union the named arm `name`
     /// stands for, with `name` on its active path.
@@ -506,6 +530,7 @@ impl MembersWalk {
             read: rustc_hash::FxHashSet::default(),
             pending: vec![MemberStep::Leave(name), MemberStep::Read(union)],
             awaiting: None,
+            partial: None,
         }
     }
 }
@@ -904,6 +929,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match self.drive_structural_fact_demands(DemandFrame::Demand {
                     settled,
                     composite: None,
+                    name: None,
+                    reentered: false,
                 }) {
                     DrivenRoot::Demand(outcome) => outcome,
                     DrivenRoot::Composite(_) => {
@@ -1238,6 +1265,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         settled: SettledDemand<'_>,
         composite: Option<SemanticNodeId>,
+        composite_completeness: ResultCompleteness,
     ) -> StructuralFactDemandOutcome {
         let SettledDemand {
             _connected_guard,
@@ -1251,10 +1279,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(reasons) = exit_reasons {
             completeness = completeness.merge(ResultCompleteness::partial(reasons));
         } else {
+            // A post-resolution reduction that read an incomplete demand
+            // leaves its node as written; its partial reasons are this
+            // demand's, so the unresolved node is never answered Complete.
+            completeness = completeness.merge(composite_completeness);
             if let Some(reduced) = composite {
                 n = reduced;
             }
-            if let Some(reduced) = self.union_over_evaluated_key_arms(n, context) {
+            let (keys, key_completeness) = self.union_over_evaluated_key_arms(n, context);
+            completeness = completeness.merge(key_completeness);
+            if let Some(reduced) = keys {
                 n = reduced;
             }
         }
@@ -2124,36 +2158,65 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// exactly the order the nested calls would, with the same connected
     /// demand held open and the same `carrier_normalizing` record, so a
     /// chain of names of any length spends no native stack per name.
+    ///
+    /// A name's completed demand is read once per run. A reduction reads
+    /// the demand of every name its arms write, and the walk over a named
+    /// union's members reads the names that union writes — the same names
+    /// the arm's own demand already read — so without reuse a chain of
+    /// union aliases demanded every link once per link above it, and the
+    /// work doubled per link (18 links exhausted the connected budget).
+    /// A completed outcome is reused only when its demand met no composite
+    /// already being reduced below it: such a re-entry leaves that composite
+    /// as written, which is where the demand ran, not what it names. The
+    /// reuse record lives for this run only.
     fn drive_structural_fact_demands<'s>(&'s self, root: DemandFrame<'s>) -> DrivenRoot {
         let transit =
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
         let mut stack = vec![root];
         let mut delivered: Option<StructuralFactDemandOutcome> = None;
+        let mut completed: rustc_hash::FxHashMap<SemanticNodeId, StructuralFactDemandOutcome> =
+            rustc_hash::FxHashMap::default();
         loop {
             let top = stack
                 .last_mut()
                 .expect("the driver runs while a frame is open");
             let reduction = match top {
                 DemandFrame::Composite(reduction) => reduction,
-                DemandFrame::Demand { settled, composite } => {
+                DemandFrame::Demand {
+                    settled,
+                    composite,
+                    reentered,
+                    ..
+                } => {
                     if composite.is_none() {
                         // A chain that did not settle is not reduced.
                         let started = if settled.exit_reasons.is_none() {
-                            self.begin_composite(settled.n)
+                            let started = self.begin_composite(settled.n);
+                            if started.is_none()
+                                && self.carrier_normalizing.borrow().contains(&settled.n)
+                            {
+                                *reentered = true;
+                            }
+                            started
                         } else {
                             None
                         };
                         match started {
                             Some(reduction) => *composite = Some(reduction),
                             None => {
-                                let Some(DemandFrame::Demand { settled, .. }) = stack.pop() else {
-                                    unreachable!("the frame just read is a demand")
-                                };
-                                let outcome = self.finish_structural_fact_demand(settled, None);
+                                let finished = stack.pop();
+                                delivered = Some(self.finish_demand_frame(
+                                    finished,
+                                    None,
+                                    ResultCompleteness::Complete,
+                                    &mut stack,
+                                    &mut completed,
+                                ));
                                 if stack.is_empty() {
-                                    return DrivenRoot::Demand(outcome);
+                                    return DrivenRoot::Demand(
+                                        delivered.take().expect("the root's outcome"),
+                                    );
                                 }
-                                delivered = Some(outcome);
                                 continue;
                             }
                         }
@@ -2163,27 +2226,75 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
             match self.step_composite(reduction, delivered.take()) {
                 CompositeStep::Demand(name) => {
+                    if let Some(outcome) = completed.get(&name) {
+                        delivered = Some(*outcome);
+                        continue;
+                    }
                     match self.begin_structural_fact_demand(name, transit, true, true) {
                         BegunDemand::Finished(outcome) => delivered = Some(outcome),
                         BegunDemand::Settled(settled) => stack.push(DemandFrame::Demand {
                             settled,
                             composite: None,
+                            name: Some(name),
+                            reentered: false,
                         }),
                     }
                 }
-                CompositeStep::Done(reduced) => match stack.pop() {
-                    Some(DemandFrame::Composite(_)) => return DrivenRoot::Composite(reduced),
-                    Some(DemandFrame::Demand { settled, .. }) => {
-                        let outcome = self.finish_structural_fact_demand(settled, reduced);
-                        if stack.is_empty() {
-                            return DrivenRoot::Demand(outcome);
-                        }
-                        delivered = Some(outcome);
+                CompositeStep::Done(reduced, completeness) => {
+                    let finished = stack.pop();
+                    if let Some(DemandFrame::Composite(_)) = finished {
+                        // A composite asked for on its own answers its node;
+                        // the demands it read folded their partials where
+                        // they finished.
+                        return DrivenRoot::Composite(reduced);
                     }
-                    None => unreachable!("the frame just stepped is on the stack"),
-                },
+                    delivered = Some(self.finish_demand_frame(
+                        finished,
+                        reduced,
+                        completeness,
+                        &mut stack,
+                        &mut completed,
+                    ));
+                    if stack.is_empty() {
+                        return DrivenRoot::Demand(delivered.take().expect("the root's outcome"));
+                    }
+                }
             }
         }
+    }
+
+    /// Finish the demand frame just popped, record its outcome for reuse when
+    /// it completed with no re-entry, and hand a re-entry down to the frame
+    /// below, whose outcome is built from this one.
+    fn finish_demand_frame<'s>(
+        &'s self,
+        finished: Option<DemandFrame<'s>>,
+        reduced: Option<SemanticNodeId>,
+        completeness: ResultCompleteness,
+        stack: &mut [DemandFrame<'s>],
+        completed: &mut rustc_hash::FxHashMap<SemanticNodeId, StructuralFactDemandOutcome>,
+    ) -> StructuralFactDemandOutcome {
+        let Some(DemandFrame::Demand {
+            settled,
+            name,
+            reentered,
+            ..
+        }) = finished
+        else {
+            unreachable!("a demand frame finishes as a demand")
+        };
+        let outcome = self.finish_structural_fact_demand(settled, reduced, completeness);
+        if reentered {
+            if let Some(DemandFrame::Demand {
+                reentered: below, ..
+            }) = stack.last_mut()
+            {
+                *below = true;
+            }
+        } else if let (Some(name), StructuralFactDemandOutcome::Complete(_)) = (name, outcome) {
+            completed.insert(name, outcome);
+        }
+        outcome
     }
 
     /// Whether `arm` is written as a name: a union or intersection reads it
@@ -2255,6 +2366,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             views: Vec::with_capacity(capacity),
             named_unions: Vec::new(),
             waiting: None,
+            completeness: ResultCompleteness::Complete,
         })
     }
 
@@ -2269,7 +2381,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             popped == Some(reduction.node),
             "composite reductions finish in the order they start"
         );
-        CompositeStep::Done(reduced)
+        CompositeStep::Done(reduced, reduction.completeness)
     }
 
     /// Advance `reduction` with `delivered`, the outcome of the demand it
@@ -2283,8 +2395,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(outcome) = delivered {
             let (arm, members) = match reduction.waiting.take() {
                 Some(ArmWait::Resolved(arm)) => {
-                    let StructuralFactDemandOutcome::Complete(resolved) = outcome else {
-                        return self.end_composite(reduction, None);
+                    let resolved = match outcome {
+                        StructuralFactDemandOutcome::Complete(resolved) => resolved,
+                        StructuralFactDemandOutcome::Partial(reasons) => {
+                            reduction.completeness = reduction
+                                .completeness
+                                .merge(ResultCompleteness::partial(reasons));
+                            return self.end_composite(reduction, None);
+                        }
                     };
                     // A union joins a named union's members, whatever they
                     // are; an intersection distributes over one made of
@@ -2308,7 +2426,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 reduction.waiting = Some(ArmWait::Members { arm, walk });
                                 return CompositeStep::Demand(name);
                             }
-                            MembersStep::Done(members) => (arm, Some(members)),
+                            MembersStep::Done(members) => {
+                                reduction.take_walk_partial(&walk);
+                                (arm, Some(members))
+                            }
                         }
                     }
                 }
@@ -2318,7 +2439,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             reduction.waiting = Some(ArmWait::Members { arm, walk });
                             return CompositeStep::Demand(name);
                         }
-                        MembersStep::Done(members) => (arm, Some(members)),
+                        MembersStep::Done(members) => {
+                            reduction.take_walk_partial(&walk);
+                            (arm, Some(members))
+                        }
                     }
                 }
                 None => unreachable!("an outcome is delivered only to a waiting reduction"),
@@ -2444,8 +2568,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .awaiting
                 .take()
                 .expect("an outcome is delivered only to a waiting walk");
-            let StructuralFactDemandOutcome::Complete(resolved) = outcome else {
-                return MembersStep::Done(None);
+            let resolved = match outcome {
+                StructuralFactDemandOutcome::Complete(resolved) => resolved,
+                StructuralFactDemandOutcome::Partial(reasons) => {
+                    walk.partial = Some(reasons);
+                    return MembersStep::Done(None);
+                }
             };
             match graph.node_data(resolved).as_deref() {
                 Some(SemanticNodeData::Union(_)) => {
@@ -2497,18 +2625,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// not generic when it builds the type, so the union holds those keys
     /// (`keyof { a: 1 } | keyof { b: 2 }` is `"a" | "b"`). An arm whose keys
     /// keep their `keyof` origin (`keyof Face` over an interface) or do not
-    /// settle stays as written. `None` when no arm changes.
+    /// settle stays as written. `None` when no arm changes, and the
+    /// completeness of the arms' evaluations: an evaluation that stopped on
+    /// an operational limit makes it partial.
     fn union_over_evaluated_key_arms(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-    ) -> Option<SemanticNodeId> {
+    ) -> (Option<SemanticNodeId>, ResultCompleteness) {
         let graph = self.graph();
-        let arms = match graph.node_data(node)?.as_ref() {
-            SemanticNodeData::Union(members) => members.members_arc(),
-            _ => return None,
+        let arms = match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.members_arc(),
+            _ => return (None, ResultCompleteness::Complete),
         };
         let mut changed = false;
+        let mut completeness = ResultCompleteness::Complete;
         let views: Vec<SemanticNodeId> = arms
             .iter()
             .map(|&arm| {
@@ -2519,6 +2650,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     return arm;
                 }
                 let keys = self.evaluate_deferred_outcome(arm, context);
+                completeness = completeness.merge(keys.completeness);
                 let settled = matches!(keys.completeness, ResultCompleteness::Complete)
                     && !matches!(
                         graph.node_data(keys.node).as_deref(),
@@ -2532,7 +2664,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             })
             .collect();
-        changed.then(|| self.intern_normalized_union_or_intersection(&views, true))
+        if completeness.is_partial() {
+            // An arm whose keys did not settle for want of work leaves the
+            // union unresolved: the demand is partial, its node unused.
+            return (None, completeness);
+        }
+        (
+            changed.then(|| self.intern_normalized_union_or_intersection(&views, true)),
+            completeness,
+        )
     }
 
     /// Fold a LOCALLY-PRODUCED partial — one no `CacheRead` carried (a step

@@ -2062,3 +2062,131 @@ fn a_builtin_utility_build_reads_the_scope_payload_once() {
         "one gate decision, one scope-payload read"
     );
 }
+
+/// Every connected work budget from one unit up either lets a
+/// structural-fact demand finish exactly as it does unlimited, or trips
+/// the demand — and a demand whose budget tripped never answers
+/// `Complete`. The reductions that run after the demand's residual
+/// carriers resolve read further demands of their own: each `keyof` arm of
+/// a union (`keyof { a: "x" } | keyof { b: "x" }`) and each named arm of a
+/// union (`A | "z"`, `A = "p" | "q"`). A trip inside one of those used to
+/// leave the arm as written and the demand `Complete`, with the unresolved
+/// union as its answer. Each budget runs on a fresh host: a completed
+/// evaluation is memoized and costs no work the next time.
+#[test]
+fn a_budget_trip_after_resolution_never_answers_complete() {
+    use super::evaluate::StructuralFactDemandOutcome;
+    use crate::semantic_query::composite::CompositeList;
+    use crate::semantic_query::{LiteralValue, SurfaceMember};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Case {
+        KeyArms,
+        NamedArm,
+    }
+    // The case's demand on a fresh host under `work` units: the rendered
+    // answer (`None` when partial) and whether the budget tripped.
+    let demand = |case: Case, work: usize| {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/k.ts",
+            "export type A = \"p\" | \"q\";
+",
+        );
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = dispatch.graph();
+        let literal = |text: &str| {
+            graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(text.into())))
+        };
+        let object = |name: &str| {
+            let member = SurfaceMember {
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                key: crate::semantic_query::AuthoredPropertyKey::string(name),
+                value: literal("x"),
+                optional: false,
+                readonly: false,
+                method_kind: None,
+                has_implementation_body: false,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                spans: Default::default(),
+                declaration_origin: None,
+            };
+            graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+                members: Arc::from(vec![member].into_boxed_slice()),
+                call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                index_signatures: Arc::from(
+                    Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice()
+                ),
+                keyspace: None,
+                has_index_signature: false,
+            }))
+        };
+        let union = |arms: Vec<SemanticNodeId>| {
+            graph.intern_node(SemanticNodeData::Union(CompositeList::test_fixture(
+                Arc::from(arms.into_boxed_slice()),
+            )))
+        };
+        let node = match case {
+            Case::KeyArms => union(vec![
+                graph.intern_node(SemanticNodeData::KeyOf { base: object("a") }),
+                graph.intern_node(SemanticNodeData::KeyOf { base: object("b") }),
+            ]),
+            Case::NamedArm => {
+                let scope = file_scope(&dispatch, "/k.ts");
+                union(vec![
+                    bare_ref_carrier(&dispatch, "A", scope, &[]),
+                    literal("z"),
+                ])
+            }
+        };
+        dispatch.set_connected_limits_for_tests(
+            work,
+            super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
+        );
+        let outcome = dispatch.normalize_node_for_structural_fact_demand(
+            node,
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        );
+        let answer = match outcome {
+            StructuralFactDemandOutcome::Complete(answer) => Some(
+                crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                    &dispatch, answer, 0,
+                ),
+            ),
+            StructuralFactDemandOutcome::Partial(_) => None,
+        };
+        (answer, dispatch.connected_demand_tripped())
+    };
+    let mut violations = Vec::new();
+    for case in [Case::KeyArms, Case::NamedArm] {
+        let (full, _) = demand(case, super::connected_demand::MAX_CONNECTED_PROJECTION_WORK);
+        let full = full.unwrap_or_else(|| panic!("{case:?}: the unlimited demand completes"));
+        let mut tripped_any = false;
+        for work in 1..=48 {
+            let (answer, tripped) = demand(case, work);
+            tripped_any |= tripped;
+            match answer {
+                Some(answer) if tripped => violations.push(format!(
+                    "{case:?} at {work} units: the budget tripped, yet the demand answered Complete({answer})"
+                )),
+                Some(answer) if answer != full => violations.push(format!(
+                    "{case:?} at {work} units: an untripped demand answered {answer}, not {full}"
+                )),
+                _ => {}
+            }
+        }
+        assert!(tripped_any, "{case:?}: some budget trips the demand");
+    }
+    assert!(
+        violations.is_empty(),
+        "{}",
+        violations.join(
+            "
+"
+        )
+    );
+}
