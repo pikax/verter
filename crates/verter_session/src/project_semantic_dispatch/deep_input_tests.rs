@@ -426,21 +426,143 @@ export const v = b{};
     assert_eq!(chain(DEPTH), chain(3));
 }
 
-/// The source parse identity a content-addressed key names is derived once
-/// per artifact: the derivations a nest's evaluation makes do not grow with
-/// its depth (deriving it per nested function hashed the whole source once
-/// per function, the square of the nesting).
+/// Callbacks nested 10,000 deep, each an arrow passed to a callee that
+/// declares its type (`a(() => a(() => … 1))`): each callback is an
+/// argument its call evaluates from the evaluator's stack, its body from the
+/// stack of evaluators. TypeScript 7.0.2: `number`, under every
+/// `strictNullChecks` × `noImplicitAny` setting.
 #[test]
-fn a_nest_derives_its_source_parse_identity_a_fixed_number_of_times() {
-    let derivations = |depth: usize| {
-        let before = crate::file_artifact_store::source_parse_identity_derivations_for_tests();
+fn callbacks_nested_10000_deep_answer_on_production_stacks() {
+    let source = format!(
+        "declare function a(f: () => number): number;\n{}",
+        returning(wrap(DEPTH, "a(() => ", ")"))
+    );
+    assert_eq!(
+        mismatches_on_a_small_stack(source, RETURN, "number"),
+        Vec::<String>::new()
+    );
+}
+
+/// Callbacks nested through a generic callee, which infers each call's
+/// type argument from its callback's return: the call's executor route
+/// types each callback under its parameter, suspending at it while its body
+/// evaluates from the stack of evaluators.
+fn generic_callbacks(depth: usize) -> String {
+    format!(
+        "declare function a<T>(f: () => T): T;\n{}",
+        returning(wrap(depth, "a(() => ", ")"))
+    )
+}
+
+/// A depth whose generic callbacks the connected-demand work budget admits.
+const GENERIC_CALLBACKS_UNDER_THE_WORK_BUDGET: usize = 400;
+
+/// TypeScript 7.0.2: `number`, under every setting.
+#[test]
+fn generic_callbacks_nested_400_deep_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(
+            generic_callbacks(GENERIC_CALLBACKS_UNDER_THE_WORK_BUDGET),
+            RETURN,
+            "number"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// Generic callbacks nested 10,000 deep return on the production stacks
+/// (their call resolutions exceed the connected-demand work budget, so the
+/// return is its typed budget failure); typing a callback in place instead
+/// of suspending the route overflows.
+#[test]
+fn generic_callbacks_nested_10000_deep_return_on_production_stacks() {
+    assert!(!returns_on_a_small_stack(generic_callbacks(DEPTH)));
+}
+
+#[test]
+#[ignore = "the connected-demand work budget admits no 10,000 nested generic callback inferences"]
+fn generic_callbacks_nested_10000_deep_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(generic_callbacks(DEPTH), RETURN, "number"),
+        Vec::<String>::new()
+    );
+}
+
+/// Immediately invoked functions nested 10,000 deep, arrows with block
+/// bodies and function expressions: each call's callee operand is a nested
+/// function value evaluated from the stack of evaluators. TypeScript 7.0.2:
+/// `number`, under every setting.
+#[test]
+fn immediately_invoked_functions_nested_10000_deep_answer_on_production_stacks() {
+    for (open, close) in [
+        ("(() => { return ", "; })()"),
+        ("(function () { return ", "; })()"),
+    ] {
         assert_eq!(
-            mismatches(&arrows(depth), &[(ARROW_PROBE, "1")]),
-            Vec::<String>::new()
+            mismatches_on_a_small_stack(returning(wrap(DEPTH, open, close)), RETURN, "number"),
+            Vec::<String>::new(),
+            "{open}"
         );
-        crate::file_artifact_store::source_parse_identity_derivations_for_tests() - before
-    };
-    assert_eq!(derivations(20), derivations(200));
+    }
+}
+
+const OBJECT_PROBE: &str = "ReturnType<typeof pf> extends object ? 1 : 2";
+
+/// Object literals whose method returns the next, 10,000 deep: a literal's
+/// methods evaluate as children of its own step. TypeScript 7.0.2: `1`,
+/// under every setting.
+#[test]
+fn object_methods_nested_10000_deep_answer_on_production_stacks() {
+    let source = returning(wrap(DEPTH, "{ m() { return ", "; } }"));
+    assert_eq!(
+        mismatches_on_a_small_stack(source, OBJECT_PROBE, "1"),
+        Vec::<String>::new()
+    );
+}
+
+/// Class expressions whose method returns the next, 10,000 deep: a class's
+/// member functions evaluate as children of its own step. TypeScript 7.0.2:
+/// `1`, under every setting.
+#[test]
+fn class_methods_nested_10000_deep_answer_on_production_stacks() {
+    let source = returning(wrap(DEPTH, "class { m() { return ", "; } }"));
+    assert_eq!(
+        mismatches_on_a_small_stack(source, ARROW_PROBE, "1"),
+        Vec::<String>::new()
+    );
+}
+
+/// Arrows nested 10,000 deep, each returning the next from inside a block,
+/// an `if` arm, a `switch` clause and a labeled statement: a branch
+/// statement's regions are frames of its region's run, so the returned
+/// function is evaluated from the stack of evaluators. TypeScript 7.0.2:
+/// `1`, under every setting.
+#[test]
+fn arrows_returned_from_branches_nested_10000_deep_answer_on_production_stacks() {
+    for (open, close) in [
+        ("() => { { return ", "; } }"),
+        ("() => { if (b) { return ", "; } throw 0; }"),
+        ("() => { switch (b) { case true: return ", "; } throw 0; }"),
+        ("() => { l: { return ", "; } }"),
+    ] {
+        assert_eq!(
+            mismatches_on_a_small_stack(returning(wrap(DEPTH, open, close)), ARROW_PROBE, "1"),
+            Vec::<String>::new(),
+            "{open}"
+        );
+    }
+}
+
+/// Arrows nested 10,000 deep, each a declarator's initializer the body
+/// returns: the declarator suspends at its initializer's nested function
+/// value. TypeScript 7.0.2: `1`, under every setting.
+#[test]
+fn arrows_initializing_declarators_nested_10000_deep_answer_on_production_stacks() {
+    let source = returning(wrap(DEPTH, "() => { const f = ", "; return f; }"));
+    assert_eq!(
+        mismatches_on_a_small_stack(source, ARROW_PROBE, "1"),
+        Vec::<String>::new()
+    );
 }
 
 /// A destructuring declarator nested 10,000 patterns deep lowers, binds and
@@ -456,4 +578,60 @@ fn destructuring_patterns_nested_10000_deep_answer_on_production_stacks() {
         mismatches_on_a_small_stack(source, "0 extends (1 & ReturnType<typeof pf>) ? 1 : 2", "1"),
         Vec::<String>::new()
     );
+}
+
+/// `await` nested 10,000 deep lowers and evaluates from explicit stacks.
+/// TypeScript 7.0.2: `Promise<number>`, under every setting.
+#[test]
+fn awaits_nested_10000_deep_answer_on_production_stacks() {
+    let source = format!(
+        "export async function pf() {{ return {}1; }}\n",
+        "await ".repeat(DEPTH)
+    );
+    assert_eq!(
+        mismatches_on_a_small_stack(source, RETURN, "Promise<number>"),
+        Vec::<String>::new()
+    );
+}
+
+/// `if`, `switch`, `try`, labeled and loop statements nested 10,000 deep
+/// return on the production stacks: each lowers and evaluates as frames of
+/// its region's lowering and run (their demand slices exceed the plan
+/// budget, so the return is its typed budget failure).
+#[test]
+fn branch_and_loop_statements_nested_10000_deep_return_on_production_stacks() {
+    let body = |open: &str, close: &str| {
+        format!(
+            "export function pf(b: boolean, x: number) {{ {}return 1;{} return 2; }}\n",
+            open.repeat(DEPTH),
+            close.repeat(DEPTH)
+        )
+    };
+    for (form, source) in [
+        ("if", body("if (b) { ", " }")),
+        ("switch", body("switch (x) { case 1: ", " }")),
+        ("try", body("try { ", " } catch { }")),
+        ("while", body("while (b) { ", " }")),
+        ("for", body("for (;;) { ", " }")),
+        ("do", body("do { ", " } while (b);")),
+    ] {
+        assert!(!returns_on_a_small_stack(source), "{form}");
+    }
+}
+
+/// The source parse identity a content-addressed key names is derived once
+/// per artifact: the derivations a nest's evaluation makes do not grow with
+/// its depth (deriving it per nested function hashed the whole source once
+/// per function, the square of the nesting).
+#[test]
+fn a_nest_derives_its_source_parse_identity_a_fixed_number_of_times() {
+    let derivations = |depth: usize| {
+        let before = crate::file_artifact_store::source_parse_identity_derivations_for_tests();
+        assert_eq!(
+            mismatches(&arrows(depth), &[(ARROW_PROBE, "1")]),
+            Vec::<String>::new()
+        );
+        crate::file_artifact_store::source_parse_identity_derivations_for_tests() - before
+    };
+    assert_eq!(derivations(20), derivations(200));
 }

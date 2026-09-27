@@ -13,10 +13,18 @@
 //! answer in hand. Everything the computation does before its executor
 //! route reads the graph and the frame, and records nothing, so running
 //! it again reaches the route exactly as the first run did.
+//!
+//! A function-value argument the route types under its parameter's
+//! contextual signature (`run(() => run(() => 1))`), and one the
+//! executor's second inference pass retypes, is a nested function value
+//! the route suspends at too ([`ResolveCallProgress::Function`]): its body
+//! evaluates from the stack of evaluators (`flow_return_nested`), not
+//! inside the route.
 
 use std::sync::Arc;
 
 use super::super::call_resolve::ResolveCallStep;
+use super::contextual::{FunctionArgumentMark, FunctionArgumentRequest};
 use super::*;
 use crate::flow_slice_content::{
     SliceCall, SliceCallArgument, SliceCallArguments, SliceCallSite, SliceExpr,
@@ -63,12 +71,33 @@ pub(super) struct CallArgumentWait<'e> {
     pub(super) lowered: &'e SliceExpr,
 }
 
+/// A call waiting on the signature of a function-value argument its
+/// executor route types.
+pub(super) struct CallFunctionWait<'e> {
+    flight: CallInFlight<'e>,
+    callee: SemanticNodeId,
+    route: RouteAt<'e>,
+    mark: FunctionArgumentMark,
+    demand: Option<NestedDemand>,
+}
+
+impl CallFunctionWait<'_> {
+    /// The function-value argument to evaluate, taken once.
+    pub(super) fn take_demand(&mut self) -> NestedDemand {
+        self.demand
+            .take()
+            .expect("a function argument is evaluated once")
+    }
+}
+
 /// What a call begun from the stack needs next.
 pub(super) enum CallStep<'e> {
     /// Its callee operand's value.
     Operand(Box<CallInFlight<'e>>, &'e SliceExpr),
     /// A lowered argument's value, for its executor route.
     Argument(Box<CallArgumentWait<'e>>),
+    /// A function-value argument's signature, for its executor route.
+    Function(Box<CallFunctionWait<'e>>),
     /// Nothing: the call's value.
     Done(Positional<SemanticNodeId>),
 }
@@ -85,12 +114,47 @@ pub(super) struct ResolveCallFrame<'e> {
     function_arguments: Vec<Option<SliceExpr>>,
     /// The binding of the argument whose lowered value is awaited.
     awaiting: Option<FlowIndexedArgumentBinding>,
+    /// The typed function value of the argument being typed, once its
+    /// signature is evaluated.
+    delivered_function: Option<Option<SemanticNodeId>>,
+}
+
+/// A call's executor route once every argument is typed: the executor
+/// asked, and asked again for each context-sensitive argument its second
+/// inference pass retypes.
+pub(super) struct FinishRoute {
+    _serve: crate::host_manage::prepared_decl::IndexedReadyServe,
+    key: crate::semantic_query::ResolveCallKey,
+    args: Vec<crate::semantic_query::CallArgKey>,
+    function_arguments: Vec<Option<SliceExpr>>,
+    step: Positional<ResolveCallStep>,
+    retyped: bool,
+    /// The arguments retyped so far.
+    rounds: usize,
+    /// The argument being retyped.
+    position: usize,
+}
+
+/// Where a call's executor route suspends at a function-value argument.
+pub(super) enum RouteAt<'e> {
+    /// Typing its arguments.
+    Typing(ResolveCallFrame<'e>),
+    /// Retyping a context-sensitive argument.
+    Finishing(Box<FinishRoute>),
+}
+
+/// A call's executor route suspended at a function-value argument.
+pub(super) struct RouteFunction<'e> {
+    pub(super) at: RouteAt<'e>,
+    pub(super) request: FunctionArgumentRequest,
 }
 
 /// What a call's executor route needs next.
 pub(super) enum ResolveCallProgress<'e> {
     /// The value of a lowered argument.
     Argument(ResolveCallFrame<'e>, &'e SliceExpr),
+    /// The signature of a function-value argument.
+    Function(Box<RouteFunction<'e>>),
     /// Nothing: the route's step.
     Done(Option<Positional<ResolveCallStep>>),
 }
@@ -180,6 +244,42 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.continue_call_route(flight, callee, progress)
     }
 
+    /// Continue a call with the signature of the function-value argument
+    /// its executor route asked for.
+    pub(super) fn resume_call_function<'e>(
+        &mut self,
+        wait: CallFunctionWait<'e>,
+        value: Positional<SemanticNodeId>,
+    ) -> CallStep<'e> {
+        let CallFunctionWait {
+            flight,
+            callee,
+            route,
+            mark,
+            ..
+        } = wait;
+        let progress = self.deliver_resolve_call_function(route, mark, value);
+        self.continue_call_route(flight, callee, progress)
+    }
+
+    /// Continue a call's executor route suspended at a function-value
+    /// argument with that argument's evaluated signature.
+    pub(super) fn deliver_resolve_call_function<'e>(
+        &mut self,
+        at: RouteAt<'e>,
+        mark: FunctionArgumentMark,
+        value: Positional<SemanticNodeId>,
+    ) -> ResolveCallProgress<'e> {
+        let typed = self.function_argument_value(mark, value);
+        match at {
+            RouteAt::Typing(mut route) => {
+                route.delivered_function = Some(typed);
+                self.advance_resolve_call(route, None)
+            }
+            RouteAt::Finishing(finish) => self.retype_resolve_call(finish, Some(typed)),
+        }
+    }
+
     /// Run a call's value computation with what the stack has delivered;
     /// stopped at an executor route over a lowered argument, start that
     /// route.
@@ -212,6 +312,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         loop {
             let (route, lowered) = match progress {
                 ResolveCallProgress::Argument(route, lowered) => (route, lowered),
+                ResolveCallProgress::Function(function) => {
+                    let RouteFunction { at, request } = *function;
+                    return CallStep::Function(Box::new(CallFunctionWait {
+                        flight,
+                        callee,
+                        route: at,
+                        mark: request.mark,
+                        demand: Some(request.demand),
+                    }));
+                }
                 ResolveCallProgress::Done(step) => {
                     let answer = self.fold_resolve_call_step(step, flight.site);
                     flight.drive.answers.push((callee, answer));
@@ -259,8 +369,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// The answer of the executor route for `callee` the stack already
-    /// took, or, for a call on the stack with lowered arguments, a stop
-    /// there: `Some` either way, which every route site returns at once.
+    /// took, or, for a call on the stack with lowered or function-value
+    /// arguments, a stop there: `Some` either way, which every route site returns at once.
     /// `None` when the route runs in place.
     pub(super) fn driven_call_route(
         &mut self,
@@ -279,7 +389,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         {
             return Some(answer.clone());
         }
-        arguments.iter().next()?;
+        // The route suspends at a lowered argument or at a function-value
+        // argument; with neither it runs in place.
+        let suspends = arguments.iter().next().is_some()
+            || self.call_arguments.get(&site.span()).is_some_and(|frame| {
+                frame
+                    .iter()
+                    .any(|argument| matches!(argument.value, SliceExpr::NestedFunctionValue { .. }))
+            });
+        if !suspends {
+            return None;
+        }
+        let drive = self
+            .call_drive
+            .as_mut()
+            .filter(|drive| drive.span == site.span())?;
         drive.demand = Some(callee);
         // A placeholder the value computation returns at once; the stack
         // discards it and takes the route.
@@ -351,6 +475,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             args: Vec::with_capacity(count),
             function_arguments: Vec::with_capacity(count),
             awaiting: None,
+            delivered_function: None,
         };
         self.advance_resolve_call(route, None)
     }
@@ -416,18 +541,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // A literal argument this frame computes is also
                     // evaluated in its const context: the value a `const`
                     // type parameter it is passed to infers from.
-                    route.function_arguments.push(
-                        arguments
-                            .get(ordinal)
-                            .or_else(|| {
-                                frame_arguments
-                                    .as_deref()
-                                    .and_then(|frame| frame.get(ordinal))
-                                    .map(|frame| &frame.value)
-                            })
-                            .filter(|expr| matches!(expr, SliceExpr::NestedFunctionValue { .. }))
-                            .cloned(),
-                    );
+                    if route.function_arguments.len() == ordinal {
+                        route.function_arguments.push(
+                            arguments
+                                .get(ordinal)
+                                .or_else(|| {
+                                    frame_arguments
+                                        .as_deref()
+                                        .and_then(|frame| frame.get(ordinal))
+                                        .map(|frame| &frame.value)
+                                })
+                                .filter(|expr| {
+                                    matches!(expr, SliceExpr::NestedFunctionValue { .. })
+                                })
+                                .cloned(),
+                        );
+                    }
                     let mut const_view = None;
                     // Whether the argument is a call whose result is wholly
                     // the fresh literal its inference kept: a fresh literal
@@ -436,15 +565,29 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // A function value whose parameters are all annotated is
                     // typed with the call's first pass, its body return read
                     // under the parameter's contextual return type.
-                    let function_value = match route
-                        .function_arguments
-                        .last()
-                        .and_then(Option::as_ref)
-                    {
-                        Some(expr) if !argument.context_sensitive => {
-                            self.eval_function_argument_under_parameter(expr, route.callee, ordinal)
+                    // Its body evaluates from the stack of evaluators: the
+                    // route suspends until the signature is delivered.
+                    let function_value = match route.delivered_function.take() {
+                        Some(delivered) => delivered,
+                        None => {
+                            let request =
+                                match route.function_arguments.last().and_then(Option::as_ref) {
+                                    Some(expr) if !argument.context_sensitive => self
+                                        .function_argument_request_under_parameter(
+                                            expr,
+                                            route.callee,
+                                            ordinal,
+                                        ),
+                                    _ => None,
+                                };
+                            if let Some(request) = request {
+                                return ResolveCallProgress::Function(Box::new(RouteFunction {
+                                    at: RouteAt::Typing(route),
+                                    request,
+                                }));
+                            }
+                            None
                         }
-                        _ => None,
                     };
                     let node = match (function_value, arguments.get(ordinal)) {
                         (Some(node), _) => Some(node),
@@ -529,23 +672,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ),
             });
         }
-        ResolveCallProgress::Done(self.finish_resolve_call(route))
+        self.finish_resolve_call(route)
     }
 
     /// Ask the executor for a call whose arguments are typed: its explicit
     /// type arguments and receiver ride the key, and the checker's second
     /// inference pass retypes a context-sensitive argument the executor
     /// names.
-    fn finish_resolve_call(
-        &mut self,
-        route: ResolveCallFrame<'_>,
-    ) -> Option<Positional<ResolveCallStep>> {
+    fn finish_resolve_call<'e>(&mut self, route: ResolveCallFrame<'_>) -> ResolveCallProgress<'e> {
+        match self.ask_resolve_call(route) {
+            Some(finish) => self.retype_resolve_call(finish, None),
+            None => ResolveCallProgress::Done(None),
+        }
+    }
+
+    /// Mint a typed call's key and ask the executor once.
+    fn ask_resolve_call(&mut self, route: ResolveCallFrame<'_>) -> Option<Box<FinishRoute>> {
         let ResolveCallFrame {
             _serve,
             callee,
             indexed,
-            mut args,
-            mut function_arguments,
+            args,
+            function_arguments,
             ..
         } = route;
         let call = &indexed.call;
@@ -573,7 +721,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             None => None,
         };
-        let mut key = crate::semantic_query::ResolveCallKey {
+        let key = crate::semantic_query::ResolveCallKey {
             point: crate::semantic_query::ProgramPointId {
                 canonical_id: Arc::from(self.canonical),
                 offset: call.point,
@@ -593,39 +741,83 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             flow: crate::semantic_query::FlowNarrowingKey::empty(),
             context: self.dispatch.resolve_call_context_for(self.canonical),
         };
-        let mut step = Positional::Value(self.dispatch.execute_resolve_call(key.clone()));
-        // The checker's second inference pass: a context-sensitive argument
-        // the executor names is typed under the contextual type it hands
-        // back, and the call is asked again with that argument's type. Each
-        // round types one argument that no round types again.
-        let mut retyped = false;
-        // bounded-loop: at most one round per argument — each round retypes one context-sensitive argument, which is no longer context-sensitive after it.
-        for _ in 0..args.len() {
-            let Some((position, contextual)) = Self::contextual_argument_request(&step) else {
-                break;
+        let step = Positional::Value(self.dispatch.execute_resolve_call(key.clone()));
+        Some(Box::new(FinishRoute {
+            _serve,
+            key,
+            args,
+            function_arguments,
+            step,
+            retyped: false,
+            rounds: 0,
+            position: 0,
+        }))
+    }
+
+    /// The checker's second inference pass: a context-sensitive argument
+    /// the executor names is typed under the contextual type it hands back,
+    /// and the call is asked again with that argument's type, `delivered`
+    /// being the retyped argument's. Each round types one argument that no
+    /// round types again, so there are at most as many rounds as arguments.
+    fn retype_resolve_call<'e>(
+        &mut self,
+        mut finish: Box<FinishRoute>,
+        delivered: Option<Option<SemanticNodeId>>,
+    ) -> ResolveCallProgress<'e> {
+        if let Some(typed) = delivered {
+            let position = finish.position;
+            let retyped = typed.and_then(|ty| match finish.args.get(position) {
+                Some(crate::semantic_query::CallArgKey::Eager { spread, .. }) => {
+                    Some((ty, *spread))
+                }
+                _ => None,
+            });
+            let Some((ty, spread)) = retyped else {
+                return ResolveCallProgress::Done(Self::settle_retyped_call(*finish));
             };
-            let Some(Some(expr)) = function_arguments.get(position).cloned() else {
-                break;
-            };
-            let Some(ty) = self.eval_function_argument_in_context(&expr, contextual) else {
-                break;
-            };
-            let Some(crate::semantic_query::CallArgKey::Eager { spread, .. }) = args.get(position)
-            else {
-                break;
-            };
-            retyped = true;
-            args[position] = crate::semantic_query::CallArgKey::Eager {
+            finish.retyped = true;
+            finish.args[position] = crate::semantic_query::CallArgKey::Eager {
                 ty,
-                spread: *spread,
+                spread,
                 context_sensitive: false,
                 const_view: None,
                 literal_mode: crate::semantic_query::ArgumentLiteralMode::Literal,
             };
-            function_arguments[position] = None;
-            key.args = Arc::from(args.clone().into_boxed_slice());
-            step = Positional::Value(self.dispatch.execute_resolve_call(key.clone()));
+            finish.function_arguments[position] = None;
+            finish.key.args = Arc::from(finish.args.clone().into_boxed_slice());
+            finish.step = Positional::Value(self.dispatch.execute_resolve_call(finish.key.clone()));
+            finish.rounds += 1;
         }
+        while finish.rounds < finish.args.len() {
+            let Some((position, contextual)) = Self::contextual_argument_request(&finish.step)
+            else {
+                break;
+            };
+            let Some(Some(expr)) = finish.function_arguments.get(position).cloned() else {
+                break;
+            };
+            if !matches!(expr, SliceExpr::NestedFunctionValue { gap: None, .. }) {
+                break;
+            }
+            let Some(signature) = self.contextual_signature(contextual) else {
+                break;
+            };
+            let Some(request) = self.function_argument_request(&expr, Some(signature)) else {
+                break;
+            };
+            finish.position = position;
+            return ResolveCallProgress::Function(Box::new(RouteFunction {
+                at: RouteAt::Finishing(finish),
+                request,
+            }));
+        }
+        ResolveCallProgress::Done(Self::settle_retyped_call(*finish))
+    }
+
+    /// The executor's step for a call once no argument is retyped again.
+    fn settle_retyped_call(finish: FinishRoute) -> Option<Positional<ResolveCallStep>> {
+        let FinishRoute { step, retyped, .. } = finish;
+        let mut step = step;
         // A call asked again after a retyped argument that still does not
         // decide answers no uninferred parameter's fallback either.
         if retyped
