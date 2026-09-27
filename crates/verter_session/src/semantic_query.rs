@@ -546,7 +546,7 @@ impl InferBinderId {
 /// events. `finish` is irrelevant because the full stream, not a digest, is
 /// retained as identity.
 #[derive(Default)]
-struct ExactHashEventRecorder {
+pub(crate) struct ExactHashEventRecorder {
     bytes: Vec<u8>,
 }
 
@@ -558,7 +558,7 @@ impl ExactHashEventRecorder {
         self.bytes.extend_from_slice(bytes);
     }
 
-    fn into_bytes(self) -> Vec<u8> {
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }
 }
