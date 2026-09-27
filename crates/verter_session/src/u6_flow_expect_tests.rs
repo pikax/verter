@@ -6253,17 +6253,15 @@ fn flow_return_candidate_count(id: &str, script: &str) -> usize {
 }
 
 /// `"key" in x` over a union arm whose key set the graph cannot decide
-/// (a type parameter, an index-signature surface, an unresolvable
-/// carrier) must keep that arm possible on BOTH edges. Retention is
-/// either EXACT or a typed-gap SUPERSET, and which one the checker
-/// gives depends on the edge and on whether a SIBLING arm settles the
-/// key:
+/// (a type parameter, an unresolvable carrier) must keep that arm
+/// possible on BOTH edges. Retention is either EXACT or a typed-gap
+/// SUPERSET, and which one the checker gives depends on the edge and on
+/// whether a SIBLING arm settles the key:
 ///
-/// - Where the checker also keeps the arm (the index-signature negated
-///   edge), reading "cannot decide" as "does not carry the key" would
-///   fabricate a dead edge and LOSE a return contributor from a result
-///   then certified complete and warm — the subset direction, the one
-///   that is never acceptable.
+/// - Where the checker also keeps the arm, reading "cannot decide" as
+///   "does not carry the key" would fabricate a dead edge and LOSE a
+///   return contributor from a result then certified complete and warm
+///   — the subset direction, the one that is never acceptable.
 /// - Where the checker resolves the union by a sibling arm that DOES
 ///   declare the key (`T | { k: number }` on the positive edge, whose
 ///   measured tsc 7.0.2 verdict is `0 | { k: number; }` — the `T` arm
@@ -6281,6 +6279,9 @@ fn flow_return_candidate_count(id: &str, script: &str) -> usize {
 /// needs positive proof: only a closed surface's required member drops
 /// an arm on the negated edge, only a closed key-absent surface on the
 /// positive edge — those controls stay exact, gap-free, and warm.
+/// An index-signature arm the key applies to is decided, not undecidable:
+/// it is possible on both edges exactly as the checker keeps it, so the
+/// negated edge that keeps it is exact, gap-free and warm.
 #[test]
 fn unclassifiable_in_guard_arms_remain_possible_degrade_and_never_warm() {
     struct Case {
@@ -6335,8 +6336,8 @@ fn unclassifiable_in_guard_arms_remain_possible_degrade_and_never_warm() {
             script: "export function f(x: { [s: string]: number } | { m: string }) { if (!(\"k\" in x)) return x; return 0; }",
             checker: "{ [s: string]: number } | { m: string } | 0",
             rendered: "Union({ m: string } | 0 | {  })",
-            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
-            warm: false,
+            degradation: Degr::None,
+            warm: true,
         },
         Case {
             id: "in_required_member_positive_control",
@@ -7311,9 +7312,9 @@ fn as_const_literal_identity_survives_evolving_assignments_and_joins() {
 /// `string | undefined`, byte-identical to the guard-free read) — so
 /// retention is exact and publishes clean and warm; a REQUIRED member
 /// gains no fabricated `undefined`; an explicit `| undefined` gains no
-/// duplicate; an arm whose key set the graph cannot decide (an
-/// index-signature surface) still fails closed with the typed guard gap
-/// and never warms.
+/// duplicate; an index-signature surface the key applies to keeps its
+/// arm on both edges and its read is the index signature's value type,
+/// clean and warm.
 #[test]
 fn in_guard_presence_is_separate_from_value_undefined() {
     let obj_v = |ty: &str| single_v_object_json(ty);
@@ -7406,24 +7407,23 @@ fn in_guard_presence_is_separate_from_value_undefined() {
     }
     assert!(report.is_empty(), "\n{}", report.join("\n"));
 
-    // An arm whose runtime key set the graph cannot decide — an
-    // index-signature surface — still fails closed: the typed guard gap
-    // rides the result and it NEVER warms (the fold refuses to claim a
-    // surface it cannot prove).
+    // An index-signature surface the key applies to is decided: the
+    // positive edge keeps the arm, as the checker does, and the result is
+    // clean and warm.
     let measured = drive_expect_boundary(
         "",
-        "in_presence_unknown",
+        "in_presence_indexed",
         "type T = { [key: string]: number }\nfunction f(x: T) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
         "f",
         None,
     );
     assert_eq!(
         measured.boundary.degradation,
-        Some(Degr::FlowGap(FlowGap::GuardNarrowing)),
-        "an undecidable key set keeps the typed guard gap"
+        Some(Degr::None),
+        "an index signature decides the key set"
     );
     assert!(
-        !measured.boundary.second_from_cache,
-        "an undecidable key set is never admitted warm"
+        measured.boundary.second_from_cache,
+        "a decided key set is admitted warm"
     );
 }

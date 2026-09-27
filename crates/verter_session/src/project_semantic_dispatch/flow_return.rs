@@ -8117,13 +8117,18 @@ enum TopTypeofEdge {
 /// `in` establishes key PRESENCE and says nothing about the value; the
 /// absent-key `undefined` is the member READ's own fact, folded at
 /// `project_segments_navigate`). `Always`/`Never` are per-edge PROOFS (a
-/// required member / a proven-absent key on a closed surface); `Unknown`
-/// proves nothing and keeps the arm on both edges with the gap recorded.
+/// required member / a proven-absent key on a closed surface); `Indexed`
+/// (no declared member, an index signature the key applies to) keeps the
+/// arm on both edges as `Optional` does, the checker's
+/// `isTypePresencePossible`, while a member read gains no absent-key
+/// `undefined` from it; `Unknown` proves nothing and keeps the arm on both
+/// edges with the gap recorded.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InArmPresence {
     Always,
     Never,
     Optional,
+    Indexed,
     Unknown,
 }
 
@@ -14290,7 +14295,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             match self.arm_in_presence(concrete, key) {
                 InArmPresence::Optional => any_optional = true,
                 InArmPresence::Always => {}
-                InArmPresence::Never | InArmPresence::Unknown => all_required = false,
+                InArmPresence::Never | InArmPresence::Indexed | InArmPresence::Unknown => {
+                    all_required = false
+                }
             }
         }
         if any_optional {
@@ -18152,11 +18159,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     ///   typed superset behind the guard gap — never a dropped edge; the
     ///   negated edge keeps the subject unchanged exactly.
     ///
-    /// An arm whose key set the graph cannot decide — a type parameter,
-    /// an index-signature surface, an unresolvable carrier — stays
-    /// possible on BOTH edges, leaves the regime undecided, and records
-    /// the typed guard gap: the checker narrows such an arm, so deciding
-    /// either way would fabricate a dead edge or a clean warm superset.
+    /// An arm without the member but with an index signature the key
+    /// applies to is possible on BOTH edges and makes the key known, as an
+    /// optional member does. An arm whose key set the graph cannot decide
+    /// — a type parameter, an unresolvable carrier — stays possible on
+    /// BOTH edges, leaves the regime undecided, and records the typed
+    /// guard gap: the checker narrows such an arm, so deciding either way
+    /// would fabricate a dead edge or a clean warm superset.
     fn narrow_in(
         &mut self,
         key: &Arc<str>,
@@ -18179,9 +18188,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .iter()
             .map(|arm| self.arm_in_presence(*arm, key))
             .collect();
-        let key_is_known = presences
-            .iter()
-            .any(|presence| matches!(presence, InArmPresence::Always | InArmPresence::Optional));
+        let key_is_known = presences.iter().any(|presence| {
+            matches!(
+                presence,
+                InArmPresence::Always | InArmPresence::Optional | InArmPresence::Indexed
+            )
+        });
         let mut gapped = false;
         let fact = if key_is_known {
             let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
@@ -18189,7 +18201,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 let keep = match presence {
                     InArmPresence::Always => !negated,
                     InArmPresence::Never => negated,
-                    InArmPresence::Optional => true,
+                    InArmPresence::Optional | InArmPresence::Indexed => true,
                     InArmPresence::Unknown => {
                         gapped = true;
                         true
@@ -18329,6 +18341,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let mut seen: Vec<SemanticNodeId> = Vec::new();
         let mut any_required = false;
         let mut any_optional = false;
+        let mut any_indexed = false;
         let mut any_unknown = false;
         while let Some(node) = pending.pop() {
             if seen.contains(&node) {
@@ -18353,12 +18366,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     pending.extend(arms.iter().copied());
                 }
                 Some(SemanticNodeData::Object(surface)) => {
-                    if surface.closed().has_index_signature()
-                        || !surface.index_signatures.is_empty()
-                    {
-                        any_unknown = true;
-                        continue;
-                    }
                     match surface.project_string_key(key) {
                         crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
                             if member.optional {
@@ -18367,9 +18374,39 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 any_required = true;
                             }
                         }
+                        // An index signature the key applies to makes the
+                        // key possible on both edges, as an optional
+                        // member does (`isTypePresencePossible`): a
+                        // `string` index takes every name, a `number` index
+                        // a numeric one.
+                        crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                            if !surface.index_signatures.is_empty() =>
+                        {
+                            let graph = self.dispatch.graph();
+                            let numeric = super::relation_predicates::is_numeric_literal_name(key);
+                            for signature in surface.index_signatures.iter() {
+                                match graph.node_data(signature.key_type).as_deref() {
+                                    Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => {
+                                        any_indexed = true;
+                                    }
+                                    Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => {
+                                        any_indexed |= numeric;
+                                    }
+                                    _ => any_unknown = true,
+                                }
+                            }
+                        }
+                        crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                            if surface.closed().has_index_signature() =>
+                        {
+                            any_unknown = true;
+                        }
                         crate::semantic_query::SurfaceKeyProjection::AbsentProven => {}
                     }
                 }
+                // The non-primitive `object` declares no property and no
+                // index signature.
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Object)) => {}
                 // Anything else may still DENOTE a surface it has not been
                 // reduced to: a deferred mapped shell, a utility or alias
                 // application, a declaration reference. `Partial<{ a: 1 }>`
@@ -18407,6 +18444,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             InArmPresence::Unknown
         } else if any_optional {
             InArmPresence::Optional
+        } else if any_indexed {
+            InArmPresence::Indexed
         } else {
             InArmPresence::Never
         }

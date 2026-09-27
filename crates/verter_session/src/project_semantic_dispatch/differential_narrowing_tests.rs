@@ -240,6 +240,11 @@ export function nNot(x: HA | HB) { if (!("a" in x)) return x; throw 0; }
 export function nTernary(x: HA | HB) { return "b" in x ? x : null; }
 export function nMissing(x: HA | HB) { if ("z" in x) return x; throw 0; }
 export function nRecord(x: Record<string, number> | HA) { if ("q" in x) return x; throw 0; }
+interface NI { [n: number]: 1 }
+export function nRecordElse(x: Record<string, number> | HA) { if ("q" in x) throw 0; return x; }
+export function nNumIdx(x: NI | HA) { if ("0" in x) return x; throw 0; }
+export function nNumIdxName(x: NI | HA) { if ("q" in x) return x; throw 0; }
+export function nObjectElse(x: object | HA) { if ("a" in x) throw 0; return x; }
 export function nSwitchLike(x: HA | HB) { if ("a" in x) { return x.a; } return x.b; }
 "##;
 
@@ -265,38 +270,36 @@ fn in_guards_narrow_as_the_checker_narrows() {
 }
 
 /// `"a" in x` over `object` (or an `unknown` narrowed to `object`) narrows to
-/// `object & Record<"a", unknown>`, so `x.a` reads `unknown`.
-///
-/// What the lane gives:
-/// - `nObject`: the checker answers `object & Record<"a", unknown>`; the lane
-///   measured `object` degraded by FlowGap(GuardNarrowing).
-/// - `nObjectProp`: the checker answers `unknown`; the lane measured `<opaque
-///   Miss>` degraded by FlowGap(GuardNarrowing).
-/// - `nUnknownObj`: the checker answers `object & Record<"k", unknown>`; the
-///   lane measured `object` degraded by FlowGap(GuardNarrowing).
+/// `object & Record<"a", unknown>`, so `x.a` reads `unknown`: `object`
+/// declares no property and no index signature, so the key is unknown to
+/// it. Its negated edge drops an arm that requires the key.
 #[test]
-#[ignore = "an in guard over a type without the key intersects Record<key, unknown>"]
 fn an_in_guard_intersects_a_record_of_the_key() {
     let matrix = Matrix::new(IN_OPERATOR);
     let failures = matrix.returns(&[
         ("nObject", "object & Record<\"a\", unknown>"),
         ("nObjectProp", "unknown"),
         ("nUnknownObj", "object & Record<\"k\", unknown>"),
+        ("nObjectElse", "object"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// `"q" in x` over `Record<string, number> | HA` keeps only the record: `HA`
-/// neither declares `q` nor has an index signature.
-///
-/// What the lane gives:
-/// - `nRecord`: the checker answers `Record<string, number>`; the lane measured
-///   `Record<string, number> | HA` degraded by FlowGap(GuardNarrowing).
+/// neither declares `q` nor has an index signature, and the record's
+/// `string` index makes the key possible on both edges, as an optional
+/// member does. A `number` index takes a numeric name only: `"0" in x`
+/// keeps it, `"q" in x` is a key no arm knows, which intersects
+/// `Record<"q", unknown>`.
 #[test]
-#[ignore = "an in guard drops an arm that neither declares the key nor has an index signature"]
 fn an_in_guard_drops_an_arm_without_the_key_or_an_index() {
     let matrix = Matrix::new(IN_OPERATOR);
-    let failures = matrix.returns(&[("nRecord", "Record<string, number>")]);
+    let failures = matrix.returns(&[
+        ("nRecord", "Record<string, number>"),
+        ("nRecordElse", "HA | Record<string, number>"),
+        ("nNumIdx", "NI"),
+        ("nNumIdxName", "(HA | NI) & Record<\"q\", unknown>"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
