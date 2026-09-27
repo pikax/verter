@@ -1407,9 +1407,17 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
         SignatureResultRecipe::UnionCommon { .. }
     ));
     assert_eq!(authored(&composite), [None]);
+    let arms: Vec<_> = match d.graph().node_data(union).as_deref() {
+        Some(SemanticNodeData::Union(list)) => list.iter().copied().collect(),
+        other => panic!("expected a union subject, got {other:?}"),
+    };
+    assert!(
+        arms.len() == 2 && arms.contains(&first) && arms.contains(&other),
+        "premise: the union keeps both authored arms, got {arms:?}"
+    );
     assert_eq!(
         &*composite.nodes[0].constituents,
-        &[first, other],
+        arms.as_slice(),
         "a composite names the authored node of every constituent, in arm order"
     );
 }

@@ -625,3 +625,311 @@ fn intrinsic_applications_key_by_the_frozen_op_tag() {
         keys.push(key);
     }
 }
+
+/// `count` unrelated literals, so the next nodes a store mints sit at other
+/// arena ids than in a fresh store.
+fn pad(graph: &SemanticGraphStore, count: usize) {
+    for index in 0..count {
+        let _ = lit_str(graph, &format!("padding-{index}"));
+    }
+}
+
+fn function_occurrence(
+    symbol: &str,
+    signature_ordinal: u32,
+) -> crate::semantic_query::SignatureNodeOccurrence {
+    use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
+    use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
+    crate::semantic_query::SignatureNodeOccurrence {
+        function: FlowFunctionReturnIdentity {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from("/src/f.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from(symbol),
+                space: LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        },
+        signature_ordinal,
+    }
+}
+
+/// One deferred callable `(x: param) => <deferred>`.
+fn deferred_callable(
+    graph: &SemanticGraphStore,
+    occurrence: crate::semantic_query::SignatureNodeOccurrence,
+    param: PrimitiveKind,
+    body_derived: bool,
+) -> SemanticNodeId {
+    use crate::semantic_query::{
+        DeferredCallable, FunctionParam, SignatureKind, SignatureReturnCarrier,
+    };
+    use verter_type_expr::facts::FunctionReturnSource;
+    let ty = prim(graph, param);
+    let return_carrier = SignatureReturnCarrier::Function(if body_derived {
+        FunctionReturnSource::Flow(occurrence.function.clone())
+    } else {
+        FunctionReturnSource::Absent
+    });
+    graph.intern_node(SemanticNodeData::DeferredCallable(
+        DeferredCallable::from_parts_for_tests(
+            SignatureKind::Call,
+            Arc::from([FunctionParam::synthetic(
+                Some(Arc::from("x")),
+                ty,
+                false,
+                false,
+            )]),
+            Arc::from(Vec::new()),
+            occurrence,
+            return_carrier,
+        ),
+    ))
+}
+
+/// A deferred callable keys its whole closed recipe — the served position
+/// it was composed at, its parameters and its deferred return carrier —
+/// and never the arena ids of its children.
+#[test]
+fn deferred_callables_key_their_composed_position_and_parameters() {
+    let graph = SemanticGraphStore::new();
+    let base = deferred_callable(
+        &graph,
+        function_occurrence("f", 0),
+        PrimitiveKind::Number,
+        true,
+    );
+    let variants = [
+        deferred_callable(
+            &graph,
+            function_occurrence("f", 1),
+            PrimitiveKind::Number,
+            true,
+        ),
+        deferred_callable(
+            &graph,
+            function_occurrence("g", 0),
+            PrimitiveKind::Number,
+            true,
+        ),
+        deferred_callable(
+            &graph,
+            function_occurrence("f", 0),
+            PrimitiveKind::String,
+            true,
+        ),
+        deferred_callable(
+            &graph,
+            function_occurrence("f", 0),
+            PrimitiveKind::Number,
+            false,
+        ),
+    ];
+    let mut keys = vec![stable_key_for_node(&graph, base)];
+    for variant in variants {
+        let key = stable_key_for_node(&graph, variant);
+        assert!(
+            !keys.contains(&key),
+            "deferred callables over another position, parameter or return share a key"
+        );
+        keys.push(key);
+    }
+    let elsewhere = SemanticGraphStore::new();
+    pad(&elsewhere, 11);
+    let same = deferred_callable(
+        &elsewhere,
+        function_occurrence("f", 0),
+        PrimitiveKind::Number,
+        true,
+    );
+    assert!(
+        stable_key_for_node(&elsewhere, same) == keys[0],
+        "the same recipe keys alike wherever its children sit"
+    );
+}
+
+fn synthetic_binding(
+    graph: &SemanticGraphStore,
+    scope: &str,
+    surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind,
+    slot_name: Option<&str>,
+    binding_name: &str,
+    value: PrimitiveKind,
+) -> SemanticNodeId {
+    let value = prim(graph, value);
+    graph.intern_node(SemanticNodeData::SyntheticBinding {
+        id: crate::semantic_query::SyntheticBindingId {
+            scope_canonical_id: Arc::from(scope),
+            surface_kind,
+            slot_name: slot_name.map(Arc::from),
+            binding_name: Arc::from(binding_name),
+        },
+        value_node: value.0,
+    })
+}
+
+/// A synthetic binding keys its synthesizing scope, its surface role, its
+/// slot and bound name, and the key of its bound value, never the arena
+/// ordinal of that value.
+#[test]
+fn synthetic_bindings_key_owner_role_position_and_value() {
+    use verter_type_expr::SyntheticCarrierSurfaceKind::{Binding, SlotBinding};
+    let graph = SemanticGraphStore::new();
+    let number = PrimitiveKind::Number;
+    let base = synthetic_binding(
+        &graph,
+        "/c.vue",
+        SlotBinding,
+        Some("default"),
+        "item",
+        number,
+    );
+    let variants = [
+        synthetic_binding(
+            &graph,
+            "/d.vue",
+            SlotBinding,
+            Some("default"),
+            "item",
+            number,
+        ),
+        synthetic_binding(&graph, "/c.vue", Binding, Some("default"), "item", number),
+        synthetic_binding(&graph, "/c.vue", SlotBinding, None, "item", number),
+        synthetic_binding(
+            &graph,
+            "/c.vue",
+            SlotBinding,
+            Some("header"),
+            "item",
+            number,
+        ),
+        synthetic_binding(
+            &graph,
+            "/c.vue",
+            SlotBinding,
+            Some("default"),
+            "row",
+            number,
+        ),
+        synthetic_binding(
+            &graph,
+            "/c.vue",
+            SlotBinding,
+            Some("default"),
+            "item",
+            PrimitiveKind::String,
+        ),
+    ];
+    let mut keys = vec![stable_key_for_node(&graph, base)];
+    for variant in variants {
+        let key = stable_key_for_node(&graph, variant);
+        assert!(
+            !keys.contains(&key),
+            "bindings with another owner, role, position or value share a key"
+        );
+        keys.push(key);
+    }
+    let elsewhere = SemanticGraphStore::new();
+    pad(&elsewhere, 5);
+    let same = synthetic_binding(
+        &elsewhere,
+        "/c.vue",
+        SlotBinding,
+        Some("default"),
+        "item",
+        number,
+    );
+    assert!(
+        stable_key_for_node(&elsewhere, same) == keys[0],
+        "the bound value keys by structure, not by its arena ordinal"
+    );
+}
+
+/// A raw fallback keys its raw text, the whole equality identity of the
+/// payload: the diagnostic provenance, which never distinguishes two
+/// payloads, never distinguishes two keys either.
+#[test]
+fn raw_fallbacks_key_their_raw_text_not_their_provenance() {
+    use verter_type_expr::UnknownValue;
+    let raw = |value: UnknownValue| {
+        let graph = SemanticGraphStore::new();
+        let node = graph.intern_node(SemanticNodeData::RawFallback { value });
+        stable_key_for_node(&graph, node)
+    };
+    assert!(
+        raw(UnknownValue::unsupported_syntax("Foo<"))
+            == raw(UnknownValue::jsdoc_parse_fallback("Foo<")),
+        "one raw text keys alike under every provenance"
+    );
+    assert!(
+        raw(UnknownValue::unsupported_syntax("Foo<"))
+            != raw(UnknownValue::unsupported_syntax("Bar<")),
+        "distinct raw text keys apart"
+    );
+}
+
+fn import_type(graph: &SemanticGraphStore, importer: Option<&str>) -> SemanticNodeId {
+    use crate::semantic_query::NodeScopeId;
+    let data = SemanticNodeData::new_import_type(
+        Arc::from("./m"),
+        Arc::from([Arc::<str>::from("G")]),
+        Arc::from(Vec::new()),
+        false,
+    );
+    match importer {
+        None => graph.intern_node(data),
+        Some(canonical) => graph.intern_node_with_scope(
+            data,
+            NodeScopeId::File {
+                canonical_id: Arc::from(canonical),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: [3u8; 16],
+                local_scope: None,
+            },
+        ),
+    }
+}
+
+/// An import-type carrier keys the importing source unit with its
+/// specifier (the whole resolver input), so one spelling written in two
+/// files, which can name two modules, keys as two identities, and the same
+/// import keys alike in every store.
+#[test]
+fn import_types_key_their_importing_unit_with_the_specifier() {
+    let graph = SemanticGraphStore::new();
+    let from_a = stable_key_for_node(&graph, import_type(&graph, Some("/src/a.ts")));
+    let from_nested = stable_key_for_node(&graph, import_type(&graph, Some("/src/lib/b.ts")));
+    let unscoped = stable_key_for_node(&graph, import_type(&graph, None));
+    assert!(
+        from_a != from_nested,
+        "one specifier from two importing units keys apart"
+    );
+    assert!(
+        unscoped != from_a && unscoped != from_nested,
+        "an unscoped carrier is not the import of any file"
+    );
+    let elsewhere = SemanticGraphStore::new();
+    pad(&elsewhere, 3);
+    assert!(
+        stable_key_for_node(&elsewhere, import_type(&elsewhere, Some("/src/a.ts"))) == from_a,
+        "the same import keys alike in another store"
+    );
+}
+
+/// No encoding in the stable-key module is Rust `Debug` text: a `Debug`
+/// form is not a versioned schema, and it prints fields (a diagnostic
+/// provenance, an arena ordinal) that are not identity.
+#[test]
+fn stable_key_encoder_formats_no_debug_text() {
+    let source = include_str!("stable_key.rs");
+    for (index, line) in source.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or_default();
+        assert!(
+            !code.contains(":?") && !code.contains("format!"),
+            "stable_key.rs line {}: `{}` formats text into a key",
+            index + 1,
+            line.trim()
+        );
+    }
+}

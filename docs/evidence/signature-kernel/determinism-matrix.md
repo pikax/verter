@@ -110,16 +110,41 @@ against the **live** `SemanticNodeData` declaration by
 `stable_key_table_enumerates_every_semantic_node_data_category`: a new variant
 cannot land without a registration row in the same change.
 
-Every variant now has a `VerterStableV1` encoding. Four rows carry a
-`residual` — an identity input the encoder **approximates** rather than
-consumes, so the row's identity claim is weaker than its `inputs` column reads:
+Every variant has a `VerterStableV1` encoding built from explicit, versioned
+fields; no encoding is Rust `Debug` text
+(`stable_key_encoder_formats_no_debug_text`). One row carries a `residual` —
+an identity input the encoder **approximates** rather than consumes, so the
+row's identity claim is weaker than its `inputs` column reads:
 
 | Variant | Residual |
 |---|---|
-| `DeferredCallable` | The encoder walks the carrier type arguments only; the deferred subject reference is not an encoding input. |
-| `ImportType` | The encoder consumes the authored specifier text, not a resolved module logical identity. |
-| `RawFallback` | The encoder serialises the opaque payload's `Debug` form rather than a stable reference to the failed input. |
-| `SyntheticBinding` | The encoder serialises the content-free binding id's `Debug` form; the synthesizing operation's owner/role anchor is not an encoding input. |
+| `ImportType` | The encoder consumes the resolver's inputs — the importing logical source unit and the authored specifier — not the resolved module logical identity. One spelling written in two files keys as two identities; two spellings of one module key apart until the carrier resolves, because key construction never resolves a module (§5.4). |
+
+The encoder walks an explicit frame stack: every finite structure gets its
+complete key at any depth, a true cycle ends at a back-reference to its open
+frame's level, and no key is incomplete. `Eq`, `Ord` and `Hash` all read the
+same `(fingerprint, exact)` pair.
+
+### Encoding revisions under `VerterStableV1`
+
+The schema version byte stays `1`. No stable key outlives its process — the
+persisted-cache axis is dormant (above), and nothing serializes a key — so no
+stored key can be read under a different encoding. The revisions below change
+bytes only where the previous encoding was not a defined schema, and they are
+registered here rather than changed silently:
+
+| Encoding | Previous bytes | Defined bytes |
+|---|---|---|
+| Depth past 256 levels | one shared depth-exhausted marker, `RECURSIVE` sub-tag 2 | the complete structure; the marker is retired |
+| `IntrinsicApplication` op | a hash of the op's `Debug` spelling | the frozen `CompilerIntrinsicTypeOp::stable_hash_tag` |
+| `DeferredCallable` | the header alone | bucket, parameters, binder declarations, served position, return carrier |
+| `ImportType` | specifier, qualifier, role, arguments | the importing logical source unit first, then the same fields |
+| `RawFallback` | the payload's `Debug` form, including its provenance | the raw text |
+| `SyntheticBinding` | the binding id's `Debug` form | scope, surface role, slot, bound name, and the bound value's key |
+| `Signature` occurrence, `TypeOfNominal` identity, numeric and unique-symbol property keys | `Debug` forms | explicit anchor, owner, name, path and ordinal fields; a numeric key as its integer |
+
+Every other encoding, and with it every existing union order over those
+variants, is byte-identical.
 
 ## Class 3 admission
 

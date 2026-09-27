@@ -10,11 +10,20 @@ use std::sync::Arc;
 
 use crate::semantic_query::composite::CompositeOriginCategory;
 use crate::semantic_query::{
-    AuthoredPropertyKey, LiteralValue, MapperKind, NodeScopeId, NullabilityPolicy, OptionalityMod,
-    PredicateSubject, PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData,
-    SemanticNodeId, SignatureKind, SurfaceEntry, SurfaceMember,
+    AuthoredPropertyKey, FunctionParam, LiteralValue, MapperKind, NodeScopeId, NullabilityPolicy,
+    OptionalityMod, PredicateSubject, PrimitiveKind, QueryError, ReadonlyMod, ScopeId,
+    SemanticNodeData, SemanticNodeId, SignatureKind, SignatureNodeOccurrence,
+    SignatureReturnCarrier, SurfaceEntry, SurfaceMember, TypeParamDecl,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
+use verter_type_expr::facts::{
+    FlowFunctionReturnIdentity, FunctionPartIdentity, FunctionReturnSource, ValueDeclIdentityPart,
+};
+use verter_type_expr::locators::{
+    AuthoredAnchor, FunctionReturnLocator, LocatorSymbolSpace, TypeBodyPathStep,
+    TypeParamBoundPosition,
+};
+use verter_type_expr::SyntheticCarrierSurfaceKind;
 
 use super::semantic_context::{
     project_order_domain, project_union_order, OrderDomainId, SemanticContext, SemanticContextId,
@@ -361,7 +370,7 @@ impl KeyWalk<'_> {
         self.open.insert(id, self.frames.len() as u32);
         self.frames.push(Frame {
             node: id,
-            recipe: encode_data(&data),
+            recipe: encode_data(self.graph, id, &data),
             written: 0,
             next_hole: 0,
             start,
@@ -440,8 +449,9 @@ impl KeyWalk<'_> {
 }
 
 /// The node's encoding recipe: its own bytes with a hole at every child.
-/// Reads the node's payload only — never another node.
-fn encode_data(data: &SemanticNodeData) -> Recipe {
+/// Reads the node's own payload and, for an import carrier, its own
+/// interning scope — never another node.
+fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNodeData) -> Recipe {
     let mut enc = Recipe::new();
     match data {
         SemanticNodeData::Primitive(kind) => {
@@ -734,33 +744,14 @@ fn encode_data(data: &SemanticNodeData) -> Recipe {
                 SignatureKind::Construct if *is_abstract => 3,
                 SignatureKind::Construct => 2,
             });
-            enc.u16(params.len() as u16);
-            for p in params.iter() {
-                match &p.name {
-                    None => enc.u8(0),
-                    Some(n) => {
-                        enc.u8(1);
-                        enc.str(n);
-                    }
-                }
-                // One byte for optionality and the literal-declared fact:
-                // a parameter that is not literal-declared encodes exactly
-                // as its optionality alone.
-                enc.u8(u8::from(p.optional) | (u8::from(p.declared_literal) << 1));
-                enc.bool(p.rest);
-                enc.child(p.ty);
-            }
+            encode_params(&mut enc, params);
             enc.child(*return_type);
-            enc.u16(type_parameters.len() as u16);
-            for tp in type_parameters.iter() {
-                enc.str(&tp.name);
-                enc.child(tp.param);
-            }
+            encode_type_parameters(&mut enc, type_parameters);
             match occurrence {
                 None => enc.u8(0),
                 Some(occ) => {
                     enc.u8(1);
-                    enc.bytes(&format!("{occ:?}").into_bytes());
+                    encode_signature_occurrence(&mut enc, occ);
                 }
             }
             // The predicate is a trailing section, present only on a
@@ -838,7 +829,7 @@ fn encode_data(data: &SemanticNodeData) -> Recipe {
         SemanticNodeData::TypeOfNominal(_) => {
             enc.header(category::AUTHORED, subtag::TYPEOF_NOMINAL);
             if let Some(identity) = data.typeof_nominal_identity() {
-                enc.bytes(&format!("{identity:?}").into_bytes());
+                encode_value_decl(&mut enc, identity);
             }
             if let Some((root, path)) = data.typeof_head() {
                 encode_scope_id(&mut enc, &root.scope);
@@ -863,6 +854,21 @@ fn encode_data(data: &SemanticNodeData) -> Recipe {
         }
         SemanticNodeData::ImportType(_) => {
             enc.header(category::AUTHORED, subtag::IMPORT_TYPE);
+            // The specifier resolves against the logical source unit the
+            // carrier is scoped to: the importing unit and the specifier are
+            // the whole resolver input, so one spelling from two importers
+            // stays two identities.
+            match graph
+                .node_scope(id)
+                .as_ref()
+                .and_then(NodeScopeId::canonical_file)
+            {
+                None => enc.u8(0),
+                Some(importer) => {
+                    enc.u8(1);
+                    enc.str(&importer);
+                }
+            }
             if let Some((spec, qual, typeof_query)) = data.import_type_head() {
                 enc.str(spec);
                 enc.u16(qual.len() as u16);
@@ -877,22 +883,219 @@ fn encode_data(data: &SemanticNodeData) -> Recipe {
                 enc.child(*arg);
             }
         }
+        // The raw text is the payload's whole equality identity; its
+        // provenance is diagnostic, so two payloads that intern as one node
+        // share one key.
         SemanticNodeData::RawFallback { value } => {
             enc.header(category::SYNTHETIC, subtag::RAW_FALLBACK);
-            enc.bytes(&format!("{value:?}").into_bytes());
+            enc.str(value.raw());
         }
-        SemanticNodeData::SyntheticBinding { id, value_node: _ } => {
+        // The synthesizing owner (the component scope), the role (the
+        // binding surface), the binder position (slot and bound name), and
+        // the bound value as a child key, never its arena ordinal.
+        SemanticNodeData::SyntheticBinding { id, value_node } => {
             enc.header(category::BINDER, subtag::SYNTHETIC_BINDING);
-            enc.bytes(&format!("{id:?}").into_bytes());
-        }
-        SemanticNodeData::DeferredCallable(_) => {
-            enc.header(category::SYNTHETIC, subtag::DEFERRED_CALLABLE);
-            for child in data.carrier_type_args() {
-                enc.child(*child);
+            enc.str(&id.scope_canonical_id);
+            enc.u8(match id.surface_kind {
+                SyntheticCarrierSurfaceKind::SlotBinding => 1,
+                SyntheticCarrierSurfaceKind::Binding => 2,
+            });
+            match &id.slot_name {
+                None => enc.u8(0),
+                Some(slot) => {
+                    enc.u8(1);
+                    enc.str(slot);
+                }
             }
+            enc.str(&id.binding_name);
+            enc.child(SemanticNodeId(*value_node));
+        }
+        // The closed carrier recipe: the bucket, the positional parameter
+        // model, the binder declarations, the served position the callable
+        // was composed at, and where its deferred return comes from.
+        SemanticNodeData::DeferredCallable(callable) => {
+            enc.header(category::SYNTHETIC, subtag::DEFERRED_CALLABLE);
+            let parts = callable.stable_identity_parts();
+            enc.u8(match parts.kind {
+                SignatureKind::Call => 1,
+                SignatureKind::Construct => 2,
+            });
+            encode_params(&mut enc, parts.params);
+            encode_type_parameters(&mut enc, parts.type_parameters);
+            encode_signature_occurrence(&mut enc, parts.occurrence);
+            encode_return_carrier(&mut enc, parts.return_carrier);
         }
     }
     enc
+}
+
+/// A signature's positional parameters, in order: each one's name, its
+/// optionality and literal-declared fact in one byte, its rest flag and its
+/// type.
+fn encode_params(enc: &mut Recipe, params: &[FunctionParam]) {
+    enc.u16(params.len() as u16);
+    for p in params {
+        match &p.name {
+            None => enc.u8(0),
+            Some(n) => {
+                enc.u8(1);
+                enc.str(n);
+            }
+        }
+        // One byte for optionality and the literal-declared fact: a
+        // parameter that is not literal-declared encodes exactly as its
+        // optionality alone.
+        enc.u8(u8::from(p.optional) | (u8::from(p.declared_literal) << 1));
+        enc.bool(p.rest);
+        enc.child(p.ty);
+    }
+}
+
+/// A signature's own binder declarations, in order.
+fn encode_type_parameters(enc: &mut Recipe, type_parameters: &[TypeParamDecl]) {
+    enc.u16(type_parameters.len() as u16);
+    for tp in type_parameters {
+        enc.str(&tp.name);
+        enc.child(tp.param);
+    }
+}
+
+fn encode_symbol_space(enc: &mut Recipe, space: LocatorSymbolSpace) {
+    enc.u8(match space {
+        LocatorSymbolSpace::Type => 1,
+        LocatorSymbolSpace::Value => 2,
+        LocatorSymbolSpace::Namespace => 3,
+    });
+}
+
+/// An authored declaration anchor: its logical source unit, lexical owner,
+/// merged symbol name and symbol space.
+fn encode_authored_anchor(enc: &mut Recipe, anchor: &AuthoredAnchor) {
+    enc.str(&anchor.canonical_id);
+    encode_owner(enc, anchor.owner);
+    enc.str(&anchor.symbol);
+    encode_symbol_space(enc, anchor.space);
+}
+
+/// A value declaration's identity: its logical source unit, lexical owner,
+/// symbol name and member path.
+fn encode_value_decl(enc: &mut Recipe, identity: &ValueDeclIdentityPart) {
+    enc.str(&identity.canonical_id);
+    encode_owner(enc, identity.owner);
+    enc.str(&identity.symbol);
+    enc.u16(identity.member_path.len() as u16);
+    for segment in identity.member_path.iter() {
+        enc.str(segment);
+    }
+}
+
+/// A served function position: its declaration anchor, the authored part
+/// of the declaration it occupies and its overload ordinal.
+fn encode_function_position(enc: &mut Recipe, function: &FlowFunctionReturnIdentity) {
+    encode_authored_anchor(enc, &function.anchor);
+    match &function.function_part {
+        FunctionPartIdentity::DeclarationBody => enc.u8(1),
+        FunctionPartIdentity::Member { member_path } => {
+            enc.u8(2);
+            enc.u16(member_path.len() as u16);
+            for ordinal in member_path.iter() {
+                enc.u32(*ordinal);
+            }
+        }
+        FunctionPartIdentity::Initializer => enc.u8(3),
+        FunctionPartIdentity::Other { ordinal } => {
+            enc.u8(4);
+            enc.u32(*ordinal);
+        }
+    }
+    enc.u32(function.overload_ordinal);
+}
+
+/// The authored occurrence of a signature: its served function position
+/// and its ordinal in that position's call or construct bucket.
+fn encode_signature_occurrence(enc: &mut Recipe, occurrence: &SignatureNodeOccurrence) {
+    encode_function_position(enc, &occurrence.function);
+    enc.u32(occurrence.signature_ordinal);
+}
+
+/// One step of a declaration-body locator path.
+fn encode_body_step(enc: &mut Recipe, step: TypeBodyPathStep) {
+    let (tag, ordinal) = match step {
+        TypeBodyPathStep::MergedContributor { ordinal } => (1, Some(ordinal)),
+        TypeBodyPathStep::IntersectionArm { ordinal } => (2, Some(ordinal)),
+        TypeBodyPathStep::TypeArgument { ordinal } => (3, Some(ordinal)),
+        TypeBodyPathStep::Member { ordinal } => (4, Some(ordinal)),
+        TypeBodyPathStep::MemberKey => (5, None),
+        TypeBodyPathStep::MemberValue => (6, None),
+        TypeBodyPathStep::TypeParamBound { ordinal, position } => {
+            enc.u8(7);
+            enc.u32(ordinal);
+            enc.u8(match position {
+                TypeParamBoundPosition::Constraint => 1,
+                TypeParamBoundPosition::Default => 2,
+            });
+            return;
+        }
+        TypeBodyPathStep::FunctionParam { ordinal } => (8, Some(ordinal)),
+        TypeBodyPathStep::FunctionReturn => (9, None),
+        TypeBodyPathStep::ValueSignature { ordinal } => (10, Some(ordinal)),
+        TypeBodyPathStep::MappedSource => (11, None),
+        TypeBodyPathStep::MappedValue => (12, None),
+        TypeBodyPathStep::MappedNameType => (13, None),
+        TypeBodyPathStep::ConditionalCheck => (14, None),
+        TypeBodyPathStep::ConditionalExtends => (15, None),
+        TypeBodyPathStep::ConditionalTrue => (16, None),
+        TypeBodyPathStep::ConditionalFalse => (17, None),
+        TypeBodyPathStep::UnionArm { ordinal } => (18, Some(ordinal)),
+        TypeBodyPathStep::IndexedAccessObject => (19, None),
+        TypeBodyPathStep::IndexedAccessIndex => (20, None),
+        TypeBodyPathStep::IndexSignatureKey => (21, None),
+        TypeBodyPathStep::IndexSignatureValue => (22, None),
+        TypeBodyPathStep::TupleElement { ordinal } => (23, Some(ordinal)),
+    };
+    enc.u8(tag);
+    if let Some(ordinal) = ordinal {
+        enc.u32(ordinal);
+    }
+}
+
+/// Where a deferred callable's return comes from: a declared node, a
+/// declared annotation's locator, a body-derived position, or nothing.
+fn encode_return_carrier(enc: &mut Recipe, carrier: &SignatureReturnCarrier) {
+    match carrier {
+        SignatureReturnCarrier::Declared(node) => {
+            enc.u8(1);
+            enc.child(*node);
+        }
+        SignatureReturnCarrier::Function(source) => {
+            enc.u8(2);
+            match source {
+                FunctionReturnSource::Declared(locator) => {
+                    enc.u8(1);
+                    let slot = match locator {
+                        FunctionReturnLocator::Authored(slot) => {
+                            enc.u8(1);
+                            slot
+                        }
+                        FunctionReturnLocator::Jsdoc(slot) => {
+                            enc.u8(2);
+                            slot
+                        }
+                    };
+                    encode_authored_anchor(enc, &slot.anchor);
+                    enc.u16(slot.path.len() as u16);
+                    for step in slot.path.iter() {
+                        encode_body_step(enc, *step);
+                    }
+                }
+                FunctionReturnSource::Flow(function) => {
+                    enc.u8(2);
+                    encode_function_position(enc, function);
+                }
+                FunctionReturnSource::Absent => enc.u8(3),
+            }
+        }
+    }
 }
 
 fn encode_surface_entry(enc: &mut Recipe, entry: &SurfaceEntry) {
@@ -968,11 +1171,11 @@ fn encode_property_key(enc: &mut Recipe, key: &AuthoredPropertyKey) {
         }
         AuthoredPropertyKey::Number(n) => {
             enc.u8(2);
-            enc.bytes(&format!("{n:?}").into_bytes());
+            enc.u64(n.get() as u64);
         }
         AuthoredPropertyKey::UniqueSymbol(id) => {
             enc.u8(3);
-            enc.bytes(&format!("{id:?}").into_bytes());
+            encode_value_decl(enc, id);
         }
         AuthoredPropertyKey::Computed(node) => {
             enc.u8(4);
