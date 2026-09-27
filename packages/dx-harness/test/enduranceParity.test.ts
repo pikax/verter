@@ -1180,6 +1180,93 @@ describe("churn retained-byte plateau verdict", () => {
     expect(slope.pass).toBe(false);
   });
 
+  it("dirty twin: a noise-free 8 KiB/cycle child climb inside its band is no pass", () => {
+    // 3.5 MiB over the late span fits the child's 8 MiB band, but with no
+    // noise at all the slope is a trend, not a plateau: the verdict extends
+    // the run instead of passing it, and a climb that never stops is no pass.
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB,
+        provider: 35 * MIB + cycles * 8 * KIB,
+      })),
+      options,
+    );
+    const child = member(slope, "child");
+    expect(child?.rss[0].withinBand).toBe(true);
+    expect(child?.rss[0].significantlyRising).toBe(true);
+    expect(child?.inconclusive).toBe(true);
+    expect(slope.inconclusive).toBe(true);
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("still rising: INCONCLUSIVE");
+
+    // Extended by the scenario's whole 400-cycle budget, it is still rising.
+    const extended = decideChurnSlope(
+      trajectory((cycles) => ({ server: 40 * MIB, provider: 35 * MIB + cycles * 8 * KIB }), {
+        cycles: 1400,
+        windows: 26,
+      }),
+      { ...options, lateFromCycle: 550 },
+    );
+    expect(extended.pass).toBe(false);
+  });
+
+  it("reads a recorded child drift as INCONCLUSIVE and passes it once it holds", () => {
+    // A real 1000-cycle run's tsgo child (Windows, stacked tree) wanders up
+    // ~10 KiB/cycle over the late span, 5 MiB of its 8 MiB band: not a breach,
+    // not yet a plateau, so the scenario reads on. Holding near 99 MiB over
+    // the extension, the whole late span is a plateau.
+    const recorded = new Map<number, number>([
+      [100, 94.9],
+      [150, 92.0],
+      [200, 95.6],
+      [250, 98.8],
+      [300, 97.7],
+      [350, 102.1],
+      [400, 94.6],
+      [450, 98.0],
+      [500, 96.7],
+      [550, 94.6],
+      [600, 97.3],
+      [650, 98.3],
+      [700, 97.5],
+      [750, 100.4],
+      [800, 95.9],
+      [850, 99.6],
+      [900, 101.5],
+      [950, 101.0],
+      [1000, 99.4],
+      [1050, 97.2],
+      [1100, 100.9],
+      [1150, 96.5],
+      [1200, 99.8],
+      [1250, 97.1],
+      [1300, 100.2],
+      [1350, 96.8],
+      [1400, 98.9],
+    ]);
+    const provider = (cycles: number) => {
+      const mib = recorded.get(cycles + 100);
+      if (mib === undefined) throw new Error(`no recorded reading at cycle ${cycles + 100}`);
+      return mib * MIB;
+    };
+    const planned = decideChurnSlope(
+      trajectory((cycles) => ({ server: 40 * MIB, provider: provider(cycles) })),
+      options,
+    );
+    expect(member(planned, "child")?.rss[0].withinBand).toBe(true);
+    expect(planned.inconclusive, planned.detail).toBe(true);
+    expect(planned.pass).toBe(false);
+    const extended = decideChurnSlope(
+      trajectory((cycles) => ({ server: 40 * MIB, provider: provider(cycles) }), {
+        cycles: 1400,
+        windows: 26,
+      }),
+      { ...options, lateFromCycle: 550 },
+    );
+    expect(extended.inconclusive, extended.detail).toBe(false);
+    expect(extended.pass, extended.detail).toBe(true);
+  });
+
   it("passes a session that plateaus after the baseline", () => {
     const slope = decideChurnSlope(run(0), options);
     expect(slope.observable).toBe(true);
@@ -1526,6 +1613,24 @@ describe("churn retained-object verdict", () => {
     const memo = verdict.trends.find((trend) => trend.counter === "semanticMemoEntries");
     expect(memo?.withinBound).toBe(false);
     expect(verdict.pass).toBe(false);
+  });
+
+  it("fails a one-way step: two flat levels that never recur are a retained batch", () => {
+    // Flat, then one batch of 100 objects retained for good halfway through
+    // the late span: grouped by value it is two perfectly flat levels, but the
+    // low level never returns, so it is judged whole — and the whole rises.
+    const verdict = decideChurnRetention(
+      run((sinceBaseline) => ({
+        ...baselineReading,
+        semanticMemoEntries: sinceBaseline >= 700 ? 100 : 0,
+      })),
+      options,
+    );
+    const memo = verdict.trends.find((trend) => trend.counter === "semanticMemoEntries");
+    expect(memo?.late.levels).toBeUndefined();
+    expect(memo?.withinBound).toBe(false);
+    expect(verdict.pass).toBe(false);
+    expect(verdict.detail).toContain("BREACH");
   });
 
   it("judges the kernel's record count by its cap, not by its trend", () => {

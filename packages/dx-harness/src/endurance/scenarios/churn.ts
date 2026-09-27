@@ -647,7 +647,10 @@ const PLATEAU_CONFIDENCE_STANDARD_ERRORS = 2.5;
  *    read against an exact instrument that would show a retainer instead.
  *  - A child (the type-provider engine, a Go runtime whose resident set
  *    follows its collector's heap goal) has no exact figure. Its resident set
- *    must fit `childPlateauBytes` within each plateau segment. It moves
+ *    must fit `childPlateauBytes` within each plateau segment, and a segment
+ *    whose slope is significantly positive inside that band is INCONCLUSIVE
+ *    (the scenario extends the run; still rising at the end is no pass), so
+ *    a slow, noise-free climb cannot hide in the band. It moves
  *    between plateaus once in some runs, by 20-35 MiB at a random cycle: one
  *    single-window increment of at least `shiftBytes` is read as that level
  *    shift, and the segments before and after it must each be a plateau. A
@@ -824,6 +827,9 @@ export function decideChurnSlope(
     const shiftIndex = largestIncrement(rss);
     const shiftBytes = shiftIndex > 0 ? rss[shiftIndex] - rss[shiftIndex - 1] : 0;
     const band = role === "root" ? bands.rssSettlingBytes : bands.childPlateauBytes;
+    // A child has no exact figure, so its resident set carries the trend test
+    // too: a slow, steady climb that still fits the band is not a plateau.
+    const testTrend = role === "child";
     let levelShift: ChurnLevelShift | null = null;
     let inconclusive = false;
     let rssChecks: PlateauCheck[];
@@ -841,12 +847,20 @@ export function decideChurnSlope(
         return index > 0 && segment.ys[index] - segment.ys[index - 1] >= bands.shiftBytes;
       });
       inconclusive = after.ys.length < bands.minPlateauReadings;
+      // A shift at the span's first window leaves one pre-shift reading: it
+      // has no slope to judge, and the post-shift segment covers the span.
       rssChecks = [before, after]
         .filter((segment) => segment.ys.length >= 2)
-        .map((segment) => plateau(segment.xs, segment.ys, band, false));
+        .map((segment) => plateau(segment.xs, segment.ys, band, testTrend));
     } else {
-      rssChecks = [plateau(cycles, rss, band, false)];
+      rssChecks = [plateau(cycles, rss, band, testTrend)];
     }
+    // A child whose resident set rises significantly inside its band has not
+    // shown a plateau yet: a Go collector's heap goal can drift for a few
+    // hundred cycles, a retainer does not stop. Read on (the scenario extends
+    // the run); still rising when the extension budget is spent is no pass.
+    const rising = rssChecks.some((check) => check.withinBand && check.significantlyRising);
+    inconclusive ||= rising;
     const withinBound =
       !inconclusive &&
       !secondShift &&
@@ -878,13 +892,17 @@ export function decideChurnSlope(
         ...(member.heap ? [describeCheck("heap", member.heap)] : []),
         ...member.rss.map((check) => describeCheck("rss", check)),
       ];
+      const risingInBand = member.rss.some(
+        (check) => check.withinBand && check.significantlyRising,
+      );
       const shift = member.levelShift
         ? ` level shift [${member.levelShift.fromCycle}..${member.levelShift.toCycle}] ` +
-          `+${mib(member.levelShift.growthBytes)}${member.inconclusive ? " (post-shift plateau unproven: INCONCLUSIVE)" : ""}`
+          `+${mib(member.levelShift.growthBytes)}${member.inconclusive && !risingInBand ? " (post-shift plateau unproven: INCONCLUSIVE)" : ""}`
         : "";
+      const rising = risingInBand ? " (still rising: INCONCLUSIVE)" : "";
       return (
         `${member.image ?? "process"}#${member.pid} (${member.role === "root" ? "server" : "child"})` +
-        `${member.withinBound ? "" : " BREACH"}: ${parts.join(", ")}${shift}`
+        `${member.withinBound ? "" : " BREACH"}: ${parts.join(", ")}${shift}${rising}`
       );
     })
     .join("; ");
@@ -978,7 +996,10 @@ export function plateau(
  * it is: each group must be flat on its own, and a drift riding on either
  * level still breaches. A drift alone never splits that way (its readings
  * climb in steps no wider than the band, or its largest gap isolates one
- * reading), so it is judged whole. Returns null when no such split exists.
+ * reading), so it is judged whole. Nor does a one-way step: the levels must
+ * recur, one of them returning after the other appeared, or a retained batch
+ * taken once inside the late span would read as two flat levels. Returns null
+ * when no such split exists.
  */
 export function twoLevelPlateau(
   xs: readonly number[],
@@ -999,6 +1020,12 @@ export function twoLevelPlateau(
   if (cut < 3 || order.length - cut < 3) return null;
   const lowIndexes = order.slice(0, cut).sort((a, b) => a - b);
   const highIndexes = order.slice(cut).sort((a, b) => a - b);
+  const onHigh = new Set(highIndexes);
+  let transitions = 0;
+  for (let index = 1; index < ys.length; index += 1) {
+    if (onHigh.has(index) !== onHigh.has(index - 1)) transitions += 1;
+  }
+  if (transitions < 2) return null;
   const fitOf = (indexes: readonly number[]) =>
     plateau(
       indexes.map((index) => xs[index]),
