@@ -3238,8 +3238,9 @@ fn infer_declaration_or_unknown(
 ///
 /// Member VALUES follow the checker's enum member value computation: an
 /// initializer is read into the constant evaluator's program
-/// ([`enum_constant_expr`]) and evaluated against the earlier members of
-/// this declaration; a member without one takes the previous member's
+/// ([`enum_constant_expr`]) and evaluated against the members of this
+/// declaration by position ([`own_references_read`]); a member without one
+/// takes the previous member's
 /// numeric value plus one (0 for the first member) — except in an AMBIENT
 /// non-`const` enum (a `declare enum`, or any enum of a declaration file or
 /// an ambient namespace), where a member without an initializer is
@@ -3258,12 +3259,21 @@ fn collect_enum(
 ) {
     use crate::analysis::enum_constant::{
         enum_constant_expr, enum_first_member_expr, enum_increment_expr, evaluate_enum_constant,
-        EnumConstant,
     };
     let enum_name = decl.id.name.as_str();
     let ambient = ambient || decl.declare;
+    // Where each member name is first declared in this body: a reference
+    // to a member of the body reads it by position, as the checker's
+    // declared-before-use rule reads it.
+    let mut declared: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
+    for (position, member) in decl.body.members.iter().enumerate() {
+        declared
+            .entry(member.id.static_name().to_string())
+            .or_insert(position);
+    }
     let mut members: Vec<(String, EnumMemberValue)> = Vec::new();
-    for member in &decl.body.members {
+    let mut member_slot: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
+    for (position, member) in decl.body.members.iter().enumerate() {
         // Member NAME resolution is SHARED with `index_enum`'s header walk.
         let member_name = member.id.static_name().to_string();
         let program = match &member.initializer {
@@ -3276,42 +3286,34 @@ fn collect_enum(
         };
         let value = match program {
             None => EnumMemberValue::Deferred(EnumPrimitiveDomain::Number),
-            Some(program) => {
+            Some(program) => match own_references_read(
+                &program,
+                enum_name,
+                position,
+                ambient,
+                &declared,
+                |name| member_slot.get(name).map(|&slot| &members[slot].1),
+            ) {
                 // A reference this declaration cannot answer — another
                 // declaration's value, or an earlier member that is itself
                 // pending — leaves the program for the session to evaluate.
-                let mut pending = false;
-                let constant = evaluate_enum_constant(&program, |path| {
-                    let member = match path {
-                        [member] => member,
-                        [owner, member] if owner == enum_name => member,
-                        _ => {
-                            pending = true;
-                            return None;
-                        }
-                    };
-                    match members.iter().find(|(earlier, _)| earlier == member) {
-                        Some((_, EnumMemberValue::Folded(scalar))) => {
-                            EnumConstant::from_scalar(scalar)
-                        }
-                        Some((_, EnumMemberValue::Pending(_))) | None => {
-                            pending = true;
-                            None
-                        }
-                        Some((_, EnumMemberValue::Deferred(_))) => None,
+                OwnReferences::Open(program) => EnumMemberValue::Pending(program),
+                OwnReferences::Closed(program) => {
+                    match evaluate_enum_constant(&program, |_| None) {
+                        Some(constant) => EnumMemberValue::Folded(constant.to_scalar()),
+                        None => EnumMemberValue::Deferred(EnumPrimitiveDomain::Number),
                     }
-                });
-                match constant {
-                    Some(constant) => EnumMemberValue::Folded(constant.to_scalar()),
-                    None if pending => EnumMemberValue::Pending(program),
-                    None => EnumMemberValue::Deferred(EnumPrimitiveDomain::Number),
                 }
-            }
+                OwnReferences::NotConstant => {
+                    EnumMemberValue::Deferred(EnumPrimitiveDomain::Number)
+                }
+            },
         };
         // Members are unique within a single enum body (TS forbids a repeated
         // member name); dedup defensively so a malformed repeat does not
         // double-count, keeping the first occurrence's entry.
-        if !members.iter().any(|(existing, _)| existing == &member_name) {
+        if !member_slot.contains_key(&member_name) {
+            member_slot.insert(member_name.clone(), members.len());
             members.push((member_name, value));
         }
     }
@@ -3366,6 +3368,90 @@ fn collect_enum(
         body: TypeExpr::Primitive(PrimitiveName::Never),
         unique_symbol_members: Vec::new(),
     });
+}
+
+/// A member's program once the references its own declaration answers are
+/// read.
+enum OwnReferences {
+    /// No constant: it names the member itself, a computed member, or (in
+    /// an ambient enum) a member declared after it.
+    NotConstant,
+    /// Every reference read: the program evaluates alone.
+    Closed(verter_type_expr::facts::EnumConstantExpr),
+    /// References another declaration, or a pending earlier member, answers.
+    Open(verter_type_expr::facts::EnumConstantExpr),
+}
+
+/// Read the references `program` — the initializer of the member at
+/// `position` of the enum body named `enum_name` — makes to members of that
+/// body (a bare `A`, or `E.A` through the enum's own name), as the checker's
+/// evaluator reads an enum member reference: an earlier member stands for
+/// its value; the member itself is used before it is assigned, and is no
+/// constant; a member declared after it reads `0`, the value the checker
+/// gives a member referenced before its declaration — except in an ambient
+/// enum, whose later members are not yet computed and so are no constant.
+/// `earlier` reads the value of a member already lowered.
+fn own_references_read<'m>(
+    program: &verter_type_expr::facts::EnumConstantExpr,
+    enum_name: &str,
+    position: usize,
+    ambient: bool,
+    declared: &rustc_hash::FxHashMap<String, usize>,
+    earlier: impl Fn(&str) -> Option<&'m EnumMemberValue>,
+) -> OwnReferences {
+    use crate::analysis::enum_constant::EnumConstant;
+    use verter_type_expr::facts::{EnumConstantExpr, EnumConstantStep, EnumScalar};
+    let literal = |constant: EnumConstant| match constant.to_scalar() {
+        EnumScalar::Number(text) => EnumConstantStep::Number(text),
+        EnumScalar::String(text) => EnumConstantStep::String(text),
+        EnumScalar::Primitive(_) => unreachable!("a constant stores a literal scalar"),
+    };
+    let mut open = false;
+    let mut steps = Vec::with_capacity(program.steps.len());
+    for step in program.steps.iter() {
+        let EnumConstantStep::Reference(path) = step else {
+            steps.push(step.clone());
+            continue;
+        };
+        let own = match &path[..] {
+            [member] => Some(member),
+            [owner, member] if owner == enum_name => Some(member),
+            _ => None,
+        };
+        let Some((member, at)) =
+            own.and_then(|member| declared.get(member.as_str()).map(|&at| (member, at)))
+        else {
+            open = true;
+            steps.push(step.clone());
+            continue;
+        };
+        if at == position || (at > position && ambient) {
+            return OwnReferences::NotConstant;
+        }
+        if at > position {
+            steps.push(literal(EnumConstant::Number(0.0)));
+            continue;
+        }
+        match earlier(member) {
+            Some(EnumMemberValue::Folded(scalar)) => match EnumConstant::from_scalar(scalar) {
+                Some(constant) => steps.push(literal(constant)),
+                None => return OwnReferences::NotConstant,
+            },
+            Some(EnumMemberValue::Deferred(_)) => return OwnReferences::NotConstant,
+            Some(EnumMemberValue::Pending(_)) | None => {
+                open = true;
+                steps.push(step.clone());
+            }
+        }
+    }
+    let program = EnumConstantExpr {
+        steps: Arc::from(steps.into_boxed_slice()),
+    };
+    if open {
+        OwnReferences::Open(program)
+    } else {
+        OwnReferences::Closed(program)
+    }
 }
 
 fn lower_function_parts(func: &Function<'_>, source: &str) -> Option<LoweredValueDeclParts> {
