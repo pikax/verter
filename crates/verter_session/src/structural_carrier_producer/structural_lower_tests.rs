@@ -241,12 +241,20 @@ fn lowers_synthetic_slot_binding_with_content_free_id() {
     // value-side `value_node` ordinal (content-free identity) while the
     // `value_node` is retained separately as provenance.
     let host = VerterHost::new_standalone(Default::default());
+    // The backing value is a node the arena holds: a carrier over a node it
+    // could still allocate is a forward reference and refuses.
+    let backing =
+        host.project_type_store()
+            .semantic_graph()
+            .intern_node(SemanticNodeData::Primitive(
+                crate::semantic_query::PrimitiveKind::String,
+            ));
     let key = SyntheticCarrierKey {
         scope_canonical_id: Arc::from("/Comp.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
         slot_name: Some(Arc::from("default")),
         binding_name: Arc::from("row"),
-        value_node: 42,
+        value_node: backing.0,
     };
     let expr = TypeExpr::SyntheticSlotBinding(Arc::new(key.clone()));
     let (graph, root) = lower_root(&host, &expr);
@@ -260,7 +268,7 @@ fn lowers_synthetic_slot_binding_with_content_free_id() {
             assert_eq!(id.binding_name.as_ref(), "row");
             assert_eq!(id.slot_name.as_deref(), Some("default"));
             assert_eq!(
-                *value_node, 42,
+                *value_node, backing.0,
                 "value_node provenance is retained separately from identity"
             );
         }

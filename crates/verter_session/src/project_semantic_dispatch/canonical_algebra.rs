@@ -1404,8 +1404,7 @@ fn canonicalize_with(
     //    `Canonical`; anything else is stamped `CanonicalUnproven` at rest
     //    — never skip-eligible.
     if is_union {
-        crate::semantic_query::stable_key::sort_union_members_by_stable_key(graph, &mut kept);
-        kept.dedup_by(|a, b| crate::semantic_query::stable_key::provably_equal(graph, *a, *b));
+        crate::semantic_query::stable_key::sort_and_collapse_union_members(graph, &mut kept);
     } else {
         // Intersection preserves construction order. First-occurrence
         // construction-identical dedup only.

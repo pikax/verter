@@ -76,6 +76,7 @@ mod signature_epoch;
 mod union_views;
 mod unresolved_reach;
 
+pub(crate) use arena::UNALLOCATABLE_ID_FLOOR;
 pub(crate) use inflight::InlineMemberFlight;
 pub use release::SemanticReleaseReport;
 pub(crate) use scc_publish::{

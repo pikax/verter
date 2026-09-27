@@ -49,6 +49,16 @@
 //! push the node. Ids are handed out sequentially (`a.0 + 1 == b.0`) and
 //! address the chunked storage described under **Storage**.
 //!
+//! **Acyclic by contract.** A payload names children the arena already
+//! holds: every child id is below the id the payload is interned at, so the
+//! node graph is a DAG and every structural walk over it terminates without
+//! cycle detection. A payload naming a child the arena could still allocate
+//! (an id at or above the new node's, below [`UNALLOCATABLE_ID_FLOOR`]) is a
+//! forward reference, the only way to close a cycle; it interns as the typed
+//! `Opaque(ForeignSemanticOperand)` refusal instead, never as its payload.
+//! Ids from the floor up are never allocated (binder tokens, sentinels), so
+//! they can dangle but never close a cycle.
+//!
 //! Dispatch builders query the sidecar via [`super::SemanticGraphStore::node_scope`]
 //! to route per-base-scope lookups through the correct
 //! [`SessionSolverHost`](crate::resolver_core::solver_host::SessionSolverHost)
@@ -91,6 +101,26 @@ use smallvec::SmallVec;
 
 use crate::instant::Instant;
 use crate::semantic_query::{NodeScopeId, SemanticNodeData, SemanticNodeId};
+
+/// Node ids from here up are never allocated: they name non-arena operands
+/// (signature-kernel binder tokens live at bit 63) or absent-node sentinels,
+/// so a payload naming one can dangle but never close a cycle.
+pub(crate) const UNALLOCATABLE_ID_FLOOR: u64 = 1 << 62;
+
+/// Whether `data`, interned at `id`, names a child the arena could allocate
+/// at or after `id`: a forward reference, the only way to close a cycle.
+fn names_forward_child(data: &SemanticNodeData, id: SemanticNodeId) -> bool {
+    let mut forward = false;
+    let mut check = |child: SemanticNodeId| {
+        forward |= child.0 >= id.0 && child.0 < UNALLOCATABLE_ID_FLOOR;
+    };
+    if let crate::semantic_query::ChildWalk::Sealed = data.for_each_child(&mut check) {
+        if let SemanticNodeData::DeferredCallable(callable) = data {
+            callable.for_each_child_node(&mut check);
+        }
+    }
+    forward
+}
 
 pub(super) const NUM_SHARDS: usize = 16;
 pub(super) const SHARD_MASK: u64 = (NUM_SHARDS as u64) - 1;
@@ -556,6 +586,22 @@ impl NodeArena {
                     let write_start = Instant::now();
                     let mut inner = self.inner.write();
                     let wait = write_start.elapsed().as_nanos() as u64;
+                    // The id this payload would take. Ids are monotonic and
+                    // never reused (storage is chunked, not a vector), so the
+                    // next id to hand out is the allocation point the
+                    // acyclicity rule reads; a released child sits below it
+                    // and is no forward reference.
+                    let id = SemanticNodeId(inner.next_id);
+                    if names_forward_child(&data, id) {
+                        drop(inner);
+                        drop(shard);
+                        return self.push_impl(
+                            SemanticNodeData::Opaque(
+                                crate::semantic_query::QueryError::ForeignSemanticOperand,
+                            ),
+                            scope,
+                        );
+                    }
                     // ONE payload allocation, shared by refcount between the
                     // arena's slot storage and the dedup bucket — the payload
                     // is never deep-cloned into the index.
@@ -847,6 +893,60 @@ impl NodeArena {
 mod arena_intern_tests {
     use super::*;
     use crate::semantic_query::PrimitiveKind;
+
+    /// The acyclicity rule refuses a payload naming a child at or above the
+    /// id the payload would take. With chunked storage that id is the
+    /// monotonic counter, not a slot count: after a close dropped whole
+    /// chunks the storage is smaller than the ids handed out, a payload over
+    /// a node interned before it is still interned as itself, and one naming
+    /// an id the arena has not handed out is refused. Discriminating: read
+    /// against the storage size, the rule would refuse every payload over a
+    /// live node whose id exceeds the slots currently stored.
+    #[test]
+    fn the_acyclicity_rule_reads_the_next_id_not_the_storage_size() {
+        use crate::semantic_query::{LiteralValue, QueryError};
+        let arena = NodeArena::default();
+        for n in 0..(CHUNK_LEN * 3 + 8) {
+            let _ = arena.push_with_scope(
+                SemanticNodeData::Literal(LiteralValue::Number(n as f64)),
+                file_scope("/closed.ts"),
+            );
+        }
+        let kept = arena.push_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(-1.0)),
+            file_scope("/kept.ts"),
+        );
+        let _ = arena.release_canonical("/closed.ts", u64::MAX);
+        assert!(
+            (kept.0 as usize) >= arena.storage_slots(),
+            "fixture: the kept node's id is past the slots still stored ({} vs {})",
+            kept.0,
+            arena.storage_slots()
+        );
+        let over_kept = arena.push(SemanticNodeData::Array {
+            element: kept,
+            readonly: false,
+        });
+        assert!(
+            matches!(
+                arena.get(over_kept).as_deref(),
+                Some(SemanticNodeData::Array { .. })
+            ),
+            "a payload over a node interned before it is interned as itself"
+        );
+        let not_handed_out = SemanticNodeId(arena.len() as u64 + 5);
+        let refused = arena.push(SemanticNodeData::Array {
+            element: not_handed_out,
+            readonly: false,
+        });
+        assert!(
+            matches!(
+                arena.get(refused).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::ForeignSemanticOperand))
+            ),
+            "a payload naming an id not handed out yet is a forward reference"
+        );
+    }
 
     /// A recursive reference is interned unscoped and carries its type
     /// arguments inside an `Opaque` payload the child walk skips. Closing

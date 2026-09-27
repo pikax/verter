@@ -13419,6 +13419,72 @@ fn mapped_binder_keys_do_not_depend_on_lowering_order() {
     );
 }
 
+/// The arena of a real workload is a DAG: after resolving and instantiating
+/// recursive, mapped, conditional and generic declarations, every node's
+/// children sit below it (or in the never-allocated sentinel range), so no
+/// structural walk over it can meet a cycle.
+#[test]
+fn a_resolved_workload_arena_is_a_dag() {
+    use crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR;
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/dag.ts",
+        "export interface Node<T> { value: T; next: Node<T> | null; children: Node<T>[] }\n\
+         export type Json = string | number | boolean | null | Json[] | { [k: string]: Json };\n\
+         export type Partialize<T> = { [K in keyof T]?: T[K] };\n\
+         export type Unwrap<T> = T extends Promise<infer U> ? Unwrap<U> : T;\n\
+         export declare function pick<T, K extends keyof T>(o: T, k: K): T[K];\n\
+         export declare function pick(o: string): number;\n\
+         export type A = Partialize<{ a: 1; b: \"x\" }>;\n\
+         export type B = Unwrap<Promise<Promise<string>>>;\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let number = primitive(&graph, PrimitiveKind::Number);
+    for name in ["Node", "Json", "Partialize", "Unwrap", "pick", "A", "B"] {
+        let _ = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+            "/w/dag.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name,
+        )));
+    }
+    for name in ["Node", "Partialize", "Unwrap"] {
+        let _ = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                decl_identity(&host, "/w/dag.ts", name),
+                Arc::from(vec![number].into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                ),
+            ),
+        ));
+    }
+    let count = graph.node_count() as u64;
+    assert!(count > 20, "premise: the workload interned {count} nodes");
+    for id in 0..count {
+        let Some(data) = graph.node_data(SemanticNodeId(id)) else {
+            continue;
+        };
+        let mut check = |child: SemanticNodeId| {
+            assert!(
+                child.0 < id || child.0 >= UNALLOCATABLE_ID_FLOOR,
+                "node {id} names child {} at or above it",
+                child.0
+            );
+        };
+        if let crate::semantic_query::ChildWalk::Sealed = data.for_each_child(&mut check) {
+            if let SemanticNodeData::DeferredCallable(callable) = data.as_ref() {
+                callable.for_each_child_node(&mut check);
+            }
+        }
+    }
+}
+
 /// Substitute-rebuild arms must preserve the origin scope. A plain
 /// `self.graph().intern_node(...)` is scope-less: under compound
 /// `(payload, scope)` interning it would intern a file-scoped shell's
@@ -29334,10 +29400,12 @@ fn missing_node_data_evaluates_partial_not_laundered_complete() {
         crate::semantic_query::ProjectionMode::Expanded,
     );
 
-    // A valid interned node fixes a small arena bound; an id far beyond it is
-    // guaranteed unallocated, so `node_data` returns `None`.
-    let real = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let missing = crate::semantic_query::SemanticNodeId(real.0 + 1_000_000);
+    // An id in the never-allocated range has no arena data, and an
+    // acyclic arena lets a payload name it (a child the arena could still
+    // allocate would be a forward reference and refuse instead).
+    let missing = crate::semantic_query::SemanticNodeId(
+        crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR + 1_000_000,
+    );
     assert!(
         graph.node_data(missing).is_none(),
         "FIXTURE INVALID: the seeded id must have no arena data"
@@ -29429,11 +29497,13 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
     let t0 = graph.intern_node(SemanticNodeData::DeclRef {
         identity: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from("T0")),
     });
-    let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    // MISSING: an `Alias` to an unallocated id — the evaluator reaches absent
-    // arena data through the hop and reports MISSING_SEMANTIC_NODE_DATA.
+    // MISSING: an `Alias` to a never-allocated id — the evaluator reaches
+    // absent arena data through the hop and reports
+    // MISSING_SEMANTIC_NODE_DATA.
     let aliased_missing = graph.intern_node(SemanticNodeData::Alias(
-        crate::semantic_query::SemanticNodeId(leaf.0 + 5_000_000),
+        crate::semantic_query::SemanticNodeId(
+            crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR + 5_000_000,
+        ),
     ));
 
     let run = |subject: crate::semantic_query::SemanticNodeId,
