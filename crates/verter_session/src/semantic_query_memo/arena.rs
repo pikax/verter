@@ -72,8 +72,8 @@
 //! tombstones every node whose origin scope is the closed canonical, plus
 //! every node whose payload embeds a released id (children are interned
 //! before their parents, so a parent of a released node is dead too — no
-//! live node ever embeds a released id, except the sealed
-//! `DeferredCallable` carrier whose parts are unreadable here). A
+//! live node ever embeds a released id; the sealed `DeferredCallable`
+//! carrier's parts are walked through its topology-only visitor). A
 //! tombstoned slot drops its `Arc` payload and its scope, leaves the dedup
 //! index, and resolves through [`NodeArena::get`] to one shared
 //! `Opaque(Miss)` placeholder so a stale holder degrades to an unresolved
@@ -120,6 +120,42 @@ fn names_forward_child(data: &SemanticNodeData, id: SemanticNodeId) -> bool {
         }
     }
     forward
+}
+
+/// Visit every node id `data` embeds, for the release cascade: the topology
+/// child walk, plus the parts it does not reach. A sealed `DeferredCallable`
+/// answers `Sealed` to the walk, so its parts are read through the same
+/// topology-only visitor [`names_forward_child`] uses; a generic callable
+/// instantiated with another document's type is interned unscoped with its
+/// served position left in its declaring document, so neither the scope
+/// root rule nor the declaring-canonical check reaches it. A recursive
+/// reference carries its type arguments inside an `Opaque` payload the walk
+/// treats as a leaf, and a pending conditional frame binds parameters the
+/// walk does not visit (substitution appends a pair whether or not a branch
+/// mentions the binder). Each of these is interned unscoped, one per
+/// distinct payload, so an id of the closed document would otherwise keep
+/// one such node per content version.
+fn for_each_embedded_node(data: &SemanticNodeData, mut visit: impl FnMut(SemanticNodeId)) {
+    if let crate::semantic_query::ChildWalk::Sealed = data.for_each_child(&mut visit) {
+        if let SemanticNodeData::DeferredCallable(callable) = data {
+            callable.for_each_child_node(&mut visit);
+        }
+    }
+    match data {
+        SemanticNodeData::Opaque(crate::semantic_query::QueryError::RecursiveRef {
+            args, ..
+        }) => args.iter().copied().for_each(visit),
+        SemanticNodeData::Conditional {
+            pending: Some(pending),
+            ..
+        } => pending
+            .true_branch()
+            .pairs()
+            .iter()
+            .chain(pending.false_branch().pairs())
+            .for_each(|&(param, _)| visit(param)),
+        _ => {}
+    }
 }
 
 pub(super) const NUM_SHARDS: usize = 16;
@@ -685,7 +721,8 @@ impl NodeArena {
     /// whose origin scope is `File { canonical_id, .. }`, the sealed
     /// `DeferredCallable` carriers whose served position is declared in
     /// it, and — transitively — every node whose payload embeds a released
-    /// id (a parent of a dead node can never be reached again: its dedup
+    /// id, sealed and pending parts included ([`for_each_embedded_node`])
+    /// (a parent of a dead node can never be reached again: its dedup
     /// key names an id that is never re-minted, and the memo entries that
     /// held it are drained by the caller). Global-scope nodes are released
     /// ONLY through that cascade; a scope-less node that embeds no released
@@ -743,22 +780,9 @@ impl NodeArena {
                         continue;
                     }
                     let mut embeds_dead = false;
-                    let _walk = payload.for_each_child(|child| {
-                        if dead.contains(&child.0) {
-                            embeds_dead = true;
-                        }
+                    for_each_embedded_node(payload, |child| {
+                        embeds_dead |= dead.contains(&child.0);
                     });
-                    // A recursive reference carries its type arguments inside
-                    // an `Opaque` payload, which the child walk treats as a
-                    // leaf. The node is interned unscoped, one per distinct
-                    // argument list, so an argument of the closed document
-                    // would otherwise keep one such node per content version.
-                    if let SemanticNodeData::Opaque(
-                        crate::semantic_query::QueryError::RecursiveRef { args, .. },
-                    ) = payload.as_ref()
-                    {
-                        embeds_dead |= args.iter().any(|arg| dead.contains(&arg.0));
-                    }
                     if embeds_dead {
                         dead.insert(id);
                         changed = true;
@@ -985,6 +1009,153 @@ mod arena_intern_tests {
             arena.is_live(over_kept),
             "a reference over a live node stays"
         );
+    }
+
+    /// A generic callable declared in one document and instantiated with a
+    /// parameter type from another is interned unscoped as a sealed
+    /// `DeferredCallable` whose served position stays in its declaring
+    /// document. Closing the document the substituted type belongs to
+    /// releases the callable over it (through a parameter or through a
+    /// binder bound), and a parent naming the callable goes with it; a
+    /// callable over a live type stays.
+    /// Discriminating: the cascade read only `for_each_child`, which answers
+    /// `Sealed` for this variant without visiting its children, and the root
+    /// check reads only the declaring canonical, so both callables and the
+    /// parent survived the close still naming a released id.
+    #[test]
+    fn a_close_releases_the_sealed_callables_over_its_nodes() {
+        use crate::semantic_query::{
+            DeferredCallable, FunctionParam, LiteralValue, SignatureKind, SignatureNodeOccurrence,
+            SignatureReturnCarrier, TypeParamDecl,
+        };
+        use verter_type_expr::facts::{
+            FlowFunctionReturnIdentity, FunctionPartIdentity, FunctionReturnSource,
+        };
+        use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
+
+        let arena = NodeArena::default();
+        let closed = arena.push_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(1.0)),
+            file_scope("/closed.ts"),
+        );
+        let kept = arena.push_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(2.0)),
+            file_scope("/kept.ts"),
+        );
+        let binder = arena.push_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(3.0)),
+            file_scope("/declaring.ts"),
+        );
+        let occurrence = SignatureNodeOccurrence {
+            function: FlowFunctionReturnIdentity {
+                anchor: AuthoredAnchor {
+                    canonical_id: Arc::from("/declaring.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    symbol: Arc::from("f"),
+                    space: LocatorSymbolSpace::Value,
+                },
+                function_part: FunctionPartIdentity::DeclarationBody,
+                overload_ordinal: 0,
+            },
+            signature_ordinal: 0,
+        };
+        let callable = |param: SemanticNodeId, constraint: Option<SemanticNodeId>| {
+            arena.push(SemanticNodeData::DeferredCallable(
+                DeferredCallable::from_parts_for_tests(
+                    SignatureKind::Call,
+                    Arc::from([FunctionParam::synthetic(
+                        Some(Arc::from("x")),
+                        param,
+                        false,
+                        false,
+                    )]),
+                    Arc::from([TypeParamDecl {
+                        name: Arc::from("T"),
+                        param: binder,
+                        constraint,
+                        default: None,
+                        is_const: false,
+                    }]),
+                    occurrence.clone(),
+                    SignatureReturnCarrier::Function(FunctionReturnSource::Absent),
+                ),
+            ))
+        };
+        let over_closed_param = callable(closed, None);
+        let over_closed_bound = callable(kept, Some(closed));
+        let over_kept = callable(kept, None);
+        let parent = arena.push(SemanticNodeData::Array {
+            element: over_closed_param,
+            readonly: false,
+        });
+
+        let released = arena.release_canonical("/closed.ts", u64::MAX);
+
+        assert!(released.contains(&closed));
+        assert!(
+            released.contains(&over_closed_param),
+            "a callable whose parameter type was released goes with it"
+        );
+        assert!(
+            released.contains(&over_closed_bound),
+            "a callable whose binder bound was released goes with it"
+        );
+        assert!(
+            released.contains(&parent),
+            "a parent of a released callable goes with it"
+        );
+        assert!(arena.is_live(over_kept), "a callable over live types stays");
+        assert!(arena.is_live(binder));
+    }
+
+    /// Substituting a binder through a deferred conditional appends the
+    /// `(param, arg)` pair to its pending frame whether or not a branch
+    /// mentions the binder, so the frame can name a released binder while
+    /// the check, extends and branches are all live. Closing the binder's
+    /// document releases that conditional; one whose frame names only live
+    /// nodes stays.
+    /// Discriminating: the child walk visits a pending frame's arguments but
+    /// never its parameters, so the conditional survived the close naming a
+    /// released binder, one per content version of the closed document.
+    #[test]
+    fn a_close_releases_the_conditionals_whose_pending_frame_binds_its_nodes() {
+        use crate::semantic_query::{ConditionalPendingSubstitution, LiteralValue};
+
+        let arena = NodeArena::default();
+        let closed = arena.push_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(1.0)),
+            file_scope("/closed.ts"),
+        );
+        let kept = arena.push_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(2.0)),
+            file_scope("/kept.ts"),
+        );
+        let bound = arena.push_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(3.0)),
+            file_scope("/kept.ts"),
+        );
+        let conditional = |param: SemanticNodeId| {
+            arena.push(SemanticNodeData::Conditional {
+                check: kept,
+                extends: kept,
+                true_branch_ref: kept,
+                false_branch_ref: kept,
+                distributive: false,
+                pending: Some(Arc::new(
+                    ConditionalPendingSubstitution::empty().append_both(param, bound),
+                )),
+            })
+        };
+        let binds_closed = conditional(closed);
+        let binds_kept = conditional(kept);
+
+        let released = arena.release_canonical("/closed.ts", u64::MAX);
+
+        assert!(
+            released.contains(&binds_closed),
+            "a conditional whose pending frame binds a released node goes with it"
+        );
+        assert!(arena.is_live(binds_kept));
     }
 
     fn file_scope(canonical: &str) -> NodeScopeId {

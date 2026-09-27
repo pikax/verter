@@ -94,6 +94,9 @@
 //! passive mirror storage lazily allocates one slot per macro on first demand.
 //! Each slot singleflights cold population and provides a lock-free committed
 //! read. A transient `LeaseMiss` leaves its slot vacant for a later retry.
+//! A document close releases the carrier nodes a slot holds while the
+//! artifact stays for the reload, so a committed handle that no longer names
+//! a live node is re-lowered in place rather than served.
 //!
 //! ## Script-setup generic seeding
 //!
@@ -1233,7 +1236,10 @@ pub(crate) struct MacroHotMirror {
 
 #[derive(Default)]
 struct MacroSlot {
-    committed: OnceLock<Option<Arc<MacroHotProduct>>>,
+    /// The committed value, replaced only under `build_lock`: a committed
+    /// handle a document close released is re-lowered in place (see
+    /// [`committed_is_servable`]).
+    committed: arc_swap::ArcSwapOption<Option<Arc<MacroHotProduct>>>,
     build_lock: parking_lot::Mutex<()>,
 }
 
@@ -1253,7 +1259,7 @@ impl MacroHotMirror {
         self.cells.get().map_or(0, |cells| {
             cells
                 .iter()
-                .filter(|cell| cell.committed.get().is_some())
+                .filter(|cell| cell.committed.load().is_some())
                 .count()
         })
     }
@@ -1264,7 +1270,11 @@ struct MacroMirrorSlot<'a>(&'a MacroSlot);
 
 impl<'a> MacroMirrorSlot<'a> {
     fn committed(self) -> Option<Option<Arc<MacroHotProduct>>> {
-        self.0.committed.get().cloned()
+        self.0
+            .committed
+            .load()
+            .as_ref()
+            .map(|committed| committed.as_ref().clone())
     }
 
     fn lock_build(self) -> MacroMirrorBuildGuard<'a> {
@@ -1283,8 +1293,26 @@ struct MacroMirrorBuildGuard<'a> {
 
 impl MacroMirrorBuildGuard<'_> {
     fn commit(self, result: Option<Arc<MacroHotProduct>>) {
-        let _ = self.slot.committed.set(result);
+        self.slot.committed.store(Some(Arc::new(result)));
     }
+}
+
+/// Whether a committed mirror value may be served. A document close releases
+/// the carrier nodes the mirror lowered, but the content-addressed artifact —
+/// and with it this slot — stays for the reload, and a byte-identical reopen
+/// serves that same artifact: its committed handle can name a released node.
+/// Only the top-level handle is checked, as for every warm result: the close
+/// releases each parent of a released node with it. A committed absence
+/// names no node and stays servable.
+fn committed_is_servable(
+    ctx: &dyn ResolverContext,
+    committed: &Option<Arc<MacroHotProduct>>,
+) -> bool {
+    committed.as_ref().is_none_or(|product| {
+        ctx.project_type_store()
+            .semantic_graph()
+            .node_is_live(product.hot.node())
+    })
 }
 
 impl std::fmt::Debug for MacroHotMirror {
@@ -1292,7 +1320,7 @@ impl std::fmt::Debug for MacroHotMirror {
         let demanded = self.cells.get().map_or(0, |cells| {
             cells
                 .iter()
-                .filter(|cell| cell.committed.get().is_some())
+                .filter(|cell| cell.committed.load().is_some())
                 .count()
         });
         f.debug_struct("MacroHotMirror")
@@ -1355,15 +1383,18 @@ fn macro_hot_product(
     // import-route facts, `ResolveDecl`/`Instantiate` file whole-hashes)
     // bubble into the consuming result's `ReadSetSignature`.
     //
-    // Preserve the typed lowering outcome across the write-once mirror-slot
+    // Preserve the typed lowering outcome across the mirror-slot
     // admission: a transient broken decl-body lease (`LeaseMiss`) must NOT be
     // committed as a permanent negative — leave the slot VACANT, mark the
     // generalized non-cacheability rail, and let the next demand retry. Only a
     // built ref OR a genuine (cacheable) absence commits.
     //
-    // Lock-free warm read first.
+    // Lock-free warm read first. A committed handle a document close released
+    // is not served: the cold path below re-lowers it in place.
     if let Some(committed) = cell.committed() {
-        return committed;
+        if committed_is_servable(ctx, &committed) {
+            return committed;
+        }
     }
     // Test-only rendezvous between the lock-free warm MISS and the build lock: when
     // armed it holds every thread that has just missed until ALL of them have, which
@@ -1377,19 +1408,20 @@ fn macro_hot_product(
         .wait_macro_hot_post_warm_miss_barrier();
     // Cold path: SINGLEFLIGHT the lowering under the per-slot build lock so
     // concurrent first demands of ONE macro collapse onto a single
-    // `build_macro_hot_ref` (the `OnceLock` alone cannot serialize — a
-    // `LeaseMiss` leaves the slot vacant for retry, which forbids
-    // `get_or_init`). Re-check under the lock: a racing builder may have
+    // `build_macro_hot_ref` (the slot is no `get_or_init` cell: a
+    // `LeaseMiss` leaves it vacant for retry, and a released handle is
+    // replaced). Re-check under the lock: a racing builder may have
     // committed while this thread waited on the lock.
     let build_guard = cell.lock_build();
     if let Some(committed) = cell.committed() {
-        return committed;
+        if committed_is_servable(ctx, &committed) {
+            return committed;
+        }
     }
     match build_macro_hot_ref(ctx, owner_canonical, &indexed, macro_index) {
         MacroHotRefOutcome::Ready(result) => {
-            // First-writer commit under the build lock: `set` cannot race a
-            // second committer (all commits take this lock), so it succeeds and
-            // `result` IS the committed value.
+            // Commit under the build lock: every commit takes this lock, so
+            // `result` IS the committed value (it replaces a released one).
             build_guard.commit(result.clone());
             result
         }

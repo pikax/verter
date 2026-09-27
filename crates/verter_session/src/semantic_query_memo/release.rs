@@ -38,14 +38,12 @@
 //! What is NOT released, and why: `Global`-scope nodes that embed no
 //! released id (primitives, shared literal unions minted for the closed
 //! content) — they are scope-less by design and may be shared by any file;
-//! the sealed `DeferredCallable` carriers of OTHER canonicals whose
-//! parameter types name a released node — their parts are unreadable
-//! outside the two sanctioned consumers; memo candidates whose only link to
-//! the closed canonical is an id behind an opaque interned handle (an
-//! intersection recipe, a signature descriptor) — the family budget
-//! reclaims those. None of these can serve a released node: the read-side
-//! [`SemanticGraphStore::result_is_live`] guard rejects any warm result
-//! naming a tombstoned id, and a tombstoned id reads as `Opaque(Miss)`.
+//! memo candidates whose only link to the closed canonical is an id behind
+//! an opaque interned handle (an intersection recipe, a signature
+//! descriptor) — the family budget reclaims those. None of these can serve
+//! a released node: the read-side [`SemanticGraphStore::result_is_live`]
+//! guard rejects any warm result naming a tombstoned id, and a tombstoned
+//! id reads as `Opaque(Miss)`.
 
 use std::sync::atomic::Ordering;
 

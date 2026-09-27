@@ -12182,3 +12182,390 @@ fn release_canonical_drops_the_union_views_of_the_closed_document() {
         "a view of a released union is served, never kept"
     );
 }
+
+/// Every node id a family identity embeds DIRECTLY — not only its base or
+/// arguments — is what the close sweep and the admission fence read
+/// ([`FamilyKey::for_each_node_id`]). Each case below builds a key whose
+/// ONLY non-live id sits in one field, and every other id-bearing field
+/// names a live node: the close must evict the candidate, and the admission
+/// fence must refuse the family afterwards. A control key over a live node in
+/// the same field must survive and stay admissible.
+///
+/// Discriminating: the visitor read a projection path's base but not its
+/// computed index nodes, neither side of a `FlowReturn` / `ResolveCall`
+/// substitution binding, a pending conditional frame's arguments but not its
+/// parameters, and none of the inference-parameter, flow-narrowing,
+/// contextual-typing or return-demand node sets — so each such key escaped
+/// the sweep and passed the fence.
+mod release_embedded_node_family_tests {
+    use super::super::family::family_and_slot;
+    use super::*;
+    use crate::semantic_query::{
+        AuthoredPropertyKey, CanonicalTypeSubstitution, ConditionalPendingSubstitution,
+        ContextualTypingKey, FlowNarrowingKey, InferableParamSetId, InferenceContextKey,
+        LiteralValue, PathSegment, ProgramAnalysisContext, ProgramPointId, ProjectionMode,
+        ProjectionReductionContext, RelationContext, RelationKind, SubstitutionCanonicalHash,
+    };
+
+    type KeyBuilder = Box<dyn Fn(SemanticNodeId) -> SemanticQueryKey>;
+
+    fn h16(byte: u8) -> crate::semantic_query::HashValue {
+        [byte; 16]
+    }
+
+    fn computed_index_path(node: SemanticNodeId) -> Arc<[PathSegment]> {
+        Arc::from([PathSegment::Index(AuthoredPropertyKey::Computed(node))])
+    }
+
+    fn slot(canonical: &str, name: &str) -> ResolvedDeclSlotIdentity {
+        ResolvedDeclSlotIdentity::type_slot(
+            Arc::from(canonical),
+            TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            0,
+            h16(0),
+            h16(0),
+        )
+    }
+
+    fn resolve_call_key(
+        callee: SemanticNodeId,
+        substitution: CanonicalTypeSubstitution,
+        flow: FlowNarrowingKey,
+    ) -> SemanticQueryKey {
+        SemanticQueryKey::ResolveCall(Box::new(crate::semantic_query::ResolveCallKey {
+            point: ProgramPointId {
+                canonical_id: Arc::from("/w/consumer.vue"),
+                offset: 3,
+            },
+            callee,
+            kind: crate::semantic_query::CallKind::Call,
+            receiver: None,
+            args: Arc::from(Vec::new().into_boxed_slice()),
+            explicit_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            flow,
+            context: crate::semantic_query::ResolveCallContext {
+                parse_env_hash: h16(0),
+                resolve_env_hash: h16(0),
+                type_env_hash: h16(0),
+                lib_env_hash: h16(0),
+                project_identity: h16(0),
+                substitution,
+            },
+        }))
+    }
+
+    fn flow_return_key(
+        substitution: CanonicalTypeSubstitution,
+        demand: crate::semantic_query::ReturnProjectionDemand,
+    ) -> SemanticQueryKey {
+        SemanticQueryKey::FlowReturn(Box::new(crate::semantic_query::FlowReturnKey {
+            function: crate::semantic_query::FlowFunctionSlotIdentity {
+                declaration_slot: slot("/w/b.ts", "f"),
+                function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                overload_ordinal: 0,
+            },
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: crate::semantic_query::FlowReturnContext {
+                parse_env_hash: h16(0),
+                resolve_env_hash: h16(0),
+                type_env_hash: h16(0),
+                lib_env_hash: h16(0),
+                project_identity: h16(0),
+                result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
+                type_substitution: substitution,
+                policy: crate::semantic_query::FlowReturnPolicy {
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                    no_implicit_any: true,
+                    use_unknown_in_catch_variables: true,
+                    no_implicit_this: true,
+                },
+            },
+            demand,
+            input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract:
+                crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+        }))
+    }
+
+    fn analysis_context() -> ProgramAnalysisContext {
+        ProgramAnalysisContext {
+            parse_env_hash: h16(0),
+            resolve_env_hash: h16(0),
+            type_env_hash: h16(0),
+            lib_env_hash: h16(0),
+            project_identity: 0,
+            substitution: SubstitutionCanonicalHash::empty(),
+        }
+    }
+
+    fn consumer_point() -> ProgramPointId {
+        ProgramPointId {
+            canonical_id: Arc::from("/w/consumer.vue"),
+            offset: 5,
+        }
+    }
+
+    fn authored_key(live: SemanticNodeId, projection_node: SemanticNodeId) -> SemanticQueryKey {
+        use crate::locator_identity::{
+            LibEnvHash, ParseEnvHash, ProjectIdentityDim, ResolveEnvHash, TypeEnvHash,
+        };
+        use crate::semantic_query::operand::SemanticOperandForceProjection;
+        use verter_type_expr::locators::{
+            AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
+        };
+        let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from("/w/authored.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("Ctx"),
+                space: LocatorSymbolSpace::Type,
+            },
+            path: Arc::from([TypeBodyPathStep::Member { ordinal: 0 }]),
+        });
+        crate::project_semantic_dispatch::semantic_operand::authored_instantiate_key_fixture(
+            slot("/w/authored.ts", "Ctx"),
+            locator,
+            Arc::from([live]),
+            (
+                ParseEnvHash::from_env_hash(h16(0)),
+                ResolveEnvHash::from_env_hash(h16(0)),
+                TypeEnvHash::from_env_hash(h16(0)),
+                LibEnvHash::from_env_hash(h16(0)),
+                ProjectIdentityDim::from_project_identity(0),
+            ),
+            crate::semantic_query::InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                h16(0),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
+            SemanticOperandForceProjection::Path(computed_index_path(projection_node)),
+        )
+    }
+
+    fn demand_over(node: SemanticNodeId) -> crate::semantic_query::ReturnProjectionDemand {
+        let mut point = crate::semantic_query::demand::Demand::identity();
+        point.projection.path = computed_index_path(node).into();
+        crate::semantic_query::ReturnProjectionDemand { point }
+    }
+
+    /// `(field, key builder)`: the builder places its node in exactly the
+    /// named field and `live` in every other id-bearing field.
+    fn cases(live: SemanticNodeId) -> Vec<(&'static str, KeyBuilder)> {
+        vec![
+            (
+                "ProjectPath.path computed index",
+                Box::new(move |node| SemanticQueryKey::ProjectPath {
+                    base: live,
+                    path: computed_index_path(node),
+                    context: ProjectionReductionContext::published(ProjectionMode::Identity),
+                }),
+            ),
+            (
+                "InstantiateAuthored.projection computed index",
+                Box::new(move |node| authored_key(live, node)),
+            ),
+            (
+                "FlowReturn.context.type_substitution parameter",
+                Box::new(move |node| {
+                    flow_return_key(
+                        CanonicalTypeSubstitution::new(vec![(node, live)]),
+                        crate::semantic_query::ReturnProjectionDemand::whole_return(),
+                    )
+                }),
+            ),
+            (
+                "FlowReturn.context.type_substitution image",
+                Box::new(move |node| {
+                    flow_return_key(
+                        CanonicalTypeSubstitution::new(vec![(live, node)]),
+                        crate::semantic_query::ReturnProjectionDemand::whole_return(),
+                    )
+                }),
+            ),
+            (
+                "FlowReturn.demand path computed index",
+                Box::new(move |node| {
+                    flow_return_key(CanonicalTypeSubstitution::empty(), demand_over(node))
+                }),
+            ),
+            (
+                "ResolveCall.context.substitution parameter",
+                Box::new(move |node| {
+                    resolve_call_key(
+                        live,
+                        CanonicalTypeSubstitution::new(vec![(node, live)]),
+                        FlowNarrowingKey::empty(),
+                    )
+                }),
+            ),
+            (
+                "ResolveCall.context.substitution image",
+                Box::new(move |node| {
+                    resolve_call_key(
+                        live,
+                        CanonicalTypeSubstitution::new(vec![(live, node)]),
+                        FlowNarrowingKey::empty(),
+                    )
+                }),
+            ),
+            (
+                "ResolveCall.flow",
+                Box::new(move |node| {
+                    resolve_call_key(
+                        live,
+                        CanonicalTypeSubstitution::empty(),
+                        FlowNarrowingKey::new(Arc::from([node])),
+                    )
+                }),
+            ),
+            (
+                "Conditional.pending parameter",
+                Box::new(move |node| SemanticQueryKey::Conditional {
+                    check: live,
+                    extends: live,
+                    true_branch: live,
+                    false_branch: live,
+                    distributive: false,
+                    pending: Some(Arc::new(
+                        ConditionalPendingSubstitution::empty().append_both(node, live),
+                    )),
+                }),
+            ),
+            (
+                "Relate.inference_context.inferable_params",
+                Box::new(move |node| SemanticQueryKey::Relate {
+                    source: live,
+                    target: live,
+                    relation: RelationKind::Assignable,
+                    policy: Default::default(),
+                    source_freshness: Default::default(),
+                    inference_context: Some(InferenceContextKey {
+                        inferable_params: InferableParamSetId::new(Arc::from([node])),
+                        ..Default::default()
+                    }),
+                    context: RelationContext::default(),
+                }),
+            ),
+            (
+                "FlowNarrowingAt.flow",
+                Box::new(move |node| SemanticQueryKey::FlowNarrowingAt {
+                    point: consumer_point(),
+                    flow: FlowNarrowingKey::new(Arc::from([node])),
+                    context: analysis_context(),
+                }),
+            ),
+            (
+                "ContextualTypeAt.contextual",
+                Box::new(move |node| SemanticQueryKey::ContextualTypeAt {
+                    point: consumer_point(),
+                    contextual: ContextualTypingKey::new(Arc::from([node])),
+                    context: analysis_context(),
+                }),
+            ),
+        ]
+    }
+
+    #[test]
+    fn release_sweeps_and_fences_a_family_whose_only_dead_id_is_an_embedded_field() {
+        let mut escaped = Vec::new();
+        for field in 0..cases(SemanticNodeId(0)).len() {
+            let store = SemanticGraphStore::new();
+            let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+            let live = store.intern_node_with_scope(
+                SemanticNodeData::Literal(LiteralValue::Number(1.0)),
+                release_file_scope("/w/b.ts", 2),
+            );
+            let control = store.intern_node_with_scope(
+                SemanticNodeData::Literal(LiteralValue::Number(2.0)),
+                release_file_scope("/w/b.ts", 2),
+            );
+            let doomed = store.intern_node_with_scope(
+                SemanticNodeData::Literal(LiteralValue::Number(3.0)),
+                release_file_scope("/w/a.ts", 1),
+            );
+            let (label, build) = cases(live).swap_remove(field);
+            let dead_key = build(doomed);
+            let live_key = build(control);
+            let roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/consumer.vue")]);
+            for key in [&dead_key, &live_key] {
+                store.publish_with_carrier_for_tests(
+                    key.clone(),
+                    QueryResult::Value(shared),
+                    carrier_naming("/w/consumer.vue", 7),
+                    Arc::clone(&roots),
+                );
+                assert!(
+                    store.get_unvalidated(key).is_some(),
+                    "{label}: fixture publishes"
+                );
+            }
+
+            let report = store.release_canonical("/w/a.ts");
+
+            assert!(!store.node_is_live(doomed), "{label}: {report:?}");
+            assert!(
+                store.get_unvalidated(&live_key).is_some(),
+                "{label}: the control over a live node stays"
+            );
+            assert!(
+                !store.family_names_released_node(&family_and_slot(&live_key).0),
+                "{label}: the control stays admissible"
+            );
+            let evicted = store.get_unvalidated(&dead_key).is_none();
+            let fenced = store.family_names_released_node(&family_and_slot(&dead_key).0);
+            if !evicted || !fenced {
+                escaped.push(format!("{label} (evicted: {evicted}, fenced: {fenced})"));
+            }
+        }
+        assert!(
+            escaped.is_empty(),
+            "a key whose only released id sits in one field must be evicted by the close \
+             and refused admission afterwards; escaped: {escaped:#?}"
+        );
+    }
+
+    /// End to end through the cooperative publish: after the close, a stale
+    /// re-dispatch of a path whose computed index is the released node is
+    /// returned to its caller but never admitted; the same path over a live
+    /// index is.
+    #[test]
+    fn a_path_over_a_released_computed_index_is_not_admitted_after_the_close() {
+        let host = ctx_host();
+        let store = SemanticGraphStore::new();
+        let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let live = store.intern_node_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(1.0)),
+            release_file_scope("/w/b.ts", 2),
+        );
+        let doomed = store.intern_node_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(3.0)),
+            release_file_scope("/w/a.ts", 1),
+        );
+        let _ = store.release_canonical("/w/a.ts");
+        for (index, admitted) in [(live, true), (doomed, false)] {
+            let key = SemanticQueryKey::ProjectPath {
+                base: live,
+                path: computed_index_path(index),
+                context: ProjectionReductionContext::published(ProjectionMode::Identity),
+            };
+            let read = store.execute_cooperative(
+                &host,
+                key.clone(),
+                || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    (
+                        QueryResult::Value(shared),
+                        dep_sig_for("/w/consumer.vue", 7),
+                    )
+                },
+            );
+            assert!(matches!(read.value, QueryResult::Value(_)));
+            assert_eq!(
+                store.get_unvalidated(&key).is_some(),
+                admitted,
+                "index {index:?}: admitted only over a live computed index"
+            );
+        }
+    }
+}
