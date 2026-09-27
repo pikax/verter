@@ -7169,9 +7169,12 @@ fn slice_expr_reads_frame(expr: &crate::flow_slice_content::SliceExpr) -> bool {
         }),
         SliceExpr::Union { arms, .. } => arms.iter().any(slice_expr_reads_frame),
         SliceExpr::ConstTemplate { holes, .. } => holes.iter().any(slice_expr_reads_frame),
-        SliceExpr::Satisfies { operand, .. }
-        | SliceExpr::Void { operand, .. }
-        | SliceExpr::Awaited { operand } => slice_expr_reads_frame(operand),
+        SliceExpr::Satisfies { operand, .. } | SliceExpr::Awaited { operand } => {
+            slice_expr_reads_frame(operand)
+        }
+        SliceExpr::Void { operand, value } => {
+            slice_expr_reads_frame(operand) || slice_expr_reads_frame(value)
+        }
         SliceExpr::OptionalAnyChain { root } | SliceExpr::OptionalMember { root, .. } => {
             slice_expr_reads_frame(root)
         }
@@ -7262,8 +7265,12 @@ fn expression_effect_tree(
                 children.push(right);
             }
             SliceExpr::Sequence { value, .. } => children.push(value),
-            SliceExpr::Satisfies { operand, .. } | SliceExpr::Void { operand, .. } => {
-                children.push(operand)
+            SliceExpr::Satisfies { operand, .. } => children.push(operand),
+            // A `void` or a comma sequence evaluates its operand, then its
+            // value.
+            SliceExpr::Void { operand, value } => {
+                children.push(operand);
+                children.push(value);
             }
             SliceExpr::Arithmetic { operands, .. } => children.extend(operands.iter()),
             SliceExpr::ConstTemplate { holes, .. } => children.extend(holes.iter()),

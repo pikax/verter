@@ -5455,6 +5455,11 @@ fn expression_freshness(expression: &Expression<'_>) -> SliceFreshness {
         // fold and the per-arm rule below still apply unchanged, so two
         // awaited fresh arms keep `1 | 2`.
         Expression::AwaitExpression(awaited) => expression_freshness(&awaited.argument),
+        // A comma expression's value is its last operand's.
+        Expression::SequenceExpression(sequence) => sequence
+            .expressions
+            .last()
+            .map_or(SliceFreshness::Pinned, expression_freshness),
         // `!x` is the checker's FRESH `true` / `false` (or `boolean`).
         Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
             SliceFreshness::Fresh
@@ -15247,6 +15252,60 @@ impl<'a> Lowerer<'a> {
             // its own question through the rails — a callee they cannot
             // represent keeps the positional fail-closed marker, so the
             // sequence context invents no arm.
+            // A sequence whose DISCARDED operands write a binding applies
+            // those writes in order and is then its last operand (`(x++,
+            // "s")` is `string` after the increment).
+            Expression::SequenceExpression(sequence)
+                if sequence.expressions.len() > 1
+                    && sequence.expressions[..sequence.expressions.len() - 1]
+                        .iter()
+                        .any(|operand| self.discarded_value_holds_write(operand)) =>
+            {
+                let (last, discarded) = sequence
+                    .expressions
+                    .split_last()
+                    .expect("the guard proved a last operand");
+                // Each writing operand evaluates in order and is discarded
+                // ([`SliceExpr::Void`]'s evaluation); any other discarded
+                // operand only runs.
+                let mut writes = Vec::new();
+                for operand in discarded {
+                    if self.discarded_value_holds_write(operand) {
+                        // A whole-binding `=` write's value site is its
+                        // right-hand side's, as at statement position.
+                        let write = match unwrap_parenthesized(operand) {
+                            Expression::AssignmentExpression(assignment)
+                                if assignment.operator
+                                    == oxc_ast::ast::AssignmentOperator::Assign =>
+                            {
+                                self.modeled_assignment_expression(
+                                    assignment,
+                                    assignment.right.span(),
+                                )
+                            }
+                            _ => None,
+                        };
+                        writes.push(write.unwrap_or_else(|| {
+                            self.lower_expr(
+                                operand,
+                                ExprMode::BindingInit {
+                                    preserve_literal: true,
+                                },
+                            )
+                        }));
+                    } else if self.record_discarded_operand_calls(operand) {
+                        self.control_test_gap = true;
+                    }
+                }
+                let value = self.lower_expr(last, mode);
+                writes
+                    .into_iter()
+                    .rev()
+                    .fold(value, |value, operand| SliceExpr::Void {
+                        operand: Box::new(operand),
+                        value: Box::new(value),
+                    })
+            }
             Expression::SequenceExpression(sequence)
                 if sequence
                     .expressions
