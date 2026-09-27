@@ -206,9 +206,41 @@ pub struct IndexedReady {
     /// empty mirror and a superseded one can never answer a new-content
     /// demand. Publishing an artifact produces ZERO mirror handles.
     pub(crate) macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror,
+    /// The exact parse identity of `raw_source`, derived on first demand
+    /// ([`Self::source_parse_key`]) and kept with the artifact: a
+    /// content-addressed key naming this source (one per function a flow
+    /// demand reaches) reads it here instead of hashing the whole source
+    /// again.
+    pub(crate) source_parse_key: SourceParseKey,
 }
 
+/// An artifact's source parse identity, derived once ([`IndexedReady::source_parse_key`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SourceParseKey(std::sync::OnceLock<Option<verter_language::ParseKey>>);
+
 impl IndexedReady {
+    /// The exact parse identity of this artifact's source under its
+    /// runtime language: its framework parse's key, or a plain script's,
+    /// derived from the whole source the first time it is asked for. The
+    /// same identity [`crate::file_artifact_store::FileArtifactKey::for_source_identity`]
+    /// derives (`None` where that refuses).
+    pub(crate) fn source_parse_key(&self) -> Option<verter_language::ParseKey> {
+        self.source_parse_key
+            .0
+            .get_or_init(|| {
+                crate::file_artifact_store::FileArtifactKey::for_source_identity(
+                    Arc::from(""),
+                    self.whole_hash,
+                    self.raw_source.as_ref(),
+                    self.file_language.clone(),
+                    self.framework_parse.as_deref(),
+                    self.parse_env_hash,
+                )
+                .map(|key| key.parse_key)
+            })
+            .clone()
+    }
+
     /// The `Route` derived-fact digest for this artifact's routing
     /// surface, or `None` when the surface carries nothing routable.
     ///
@@ -260,6 +292,7 @@ impl IndexedReady {
             route_inventory,
             declares_interface_app_config: false,
             macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
+            source_parse_key: crate::project_type_store::SourceParseKey::default(),
         }
     }
 
@@ -296,6 +329,7 @@ impl IndexedReady {
             route_inventory,
             declares_interface_app_config: false,
             macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
+            source_parse_key: crate::project_type_store::SourceParseKey::default(),
         }
     }
 }
@@ -2090,6 +2124,7 @@ mod tests {
                 route_inventory,
                 declares_interface_app_config: false,
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
+                source_parse_key: crate::project_type_store::SourceParseKey::default(),
             }),
         );
         assert!(db
@@ -2143,6 +2178,7 @@ mod tests {
                 route_inventory: Arc::clone(&route_inventory),
                 declares_interface_app_config: false,
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
+                source_parse_key: crate::project_type_store::SourceParseKey::default(),
             })
         };
 

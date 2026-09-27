@@ -2391,6 +2391,7 @@ impl VerterHost {
                 route_inventory: Arc::clone(&route_inventory),
                 declares_interface_app_config,
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
+                source_parse_key: crate::project_type_store::SourceParseKey::default(),
             });
 
             if held_source.is_some_and(|held| {

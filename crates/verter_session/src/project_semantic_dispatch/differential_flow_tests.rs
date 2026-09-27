@@ -578,3 +578,79 @@ fn unreachable_code_contributes_as_the_checker_says() {
     failures.extend(matrix.nullness(&[(Read::Return("uMixedVoid"), "1 | undefined", "number")]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Code past a path only the checker proves dead: an exhaustive `switch`
+/// whose clauses all exit, and a call to a `never`-returning function.
+const PAST_DEAD_PATH: &str = r##"
+declare function fail(): never;
+export function sEnd(x: "a" | "b") { switch (x) { case "a": return 1; case "b": return 2; } return "end"; }
+export function sSubject(x: "a" | "b") { switch (x) { case "a": return 1; case "b": return 2; } return x; }
+export function sOther(x: "a" | "b", y: string) { switch (x) { case "a": return 1; case "b": return 2; } return y; }
+export function sConst(x: "a" | "b") { switch (x) { case "a": return 1; case "b": return 2; } const z = "zz"; return z; }
+export function sBranch(x: "a" | "b", c: boolean) { switch (x) { case "a": return 1; case "b": return 2; } if (c) return 3; return 4; }
+export function sDefault(x: "a" | "b") { switch (x) { case "a": return 1; default: return 2; } return "end"; }
+export function sLet(x: "a" | "b") { switch (x) { case "a": return 1; case "b": return 2; } let w = 5; w = 6; return w; }
+export function sNested(x: "a" | "b") { { switch (x) { case "a": return 1; case "b": return 2; } } return "end"; }
+export function sSubjectMember(o: { k: "a" } | { k: "b" }) { switch (o.k) { case "a": return 1; case "b": return 2; } return o; }
+export function sThenSwitch(x: "a" | "b", y: "c" | "d") { switch (x) { case "a": return 1; case "b": return 2; } switch (y) { case "c": return 3; case "d": return 4; } return "end"; }
+export function sLoopAfter(x: "a" | "b") { switch (x) { case "a": return 1; case "b": return 2; } for (;;) { return "loop"; } }
+export function sAnnot(x: "a" | "b") { switch (x) { case "a": return 1; case "b": return 2; } const w: string | number = "a"; return w; }
+export function sNarrowed(x: "a" | "b", y: string | number) { if (typeof y === "string") { switch (x) { case "a": return 1; case "b": return 2; } return y; } return true; }
+export function sAssign(x: "a" | "b", y: string | number) { switch (x) { case "a": return 1; case "b": return 2; } y = "q"; return y; }
+export function sGuardAfter(x: "a" | "b", y: string | number) { switch (x) { case "a": return 1; case "b": return 2; } if (typeof y === "string") return y; return false; }
+export function sTwice(x: "a" | "b") { switch (x) { case "a": return 1; case "b": return 2; } switch (x) { case "a": return 3; } return x; }
+export function nCall(y: string) { fail(); return y; }
+export function nCallConst(y: string) { fail(); const z = "zz"; return z; }
+export function nCallAssign(y: string | number) { fail(); y = "q"; return y; }
+declare const o: { fail(): never };
+export function nNarrowed(y: string | number) { if (typeof y === "string") { fail(); return y; } return true; }
+export function nMethodNarrowed(y: string | number) { if (typeof y === "string") { o.fail(); return y; } return true; }
+export function nLocal(y: string | number) { let w = y; fail(); return w; }
+export function nNarrowLet(y: string | number) { let w: string | number = 1; fail(); return w; }
+"##;
+
+/// The checker aggregates every `return` in the body, the ones past a path
+/// it proves dead included. Past an exhaustive `switch` a reference reads
+/// the no-matching-case edge (the discriminant `never`, every other
+/// reference as it reached the `switch`); past a `never`-returning call it
+/// reads its declared type; and a write on either dead path leaves the
+/// written reference its declared type.
+#[test]
+fn returns_past_a_path_the_checker_proves_dead_contribute() {
+    let matrix = Matrix::new(PAST_DEAD_PATH);
+    let failures = matrix.returns(&[
+        ("sEnd", "\"end\" | 1 | 2"),
+        ("sSubject", "1 | 2"),
+        ("sOther", "string | 1 | 2"),
+        ("sConst", "\"zz\" | 1 | 2"),
+        ("sBranch", "1 | 2 | 3 | 4"),
+        ("sDefault", "\"end\" | 1 | 2"),
+        ("sLet", "number"),
+        ("sNested", "\"end\" | 1 | 2"),
+        ("sSubjectMember", "1 | 2"),
+        ("sThenSwitch", "\"end\" | 1 | 2 | 3 | 4"),
+        ("sLoopAfter", "\"loop\" | 1 | 2"),
+        ("sAnnot", "string | number"),
+        ("sNarrowed", "string | 1 | 2 | true"),
+        ("sAssign", "string | number"),
+        ("sGuardAfter", "string | 1 | 2 | false"),
+        ("sTwice", "1 | 2 | 3"),
+        ("nCall", "string"),
+        ("nCallConst", "string"),
+        ("nCallAssign", "string | number"),
+        ("nNarrowed", "string | number | true"),
+        ("nLocal", "string | number"),
+        ("nNarrowLet", "string | number"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A reference narrowed before a call to a `never`-returning METHOD reads
+/// its declared type past the call, as past a `never`-returning function.
+#[test]
+#[ignore = "a reference narrowed before a never-returning method call reads its narrowed type past the call"]
+fn a_reference_past_a_never_returning_method_call_reads_its_declared_type() {
+    let matrix = Matrix::new(PAST_DEAD_PATH);
+    let failures = matrix.returns(&[("nMethodNarrowed", "string | number | true")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

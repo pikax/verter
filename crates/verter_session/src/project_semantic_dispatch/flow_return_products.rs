@@ -78,6 +78,7 @@ mod tests {
         let bound = memo.flow_bound_graph_for_tests(entry);
         let bundle = bound.bundle();
         let request = FlowDemandRequest {
+            ancestry: crate::project_semantic_dispatch::flow_solve::FlowInputAncestry::default(),
             query: SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
                 function: FlowFunctionSlotIdentity {
                     declaration_slot: ResolvedDeclSlotIdentity::value_slot(

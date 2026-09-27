@@ -1568,22 +1568,25 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
     let mut descendant_seen = vec![rustc_hash::FxHashSet::default(); entries.len()];
     let mut descendant_assignments = vec![Vec::new(); entries.len()];
     let mut assignment_seen = vec![rustc_hash::FxHashSet::default(); entries.len()];
+    // Each frame's enclosing frame, by position: the chain a name resolves
+    // through is walked from the frame only as far as the name needs, never
+    // built whole for every frame (which cost the square of the nesting).
+    let parent_position: Vec<Option<usize>> = parents
+        .iter()
+        .map(|parent| {
+            parent
+                .as_ref()
+                .and_then(|key| position_of.get(key).copied())
+        })
+        .collect();
     for index in 0..entries.len() {
         // The enclosing frame chain, innermost first.
-        let mut chain: Vec<usize> = Vec::new();
-        let mut current = parents[index].clone();
-        while let Some(key) = current {
-            let Some(position) = position_of.get(&key).copied() else {
-                break;
-            };
-            chain.push(position);
-            current = parents[position].clone();
-        }
+        let chain =
+            || std::iter::successors(parent_position[index], |frame| parent_position[*frame]);
         let site = entries[index].span;
         let resolve = |name: &Arc<str>, span: verter_span::Span| {
-            let Some((frame, slot)) =
-                resolve_lexical_binding(&[index], &lexical_scopes, name, span)
-                    .or_else(|| resolve_lexical_binding(&chain, &lexical_scopes, name, site))
+            let Some((frame, slot)) = resolve_lexical_binding([index], &lexical_scopes, name, span)
+                .or_else(|| resolve_lexical_binding(chain(), &lexical_scopes, name, site))
             else {
                 return FunctionReferenceBinding::Free;
             };
@@ -1675,23 +1678,52 @@ fn resolve_nested_capture_reads(entries: &mut [FunctionProgramEntry]) {
         .map(|(i, entry)| (entry.key.clone(), i))
         .collect();
     let mut children = vec![Vec::new(); entries.len()];
-    let mut order = Vec::with_capacity(entries.len());
-    for (i, entry) in entries.iter().enumerate() {
-        if let Some(parent) = entry
-            .lexical_parent
-            .as_deref()
-            .and_then(|parent| positions.get(parent))
-        {
+    let parent_position: Vec<Option<usize>> = entries
+        .iter()
+        .map(|entry| {
+            entry
+                .lexical_parent
+                .as_deref()
+                .and_then(|parent| positions.get(parent).copied())
+        })
+        .collect();
+    for (i, parent) in parent_position.iter().enumerate() {
+        if let Some(parent) = parent {
             children[*parent].push(i);
         }
-        let mut depth = 0;
-        let mut parent = entry.lexical_parent.as_deref();
-        while let Some(position) = parent.and_then(|parent| positions.get(parent)) {
-            depth += 1;
-            parent = entries[*position].lexical_parent.as_deref();
-        }
-        order.push((std::cmp::Reverse(depth), i));
     }
+    // Each frame's nesting under its outermost enclosing frame, each
+    // computed once from its parent's (walking every frame's whole chain
+    // cost the square of the nesting).
+    let mut nesting: Vec<Option<usize>> = vec![None; entries.len()];
+    let mut pending = Vec::new();
+    for i in 0..entries.len() {
+        let mut frame = i;
+        let mut known = loop {
+            if let Some(known) = nesting[frame] {
+                break known;
+            }
+            match parent_position[frame] {
+                Some(parent) if nesting[frame].is_none() => {
+                    pending.push(frame);
+                    frame = parent;
+                }
+                _ => {
+                    nesting[frame] = Some(0);
+                    break 0;
+                }
+            }
+        };
+        while let Some(frame) = pending.pop() {
+            known += 1;
+            nesting[frame] = Some(known);
+        }
+    }
+    let mut order: Vec<_> = nesting
+        .iter()
+        .enumerate()
+        .map(|(i, nesting)| (std::cmp::Reverse(nesting.unwrap_or(0)), i))
+        .collect();
     order.sort_unstable();
     for (_, i) in order {
         let key = &entries[i].key;
@@ -1866,15 +1898,15 @@ thread_local! {
 /// Resolve against containing scopes, innermost frame first. Runtime variable
 /// canonicalization follows this exact lexical lookup.
 fn resolve_lexical_binding(
-    chain: &[usize],
+    chain: impl IntoIterator<Item = usize>,
     frame_scopes: &[LexicalScopeIndex],
     name: &Arc<str>,
     site: verter_span::Span,
 ) -> Option<(usize, LexicalBinding)> {
-    chain.iter().find_map(|frame| {
-        frame_scopes[*frame]
+    chain.into_iter().find_map(|frame| {
+        frame_scopes[frame]
             .resolve(name, site)
-            .map(|slot| (*frame, slot))
+            .map(|slot| (frame, slot))
     })
 }
 
