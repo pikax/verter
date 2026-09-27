@@ -361,8 +361,8 @@ pub fn stable_key_for_node(graph: &SemanticGraphStore, id: SemanticNodeId) -> St
     StableKey::from_exact(table.write(root))
 }
 
-/// Test-only: classification frames opened and ancestor pairs copied into
-/// placements on this thread.
+// Test-only: classification frames opened and ancestor pairs copied into
+// placements on this thread.
 #[cfg(test)]
 thread_local! {
     pub(crate) static CLASSIFICATION_WORK: std::cell::Cell<(u64, u64)> =
