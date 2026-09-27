@@ -1592,7 +1592,11 @@ export function c1(v: number) { return idc({ a: v, s: \"lit\" }); }\n\
 export function c2(v: number) { return idc([v, \"lit\"]); }\n\
 export function c3(v: number) { return idc({ a: v, n: { s: \"lit\" }, xs: [v, 1] }); }\n\
 function boxc<const T>(o: { a: T }) { return o.a; }\n\
-export function c4(v: number) { return boxc({ a: [v, \"lit\"] }); }\n";
+export function c4(v: number) { return boxc({ a: [v, \"lit\"] }); }\n\
+function boxn<const T>(o: { p: { a: T } }) { return o.p.a; }\n\
+function boxo<const T>(o: { a: T; b: string }) { return o; }\n\
+export function c5(v: number) { return boxn({ p: { a: [v, \"lit\"] } }); }\n\
+export function c6() { return boxo({ a: { k: \"x\" }, b: \"y\" }); }\n";
 
 /// A literal argument of a `const` type parameter that reads the frame is
 /// read in its const context (`isConstContext`): literals kept, members
@@ -1617,20 +1621,23 @@ fn a_const_type_parameter_reads_a_frame_literal_argument_in_its_const_context() 
 }
 
 /// A literal member whose contextual type is a `const` type parameter
-/// nested in the parameter's type is read in its const context.
+/// nested in the parameter's type is read in its const context, while the
+/// object literal around it is read as written.
 ///
 /// Measured on TypeScript 7.0.2 (all four settings alike): `c4`
-/// (`boxc<const T>(o: { a: T })` over `{ a: [v, "lit"] }`) is `readonly
-/// [number, "lit"]`. The lane reads the member widened and answers
-/// `readonly (string | number)[]`.
+/// (`boxc<const T>(o: { a: T })` over `{ a: [v, "lit"] }`) and `c5` (the
+/// parameter nested one object deeper) are `readonly [number, "lit"]`, and
+/// `c6` (`boxo<const T>(o: { a: T; b: string })` over `{ a: { k: "x" }, b:
+/// "y" }`, returning `o`) is `{ a: { readonly k: "x"; }; b: string; }`.
 #[test]
-#[ignore = "a literal member read in the const context of a const type parameter nested in its parameter's type"]
 fn a_const_type_parameter_nested_in_the_parameter_reads_its_member_in_its_const_context() {
-    assert_answers_as_the_checker(&cold_read_of(
-        LITERAL_ARGUMENT_SOURCE,
-        "c4",
-        "readonly [number, \"lit\"]",
-    ));
+    for (name, expected) in [
+        ("c4", "readonly [number, \"lit\"]"),
+        ("c5", "readonly [number, \"lit\"]"),
+        ("c6", "{ a: { readonly k: \"x\"; }; b: string; }"),
+    ] {
+        assert_answers_as_the_checker(&cold_read_of(LITERAL_ARGUMENT_SOURCE, name, expected));
+    }
 }
 
 /// A 200-level chain whose every level passes the next an object literal
