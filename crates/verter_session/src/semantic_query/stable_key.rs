@@ -92,9 +92,6 @@ pub mod subtag {
 }
 
 /// Exact key plus versioned fingerprint. Order is the whole pair.
-/// `complete` rides alongside: an incomplete key (its encoding tripped
-/// [`MAX_ENCODE_DEPTH`]) still orders deterministically but never
-/// licenses a structural collapse.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct StableKey {
     fingerprint: u64,
@@ -134,10 +131,8 @@ impl StableKey {
         &self.exact
     }
 
-    /// Whether the encoding finished within [`MAX_ENCODE_DEPTH`]. Only a
-    /// complete key proves structural identity; the depth-exhausted
-    /// marker is shared by every over-deep structure and must never
-    /// collapse anything.
+    /// Whether the key encodes its whole structure. The walk has no depth
+    /// cutoff, so every key it publishes is complete.
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.complete
@@ -169,18 +164,29 @@ pub fn fingerprint_v1(exact: &[u8]) -> u64 {
     hash
 }
 
-struct Encoder {
-    buf: Vec<u8>,
-    /// Whether any embedded child key was the incomplete depth-exhausted
-    /// marker: completeness must propagate to every enclosing key.
-    saw_incomplete: bool,
+/// Where one child's key goes in its parent's encoding.
+enum Hole {
+    /// One child key, written as a `u32` length and its bytes.
+    Child(SemanticNodeId),
+    /// An unordered child collection: its member keys sorted and
+    /// deduplicated by exact bytes, written as a `u16` count and each key.
+    Set(Vec<SemanticNodeId>),
 }
 
-impl Encoder {
+/// One node's encoding with its children left as holes. Scalar fields are
+/// written inline; each hole is filled by the walk with the child's own
+/// complete key, so building a recipe never reads another node.
+struct Recipe {
+    buf: Vec<u8>,
+    /// Holes in write order, each at the `buf` offset it follows.
+    holes: Vec<(usize, Hole)>,
+}
+
+impl Recipe {
     fn new() -> Self {
         let mut enc = Self {
             buf: Vec::with_capacity(32),
-            saw_incomplete: false,
+            holes: Vec::new(),
         };
         enc.u8(VERTER_STABLE_V1);
         enc
@@ -220,26 +226,14 @@ impl Encoder {
         self.u8(subtag);
     }
 
-    fn finish(self) -> StableKey {
-        StableKey {
-            fingerprint: fingerprint_v1(&self.buf),
-            complete: !self.saw_incomplete,
-            exact: self.buf,
-        }
+    /// A child whose key is embedded in place.
+    fn child(&mut self, id: SemanticNodeId) {
+        self.holes.push((self.buf.len(), Hole::Child(id)));
     }
 
-    /// Propagate a child key's incompleteness into this enclosing key.
-    fn absorb_incomplete(&mut self, child: &StableKey) {
-        self.saw_incomplete |= !child.is_complete();
-    }
-
-    /// Finish with `complete: false` — the depth-exhausted marker.
-    fn finish_incomplete(self) -> StableKey {
-        StableKey {
-            fingerprint: fingerprint_v1(&self.buf),
-            exact: self.buf,
-            complete: false,
-        }
+    /// An unordered child collection, normalized as a set of keys.
+    fn child_set(&mut self, members: Vec<SemanticNodeId>) {
+        self.holes.push((self.buf.len(), Hole::Set(members)));
     }
 }
 
@@ -277,7 +271,7 @@ fn origin_tag(category: CompositeOriginCategory) -> u8 {
     }
 }
 
-fn encode_owner(enc: &mut Encoder, owner: verter_type_expr::TopLevelOwnerId) {
+fn encode_owner(enc: &mut Recipe, owner: verter_type_expr::TopLevelOwnerId) {
     enc.u8(match owner.kind() {
         verter_type_expr::TopLevelOwnerKind::Module => 1,
         verter_type_expr::TopLevelOwnerKind::Instance => 2,
@@ -286,7 +280,7 @@ fn encode_owner(enc: &mut Encoder, owner: verter_type_expr::TopLevelOwnerId) {
     enc.u32(owner.ordinal());
 }
 
-fn encode_scope(enc: &mut Encoder, scope: &NodeScopeId) {
+fn encode_scope(enc: &mut Recipe, scope: &NodeScopeId) {
     match scope {
         NodeScopeId::Global => enc.u8(0),
         NodeScopeId::File {
@@ -309,7 +303,7 @@ fn encode_scope(enc: &mut Encoder, scope: &NodeScopeId) {
     }
 }
 
-fn encode_scope_id(enc: &mut Encoder, scope: &ScopeId) {
+fn encode_scope_id(enc: &mut Recipe, scope: &ScopeId) {
     enc.str(&scope.canonical_id);
     encode_owner(enc, scope.owner);
     match scope.local_scope {
@@ -322,71 +316,160 @@ fn encode_scope_id(enc: &mut Encoder, scope: &ScopeId) {
     enc.bytes(&scope.binder_scope_id.structural_hash);
 }
 
-/// Encode a node. Recursion terminates at a prior occurrence in this walk
-/// (relative ordinal), never by publishing a node id. Nesting beyond
-/// [`MAX_ENCODE_DEPTH`] publishes the shared depth-exhausted marker — an
-/// INCOMPLETE key that never licenses a collapse.
+/// Encode a node. The walk is iterative over an explicit frame stack, so a
+/// finite structure of any depth gets its complete key and the encoder
+/// never recurses natively. A child already open on the walk's path is a
+/// true cycle: it encodes as a back-reference to that frame's level (its
+/// distance from this walk's root), never a node id, so recursion
+/// terminates deterministically.
 pub fn stable_key_for_node(graph: &SemanticGraphStore, id: SemanticNodeId) -> StableKey {
-    let mut seen: HashMap<SemanticNodeId, u32> = HashMap::new();
-    encode_node(graph, id, &mut seen, 0)
-}
-
-/// Deepest nesting the recursive encoder may descend before it stops and
-/// publishes the incomplete marker. Bounds both the encoder's stack and
-/// the collapse-proving work to a constant, mirroring the canonical
-/// comparator's comparison budget: a structural collapse that cannot be
-/// proven within bounded work must not happen.
-const MAX_ENCODE_DEPTH: u16 = 256;
-
-fn encode_node(
-    graph: &SemanticGraphStore,
-    id: SemanticNodeId,
-    seen: &mut HashMap<SemanticNodeId, u32>,
-    depth: u16,
-) -> StableKey {
-    if let Some(&ordinal) = seen.get(&id) {
-        let mut enc = Encoder::new();
-        enc.header(category::RECURSIVE, 1);
-        enc.u32(ordinal);
-        return enc.finish();
-    }
-    if depth >= MAX_ENCODE_DEPTH {
-        let mut enc = Encoder::new();
-        enc.header(category::RECURSIVE, 2);
-        return enc.finish_incomplete();
-    }
-    let ordinal = seen.len() as u32;
-    seen.insert(id, ordinal);
-    let Some(data) = graph.node_data(id) else {
-        let mut enc = Encoder::new();
-        enc.header(category::INTRINSIC, subtag::OPAQUE);
-        enc.u8(0xff);
-        return enc.finish();
+    let mut walk = KeyWalk {
+        graph,
+        out: Vec::with_capacity(64),
+        frames: Vec::new(),
+        open: HashMap::new(),
     };
-    let key = encode_data(graph, data.as_ref(), seen, depth);
-    seen.remove(&id);
-    key
+    walk.enter(id, 0);
+    walk.run();
+    StableKey::from_exact(walk.out)
 }
 
-fn encode_child(
-    graph: &SemanticGraphStore,
-    id: SemanticNodeId,
-    seen: &mut HashMap<SemanticNodeId, u32>,
-    enc: &mut Encoder,
-    depth: u16,
-) {
-    let child = encode_node(graph, id, seen, depth + 1);
-    enc.absorb_incomplete(&child);
-    enc.bytes(&child.exact);
+/// One node open on the walk's path.
+struct Frame {
+    node: SemanticNodeId,
+    recipe: Recipe,
+    /// Bytes of `recipe.buf` already written to the output.
+    written: usize,
+    /// The next hole to fill.
+    next_hole: usize,
+    /// Offset of this node's first byte in the output.
+    start: usize,
+    /// The set hole being filled, while one is open.
+    set: Option<SetFill>,
 }
 
-fn encode_data(
-    graph: &SemanticGraphStore,
-    data: &SemanticNodeData,
-    seen: &mut HashMap<SemanticNodeId, u32>,
-    depth: u16,
-) -> StableKey {
-    let mut enc = Encoder::new();
+/// An unordered child collection whose member keys are being collected.
+struct SetFill {
+    members: Vec<SemanticNodeId>,
+    next: usize,
+    keys: Vec<Vec<u8>>,
+}
+
+/// The iterative encoder: every open node is a heap frame, and every key is
+/// written straight into one output buffer.
+struct KeyWalk<'g> {
+    graph: &'g SemanticGraphStore,
+    out: Vec<u8>,
+    frames: Vec<Frame>,
+    /// Each node open on the path, with its frame level.
+    open: HashMap<SemanticNodeId, u32>,
+}
+
+impl KeyWalk<'_> {
+    /// Begin the key of `id` at output offset `start`: a back-reference or
+    /// an absent node is written at once, anything else opens a frame.
+    fn enter(&mut self, id: SemanticNodeId, start: usize) {
+        if let Some(&level) = self.open.get(&id) {
+            let mut enc = Recipe::new();
+            enc.header(category::RECURSIVE, 1);
+            enc.u32(level);
+            self.out.extend_from_slice(&enc.buf);
+            self.deliver(start);
+            return;
+        }
+        let Some(data) = self.graph.node_data(id) else {
+            let mut enc = Recipe::new();
+            enc.header(category::INTRINSIC, subtag::OPAQUE);
+            enc.u8(0xff);
+            self.out.extend_from_slice(&enc.buf);
+            self.deliver(start);
+            return;
+        };
+        self.open.insert(id, self.frames.len() as u32);
+        self.frames.push(Frame {
+            node: id,
+            recipe: encode_data(&data),
+            written: 0,
+            next_hole: 0,
+            start,
+            set: None,
+        });
+    }
+
+    /// Hand the finished key at `start..` to the enclosing frame: a set
+    /// member is kept aside for sorting, a single child gets its length.
+    fn deliver(&mut self, start: usize) {
+        let Some(parent) = self.frames.last_mut() else {
+            return;
+        };
+        match &mut parent.set {
+            Some(set) => set.keys.push(self.out.split_off(start)),
+            None => {
+                let len = (self.out.len() - start) as u32;
+                self.out[start - 4..start].copy_from_slice(&len.to_le_bytes());
+            }
+        }
+    }
+
+    fn run(&mut self) {
+        while let Some(frame) = self.frames.last_mut() {
+            if let Some(set) = &mut frame.set {
+                if let Some(&member) = set.members.get(set.next) {
+                    set.next += 1;
+                    let start = self.out.len();
+                    self.enter(member, start);
+                    continue;
+                }
+                let mut keys = std::mem::take(&mut set.keys);
+                frame.set = None;
+                keys.sort();
+                keys.dedup();
+                self.out
+                    .extend_from_slice(&(keys.len() as u16).to_le_bytes());
+                for key in keys {
+                    self.out
+                        .extend_from_slice(&(key.len() as u32).to_le_bytes());
+                    self.out.extend_from_slice(&key);
+                }
+                continue;
+            }
+            if let Some((at, hole)) = frame.recipe.holes.get_mut(frame.next_hole) {
+                frame.next_hole += 1;
+                self.out
+                    .extend_from_slice(&frame.recipe.buf[frame.written..*at]);
+                frame.written = *at;
+                match hole {
+                    Hole::Child(child) => {
+                        let child = *child;
+                        self.out.extend_from_slice(&[0; 4]);
+                        let start = self.out.len();
+                        self.enter(child, start);
+                    }
+                    Hole::Set(members) => {
+                        frame.set = Some(SetFill {
+                            members: std::mem::take(members),
+                            next: 0,
+                            keys: Vec::new(),
+                        });
+                    }
+                }
+                continue;
+            }
+            self.out
+                .extend_from_slice(&frame.recipe.buf[frame.written..]);
+            let Some(frame) = self.frames.pop() else {
+                break;
+            };
+            self.open.remove(&frame.node);
+            self.deliver(frame.start);
+        }
+    }
+}
+
+/// The node's encoding recipe: its own bytes with a hole at every child.
+/// Reads the node's payload only — never another node.
+fn encode_data(data: &SemanticNodeData) -> Recipe {
+    let mut enc = Recipe::new();
     match data {
         SemanticNodeData::Primitive(kind) => {
             enc.header(category::INTRINSIC, primitive_subtag(*kind));
@@ -419,7 +502,7 @@ fn encode_data(
             if let QueryError::RecursiveRef { args, .. } = err {
                 enc.u16(args.len() as u16);
                 for arg in args.iter() {
-                    encode_child(graph, *arg, seen, &mut enc, depth);
+                    enc.child(*arg);
                 }
             }
         }
@@ -428,45 +511,30 @@ fn encode_data(
             enc.u8(intrinsic_op_tag(*op));
             enc.u16(args.len() as u16);
             for arg in args.iter() {
-                encode_child(graph, *arg, seen, &mut enc, depth);
+                enc.child(*arg);
             }
         }
         SemanticNodeData::Alias(inner) => {
             enc.header(category::AUTHORED, subtag::ALIAS);
-            encode_child(graph, *inner, seen, &mut enc, depth);
+            enc.child(*inner);
         }
         SemanticNodeData::Union(members) => {
             enc.header(category::SYNTHETIC, subtag::UNION);
             enc.u8(origin_tag(members.origin_category()));
-            let mut child_keys: Vec<(Vec<u8>, bool)> = members
-                .iter()
-                .map(|id| {
-                    let key = encode_node(graph, *id, seen, depth + 1);
-                    let complete = key.is_complete();
-                    (key.exact, complete)
-                })
-                .collect();
-            child_keys.sort();
-            child_keys.dedup();
-            enc.saw_incomplete |= child_keys.iter().any(|(_, complete)| !*complete);
-            let child_keys: Vec<Vec<u8>> = child_keys.into_iter().map(|(exact, _)| exact).collect();
-            enc.u16(child_keys.len() as u16);
-            for key in child_keys {
-                enc.bytes(&key);
-            }
+            enc.child_set(members.iter().copied().collect());
         }
         SemanticNodeData::Intersection(members) => {
             enc.header(category::SYNTHETIC, subtag::INTERSECTION);
             enc.u8(origin_tag(members.origin_category()));
             enc.u16(members.len() as u16);
             for id in members.iter() {
-                encode_child(graph, *id, seen, &mut enc, depth);
+                enc.child(*id);
             }
         }
         SemanticNodeData::Array { element, readonly } => {
             enc.header(category::SYNTHETIC, subtag::ARRAY);
             enc.bool(*readonly);
-            encode_child(graph, *element, seen, &mut enc, depth);
+            enc.child(*element);
         }
         SemanticNodeData::Tuple { elements, readonly } => {
             enc.header(category::SYNTHETIC, subtag::TUPLE);
@@ -482,7 +550,7 @@ fn encode_data(
                 }
                 enc.bool(el.optional);
                 enc.bool(el.rest);
-                encode_child(graph, el.value, seen, &mut enc, depth);
+                enc.child(el.value);
             }
         }
         SemanticNodeData::TemplateLiteral {
@@ -496,24 +564,24 @@ fn encode_data(
             }
             enc.u16(expressions.len() as u16);
             for expr in expressions.iter() {
-                encode_child(graph, *expr, seen, &mut enc, depth);
+                enc.child(*expr);
             }
         }
         SemanticNodeData::KeyOf { base } => {
             enc.header(category::SYNTHETIC, subtag::KEYOF);
-            encode_child(graph, *base, seen, &mut enc, depth);
+            enc.child(*base);
         }
         SemanticNodeData::IndexedAccess { object, index } => {
             enc.header(category::SYNTHETIC, subtag::INDEXED_ACCESS);
-            encode_child(graph, *object, seen, &mut enc, depth);
-            encode_property_key(graph, index, seen, &mut enc, depth);
+            enc.child(*object);
+            encode_property_key(&mut enc, index);
         }
         SemanticNodeData::Mapped { source, mapper } => {
             enc.header(category::SYNTHETIC, subtag::MAPPED);
-            encode_child(graph, *source, seen, &mut enc, depth);
-            encode_child(graph, mapper.parameter_node, seen, &mut enc, depth);
-            encode_child(graph, mapper.key_space, seen, &mut enc, depth);
-            encode_child(graph, mapper.value_expr, seen, &mut enc, depth);
+            enc.child(*source);
+            enc.child(mapper.parameter_node);
+            enc.child(mapper.key_space);
+            enc.child(mapper.value_expr);
             enc.u8(match mapper.optionality {
                 OptionalityMod::Add => 1,
                 OptionalityMod::Remove => 2,
@@ -533,7 +601,7 @@ fn encode_data(
                 None => enc.u8(0),
                 Some(remap) => {
                     enc.u8(1);
-                    encode_child(graph, remap, seen, &mut enc, depth);
+                    enc.child(remap);
                 }
             }
         }
@@ -553,14 +621,14 @@ fn encode_data(
                 None => enc.u8(0),
                 Some(c) => {
                     enc.u8(1);
-                    encode_child(graph, *c, seen, &mut enc, depth);
+                    enc.child(*c);
                 }
             }
             match default {
                 None => enc.u8(0),
                 Some(d) => {
                     enc.u8(1);
-                    encode_child(graph, *d, seen, &mut enc, depth);
+                    enc.child(*d);
                 }
             }
         }
@@ -584,10 +652,10 @@ fn encode_data(
         } => {
             enc.header(category::SYNTHETIC, subtag::CONDITIONAL);
             enc.bool(*distributive);
-            encode_child(graph, *check, seen, &mut enc, depth);
-            encode_child(graph, *extends, seen, &mut enc, depth);
-            encode_child(graph, *true_branch_ref, seen, &mut enc, depth);
-            encode_child(graph, *false_branch_ref, seen, &mut enc, depth);
+            enc.child(*check);
+            enc.child(*extends);
+            enc.child(*true_branch_ref);
+            enc.child(*false_branch_ref);
             // The pending substitution is part of the shell's identity: a
             // different parameter binder is a different binding, never a
             // duplicate. Binders and arguments both descend as children.
@@ -601,8 +669,8 @@ fn encode_data(
                         enc.u8(tag);
                         enc.u16(frame.pairs().len() as u16);
                         for (parameter, argument) in frame.pairs().iter() {
-                            encode_child(graph, *parameter, seen, &mut enc, depth);
-                            encode_child(graph, *argument, seen, &mut enc, depth);
+                            enc.child(*parameter);
+                            enc.child(*argument);
                         }
                     }
                 }
@@ -623,7 +691,7 @@ fn encode_data(
             enc.str(&literal.enum_decl.decl_name);
             enc.str(&literal.member);
             enc.u64(u64::from(literal.member_count));
-            encode_child(graph, literal.base, seen, &mut enc, depth);
+            enc.child(literal.base);
         }
         SemanticNodeData::InstantiationRef { base, args } => {
             enc.header(category::AUTHORED, subtag::INSTANTIATION_REF);
@@ -632,7 +700,7 @@ fn encode_data(
             enc.str(&base.decl_name);
             enc.u16(args.len() as u16);
             for arg in args.iter() {
-                encode_child(graph, *arg, seen, &mut enc, depth);
+                enc.child(*arg);
             }
         }
         // The class identity is the authored position (file, owner, offset);
@@ -662,15 +730,15 @@ fn encode_data(
             enc.u8(u8::from(identity.object_literal));
             enc.u16(type_arguments.len() as u16);
             for argument in type_arguments.iter() {
-                encode_child(graph, *argument, seen, &mut enc, depth);
+                enc.child(*argument);
             }
-            encode_child(graph, *surface, seen, &mut enc, depth);
+            enc.child(*surface);
         }
         SemanticNodeData::MergedDecl { contributors } => {
             enc.header(category::AUTHORED, subtag::MERGED_DECL);
             enc.u16(contributors.len() as u16);
             for c in contributors.iter() {
-                encode_child(graph, *c, seen, &mut enc, depth);
+                enc.child(*c);
             }
         }
         SemanticNodeData::Signature {
@@ -705,13 +773,13 @@ fn encode_data(
                 // as its optionality alone.
                 enc.u8(u8::from(p.optional) | (u8::from(p.declared_literal) << 1));
                 enc.bool(p.rest);
-                encode_child(graph, p.ty, seen, &mut enc, depth);
+                enc.child(p.ty);
             }
-            encode_child(graph, *return_type, seen, &mut enc, depth);
+            enc.child(*return_type);
             enc.u16(type_parameters.len() as u16);
             for tp in type_parameters.iter() {
                 enc.str(&tp.name);
-                encode_child(graph, tp.param, seen, &mut enc, depth);
+                enc.child(tp.param);
             }
             match occurrence {
                 None => enc.u8(0),
@@ -737,7 +805,7 @@ fn encode_data(
                     None => enc.u8(0),
                     Some(ty) => {
                         enc.u8(1);
-                        encode_child(graph, ty, seen, &mut enc, depth);
+                        enc.child(ty);
                     }
                 }
             }
@@ -746,14 +814,14 @@ fn encode_data(
             enc.header(category::AUTHORED, subtag::OBJECT);
             enc.u16(surface.entries.len() as u16);
             for entry in surface.entries.iter() {
-                encode_surface_entry(graph, entry, seen, &mut enc, depth);
+                encode_surface_entry(&mut enc, entry);
             }
             enc.bool(surface.has_known_index_signature());
             match surface.keyspace {
                 None => enc.u8(0),
                 Some(ks) => {
                     enc.u8(1);
-                    encode_child(graph, ks, seen, &mut enc, depth);
+                    enc.child(ks);
                 }
             }
             // The derived positive-members index participates in arena
@@ -765,7 +833,7 @@ fn encode_data(
             let members = surface.positive_members();
             enc.u16(members.len() as u16);
             for member in members.iter() {
-                encode_surface_member(graph, member, seen, &mut enc, depth);
+                encode_surface_member(&mut enc, member);
             }
         }
         SemanticNodeData::ObjectSpreadProgram(program) => {
@@ -773,7 +841,7 @@ fn encode_data(
             let children: Vec<SemanticNodeId> = program.child_nodes().collect();
             enc.u16(children.len() as u16);
             for child in children {
-                encode_child(graph, child, seen, &mut enc, depth);
+                enc.child(child);
             }
         }
         SemanticNodeData::TypeOf(_) => {
@@ -789,7 +857,7 @@ fn encode_data(
             let args = data.carrier_type_args();
             enc.u16(args.len() as u16);
             for arg in args {
-                encode_child(graph, *arg, seen, &mut enc, depth);
+                enc.child(*arg);
             }
         }
         SemanticNodeData::TypeOfNominal(_) => {
@@ -815,7 +883,7 @@ fn encode_data(
             let args = data.carrier_type_args();
             enc.u16(args.len() as u16);
             for arg in args {
-                encode_child(graph, *arg, seen, &mut enc, depth);
+                enc.child(*arg);
             }
         }
         SemanticNodeData::ImportType(_) => {
@@ -831,7 +899,7 @@ fn encode_data(
             let args = data.carrier_type_args();
             enc.u16(args.len() as u16);
             for arg in args {
-                encode_child(graph, *arg, seen, &mut enc, depth);
+                enc.child(*arg);
             }
         }
         SemanticNodeData::RawFallback { value } => {
@@ -845,24 +913,18 @@ fn encode_data(
         SemanticNodeData::DeferredCallable(_) => {
             enc.header(category::SYNTHETIC, subtag::DEFERRED_CALLABLE);
             for child in data.carrier_type_args() {
-                encode_child(graph, *child, seen, &mut enc, depth);
+                enc.child(*child);
             }
         }
     }
-    enc.finish()
+    enc
 }
 
-fn encode_surface_entry(
-    graph: &SemanticGraphStore,
-    entry: &SurfaceEntry,
-    seen: &mut HashMap<SemanticNodeId, u32>,
-    enc: &mut Encoder,
-    depth: u16,
-) {
+fn encode_surface_entry(enc: &mut Recipe, entry: &SurfaceEntry) {
     match entry {
         SurfaceEntry::Member(member) => {
             enc.u8(1);
-            encode_property_key(graph, &member.key, seen, enc, depth);
+            encode_property_key(enc, &member.key);
             enc.bool(member.optional);
             enc.bool(member.readonly);
             enc.u8(match member.visibility {
@@ -870,21 +932,21 @@ fn encode_surface_entry(
                 verter_type_expr::MemberVisibility::Protected => 2,
                 verter_type_expr::MemberVisibility::Private => 3,
             });
-            encode_child(graph, member.value, seen, enc, depth);
+            enc.child(member.value);
         }
         SurfaceEntry::CallSignature(id) => {
             enc.u8(2);
-            encode_child(graph, *id, seen, enc, depth);
+            enc.child(*id);
         }
         SurfaceEntry::ConstructSignature(id) => {
             enc.u8(3);
-            encode_child(graph, *id, seen, enc, depth);
+            enc.child(*id);
         }
         SurfaceEntry::IndexSignature(sig) => {
             enc.u8(4);
             enc.bool(sig.readonly);
-            encode_child(graph, sig.key_type, seen, enc, depth);
-            encode_child(graph, sig.value_type, seen, enc, depth);
+            enc.child(sig.key_type);
+            enc.child(sig.value_type);
         }
     }
 }
@@ -893,14 +955,8 @@ fn encode_surface_entry(
 /// arena's `Eq` carries except the deliberately excluded `spans` and
 /// `declaration_origin` (source-location-only differences collapse under
 /// `T | T = T`).
-fn encode_surface_member(
-    graph: &SemanticGraphStore,
-    member: &SurfaceMember,
-    seen: &mut HashMap<SemanticNodeId, u32>,
-    enc: &mut Encoder,
-    depth: u16,
-) {
-    encode_property_key(graph, &member.key, seen, enc, depth);
+fn encode_surface_member(enc: &mut Recipe, member: &SurfaceMember) {
+    encode_property_key(enc, &member.key);
     enc.bool(member.optional);
     enc.bool(member.readonly);
     match member.method_kind {
@@ -926,16 +982,10 @@ fn encode_surface_member(
         verter_type_expr::ExcessPropertyOrigin::SpreadTainted => enc.u8(2),
         verter_type_expr::ExcessPropertyOrigin::NonLiteral => enc.u8(3),
     }
-    encode_child(graph, member.value, seen, enc, depth);
+    enc.child(member.value);
 }
 
-fn encode_property_key(
-    graph: &SemanticGraphStore,
-    key: &AuthoredPropertyKey,
-    seen: &mut HashMap<SemanticNodeId, u32>,
-    enc: &mut Encoder,
-    depth: u16,
-) {
+fn encode_property_key(enc: &mut Recipe, key: &AuthoredPropertyKey) {
     match key {
         AuthoredPropertyKey::String(s) => {
             enc.u8(1);
@@ -951,12 +1001,12 @@ fn encode_property_key(
         }
         AuthoredPropertyKey::Computed(node) => {
             enc.u8(4);
-            encode_child(graph, *node, seen, enc, depth);
+            enc.child(*node);
         }
     }
 }
 
-fn encode_query_error(enc: &mut Encoder, err: &QueryError) {
+fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
     let tag: u8 = match err {
         QueryError::Miss => 1,
         QueryError::UnsupportedIntrinsic { .. } => 2,
@@ -1034,18 +1084,14 @@ pub fn sort_by_stable_key(graph: &SemanticGraphStore, members: &mut [SemanticNod
 }
 
 /// Stable-key equality that may license a collapse: BOTH keys must be
-/// complete. The depth-exhausted marker is shared by every over-deep
-/// structure, so an incomplete key never proves structural identity —
-/// mirroring the canonical comparator's budgeted refusal to collapse.
+/// complete and equal.
 pub fn provably_equal(graph: &SemanticGraphStore, a: SemanticNodeId, b: SemanticNodeId) -> bool {
     let key_a = stable_key_for_node(graph, a);
     let key_b = stable_key_for_node(graph, b);
     key_a.is_complete() && key_b.is_complete() && key_a == key_b
 }
 
-/// Union-set canonicalization: sort by stable key and drop exact duplicates.
-/// An incomplete (depth-exhausted) key never drops anything — the shared
-/// marker would collapse distinct over-deep structures into one.
+/// Union-set canonicalization: sort by stable key and drop repeated node ids.
 pub fn canonicalize_union_members(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],

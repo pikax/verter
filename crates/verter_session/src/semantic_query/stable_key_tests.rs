@@ -256,3 +256,276 @@ fn union_views_are_scoped_to_their_store() {
         "store B must read ITS union, not the view store A built under the same id"
     );
 }
+
+/// `depth` nested arrays around a `leaf` primitive.
+fn array_chain(graph: &SemanticGraphStore, depth: usize, leaf: PrimitiveKind) -> SemanticNodeId {
+    let mut node = prim(graph, leaf);
+    for _ in 0..depth {
+        node = graph.intern_node(SemanticNodeData::Array {
+            element: node,
+            readonly: false,
+        });
+    }
+    node
+}
+
+/// The members of a union node, or the node itself when it is not one.
+fn union_arms(graph: &SemanticGraphStore, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+    match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Union(list)) => list.iter().copied().collect(),
+        _ => vec![node],
+    }
+}
+
+/// A depth past 256 levels.
+const PAST_256_LEVELS: usize = 300;
+
+/// One store's fixture: two structures identical through
+/// [`PAST_256_LEVELS`] levels that differ only in their leaf, each also
+/// wrapped as an intersection arm, interned A-first or B-first.
+struct DeepPair {
+    graph: SemanticGraphStore,
+    a: SemanticNodeId,
+    b: SemanticNodeId,
+    a_arm: SemanticNodeId,
+    b_arm: SemanticNodeId,
+}
+
+impl DeepPair {
+    fn build(a_first: bool) -> Self {
+        let graph = SemanticGraphStore::new();
+        let (a, b) = if a_first {
+            let a = array_chain(&graph, PAST_256_LEVELS, PrimitiveKind::Number);
+            let b = array_chain(&graph, PAST_256_LEVELS, PrimitiveKind::String);
+            (a, b)
+        } else {
+            let b = array_chain(&graph, PAST_256_LEVELS, PrimitiveKind::String);
+            let a = array_chain(&graph, PAST_256_LEVELS, PrimitiveKind::Number);
+            (a, b)
+        };
+        let tag = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: crate::semantic_query::DeclIdentity::synthetic("Tag"),
+        });
+        let arm = |deep| {
+            crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
+                &graph,
+                &[tag, deep],
+            )
+            .node
+        };
+        let (a_arm, b_arm) = if a_first {
+            let a_arm = arm(a);
+            (a_arm, arm(b))
+        } else {
+            let b_arm = arm(b);
+            (arm(a), b_arm)
+        };
+        Self {
+            graph,
+            a,
+            b,
+            a_arm,
+            b_arm,
+        }
+    }
+
+    /// `"A"` / `"B"` for this store's nodes, so orders compare across stores.
+    fn label(&self, node: SemanticNodeId) -> &'static str {
+        if node == self.a || node == self.a_arm {
+            "A"
+        } else if node == self.b || node == self.b_arm {
+            "B"
+        } else {
+            panic!("an unexpected node {node:?} in the ordered output")
+        }
+    }
+
+    fn labels(&self, nodes: &[SemanticNodeId]) -> Vec<&'static str> {
+        nodes.iter().map(|node| self.label(*node)).collect()
+    }
+
+    /// Every union ordering consumer's answer over the pair, fed A-first or
+    /// B-first.
+    fn orders(&self, a_first: bool) -> Vec<Vec<&'static str>> {
+        use crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union;
+        use crate::semantic_query::stable_key::{
+            canonicalize_union_members, sort_union_members_by_stable_key,
+        };
+        let input = |x, y| if a_first { [x, y] } else { [y, x] };
+        let mut sorted = input(self.a, self.b);
+        sort_union_members_by_stable_key(&self.graph, &mut sorted);
+        let canonical = canonicalize_union_members(&self.graph, &input(self.a, self.b));
+        let union = intern_ordered_union(
+            &self.graph,
+            &input(self.a, self.b),
+            crate::semantic_query::NullabilityPolicy::Strict,
+        );
+        let arm_union = intern_ordered_union(
+            &self.graph,
+            &input(self.a_arm, self.b_arm),
+            crate::semantic_query::NullabilityPolicy::Strict,
+        );
+        vec![
+            self.labels(&sorted),
+            self.labels(&canonical),
+            self.labels(&union_arms(&self.graph, union.node)),
+            self.labels(&union_arms(&self.graph, arm_union.node)),
+        ]
+    }
+}
+
+/// Two structures identical through more than 256 levels that differ only
+/// below them get distinct keys, the same keys in two stores that interned
+/// them in opposite orders, and one canonical order through every union
+/// ordering consumer — never an order inherited from arrival.
+#[test]
+fn structures_differing_below_256_levels_keep_distinct_keys_and_one_order() {
+    let forward = DeepPair::build(true);
+    let reverse = DeepPair::build(false);
+    for pair in [&forward, &reverse] {
+        assert!(
+            stable_key_for_node(&pair.graph, pair.a) != stable_key_for_node(&pair.graph, pair.b),
+            "structures that differ below the 256th level must not share a key"
+        );
+        assert!(
+            stable_key_for_node(&pair.graph, pair.a_arm)
+                != stable_key_for_node(&pair.graph, pair.b_arm),
+            "intersections over them must not share a key"
+        );
+    }
+    for (node_forward, node_reverse) in [
+        (forward.a, reverse.a),
+        (forward.b, reverse.b),
+        (forward.a_arm, reverse.a_arm),
+        (forward.b_arm, reverse.b_arm),
+    ] {
+        assert!(
+            stable_key_for_node(&forward.graph, node_forward)
+                == stable_key_for_node(&reverse.graph, node_reverse),
+            "a key is a function of structure, not of intern order"
+        );
+    }
+    let expected = forward.orders(true);
+    for orders in [
+        forward.orders(false),
+        reverse.orders(true),
+        reverse.orders(false),
+    ] {
+        assert_eq!(
+            orders, expected,
+            "every ordering consumer answers one order in both stores and for both inputs"
+        );
+    }
+    for order in &expected {
+        assert_eq!(order.len(), 2, "no consumer collapses the pair: {order:?}");
+    }
+}
+
+/// An array node whose element is `next`, an id the store has not minted yet.
+fn array_of(graph: &SemanticGraphStore, next: u64) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::Array {
+        element: SemanticNodeId(next),
+        readonly: false,
+    })
+}
+
+/// A true cycle — a node reaching itself, directly or through another node
+/// — terminates at a back-reference to its open frame's level, so its key
+/// is finite and the same in stores where the cycle sits at other ids.
+#[test]
+fn true_cycles_terminate_at_level_back_references() {
+    let cycles = |padding: usize| {
+        let graph = SemanticGraphStore::new();
+        for index in 0..padding {
+            let _ = lit_str(&graph, &format!("padding-{index}"));
+        }
+        let own = graph.node_count() as u64;
+        let self_cycle = array_of(&graph, own);
+        assert_eq!(
+            self_cycle,
+            SemanticNodeId(own),
+            "the fixture needs a self edge"
+        );
+        let first = graph.node_count() as u64;
+        let head = array_of(&graph, first + 1);
+        let tail = graph.intern_node(SemanticNodeData::Tuple {
+            elements: Arc::from([crate::semantic_query::TupleElement {
+                label: None,
+                value: SemanticNodeId(first),
+                optional: false,
+                rest: false,
+            }]),
+            readonly: false,
+        });
+        assert_eq!(
+            (head, tail),
+            (SemanticNodeId(first), SemanticNodeId(first + 1)),
+            "the fixture needs a two-node cycle"
+        );
+        [
+            stable_key_for_node(&graph, self_cycle),
+            stable_key_for_node(&graph, head),
+            stable_key_for_node(&graph, tail),
+        ]
+    };
+    let near = cycles(0);
+    let far = cycles(17);
+    assert!(
+        near == far,
+        "a cycle's key does not depend on where its nodes sit"
+    );
+    // The self cycle is an array whose element is a back-reference to the
+    // root frame, level 0.
+    let back_reference = [1u8, 7, 1, 0, 0, 0, 0];
+    let mut expected = vec![1u8, 6, 3, 0];
+    expected.extend_from_slice(&(back_reference.len() as u32).to_le_bytes());
+    expected.extend_from_slice(&back_reference);
+    assert_eq!(near[0].exact(), expected.as_slice());
+    assert!(
+        near[1] != near[2],
+        "each entry point of a cycle keys its own shape"
+    );
+}
+
+/// Ten thousand levels encode completely on a 1 MiB thread: the encoder
+/// keeps its frames on the heap, so depth never reaches the native stack.
+#[test]
+fn ten_thousand_levels_encode_on_a_one_mebibyte_thread() {
+    const DEPTH: usize = 10_000;
+    let worker = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            use crate::semantic_query::stable_key::{
+                canonicalize_union_members, sort_union_members_by_stable_key,
+            };
+            let graph = SemanticGraphStore::new();
+            let b = array_chain(&graph, DEPTH, PrimitiveKind::String);
+            let a = array_chain(&graph, DEPTH, PrimitiveKind::Number);
+            let key_a = stable_key_for_node(&graph, a);
+            let key_b = stable_key_for_node(&graph, b);
+            assert!(key_a != key_b, "the leaves differ ten thousand levels down");
+            assert!(
+                key_a == stable_key_for_node(&graph, a),
+                "re-encoding reproduces the key"
+            );
+            let mut forward = [a, b];
+            let mut reverse = [b, a];
+            sort_union_members_by_stable_key(&graph, &mut forward);
+            sort_union_members_by_stable_key(&graph, &mut reverse);
+            assert_eq!(forward, reverse, "one order for both inputs");
+            assert_eq!(
+                canonicalize_union_members(&graph, &[b, a]).as_ref(),
+                &forward,
+                "the union view agrees with the sort"
+            );
+            key_a.exact().len()
+        })
+        .expect("spawn the 1 MiB encoder thread");
+    let bytes = worker
+        .join()
+        .expect("the encoder completes on a 1 MiB stack");
+    assert!(
+        bytes > DEPTH * 7,
+        "every level is in the key ({bytes} bytes for {DEPTH} levels)"
+    );
+}
