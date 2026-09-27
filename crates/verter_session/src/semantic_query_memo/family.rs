@@ -800,23 +800,49 @@ impl FamilyKey {
     /// never re-minted), so its candidates are pure retention. Node ids
     /// that live behind an opaque interned handle (an intersection recipe
     /// id, a signature descriptor id) are NOT reached — those families are
-    /// reclaimed by the reverse index and the family budget instead. The
-    /// match carries no wildcard so a new variant must be dispositioned
-    /// here.
+    /// reclaimed by the reverse index and the family budget instead. Every
+    /// id held inline is visited, however deep: a computed index in a path,
+    /// both sides of a substitution binding or a pending conditional pair,
+    /// and each node-set axis. The match carries no wildcard so a new
+    /// variant must be dispositioned here.
     pub(super) fn for_each_node_id(&self, mut visit: impl FnMut(SemanticNodeId)) {
         use crate::semantic_query::{
-            authored_property_key_child, CallArgKey, IntersectionInputRef,
+            authored_property_key_child, CallArgKey, CanonicalTypeSubstitution,
+            IntersectionInputRef, PathSegment,
         };
+        fn path_nodes(path: &[PathSegment], visit: &mut impl FnMut(SemanticNodeId)) {
+            for segment in path {
+                match segment {
+                    PathSegment::Member(_) => {}
+                    PathSegment::Index(index) => {
+                        authored_property_key_child(index)
+                            .into_iter()
+                            .for_each(&mut *visit);
+                    }
+                }
+            }
+        }
+        fn substitution_nodes(
+            substitution: &CanonicalTypeSubstitution,
+            visit: &mut impl FnMut(SemanticNodeId),
+        ) {
+            for &(param, bound) in substitution.bindings() {
+                visit(param);
+                visit(bound);
+            }
+        }
         match self {
             FamilyKey::ResolveDecl(_)
             | FamilyKey::TypeOf { .. }
             | FamilyKey::ResolveEnum { .. }
             | FamilyKey::ClassifyBroadRuntime { .. }
-            | FamilyKey::FlowNarrowingAt { .. }
-            | FamilyKey::ContextualTypeAt { .. }
             | FamilyKey::LowerLocator { .. }
             | FamilyKey::ClassifyMaterializationCycleGate { .. }
             | FamilyKey::ReadSignatureResult { .. } => {}
+            FamilyKey::FlowNarrowingAt { flow, .. } => flow.ids().iter().copied().for_each(visit),
+            FamilyKey::ContextualTypeAt { contextual, .. } => {
+                contextual.ids().iter().copied().for_each(visit);
+            }
             FamilyKey::Instantiate { args, .. }
             | FamilyKey::ResolveMacroPayload {
                 type_args: args, ..
@@ -832,11 +858,17 @@ impl FamilyKey {
                 args.iter().copied().for_each(visit);
             }
             FamilyKey::InstantiateAuthored { identity } => {
-                identity.args.iter().copied().for_each(visit);
+                identity.args.iter().copied().for_each(&mut visit);
+                if let Some(path) = identity.projection.residual_path() {
+                    path_nodes(path, &mut visit);
+                }
+            }
+            FamilyKey::ProjectPath { base, path, .. } => {
+                visit(*base);
+                path_nodes(path, &mut visit);
             }
             FamilyKey::ProjectMember { base, .. }
             | FamilyKey::KeyOf { base, .. }
-            | FamilyKey::ProjectPath { base, .. }
             | FamilyKey::ApparentType { base, .. }
             | FamilyKey::ClassifyTruthinessDomain { subject: base }
             | FamilyKey::AwaitedNormalize { operand: base, .. }
@@ -864,7 +896,15 @@ impl FamilyKey {
                 ..
             } => {
                 if let Some(pending) = pending {
-                    pending.argument_nodes().for_each(&mut visit);
+                    for &(param, argument) in pending
+                        .true_branch()
+                        .pairs()
+                        .iter()
+                        .chain(pending.false_branch().pairs())
+                    {
+                        visit(param);
+                        visit(argument);
+                    }
                 }
                 [*check, *extends, *true_branch, *false_branch]
                     .into_iter()
@@ -888,12 +928,22 @@ impl FamilyKey {
             FamilyKey::Relate { key } => {
                 visit(key.source);
                 visit(key.target);
+                if let Some(inference) = &key.inference_context {
+                    inference
+                        .inferable_params
+                        .ids()
+                        .iter()
+                        .copied()
+                        .for_each(visit);
+                }
             }
             FamilyKey::FlowReturn { key } => {
                 key.normalized_type_args
                     .iter()
                     .copied()
                     .for_each(&mut visit);
+                substitution_nodes(&key.context.type_substitution, &mut visit);
+                path_nodes(key.demand.point.projection.path.as_slice(), &mut visit);
                 key.input
                     .contextual_parameters
                     .iter()
@@ -901,6 +951,8 @@ impl FamilyKey {
                     .for_each(visit);
             }
             FamilyKey::ResolveCall { key } => {
+                substitution_nodes(&key.context.substitution, &mut visit);
+                key.flow.ids().iter().copied().for_each(&mut visit);
                 visit(key.callee);
                 key.receiver.into_iter().for_each(&mut visit);
                 for arg in key.args.iter() {
