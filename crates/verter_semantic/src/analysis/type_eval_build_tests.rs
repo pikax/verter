@@ -2834,9 +2834,12 @@ fn indexed_call_with_observed_roots(
     let ordinary = lower_indexed_call_expression(&call, source);
     let mut roots = Vec::new();
     let observed =
-        lower_indexed_call_expression_with_read_roots(&call, source, &mut |site, root| {
-            roots.push((site, root))
-        });
+        lower_indexed_call_expression_with_read_roots(
+            &call,
+            source,
+            &mut |site, root| roots.push((site, root)),
+            &[],
+        );
     assert_eq!(
         observed, ordinary,
         "observing roots must preserve all IR: {source}"
@@ -4714,4 +4717,41 @@ fn object_literal_preserves_accessor_kind_duplicates_and_spread_order() {
             if method.method_kind == ObjectMethodKind::Method
                 && method.function.has_implementation_body
     ));
+}
+
+/// Calls nested 10,000 deep lower to indexed records, and drop, on a 1 MiB
+/// thread: the nested records build from an explicit stack, and a record
+/// drops the records nested in it from a loop.
+#[test]
+fn calls_nested_10000_deep_lower_to_indexed_records_on_a_small_stack() {
+    use super::type_eval_build::{lower_indexed_call_expression, IndexedValueExpression};
+    const DEPTH: usize = 10_000;
+    let levels = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let source = format!("{}1{}", "f(".repeat(DEPTH), ")".repeat(DEPTH));
+            let allocator = oxc_allocator::Allocator::default();
+            let expression = verter_parser::oxc_parse::Parser::new(
+                &allocator,
+                &source,
+                oxc_span::SourceType::ts(),
+            )
+            .parse_expression()
+            .expect("fixture expression");
+            let oxc_ast::ast::Expression::CallExpression(call) = expression else {
+                panic!("fixture must be a direct call");
+            };
+            let record = lower_indexed_call_expression(&call, &source);
+            let mut levels = 1;
+            let mut current = &record;
+            while let IndexedValueExpression::Call(nested) = &current.args[0].expression {
+                levels += 1;
+                current = nested;
+            }
+            levels
+        })
+        .expect("spawn the lowering thread")
+        .join()
+        .expect("the lowering returns");
+    assert_eq!(levels, DEPTH);
 }

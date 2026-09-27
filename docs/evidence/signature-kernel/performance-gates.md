@@ -690,6 +690,28 @@ Recorded plainly so no reader mistakes absence for a pass:
   arguments, lowering the frame-lowered arguments or dropping a call's
   arguments in place overflows the thread.
 
+* **Nested indexed call records build from an explicit stack.** A call's
+  indexed record (`type_eval_build::lower_indexed_call_expression`, which
+  the flow evaluator's executor route re-reads for every call it resolves)
+  lowered a call nested in an argument, a callee or a receiver by
+  recursing into it, and the record's derived drop dropped it the same
+  way: 2,000 nested calls overflowed the thread reading the outermost one,
+  unoptimized. The nested records now build from an explicit stack, each
+  record's children lowered in order and the record built over them, and
+  `IndexedValueCall`'s `Drop` moves the records it solely owns onto a
+  stack. A flow frame reads a record over the arguments it lowers and
+  evaluates itself (`indexed_call_expression_over_frame_at`): a direct
+  call among them keeps no record of its own, so reading a nest call by
+  call no longer lowers every call again under every call around it
+  (4,000 nested calls took 52 s to answer, 2.6 s now, unoptimized).
+  `type_eval_build_tests.rs` →
+  `calls_nested_10000_deep_lower_to_indexed_records_on_a_small_stack`
+  lowers and drops the record of 10,000 nested calls on a 1 MiB thread;
+  lowering a nested record in place or dropping the nest through the
+  derived glue overflows it. `decl_body_memo_tests.rs` →
+  `a_frame_lowered_call_argument_keeps_no_indexed_record` fails when the
+  frame's arguments are ignored.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the

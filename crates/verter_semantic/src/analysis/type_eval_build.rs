@@ -7225,19 +7225,224 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
     expr: &Expression<'_>,
     source: &str,
     policy: MemberLiteralPolicy,
-    mut read_root: Option<&mut IndexedValueReadRoot>,
+    read_root: Option<&mut IndexedValueReadRoot>,
 ) -> IndexedValueExpression {
+    match indexed_value_step(expr, source, policy, read_root) {
+        IndexedValueStep::Lowered(lowered) => lowered,
+        IndexedValueStep::Call(call) => lower_nested_indexed_calls(call, source),
+    }
+}
+
+/// A direct call, construct or tagged template whose indexed record lowers
+/// its callee, receiver and arguments.
+#[derive(Clone, Copy)]
+enum IndexedCallNode<'a> {
+    Call(&'a oxc_ast::ast::CallExpression<'a>),
+    New(&'a oxc_ast::ast::NewExpression<'a>),
+    Tagged(&'a oxc_ast::ast::TaggedTemplateExpression<'a>),
+}
+
+/// One value expression's indexed lowering: done, or a direct call-like
+/// record to build over its children.
+enum IndexedValueStep<'a> {
+    Lowered(IndexedValueExpression),
+    Call(IndexedCallNode<'a>),
+}
+
+/// Lower a direct call-like expression, and every direct call-like
+/// expression nested in its callee, receiver and arguments, from an
+/// explicit stack: a call nested in an argument of a call (`f(f(f(1)))`) or
+/// in a receiver (`a.m().m()`) costs no native level. The nested records
+/// report no read roots, exactly as their recursive lowering did.
+fn lower_nested_indexed_calls(
+    first: IndexedCallNode<'_>,
+    source: &str,
+) -> IndexedValueExpression {
+    enum Task<'a> {
+        Value(&'a Expression<'a>, MemberLiteralPolicy),
+        Build(IndexedCallNode<'a>),
+    }
+    fn push_node<'a>(node: IndexedCallNode<'a>, tasks: &mut Vec<Task<'a>>) {
+        tasks.push(Task::Build(node));
+        let (callee, arguments): (Option<&'a Expression<'a>>, Vec<&'a Expression<'a>>) =
+            match node {
+                IndexedCallNode::Call(call) => (
+                    Some(&call.callee),
+                    call.arguments.iter().map(indexed_argument_expression).collect(),
+                ),
+                IndexedCallNode::New(call) => (
+                    Some(&call.callee),
+                    call.arguments.iter().map(indexed_argument_expression).collect(),
+                ),
+                IndexedCallNode::Tagged(tagged) => {
+                    (Some(&tagged.tag), tagged.quasi.expressions.iter().collect())
+                }
+            };
+        for argument in arguments.into_iter().rev() {
+            tasks.push(Task::Value(argument, MemberLiteralPolicy::Argument));
+        }
+        if let Some(callee) = callee {
+            tasks.push(Task::Value(callee, MemberLiteralPolicy::Widen));
+            if !matches!(node, IndexedCallNode::New(_)) {
+                if let Some(receiver) = indexed_call_receiver(callee) {
+                    tasks.push(Task::Value(receiver, MemberLiteralPolicy::Widen));
+                }
+            }
+        }
+    }
+    let mut tasks = Vec::new();
+    let mut values: Vec<IndexedValueExpression> = Vec::new();
+    push_node(first, &mut tasks);
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Value(expr, policy) => match indexed_value_step(expr, source, policy, None) {
+                IndexedValueStep::Lowered(lowered) => values.push(lowered),
+                IndexedValueStep::Call(node) => push_node(node, &mut tasks),
+            },
+            Task::Build(node) => {
+                let call = build_indexed_call(node, &mut values, source);
+                values.push(IndexedValueExpression::Call(call));
+            }
+        }
+    }
+    values
+        .pop()
+        .expect("the outermost record is the one value left")
+}
+
+/// The expression one call or `new` argument passes (a spread's operand).
+fn indexed_argument_expression<'a>(
+    argument: &'a oxc_ast::ast::Argument<'a>,
+) -> &'a Expression<'a> {
+    match argument {
+        oxc_ast::ast::Argument::SpreadElement(spread) => &spread.argument,
+        argument => argument.to_expression(),
+    }
+}
+
+/// The indexed record of `node` over its lowered children, which
+/// [`lower_nested_indexed_calls`] left on `values` in order: the receiver
+/// (a call or tagged template whose callee has one), the callee, then the
+/// arguments.
+fn build_indexed_call(
+    node: IndexedCallNode<'_>,
+    values: &mut Vec<IndexedValueExpression>,
+    source: &str,
+) -> IndexedValueCall {
+    let argument_count = match node {
+        IndexedCallNode::Call(call) => call.arguments.len(),
+        IndexedCallNode::New(call) => call.arguments.len(),
+        IndexedCallNode::Tagged(tagged) => tagged.quasi.expressions.len(),
+    };
+    let lowered_arguments = values.split_off(values.len() - argument_count);
+    let callee = values.pop().expect("the callee's record");
+    let receiver = match node {
+        IndexedCallNode::Call(call) => indexed_call_receiver(&call.callee),
+        IndexedCallNode::Tagged(tagged) => indexed_call_receiver(&tagged.tag),
+        IndexedCallNode::New(_) => None,
+    }
+    .map(|_| Box::new(values.pop().expect("the receiver's record")));
+    let argument = |expression: &Expression<'_>, lowered, spread| IndexedValueCallArg {
+        expression: lowered,
+        point: expression.span().start,
+        spread,
+        literal_mode: indexed_literal_mode(Some(expression)),
+        context_sensitive: indexed_context_sensitive(Some(expression)),
+        function_return_source: None,
+    };
+    let call_arguments = |arguments: &[oxc_ast::ast::Argument<'_>], lowered: Vec<_>| {
+        let args: Vec<IndexedValueCallArg> = arguments
+            .iter()
+            .zip(lowered)
+            .map(|(authored, lowered)| {
+                argument(
+                    indexed_argument_expression(authored),
+                    lowered,
+                    matches!(authored, oxc_ast::ast::Argument::SpreadElement(_)),
+                )
+            })
+            .collect();
+        Arc::from(args.into_boxed_slice())
+    };
+    match node {
+        IndexedCallNode::Call(call) => IndexedValueCall {
+            point: call.span.start,
+            kind: IndexedValueCallKind::Call,
+            callee: Box::new(callee),
+            receiver,
+            args: call_arguments(&call.arguments, lowered_arguments),
+            explicit_type_args: lower_indexed_explicit_type_arguments(
+                call.type_arguments.as_deref(),
+                source,
+            ),
+        },
+        IndexedCallNode::New(call) => IndexedValueCall {
+            point: call.span.start,
+            kind: IndexedValueCallKind::Construct,
+            callee: Box::new(callee),
+            receiver: None,
+            args: call_arguments(&call.arguments, lowered_arguments),
+            explicit_type_args: lower_indexed_explicit_type_arguments(
+                call.type_arguments.as_deref(),
+                source,
+            ),
+        },
+        IndexedCallNode::Tagged(tagged) => {
+            let mut args = Vec::with_capacity(argument_count + 1);
+            args.push(IndexedValueCallArg {
+                expression: IndexedValueExpression::TemplateStrings {
+                    point: tagged.quasi.span.start,
+                },
+                point: tagged.quasi.span.start,
+                spread: false,
+                literal_mode: IndexedValueLiteralMode::Literal,
+                context_sensitive: false,
+                function_return_source: None,
+            });
+            args.extend(
+                tagged
+                    .quasi
+                    .expressions
+                    .iter()
+                    .zip(lowered_arguments)
+                    .map(|(expression, lowered)| argument(expression, lowered, false)),
+            );
+            IndexedValueCall {
+                point: tagged.span.start,
+                kind: IndexedValueCallKind::Call,
+                callee: Box::new(callee),
+                receiver,
+                args: Arc::from(args.into_boxed_slice()),
+                explicit_type_args: lower_indexed_explicit_type_arguments(
+                    tagged.type_arguments.as_deref(),
+                    source,
+                ),
+            }
+        }
+    }
+}
+
+/// One value expression's indexed lowering up to a direct call-like
+/// record, whose children [`lower_nested_indexed_calls`] lowers.
+fn indexed_value_step<'a>(
+    expr: &'a Expression<'a>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+    mut read_root: Option<&mut IndexedValueReadRoot>,
+) -> IndexedValueStep<'a> {
     if let Some(read_root) = read_root.as_deref_mut() {
         *read_root = IndexedValueReadRoot::NonBinding;
     }
     let input = match indexed_value_disposition(expr) {
         IndexedValueDisposition::Asserted(input) => {
             // The assertion supplies the result; its operand's binding does not.
-            return lower_value_expression_with_read_root(input, source, policy, read_root)
-                .map(IndexedValueExpression::Value)
-                .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
-                    PrimitiveName::Any,
-                )));
+            return IndexedValueStep::Lowered(
+                lower_value_expression_with_read_root(input, source, policy, read_root)
+                    .map(IndexedValueExpression::Value)
+                    .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
+                        PrimitiveName::Any,
+                    ))),
+            );
         }
         // `… as const` over a literal keeps the literal it spells, readonly:
         // the operand is inferred in the const context the assertion opens.
@@ -7250,23 +7455,25 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
             | Expression::BooleanLiteral(_)
             | Expression::TemplateLiteral(_),
         ) if expr_is_const_asserted(expr, source) => {
-            return lower_value_expression_with_read_root(expr, source, policy, read_root)
-                .map(IndexedValueExpression::Value)
-                .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
-                    PrimitiveName::Any,
-                )));
+            return IndexedValueStep::Lowered(
+                lower_value_expression_with_read_root(expr, source, policy, read_root)
+                    .map(IndexedValueExpression::Value)
+                    .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
+                        PrimitiveName::Any,
+                    ))),
+            );
         }
         IndexedValueDisposition::Inferred(input) => input,
     };
-    match input {
+    IndexedValueStep::Lowered(match input {
         Expression::CallExpression(call) => {
-            IndexedValueExpression::Call(lower_indexed_call_expression(call, source))
+            return IndexedValueStep::Call(IndexedCallNode::Call(call));
         }
         Expression::NewExpression(call) => {
-            IndexedValueExpression::Call(lower_indexed_new_expression(call, source))
+            return IndexedValueStep::Call(IndexedCallNode::New(call));
         }
         Expression::TaggedTemplateExpression(tagged) => {
-            IndexedValueExpression::Call(lower_indexed_tagged_template_expression(tagged, source))
+            return IndexedValueStep::Call(IndexedCallNode::Tagged(tagged));
         }
         Expression::FunctionExpression(function) => {
             let signature = extract_function_signature(function, source);
@@ -7296,7 +7503,7 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
             .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
                 PrimitiveName::Any,
             ))),
-    }
+    })
 }
 
 /// The authored literal shape of one argument position — the ONE
@@ -7388,7 +7595,10 @@ pub fn lower_indexed_call_expression(
     call: &oxc_ast::ast::CallExpression<'_>,
     source: &str,
 ) -> IndexedValueCall {
-    lower_indexed_call_expression_observed(call, source, None)
+    match lower_nested_indexed_calls(IndexedCallNode::Call(call), source) {
+        IndexedValueExpression::Call(call) => call,
+        _ => unreachable!("a call lowers to its call record"),
+    }
 }
 
 /// Lower one call while reporting exact direct-input source provenance.
@@ -7396,18 +7606,26 @@ pub fn lower_indexed_call_expression(
 /// is reported exactly when the lowered call contains one. Nested calls use
 /// their ordinary lowering and do not report into this observer.
 /// Authored whole type queries are distinct from runtime operand reads.
+///
+/// `frame_lowered` names, by ordinal, the arguments the caller lowers and
+/// evaluates itself (a flow frame's frame-lowered arguments): such an
+/// argument that is a direct call keeps no record of its own
+/// ([`IndexedValueExpression::UnsupportedCall`] at its point), so a nest of
+/// calls read call by call is not lowered again at every level.
 pub fn lower_indexed_call_expression_with_read_roots(
     call: &oxc_ast::ast::CallExpression<'_>,
     source: &str,
     observe: &mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot),
+    frame_lowered: &[bool],
 ) -> IndexedValueCall {
-    lower_indexed_call_expression_observed(call, source, Some(observe))
+    lower_indexed_call_expression_observed(call, source, Some(observe), frame_lowered)
 }
 
 fn lower_indexed_call_expression_observed(
     call: &oxc_ast::ast::CallExpression<'_>,
     source: &str,
     mut observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+    frame_lowered: &[bool],
 ) -> IndexedValueCall {
     let (callee, receiver) = indexed_callee_and_receiver(&call.callee, source, &mut observe);
     IndexedValueCall {
@@ -7415,19 +7633,12 @@ fn lower_indexed_call_expression_observed(
         kind: IndexedValueCallKind::Call,
         callee: Box::new(callee),
         receiver,
-        args: lower_indexed_call_arguments(&call.arguments, source, observe),
+        args: lower_indexed_call_arguments(&call.arguments, source, observe, frame_lowered),
         explicit_type_args: lower_indexed_explicit_type_arguments(
             call.type_arguments.as_deref(),
             source,
         ),
     }
-}
-
-fn lower_indexed_new_expression(
-    call: &oxc_ast::ast::NewExpression<'_>,
-    source: &str,
-) -> IndexedValueCall {
-    lower_indexed_new_expression_observed(call, source, None)
 }
 
 /// The construct twin of [`lower_indexed_call_expression_with_read_roots`]:
@@ -7437,33 +7648,28 @@ pub fn lower_indexed_new_expression_with_read_roots(
     call: &oxc_ast::ast::NewExpression<'_>,
     source: &str,
     observe: &mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot),
+    frame_lowered: &[bool],
 ) -> IndexedValueCall {
-    lower_indexed_new_expression_observed(call, source, Some(observe))
+    lower_indexed_new_expression_observed(call, source, Some(observe), frame_lowered)
 }
 
 fn lower_indexed_new_expression_observed(
     call: &oxc_ast::ast::NewExpression<'_>,
     source: &str,
     observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+    frame_lowered: &[bool],
 ) -> IndexedValueCall {
     IndexedValueCall {
         point: call.span.start,
         kind: IndexedValueCallKind::Construct,
         callee: Box::new(lower_indexed_value_expression(&call.callee, source)),
         receiver: None,
-        args: lower_indexed_call_arguments(&call.arguments, source, observe),
+        args: lower_indexed_call_arguments(&call.arguments, source, observe, frame_lowered),
         explicit_type_args: lower_indexed_explicit_type_arguments(
             call.type_arguments.as_deref(),
             source,
         ),
     }
-}
-
-fn lower_indexed_tagged_template_expression(
-    tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>,
-    source: &str,
-) -> IndexedValueCall {
-    lower_indexed_tagged_template_expression_observed(tagged, source, None)
 }
 
 /// The tagged-template twin of
@@ -7510,6 +7716,7 @@ fn lower_indexed_tagged_template_expression_observed(
             index + 1,
             source,
             &mut observe,
+            false,
         ));
     }
     IndexedValueCall {
@@ -7531,21 +7738,31 @@ fn lower_indexed_call_arguments(
     arguments: &[oxc_ast::ast::Argument<'_>],
     source: &str,
     mut observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+    frame_lowered: &[bool],
 ) -> Arc<[IndexedValueCallArg]> {
     let args = arguments
         .iter()
         .enumerate()
-        .map(|(ordinal, argument)| match argument {
-            oxc_ast::ast::Argument::SpreadElement(spread) => {
-                lower_indexed_call_argument(&spread.argument, true, ordinal, source, &mut observe)
+        .map(|(ordinal, argument)| {
+            let frame_lowered = frame_lowered.get(ordinal).copied().unwrap_or(false);
+            match argument {
+                oxc_ast::ast::Argument::SpreadElement(spread) => lower_indexed_call_argument(
+                    &spread.argument,
+                    true,
+                    ordinal,
+                    source,
+                    &mut observe,
+                    frame_lowered,
+                ),
+                argument => lower_indexed_call_argument(
+                    argument.to_expression(),
+                    false,
+                    ordinal,
+                    source,
+                    &mut observe,
+                    frame_lowered,
+                ),
             }
-            argument => lower_indexed_call_argument(
-                argument.to_expression(),
-                false,
-                ordinal,
-                source,
-                &mut observe,
-            ),
         })
         .collect::<Vec<_>>();
     Arc::from(args.into_boxed_slice())
@@ -7558,14 +7775,24 @@ fn lower_indexed_call_argument(
     ordinal: usize,
     source: &str,
     observe: &mut Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+    frame_lowered: bool,
 ) -> IndexedValueCallArg {
     let mut read_root = IndexedValueReadRoot::NonBinding;
-    let lowered = lower_indexed_value_expression_with_policy_and_read_root(
+    let lowered = match indexed_value_step(
         expression,
         source,
         MemberLiteralPolicy::Argument,
         observe.as_ref().map(|_| &mut read_root),
-    );
+    ) {
+        IndexedValueStep::Lowered(lowered) => lowered,
+        // A direct call the caller lowers and evaluates itself.
+        IndexedValueStep::Call(IndexedCallNode::Call(_)) if frame_lowered => {
+            IndexedValueExpression::UnsupportedCall {
+                point: expression.span().start,
+            }
+        }
+        IndexedValueStep::Call(node) => lower_nested_indexed_calls(node, source),
+    };
     if let Some(observe) = observe.as_mut() {
         observe(IndexedCallReadSite::Argument(ordinal), read_root);
     }

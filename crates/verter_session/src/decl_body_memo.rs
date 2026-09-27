@@ -1509,6 +1509,18 @@ impl DeclBodyMemo {
         &self,
         span: verter_span::Span,
     ) -> Option<Arc<IndexedFlowCallExpression>> {
+        self.indexed_call_expression_over_frame_at(span, Arc::from([]))
+    }
+
+    /// [`Self::indexed_call_expression_at`] for a flow frame that lowers
+    /// and evaluates the arguments `frame_lowered` names by ordinal itself:
+    /// a direct call among them keeps no record of its own
+    /// (`lower_indexed_call_expression_with_read_roots`).
+    pub(crate) fn indexed_call_expression_over_frame_at(
+        &self,
+        span: verter_span::Span,
+        frame_lowered: Arc<[bool]>,
+    ) -> Option<Arc<IndexedFlowCallExpression>> {
         use verter_semantic::analysis::function_program::IndexedCallSite;
         use verter_semantic::analysis::type_eval_build::{
             lower_indexed_call_expression_with_read_roots,
@@ -1525,12 +1537,22 @@ impl DeclBodyMemo {
                     .with_indexed_call_site(span, |site| match site {
                         IndexedCallSite::Call(call) => {
                             observed_indexed_call(call.arguments.len(), |observe| {
-                                lower_indexed_call_expression_with_read_roots(call, source, observe)
+                                lower_indexed_call_expression_with_read_roots(
+                                    call,
+                                    source,
+                                    observe,
+                                    &frame_lowered,
+                                )
                             })
                         }
                         IndexedCallSite::Construct(call) => {
                             observed_indexed_call(call.arguments.len(), |observe| {
-                                lower_indexed_new_expression_with_read_roots(call, source, observe)
+                                lower_indexed_new_expression_with_read_roots(
+                                    call,
+                                    source,
+                                    observe,
+                                    &frame_lowered,
+                                )
                             })
                         }
                         // The template strings are the first argument.

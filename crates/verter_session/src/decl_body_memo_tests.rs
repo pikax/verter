@@ -2584,3 +2584,38 @@ fn retained_call_type_query_keeps_its_distinct_source_origin() {
     );
     assert_eq!(parses(&provenance), parse_count);
 }
+
+/// A flow frame reads a call's indexed record over the arguments it lowers
+/// and evaluates itself: an argument that is a direct call keeps no record
+/// of its own there, so reading a nest of calls call by call lowers each
+/// call once. Read without the frame, the nested call keeps its record.
+#[test]
+fn a_frame_lowered_call_argument_keeps_no_indexed_record() {
+    use verter_type_expr::IndexedValueExpression;
+    let source = "function f<T>(v: T): T { return v; }\nfunction g() { return f(f(1), f(2)); }";
+    let (memo, _) = memo_for(source);
+    let index = memo.function_program_index();
+    let entry = index.matches_named("g").next().unwrap().entry();
+    let outer = entry
+        .call_sites
+        .iter()
+        .max_by_key(|site| site.span.end - site.span.start)
+        .unwrap()
+        .span;
+    let over_frame = memo
+        .indexed_call_expression_over_frame_at(outer, Arc::from([true, false]))
+        .unwrap();
+    assert!(matches!(
+        over_frame.call.args[0].expression,
+        IndexedValueExpression::UnsupportedCall { .. }
+    ));
+    assert!(matches!(
+        over_frame.call.args[1].expression,
+        IndexedValueExpression::Call(_)
+    ));
+    let whole = memo.indexed_call_expression_at(outer).unwrap();
+    assert!(matches!(
+        whole.call.args[0].expression,
+        IndexedValueExpression::Call(_)
+    ));
+}
