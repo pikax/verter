@@ -1416,3 +1416,70 @@ fn union_reducer_keeps_a_literal_specialized_signature_apart() {
         );
     }
 }
+
+/// `{ [K in keyof T]: V }` over a type variable (homomorphic) and the same
+/// recipe over concrete keys evaluate differently, so a union keeps both,
+/// with few arms and with enough child-bearing arms to bucket them.
+#[test]
+fn union_reducer_keeps_homomorphic_and_concrete_mappings_apart() {
+    use crate::semantic_query::{MapperKey, MapperKind, OptionalityMod, ReadonlyMod};
+    let graph = SemanticGraphStore::new();
+    let source = bound_free_binder(&graph);
+    let key_space = graph.intern_node(SemanticNodeData::KeyOf { base: source });
+    let parameter = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let value = prim(&graph, PrimitiveKind::Number);
+    let mapped = |over_type_variable| {
+        graph.intern_node(SemanticNodeData::Mapped {
+            source,
+            mapper: MapperKey {
+                parameter_node: parameter,
+                key_space,
+                value_expr: value,
+                optionality: OptionalityMod::Keep,
+                readonly: ReadonlyMod::Keep,
+                name_remap: None,
+                kind: MapperKind::Computed,
+                over_type_variable,
+            },
+        })
+    };
+    let homomorphic = mapped(true);
+    let concrete = mapped(false);
+    assert_eq!(
+        structural_identity(&graph, homomorphic, concrete),
+        StructuralIdentity::Distinct,
+        "the comparator tells the two mappings apart"
+    );
+    let bystanders: Vec<SemanticNodeId> = (0..7)
+        .map(|index| {
+            let element = lit_str(&graph, &format!("bystander-{index}"));
+            graph.intern_node(SemanticNodeData::Array {
+                element,
+                readonly: false,
+            })
+        })
+        .collect();
+    for extra in [&[][..], &bystanders[..]] {
+        for pair in [[homomorphic, concrete], [concrete, homomorphic]] {
+            let mut members = pair.to_vec();
+            members.extend_from_slice(extra);
+            let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+                &graph,
+                &members,
+                crate::semantic_query::NullabilityPolicy::Strict,
+            );
+            let arms = union_arms(&graph, union.node);
+            assert!(
+                arms.contains(&homomorphic) && arms.contains(&concrete),
+                "both mappings survive beside {} other arms",
+                extra.len()
+            );
+        }
+    }
+}

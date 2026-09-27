@@ -2880,7 +2880,12 @@ fn compare_shallow(
                 mapper: mb,
             },
         ) => {
-            if ma.optionality != mb.optionality || ma.readonly != mb.readonly || ma.kind != mb.kind
+            // A homomorphic mapping passes a primitive source through where a
+            // concrete-key mapping enumerates its properties.
+            if ma.optionality != mb.optionality
+                || ma.readonly != mb.readonly
+                || ma.kind != mb.kind
+                || ma.over_type_variable != mb.over_type_variable
             {
                 return false;
             }
