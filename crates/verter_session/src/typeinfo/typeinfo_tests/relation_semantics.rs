@@ -20,7 +20,6 @@ fn upsert(host: &crate::VerterHost) {
 // =====================================================================
 
 #[test]
-#[ignore = "typeinfo currently selects only the True branch (`\"yes\"`) for `any extends string ? \"yes\" : \"no\"` instead of distributing across both branches; keep as the future `any`-distribution relation contract"]
 fn relation_any_extends_string_distributes_both_branches() {
     // TS7 contract: `any extends string ? "yes" : "no"` distributes the
     // `any` check across both branches, emitting the union `"yes" | "no"`.
@@ -84,7 +83,6 @@ fn relation_never_extends_string_directly_selects_true_branch() {
 }
 
 #[test]
-#[ignore = "typeinfo currently emits `\"no\"` for `IsStringDistributive<never>` instead of collapsing the distributive conditional to `never` when the bare type parameter has no constituents; keep as the future never-distribution relation contract"]
 fn relation_never_via_generic_helper_collapses_to_never() {
     // TS7 contract: `IsStringDistributive<never>` where the helper is
     // `T extends string ? "yes" : "no"` distributes over the bare type
@@ -253,7 +251,6 @@ fn relation_mutable_property_assignable_to_readonly() {
 }
 
 #[test]
-#[ignore = "typeinfo currently rejects `{ readonly a: string } extends { a: string }` (returning `\"no\"`); TypeScript's structural relation accepts readonly-to-mutable, so the relation engine must drop readonly enforcement on the producer side"]
 fn relation_readonly_property_assignable_to_mutable() {
     // TS7 contract: `{ readonly a: string } extends { a: string } ? "yes"
     // : "no"` reduces to `"yes"`. Structural subtyping in TypeScript does
@@ -326,7 +323,6 @@ fn relation_function_with_narrower_param_not_assignable_to_wider_target() {
 // =====================================================================
 
 #[test]
-#[ignore = "typeinfo currently rejects `[string, number] extends [string, ...unknown[]]` (returning `\"no\"`); the relation engine must accept a fixed tuple whose tail satisfies a `...unknown[]` rest slot"]
 fn relation_fixed_tuple_assignable_to_first_plus_rest() {
     // TS7 contract: `[string, number] extends [string, ...unknown[]] ?
     // "yes" : "no"` reduces to `"yes"`. The fixed tuple satisfies the
@@ -413,7 +409,6 @@ fn relation_empty_tuple_assignable_to_readonly_array() {
 // =====================================================================
 
 #[test]
-#[ignore = "behavior is GREEN since the carrier-shaped distributive-check fix (build_conditional resolves Alias/DeclRef/InstantiationRef union carriers through the shared structural-fact demand before distributing); the row stays in the §10.4.1 ledger until its U2 oracle-backed lift (ProofRequirement::Ts7Oracle) converts it to an oracle::run_row body"]
 fn relation_distributive_conditional_over_union_emits_branch_union() {
     // TS7 contract: `IsStringDistributive<string | number>` where the
     // helper is `T extends string ? "yes" : "no"` distributes the union
@@ -506,7 +501,6 @@ fn relation_one_arm_not_assignable_to_intersection() {
 // =====================================================================
 
 #[test]
-#[ignore = "typeinfo currently preserves the conditional `{ value: number } extends { value: infer V } ? V : never` unevaluated instead of binding `V = number` and selecting the True branch; keep as the future InferBind contract for object-property patterns"]
 fn relation_infer_value_of_object_property() {
     // TS7 contract: `{ value: number } extends { value: infer V } ? V :
     // never` binds `V = number` via the relation engine's `InferBind`
@@ -527,7 +521,6 @@ fn relation_infer_value_of_object_property() {
 }
 
 #[test]
-#[ignore = "typeinfo currently emits `never` for `[1, 2, 3] extends [infer H, ...unknown[]] ? H : never` instead of binding `H = 1`; keep as the future InferBind contract for tuple-head patterns"]
 fn relation_infer_head_of_tuple_pattern() {
     // TS7 contract: `[1, 2, 3] extends [infer H, ...unknown[]] ? H :
     // never` binds `H = 1` (the first element literal).
@@ -547,7 +540,6 @@ fn relation_infer_head_of_tuple_pattern() {
 }
 
 #[test]
-#[ignore = "typeinfo currently emits `never` for `[1, 2, 3] extends [unknown, ...infer R] ? R : never` instead of binding `R = [2, 3]`; keep as the future InferBind contract for tuple-tail rest patterns"]
 fn relation_infer_tail_of_tuple_pattern() {
     // TS7 contract: `[1, 2, 3] extends [unknown, ...infer R] ? R : never`
     // binds `R = [2, 3]` (the remaining tuple after consuming the head).

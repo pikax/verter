@@ -38,7 +38,6 @@ fn resolve_alias(alias: &str) -> TypeExpr {
 // TS7: `ReturnType<any>` = `any`. The conditional distributes over `any`,
 // both branches contribute, the merged result collapses to `any`.
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `return_type_and_instance_type_absorb_any_and_never` dispatch regression); NOT oracle-liftable — the RESULT is a degenerate keyword the oracle's two-sided positive allowlist rejects (AnyKeyword). Lift pending an oracle admission extension for degenerate keyword results"]
 fn utility_top_bottom_utb01_return_type_of_any_is_any() {
     let expr = resolve_alias("Utb01ReturnTypeOfAny");
     assert_primitive(&expr, PrimitiveName::Any);
@@ -47,7 +46,6 @@ fn utility_top_bottom_utb01_return_type_of_any_is_any() {
 // TS7: `ReturnType<never>` = `never`. Distribution over `never` collapses
 // to `never`.
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `return_type_and_instance_type_absorb_any_and_never` dispatch regression); NOT oracle-liftable — the RESULT is a degenerate keyword the oracle's two-sided positive allowlist rejects (NeverKeyword). Lift pending an oracle admission extension for degenerate keyword results"]
 fn utility_top_bottom_utb02_return_type_of_never_is_never() {
     let expr = resolve_alias("Utb02ReturnTypeOfNever");
     assert_primitive(&expr, PrimitiveName::Never);
@@ -162,7 +160,6 @@ fn utility_top_bottom_utb13_constructor_parameters_any_ctor_is_any_array() {
 
 // TS7: `Awaited<any>` = `any` (Awaited's conditional distributes over `any`).
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `awaited_absorbs_lattice_extremes` dispatch regression); NOT oracle-liftable — the RESULT is a degenerate keyword the oracle's two-sided positive allowlist rejects (AnyKeyword). Lift pending an oracle admission extension for degenerate keyword results"]
 fn utility_top_bottom_utb14_awaited_any_is_any() {
     let expr = resolve_alias("Utb14AwaitedAny");
     assert_primitive(&expr, PrimitiveName::Any);
@@ -180,7 +177,6 @@ fn utility_top_bottom_utb15_awaited_unknown_is_unknown() {}
 
 // TS7: `Awaited<never>` = `never` (distribution over `never` collapses).
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `awaited_absorbs_lattice_extremes` dispatch regression); NOT oracle-liftable — the RESULT is a degenerate keyword the oracle's two-sided positive allowlist rejects (NeverKeyword). Lift pending an oracle admission extension for degenerate keyword results"]
 fn utility_top_bottom_utb16_awaited_never_is_never() {
     let expr = resolve_alias("Utb16AwaitedNever");
     assert_primitive(&expr, PrimitiveName::Never);
@@ -216,7 +212,6 @@ fn utility_top_bottom_utb19_awaited_nested_promise_is_inner_primitive() {}
 // TS7: `NonNullable<any>` = `any`. Defined as `T & {}`;
 // `any & {}` = `any`.
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `non_nullable_reduces_settled_operands` dispatch regression); NOT oracle-liftable — the RESULT is a degenerate keyword the oracle's two-sided positive allowlist rejects (AnyKeyword). Lift pending an oracle admission extension for degenerate keyword results"]
 fn utility_top_bottom_utb20_non_nullable_any_is_any() {
     let expr = resolve_alias("Utb20NonNullableAny");
     assert_primitive(&expr, PrimitiveName::Any);
@@ -232,7 +227,6 @@ fn utility_top_bottom_utb21_non_nullable_unknown_is_empty_object() {}
 
 // TS7: `NonNullable<never>` = `never`.
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `non_nullable_reduces_settled_operands` dispatch regression); NOT oracle-liftable — the RESULT is a degenerate keyword the oracle's two-sided positive allowlist rejects (NeverKeyword). Lift pending an oracle admission extension for degenerate keyword results"]
 fn utility_top_bottom_utb22_non_nullable_never_is_never() {
     let expr = resolve_alias("Utb22NonNullableNever");
     assert_primitive(&expr, PrimitiveName::Never);
@@ -241,7 +235,6 @@ fn utility_top_bottom_utb22_non_nullable_never_is_never() {
 // TS7: `NonNullable<null | undefined>` = `never`. Both arms intersect
 // with `{}` to produce `never`, the union collapses.
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `non_nullable_reduces_settled_operands` dispatch regression); NOT oracle-liftable — generation was attempted and the generator's reducer preflight measured PreflightUnclean(Reject(NeverKeyword)) on the `never` result. Lift pending an oracle admission extension for degenerate keyword results"]
 fn utility_top_bottom_utb23_non_nullable_null_undefined_is_never() {
     let expr = resolve_alias("Utb23NonNullableNullableOnly");
     assert_primitive(&expr, PrimitiveName::Never);
@@ -261,7 +254,6 @@ fn utility_top_bottom_utb24_extract_any_against_string_is_any() {
 
 // TS7: `Exclude<any, string>` = `any`. Same `any` distribution semantics.
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `extract_and_exclude_absorb_any_source_to_any` dispatch regression); NOT oracle-liftable — the RESULT is a degenerate keyword the oracle's two-sided positive allowlist rejects (AnyKeyword). Lift pending an oracle admission extension for degenerate keyword results"]
 fn utility_top_bottom_utb25_exclude_any_against_string_is_any() {
     let expr = resolve_alias("Utb25ExcludeAnyAgainstString");
     assert_primitive(&expr, PrimitiveName::Any);

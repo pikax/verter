@@ -179,7 +179,6 @@ fn module_features_declare_global_merges_two_blocks() {
 fn module_features_typeof_import_default_resolves_value_shape() {}
 
 #[test]
-#[ignore = "MODULE_AUGMENTATION reducer complete: Verter resolves `import(\"./module_features_leaf\").LeafShape` to the declared `LeafShape` interface `{ id: string; count: number }` (verified). NOT oracle-liftable — the `import(\"…\").X` import-type source body lowers to a deferred construct at the oracle source-walk (oracle admission Reject(DeferredConstruct(\"import-type\"))); lift pending an import-type source-walk carve-out"]
 fn module_features_typeof_import_named_shape_resolves_to_interface() {
     // TS7 contract: `LeafNamedShape = import("./module_features_leaf").LeafShape`
     //   = `{ id: string; count: number }` (the declared `LeafShape` interface).
@@ -254,7 +253,6 @@ fn module_features_module_augmentation_merges_plugin_surface() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "MODULE_AUGMENTATION reducer complete: Verter resolves `typeof import(\"./module_features_cjs\")` against the ambient `export = CjsCarrierValue` declaration to the `CjsCarrier` carrier `{ readonly tag: \"cjs\"; payload: number }` (verified). NOT oracle-liftable — the bare `typeof import(\"…\")` source body lowers to a deferred import-type construct (oracle admission Reject(DeferredConstruct(\"typeof-import\"))); lift pending a typeof-import source-walk carve-out"]
 fn module_features_cjs_export_equals_resolves_to_carrier() {
     // TS7 contract: `CjsBinding = typeof import("./module_features_cjs")`.
     //   The ambient `module_features_cjs.d.ts` exports a single value via
@@ -382,7 +380,6 @@ fn module_features_namespace_interface_merge_namespace_member_resolves() {
 }
 
 #[test]
-#[ignore = "MODULE_AUGMENTATION reducer complete: Verter resolves `typeof Connector.VERSION` through the merged interface+namespace declaration to the const-narrowed string literal `\"1.0\"` (verified). NOT oracle-liftable — the bare `typeof` source body is a deferred construct at the oracle source-walk (oracle admission Reject(DeferredConstruct(\"typeof\"))); lift pending a typeof-namespace-value carve-out"]
 fn module_features_namespace_interface_merge_namespace_value_resolves_to_literal() {
     // TS7 contract: `typeof Connector.VERSION` where the merged namespace
     //   declares `export const VERSION = "1.0" as const` resolves to the

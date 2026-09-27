@@ -42,7 +42,6 @@ fn resolve_alias(alias: &str) -> TypeExpr {
 // TS7: if-branch sees {a:string} arm, else sees {b:number} arm. Joined:
 // string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate `\"a\" in x` narrowing on a binary structural union through `ReturnType<typeof fn>`; keep as the future Io01 in-operator binary-union contract"]
 fn narrow_in_operator_io01_binary_union() {
     let expr = resolve_alias("Io01Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -54,7 +53,6 @@ fn narrow_in_operator_io01_binary_union() {
 // Branch sees full union; x.a is `string | number`. Else is never (absorbed).
 // Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate the TS7 non-discriminating `\"a\" in x` emission when both union arms carry the probed key through `ReturnType<typeof fn>`; keep as the future Io02 in-operator shared-key contract"]
 fn narrow_in_operator_io02_shared_key() {
     let expr = resolve_alias("Io02Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -65,7 +63,6 @@ fn narrow_in_operator_io02_shared_key() {
 // !("a" in x) selects {b:number}; positive branch selects {a:string}.
 // Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate the else-branch of `\"a\" in x` narrowing through `ReturnType<typeof fn>`; keep as the future Io03 in-operator else-branch contract"]
 fn narrow_in_operator_io03_else_branch() {
     let expr = resolve_alias("Io03Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -76,7 +73,6 @@ fn narrow_in_operator_io03_else_branch() {
 // Branch is full intersection, else is never (absorbed). Joined:
 // {a:string} & {b:number}.
 #[test]
-#[ignore = "typeinfo currently does not propagate `\"a\" in x` narrowing on an intersection (a is always present, branch is full intersection) through `ReturnType<typeof fn>`; keep as the future Io04 in-operator intersection contract"]
 fn narrow_in_operator_io04_intersection() {
     let expr = resolve_alias("Io04Result");
     // Joined: an intersection with `a` and `b`.
@@ -94,7 +90,6 @@ fn narrow_in_operator_io04_intersection() {
 // `string | undefined`. Else is never (absorbed).
 // Joined: string | undefined.
 #[test]
-#[ignore = "typeinfo currently does not propagate the TS7 optional-property emission for `\"a\" in x` (branch keeps `string | undefined`) through `ReturnType<typeof fn>`; keep as the future Io05 in-operator optional-property contract"]
 fn narrow_in_operator_io05_optional_property() {
     let expr = resolve_alias("Io05Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -107,7 +102,6 @@ fn narrow_in_operator_io05_optional_property() {
 // `object & Record<"a", unknown>`. Else returns null.
 // Joined: (object & Record<"a", unknown>) | null.
 #[test]
-#[ignore = "typeinfo currently does not propagate `\"a\" in x` narrowing on `unknown` (with typeof+null widening) to `object & Record<\"a\", unknown>` through `ReturnType<typeof fn>`; keep as the future Io06 in-operator on-unknown contract"]
 fn narrow_in_operator_io06_on_unknown() {
     let expr = resolve_alias("Io06Result");
     assert_union_contains_primitive(&expr, PrimitiveName::Null);
@@ -126,7 +120,6 @@ fn narrow_in_operator_io06_on_unknown() {
 // ----- 7) "a" in x on object — narrows to object & Record<"a", unknown>.
 // Else returns null. Joined: (object & Record<"a", unknown>) | null.
 #[test]
-#[ignore = "typeinfo currently does not propagate `\"a\" in x` narrowing on `object` to `object & Record<\"a\", unknown>` through `ReturnType<typeof fn>`; keep as the future Io07 in-operator on-object contract"]
 fn narrow_in_operator_io07_on_object() {
     let expr = resolve_alias("Io07Result");
     assert_union_contains_primitive(&expr, PrimitiveName::Null);
@@ -146,7 +139,6 @@ fn narrow_in_operator_io07_on_object() {
 // Branch narrows to the arm with both keys ({a:1; b:2}). Else returns null.
 // Joined: {a:1; b:2} | null.
 #[test]
-#[ignore = "typeinfo currently does not propagate compound `\"a\" in x && \"b\" in x` narrowing through `ReturnType<typeof fn>`; keep as the future Io08 in-operator compound-conjunction contract"]
 fn narrow_in_operator_io08_compound_conjunction() {
     let expr = resolve_alias("Io08Result");
     assert_union_contains_primitive(&expr, PrimitiveName::Null);
@@ -156,7 +148,6 @@ fn narrow_in_operator_io08_compound_conjunction() {
 // ----- 9) !("a" in x) negated ------------------------------------------
 // Same emission as #1 with branch/else swapped. Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate negated `!(\"a\" in x)` narrowing through `ReturnType<typeof fn>`; keep as the future Io09 in-operator negated contract"]
 fn narrow_in_operator_io09_negated() {
     let expr = resolve_alias("Io09Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -167,7 +158,6 @@ fn narrow_in_operator_io09_negated() {
 // Branch = {a:1} | {a:2;b:1}; x.a is `1 | 2`. Else = {c:1}; x.c is `1`.
 // Joined: 1 | 2.
 #[test]
-#[ignore = "typeinfo currently does not propagate `\"a\" in x` narrowing on a three-arm structural union through `ReturnType<typeof fn>`; keep as the future Io10 in-operator three-arm contract"]
 fn narrow_in_operator_io10_three_arm_union() {
     let expr = resolve_alias("Io10Result");
     assert_number_literal_union(&expr, &[1.0, 2.0]);
@@ -200,7 +190,6 @@ fn narrow_in_operator_io11_generic_constrained() {
 // read of x.b is `2`. Else also reads x.b from original {b:2} arm — also `2`.
 // Joined: 2.
 #[test]
-#[ignore = "typeinfo currently does not propagate `\"a\" in x` re-narrowing after reassignment in the branch through `ReturnType<typeof fn>`; keep as the future Io12 in-operator reassignment-renarrowing contract"]
 fn narrow_in_operator_io12_reassignment_renarrowing() {
     let expr = resolve_alias("Io12Result");
     assert_eq!(
@@ -213,7 +202,6 @@ fn narrow_in_operator_io12_reassignment_renarrowing() {
 // Branch narrows to Io13C (the class has field `a`). Else returns x — the
 // branch and else returns are joined as Io13C | {b:2}.
 #[test]
-#[ignore = "typeinfo currently does not propagate `\"a\" in x` narrowing across class-instance vs object-literal union through `ReturnType<typeof fn>`; keep as the future Io13 in-operator class-vs-object contract"]
 fn narrow_in_operator_io13_class_vs_object() {
     let expr = resolve_alias("Io13Result");
     let TypeExpr::Union(arms) = &expr else {
@@ -233,7 +221,6 @@ fn narrow_in_operator_io13_class_vs_object() {
 // placeholder. `key in x` does NOT narrow. Both branches return the same
 // union. Joined: {prefixed_a:1} | {other:2}.
 #[test]
-#[ignore = "typeinfo currently does not characterize the TS7 NO-OP emission for a template-literal-typed key in `key in x` through `ReturnType<typeof fn>`; keep as the future Io14 in-operator template-literal-key contract"]
 fn narrow_in_operator_io14_template_literal_key() {
     let expr = resolve_alias("Io14Result");
     // Joined: union of two object literals — one carrying `prefixed_a`,
@@ -260,7 +247,6 @@ fn narrow_in_operator_io14_template_literal_key() {
 // Branch narrows to the iterable arm; else returns null.
 // Joined: { [Symbol.iterator](): Iterator<number> } | null.
 #[test]
-#[ignore = "typeinfo currently does not propagate `Symbol.iterator in x` narrowing through `ReturnType<typeof fn>`; keep as the future Io15 in-operator symbol-key contract"]
 fn narrow_in_operator_io15_symbol_key() {
     let expr = resolve_alias("Io15Result");
     assert_union_contains_primitive(&expr, PrimitiveName::Null);

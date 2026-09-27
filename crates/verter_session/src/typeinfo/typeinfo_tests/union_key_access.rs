@@ -14,7 +14,6 @@ fn upsert(host: &crate::VerterHost) {
 }
 
 #[test]
-#[ignore = "the U2 IndexedAccess-reduction bridge has landed (operator-bodied alias reduction in resolve_named_symbol); the remaining blocker is union-key distribution — distributing indexed access over a union key into a union of member value types"]
 fn union_key_access_two_key_union_projects_member_type_union() {
     // TS7 contract: `Surface["alpha" | "beta"]` = `Surface["alpha"] |
     // Surface["beta"]` = `number | string`. TS distributes indexed access

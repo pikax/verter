@@ -86,7 +86,6 @@ fn conditional_infer_aliases_reduce_when_requested_directly() {
 }
 
 #[test]
-#[ignore = "typeinfo currently preserves tuple-pattern conditional-infer aliases instead of binding each tuple slot; keep as the future tuple InferBind contract"]
 fn conditional_infer_tuple_pattern_resolves_each_slot() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/conditional-infer.ts", CONDITIONAL_INFER);

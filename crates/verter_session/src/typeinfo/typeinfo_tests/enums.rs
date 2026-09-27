@@ -23,7 +23,6 @@ fn upsert_enum_fixture(host: &crate::VerterHost) {
 const ENUMS: &str = include_str!("fixtures/enums.ts");
 
 #[test]
-#[ignore = "Enums reducer complete: Verter resolves `Color.Red` to the member's nominal literal type, printed `Color.Red` as tsgo prints it (verified). NOT oracle-liftable — the oracle admission gate rejects a qualified enum-member print (Reject(EnumMemberOrQualified)); lift pending oracle-infra for nominal enum-member display"]
 fn enum_numeric_member_resolves_to_branded_literal_zero() {
     // TS7 contract: `Color.Red` is the numeric-enum member's own literal
     // type, whose value is `0`. TypeScript 7.0.2 prints the alias
@@ -45,7 +44,6 @@ fn enum_numeric_member_resolves_to_branded_literal_zero() {
 }
 
 #[test]
-#[ignore = "Enums reducer complete: Verter resolves `Status.Idle` to the member's nominal literal type, printed `Status.Idle` as tsgo prints it (verified). NOT oracle-liftable — the oracle admission gate rejects a qualified enum-member print (Reject(EnumMemberOrQualified)); lift pending oracle-infra for nominal enum-member display"]
 fn enum_string_member_resolves_to_branded_string_literal() {
     // TS7 contract: `Status.Idle` is the string-enum member's own literal
     // type, whose value is `"idle"`; TypeScript 7.0.2 prints it
@@ -66,7 +64,6 @@ fn enum_string_member_resolves_to_branded_string_literal() {
 }
 
 #[test]
-#[ignore = "Enums reducer complete: Verter expands `${Status}` to `\"active\" | \"done\" | \"idle\"` via TemplateLiteralReduce (verified). NOT oracle-liftable — tsgo hover displays the template-literal ORIGIN `${Status}`, not the expansion (oracle admission Reject(DeferredConstruct(template-literal))); lift pending a template-literal expansion probe"]
 fn enum_template_literal_over_string_enum_produces_value_union() {
     // TS7 contract: `${Status}` is a template-literal type that expands the
     // string-enum value union, producing `"idle" | "active" | "done"`.
@@ -86,7 +83,6 @@ fn enum_template_literal_over_string_enum_produces_value_union() {
 }
 
 #[test]
-#[ignore = "Enums reducer complete: Verter projects `keyof typeof Color` to `\"Blue\" | \"Green\" | \"Red\"` via KeyOf over the enum `typeof` object (verified). NOT oracle-liftable — `keyof typeof Enum` is not a recognized source-walk carve-out shape (oracle admission Reject(SourceUnresolvedOrCyclic)); lift pending a keyof-typeof-of-enum carve-out + distributive-identity probe"]
 fn enum_keyof_typeof_numeric_yields_member_name_union() {
     // TS7 contract: `keyof typeof Color` is the union of the enum's declared
     // member names, NOT the reverse-mapped numeric keys. So
@@ -109,7 +105,6 @@ fn enum_keyof_typeof_numeric_yields_member_name_union() {
 }
 
 #[test]
-#[ignore = "Enums reducer complete: Verter projects `keyof typeof Status` to `\"Active\" | \"Done\" | \"Idle\"` (verified). NOT oracle-liftable — `keyof typeof Enum` is not a recognized source-walk carve-out shape (oracle admission Reject(SourceUnresolvedOrCyclic)); lift pending a keyof-typeof-of-enum carve-out + distributive-identity probe"]
 fn enum_keyof_typeof_string_yields_member_name_union() {
     // TS7 contract: `keyof typeof Status` = `"Idle" | "Active" | "Done"`.
     let host = make_host_with_footprint();
@@ -128,7 +123,6 @@ fn enum_keyof_typeof_string_yields_member_name_union() {
 }
 
 #[test]
-#[ignore = "Enums reducer complete: Verter resolves the const-enum member `Direction.Up` to its nominal literal type, printed `Direction.Up` as tsgo prints it (verified). NOT oracle-liftable — the oracle admission gate rejects a qualified enum-member print (Reject(EnumMemberOrQualified)); lift pending oracle-infra for nominal enum-member display"]
 fn enum_const_enum_member_resolves_to_inlined_string_literal() {
     // TS7 contract: `Direction.Up` from a `const enum` is the member's own
     // literal type, whose value is `"UP"` (a const enum is inlined at run
@@ -150,7 +144,6 @@ fn enum_const_enum_member_resolves_to_inlined_string_literal() {
 }
 
 #[test]
-#[ignore = "Enums reducer complete: Verter selects the `Status.Idle` arm and projects its payload `{ hint: string }` (verified) — `Status.Idle` lowers to the SAME member literal on both the union arm and the Extract probe, so the shared object relation + indexed access pick the right arm. NOT oracle-liftable — tsgo hover displays the indexed-access ORIGIN, not the resolved object (oracle admission Reject(DeferredConstruct(indexed-access))); lift pending an indexed-access expansion probe"]
 fn enum_discriminant_extract_projects_matching_arm_payload() {
     // TS7 contract: `Extract<StatefulNode, { status: Status.Idle }>["payload"]`
     // selects the `Status.Idle` arm and projects its payload object:

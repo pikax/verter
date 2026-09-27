@@ -82,7 +82,6 @@ fn contextual_typing_ct02_callback_return_type_published() {
 // TS7: `const o: { a: 1; b: 2 } = { a: 1, b: 2 }` preserves the literal
 // types. `typeof o` is `{ a: 1; b: 2 }`.
 #[test]
-#[ignore = "typeinfo currently does not propagate contextual typing from a declared object-literal target type through `ReturnType<typeof fn>` to preserve literal property types; keep as the future Ct03 object-literal-assignment-from-typed-target contract"]
 fn contextual_typing_ct03_object_literal_assignment_from_typed_target() {
     let expr = resolve_alias("Ct03Result");
     let props = object_props(&expr);
@@ -96,7 +95,6 @@ fn contextual_typing_ct03_object_literal_assignment_from_typed_target() {
 // as `{ tag: "x" }`. Returning `o` publishes that contextually-typed
 // shape — emission is `{ tag: "x" }`.
 #[test]
-#[ignore = "the object-literal argument is contextually typed from the function parameter and the row PASSES under --include-ignored (the projected shape pins `tag: \"x\"`); it stays ignored because it has no `ORACLE_QUERY_SPECS` seat: `ProofRequirement::Ts7Oracle` requires a registry entry, a vendored source, a checked-in tsgo snapshot, and retained lift-migration provenance from the audited lift command. Lift under U6.CONTEXTUAL_CALLBACK when the row is seated"]
 fn contextual_typing_ct04_object_literal_in_function_call() {
     let expr = resolve_alias("Ct04Result");
     let props = object_props(&expr);
@@ -128,7 +126,6 @@ fn contextual_typing_ct06_parenthesized_expression_preserves_context() {
 // widens the body to `number`. Calling `fn07()` returns `number`, NOT
 // the literal `42`.
 #[test]
-#[ignore = "the `as`-cast erases the contextual literal and the projected return widens to `number`; the row PASSES under --include-ignored; it stays ignored because it has no `ORACLE_QUERY_SPECS` seat: `ProofRequirement::Ts7Oracle` requires a registry entry, a vendored source, a checked-in tsgo snapshot, and retained lift-migration provenance from the audited lift command. Lift under U6.CONTEXTUAL_CALLBACK when the row is seated"]
 fn contextual_typing_ct07_as_cast_erases_context() {
     let expr = resolve_alias("Ct07Result");
     assert_primitive(&expr, PrimitiveName::Number);
@@ -150,7 +147,6 @@ fn contextual_typing_ct08_jsx_like_attribute_contextual_typing() {
 // position to the arm of the assigned literal — emission is the narrow
 // arm `{ kind: "a"; a: 1 }`, NOT the declared union.
 #[test]
-#[ignore = "typeinfo currently does not propagate contextual typing from a discriminated-union declared type combined with TS7 same-block narrowing in the return position through `ReturnType<typeof fn>` to the narrow arm; keep as the future Ct09 discriminated-union-contextual-narrowing contract"]
 fn contextual_typing_ct09_discriminated_union_contextual_narrowing() {
     let expr = resolve_alias("Ct09Result");
     // TS7 narrows to the assigned arm: { kind: "a"; a: 1 }.
@@ -165,7 +161,6 @@ fn contextual_typing_ct09_discriminated_union_contextual_narrowing() {
 // is contextually typed as a tuple. Emission is `[string, number]`,
 // NOT `(string | number)[]`.
 #[test]
-#[ignore = "typeinfo currently does not propagate tuple-type contextual typing on an array literal initializer through `ReturnType<typeof fn>` to the tuple shape `[string, number]`; keep as the future Ct10 array-literal-contextually-typed-as-tuple contract"]
 fn contextual_typing_ct10_array_literal_contextually_typed_as_tuple() {
     let expr = resolve_alias("Ct10Result");
     let TypeExpr::Tuple { elements, .. } = &expr else {
@@ -180,7 +175,6 @@ fn contextual_typing_ct10_array_literal_contextually_typed_as_tuple() {
 // TS7 quirk: `{ a: 1 } as const` produces `{ readonly a: 1 }` — every
 // property is marked readonly. The literal type `1` is preserved.
 #[test]
-#[ignore = "`as const` on the object literal projects `{ readonly a: 1 }` including the readonly modifier and the row PASSES under --include-ignored; it stays ignored because it has no `ORACLE_QUERY_SPECS` seat: `ProofRequirement::Ts7Oracle` requires a registry entry, a vendored source, a checked-in tsgo snapshot, and retained lift-migration provenance from the audited lift command. Lift under U6.CONTEXTUAL_CALLBACK when the row is seated"]
 fn contextual_typing_ct11_as_const_readonly_modifier() {
     let expr = resolve_alias("Ct11Result");
     let props = object_props(&expr);
@@ -209,7 +203,6 @@ fn contextual_typing_ct12_function_expression_argument_from_contextual_signature
 // TS7 quirk: `{ a: 1, b: 2 } as { a: 1 }` narrows to the cast target,
 // dropping the excess `b` property. Emission is `{ a: 1 }`.
 #[test]
-#[ignore = "the `as` cast narrows the object literal to `{ a: 1 }`, dropping the excess property, and the row PASSES under --include-ignored; it stays ignored because it has no `ORACLE_QUERY_SPECS` seat: `ProofRequirement::Ts7Oracle` requires a registry entry, a vendored source, a checked-in tsgo snapshot, and retained lift-migration provenance from the audited lift command. Lift under U6.CONTEXTUAL_CALLBACK when the row is seated"]
 fn contextual_typing_ct13_object_literal_as_cast_narrows_shape() {
     let expr = resolve_alias("Ct13Result");
     let props = object_props(&expr);
@@ -223,7 +216,6 @@ fn contextual_typing_ct13_object_literal_as_cast_narrows_shape() {
 // The `const` keyword does NOT preserve literal types here — this is
 // the key surprise satisfies pins.
 #[test]
-#[ignore = "typeinfo currently does not propagate `satisfies T` on an object literal to the wider T target shape through `ReturnType<typeof fn>` to `{ a: number; b: string }`; keep as the future Ct14 satisfies-widens-to-target contract"]
 fn contextual_typing_ct14_satisfies_widens_to_target() {
     let expr = resolve_alias("Ct14Result");
     let props = object_props(&expr);
@@ -239,7 +231,6 @@ fn contextual_typing_ct14_satisfies_widens_to_target() {
 // parameter x as number. x + 1 returns number. The outer call returns
 // T = number.
 #[test]
-#[ignore = "`T` infers from the value argument, flows into the callback parameter, and the projected return is `number`; the row PASSES under --include-ignored; it stays ignored because it has no `ORACLE_QUERY_SPECS` seat: `ProofRequirement::Ts7Oracle` requires a registry entry, a vendored source, a checked-in tsgo snapshot, and retained lift-migration provenance from the audited lift command. Lift under U6.CONTEXTUAL_CALLBACK when the row is seated"]
 fn contextual_typing_ct15_contextual_type_via_type_parameter_constraint() {
     let expr = resolve_alias("Ct15Result");
     assert_primitive(&expr, PrimitiveName::Number);

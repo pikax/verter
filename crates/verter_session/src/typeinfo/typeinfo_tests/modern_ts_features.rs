@@ -154,7 +154,6 @@ fn using_declaration_simulated_return_type_resolves_to_primitive() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "`Awaited<ReturnType<typeof async_helper>>` over the try/finally async helper projects the `number` primitive and the row PASSES under --include-ignored; it stays ignored because it has no `ORACLE_QUERY_SPECS` seat: `ProofRequirement::Ts7Oracle` requires a registry entry, a vendored source, a checked-in tsgo snapshot, and retained lift-migration provenance from the audited lift command. Lift under U6.ASYNC_GENERATOR when the row is seated"]
 fn await_using_simulated_return_type_resolves_to_primitive() {
     // TS7 contract (simulated): `Awaited<ReturnType<typeof consumeAsyncDisposable>>`
     // unwraps the Promise<number> to `number`. The SIMULATED form characterises
@@ -179,7 +178,6 @@ fn await_using_simulated_return_type_resolves_to_primitive() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "MODULE_AUGMENTATION reducer complete: Verter resolves `typeof importedJsonConfig` to the readonly `as const` object `{ readonly name: \"verter-fixture\"; readonly version: 1 }` (verified). NOT oracle-liftable — the `as const` value root is gate-rejected at the oracle source-walk (oracle admission Reject(ConstAssertion)); lift pending a const-assertion source-walk carve-out"]
 fn import_attribute_simulated_resolves_imported_json_shape() {
     // TS7 contract (simulated): `typeof importedJsonConfig` where
     // `importedJsonConfig` is `{ name: "verter-fixture", version: 1 } as const`
@@ -270,7 +268,6 @@ fn satisfies_widens_inner_value_to_primitive_without_as_const() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "typeinfo currently emits a `semanticMiss` for `Parameters<NumberConsumer[\"consume\"]>` — substituting `T = number` from a variance-annotated `<in T>` parameter into a method's parameter type through `Parameters<...>` is not yet reduced; keep as the future variance-substitution-through-method contract"]
 fn variance_annotation_in_substitution_through_consumer_consume_parameters() {
     // TS7 contract: `Parameters<NumberConsumer["consume"]>` =
     // `[value: number]` — a single-element labelled tuple whose element type

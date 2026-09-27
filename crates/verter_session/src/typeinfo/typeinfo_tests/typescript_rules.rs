@@ -239,7 +239,6 @@ fn typescript_rules_keyof_materializes_literal_key_union() {}
 fn typescript_rules_indexed_access_reduces_terminal_property() {}
 
 #[test]
-#[ignore = "typeinfo currently does not distribute conditional aliases over union checks into a union of branch objects; keep as the future distributive conditional contract"]
 fn typescript_rules_distributive_conditional_expands_each_union_arm() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);
@@ -292,7 +291,6 @@ fn typescript_rules_constructor_parameters_resolve_tuple() {}
 fn typescript_rules_instance_type_resolves_constructed_object() {}
 
 #[test]
-#[ignore = "reducer projects the full public instance surface correctly (Verter expands `InstanceType<typeof ClassRules>` to `{ id: string; method(p0: number): string }`) but the row is NOT oracle-liftable — tsgo's hover displays a class instance type NOMINALLY (`ClassRules`, a bare ref), so the snapshot value cannot discriminate the structural field+method composition the row contracts (measured ValueMismatch: verter structural vs oracle nominal ref). Lift pending an oracle probe/grammar extension that elicits structural display for class instance types"]
 fn typescript_rules_class_instance_type_includes_fields_and_methods() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);
@@ -316,7 +314,6 @@ fn typescript_rules_class_instance_type_includes_fields_and_methods() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not lower typeof const assertions into readonly literal object surfaces; keep as the future typeof const contract"]
 fn typescript_rules_typeof_const_preserves_readonly_literals() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);
@@ -364,7 +361,6 @@ fn typescript_rules_typeof_const_nested_value_resolves_literal() {
 fn typescript_rules_awaited_recursively_unwraps_promises() {}
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `template_intrinsic_reducer_evaluates_union` regression); NOT oracle-liftable — the SOURCE body is a template-literal construct that the oracle §Q2 positive-allowlist rejects (Reject(DeferredConstruct(\"template-literal\"))). Lift pending an oracle admission + hover-grammar extension for template-literal source roots"]
 fn typescript_rules_template_intrinsic_evaluates_union() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);
@@ -413,7 +409,6 @@ fn template_intrinsic_reducer_evaluates_union() {
 }
 
 #[test]
-#[ignore = "blocked on TWO deferred shared-resolver gaps: (1) per-key CONDITIONAL branch selection / `as never` key drop (the `K extends \"internal\" ? never : …` arm is Relate-carrying — deferred to the relation-oracle block); (2) the `K & string` literal-subsumption normalization (`\"id\" & string` → `\"id\"`) — deferred to a future shared-normalization block. Both must land before the `public:${K & string}` remapped surface materializes; keep as the future key-remap filter contract"]
 fn typescript_rules_key_remap_exclude_filters_and_renames_keys() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);

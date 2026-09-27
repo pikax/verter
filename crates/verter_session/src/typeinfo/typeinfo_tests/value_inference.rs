@@ -165,7 +165,6 @@ fn value_inference_arrow_expression_body_publishes_return_shape() {}
 fn value_inference_arrow_expression_body_substitutes_parameter_references() {}
 
 #[test]
-#[ignore = "the substrate's branch join composes the per-arm return objects, but the text arm's `value` stays `string | number` — `typeof` narrowing is a separate mechanism that has not landed; keep as the future flow-sensitive value inference contract"]
 fn value_inference_flow_variables_narrow_return_value_by_branch() {
     let host = make_host_with_footprint();
     upsert_value_fixture(&host);
@@ -210,7 +209,6 @@ fn value_inference_flow_variables_narrow_return_value_by_branch() {
 }
 
 #[test]
-#[ignore = "`computed<T>(() => ...)` infers `T` from the callback's return body and the published shape carries the asserted `id`/`count`/`nested.ready` slots; the row PASSES under --include-ignored; it stays ignored because it has no `ORACLE_QUERY_SPECS` seat: `ProofRequirement::Ts7Oracle` requires a registry entry, a vendored source, a checked-in tsgo snapshot, and retained lift-migration provenance from the audited lift command. Lift under U6.FLOW_RETURN_SUBSTRATE when the row is seated"]
 fn value_inference_computed_callback_object_value_resolves_from_callback_body() {
     // TS7 contract: ComputedObjectValue =
     //   { id: "computed"; count: number; nested: { ready: boolean } }

@@ -55,7 +55,6 @@ fn cross_file_surface_resolves_barrel_and_renamed_imports() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not reduce indexed-access projection through a barrel-renamed imported generic alias; keep as the future cross-file path projection contract"]
 fn cross_file_projected_item_resolves_local_extension() {
     let host = make_host_with_footprint();
     upsert_cross_file_fixture(&host);
@@ -76,7 +75,6 @@ fn cross_file_projected_item_resolves_local_extension() {
 }
 
 #[test]
-#[ignore = "typeinfo currently preserves multi-hop indexed access through cross-file aliases instead of reducing the terminal property; keep as the future cross-file terminal projection contract"]
 fn cross_file_projected_extra_resolves_number_terminal() {
     let host = make_host_with_footprint();
     upsert_cross_file_fixture(&host);
@@ -94,7 +92,6 @@ fn cross_file_projected_extra_resolves_number_terminal() {
 }
 
 #[test]
-#[ignore = "typeinfo currently cannot combine Parameters<T>[0] with a cross-file indexed-access function property; keep as the future cross-file Parameters projection contract"]
 fn cross_file_label_parameter_resolves_local_item() {
     let host = make_host_with_footprint();
     upsert_cross_file_fixture(&host);

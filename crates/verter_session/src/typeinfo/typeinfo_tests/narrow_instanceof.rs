@@ -40,7 +40,6 @@ fn resolve_alias(alias: &str) -> TypeExpr {
 // ----- 1) x instanceof A on A | B ---------------------------------------
 // TS7: if-branch returns A, else returns B. Joined: A | B.
 #[test]
-#[ignore = "typeinfo currently does not propagate `instanceof`-narrowing through `ReturnType<typeof fn>` to the joined return type; keep as the future In01 instanceof-narrowing binary-class-union contract"]
 fn narrow_instanceof_in01_binary_union() {
     let expr = resolve_alias("In01InstanceOfBinaryUnionResult");
     // Joined: InA | InB.
@@ -60,7 +59,6 @@ fn narrow_instanceof_in01_binary_union() {
 // ----- 2) x instanceof A on A | string ----------------------------------
 // TS7: if-branch returns A, else returns string. Joined: A | string.
 #[test]
-#[ignore = "typeinfo currently does not propagate `instanceof`-narrowing across a class/primitive union through `ReturnType<typeof fn>`; keep as the future In02 instanceof-narrowing class-plus-primitive contract"]
 fn narrow_instanceof_in02_class_plus_primitive() {
     let expr = resolve_alias("In02InstanceOfWithPrimitiveResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -79,7 +77,6 @@ fn narrow_instanceof_in02_class_plus_primitive() {
 // ----- 3) x instanceof A on unknown -------------------------------------
 // TS7: if-branch narrows to A, else stays unknown. Joined: unknown (A is subsumed).
 #[test]
-#[ignore = "typeinfo currently does not propagate `instanceof`-narrowing on `unknown` through `ReturnType<typeof fn>` to the joined-unknown return; keep as the future In03 instanceof-on-unknown contract"]
 fn narrow_instanceof_in03_on_unknown() {
     let expr = resolve_alias("In03InstanceOfOnUnknownResult");
     assert_primitive(&expr, PrimitiveName::Unknown);
@@ -120,7 +117,6 @@ fn narrow_instanceof_in06_abstract_class() {
 // TS7: if-branch returns null; else returns `x` narrowed to NOT-A = B.
 // Joined: B | null.
 #[test]
-#[ignore = "typeinfo currently does not propagate else-branch instanceof narrowing (`if (x instanceof A) return null; else x is B`) through `ReturnType<typeof fn>`; keep as the future In07 instanceof-else-reachability contract"]
 fn narrow_instanceof_in07_else_reachability() {
     let expr = resolve_alias("In07InstanceOfElseReachabilityResult");
     assert_union_contains_primitive(&expr, PrimitiveName::Null);
@@ -137,7 +133,6 @@ fn narrow_instanceof_in07_else_reachability() {
 // TS7: I is an interface, A implements I. The if-branch narrows x to A.
 // else returns null. Joined: A | null.
 #[test]
-#[ignore = "typeinfo currently does not propagate instanceof-narrowing on an interface-typed parameter against an implementing class through `ReturnType<typeof fn>`; keep as the future In08 instanceof-on-interface-union contract"]
 fn narrow_instanceof_in08_interface_union() {
     let expr = resolve_alias("In08InstanceOfInterfaceUnionResult");
     assert_union_contains_primitive(&expr, PrimitiveName::Null);
@@ -157,7 +152,6 @@ fn narrow_instanceof_in08_interface_union() {
 // TS7: if-branch (negated) returns null; trailing return sees x as A
 // (only path past the guard). Joined: A | null.
 #[test]
-#[ignore = "typeinfo currently does not propagate negated instanceof narrowing across an early return through `ReturnType<typeof fn>`; keep as the future In09 negated-instanceof-early-return contract"]
 fn narrow_instanceof_in09_negated_early_return() {
     let expr = resolve_alias("In09InstanceOfNegatedResult");
     assert_union_contains_primitive(&expr, PrimitiveName::Null);
@@ -175,7 +169,6 @@ fn narrow_instanceof_in09_negated_early_return() {
 // (instanceof narrows the A side; the `{ tag: 1 }` side is preserved).
 // else returns null. Joined: (A & { tag: 1 }) | null.
 #[test]
-#[ignore = "typeinfo currently does not preserve an intersection's non-instanceof arm across `instanceof` through `ReturnType<typeof fn>`; keep as the future In10 instanceof-intersection contract"]
 fn narrow_instanceof_in10_intersection() {
     let expr = resolve_alias("In10InstanceOfIntersectionResult");
     // Joined: (In10A & { tag: 1 }) | null.
@@ -267,7 +260,6 @@ fn narrow_instanceof_in14_promise_special_case() {
 // TS7: if-branch narrows to A (null/undefined are not instances). else
 // returns null. Joined: A | null.
 #[test]
-#[ignore = "typeinfo currently does not propagate instanceof-narrowing on a nullable parameter through `ReturnType<typeof fn>`; keep as the future In15 instanceof-on-nullable contract"]
 fn narrow_instanceof_in15_nullable() {
     let expr = resolve_alias("In15InstanceOfNullableResult");
     assert_union_contains_primitive(&expr, PrimitiveName::Null);

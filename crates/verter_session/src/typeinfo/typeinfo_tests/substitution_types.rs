@@ -65,7 +65,6 @@ fn resolve_alias(alias: &str) -> TypeExpr {
 // via ReturnType, the joined return is `string | unknown` which collapses
 // to `unknown` (string is subsumed by unknown).
 #[test]
-#[ignore = "typeinfo currently does not propagate substitution-type narrowing on a bare generic T through `ReturnType<typeof fn>` to the collapsed `unknown` emission; keep as the future Sb01 bare-narrowing-of-generic contract"]
 fn substitution_types_sb01_bare_narrowing_of_generic() {
     let expr = resolve_alias("Sb01Result");
     assert_primitive(&expr, PrimitiveName::Unknown);
@@ -76,7 +75,6 @@ fn substitution_types_sb01_bare_narrowing_of_generic() {
 // (constrained to `string | number`). Joined: `string | (string | number)`
 // = `string | number`.
 #[test]
-#[ignore = "typeinfo currently does not propagate substitution-type narrowing across a constrained generic with method-call apparent type through `ReturnType<typeof fn>` to the joined `string | number` emission; keep as the future Sb02 narrowing-in-constrained-generic contract"]
 fn substitution_types_sb02_narrowing_in_constrained_generic() {
     let expr = resolve_alias("Sb02Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -99,7 +97,6 @@ fn substitution_types_sb03_substitution_survives_method_calls() {
 // the emission is `unknown` — NOT the substitution `T & string` and NOT
 // the literal `T`.
 #[test]
-#[ignore = "typeinfo currently does not propagate the explicit `: T` return annotation on a generic-narrowed body through `ReturnType<typeof fn>` to the T-resolves-to-`unknown` emission; keep as the future Sb04 narrowed-substitution-to-return-position contract"]
 fn substitution_types_sb04_narrowed_substitution_to_return_position() {
     let expr = resolve_alias("Sb04Result");
     assert_primitive(&expr, PrimitiveName::Unknown);
@@ -121,7 +118,6 @@ fn substitution_types_sb05_compound_typeof_and_instanceof() {
 // on assignment to a wider site). The return is the un-narrowed T which
 // resolves to `unknown` via ReturnType.
 #[test]
-#[ignore = "typeinfo currently does not model TS7's un-narrowing-on-assignment-to-wider-site behaviour on a generic substitution through `ReturnType<typeof fn>` to the widened `unknown` emission; keep as the future Sb06 narrowing-widens-after-reassignment contract"]
 fn substitution_types_sb06_narrowing_widens_after_reassignment() {
     let expr = resolve_alias("Sb06Result");
     assert_primitive(&expr, PrimitiveName::Unknown);
@@ -165,7 +161,6 @@ fn substitution_types_sb09_asserts_x_is_string_on_generic() {
 // TS7: After `isFoo<T>(x)` the variable x narrows to T. ReturnType
 // resolves T to `unknown`. Joined: unknown.
 #[test]
-#[ignore = "typeinfo currently does not propagate `x is T` predicate narrowing on a bare generic through `ReturnType<typeof fn>` to the T-resolves-to-`unknown` emission; keep as the future Sb10 x-is-T-predicate-on-generic contract"]
 fn substitution_types_sb10_x_is_t_predicate_on_generic() {
     let expr = resolve_alias("Sb10Result");
     assert_primitive(&expr, PrimitiveName::Unknown);
@@ -206,7 +201,6 @@ fn substitution_types_sb13_substitution_carried_across_destructure() {
 // The bare function type is still unparameterised; ReturnType resolves
 // T to `unknown` (not the default). Joined: unknown.
 #[test]
-#[ignore = "typeinfo currently does not model TS7's defaults-do-not-apply-inside-ReturnType rule; the emission must be the un-narrowed `unknown`, NOT the default `string`. Keep as the future Sb14 default-type-arg-ignored-by-return-type contract"]
 fn substitution_types_sb14_default_type_arg_ignored_by_return_type() {
     let expr = resolve_alias("Sb14Result");
     assert_primitive(&expr, PrimitiveName::Unknown);

@@ -17,7 +17,6 @@ fn upsert(host: &crate::VerterHost) {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `utility_edge_object_filter_keyspace_reducer_regression`); NOT oracle-liftable — the `never` key argument in the declared source is outside the oracle's source-side positive allowlist (NeverKeyword). Lift pending an oracle admission extension for degenerate keyword arguments"]
 fn utility_edge_pick_never_yields_empty_object() {
     // TS7 contract: `Pick<Base, never>` = `{}`. The mapped form is
     // `{ [K in never]: Base[K] }` which has no members.
@@ -61,7 +60,6 @@ fn utility_edge_omit_never_yields_input_shape() {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `utility_edge_object_filter_keyspace_reducer_regression`); NOT oracle-liftable — generation was attempted and measured Reject(DeferredConstruct(keyof)) on the `keyof Base` key argument. Lift pending an oracle source-walk carve-out for keyof key arguments"]
 fn utility_edge_omit_all_keys_yields_empty_object() {
     // TS7 contract: `Omit<Base, keyof Base>` removes every declared member,
     // leaving `{}`.
@@ -82,7 +80,6 @@ fn utility_edge_omit_all_keys_yields_empty_object() {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `utility_edge_object_filter_keyspace_reducer_regression`); NOT oracle-liftable — generation was attempted and measured Reject(DeferredConstruct(keyof)) on the `keyof Base` key argument. Lift pending an oracle source-walk carve-out for keyof key arguments"]
 fn utility_edge_pick_all_keys_yields_input_shape() {
     // TS7 contract: `Pick<Base, keyof Base>` = `Base`.
     let host = make_host_with_footprint();

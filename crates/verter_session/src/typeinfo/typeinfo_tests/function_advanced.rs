@@ -68,7 +68,6 @@ fn function_advanced_parameters_omits_this_slot() {
 // TS7 contract: `ThisParameterType<typeof withReceiver>` = the type of
 // the `this` parameter annotation = `{ value: number }`.
 #[test]
-#[ignore = "`ThisParameterType<typeof withReceiver>` projects the declared `this` annotation `{ value: number }` today and the row PASSES under --include-ignored; it stays ignored because it cannot be oracle-seated: the harness source-side admission gate rejects the row with `Reject(ThisTypeOrParam)`, so no checked-in tsgo snapshot can be generated for it. Lift when the admission allowlist covers `this`-typed declarations"]
 fn function_advanced_this_parameter_type_returns_this_annotation() {
     let host = make_host_with_footprint();
     upsert(&host);
@@ -91,7 +90,6 @@ fn function_advanced_this_parameter_type_returns_this_annotation() {
 // `(factor: number) => number`. The function type is republished with
 // the `this` slot stripped.
 #[test]
-#[ignore = "`OmitThisParameter<typeof withReceiver>` republishes `(factor: number) => number` with the `this` slot stripped today and the row PASSES under --include-ignored; it stays ignored because it cannot be oracle-seated: the harness source-side admission gate rejects the row with `Reject(ThisTypeOrParam)`, so no checked-in tsgo snapshot can be generated for it. Lift when the admission allowlist covers `this`-typed declarations"]
 fn function_advanced_omit_this_parameter_returns_function_without_this() {
     let host = make_host_with_footprint();
     upsert(&host);
