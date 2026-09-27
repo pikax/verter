@@ -1388,6 +1388,18 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "ca413199ab0bff1dde03fc9e6c7a418890599f4325a608716909e5c50cac0c68",
     ),
     (
+        "N27_switch_true_guard_dispatch",
+        "1c043dc24b7e6935166359f8b8e525898c6758fbf3c72411181aff62216cf5fa",
+    ),
+    (
+        "N28_switch_typeof_dispatch",
+        "01e7a5edd516cafdf83f8f1c953ff5dc4e122969bf6af15d58332485988028e8",
+    ),
+    (
+        "N30_switch_true_negated_guard_dispatch",
+        "60b88e0dd8c216eb7c3a29684952ed99475202da6431d8dfe46d4e592b0f7a6b",
+    ),
+    (
         "N31_discriminated_union_switch_positive_control",
         "82864336129b447c34bf97d99dd936464a993c1c7a6112ab35892ffa151ca93c",
     ),
@@ -3407,11 +3419,11 @@ mod corpus_suite {
             ),
             (
                 "N28_switch_typeof_dispatch",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same surface `{ v: string }` — object members print without the trailing `;` terminator",
             ),
             (
                 "N30_switch_true_negated_guard_dispatch",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same surface `{ v: string }` — object members print without the trailing `;` terminator",
             ),
             (
                 "N34_non_null_asserted_property_discriminant",
@@ -5443,10 +5455,7 @@ const OPEN_DEBTS: &[&str] = &[
     //    carry. Every row publishes an HONEST SUPERSET as a typed
     //    ReturnOnly (zero candidates, recomputed cold), never a
     //    silently narrowed answer.
-    "N27_switch_true_guard_dispatch",
-    "N28_switch_typeof_dispatch",
     "N29_switch_optional_chain_discriminant",
-    "N30_switch_true_negated_guard_dispatch",
     "N32_optional_chain_property_discriminant",
     "N33_computed_property_discriminant",
     "N34_non_null_asserted_property_discriminant",
@@ -5571,7 +5580,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // selects both nullish arms (N76), a test behind a comma sequence is
     // its last operand (N42), and a nested body narrows a captured binding
     // by its own guard (N48): 42 match.
-    (Owner::U6NarrowTypeof, 48, 42, 6),
+    (Owner::U6NarrowTypeof, 48, 45, 3),
     // The `instanceof` arm rule: derivation decided by class heritage on
     // both edges (the subclass arm survives, the base arm downcasts, the
     // negated edge drops the tested class's family) with nullish

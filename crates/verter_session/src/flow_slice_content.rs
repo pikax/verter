@@ -996,9 +996,16 @@ pub enum SliceSwitchTest {
     /// A `default` clause: no test at all. Its dispatch edge is the
     /// discriminant minus every carried test.
     Default,
-    /// `case <literal>:` — the one relation this lowering carries. Its
-    /// dispatch edge narrows the discriminant to the literal.
+    /// `case <literal>:` against a represented discriminant. Its dispatch
+    /// edge narrows the discriminant to the literal.
     Literal(SliceGuardLiteral),
+    /// A clause whose dispatch relation IS a guard: `case "number":` under
+    /// `switch (typeof x)` is `typeof x === "number"`
+    /// (`narrowTypeBySwitchOnTypeOf`), and `case c:` under `switch (true)`
+    /// is the condition `c` (`narrowTypeBySwitchOnTrue`). Its dispatch edge
+    /// applies the guard; the default clause's edge applies every clause's
+    /// guard negated.
+    Guard(Box<SliceGuard>),
     /// A case test whose relation this lowering cannot carry. Its
     /// dispatch edge applies NO narrow — the clause is reachable for
     /// discriminant values this half cannot enumerate — and the switch
@@ -8177,15 +8184,13 @@ impl<'a> Lowerer<'a> {
                     // The scan alone is NOT completeness evidence, because
                     // a case relation narrows with no call and no write at
                     // all: `switch (true) { case typeof x === "string": }`
-                    // narrows `x` inside the clause, `case K:` against a
-                    // literal-typed `const` narrows the discriminant, and a
-                    // bare-identifier test aliasing a narrowing expression
-                    // narrows through the alias. The MODELED
-                    // dispatch is therefore exactly one shape — a
-                    // represented discriminant against a LITERAL case
-                    // relation, the only pair this lowering carries to the
-                    // evaluator — and every other clause with a test mints
-                    // the typed gap.
+                    // narrows `x` inside the clause, and `case K:` against a
+                    // literal-typed `const` narrows the discriminant. The
+                    // MODELED dispatches are a represented discriminant
+                    // against a LITERAL case relation, a `switch (typeof x)`
+                    // string case, and a `switch (true)` case whose
+                    // condition is a guard; every other clause with a test
+                    // mints the typed gap.
                     //
                     // The gap belongs AHEAD of the switch: a case test
                     // evaluates whether or not its clause is entered, so
@@ -8225,6 +8230,34 @@ impl<'a> Lowerer<'a> {
                         // must never be dispatched as the default edge.
                         let test = match case.test.as_ref() {
                             None => SliceSwitchTest::Default,
+                            // `switch (typeof x)`: each string case is the
+                            // `typeof x === "…"` guard.
+                            Some(test)
+                                if discriminant.is_none()
+                                    && self
+                                        .typeof_guard(&switch.discriminant, test, false)
+                                        .is_some() =>
+                            {
+                                SliceSwitchTest::Guard(Box::new(
+                                    self.typeof_guard(&switch.discriminant, test, false)
+                                        .expect("the guard was just lowered"),
+                                ))
+                            }
+                            // `switch (true)`: each case is its condition.
+                            Some(test)
+                                if matches!(
+                                    unwrap_parenthesized(&switch.discriminant),
+                                    Expression::BooleanLiteral(literal) if literal.value
+                                ) =>
+                            {
+                                match self.lower_guard(test) {
+                                    SliceGuard::None => {
+                                        unprovable_switch_effect = true;
+                                        SliceSwitchTest::Unmodeled
+                                    }
+                                    guard => SliceSwitchTest::Guard(Box::new(guard)),
+                                }
+                            }
                             Some(test) => {
                                 match guard_literal_of(test, self.source)
                                     .or_else(|| self.guard_value_path_of(test))

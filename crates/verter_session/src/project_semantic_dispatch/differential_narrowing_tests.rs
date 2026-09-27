@@ -39,6 +39,9 @@ export function tLitUnion(x: "a" | 1 | true) { if (typeof x === "number") return
 export function tSwitch(x: string | number | boolean) { switch (typeof x) { case "number": return x; default: throw 0; } }
 export function tSwitchFall(x: string | number | boolean) { switch (typeof x) { case "number": case "boolean": return x; default: throw 0; } }
 export function tSwitchDefault(x: string | number | boolean) { switch (typeof x) { case "number": throw 0; default: return x; } }
+export function tSwitchExhaustive(x: string | number) { switch (typeof x) { case "string": return 1; case "number": return 2; } }
+export function tSwitchPartial(x: string | number | boolean) { switch (typeof x) { case "string": return 1; case "number": return 2; } }
+export function tSwitchAfter(x: string | number | boolean) { switch (typeof x) { case "string": case "number": return 0; } return x; }
 export function tBothSides(x: string | number) { if ("string" === typeof x) return x; throw 0; }
 export function tNested(x: string | number | null) { if (x !== null) { if (typeof x === "number") return x; } throw 0; }
 export function tAndGuard(x: string | number, y: boolean) { if (typeof x === "string" && y) return x; throw 0; }
@@ -95,25 +98,24 @@ fn typeof_guards_narrow_as_the_checker_narrows() {
 }
 
 /// `switch (typeof x)` narrows `x` in each `case` clause to the tested kinds
-/// (several for fall-through labels) and in `default` to the kinds no clause
-/// names.
-///
-/// What the lane gives:
-/// - `tSwitch`: the checker answers `number`; the lane measured `number |
-///   boolean | string` degraded by FlowGap(GuardNarrowing).
-/// - `tSwitchFall`: the checker answers `number | boolean`; the lane measured
-///   `number | boolean | string` degraded by FlowGap(GuardNarrowing).
-/// - `tSwitchDefault`: the checker answers `string | boolean`; the lane
-///   measured `number | boolean | string` degraded by FlowGap(GuardNarrowing).
+/// (several for fall-through labels), in `default` and past a switch without
+/// one to the kinds no clause names, and a switch whose clauses name every
+/// kind is exhaustive (no implicit `undefined` return).
 #[test]
-#[ignore = "a switch over typeof x narrows x in each clause"]
 fn a_switch_on_typeof_narrows_each_clause() {
     let matrix = Matrix::new(TYPEOF);
-    let failures = matrix.returns(&[
+    let mut failures = matrix.returns(&[
         ("tSwitch", "number"),
         ("tSwitchFall", "number | boolean"),
         ("tSwitchDefault", "string | boolean"),
+        ("tSwitchExhaustive", "1 | 2"),
+        ("tSwitchAfter", "0 | boolean"),
     ]);
+    failures.extend(matrix.nullness(&[(
+        Read::Return("tSwitchPartial"),
+        "1 | 2 | undefined",
+        "1 | 2",
+    )]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -324,6 +326,9 @@ export function eLooseEqLit(x: 1 | "1" | 2) { if (x == 1) return x; throw 0; }
 export function eYoda(x: ABC) { if ("b" === x) return x; throw 0; }
 export function eMember(o: { k: ABC }) { if (o.k === "c") return o.k; throw 0; }
 export function eSwitchTrue(x: string | number) { switch (true) { case typeof x === "string": return x; default: throw 0; } }
+export function eSwitchTrueSecond(x: string | number | bigint) { switch (true) { case typeof x === "string": throw 0; case typeof x === "number": throw 1; default: return x; } }
+export function eSwitchTrueFall(x: string | number | boolean) { switch (true) { case typeof x === "string": case typeof x === "number": return x; default: throw 0; } }
+export function eSwitchTrueOrder(x: string | number) { switch (true) { case typeof x === "string": throw 0; case x !== undefined: return x; default: throw 1; } }
 export function eNullOrUndefUnion(x: number | null) { if (x === undefined) return x; throw 0; }
 "##;
 
@@ -364,17 +369,19 @@ fn equality_guards_narrow_as_the_checker_narrows() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `switch (true) { case typeof x === "string": … }` narrows `x` in the clause
-/// by the clause's condition.
-///
-/// What the lane gives:
-/// - `eSwitchTrue`: the checker answers `string`; the lane measured `number |
-///   string` degraded by FlowGap(GuardNarrowing).
+/// `switch (true) { case typeof x === "string": … }` narrows `x` in each clause
+/// by the clause's condition beneath every earlier clause's condition negated,
+/// in a fall-through clause by the union of the conditions, and in `default` by
+/// every condition negated (`narrowTypeBySwitchOnTrue`).
 #[test]
-#[ignore = "switch (true) narrows by each case condition"]
 fn a_switch_on_true_narrows_by_each_clause_condition() {
     let matrix = Matrix::new(EQUALITY);
-    let failures = matrix.returns(&[("eSwitchTrue", "string")]);
+    let failures = matrix.returns(&[
+        ("eSwitchTrue", "string"),
+        ("eSwitchTrueSecond", "bigint"),
+        ("eSwitchTrueFall", "string | number"),
+        ("eSwitchTrueOrder", "number"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

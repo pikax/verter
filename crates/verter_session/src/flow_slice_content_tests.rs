@@ -3001,11 +3001,10 @@ fn for_loop_left_targets_in_scanned_positions_collect_writes() {
 /// consumed by the dispatch but never feeds the demanded answer — only an
 /// `asserts` callee narrows what follows), and each case test takes the
 /// control-test discipline (a predicate callee CONTROLS the clause's
-/// narrowing). A bare-identifier test — including one aliasing a predicate
-/// call's result — carries no new call, so the SCAN is silent on it; the
-/// dispatch relation rule is what gaps it
-/// (`switch_dispatch_relation_the_lowering_cannot_carry_takes_the_typed_gap`),
-/// because silence is not completeness evidence.
+/// narrowing). A bare-identifier test under `switch (true)` aliasing a
+/// predicate call's result is the aliased condition the clause narrows by
+/// (`narrowTypeBySwitchOnTrue`): it is carried as the clause's guard and
+/// mints no gap.
 #[test]
 fn switch_case_tests_and_discriminant_take_the_control_discipline() {
     let gapped = [
@@ -3033,11 +3032,6 @@ fn switch_case_tests_and_discriminant_take_the_control_discipline() {
             "a class-hidden write in a case test",
             "export {};\nfunction f(x: string | number) { switch (true) { case (class { static { x = \"s\"; } }, true): break; } return x }",
         ),
-        (
-            "a bare-identifier case test aliasing a predicate call's result",
-            "export {};\nfunction isString(x: unknown): x is string { return true }\n\
-             function f(x: string | number) { const c = isString(x); switch (true) { case c: break; } return x }",
-        ),
     ];
     for (case, source) in gapped {
         let node = content_for(source, "f");
@@ -3061,13 +3055,23 @@ fn switch_case_tests_and_discriminant_take_the_control_discipline() {
     );
     // Certification and the dispatch relation rule are INDEPENDENT: the
     // callee is proven non-narrowing (so its call is decided above),
-    // while the clause's RELATION — a `true` discriminant against a call
-    // test — is one this lowering carries nothing for, so the switch
-    // still takes the typed gap.
+    // while the clause's condition expresses no guard, so the switch still
+    // takes the typed gap.
     assert_eq!(
         guard_gap_count(&certified),
         1,
         "a certified case call still leaves an uncarried dispatch relation: {certified:?}"
+    );
+
+    let aliased = content_for(
+        "export {};\nfunction isString(x: unknown): x is string { return true }\n\
+         function f(x: string | number) { const c = isString(x); switch (true) { case c: break; } return x }",
+        "f",
+    );
+    assert_eq!(
+        guard_gap_count(&aliased),
+        0,
+        "a bare-identifier case test aliasing a predicate call's result is the clause's guard: {aliased:?}"
     );
 
     let silent = [
@@ -3090,31 +3094,22 @@ fn switch_case_tests_and_discriminant_take_the_control_discipline() {
     }
 }
 
-/// A `switch` dispatch narrows its discriminant per clause, and the ONLY
-/// relation this lowering carries to the evaluator is a represented
-/// discriminant against a LITERAL case test. Every other clause relation
-/// narrows in the checker with NO call and NO write to observe — a
-/// `typeof` relation under a `true` discriminant, a case test naming a
+/// A `switch` dispatch narrows its discriminant per clause. The relations
+/// this lowering carries to the evaluator are a represented discriminant
+/// against a LITERAL case test, a `switch (typeof x)` string case (the
+/// `typeof` guard), and a `switch (true)` case whose condition is a guard
+/// (`narrowTypeBySwitchOnTrue`). Every other clause relation narrows in the
+/// checker with NO call and NO write to observe — a case test naming a
 /// literal-typed constant, a discriminant that is not a represented
 /// reference — so "the scan found nothing" is silence, not completeness.
 /// Each of those takes ONE typed gap ahead of the switch; the modeled
-/// pair and a test-free `default` stay silent.
+/// relations and a test-free `default` stay silent.
 #[test]
 fn switch_dispatch_relation_the_lowering_cannot_carry_takes_the_typed_gap() {
-    let gapped = [
-        (
-            "a `typeof` relation under a literal discriminant",
-            "export {};\nfunction f(x: string | number) { switch (true) { case typeof x === \"string\": return x; } return 0 }",
-        ),
-        (
-            "a case test naming a literal-typed constant",
-            "export {};\nfunction f(x: 1 | 2) { const k: 1 = 1; switch (x) { case k: return x; } return 0 }",
-        ),
-        (
-            "an equality relation under a literal discriminant",
-            "export {};\nfunction f(x: \"a\" | \"b\") { switch (true) { case x === \"a\": return x; } return 0 }",
-        ),
-    ];
+    let gapped = [(
+        "a case test naming a literal-typed constant",
+        "export {};\nfunction f(x: 1 | 2) { const k: 1 = 1; switch (x) { case k: return x; } return 0 }",
+    )];
     for (case, source) in gapped {
         let node = content_for(source, "f");
         assert_eq!(
@@ -3125,6 +3120,18 @@ fn switch_dispatch_relation_the_lowering_cannot_carry_takes_the_typed_gap() {
     }
 
     let silent = [
+        (
+            "a `typeof` relation under a `true` discriminant",
+            "export {};\nfunction f(x: string | number) { switch (true) { case typeof x === \"string\": return x; } return 0 }",
+        ),
+        (
+            "an equality relation under a `true` discriminant",
+            "export {};\nfunction f(x: \"a\" | \"b\") { switch (true) { case x === \"a\": return x; } return 0 }",
+        ),
+        (
+            "a `switch (typeof x)` string case",
+            "export {};\nfunction f(x: string | number) { switch (typeof x) { case \"string\": return x; } return 0 }",
+        ),
         (
             "a represented discriminant against a literal case test",
             "export {};\nfunction f(x: 1 | 2) { switch (x) { case 1: return x; } return 0 }",

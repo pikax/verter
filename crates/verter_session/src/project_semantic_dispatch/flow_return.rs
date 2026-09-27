@@ -17454,6 +17454,53 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// would erase both facts (they differ), while the
     /// reaching-definition join unions the two narrowed values — the
     /// checker's own rule for a fall-through-joined switch case start.
+    /// `entry` with each guard of `applied` applied on its edge (positive or
+    /// negated) and the narrows it establishes baked into the state, the way
+    /// a switch clause's dispatch edge carries its test. The flag is set when
+    /// every guard is a `typeof` test and the reference they test is left
+    /// `never`: that edge is dead (`isExhaustiveSwitchStatement` over a
+    /// `switch (typeof x)`).
+    fn guarded_switch_state(
+        &mut self,
+        entry: &FlowLayerState,
+        applied: &[(&crate::flow_slice_content::SliceGuard, bool)],
+    ) -> (FlowLayerState, bool) {
+        self.restore_layer_state(entry.clone());
+        let mark = self.narrowing_snapshot();
+        for (guard, positive) in applied {
+            self.apply_guard_scoped(guard, *positive);
+        }
+        let narrowed = self.narrowings_since(&mark);
+        self.restore_narrowings(mark);
+        self.restore_layer_state(entry.clone());
+        let typeof_subjects: Vec<&crate::flow_slice_content::SliceNarrowSubject> = applied
+            .iter()
+            .filter_map(|(guard, _)| match guard {
+                crate::flow_slice_content::SliceGuard::Typeof { subject, .. } => Some(subject),
+                _ => None,
+            })
+            .collect();
+        let dead = !applied.is_empty()
+            && typeof_subjects.len() == applied.len()
+            && typeof_subjects.iter().all(|subject| {
+                narrowed
+                    .iter()
+                    .rev()
+                    .find(|(narrowed, _)| narrowed == *subject)
+                    .is_some_and(|(_, node)| {
+                        matches!(
+                            self.dispatch.graph().node_data(*node).as_deref(),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+                        )
+                    })
+            });
+        let mut state = entry.clone();
+        for (subject, node) in narrowed {
+            self.bake_narrow_into_state(&mut state, &subject, node);
+        }
+        (state, dead)
+    }
+
     fn bake_narrow_into_state(
         &mut self,
         state: &mut FlowLayerState,
@@ -19908,7 +19955,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 Some(literal.clone())
                             }
                             crate::flow_slice_content::SliceSwitchTest::Default
+                            | crate::flow_slice_content::SliceSwitchTest::Guard(_)
                             | crate::flow_slice_content::SliceSwitchTest::Unmodeled => None,
+                        })
+                        .collect();
+                    // The clauses whose relation is a guard (`switch (typeof
+                    // x)`, `switch (true)`): the default edge and the
+                    // no-matching-case path apply every one negated.
+                    let guards: Vec<&crate::flow_slice_content::SliceGuard> = cases
+                        .iter()
+                        .filter_map(|case| match &case.test {
+                            crate::flow_slice_content::SliceSwitchTest::Guard(guard) => {
+                                Some(&**guard)
+                            }
+                            _ => None,
                         })
                         .collect();
                     // Exhaustiveness is a resolver question: the lowering
@@ -19940,10 +20000,37 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let mut chain_end: Option<FlowLayerState> = None;
                     let mut last_end: Option<FlowLayerState> = None;
                     let mut last_falls = false;
+                    let mut guards_before = 0;
                     for case in cases.iter() {
                         // The dispatch component of this clause's start.
                         let mut dispatch = entry.clone();
                         let mut dead_dispatch = false;
+                        match &case.test {
+                            // The clause's own guard, beneath every earlier
+                            // clause's guard negated (`narrowTypeBySwitchOnTrue`;
+                            // the `typeof` tests are disjoint, so the negations
+                            // change nothing there).
+                            crate::flow_slice_content::SliceSwitchTest::Guard(guard) => {
+                                let applied: Vec<(&crate::flow_slice_content::SliceGuard, bool)> =
+                                    guards[..guards_before]
+                                        .iter()
+                                        .map(|earlier| (*earlier, false))
+                                        .chain(std::iter::once((&**guard, true)))
+                                        .collect();
+                                dispatch = self.guarded_switch_state(&entry, &applied).0;
+                                guards_before += 1;
+                            }
+                            crate::flow_slice_content::SliceSwitchTest::Default
+                                if !guards.is_empty() =>
+                            {
+                                let applied: Vec<(&crate::flow_slice_content::SliceGuard, bool)> =
+                                    guards.iter().map(|guard| (*guard, false)).collect();
+                                let (state, dead) = self.guarded_switch_state(&entry, &applied);
+                                dispatch = state;
+                                dead_dispatch = dead;
+                            }
+                            _ => {}
+                        }
                         if let Some(subject) = discriminant {
                             self.restore_layer_state(entry.clone());
                             match &case.test {
@@ -19955,7 +20042,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 // not this clause's reaching set, and
                                 // baking it in would publish a type the
                                 // clause was never proven to see.
-                                crate::flow_slice_content::SliceSwitchTest::Unmodeled => {}
+                                crate::flow_slice_content::SliceSwitchTest::Unmodeled
+                                | crate::flow_slice_content::SliceSwitchTest::Guard(_) => {}
                                 // The dispatch edge: the discriminant IS
                                 // this test.
                                 // A test no discriminant arm matches bakes
@@ -20100,7 +20188,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     let mut exit_states: Vec<FlowLayerState> = Vec::new();
                     if !has_default && !covered {
-                        exit_states.push(entry.clone());
+                        if guards.is_empty() {
+                            exit_states.push(entry.clone());
+                        } else {
+                            // The no-matching-case path sees every guard
+                            // negated, and is dead when that leaves the
+                            // tested reference nothing (`isExhaustiveSwitchStatement`).
+                            let applied: Vec<(&crate::flow_slice_content::SliceGuard, bool)> =
+                                guards.iter().map(|guard| (*guard, false)).collect();
+                            let (state, dead) = self.guarded_switch_state(&entry, &applied);
+                            if !dead {
+                                exit_states.push(state);
+                            }
+                        }
                     }
                     // Lexical bindings declared inside a clause are scoped
                     // to the switch body: the close replays on every state
