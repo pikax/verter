@@ -2894,21 +2894,21 @@ fn reduce_union_incomplete_comparison_is_return_only_with_zero_warm_candidates()
     let missing_payload: Arc<[SemanticNodeId]> =
         Arc::from(vec![string, dangling].into_boxed_slice());
 
-    // Case 2 — budget exhaustion: two structurally EQUAL alias chains,
-    // longer than the per-normalization comparison budget, rooted at the
-    // same literal payload under different file scopes so every link has
-    // a distinct id. The collapse would be legitimate, but it cannot be
-    // PROVEN within budget — so it must not happen, and nothing warms.
+    // Case 2 — budget exhaustion: two alias chains longer than the
+    // per-normalization comparison budget that agree on every link and
+    // differ only in their leaf literal. The comparator runs out of budget
+    // before it reaches the leaves, so the pair stays undecided and nothing
+    // warms; their complete stable keys differ, so no key collapses them.
     let file_scope = |canonical: &str| NodeScopeId::File {
         canonical_id: Arc::from(canonical),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [9u8; 16],
         local_scope: None,
     };
-    let chain = |leaf_file: &str| {
+    let chain = |leaf_file: &str, leaf: &str| {
         let mut node = graph.intern_node_with_scope(
             SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(
-                "chain-leaf".to_string(),
+                leaf.to_string(),
             )),
             file_scope(leaf_file),
         );
@@ -2918,8 +2918,8 @@ fn reduce_union_incomplete_comparison_is_return_only_with_zero_warm_candidates()
         }
         node
     };
-    let chain_a = chain("/w/chain_a.ts");
-    let chain_b = chain("/w/chain_b.ts");
+    let chain_a = chain("/w/chain_a.ts", "chain-leaf-a");
+    let chain_b = chain("/w/chain_b.ts", "chain-leaf-b");
     assert_ne!(chain_a, chain_b);
     let over_budget: Arc<[SemanticNodeId]> = Arc::from(vec![chain_a, chain_b].into_boxed_slice());
 
