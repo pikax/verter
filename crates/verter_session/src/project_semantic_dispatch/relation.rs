@@ -184,6 +184,9 @@ pub(crate) enum InferPatternShape {
     Function,
     /// `{ [P in keyof infer T]: X }` with no key remap.
     ReverseHomomorphicMapped,
+    /// ``T extends `${infer H}-${infer R}` `` — direct `Infer` holes of a
+    /// template literal pattern.
+    TemplateLiteral,
 }
 
 /// Mapped modifiers whose inverse metadata effect is applied while the
@@ -3468,6 +3471,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 (!sites.is_empty())
                     .then(|| InferPatternInfo::new(InferPatternShape::Function, sites, None))
+            }
+            Some(SemanticNodeData::TemplateLiteral { expressions, .. }) => {
+                let sites: Vec<InferParamSite> = expressions
+                    .iter()
+                    .filter_map(|hole| match graph.node_data(*hole).as_deref() {
+                        Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
+                            node: *hole,
+                            name: Arc::clone(name),
+                            priority: InferenceCandidatePriority::Argument,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                (!sites.is_empty())
+                    .then(|| InferPatternInfo::new(InferPatternShape::TemplateLiteral, sites, None))
             }
             _ => None,
         }
@@ -8607,6 +8625,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
             drop(source_data);
             drop(target_data);
             work.push(RelateWork::Eval(source, target));
+            return;
+        }
+        // A template literal pattern holding `infer` placeholders infers
+        // each placeholder from the slice of the source it covers
+        // (`inferToTemplateLiteralType`); every other hole checks its
+        // slice as the template relation does.
+        if let Some(slices) = self.template_infer_pattern_slices(source, target) {
+            drop(source_data);
+            drop(target_data);
+            let Some(slices) = slices else {
+                results.push(RelationResult::NotAssignable);
+                return;
+            };
+            if !self.relation_session_active() {
+                results.push(RelationResult::Unknown);
+                return;
+            }
+            let mut undecided = false;
+            for (hole, slice) in slices {
+                if matches!(
+                    graph.node_data(hole).as_deref(),
+                    Some(SemanticNodeData::Infer { .. })
+                ) {
+                    undecided |= !self.relation_deposit(hole, slice, occurrence);
+                    continue;
+                }
+                match self.valid_for_template_placeholder(slice, hole) {
+                    Some(true) => {}
+                    Some(false) => {
+                        results.push(RelationResult::NotAssignable);
+                        return;
+                    }
+                    None => undecided = true,
+                }
+            }
+            results.push(if undecided {
+                RelationResult::Unknown
+            } else {
+                assignable(bindings)
+            });
             return;
         }
         if let Some(accepted) = self.string_mapping_relation(source, target) {

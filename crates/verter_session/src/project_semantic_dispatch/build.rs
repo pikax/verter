@@ -13807,6 +13807,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ConditionalInferRoute::None
                 }
             }
+            SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                let mut direct = false;
+                for hole in expressions.iter() {
+                    if matches!(
+                        graph.node_data(*hole).as_deref(),
+                        Some(SemanticNodeData::Infer { .. })
+                    ) {
+                        direct = true;
+                    } else if self.subtree_contains_infer(*hole) {
+                        return ConditionalInferRoute::OutOfScope;
+                    }
+                }
+                if direct {
+                    ConditionalInferRoute::InScopePattern(
+                        super::relation::InferPatternShape::TemplateLiteral,
+                    )
+                } else {
+                    ConditionalInferRoute::None
+                }
+            }
             _ => {
                 if self.subtree_contains_infer(extends) {
                     ConditionalInferRoute::OutOfScope

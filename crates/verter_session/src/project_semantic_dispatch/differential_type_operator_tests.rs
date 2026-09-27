@@ -249,6 +249,9 @@ type Last<T extends unknown[]> = T extends [...unknown[], infer L] ? L : never;
 type Fn1<T> = T extends (a: infer A) => infer R ? [A, R] : never;
 type Deep<T> = T extends object ? { [K in keyof T]: Deep<T[K]> } : T;
 type InferStr<T> = T extends `${infer H}-${infer R}` ? [H, R] : never;
+type InferTail<T> = T extends `x${infer R}` ? R : 0;
+type InferTwo<T> = T extends `${infer A}${infer B}` ? [A, B] : 0;
+type InferAfterNum<T> = T extends `${number}-${infer R}` ? R : 0;
 type Len<T extends readonly unknown[]> = T["length"];
 type NotAny<T> = 0 extends 1 & T ? "any" : "not";
 type Eq<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
@@ -348,20 +351,22 @@ fn a_recursive_conditional_alias_resolves() {
 }
 
 /// `T extends \`${infer H}-${infer R}\` ? [H, R] : never` over `'a-b-c'` is
-/// `["a", "b-c"]` and over `'abc'` is `never`.
-///
-/// What the lane gives:
-/// - `InferStr<'a-b-c'>`: the checker answers `["a", "b-c"]`; the lane measured
-///   `<unreduced conditional>`.
-/// - `InferStr<'abc'>`: the checker answers `never`; the lane measured
-///   `<unreduced conditional>`.
+/// `["a", "b-c"]` and over `'abc'` is `never`: each placeholder takes the
+/// slice of the source its hole covers, texts matched leftmost, a
+/// placeholder before an empty text one character, and a settled hole
+/// (`${number}`) checks its slice.
 #[test]
-#[ignore = "infer placeholders in a template literal check type match leftmost"]
 fn infer_in_a_template_literal_pattern_resolves() {
     let matrix = Matrix::new(CONDITIONALS);
     let failures = matrix.types(&[
         ("InferStr<'a-b-c'>", "[\"a\", \"b-c\"]"),
         ("InferStr<'abc'>", "never"),
+        ("InferTail<'xyz'>", "\"yz\""),
+        ("InferTail<'abc'>", "0"),
+        ("InferTwo<'abc'>", "[\"a\", \"bc\"]"),
+        ("InferTwo<''>", "0"),
+        ("InferAfterNum<'12-ab'>", "\"ab\""),
+        ("InferAfterNum<'x-ab'>", "0"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -57,6 +57,57 @@ impl ProjectSemanticDispatch<'_> {
         (!undecided).then_some(true)
     }
 
+    /// The slice a string literal or settled template `source` gives each
+    /// hole of `target`, a template literal pattern holding `infer`
+    /// placeholders (`inferTypesFromTemplateLiteralType`), paired with its
+    /// hole in order: `Some(None)` when the pattern's texts do not fit the
+    /// source, `None` when `target` holds no `infer` placeholder, holds a
+    /// hole that is neither one nor a settled placeholder, or `source` is
+    /// no such operand.
+    pub(super) fn template_infer_pattern_slices(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<Option<Vec<(SemanticNodeId, SemanticNodeId)>>> {
+        let graph = self.graph();
+        let is_infer = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Infer { .. })
+            )
+        };
+        let target = match graph.node_data(target).as_deref() {
+            Some(SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            }) if quasis.len() == expressions.len() + 1
+                && quasis.iter().all(|quasi| !quasi.contains('\\'))
+                && expressions.iter().any(|hole| is_infer(*hole))
+                && expressions
+                    .iter()
+                    .all(|hole| is_infer(*hole) || self.is_template_hole(*hole)) =>
+            {
+                TemplateParts {
+                    texts: quasis.iter().map(|quasi| quasi.to_string()).collect(),
+                    holes: expressions.to_vec(),
+                }
+            }
+            _ => return None,
+        };
+        let source_parts = match graph.node_data(source).as_deref() {
+            Some(SemanticNodeData::Literal(LiteralValue::String(text))) => TemplateParts {
+                texts: vec![text.clone()],
+                holes: Vec::new(),
+            },
+            Some(SemanticNodeData::TemplateLiteral { .. }) => self.template_parts(source)?,
+            _ => return None,
+        };
+        Some(
+            self.infer_template_slices(&source_parts, &target)
+                .map(|slices| target.holes.iter().copied().zip(slices).collect()),
+        )
+    }
+
     /// Whether `node` is a settled template literal type (see
     /// [`Self::template_parts`]).
     pub(super) fn template_is_settled(&self, node: SemanticNodeId) -> bool {
@@ -209,7 +260,7 @@ impl ProjectSemanticDispatch<'_> {
     /// numeric / bigint spelling, and a string mapping when the mapping
     /// leaves it unchanged; a lone-hole template fits by its hole; every
     /// other slice by assignability.
-    fn valid_for_template_placeholder(
+    pub(super) fn valid_for_template_placeholder(
         &self,
         slice: SemanticNodeId,
         hole: SemanticNodeId,
