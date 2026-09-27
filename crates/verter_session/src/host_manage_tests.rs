@@ -19180,6 +19180,81 @@ defineProps<IconProps>()
     );
 }
 
+/// The consumer itself is closed and reopened UNCHANGED: the byte-identical
+/// reload serves the same indexed artifact, whose macro mirror lowered the
+/// `defineProps<IconProps>()` carrier before the close released it. When the
+/// imported dependency then changes, the cold component-meta demand re-reads
+/// that mirror and must get a live carrier: the props resolve through the
+/// dependency's new content exactly as they did before the close.
+///
+/// Discriminating: the write-once mirror cell handed the cold demand the
+/// released carrier, which reads as an unresolved value, so the props the
+/// dependency declares were lost.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn host_evict_of_an_unchanged_consumer_keeps_its_macro_props_resolving_after_a_dependency_edit() {
+    const CONSUMER: &str = r#"<script setup lang="ts">
+import type { IconProps } from './types/icon'
+defineProps<IconProps>()
+</script>
+<template><div /></template>"#;
+
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/Consumer.vue", CONSUMER);
+    ws.inject_file(
+        "/src/types/icon.ts",
+        "export interface IconProps { name: string; size: number }\n",
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    let prop_names = |host: &VerterHost| {
+        let mut names = host
+            .get_component_meta("/src/Consumer.vue")
+            .expect("component meta")
+            .props
+            .iter()
+            .map(|prop| prop.name.clone())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    assert!(host.ensure_loaded("/src/Consumer.vue"));
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types/icon", "/src/types/icon.ts")],
+    );
+    assert_eq!(
+        prop_names(&host),
+        vec!["name".to_string(), "size".to_string()],
+        "fixture: the consumer's props resolve through icon.ts"
+    );
+
+    // Close the consumer and reload the same bytes from disk.
+    host.evict("/src/Consumer.vue");
+    assert!(host.ensure_loaded("/src/Consumer.vue"));
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types/icon", "/src/types/icon.ts")],
+    );
+
+    // The dependency changes, so the consumer's component meta recomputes.
+    upsert_ts(
+        &host,
+        "/src/types/icon.ts",
+        "export interface IconProps { name: string; size: number; color: string }\n",
+    );
+    assert_eq!(
+        prop_names(&host),
+        vec!["color".to_string(), "name".to_string(), "size".to_string()],
+        "the reopened consumer's props resolve through the dependency's new content"
+    );
+}
+
 /// One checkpoint of the in-process churn lanes: live nodes, memo entries,
 /// shape entries, the per-family memo breakdown and the node slot count.
 type ChurnCycleCounters = (usize, usize, usize, Vec<(&'static str, usize)>, usize);
