@@ -2534,9 +2534,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                     None => None,
                 };
-                concrete_seeds.push(
-                    self.substitute_canonical(*declared, widened.as_ref().unwrap_or(&substitution)),
-                );
+                let instantiated =
+                    self.substitute_canonical(*declared, widened.as_ref().unwrap_or(&substitution));
+                concrete_seeds.push(self.reduce_instantiated_operators(instantiated));
             }
             SignatureReturnCarrier::Function(source) => match source {
                 verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {

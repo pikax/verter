@@ -216,6 +216,18 @@ impl EvaluateDeferredOutcome {
         }
         self.node
     }
+
+    /// The evaluated node of a complete evaluation, released as
+    /// [`Self::into_active_query_build_node`] releases it; `None` for a
+    /// partial one, whose caller keeps the operand it asked about and
+    /// folds nothing.
+    pub(super) fn into_complete_active_query_build_node(
+        self,
+        dispatch: &ProjectSemanticDispatch<'_>,
+    ) -> Option<SemanticNodeId> {
+        matches!(self.completeness, ResultCompleteness::Complete)
+            .then(|| self.into_active_query_build_node(dispatch))
+    }
 }
 
 /// Heap-owned continuation for one deferred-operator evaluation entry. A

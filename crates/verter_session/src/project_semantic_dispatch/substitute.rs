@@ -175,6 +175,158 @@ impl<'a> ProjectSemanticDispatch<'a> {
         false
     }
 
+    /// Whether `node` holds a type parameter or an `infer` placeholder
+    /// anywhere below it: the checker's generic type, whose operators stay
+    /// deferred.
+    fn mentions_binder(&self, node: SemanticNodeId) -> bool {
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                return true;
+            };
+            if matches!(
+                data.as_ref(),
+                SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. }
+            ) {
+                return true;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        false
+    }
+
+    /// `node` with each `keyof` and indexed access its instantiation
+    /// closed evaluated, as the checker's instantiation reduces an
+    /// operator over non-generic operands (`getIndexType`,
+    /// `getIndexedAccessType`): `(keyof T)[]` with `T` an object literal
+    /// type `{ a: string }` is `"a"[]`, and `{ v: T[K] }` with `K` its key
+    /// `"a"` is `{ v: string }`. A `keyof` over a declaration keeps its
+    /// name (`keyof I`), as the checker keeps the operator it reduced for
+    /// display; an operator whose operands hold a type parameter, and one
+    /// whose evaluation does not complete, stay as they are. The walk
+    /// reads arrays, tuples, object member values and unions.
+    pub(super) fn reduce_instantiated_operators(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let graph = self.graph();
+        // Post-order over the structure: a node is rebuilt once every part
+        // it reads has been, so authored nesting needs no call frames.
+        let mut done: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId> =
+            rustc_hash::FxHashMap::default();
+        let mut stack: Vec<(SemanticNodeId, bool)> = vec![(node, false)];
+        while let Some((current, parts_done)) = stack.pop() {
+            if done.contains_key(&current) {
+                continue;
+            }
+            let Some(data) = graph.node_data(current) else {
+                done.insert(current, current);
+                continue;
+            };
+            let parts: Vec<SemanticNodeId> = match data.as_ref() {
+                SemanticNodeData::Array { element, .. } => vec![*element],
+                SemanticNodeData::Tuple { elements, .. } => {
+                    elements.iter().map(|element| element.value).collect()
+                }
+                SemanticNodeData::Object(surface) => surface
+                    .positive_members()
+                    .iter()
+                    .map(|member| member.value)
+                    .collect(),
+                SemanticNodeData::Union(members) => members.iter().copied().collect(),
+                _ => Vec::new(),
+            };
+            if !parts_done {
+                stack.push((current, true));
+                stack.extend(
+                    parts
+                        .into_iter()
+                        .filter(|part| !done.contains_key(part))
+                        .map(|part| (part, false)),
+                );
+                continue;
+            }
+            let reduced_part = |part: SemanticNodeId| done.get(&part).copied().unwrap_or(part);
+            let reduced = match data.as_ref() {
+                SemanticNodeData::KeyOf { base } => {
+                    let anonymous = matches!(
+                        graph.node_data(*base).as_deref(),
+                        Some(SemanticNodeData::Object(_))
+                    );
+                    if anonymous && !self.mentions_binder(*base) {
+                        self.evaluate_closed_operator(current)
+                    } else {
+                        current
+                    }
+                }
+                SemanticNodeData::IndexedAccess { .. } => {
+                    if self.mentions_binder(current) {
+                        current
+                    } else {
+                        self.evaluate_closed_operator(current)
+                    }
+                }
+                _ if parts.iter().all(|part| reduced_part(*part) == *part) => current,
+                SemanticNodeData::Array { readonly, .. } => graph.intern_preserving_scope(
+                    current,
+                    SemanticNodeData::Array {
+                        element: reduced_part(parts[0]),
+                        readonly: *readonly,
+                    },
+                ),
+                SemanticNodeData::Tuple { elements, readonly } => {
+                    let mut elements = elements.to_vec();
+                    for element in &mut elements {
+                        element.value = reduced_part(element.value);
+                    }
+                    graph.intern_preserving_scope(
+                        current,
+                        SemanticNodeData::Tuple {
+                            elements: Arc::from(elements.into_boxed_slice()),
+                            readonly: *readonly,
+                        },
+                    )
+                }
+                SemanticNodeData::Object(surface) => {
+                    let mut members = surface.positive_members().to_vec();
+                    for member in &mut members {
+                        member.value = reduced_part(member.value);
+                    }
+                    graph.intern_preserving_scope(
+                        current,
+                        SemanticNodeData::Object(
+                            surface
+                                .clone()
+                                .with_positive_members(Arc::from(members.into_boxed_slice())),
+                        ),
+                    )
+                }
+                SemanticNodeData::Union(_) => {
+                    let members: Vec<SemanticNodeId> =
+                        parts.iter().map(|part| reduced_part(*part)).collect();
+                    self.intern_normalized_union_or_intersection(&members, true)
+                }
+                _ => current,
+            };
+            done.insert(current, reduced);
+        }
+        done.get(&node).copied().unwrap_or(node)
+    }
+
+    /// An operator over closed operands, evaluated; the operator itself
+    /// when its evaluation does not complete.
+    fn evaluate_closed_operator(&self, operator: SemanticNodeId) -> SemanticNodeId {
+        self.evaluate_deferred_semantic_node_with_context(
+            operator,
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            ),
+        )
+        .into_complete_active_query_build_node(self)
+        .unwrap_or(operator)
+    }
+
     /// Whether a member read off `node` binds a polymorphic `this`: a
     /// reference to a class (or class expression) instance.
     pub(super) fn is_this_receiver(&self, node: SemanticNodeId) -> bool {

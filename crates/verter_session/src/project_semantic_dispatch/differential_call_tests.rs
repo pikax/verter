@@ -270,17 +270,60 @@ fn a_function_value_return_infers_its_type_parameter_widened() {
 }
 
 /// `keys(o)` with `keys<T>(o: T): (keyof T)[]` and `o: { a: string; b: number
-/// }` is `("a" | "b")[]`. Wrong-but-clean (unreduced): the lane keeps `keyof`
-/// over the object literal type.
-///
-/// What the lane gives:
-/// - `gKeys`: the checker answers `("a" | "b")[]`; the lane measured `(keyof {
-///   a: string; b: number; })[]`.
+/// }` is `("a" | "b")[]`: the instantiation reduces `keyof` over the object
+/// literal type wherever it sits in the declared return.
 #[test]
-#[ignore = "keyof an inferred object argument reduces to its key union"]
-fn wrong_clean_a_keyof_of_an_inferred_object_prints_its_keys() {
+fn a_keyof_of_an_inferred_object_prints_its_keys() {
     let matrix = Matrix::new(GENERIC_INFERENCE);
     let failures = matrix.returns(&[("gKeys", "(\"a\" | \"b\")[]")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Declared returns whose operators the call's instantiation closes.
+const INSTANTIATED_OPERATORS: &str = r##"
+declare function keys<T>(o: T): (keyof T)[];
+declare function kbox<T>(o: T): { k: keyof T };
+declare function pickArr<T, K extends keyof T>(o: T, k: K): T[K][];
+declare function pickBox<T, K extends keyof T>(o: T, k: K): { v: T[K] };
+declare function keyU<T>(o: T): keyof T | undefined;
+interface I { a: string; b: number }
+export function n0(o: I) { return keys(o); }
+export function n1(o: { a: string; b: number }) { return kbox(o); }
+export function n2(o: { a: string; b: number }) { return pickArr(o, "a"); }
+export function n3(o: { a: string; b: number }) { return pickBox(o, "b"); }
+export function n4(o: { a: string; b: number }) { return keyU(o); }
+export function n5() { return keys({ x: 1, y: "s" }); }
+export function n6(o: { 0: string; b: number }) { return keys(o); }
+type A = { a: string };
+class C { x = 1 }
+export function n7(o: A) { return keys(o); }
+export function n8(o: C) { return keys(o); }
+"##;
+
+/// A `keyof` or an indexed access the call's instantiation closes is
+/// reduced inside the declared return as at its top (`getIndexType`,
+/// `getIndexedAccessType` over non-generic operands): an array element, an
+/// object member, a numeric key. A `keyof` over an interface, a class or an
+/// alias keeps its name. TypeScript 7.0.2, all four settings alike but for the `undefined`
+/// arm `strictNullChecks` drops.
+#[test]
+fn an_operator_the_instantiation_closes_is_reduced_in_the_declared_return() {
+    let matrix = Matrix::new(INSTANTIATED_OPERATORS);
+    let mut failures = matrix.returns(&[
+        ("n0", "(keyof I)[]"),
+        ("n1", "{ k: \"a\" | \"b\"; }"),
+        ("n2", "string[]"),
+        ("n3", "{ v: number; }"),
+        ("n5", "(\"x\" | \"y\")[]"),
+        ("n6", "(\"b\" | 0)[]"),
+        ("n7", "(keyof A)[]"),
+        ("n8", "(keyof C)[]"),
+    ]);
+    failures.extend(matrix.nullness(&[(
+        Read::Return("n4"),
+        "\"a\" | \"b\" | undefined",
+        "\"a\" | \"b\"",
+    )]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
