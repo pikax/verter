@@ -130,8 +130,8 @@ same `(fingerprint, exact)` pair.
 The schema version byte stays `1`. No stable key outlives its process — the
 persisted-cache axis is dormant (above), and nothing serializes a key — so no
 stored key can be read under a different encoding. The revisions below change
-bytes only where the previous encoding was not a defined schema, and they are
-registered here rather than changed silently:
+bytes only where the previous encoding was not a defined schema or depended on
+discovery order, and they are registered here rather than changed silently:
 
 | Encoding | Previous bytes | Defined bytes |
 |---|---|---|
@@ -142,6 +142,7 @@ registered here rather than changed silently:
 | `RawFallback` | the payload's `Debug` form, including its provenance | the raw text |
 | `SyntheticBinding` | the binding id's `Debug` form | scope, surface role, slot, bound name, and the bound value's key |
 | `Signature` occurrence, `TypeOfNominal` identity, numeric and unique-symbol property keys | `Debug` forms | explicit anchor, owner, name, path and ordinal fields; a numeric key as its integer |
+| `TypeParam` mapped binder | the `<mapper-param>` sentinel name and the registry ordinal, handed out in discovery order | the binding mapping's identity (a 128-bit digest over its exact source, value, name-type and modifier structure) as the declaration name; the ordinal is not encoded |
 
 Every other encoding, and with it every existing union order over those
 variants, is byte-identical.

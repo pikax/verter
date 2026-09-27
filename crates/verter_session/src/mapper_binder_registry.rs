@@ -169,6 +169,50 @@ impl MapperFingerprint {
     }
 }
 
+/// Leading text of every mapped-binder declaration name.
+const MAPPER_BINDER_DECL_PREFIX: &str = "<mapper-param ";
+
+/// The declaration name of a `[K in S]` binder: a reproducible identity of
+/// the mapping that binds it, never an allocation or discovery ordinal.
+///
+/// It is a 128-bit digest over the exact, platform-stable hash-event stream
+/// of the mapping's modifiers, optional name type, source and value — the
+/// same structure [`MapperFingerprint`] reads. Two mappings of one shape in
+/// one file name one binder, exactly as the registry merges them; the
+/// registry's `param_index` stays an interning ordinal handed out in
+/// discovery order and is never part of a binder's stable identity.
+pub(crate) fn mapper_binder_decl_name(
+    source: &Arc<TypeExpr>,
+    value: &Arc<TypeExpr>,
+    optional: MappedModifier,
+    readonly: MappedModifier,
+    name_type: Option<&Arc<TypeExpr>>,
+) -> Arc<str> {
+    let mut events = crate::semantic_query::ExactHashEventRecorder::default();
+    b"MapperBinderIdentity::v1".hash(&mut events);
+    encode_modifier(optional).hash(&mut events);
+    encode_modifier(readonly).hash(&mut events);
+    match name_type {
+        Some(name_type) => {
+            1u8.hash(&mut events);
+            hash_type_expr_structurally(name_type, &mut events);
+        }
+        None => 0u8.hash(&mut events),
+    }
+    b"|source|".hash(&mut events);
+    hash_type_expr_structurally(source, &mut events);
+    b"|value|".hash(&mut events);
+    hash_type_expr_structurally(value, &mut events);
+    let digest = xxhash_rust::xxh3::xxh3_128(&events.into_bytes());
+    Arc::from(format!("{MAPPER_BINDER_DECL_PREFIX}{digest:032x}>"))
+}
+
+/// Whether `decl_name` names a mapped binder minted by
+/// [`mapper_binder_decl_name`].
+pub(crate) fn is_mapper_binder_decl_name(decl_name: &str) -> bool {
+    decl_name.starts_with(MAPPER_BINDER_DECL_PREFIX) && decl_name.ends_with('>')
+}
+
 fn encode_modifier(m: MappedModifier) -> u8 {
     match m {
         MappedModifier::None => 0,

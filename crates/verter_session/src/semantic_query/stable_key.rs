@@ -601,7 +601,12 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             enc.str(&decl.canonical_id);
             encode_owner(&mut enc, decl.owner);
             enc.str(&decl.decl_name);
-            enc.u16(*param_index);
+            // A mapped binder's declaration name is the identity of the
+            // mapping that binds it; its index is an interning ordinal handed
+            // out in discovery order, so it never enters the key.
+            if !crate::mapper_binder_registry::is_mapper_binder_decl_name(&decl.decl_name) {
+                enc.u16(*param_index);
+            }
             match constraint {
                 None => enc.u8(0),
                 Some(c) => {
