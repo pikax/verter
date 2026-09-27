@@ -188,9 +188,18 @@ pub(crate) trait ResolverContext: sealed::Sealed + sealed::RequestBoundSealed {
     }
 
     /// Cheap cancellation checkpoint used at semantic dispatch/work charges.
+    #[cfg_attr(feature = "test-support", track_caller)]
     fn is_cancelled(&self) -> bool {
-        self.cancellation_token()
-            .is_some_and(|token| token.is_cancelled())
+        let cancelled = self
+            .cancellation_token()
+            .is_some_and(|token| token.is_cancelled());
+        #[cfg(feature = "test-support")]
+        if cancelled {
+            crate::for_tests::signature_kernel_bench_support::cancel_trace::observed(
+                std::panic::Location::caller(),
+            );
+        }
+        cancelled
     }
 
     // -------- Cache accessors --------------------------------------

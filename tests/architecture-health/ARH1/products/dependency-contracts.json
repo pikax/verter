@@ -234,6 +234,7 @@
           "crates/verter_session/src/u6_flow_expect_tests.rs",
           "crates/verter_session/src/u6_flow_shape_corpus_tests.rs",
           "crates/verter_session/examples/signature_kernel_bench.rs",
+          "crates/verter_session/examples/signature_kernel_contention_probe.rs",
           "crates/verter_session/tests/cases/component_meta_audit_corpus/chunk_harness.rs",
           "crates/verter_session/tests/cases/corpus_audit_layout.rs",
           "crates/verter_session/tests/cases/exposed_binding_regression.rs",
@@ -697,7 +698,7 @@
       "snapshot": {
         "pubFn": 0,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 15,
+        "pubCrateFn": 19,
         "pubType": 0,
         "pubCrateMod": 1,
         "inlinePubMod": 0,
@@ -868,7 +869,7 @@
       "snapshot": {
         "pubFn": 0,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 5,
+        "pubCrateFn": 9,
         "pubType": 0,
         "pubCrateMod": 0,
         "inlinePubMod": 0,
@@ -1009,13 +1010,13 @@
         }
       ],
       "snapshot": {
-        "pubFn": 174,
+        "pubFn": 179,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 41,
-        "pubType": 199,
+        "pubCrateFn": 47,
+        "pubType": 201,
         "pubCrateMod": 2,
         "inlinePubMod": 15,
-        "pubStructField": 290
+        "pubStructField": 306
       },
       "authority": [
         {
@@ -1356,13 +1357,13 @@
         }
       ],
       "snapshot": {
-        "pubFn": 15,
+        "pubFn": 22,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 11,
-        "pubType": 36,
-        "pubCrateMod": 1,
+        "pubCrateFn": 17,
+        "pubType": 64,
+        "pubCrateMod": 2,
         "inlinePubMod": 0,
-        "pubStructField": 65
+        "pubStructField": 117
       },
       "authority": [
         {

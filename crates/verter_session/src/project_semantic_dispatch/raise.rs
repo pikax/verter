@@ -44,6 +44,8 @@ use crate::semantic_query::HotTypeRef;
 /// `&TypeExpr` folding). Owns the single exhaustive traversal so the
 /// materialization and the node-domain facts/key cannot drift.
 mod shape_engine;
+#[cfg(test)]
+pub(crate) use shape_engine::folded_nodes_for_tests;
 
 // Crate-wide re-export of the ONE semantic-primitive-kind → `PrimitiveName`
 // conversion so fact producers (the macro-output expansion sink's leaf-fact
@@ -803,6 +805,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::IntrinsicApplication { .. }
             | SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::InferRef { .. }
@@ -1135,6 +1138,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::IntrinsicApplication { .. }
             | SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::TypeParam { .. }
             | SemanticNodeData::Opaque(_)
             // Raw-fallback / synthetic-binding carriers pass through this
@@ -1582,6 +1586,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self,
                 node,
                 arms,
+                arms.origin_category(),
                 /* is_union */ true,
                 &state.mapping,
                 context,
@@ -1591,6 +1596,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self,
                 node,
                 arms,
+                arms.origin_category(),
                 /* is_union */ false,
                 &state.mapping,
                 context,
@@ -1628,6 +1634,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 signature_span,
                 return_type_span,
                 predicate,
+                is_abstract: _,
             } => rebuild_function(
                 self,
                 node,
@@ -1960,6 +1967,7 @@ fn rebuild_union_or_intersection(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     arms: &[SemanticNodeId],
+    category: crate::semantic_query::composite::CompositeOriginCategory,
     is_union: bool,
     mapping: &MappingMap,
     context: ProjectionReductionContext,
@@ -1980,17 +1988,14 @@ fn rebuild_union_or_intersection(
     }
     // Order- and scope-preserving rebuild: the reduced arms replace the
     // originals 1:1, inheriting the original carrier's semantics.
+    let new_arms: Arc<[SemanticNodeId]> = Arc::from(new_arms.into_boxed_slice());
     let data = if is_union {
         SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::preserving_rebuild(Arc::from(
-                new_arms.into_boxed_slice(),
-            )),
+            crate::semantic_query::composite::CompositeList::rebuilt_from(category, new_arms),
         )
     } else {
         SemanticNodeData::Intersection(
-            crate::semantic_query::composite::CompositeList::preserving_rebuild(Arc::from(
-                new_arms.into_boxed_slice(),
-            )),
+            crate::semantic_query::composite::CompositeList::rebuilt_from(category, new_arms),
         )
     };
     Some(dispatch.graph().intern_preserving_scope(node, data))
@@ -2103,6 +2108,7 @@ fn rebuild_function(
         node,
         SemanticNodeData::Signature {
             kind,
+            is_abstract: dispatch.signature_is_abstract(node),
             params: Arc::from(new_params.into_boxed_slice()),
             return_type: new_return,
             type_parameters: Arc::from(new_type_params.into_boxed_slice()),
@@ -2684,7 +2690,7 @@ fn lower_and_classify_key_domain_at(
 /// `T = D` bound slot), derefed LEASE-ONLY through the anchor canonical's
 /// retained snapshot via the shared locator-deref worker. `None` =
 /// unavailable — conservative (undecidable ⇒ refusal).
-fn deref_slot_body(
+pub(super) fn deref_slot_body(
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     slot: &verter_type_expr::locators::TypeBodySlot,
 ) -> Option<TypeExpr> {
@@ -4281,7 +4287,9 @@ impl<'a> OpenWalk<'a> {
                     || self.position == OperandPosition::ValueSensitive)
                     && elements.iter().any(|e| self.node_is_open(ctx, e.value))
             }
-            SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_) => false,
+            SemanticNodeData::Primitive(_)
+            | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_) => false,
 
             // --- composites: open iff any arm is open ---
             composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
@@ -5478,6 +5486,7 @@ mod tests {
         let mapped_open_keyspace = graph.intern_node(SemanticNodeData::Mapped {
             source: concrete_object,
             mapper: MapperKey {
+                over_type_variable: false,
                 parameter_node: binder,
                 key_space: open_key,
                 value_expr: concrete_object,
@@ -5563,6 +5572,7 @@ mod tests {
             graph.intern_node(SemanticNodeData::Mapped {
                 source: concrete_object,
                 mapper: MapperKey {
+                    over_type_variable: false,
                     parameter_node: binder_k,
                     key_space: concrete_key,
                     value_expr: concrete_object,

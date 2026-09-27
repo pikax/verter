@@ -66,6 +66,23 @@
         "hoverNeedle": { "type": "string", "minLength": 1 },
         "definitionNeedle": { "type": "string", "minLength": 1 },
         "expectedNegativeCode": { "type": "integer" },
+        "allowedNegativeCodes": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "negativeAnchors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "code", "messageIncludes"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "code": { "type": "integer" },
+              "messageIncludes": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
         "expectedHoverType": { "type": "string", "minLength": 1 },
         "expectedInstanceType": { "type": "string", "minLength": 1 },
         "expectedInstanceMembers": {

@@ -383,10 +383,11 @@ fn optionality_and_tuple_rest_flatten_under_the_active_context() {
     assert_ne!(strict, loose, "the effective option is part of the shape");
 }
 
-/// Enumeration forces zero bodies; only a result read demanding the return
-/// forces one, and an effects-only demand never does.
+/// Enumeration forces zero bodies; only a result read forces one. An
+/// effects-only demand over a body with no recoverable obligation forces
+/// nothing, while a return read of it counts the attempt.
 #[test]
-fn enumeration_forces_no_body_and_effects_only_reads_stay_shape_only() {
+fn enumeration_forces_no_body_and_an_unrecoverable_body_effect_forces_none() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let string = prim(&d, PrimitiveKind::String);
@@ -402,6 +403,7 @@ fn enumeration_forces_no_body_and_effects_only_reads_stay_shape_only() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let object = callable(&d, vec![node], vec![]);
     let store = d.graph().signature_store();
@@ -429,7 +431,7 @@ fn enumeration_forces_no_body_and_effects_only_reads_stay_shape_only() {
     assert_eq!(
         store.bodies_forced(),
         0,
-        "an effects-only demand forced no body"
+        "an effects-only demand over an unrecoverable body forced no body"
     );
 
     assert_eq!(
@@ -1316,6 +1318,7 @@ fn untyped_javascript_signatures_publish_the_untyped_flag() {
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         });
         let store = d.graph().signature_store();
         let list = candidates(ready(discover(&d, node, SignatureKind::Call)), store);
@@ -1354,6 +1357,7 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
             signature_span: None,
             return_type_span,
             predicate: None,
+            is_abstract: false,
         })
     };
     let first = authored_at(Some(verter_span::Span::new(1, 2)), string);
@@ -1403,9 +1407,17 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
         SignatureResultRecipe::UnionCommon { .. }
     ));
     assert_eq!(authored(&composite), [None]);
+    let arms: Vec<_> = match d.graph().node_data(union).as_deref() {
+        Some(SemanticNodeData::Union(list)) => list.iter().copied().collect(),
+        other => panic!("expected a union subject, got {other:?}"),
+    };
+    assert!(
+        arms.len() == 2 && arms.contains(&first) && arms.contains(&other),
+        "premise: the union keeps both authored arms, got {arms:?}"
+    );
     assert_eq!(
         &*composite.nodes[0].constituents,
-        &[first, other],
+        arms.as_slice(),
         "a composite names the authored node of every constituent, in arm order"
     );
 }

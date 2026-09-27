@@ -603,3 +603,46 @@ fn planner_carriers_are_arena_free_send_sync_static() {
     assert_arena_free::<FlowSliceBudgetExceeded>();
     assert_arena_free::<ReturnSlicePlan>();
 }
+
+/// The whole-return demand of a plain function with one valued `return`
+/// names every identifier parameter NOTHING assigns as a predicate origin
+/// — the checker's `isSymbolAssigned`, which reads the function's own
+/// whole writes and every assignment a nested callable makes, and nothing
+/// else. Measured on 7.0.2 (`tsc --declaration --strict`, each body
+/// returning `typeof x === "string"`): a closure that only reads `x`, a
+/// callback reading it, a closure writing one of its members and a
+/// closure assigning its own shadowing `x` all leave `x is string`; a
+/// closure assigning `x` (directly, one callable deeper, or as a
+/// destructuring target) and the body's own assignment make the return
+/// `boolean`.
+#[test]
+fn planner_names_every_parameter_nothing_assigns_as_a_predicate_origin() {
+    let cases = [
+        ("function f(x) { const g = () => x; g(); return typeof x === 'string'; }", true),
+        ("function f(x) { [1].forEach(() => x); return typeof x === 'string'; }", true),
+        ("function f(x) { const g = () => { x.a = 1; }; g(); return typeof x === 'string'; }", true),
+        ("function f(x) { const g = (x) => { x = 1; }; g(1); return typeof x === 'string'; }", true),
+        ("function f(x) { const g = () => { x = 1; }; g(); return typeof x === 'string'; }", false),
+        ("function f(x) { const g = () => () => { x = 1; }; g(); return typeof x === 'string'; }", false),
+        ("function f(x) { const g = () => { [x] = [1]; }; g(); return typeof x === 'string'; }", false),
+        ("function f(x) { x = x; return typeof x === 'string'; }", false),
+    ];
+    for (source, origin) in cases {
+        let skeleton = skeleton_of(source);
+        let parameter = skeleton
+            .bindings
+            .iter()
+            .position(|binding| {
+                binding.kind == crate::analysis::flow::SkeletonBindingKind::Param
+                    && skeleton.name(binding.name) == "x"
+            })
+            .expect("the fixture's parameter");
+        let parameter = SkeletonBindingId::from_index(parameter as u32);
+        let demand = SliceDemand::for_return_projection(&skeleton, &[]);
+        assert_eq!(
+            demand.origins.contains(&SliceOrigin::Parameter(parameter)),
+            origin,
+            "{source}"
+        );
+    }
+}

@@ -109,6 +109,41 @@ impl DeferredCallable {
         }
     }
 
+    /// The parts as identity inputs for the representation-only stable key,
+    /// the same fields the derived `Eq` / `Hash` read. Visible to the
+    /// `semantic_query` layer only, never to a consumer: a decision that
+    /// reads the parts still presents a sealed witness through
+    /// [`Self::parts`].
+    #[must_use]
+    pub(super) fn stable_identity_parts(&self) -> DeferredCallableParts<'_> {
+        DeferredCallableParts {
+            kind: self.kind,
+            params: &self.params,
+            type_parameters: &self.type_parameters,
+            occurrence: &self.occurrence,
+            return_carrier: &self.return_carrier,
+        }
+    }
+
+    /// A carrier from explicit parts, for this crate's unit tests only.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn from_parts_for_tests(
+        kind: SignatureKind,
+        params: Arc<[FunctionParam]>,
+        type_parameters: Arc<[TypeParamDecl]>,
+        occurrence: SignatureNodeOccurrence,
+        return_carrier: SignatureReturnCarrier,
+    ) -> Self {
+        Self {
+            kind,
+            params,
+            type_parameters,
+            occurrence,
+            return_carrier,
+        }
+    }
+
     /// The canonical that declares this callable's served position.
     ///
     /// Witness-free on purpose: the seal protects the composed parameters
@@ -154,6 +189,7 @@ impl DeferredCallable {
             return_type_span: None,
             // A body-derived return carries no authored predicate.
             predicate: None,
+            is_abstract: false,
         }
     }
 }

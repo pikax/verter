@@ -577,3 +577,77 @@ defineSlots<{ default(props: { item: string }): number }>()
         "slot return display is carried separately"
     );
 }
+
+/// The materialized function type of one output lane renders exactly as
+/// the checker prints it.
+fn assert_renders(ty: Option<&TypeExpr>, printed: &str, lane: &str) {
+    let ty = ty.unwrap_or_else(|| panic!("{lane}: the lane materializes"));
+    assert_eq!(
+        verter_type_expr::render_type_expr_display(ty)
+            .unwrap_or_else(|error| panic!("{lane}: renders: {error:?}"))
+            .text,
+        printed,
+        "{lane} is `{printed}` on 7.0.2; materialized {ty:?}"
+    );
+}
+
+/// Component metadata OBSERVES a function type's predicate, and publishes
+/// it: a prop and an emit payload element typed by a guard or an
+/// assertion each materialize with the predicate in the return position. Every such position is an authored locator, which keeps the
+/// predicate; the one function the output composes from a closed fact
+/// instead — a payload-less slot's synthesized callable — authors no return
+/// at all, so the fact path has no predicate to carry
+/// (`slot_field_function_source_publishes_payload_else_closed_function_fact`).
+/// Measured on 7.0.2 (`.d.ts` of the component's types):
+/// `(x: unknown) => x is string` and `(x: unknown) => asserts x is string`.
+#[test]
+fn component_meta_publishes_function_type_predicates() {
+    let project = project_with(
+        "/App.vue",
+        r#"<script setup lang="ts">
+defineProps<{ check: (x: unknown) => x is string; ensure: (x: unknown) => asserts x is string }>()
+defineEmits<{ (e: 'pick', guard: (x: unknown) => x is string): void }>()
+</script>
+<template><div /></template>"#,
+    );
+    let (analysis, _resolution, types) = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("component-meta output materializes")
+        .expect("component resolves")
+        .into_parts();
+    let lanes = types.into_lanes();
+
+    for (name, printed) in [
+        ("check", "(x: unknown) => x is string"),
+        ("ensure", "(x: unknown) => asserts x is string"),
+    ] {
+        let index = analysis
+            .props
+            .iter()
+            .position(|prop| prop.name == name)
+            .unwrap_or_else(|| panic!("the `{name}` prop is published"));
+        assert_renders(
+            lanes.props[index].materialized_type(),
+            printed,
+            &format!("prop `{name}`"),
+        );
+    }
+
+    let pick = lanes
+        .events
+        .iter()
+        .find(|occurrence| occurrence.event.name == "pick")
+        .expect("the `pick` event is published");
+    let Some(TypeExpr::Tuple { elements, .. }) = pick.payload.materialized_type() else {
+        panic!(
+            "the `pick` payload is a tuple: {:?}",
+            pick.payload.materialized_type()
+        );
+    };
+    assert_renders(
+        elements.first().map(|element| &element.ty),
+        "(x: unknown) => x is string",
+        "emit payload `guard`",
+    );
+}

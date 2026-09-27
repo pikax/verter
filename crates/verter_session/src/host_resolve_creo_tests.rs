@@ -85,7 +85,12 @@ fn assert_overload(
 }
 
 // @ai-generated - CREO must deduplicate one exact instantiated root occurrence
-// reached through a diamond while retaining base-before-own declaration order.
+// reached through a diamond while keeping the checker's heritage order: a
+// declaration's own signatures first, then each base's in clause order. On
+// TypeScript 7.0.2 `DerivedEmits` carries [own, left, shared, right, shared] —
+// `ReturnType<DerivedEmits>` is `string` and `Parameters<DerivedEmits>` is
+// `[event: "shared", root: string]`, the root's signature reached again
+// through `RightEmits`.
 #[test]
 fn creo_diamond_deduplicates_exact_occurrence_in_resolver_order() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -123,7 +128,7 @@ defineEmits<DerivedEmits>()
             .iter()
             .map(|event| event.name.as_ref())
             .collect::<Vec<_>>(),
-        ["shared", "left", "right", "own"]
+        ["own", "left", "shared", "right"]
     );
     assert_eq!(event(&contract, "shared").overloads.len(), 1);
     assert_overload(

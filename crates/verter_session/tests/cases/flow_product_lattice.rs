@@ -127,6 +127,9 @@ fn request(basis: u8) -> FlowDemandRequest {
                 type_substitution: CanonicalTypeSubstitution::empty(),
                 policy: FlowReturnPolicy {
                     nullability: NullabilityPolicy::Strict,
+                    no_implicit_any: true,
+                    use_unknown_in_catch_variables: true,
+                    no_implicit_this: true,
                 },
             },
             demand: ReturnProjectionDemand::whole_return(),
@@ -315,6 +318,7 @@ fn writes_replace_reaching_state_and_kill_only_explicit_narrowing() {
         binding: key.binding().unwrap().clone(),
         path: Arc::from([Arc::from("member")]),
         narrowed_to: number,
+        fresh_literal: None,
     };
     let mut state = execution.empty_state();
     put(&mut execution, &mut state, &key, reaching(number)).unwrap();
@@ -368,6 +372,7 @@ fn failed_transfer_bundles_preserve_prior_state_and_never_seal_evidence() {
         binding: key.binding().unwrap().clone(),
         path: Arc::from([]),
         narrowed_to,
+        fresh_literal: None,
     });
     let result = execution.apply_transfers(
         &mut store,
@@ -447,6 +452,7 @@ fn continuation_joins_use_actual_predecessors_and_preserve_domain_rules() {
             binding: key.binding().unwrap().clone(),
             path: Arc::from([]),
             narrowed_to: number,
+            fresh_literal: None,
         }])),
     )
     .unwrap();
@@ -519,6 +525,7 @@ fn product_snapshots_and_evidence_are_predecessor_permutation_invariant() {
                             binding: key.binding().unwrap().clone(),
                             path: Arc::from([]),
                             narrowed_to: number,
+                            fresh_literal: None,
                         }]))
                     }
                     FlowDomain::DeclaredType => {
@@ -715,6 +722,12 @@ fn product_domains_refuse_conflicts_mismatches_and_unproven_algebra() {
     assert_eq!(joined(&algebra, &a, &b), joined(&algebra, &b, &a));
     struct Incomplete;
     impl FlowSemanticAlgebra for Incomplete {
+        fn subtype_union(&self, _: &[SemanticNodeId]) -> FlowAlgebraComposite {
+            unreachable!()
+        }
+        fn evolving_array(&self, _: &[EvolvingElement]) -> FlowAlgebraComposite {
+            unreachable!()
+        }
         fn union(&self, _: &[SemanticNodeId]) -> FlowAlgebraComposite {
             FlowAlgebraComposite {
                 node: SemanticNodeId(0),
@@ -809,6 +822,7 @@ fn narrowing_facts_follow_runtime_aliases_without_rewriting_declaration_evidence
         binding: keys[0].binding().unwrap().clone(),
         path: Arc::from([]),
         narrowed_to: number,
+        fresh_literal: None,
     };
     put(
         &mut execution,
@@ -955,6 +969,7 @@ fn alias_normalization_precedes_narrowing_width_accounting() {
         binding: key.binding().unwrap().clone(),
         path: Arc::from([]),
         narrowed_to: number,
+        fresh_literal: None,
     });
     let mut state = execution.empty_state();
     put(
@@ -1074,6 +1089,12 @@ fn snapshots_share_runtime_storage_and_writes_preserve_other_continuations() {
 fn predecessor_joins_follow_domain_order_and_a_failure_permanently_seals_evidence() {
     struct Refusing(std::cell::Cell<usize>);
     impl FlowSemanticAlgebra for Refusing {
+        fn subtype_union(&self, _: &[SemanticNodeId]) -> FlowAlgebraComposite {
+            unreachable!()
+        }
+        fn evolving_array(&self, _: &[EvolvingElement]) -> FlowAlgebraComposite {
+            unreachable!()
+        }
         fn union(&self, _: &[SemanticNodeId]) -> FlowAlgebraComposite {
             self.0.set(self.0.get() + 1);
             FlowAlgebraComposite {
@@ -1245,6 +1266,12 @@ fn actual_multiway_type_join_constructs_one_canonical_union_and_one_provenance_b
         inputs: std::cell::RefCell<Vec<usize>>,
     }
     impl FlowSemanticAlgebra for Counting<'_> {
+        fn subtype_union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
+            self.graph.subtype_union(members)
+        }
+        fn evolving_array(&self, elements: &[EvolvingElement]) -> FlowAlgebraComposite {
+            self.graph.evolving_array(elements)
+        }
         fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
             self.unions.set(self.unions.get() + 1);
             self.graph.union(members)

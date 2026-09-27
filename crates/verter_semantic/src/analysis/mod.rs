@@ -25,6 +25,7 @@ mod classify;
 pub mod component_meta;
 pub mod decl_dependencies;
 pub mod decl_headers;
+pub mod enum_constant;
 
 #[cfg(test)]
 #[path = "decl_dependencies_tests.rs"]
@@ -37,6 +38,15 @@ pub mod file_usage;
 pub mod flow;
 pub mod framework_facts;
 pub mod function_program;
+/// The stack containment of oxc's walks over a retained program (the
+/// parser's, [`verter_parser::oxc_parse`]): a consumer of this crate's
+/// program facts walks the program it holds under it without depending on
+/// the parser itself.
+pub mod walk_stack {
+    pub use verter_parser::oxc_parse::{
+        with_node_stack, with_own_syntax_stack, with_program_stack, Nesting, ProgramWalkStack,
+    };
+}
 mod function_program_hash;
 pub mod html_intrinsics;
 mod imports;

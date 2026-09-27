@@ -611,7 +611,7 @@ fn bind_key(arg: &str, modifiers: &[String]) -> String {
 
 /// Component `v-on` key: `toHandlerKey(camelize(event))`, `.right` /
 /// `.middle` retarget `click`, event-option modifiers append their postfix.
-fn handler_key(event: &str, modifiers: &[String]) -> String {
+pub(super) fn handler_key(event: &str, modifiers: &[String]) -> String {
     let mut key = String::with_capacity(event.len() + 2);
     format_event_handler_key_into(&mut key, event);
     let has = |name: &str| modifiers.iter().any(|m| m == name);
@@ -770,7 +770,7 @@ fn consumer_channels(key: &str) -> Vec<ConsumerChannel> {
 }
 
 /// Runtime `isReservedProp`.
-fn is_reserved(key: &str) -> bool {
+pub(crate) fn is_reserved(key: &str) -> bool {
     matches!(
         key,
         "" | "key"

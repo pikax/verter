@@ -106,7 +106,10 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                     ret.map(Arc::new),
                     json_to_type_params(v.get("typeParameters"))?,
                 )
-                .with_predicate(json_to_type_predicate(v.get("predicate"))?),
+                .with_predicate(json_to_type_predicate(v.get("predicate"))?)
+                .with_abstract(
+                    v.get("abstract").and_then(serde_json::Value::as_bool) == Some(true),
+                ),
             )))
         }
         "intrinsicApplication" => {
@@ -820,6 +823,9 @@ impl TypeExpr {
                 encoded["ty"] = ty.to_json_value();
             }
             v["predicate"] = encoded;
+        }
+        if func.is_abstract {
+            v["abstract"] = json!(true);
         }
         v
     }

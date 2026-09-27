@@ -214,11 +214,12 @@ fn jsx_element_body_facts(code: &str) -> JsxElementBodyFacts {
     }
 
     let alloc = Allocator::default();
-    let parsed = oxc_parser::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
     assert!(
-        !parsed.panicked && parsed.errors.is_empty(),
+        !parsed.fatal_error && parsed.diagnostics.is_empty(),
         "generated template must be valid TSX: {:?}\n{code}",
-        parsed.errors
+        parsed.diagnostics
     );
 
     let mut scanner = Scanner {
@@ -282,11 +283,12 @@ fn jsx_attributes_for_element(code: &str, wanted_element: &str) -> Vec<JsxAttrib
     }
 
     let alloc = Allocator::default();
-    let parsed = oxc_parser::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
     assert!(
-        !parsed.panicked && parsed.errors.is_empty(),
+        !parsed.fatal_error && parsed.diagnostics.is_empty(),
         "generated template must be valid TSX: {:?}\n{code}",
-        parsed.errors
+        parsed.diagnostics
     );
     let mut scanner = Scanner {
         wanted_element,
@@ -1549,12 +1551,14 @@ fn v_if_else_with_whitespace_between_elements() {
     // Validate JSX syntax: the full template output must parse
     let wrapper = format!("const x = {}", result);
     let val_alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&val_alloc, &wrapper, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&val_alloc, &wrapper, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "TSX template output has syntax errors: {:?}\n--- output ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -1618,12 +1622,14 @@ fn v_if_else_if_else_with_whitespace() {
     // Validate JSX syntax: the full template output must parse
     let wrapper = format!("const x = {}", result);
     let val_alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&val_alloc, &wrapper, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&val_alloc, &wrapper, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "TSX template output has syntax errors: {:?}\n--- output ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -1804,13 +1810,15 @@ fn assert_valid_jsx(source: &str, label: &str) {
     let result = gen_tsx_template(source);
     let wrapper = format!("const x = <>{}</>", result);
     let val_alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&val_alloc, &wrapper, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&val_alloc, &wrapper, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "[{}] TSX syntax errors: {:?}\n--- source ---\n{}\n--- output ---\n{}",
         label,
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -5134,14 +5142,14 @@ fn v_show_with_style_binding_no_leaked_prefix() {
     let alloc = Allocator::new();
     let source_type = oxc_span::SourceType::tsx();
     let wrapped = format!("import {{}} from 'vue';\n{}", result);
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
-    for err in &parsed.errors {
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, source_type).parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC ERROR: {}", err);
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Generated TSX should have no parse errors. Got {} errors. Output:\n{}",
-        parsed.errors.len(),
+        parsed.diagnostics.len(),
         result
     );
 }
@@ -5203,14 +5211,14 @@ fn notification_template_complex_no_syntax_errors() {
     let alloc = Allocator::new();
     let source_type = oxc_span::SourceType::tsx();
     let wrapped = format!("import {{}} from 'vue';\n{}", result);
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
-    for err in &parsed.errors {
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, source_type).parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC ERROR: {}", err);
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Generated TSX should have no parse errors. Got {} errors. Output:\n{}",
-        parsed.errors.len(),
+        parsed.diagnostics.len(),
         result
     );
 }
@@ -5246,14 +5254,15 @@ fn component_is_with_v_if_and_v_text_produces_valid_jsx() {
 
     // Parse with OXC to verify valid TSX
     let alloc = Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &result, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &result, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC ERROR: {}", err);
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Generated TSX should have no parse errors. Got {} errors. Output:\n{}",
-        parsed.errors.len(),
+        parsed.diagnostics.len(),
         result
     );
 }
@@ -5295,14 +5304,16 @@ export default defineComponent({
     eprintln!("=== FULL SFC TSX ===\n{}\n=== END ===", tsx.code);
 
     // Parse with OXC to verify valid TSX
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC ERROR: {}", err);
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Full SFC TSX should have no parse errors. Got {} errors. Output:\n{}",
-        parsed.errors.len(),
+        parsed.diagnostics.len(),
         tsx.code
     );
 }
@@ -5336,14 +5347,16 @@ fn balcard_vue_full_sfc_produces_valid_tsx() {
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     eprintln!("=== BALCARD FULL TSX ===\n{}\n=== END ===", tsx.code);
 
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC ERROR: {}", err);
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "BalCard TSX should have no parse errors. Got {} errors",
-        parsed.errors.len(),
+        parsed.diagnostics.len(),
     );
 }
 
@@ -5389,14 +5402,16 @@ const checked = ref<boolean>(false);
         "Custom block content should not leak into TSX"
     );
 
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC ERROR: {}", err);
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "TSX with custom block should have no parse errors. Got {} errors.\nOutput:\n{}",
-        parsed.errors.len(),
+        parsed.diagnostics.len(),
         tsx.code
     );
 }
@@ -5427,14 +5442,16 @@ fn ant_design_switch_basic_produces_valid_tsx() {
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     eprintln!("=== ANT BASIC TSX ===\n{}\n=== END ===", tsx.code);
 
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC ERROR: {}", err);
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Got {} errors",
-        parsed.errors.len(),
+        parsed.diagnostics.len(),
     );
 }
 
@@ -5463,14 +5480,16 @@ fn activist_card_topic_selection_produces_valid_tsx() {
     );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     eprintln!("=== ACTIVIST TSX ===\n{}\n=== END ===", tsx.code);
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC ERROR: {}", err);
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Got {} errors",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 
@@ -5499,14 +5518,16 @@ fn activist_machine_steps_produces_valid_tsx() {
     );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     eprintln!("=== MACHINE STEPS TSX ===\n{}\n=== END ===", tsx.code);
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC ERROR: {}", err);
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Got {} errors",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 
@@ -5545,11 +5566,13 @@ const tag = 'div';
     );
 
     // Parse to ensure valid TSX
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Got {} errors",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 
@@ -5585,14 +5608,16 @@ fn external_notification_component_produces_valid_tsx() {
     );
 
     // Parse with OXC to verify valid TSX
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC ERROR: {}", err);
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Got {} errors",
-        parsed.errors.len(),
+        parsed.diagnostics.len(),
     );
 }
 
@@ -5641,14 +5666,16 @@ const { msg, count } = defineProps<{
     );
 
     // Parse to ensure valid TSX
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC ERROR: {}", err);
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Got {} errors",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 
@@ -5677,14 +5704,16 @@ fn external_bloc_component_produces_valid_tsx() {
     );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     eprintln!("=== BLOC TSX ===\n{}\n=== END ===", tsx.code);
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC ERROR: {}", err);
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Got {} errors",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 
@@ -5743,11 +5772,13 @@ defineProps({
     );
 
     // OXC validation
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Full TSX should parse without errors. Got {} errors:\n{}",
-        parsed.errors.len(),
+        parsed.diagnostics.len(),
         tsx.code
     );
 }
@@ -6335,14 +6366,15 @@ fn compile_full_sfc_tsx(source: &str, filename: &str) -> String {
 
 fn assert_valid_tsx(code: &str, label: &str) {
     let alloc = Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.diagnostics {
         eprintln!("[{label}] OXC ERROR: {err}");
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "[{label}] TSX should have no parse errors. Got {} errors. Output:\n{code}",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 
@@ -8426,11 +8458,13 @@ export default defineComponent({
         tsx.code
     );
     // Must be valid TSX
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "TSX should have no parse errors. Got {} errors:\n{}",
-        parsed.errors.len(),
+        parsed.diagnostics.len(),
         tsx.code
     );
 }
@@ -8474,11 +8508,13 @@ export default defineComponent({
         tsx.code
     );
     // Must be valid TSX
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "TSX should have no parse errors. Got {} errors:\n{}",
-        parsed.errors.len(),
+        parsed.diagnostics.len(),
         tsx.code
     );
 }
@@ -9485,12 +9521,14 @@ fn vmodel_dynamic_arg_modifier_maps_and_is_valid() {
     // braces). Wrap as a JSX element attribute list and parse.
     let wrapper = format!("const x = <input {} />", output_attrs(&output));
     let val_alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&val_alloc, &wrapper, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&val_alloc, &wrapper, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "dynamic-arg v-model + modifier must produce valid TSX. Errors: {:?}\n--- output ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),

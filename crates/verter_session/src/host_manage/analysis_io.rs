@@ -1005,6 +1005,20 @@ impl VerterHost {
             return None;
         }
         let state = self.effective_file_state(analysis_canonical, None)?;
+        // A plain script's parse identity was derived once with its source
+        // snapshot: reuse it rather than hashing the source bytes again on
+        // every artifact read.
+        if let (None, Some(parse_key)) = (state.framework_parse.as_ref(), state.script_parse_key) {
+            return Some(
+                crate::file_artifact_store::FileArtifactKey::for_script_parse_identity(
+                    Arc::from(analysis_canonical),
+                    state.whole_hash,
+                    parse_key,
+                    state.file_language,
+                    crate::file_artifact_store::BASE_PARSE_ENV_HASH,
+                ),
+            );
+        }
         crate::file_artifact_store::FileArtifactKey::for_source_identity(
             Arc::from(analysis_canonical),
             state.whole_hash,

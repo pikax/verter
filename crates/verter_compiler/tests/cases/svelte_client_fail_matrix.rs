@@ -1916,7 +1916,7 @@ fn parses_as_js(code: &str) -> bool {
     let alloc = Allocator::default();
     let source_type = oxc_span::SourceType::mjs();
     let ret = oxc_parser::Parser::new(&alloc, code, source_type).parse();
-    !ret.panicked && ret.errors.is_empty()
+    !ret.fatal_error && ret.diagnostics.is_empty()
 }
 
 /// Assert a generated variant lands on the expected side of the boundary.

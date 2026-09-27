@@ -925,6 +925,7 @@ fn require_retained_selection_of_bound_graph(
     let origins_in_range = selection.origins().iter().all(|origin| match origin {
         SliceOrigin::Return(site) => site.index() < bundle.skeleton.return_sites.len(),
         SliceOrigin::Expr(site) => site.index() < bundle.skeleton.expr_sites.len(),
+        SliceOrigin::Parameter(binding) => binding.index() < bundle.skeleton.bindings.len(),
     });
     if !origins_in_range {
         return Err(FlowDemandPlanError::SelectionOutOfRange);
@@ -1260,15 +1261,16 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                 }
             }
             F::Capture => {
-                // Nested function and class DECLARATIONS anchor on the
-                // declared binding identity. The capture SET of a nested
-                // body is beyond this skeleton's authority (nested bodies
-                // carry no reads here, and no index record serves a class
-                // member), so each such subject installs as the family's
-                // accepted typed gap — never an omission.
+                // A class DECLARATION anchors on the declared binding
+                // identity. Its capture SET is beyond this skeleton's
+                // authority (no index record serves a class member), so the
+                // subject installs as the family's accepted typed gap —
+                // never an omission. A function declaration's captures ride
+                // every site that reads it, as that site's own closure
+                // below.
                 for node in &selected {
                     let FlowNodeKind::Binding(binding) = graph.node_kind(*node) else { continue };
-                    if !matches!(bundle.skeleton.binding(binding).kind, SkeletonBindingKind::NestedFunction | SkeletonBindingKind::Class) { continue; }
+                    if !matches!(bundle.skeleton.binding(binding).kind, SkeletonBindingKind::Class) { continue; }
                     let id = push(
                         FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
                         FlowObligationOrigin::Expansion(E::Capture),

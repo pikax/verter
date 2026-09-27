@@ -3912,6 +3912,9 @@ pub(crate) struct EffectiveFileState {
     pub(crate) script_analysis: std::sync::Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
     pub(crate) framework_parse:
         Option<std::sync::Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
+    /// The source snapshot's plain-script parse identity
+    /// ([`crate::host_executor::HostSourceData::script_parse_key`]).
+    pub(crate) script_parse_key: Option<verter_language::ParseKey>,
     pub(crate) whole_hash: Hash16,
 }
 

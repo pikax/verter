@@ -514,9 +514,9 @@ fn add_namespace_sibling_resolutions(
             }
         }
         // Global-augmentation decl: bind global TYPE siblings ONLY — a global
-        // VALUE sibling is not consumable (no prepared-value slot/fallback), so
-        // binding it would dangle (RESTRICT). The key set spans every
-        // augmentation scope, so filter to `Global`.
+        // namespace's VALUE members are not modelled as bare-name siblings
+        // (RESTRICT). The key set spans every augmentation scope, so filter
+        // to `Global`.
         Some(AugmentationScopeKind::Global) => {
             for (scope, name) in state.augmentation_type_keys() {
                 if !matches!(scope, AugmentationScopeKind::Global) {

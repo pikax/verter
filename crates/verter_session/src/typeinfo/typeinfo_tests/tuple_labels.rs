@@ -13,7 +13,6 @@ fn upsert(host: &crate::VerterHost) {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `parameters_tuple_widens_optional_slot_and_keeps_label` dispatch regression); NOT oracle-liftable — the labelled/optional tuple-element result shape is outside the oracle's hover-side positive allowlist. Lift pending an oracle admission + normalization extension for named tuple members"]
 fn tuple_labels_parameters_preserves_named_labels_and_optional_marker() {
     // TS7 contract: `Parameters<(name: string, count: number, active?: boolean)
     // => void>` = `[name: string, count: number, active?: boolean | undefined]`.
@@ -51,7 +50,6 @@ fn tuple_labels_parameters_preserves_named_labels_and_optional_marker() {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `project_path_tuple_numeric_index_projects_positions_and_broad_union` dispatch regression); NOT oracle-liftable — the declared source body is an indexed-access construct the oracle's source-side positive allowlist rejects (measured Reject(DeferredConstruct(indexed-access)) on the tuple_labels generation probe). Lift pending an oracle source-walk carve-out for utility-rooted indexed-access chains"]
 fn tuple_labels_numeric_position_access_drops_label() {
     // TS7 contract: `HandlerParams[0]` = `string`. Numeric-position indexed
     // access drops the label and the optional marker (since the slot is
@@ -72,7 +70,6 @@ fn tuple_labels_numeric_position_access_drops_label() {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `project_path_tuple_numeric_index_projects_positions_and_broad_union` dispatch regression); NOT oracle-liftable — the declared source body is an indexed-access construct the oracle's source-side positive allowlist rejects (measured Reject(DeferredConstruct(indexed-access)) on the tuple_labels generation probe) — `HandlerParams[2]` shares the probe row's source shape. Lift pending an oracle source-walk carve-out for utility-rooted indexed-access chains"]
 fn tuple_labels_numeric_position_access_on_optional_slot_carries_undefined() {
     // TS7 contract: `HandlerParams[2]` = `boolean | undefined`. The optional
     // slot's slot-type includes `undefined`.
@@ -93,7 +90,6 @@ fn tuple_labels_numeric_position_access_on_optional_slot_carries_undefined() {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `project_path_tuple_numeric_index_projects_positions_and_broad_union` dispatch regression); NOT oracle-liftable — the declared source body is an indexed-access construct the oracle's source-side positive allowlist rejects (measured Reject(DeferredConstruct(indexed-access)) on the tuple_labels generation probe) — `HandlerParams[number]` shares the probe row's source shape. Lift pending an oracle source-walk carve-out for utility-rooted indexed-access chains"]
 fn tuple_labels_number_index_projects_all_elements_union() {
     // TS7 contract: `HandlerParams[number]` = `string | number | boolean |
     // undefined` (every element type unioned together; the optional slot

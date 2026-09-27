@@ -217,7 +217,6 @@ fn mapped_modifier_minus_readonly_minus_optional_strips_both() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not evaluate `as never` key filters in a mapped-type key remap; keep as the future as-never key-filter contract"]
 fn mapped_modifier_as_never_filter_drops_matching_keys() {
     // TS7 contract: `DropPrivate<{ _internal: string; visible: number; _hidden: boolean }>`
     // remaps each key through `K extends \`_${string}\` ? never : K`. Keys that
@@ -249,7 +248,6 @@ fn mapped_modifier_as_never_filter_drops_matching_keys() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not evaluate a mapped type whose value position is a conditional with `T[K] extends string` discriminating each member; keep as the future conditional-value mapped-type contract"]
 fn mapped_modifier_conditional_value_keeps_never_typed_members() {
     // TS7 contract: `StringValuesOnly<{ a: string; b: number; c: "literal" }>` =
     // `{ a: string; b: never; c: "literal" }`. The mapped value is a
@@ -339,7 +337,6 @@ fn mapped_modifier_plus_readonly_idempotent_over_readonly_source() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not evaluate a mapped-type `as` key remap that rewrites every key through `Capitalize<K>`; the result surface keeps the original lowercase keys instead of the capitalised forms. Keep as the future as-rename-without-filter contract"]
 fn mapped_modifier_as_rename_capitalize_rewrites_keys() {
     // TS7 contract: `CapitalizeKeys<{ alpha: number; beta: string }>` =
     // `{ Alpha: number; Beta: string }`. The `as` clause renames each key via

@@ -325,12 +325,24 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
             }
         }
-        SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+        SemanticNodeData::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            surface,
+        } => {
             identity.hash(hasher);
+            hasher.write_u64(type_arguments.len() as u64);
+            for argument in type_arguments.iter() {
+                hash_node_rec(ctx, *argument, hasher, seen, depth + 1);
+            }
             hash_node_rec(ctx, *surface, hasher, seen, depth + 1);
         }
         SemanticNodeData::Literal(value) => {
             value.hash(hasher);
+        }
+        SemanticNodeData::EnumLiteral(literal) => {
+            literal.enum_decl.hash(hasher);
+            literal.member.hash(hasher);
         }
         SemanticNodeData::Primitive(kind) => {
             kind.hash(hasher);

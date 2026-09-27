@@ -90,7 +90,7 @@ pub fn collect_macro_usage(
         facts: MacroUsageFacts::default(),
         consumed: FxHashSet::default(),
     };
-    visitor.visit_program(program);
+    verter_parser::oxc_parse::with_program_stack(program, || visitor.visit_program(program));
     visitor.facts
 }
 
@@ -259,11 +259,12 @@ mod tests {
     fn facts(source: &str, props: Option<&str>, emit: Option<&str>) -> MacroUsageFacts {
         let allocator = oxc_allocator::Allocator::new();
         let parsed =
-            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse();
         assert!(
-            parsed.errors.is_empty(),
+            parsed.diagnostics.is_empty(),
             "fixture must parse: {:?}",
-            parsed.errors
+            parsed.diagnostics
         );
         let vue: FxHashSet<String> = ["toRef", "toRefs", "useSlots"]
             .iter()
@@ -375,7 +376,8 @@ mod tests {
         let allocator = oxc_allocator::Allocator::new();
         let source = "const props = defineProps();\nconst a = toRef(props, 'a');";
         let parsed =
-            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse();
         let f = collect_macro_usage(&parsed.program, Some("props"), None, &FxHashSet::default());
         assert!(f.props_escapes);
         assert!(f.props_member_reads.is_empty());

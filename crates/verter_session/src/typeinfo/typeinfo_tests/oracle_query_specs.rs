@@ -2772,17 +2772,12 @@ pub(crate) const RELATION_QUERY_SPECS: &[RelationQuerySpec] = &[
         None,
     ),
     // -- Row 5: tuple / rest (×4) --------------------------------------------
-    // LEDGER (source-proven): the engine answers `not_assignable` today
-    // (`relation_fixed_tuple_assignable_to_first_plus_rest` is `#[ignore]`d);
-    // the oracle captures `assignable` (the fixed tail satisfies the rest slot).
     relation_spec(
         "relation_fixed_to_first_rest",
         "[string, number]",
         "[string, ...unknown[]]",
         &["relation_fixed_tuple_assignable_to_first_plus_rest"],
-        Some(EngineObservationPin::MismatchedVerdict(
-            RelationEngineVerdict::NotAssignable,
-        )),
+        None,
     ),
     relation_spec(
         "relation_rest_to_fixed",

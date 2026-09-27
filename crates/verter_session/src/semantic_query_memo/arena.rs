@@ -317,6 +317,9 @@ fn payload_binds_canonical(data: &SemanticNodeData, canonical_id: &str) -> bool 
         // A class expression's instance is the class authored in `canonical_id`;
         // its surface node is reached by the child cascade.
         SemanticNodeData::ClassExpressionInstance { identity, .. } => names(&identity.canonical_id),
+        // An enum member's literal type is the enum declared in `canonical_id`;
+        // the value it stands for (`base`) is reached by the child cascade.
+        SemanticNodeData::EnumLiteral(literal) => names(&literal.enum_decl.canonical_id),
         SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
             canonical_id: refused,
             ..
@@ -699,6 +702,17 @@ impl NodeArena {
                             embeds_dead = true;
                         }
                     });
+                    // A recursive reference carries its type arguments inside
+                    // an `Opaque` payload, which the child walk treats as a
+                    // leaf. The node is interned unscoped, one per distinct
+                    // argument list, so an argument of the closed document
+                    // would otherwise keep one such node per content version.
+                    if let SemanticNodeData::Opaque(
+                        crate::semantic_query::QueryError::RecursiveRef { args, .. },
+                    ) = payload.as_ref()
+                    {
+                        embeds_dead |= args.iter().any(|arg| dead.contains(&arg.0));
+                    }
                     if embeds_dead {
                         dead.insert(id);
                         changed = true;
@@ -833,6 +847,45 @@ impl NodeArena {
 mod arena_intern_tests {
     use super::*;
     use crate::semantic_query::PrimitiveKind;
+
+    /// A recursive reference is interned unscoped and carries its type
+    /// arguments inside an `Opaque` payload the child walk skips. Closing
+    /// the document an argument belongs to releases the reference with it;
+    /// a reference over arguments of another document stays.
+    /// Discriminating: without the cascade's explicit arm the reference
+    /// survives the close, one per content version of the closed document.
+    #[test]
+    fn a_close_releases_the_recursive_references_over_its_nodes() {
+        use crate::semantic_query::{LiteralValue, QueryError};
+        let arena = NodeArena::default();
+        let closed = arena.push_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(1.0)),
+            file_scope("/closed.ts"),
+        );
+        let kept = arena.push_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(2.0)),
+            file_scope("/kept.ts"),
+        );
+        let recursive_over = |arg: SemanticNodeId| {
+            arena.push(SemanticNodeData::Opaque(QueryError::RecursiveRef {
+                name: Arc::from("Tree"),
+                args: Arc::from([arg]),
+            }))
+        };
+        let over_closed = recursive_over(closed);
+        let over_kept = recursive_over(kept);
+        let released = arena.release_canonical("/closed.ts", u64::MAX);
+        assert!(released.contains(&closed));
+        assert!(
+            released.contains(&over_closed),
+            "the reference over the closed document's node goes with it"
+        );
+        assert!(arena.is_live(kept));
+        assert!(
+            arena.is_live(over_kept),
+            "a reference over a live node stays"
+        );
+    }
 
     fn file_scope(canonical: &str) -> NodeScopeId {
         NodeScopeId::File {

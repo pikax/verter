@@ -1267,12 +1267,9 @@ fn compute_function_guard_injection(
 
     match expression {
         Expression::ArrowFunctionExpression(arrow) => {
-            if arrow.expression {
-                // Arrow expression body: the body is wrapped in a synthetic
-                // ExpressionStatement whose span IS the body expression. Inject the
-                // ternary guard right before it (the `=>` and any whitespace stay as
-                // preserved source).
-                let body = arrow.body.statements.first()?;
+            if let Some(body) = arrow.get_expression() {
+                // Arrow expression body. Inject the ternary guard right before it
+                // (the `=>` and any whitespace stay as preserved source).
                 Some(GuardInjection {
                     source_offset: base + body.span().start,
                     text: crate::ide::condition::build_ternary_guard(guard),

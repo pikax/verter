@@ -375,6 +375,7 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
     });
     let value_expr = parameter_node;
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -488,6 +489,7 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
         index: IndexKey::Computed(parameter_node),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -607,6 +609,7 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
         display_name: Arc::from("K"),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -888,6 +891,7 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
         display_name: Arc::from("K"),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -3398,6 +3402,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
         index: IndexKey::Computed(parameter_node),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -3511,6 +3516,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
         index: IndexKey::Computed(parameter_node),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         // Userland-style: key_space is a literal `'a'` union (one key).
         key_space: graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -4251,9 +4257,11 @@ fn comparable_budget_exhaustion_is_typed_and_non_admissible() {
 
 /// Strictness is a per-project tsconfig fact that reaches the relation
 /// engine through the project owning the REQUEST's canonical. Two projects
-/// in one workspace differing only in `strict` judge `null → string` and an
-/// optional-vs-required property row differently (the TS-default strict
-/// project rejects, the relaxed project admits), the two judgements occupy
+/// in one workspace differing only in `strict` judge `null → string`
+/// differently (the TS-default strict project rejects, the relaxed project
+/// admits) and an optional-vs-required property row alike (TypeScript
+/// 7.0.2 refuses `{ a?: string }` against `{ a: string }` with
+/// `strictNullChecks` on and off), the two judgements occupy
 /// DISTINCT memo slots because the request project's `type_env_hash`
 /// differs, and neither slot is ever served to the other project's request
 /// — a warm strict-on payload never answers a relaxed request, and
@@ -4333,9 +4341,10 @@ fn strict_family_flip_changes_verdict_without_cross_hit() {
         matches!(relaxed_verdict, RelationResult::Assignable { .. }),
         "strictNullChecks OFF admits null into string — the BEHAVIORAL branch"
     );
-    assert!(
-        matches!(relaxed_row_verdict, RelationResult::Assignable { .. }),
-        "strictNullChecks OFF relates the optional row on its value type alone"
+    assert_eq!(
+        relaxed_row_verdict,
+        RelationResult::NotAssignable,
+        "an optional row never fills a required slot, strictNullChecks off included"
     );
 
     // No cross-hit: each slot holds its own verdict.
@@ -4787,6 +4796,7 @@ fn contravariant_infer_candidates_intersect_not_union() {
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
     let check = function(string_node, number_node);
@@ -4928,6 +4938,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
@@ -4968,12 +4979,17 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
     );
 }
 
-/// Mutable-array inference: a MUTABLE array `(infer U)[]` pattern still binds —
-/// `string[] extends (infer U)[] ? U : never` → `string`. The invariant
-/// element check for non-readonly arrays must not impose the reverse arm
-/// against an `Infer` element under an active session (the deposit IS the
-/// binding); the readonly Flatten fixture took the covariant-only path and
-/// hid this.
+/// Mutable-array inference: a MUTABLE array `(infer U)[]` pattern binds —
+/// `string[] extends (infer U)[] ? U : never` → `string`. Array element
+/// types relate covariantly, mutable or readonly (the checker's
+/// `arrayVariances`), so the element deposit IS the binding and no reverse
+/// arm runs against the `Infer` element.
+///
+/// tsc 7.0.2 (`--strict`): `const y: (string | number)[] = x` over
+/// `x: string[]` has no error, and `if (c) return x; return y` over
+/// `x: string[]` and `y: (string | number)[]` is `(string | number)[]` — the
+/// subtype reduction absorbs `string[]`; the reverse, `(string | number)[]`
+/// to `string[]`, is TS2322.
 #[test]
 fn mutable_array_infer_element_binds_covariantly() {
     use crate::semantic_query::{
@@ -5017,9 +5033,9 @@ fn mutable_array_infer_element_binds_covariantly() {
         graph.node_data(result)
     );
 
-    // Negative control: non-`Infer` mutable arrays KEEP the invariant
-    // bidirectional element check — `string[] ≤ (string | number)[]`
-    // (mutable) stays NotAssignable (the reverse arm fails).
+    // Mutable arrays without an `Infer` element relate covariantly too:
+    // `string[] ≤ (string | number)[]` under assignability and the subtype
+    // relation, never the reverse.
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let union_node = graph.intern_node(SemanticNodeData::Union(
         crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
@@ -5030,10 +5046,28 @@ fn mutable_array_infer_element_binds_covariantly() {
         element: union_node,
         readonly: false,
     });
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_as_result_for_tests(check, union_array),
+            RelationResult::Assignable { .. }
+        ),
+        "a mutable array's element relates covariantly: string[] ≤ (string | number)[]"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(
+                check,
+                union_array,
+                crate::semantic_query::RelationKind::Subtype
+            ),
+            crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { .. }
+        ),
+        "string[] is a subtype of (string | number)[]"
+    );
     assert_eq!(
-        dispatch.execute_relate_pair_as_result_for_tests(check, union_array),
+        dispatch.execute_relate_pair_as_result_for_tests(union_array, check),
         RelationResult::NotAssignable,
-        "mutable non-Infer arrays must stay INVARIANT (string[] ≤ (string|number)[] rejects)"
+        "(string | number)[] is not assignable to string[]"
     );
 }
 
@@ -5353,6 +5387,7 @@ fn mapped_extends_infer_declaration_shadows_outer_binder() {
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: lit_a,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: k_param,
             key_space: lit_a,
             value_expr: infer_u,
@@ -5449,6 +5484,7 @@ fn mapped_own_key_param_shadows_same_named_outer_infer_binder() {
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: lit_a,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: k_param,
             key_space: lit_a,
             value_expr: k_param,
@@ -5563,6 +5599,7 @@ fn constructor_type_substitutes_bound_infer_inside_signature() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let ctor = graph.intern_construct_twin_for_tests(signature);
 
@@ -5635,6 +5672,7 @@ fn constructor_type_relates_and_binds_infer_return() {
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         });
         graph.intern_construct_twin_for_tests(signature)
     };
@@ -5721,12 +5759,14 @@ fn mapped_constructor_value_substitutes_per_key() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let ctor = graph.intern_construct_twin_for_tests(signature);
 
     let surface = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source: lit_a,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: k_param,
             key_space: lit_a,
             value_expr: ctor,
@@ -5816,6 +5856,7 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let ctor_pattern = graph.intern_construct_twin_for_tests(signature);
     // Inner: `(new (x: number) => any) extends new (x: infer P) => any ? P : never`.
@@ -5837,6 +5878,7 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let inner_check = graph.intern_construct_twin_for_tests(inner_check_sig);
     let inner = graph.intern_node(SemanticNodeData::Conditional {
@@ -5915,6 +5957,7 @@ fn signature_fixture_nodes(
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let construct = graph.intern_construct_twin_for_tests(call);
     (call, construct)
@@ -6131,6 +6174,7 @@ fn signature_kind_semantics_and_cross_producer_parity() {
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
     let construct_obj = graph.intern_node(SemanticNodeData::Object(

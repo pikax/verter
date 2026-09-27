@@ -88,7 +88,7 @@ fn open(source: &str) -> Opened {
 fn oxc_parse_errors(code: &str) -> Vec<String> {
     let alloc = oxc_allocator::Allocator::new();
     let parsed = oxc_parser::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
-    parsed.errors.iter().map(|e| e.to_string()).collect()
+    parsed.diagnostics.iter().map(|e| e.to_string()).collect()
 }
 
 /// LSP cursor immediately after the last occurrence of `needle` in `source`.

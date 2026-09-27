@@ -173,8 +173,8 @@ fn analyze_source(
     ctx: &mut AnalysisContext,
 ) -> Result<Vec<(String, String)>, String> {
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
 
     let allocator = Allocator::default();
     let source_type =
@@ -186,7 +186,7 @@ fn analyze_source(
         };
 
     let parse_result = Parser::new(&allocator, source, source_type).parse();
-    if parse_result.panicked {
+    if parse_result.fatal_error {
         return Err("parser panicked".to_string());
     }
 
@@ -667,7 +667,11 @@ fn eval_new_url(
 
     let is_import_meta_url = match new_expr.arguments[1].as_expression() {
         Some(Expression::StaticMemberExpression(member)) => {
-            member.property.name == "url" && matches!(&member.object, Expression::MetaProperty(_))
+            member.property.name == "url"
+                && matches!(
+                    &member.object,
+                    Expression::ImportMeta(_) | Expression::NewTarget(_)
+                )
         }
         _ => false,
     };

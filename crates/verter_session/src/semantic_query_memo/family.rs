@@ -904,8 +904,20 @@ impl FamilyKey {
                 visit(key.callee);
                 key.receiver.into_iter().for_each(&mut visit);
                 for arg in key.args.iter() {
-                    if let CallArgKey::Eager { ty, .. } = arg {
+                    // Every field is named so a new id-bearing one must be
+                    // dispositioned here.
+                    if let CallArgKey::Eager {
+                        ty,
+                        const_view,
+                        spread: _,
+                        literal_mode: _,
+                        context_sensitive: _,
+                    } = arg
+                    {
                         visit(*ty);
+                        if let Some(const_view) = const_view {
+                            visit(*const_view);
+                        }
                     }
                 }
                 key.explicit_type_args.iter().copied().for_each(visit);

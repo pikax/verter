@@ -1,6 +1,6 @@
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
+use verter_parser::oxc_parse::Parser;
 use verter_parser::utils::oxc::script::route_inventory::{
     RouteCapability, RouteImportForm, RouteImportedName, ScriptImportRoute, ScriptLocalExportRoute,
 };
@@ -20,7 +20,7 @@ export { Props as PublicProps }
 "#;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
 
     let ScriptShallowIndex {
         declaration_headers,
@@ -70,7 +70,7 @@ export { Props as PublicProps }
 "#;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let module = TopLevelOwnerId::module(2);
     let instance = TopLevelOwnerId::instance(4);
     let owners = TopLevelOwnerTable::try_from_statement_owners(

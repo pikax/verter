@@ -246,7 +246,23 @@ where
                 victims.push((*seq, key.clone()));
             }
         }
-        if !victims.is_empty() {
+        // Victims that are the ledger's oldest records — every trim that
+        // skipped no exempt key — leave from the front, which touches only
+        // them. The ledger is held under the memo's host-wide lock on
+        // every admission, and a full-ledger pass per admission made each
+        // cold publish wait on the whole ledger.
+        let prefix = ledger
+            .iter()
+            .zip(&victims)
+            .take_while(|((seq, _), (victim, _))| seq == victim)
+            .count();
+        if prefix == victims.len() {
+            ledger.drain(..prefix);
+            #[cfg(test)]
+            TRIM_VISITS.with(|visits| visits.set(visits.get() + prefix));
+        } else {
+            #[cfg(test)]
+            TRIM_VISITS.with(|visits| visits.set(visits.get() + ledger.len()));
             // Admission seqs are unique per admission and the victim list
             // was built by walking the ledger, so a single forward cursor
             // removes exactly the selected records — no O(n·k) membership
@@ -321,6 +337,12 @@ where
     pub fn tracked_len(&self) -> usize {
         self.ledger.lock().len()
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Ledger records the removal step of a trim touched on this thread.
+    static TRIM_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Default total cap for a `GlobalRetentionBudget` constructed via

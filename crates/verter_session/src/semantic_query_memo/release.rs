@@ -226,12 +226,12 @@ impl SemanticGraphStore {
     /// placeholder to any holder. Views of live unions are untouched, so
     /// the union order those unions were built with stays resident.
     fn release_union_views(&self, dead: &FxHashSet<SemanticNodeId>) -> usize {
-        let mut views = self.union_views.lock();
-        let before = views.len();
-        views.retain(|key, members| {
-            !dead.contains(&key.union()) && !members.iter().any(|member| dead.contains(member))
+        let taken = self.union_views.lock().take_where(|key, members| {
+            dead.contains(&key.union()) || members.iter().any(|member| dead.contains(member))
         });
-        before - views.len()
+        // The views and their retention charges drop here, outside the
+        // table's lock.
+        taken.len()
     }
 
     /// Drop every relate key whose operands name a released node, then

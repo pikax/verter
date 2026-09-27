@@ -320,38 +320,71 @@ fn non_unit_member_conflict_narrows_to_the_checker_kept_intersection() {
     );
 }
 
-/// A predicate narrow over an operand nobody can read publishes NO fact in
+/// A predicate narrow over a member read through an indexed access of an
+/// OPTIONAL property decides as the checker does: `Boxed["k"]` over
+/// `k?: "a"` reads `"a" | undefined`, an empty discriminant against the
+/// predicate's `v: "b"`, so `Subject & { v: "b" }` is `never` and only
+/// the widened literal arm is left. Measured on TypeScript 7.0.2 (`tsc
+/// --strict`, and with `--strictNullChecks false`): `makeProps` returns
+/// `{ v: string; }`. The decided narrow is complete and warm.
+#[test]
+fn predicate_narrow_over_an_optional_member_read_decides_as_the_checker() {
+    let trace = run("optional_read_narrow", OPTIONAL_READ_NARROW, "makeProps");
+    assert_complete_warm(
+        &trace,
+        Some(
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"string"}}]}"#,
+        ),
+    );
+}
+
+const OPTIONAL_READ_NARROW: &str = "type Boxed = { k?: \"a\" };\n\
+     type Subject = { v: Boxed[\"k\"] };\n\
+     function isOther(x: Subject): x is { v: \"b\" } { return true as boolean as never }\n\
+     function makeProps(x: Subject) { return { v: isOther(x) ? x : \"no\" } }";
+
+/// A predicate narrow whose relation is left UNDECIDED publishes NO fact in
 /// either direction — the subject keeps its own type, with no degradation.
 ///
-/// The deciding member value is an indexed access (`Boxed["k"]`) that no
-/// relation stage reduces: assignability defers, so the narrow never
-/// reaches a decided judgement at all, and the recompute (not a warm
-/// serve — an unread operand publishes nothing cacheable either) answers
-/// the same way. The temperature pins below carry that cold half: BOTH
-/// requests recompute (`from_cache` false, cold work nonzero) and neither
-/// admits a candidate, so an undecided relation can never be served warm
-/// as a decision. Both wrong-complete directions are discriminated by the
-/// value pin: minting a disjointness proof from the unread operand would
-/// publish `never` (the `v` type would collapse to the widened literal arm
-/// alone), and fabricating an overlap would publish an intersection the
-/// checker does not have.
+/// The relation reducer's work budget is tripped for the whole request, so
+/// the comparability the narrow asks for is never decided: assignability
+/// defers, the narrow never reaches a decided judgement at all, and the
+/// recompute (not a warm serve — an undecided narrow publishes nothing
+/// cacheable either) answers the same way. The temperature pins below carry
+/// that cold half: BOTH requests recompute (`from_cache` false, cold work
+/// nonzero) and neither admits a candidate, so an undecided relation can
+/// never be served warm as a decision. Both wrong-complete directions are
+/// discriminated by the value pin: minting a disjointness proof from the
+/// undecided relation would publish `never` (the `v` type would collapse to
+/// the widened literal arm alone), and fabricating an overlap would publish
+/// an intersection.
 #[test]
-fn predicate_narrow_over_an_unreduced_operand_publishes_no_fact() {
-    const SOURCE: &str = "type Boxed = { k: \"a\" };\n\
-         type Subject = { v: Boxed[\"k\"] };\n\
-         function isOther(x: Subject): x is { v: \"b\" } { return true as boolean as never }\n\
-         function makeProps(x: Subject) { return { v: isOther(x) ? x : \"no\" } }";
-    let trace = run("unreduced_operand_narrow", SOURCE, "makeProps");
+fn predicate_narrow_over_an_undecided_relation_publishes_no_fact() {
+    let host = make_audit_host();
+    let canonical = "/flow-gap-retraction/undecided_relation_narrow.ts";
+    upsert(
+        &host,
+        canonical,
+        &super::module_script(OPTIONAL_READ_NARROW),
+        FileLanguage::script_ts(),
+    );
+    host.relation_knobs
+        .force_budget_exhaustion
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let trace = run_on(&host, canonical, "makeProps");
+    host.relation_knobs
+        .force_budget_exhaustion
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     for sample in [&trace.first, &trace.second] {
         assert_eq!(sample.error, None, "must evaluate: {trace:#?}");
         assert_eq!(
             sample.degradation, None,
-            "an unread fact is not a gap: {trace:#?}"
+            "an undecided fact is not a gap: {trace:#?}"
         );
         assert!(
             !sample.from_cache,
-            "an unread operand publishes nothing cacheable — every request must \
-             recompute, never warm-serve an undecided narrow: {trace:#?}"
+            "an undecided narrow publishes nothing cacheable — every request must \
+             recompute, never warm-serve it: {trace:#?}"
         );
         assert!(
             sample.cold_computes >= 1,
@@ -367,12 +400,12 @@ fn predicate_narrow_over_an_unreduced_operand_publishes_no_fact() {
             .expect("the unchanged subject must project a value");
         assert!(
             json.contains("\"kind\":\"ref\",\"name\":\"Subject\""),
-            "the unread operand decides nothing: the subject keeps its own type rather than \
-             narrowing to `never` or to a fabricated intersection: {json}"
+            "the undecided relation decides nothing: the subject keeps its own type rather \
+             than narrowing to `never` or to a fabricated intersection: {json}"
         );
         assert!(
             !json.contains("\"kind\":\"intersection\""),
-            "no overlap fact exists for an unread operand: {json}"
+            "no overlap fact exists for an undecided relation: {json}"
         );
     }
     assert_eq!(
@@ -627,29 +660,38 @@ fn nominal_computed_keys_preserve_declaring_identity() {
     );
 }
 
+/// A `let` captured outside its extended container — written after the
+/// creation, or by another closure at any depth — reads its declared type
+/// in the body: a complete answer, admitted warm.
+///
+/// Measured on TypeScript 7.0.2: `ReturnType<typeof makeProps>` is
+/// `() => "a" | "b"` for all three.
 #[test]
-fn flow_gap_known_gap_results_are_typed_partial_and_never_warm() {
+fn a_let_capture_outside_its_container_is_complete_and_warm() {
     let fixtures = [
         (
             "g6",
             "function makeProps() { let x: \"a\" | \"b\" = \"a\"; const f = () => x; x = \"b\"; return f }",
-            FlowGap::ClosureCapture,
         ),
         (
             "g7_sibling",
             "function makeProps() { let x: \"a\" | \"b\" = \"a\"; const w = () => { x = \"b\" }; void w; return () => x }",
-            FlowGap::ClosureCapture,
         ),
         (
             "g7_deeper",
             "function makeProps() { let x: \"a\" | \"b\" = \"a\"; const w = () => () => { x = \"b\" }; void w; return () => x }",
-            FlowGap::ClosureCapture,
         ),
-        (
-            "g9",
-            "function makeProps(v: string | number) { if (typeof v === \"string\") { return () => v } return () => \"z\" as const }",
-            FlowGap::ClosureCapture,
-        ),
+    ];
+    for (id, script) in fixtures {
+        let trace = run(id, script, "makeProps");
+        record_trace(id, &trace);
+        assert_complete_warm(&trace, None);
+    }
+}
+
+#[test]
+fn flow_gap_known_gap_results_are_typed_partial_and_never_warm() {
+    let fixtures = [
         (
             "g11_sequence",
             "function makeProps() { return (0, () => \"a\" as const) }",
@@ -667,6 +709,26 @@ fn flow_gap_known_gap_results_are_typed_partial_and_never_warm() {
         record_trace(id, &trace);
         assert_partial(&trace, gap);
     }
+}
+
+/// A closure created under a guard over a parameter never written again
+/// reads the guarded type: the checker extends the closure's control-flow
+/// container to the enclosing one (measured, 7.0.2: `() => string`), so
+/// the result is exact, complete and warm.
+#[test]
+fn flow_gap_closure_under_a_guard_past_the_last_assignment_is_complete() {
+    let trace = run(
+        "g9",
+        "function makeProps(v: string | number) { if (typeof v === \"string\") { return () => v } return () => \"z\" as const }",
+        "makeProps",
+    );
+    record_trace("g9", &trace);
+    assert_complete_warm(
+        &trace,
+        Some(
+            r#"{"kind":"function","parameters":[],"returnType":{"kind":"primitive","name":"string"}}"#,
+        ),
+    );
 }
 
 #[test]
@@ -1088,5 +1150,62 @@ fn flow_gap_false_refusal_controls_remain_complete_and_warm() {
         let trace = run(id, script, "makeProps");
         record_trace(id, &trace);
         assert_complete_warm(&trace, json);
+    }
+}
+
+/// Same-host incremental evidence for the protected-member rule: the
+/// relation reads whether the source member's class derives from the
+/// target member's through the class-heritage ancestry, and an edit to
+/// the base class's file retracts the answer. Measured on TypeScript
+/// 7.0.2 (both `strictNullChecks` settings): with `export class PR {
+/// protected x = 1 }`, `makeProps` over `class Sub extends PR { protected
+/// x = 2 }` is `{ v: Sub; } | { v: 0; }`; with `PR`'s `x` public, `Sub`
+/// and `PR` are not comparable (TS2367) and the `Sub` arm is gone.
+#[test]
+fn protected_member_relation_retracts_when_the_base_class_file_changes() {
+    let host = make_audit_host();
+    let base = "/flow-gap-retraction/protected-base.ts";
+    let consumer = "/flow-gap-retraction/protected-consumer.ts";
+    upsert(
+        &host,
+        base,
+        &super::module_script("export class PR { protected x = 1 }"),
+        FileLanguage::script_ts(),
+    );
+    upsert(
+        &host,
+        consumer,
+        &super::module_script(
+            "import { PR } from \"./protected-base\";\nclass Sub extends PR { protected x = 2 }\ndeclare const pr: PR;\nfunction makeProps(x: Sub | number) { if (x === pr) { return { v: x }; } return { v: 0 as const }; }",
+        ),
+        FileLanguage::script_ts(),
+    );
+    let sub = "\"name\":\"Sub\"";
+    let before = run_on(&host, consumer, "makeProps");
+    for sample in [&before.first, &before.second] {
+        assert_eq!(sample.degradation, None, "complete: {before:#?}");
+        assert!(
+            sample.json.as_deref().unwrap_or_default().contains(sub),
+            "`x === pr` keeps the `Sub` arm: {before:#?}"
+        );
+    }
+    assert!(before.second.from_cache, "the answer warms: {before:#?}");
+
+    upsert(
+        &host,
+        base,
+        &super::module_script("export class PR { x = 1 }"),
+        FileLanguage::script_ts(),
+    );
+    let after = run_on(&host, consumer, "makeProps");
+    assert!(
+        !after.first.from_cache,
+        "the pre-edit answer never serves: {after:#?}"
+    );
+    for sample in [&after.first, &after.second] {
+        assert!(
+            !sample.json.as_deref().unwrap_or_default().contains(sub),
+            "the edit to the base class's file drops the `Sub` arm: {after:#?}"
+        );
     }
 }

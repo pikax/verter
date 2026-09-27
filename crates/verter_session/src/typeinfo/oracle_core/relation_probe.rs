@@ -24,9 +24,9 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{TSType, TSTypeOperatorOperator};
-use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use serde_json::Value;
+use verter_parser::oxc_parse::Parser;
 use verter_type_expr::TypeExpr;
 
 use super::admission;
@@ -254,7 +254,7 @@ fn substitute_binder_refs(
 ) -> Result<(String, Vec<BinderRef>), OperandCanonError> {
     let wrapped = format!("type __oracle_operand__ = {target_text};");
     let ret = Parser::new(allocator, &wrapped, SourceType::ts()).parse();
-    if ret.panicked || !ret.errors.is_empty() {
+    if ret.fatal_error || !ret.diagnostics.is_empty() {
         return Err(OperandCanonError::Parse(target_text.to_string()));
     }
     let Some(alias) = ret.program.body.iter().find_map(|stmt| match stmt {
@@ -493,7 +493,7 @@ pub(crate) fn parse_probe_header(
     let allocator = Allocator::default();
     let trimmed = header.trim();
     let ret = Parser::new(&allocator, trimmed, SourceType::ts()).parse();
-    if ret.panicked || !ret.errors.is_empty() {
+    if ret.fatal_error || !ret.diagnostics.is_empty() {
         return Err(ProbeHeaderError::Alias);
     }
     let mut stmts = ret.program.body.iter();
@@ -732,7 +732,7 @@ pub(crate) fn decode_tuple_wire(rhs: &str) -> Result<RelationVerdictValue, Tuple
     let allocator = Allocator::default();
     let wrapped = format!("type __oracle_probe__ = {rhs};");
     let ret = Parser::new(&allocator, &wrapped, SourceType::ts()).parse();
-    if ret.panicked || !ret.errors.is_empty() {
+    if ret.fatal_error || !ret.diagnostics.is_empty() {
         return Err(TupleWireError::Parse);
     }
     let Some(alias) = ret.program.body.iter().find_map(|stmt| match stmt {

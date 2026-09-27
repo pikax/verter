@@ -60,7 +60,8 @@ jobs:
       - uses: dorny/paths-filter@v4
         id: filter
         with:
-          # `any_files` feeds the crate-graph classifier below.
+          # `any_files` feeds the crate-graph classifier below, and every other
+          # `<filter>_files` list tells it which non-crate files a filter owns.
           list-files: json
           filters: |
             any:
@@ -362,12 +363,25 @@ jobs:
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
+      # The filter outputs carry every `<filter>_files` list, so on a large
+      # diff they run to hundreds of KB. They must NOT reach the classifier
+      # through `env:` or argv: Linux caps one environment string at 128 KiB
+      # (MAX_ARG_STRLEN) and a whole exec at ARG_MAX, past which the runner
+      # cannot even start bash ("Argument list too long"). The expression is
+      # expanded into the script body instead — the runner writes that to a
+      # file — and a quoted heredoc copies it verbatim into $RUNNER_TEMP. That
+      # holds for any file name: a quoted heredoc expands nothing, and `toJSON`
+      # escapes newlines inside values, so no expanded line can equal the
+      # delimiter. `any_files`, the whole changed-file list, travels inside it.
       - name: Compose the lane gates from the path filters and the crate graph
         id: gates
-        env:
-          CI_IMPACT_CHANGED_FILES_JSON: ${{ steps.filter.outputs.any_files }}
-          CI_IMPACT_FILTER_OUTPUTS_JSON: ${{ toJSON(steps.filter.outputs) }}
-        run: node scripts/ci-impact.mjs --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+        run: |
+          outputs="$RUNNER_TEMP/ci-impact-filter-outputs.json"
+          cat > "$outputs" <<'CI_IMPACT_FILTER_OUTPUTS_EOF'
+          ${{ toJSON(steps.filter.outputs) }}
+          CI_IMPACT_FILTER_OUTPUTS_EOF
+          node scripts/ci-impact.mjs --filter-outputs "$outputs" \
+            --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
   # `dtolnay/rust-toolchain@1.97.1` (not `@stable`) in every job below, and in
@@ -812,12 +826,20 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.js == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # The sfc-projection node verifiers under test:scripts:ci compile
+    # verter_compiler and rebuild it once per applied dirty-twin source patch,
+    # so this lane's Rust work grows with every verified node.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       # gen-svelte-goldens invokes the Rust semantic-comment extractor. Pin the
       # toolchain instead of relying on GitHub-hosted runner preinstalls.
       - uses: dtolnay/rust-toolchain@1.97.1
+      # Reuse the compiled dependency graph across runs; each dirty twin then
+      # rebuilds only the patched crate.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: js-build-test
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
@@ -876,7 +898,13 @@ jobs:
         # architecture-health, the lane self-tests in their lanes, the
         # aggregate test in the step below); `test:scripts` keeps them for
         # local runs.
-        run: pnpm run test:scripts:ci
+        #
+        # rust-cache exports CARGO_INCREMENTAL=0 for the job. The sfc-projection
+        # dirty twins re-edit one verter_compiler source file and rebuild the
+        # crate once per twin, so a non-incremental rebuild of the whole crate
+        # per twin (measured ~2.3x slower than incremental) dominates this
+        # lane; re-enable incremental for this step only.
+        run: CARGO_INCREMENTAL=1 pnpm run test:scripts:ci
       - name: CI aggregate completeness
         # Every job in this workflow must be listed in the `CI Required`
         # aggregate; the checker fails this lane when one is missing.

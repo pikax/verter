@@ -312,6 +312,7 @@ fn materialize_constructor_type_preserves_ctor_ness() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let node = graph.intern_construct_twin_for_tests(signature);
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -371,6 +372,7 @@ fn materialize_recursive_ref_back_edge_round_trips() {
         &host,
         SemanticNodeData::Opaque(QueryError::RecursiveRef {
             name: Arc::from("Tree"),
+            args: std::sync::Arc::from([]),
         }),
     );
     match &expr {

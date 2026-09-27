@@ -19,7 +19,7 @@ use super::super::expr::peel_parens;
 /// traversal (every sub-expression — call arguments, nested members, arrow
 /// bodies — is reached; `String(k as any)` is found), never a text scan. The
 /// wrapper kinds are exactly the five the chain walk itself peels.
-pub(super) fn expression_contains_ts_only_syntax(expr: &Expression<'_>) -> bool {
+pub(super) fn expression_contains_ts_only_syntax(expr: &Expression<'_>, source: &str) -> bool {
     struct TsOnlySyntaxDetector {
         found: bool,
     }
@@ -43,7 +43,9 @@ pub(super) fn expression_contains_ts_only_syntax(expr: &Expression<'_>) -> bool 
         }
     }
     let mut detector = TsOnlySyntaxDetector { found: false };
-    detector.visit_expression(expr);
+    verter_parser::oxc_parse::with_span_stack(source, expr.span(), || {
+        detector.visit_expression(expr)
+    });
     detector.found
 }
 

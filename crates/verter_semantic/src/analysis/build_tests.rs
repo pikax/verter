@@ -2496,8 +2496,8 @@ fn define_model_default_modelvalue() {
 fn owner_aware_analysis_stamps_imports_macros_and_declarations_at_production() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::TopLevelOwnerId;
 
     let source = r#"
@@ -2509,7 +2509,7 @@ const props = defineProps<SetupProps>();
 "#;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let module = TopLevelOwnerId::module(0);
     let instance = TopLevelOwnerId::instance(0);
     let owners = TopLevelOwnerTable::try_from_statement_owners(
@@ -2523,7 +2523,7 @@ const props = defineProps<SetupProps>();
         &parsed.program,
         AnalysisScope::all(),
         &owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     );
 
     assert_eq!(snapshot.imports[0].owner, module);
@@ -2544,14 +2544,14 @@ const props = defineProps<SetupProps>();
 fn declaration_content_hash_discriminates_owner_only_role_changes() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::TopLevelOwnerId;
 
     let source = "interface Shared { value: string }";
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let module_owners = TopLevelOwnerTable::try_from_statement_owners(
         parsed.program.body.len(),
         [TopLevelOwnerId::module(0)],
@@ -2568,7 +2568,7 @@ fn declaration_content_hash_discriminates_owner_only_role_changes() {
         &parsed.program,
         AnalysisScope::all(),
         &module_owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     );
     let instance = build_script_analysis_with_scope_from_program_with_owners(
         source,
@@ -2576,7 +2576,7 @@ fn declaration_content_hash_discriminates_owner_only_role_changes() {
         &parsed.program,
         AnalysisScope::all(),
         &instance_owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     );
 
     assert_ne!(
@@ -2589,8 +2589,8 @@ fn declaration_content_hash_discriminates_owner_only_role_changes() {
 fn macro_local_type_resolution_is_scoped_by_owner() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::TopLevelOwnerId;
 
     let source = r#"
@@ -2601,7 +2601,7 @@ const instanceProps = defineProps<Props>();
 "#;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse");
+    assert!(!parsed.fatal_error, "fixture must parse");
     let module = TopLevelOwnerId::module(0);
     let instance = TopLevelOwnerId::instance(0);
     let owners = TopLevelOwnerTable::try_from_statement_owners(
@@ -2615,7 +2615,7 @@ const instanceProps = defineProps<Props>();
         &parsed.program,
         AnalysisScope::all(),
         &owners,
-        !parsed.errors.is_empty(),
+        !parsed.diagnostics.is_empty(),
     );
 
     assert_eq!(snapshot.macros.len(), 2);
@@ -2629,14 +2629,14 @@ const instanceProps = defineProps<Props>();
 fn macro_local_type_resolution_uses_only_the_validated_one_way_parent() {
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::TopLevelOwnerId;
 
     let analyze = |source: &str, statement_owners: &[TopLevelOwnerId]| {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-        assert!(!parsed.panicked, "fixture must parse");
+        assert!(!parsed.fatal_error, "fixture must parse");
         let owners = TopLevelOwnerTable::try_from_statement_owners(
             parsed.program.body.len(),
             statement_owners.iter().copied(),
@@ -2648,7 +2648,7 @@ fn macro_local_type_resolution_uses_only_the_validated_one_way_parent() {
             &parsed.program,
             AnalysisScope::all(),
             &owners,
-            !parsed.errors.is_empty(),
+            !parsed.diagnostics.is_empty(),
         )
     };
 

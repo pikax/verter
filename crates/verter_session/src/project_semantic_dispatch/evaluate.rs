@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    CacheRead, IndexKey, LiteralValue, PartialReasonSet, ProjectionMode,
+    CacheRead, IndexKey, LiteralValue, PartialReasonSet, PrimitiveKind, ProjectionMode,
     ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ResultCompleteness,
     ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
@@ -23,13 +23,52 @@ use crate::semantic_query::{
 /// `ProjectSemanticDispatch::printed_declaration`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrintedDeclaration {
-    /// An interface or class: printed by its name.
+    /// An interface or class, or a mapped utility application the checker
+    /// names (`Partial<Face>`): printed by its name.
     Named,
     /// An alias the checker prints by name when its application settles
     /// on the type the alias constructs.
     AliasNamed,
+    /// An alias whose body is an intersection: the checker names only the
+    /// intersection or the distributed union its application constructs
+    /// (`type NN<T> = T & {}` prints `NN<string | number | null>`), never
+    /// a constituent the intersection reduced to (`NN<{ a: string } |
+    /// null>` prints `{ a: string; }`, `NN<unknown>` prints `{}`) nor an
+    /// argument it returned as it is (`type NU<T> = T & unknown` prints
+    /// `NU<string | null>` as `string | null`).
+    AliasNamedIntersection,
+    /// An alias the checker prints as the application its body writes: a
+    /// reference to a non-generic declaration (`type ToFace = Face` prints
+    /// `Face`) or a homomorphic mapped application (`type P<T> =
+    /// Partial<T>` prints `P<{ a: 1 }>` as `Partial<{ a: 1; }>`).
+    AliasThrough,
     /// An alias the checker prints as what it resolves to.
     AliasTransparent,
+}
+
+/// A builtin mapped utility, by whether its mapping is homomorphic (its
+/// keys are `keyof` its source).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuiltinMappedUtility {
+    /// `Partial` / `Required` / `Readonly`.
+    Homomorphic,
+    /// `Pick` / `Record` / `Omit`.
+    Keyed,
+}
+
+impl BuiltinMappedUtility {
+    fn of(name: &str) -> Option<Self> {
+        match name {
+            "Partial" | "Required" | "Readonly" => Some(Self::Homomorphic),
+            "Pick" | "Record" | "Omit" => Some(Self::Keyed),
+            _ => None,
+        }
+    }
+}
+
+/// Whether `identity` names a builtin (lib) declaration.
+fn is_builtin(identity: &crate::semantic_query::DeclIdentity) -> bool {
+    identity.canonical_id.as_ref() == "__builtin__"
 }
 
 /// Map a residual-carrier resolution read's `QueryError` onto the demand
@@ -177,6 +216,55 @@ impl EvaluateDeferredOutcome {
         }
         self.node
     }
+
+    /// The evaluated node of a complete evaluation, released as
+    /// [`Self::into_active_query_build_node`] releases it; `None` for a
+    /// partial one, whose caller keeps the operand it asked about. The
+    /// partial still folds into the enclosing build and the request: the
+    /// build that keeps the unevaluated operand is partial and never
+    /// admitted, whatever else its caller reads afterwards.
+    pub(super) fn into_complete_active_query_build_node(
+        self,
+        dispatch: &ProjectSemanticDispatch<'_>,
+    ) -> Option<SemanticNodeId> {
+        #[cfg(test)]
+        let this = if FORCE_PARTIAL_CLOSED_EVALUATION.get() {
+            Self {
+                completeness: ResultCompleteness::partial(PartialReasonSet::PROJECTION_WORK_LIMIT),
+                ..self
+            }
+        } else {
+            self
+        };
+        #[cfg(not(test))]
+        let this = self;
+        match this.completeness {
+            ResultCompleteness::Complete => Some(this.into_active_query_build_node(dispatch)),
+            ResultCompleteness::Partial(reasons) => {
+                dispatch.fold_local_partial_completeness(reasons);
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static FORCE_PARTIAL_CLOSED_EVALUATION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Test-only: every closed-operator evaluation on this thread ends partial
+/// on the work rail, as a trip inside it does, while the guard lives.
+#[cfg(test)]
+pub(crate) fn force_partial_closed_operator_evaluation_for_tests() -> impl Drop {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCE_PARTIAL_CLOSED_EVALUATION.set(self.0);
+        }
+    }
+    Restore(FORCE_PARTIAL_CLOSED_EVALUATION.replace(true))
 }
 
 /// Heap-owned continuation for one deferred-operator evaluation entry. A
@@ -311,6 +399,140 @@ pub(crate) enum StructuralFactDemandOutcome {
     Complete(SemanticNodeId),
     /// Truncated / faulted. Carries the reasons ONLY — no node.
     Partial(PartialReasonSet),
+}
+
+/// One structural-fact demand after its resolution loop: the node it
+/// settled on and everything its finish reads, held while the composite
+/// reduction of that node runs. The connected-demand guard lives as long
+/// as the demand does, as it would across a native call.
+struct SettledDemand<'g> {
+    _connected_guard: super::connected_demand::ConnectedDemandGuard<'g>,
+    context: ProjectionReductionContext,
+    resolve_declaration_refs: bool,
+    completeness: ResultCompleteness,
+    n: SemanticNodeId,
+    exit_reasons: Option<PartialReasonSet>,
+    named_alias_application: Option<(SemanticNodeId, Option<Vec<SemanticNodeId>>)>,
+}
+
+/// A demand's first half: finished outright (a trip on entry), or settled.
+enum BegunDemand<'g> {
+    Finished(StructuralFactDemandOutcome),
+    Settled(SettledDemand<'g>),
+}
+
+/// A suspended frame of `ProjectSemanticDispatch::drive_structural_fact_demands`.
+enum DemandFrame<'g> {
+    /// A settled demand; `composite` is its reduction once started.
+    Demand {
+        settled: SettledDemand<'g>,
+        composite: Option<CompositeReduction>,
+        /// The name a reduction asked this demand for; `None` for the root.
+        name: Option<SemanticNodeId>,
+        /// Whether the demand met a composite already being reduced
+        /// further down (a re-entry left it as written): its outcome
+        /// depends on where it ran, so it is not reused.
+        reentered: bool,
+    },
+    /// A composite reduction asked for on its own (only ever the root).
+    Composite(CompositeReduction),
+}
+
+/// What the driver's root frame finished with.
+enum DrivenRoot {
+    Demand(StructuralFactDemandOutcome),
+    Composite(Option<SemanticNodeId>),
+}
+
+/// The composite reduction of one union or intersection, reading its arms
+/// in order; suspended while a named arm's demand runs.
+struct CompositeReduction {
+    node: SemanticNodeId,
+    arms: Arc<[SemanticNodeId]>,
+    is_union: bool,
+    next: usize,
+    views: Vec<SemanticNodeId>,
+    named_unions: Vec<(SemanticNodeId, Vec<SemanticNodeId>)>,
+    waiting: Option<ArmWait>,
+    /// The typed completeness of the demands the reduction read: a name
+    /// whose demand did not complete leaves the composite as written, and
+    /// its partial reasons with it.
+    completeness: ResultCompleteness,
+}
+
+/// What a suspended composite reduction waits for.
+enum ArmWait {
+    /// The demand of this named arm.
+    Resolved(SemanticNodeId),
+    /// The demand of a name inside the resolved union the named arm `arm`
+    /// stands for.
+    Members {
+        arm: SemanticNodeId,
+        walk: MembersWalk,
+    },
+}
+
+/// What a composite reduction asks for next.
+enum CompositeStep {
+    /// The demand of this name, at structural transit.
+    Demand(SemanticNodeId),
+    /// The reduced node, or `None` when the composite stays as written,
+    /// and the completeness of the demands it read.
+    Done(Option<SemanticNodeId>, ResultCompleteness),
+}
+
+/// The walk over the members of the resolved union a named arm stands for,
+/// suspended while the demand of a name inside it runs.
+struct MembersWalk {
+    members: Vec<SemanticNodeId>,
+    /// The names on the walk's active path, and those fully read.
+    active: rustc_hash::FxHashSet<SemanticNodeId>,
+    read: rustc_hash::FxHashSet<SemanticNodeId>,
+    pending: Vec<MemberStep>,
+    awaiting: Option<SemanticNodeId>,
+    /// The partial reasons of a name whose demand did not complete.
+    partial: Option<PartialReasonSet>,
+}
+
+enum MemberStep {
+    Read(SemanticNodeId),
+    Leave(SemanticNodeId),
+}
+
+/// What a members walk asks for next.
+enum MembersStep {
+    Demand(SemanticNodeId),
+    /// The members, or `None` when a name did not complete or the walk
+    /// reached a name on its own active path.
+    Done(Option<Vec<SemanticNodeId>>),
+}
+
+impl CompositeReduction {
+    /// Merge the partial reasons of a finished members walk.
+    fn take_walk_partial(&mut self, walk: &MembersWalk) {
+        if let Some(reasons) = walk.partial {
+            self.completeness = self
+                .completeness
+                .merge(ResultCompleteness::partial(reasons));
+        }
+    }
+}
+
+impl MembersWalk {
+    /// The walk over `union`, the resolved union the named arm `name`
+    /// stands for, with `name` on its active path.
+    fn new(name: SemanticNodeId, union: SemanticNodeId) -> Self {
+        let mut active = rustc_hash::FxHashSet::default();
+        active.insert(name);
+        Self {
+            members: Vec::new(),
+            active,
+            read: rustc_hash::FxHashSet::default(),
+            pending: vec![MemberStep::Leave(name), MemberStep::Read(union)],
+            awaiting: None,
+            partial: None,
+        }
+    }
 }
 
 impl StructuralFactDemandOutcome {
@@ -596,6 +818,84 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.resolve_structural_fact_demand(node, context, true, false)
     }
 
+    /// The named declaration an indexed access reads, when its terminal is
+    /// one: the object evaluated, the member read at navigate altitude, and
+    /// the read kept only when it is a declaration or class reference.
+    /// `None` for any other access (a computed index, a partial read, a
+    /// terminal that is not a named reference).
+    fn named_indexed_access(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<EvaluateDeferredOutcome> {
+        let (object, index) = match self.graph().node_data(node)?.as_ref() {
+            SemanticNodeData::IndexedAccess { object, index }
+                if !matches!(index, IndexKey::Computed(_)) =>
+            {
+                (*object, clone_index_key(index))
+            }
+            _ => return None,
+        };
+        let base =
+            self.evaluate_deferred_outcome(object, context.with_mode(ProjectionMode::Navigate));
+        if !matches!(base.completeness, ResultCompleteness::Complete) {
+            return None;
+        }
+        let read = self.execute_read(SemanticQueryKey::IndexedAccess {
+            base: base.node,
+            index,
+            mode: ProjectionMode::Navigate,
+        });
+        if read.result_is_partial {
+            return None;
+        }
+        let QueryResult::Value(value) = read.value else {
+            return None;
+        };
+        self.is_named_reference(value)
+            .then(|| EvaluateDeferredOutcome::complete(value))
+    }
+
+    /// Whether `node` is a type the checker prints by name: a declaration
+    /// or class reference, or a union or intersection of them.
+    fn is_named_reference(&self, node: SemanticNodeId) -> bool {
+        match self.graph().node_data(node).as_deref() {
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::ClassExpressionInstance { .. },
+            ) => true,
+            Some(SemanticNodeData::Union(arms)) => {
+                arms.iter().all(|arm| self.is_named_reference(*arm))
+            }
+            Some(SemanticNodeData::Intersection(arms)) => {
+                arms.iter().all(|arm| self.is_named_reference(*arm))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether reading `index` off the evaluated `object` at navigate
+    /// altitude ends at a named declaration or class reference.
+    pub(super) fn indexed_access_reads_named_declaration(
+        &self,
+        object: SemanticNodeId,
+        index: &IndexKey,
+    ) -> bool {
+        let read = self.execute_read(SemanticQueryKey::IndexedAccess {
+            base: object,
+            index: clone_index_key(index),
+            mode: ProjectionMode::Navigate,
+        });
+        if read.result_is_partial {
+            return false;
+        }
+        let QueryResult::Value(value) = read.value else {
+            return false;
+        };
+        self.is_named_reference(value)
+    }
+
     /// Shared residual-carrier resolution loop backing
     /// [`Self::normalize_node_for_structural_fact_demand`] (both residual arms
     /// resolve), [`Self::peel_node_for_uninstantiated_carrier_fact_demand`]
@@ -604,6 +904,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// (`resolve_declaration_refs = false`). ONE loop, one resolver — the
     /// entry points differ ONLY in which residual arm is allowed to resolve
     /// (there is no divergent second implementation).
+    ///
+    /// A composite the demand settles on reads its named arms' own demands
+    /// (see [`Self::composite_over_resolved_arms`]), and those arms' demands
+    /// read theirs in turn: that nesting runs from an explicit stack of
+    /// suspended demands ([`Self::drive_structural_fact_demands`]), so a
+    /// finite chain of names (`type U1 = U0 | 2; type U2 = U1 | 3; …`)
+    /// spends no native stack per link.
     fn resolve_structural_fact_demand(
         &self,
         node: SemanticNodeId,
@@ -611,15 +918,60 @@ impl<'a> ProjectSemanticDispatch<'a> {
         instantiate_instantiation_refs: bool,
         resolve_declaration_refs: bool,
     ) -> StructuralFactDemandOutcome {
-        let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
+        match self.begin_structural_fact_demand(
+            node,
+            context,
+            instantiate_instantiation_refs,
+            resolve_declaration_refs,
+        ) {
+            BegunDemand::Finished(outcome) => outcome,
+            BegunDemand::Settled(settled) => {
+                match self.drive_structural_fact_demands(DemandFrame::Demand {
+                    settled,
+                    composite: None,
+                    name: None,
+                    reentered: false,
+                }) {
+                    DrivenRoot::Demand(outcome) => outcome,
+                    DrivenRoot::Composite(_) => {
+                        unreachable!("a demand root finishes as a demand")
+                    }
+                }
+            }
+        }
+    }
+
+    /// The first half of one structural-fact demand: enter the connected
+    /// demand, evaluate deferred shells and resolve residual carriers until
+    /// the chain settles. What remains — the composite reduction of the
+    /// settled node, then [`Self::finish_structural_fact_demand`] — is run
+    /// by [`Self::drive_structural_fact_demands`].
+    fn begin_structural_fact_demand(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        instantiate_instantiation_refs: bool,
+        resolve_declaration_refs: bool,
+    ) -> BegunDemand<'_> {
+        let (connected_guard, initial_trip) = self.enter_connected_demand(false);
         if let Some(reasons) = initial_trip {
             self.fold_local_partial_completeness(reasons);
-            return StructuralFactDemandOutcome::Partial(reasons);
+            return BegunDemand::Finished(StructuralFactDemandOutcome::Partial(reasons));
         }
         // Step 1: evaluate deferred shells (Alias / KeyOf / IndexedAccess /
         // Mapped / Conditional / TemplateLiteral / DeclPlaceholder / bare-import),
         // merging the evaluation's typed completeness into the demand outcome.
-        let first = self.evaluate_deferred_outcome(node, context);
+        // The declaration-keeping mode prints an indexed access that reads
+        // a named declaration by that name, as the checker does (`W['d']`
+        // over `d: Decl` is `Decl`, a class constructor's `prototype` its
+        // class): the read stops at the reference its terminal holds.
+        let first = match (!resolve_declaration_refs)
+            .then(|| self.named_indexed_access(node, context))
+            .flatten()
+        {
+            Some(named) => named,
+            None => self.evaluate_deferred_outcome(node, context),
+        };
         let mut completeness = first.completeness;
         let mut n = first.node;
         // Step 2: resolve residual DeclRef / InstantiationRef carriers the
@@ -642,7 +994,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // The declaration-keeping mode's OUTERMOST alias application the
         // checker names, recorded as the chain resolves through it and
         // printed when the chain settles on a type that alias names.
-        let mut named_alias_application: Option<SemanticNodeId> = None;
+        // An intersection-bodied alias also keeps its application's
+        // arguments: an argument the construction returns as it is was not
+        // constructed by the alias.
+        let mut named_alias_application: Option<(SemanticNodeId, Option<Vec<SemanticNodeId>>)> =
+            None;
         // The loop's own exit classification: `None` = a stable (Complete)
         // stop; `Some(reasons)` = an operational truncation/fault.
         let exit_reasons: Option<PartialReasonSet> = loop {
@@ -661,16 +1017,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } else {
                 match data.as_ref() {
                     SemanticNodeData::DeclRef { identity } => Some((identity.clone(), None)),
-                    SemanticNodeData::InstantiationRef { base, args }
-                        if base.canonical_id.as_ref() != "__builtin__" =>
-                    {
+                    SemanticNodeData::InstantiationRef { base, args } => {
                         Some((base.clone(), Some(Arc::clone(args))))
                     }
                     _ => None,
                 }
             };
             let printed = printed.map(|(identity, args)| {
-                let kind = self.printed_declaration(&identity);
+                let kind = if is_builtin(&identity) {
+                    self.printed_builtin_application(
+                        &identity,
+                        args.as_deref().unwrap_or_default(),
+                        context,
+                    )
+                } else {
+                    self.printed_declaration(&identity)
+                };
                 (identity, args, kind)
             });
             // TERMINAL-BEFORE-FUSE: classify whether `n` is a residual
@@ -696,14 +1058,69 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if let Some((identity, args, Some(kind))) = &printed {
                 let args = args.as_deref().unwrap_or_default();
                 match kind {
+                    // A builtin application is its own printed name.
+                    PrintedDeclaration::Named if is_builtin(identity) => {}
                     PrintedDeclaration::Named => {
                         n = self.declared_application(n, identity, args, context);
                     }
-                    PrintedDeclaration::AliasNamed if named_alias_application.is_none() => {
-                        named_alias_application =
-                            Some(self.declared_application(n, identity, args, context));
+                    PrintedDeclaration::AliasNamed | PrintedDeclaration::AliasNamedIntersection
+                        if named_alias_application.is_none() =>
+                    {
+                        let intersection_arguments =
+                            (*kind == PrintedDeclaration::AliasNamedIntersection).then(|| {
+                                args.iter()
+                                    .flat_map(|arg| {
+                                        [*arg, self.evaluate_deferred_outcome(*arg, context).node]
+                                    })
+                                    .collect()
+                            });
+                        named_alias_application = Some((
+                            self.declared_application(n, identity, args, context),
+                            intersection_arguments,
+                        ));
                     }
-                    PrintedDeclaration::AliasNamed | PrintedDeclaration::AliasTransparent => {}
+                    // The application the alias's body writes, substituted
+                    // and still unreduced — classified in turn.
+                    PrintedDeclaration::AliasThrough => {
+                        let read = self.execute_read(SemanticQueryKey::Instantiate(
+                            crate::semantic_query::InstantiateKey::new(
+                                self.type_slot_for(
+                                    Arc::clone(&identity.canonical_id),
+                                    identity.owner,
+                                    Arc::clone(&identity.decl_name),
+                                ),
+                                Arc::from(args.to_vec().into_boxed_slice()),
+                                self.instantiate_context_for(
+                                    &identity.canonical_id,
+                                    ProjectionReductionContext::structural_transit_with_mode(
+                                        ProjectionMode::Navigate,
+                                    ),
+                                ),
+                            ),
+                        ));
+                        crate::request_context::observe_component_meta_read_suppress(&read);
+                        crate::meta_resolve::emit_dispatch_dep_signature_facts(
+                            self.ctx,
+                            &read.dep_signature,
+                        );
+                        completeness = completeness
+                            .or_partial_if(read.result_is_partial, read.partial_reason_classes());
+                        if let QueryResult::Value(target) = read.value {
+                            if target != n {
+                                if !visited.insert(n) {
+                                    break Some(PartialReasonSet::SAME_PATH_RECURSION);
+                                }
+                                if let Err(reasons) = self.charge_connected_work() {
+                                    break Some(reasons);
+                                }
+                                n = target;
+                                continue;
+                            }
+                        }
+                    }
+                    PrintedDeclaration::AliasNamed
+                    | PrintedDeclaration::AliasNamedIntersection
+                    | PrintedDeclaration::AliasTransparent => {}
                 }
             }
             if !is_residual {
@@ -726,7 +1143,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let resolved = match data.as_ref() {
                 // A class expression's instance resolves to the instance surface
                 // it carries — the body a `DeclRef` resolves to, already in hand.
-                SemanticNodeData::ClassExpressionInstance { surface, .. } => *surface,
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                    let surface = *surface;
+                    drop(data);
+                    self.class_expression_read_surface(n).unwrap_or(surface)
+                }
                 // Residual DeclRef → the canonical shallow `ResolveDecl` query
                 // (the `ScopeId { canonical_id, local_scope: None }` shape the
                 // canonical resolver issues).
@@ -825,17 +1246,73 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             n = next.node;
         };
+        BegunDemand::Settled(SettledDemand {
+            _connected_guard: connected_guard,
+            context,
+            resolve_declaration_refs,
+            completeness,
+            n,
+            exit_reasons,
+            named_alias_application,
+        })
+    }
+
+    /// The second half of one structural-fact demand, once the composite
+    /// reduction of the node it settled on is known (`composite`, `None`
+    /// when nothing reduced or the chain did not settle): the key-arm
+    /// reading, the alias naming, and the typed outcome.
+    fn finish_structural_fact_demand(
+        &self,
+        settled: SettledDemand<'_>,
+        composite: Option<SemanticNodeId>,
+        composite_completeness: ResultCompleteness,
+    ) -> StructuralFactDemandOutcome {
+        let SettledDemand {
+            _connected_guard,
+            context,
+            resolve_declaration_refs,
+            mut completeness,
+            mut n,
+            exit_reasons,
+            named_alias_application,
+        } = settled;
         if let Some(reasons) = exit_reasons {
             completeness = completeness.merge(ResultCompleteness::partial(reasons));
+        } else {
+            // A post-resolution reduction that read an incomplete demand
+            // leaves its node as written; its partial reasons are this
+            // demand's, so the unresolved node is never answered Complete.
+            completeness = completeness.merge(composite_completeness);
+            if let Some(reduced) = composite {
+                n = reduced;
+            }
+            let (keys, key_completeness) = self.union_over_evaluated_key_arms(n, context);
+            completeness = completeness.merge(key_completeness);
+            if let Some(reduced) = keys {
+                n = reduced;
+            }
         }
         // The alias names the type its application settled on only while
         // that type is one the alias itself constructs; a union that
         // collapsed to one member (`type U<T> = T | string` at `string`) or
         // an intersection reduced to `never` is printed as itself.
-        if let Some(named) = named_alias_application {
-            if self.alias_names_settled_type(n) {
+        if let Some((named, intersection_arguments)) = named_alias_application {
+            let named_by_alias = if let Some(arguments) = intersection_arguments {
+                matches!(
+                    self.graph().node_data(n).as_deref(),
+                    Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
+                ) && !arguments.contains(&n)
+            } else {
+                self.alias_names_settled_type(n) && !self.mapped_alias_over_array(named, n)
+            };
+            if named_by_alias {
                 n = named;
             }
+        }
+        // The declaration-keeping mode prints an application's arguments as
+        // the checker prints them.
+        if !resolve_declaration_refs && !completeness.is_partial() {
+            n = self.application_over_printed_arguments(n, context);
         }
         match completeness {
             ResultCompleteness::Complete => StructuralFactDemandOutcome::Complete(n),
@@ -880,66 +1357,234 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   (`GI` with `interface GI<T = number>` prints `GI<number>`);
     /// - an alias whose declared body is a type the alias itself
     ///   constructs — an object, function, mapped, array or tuple type, a
-    ///   union or an intersection, directly or through another such alias
-    ///   (`type G<U> = F<U[]>`) — is printed by the alias
-    ///   (`G<boolean>`, `Tup<number>`, `Fn<number>`);
+    ///   union or an intersection — is printed by the alias (`Tup<number>`,
+    ///   `Fn<number>`);
+    /// - an alias whose body references another declaration prints as
+    ///   [`Self::printed_alias_reference`] decides;
     /// - every other alias is not named by the alias: a conditional
-    ///   (`Cond` prints its selected branch), a utility application, a bare
-    ///   parameter (`type Lit<T> = T`), a primitive, or a reference to an
-    ///   interface (`type ToFace = Face` prints `Face`, while this demand
-    ///   resolves a bare alias reference through to the interface's
-    ///   body).
+    ///   (`Cond` prints its selected branch), a bare parameter
+    ///   (`type Lit<T> = T`) or a primitive.
     ///
     /// `None` when the declaration's kind or body cannot be recovered.
     fn printed_declaration(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<PrintedDeclaration> {
+        self.printed_declaration_within(identity, &mut rustc_hash::FxHashSet::default())
+    }
+
+    fn printed_declaration_within(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+        visited: &mut rustc_hash::FxHashSet<crate::semantic_query::DeclIdentity>,
+    ) -> Option<PrintedDeclaration> {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        if !visited.insert(identity.clone()) {
+            // An alias cycle names nothing.
+            return Some(PrintedDeclaration::AliasTransparent);
+        }
+        match self.prepared_decl_kind(identity)? {
+            TypeDeclKind::Interface | TypeDeclKind::Class => {
+                return Some(PrintedDeclaration::Named)
+            }
+            TypeDeclKind::Alias => {}
+        }
+        let Some(body) = self.declared_alias_body(identity)? else {
+            return Some(PrintedDeclaration::AliasTransparent);
+        };
+        Some(match self.graph().node_data(body).as_deref() {
+            Some(
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::Signature { .. }
+                | SemanticNodeData::Mapped { .. }
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Union(_),
+            ) => PrintedDeclaration::AliasNamed,
+            Some(SemanticNodeData::Intersection(_)) => PrintedDeclaration::AliasNamedIntersection,
+            Some(SemanticNodeData::DeclRef { identity: target }) => {
+                self.printed_alias_reference(target, &[], visited)
+            }
+            Some(SemanticNodeData::InstantiationRef { base: target, args }) => {
+                self.printed_alias_reference(target, args, visited)
+            }
+            _ => PrintedDeclaration::AliasTransparent,
+        })
+    }
+
+    /// How the checker prints an alias whose declared body references
+    /// `target` with the declared arguments `args`, measured on TypeScript
+    /// 7.0.2:
+    ///
+    /// - a reference to a NON-generic declaration is that declaration's
+    ///   type, printed as it prints (`type ToFace = Face` prints `Face`,
+    ///   `type ToObj = Obj` prints `Obj`, `type ToToFace = ToFace` prints
+    ///   `Face`);
+    /// - a generic interface or class application is named by the alias
+    ///   (`type ToGFace = GFace<string>` prints `ToGFace`,
+    ///   `type ToGFaceDefault = GFace` prints `ToGFaceDefault`,
+    ///   `type PromAlias<T> = Promise<T>` prints `PromAlias<number>`);
+    /// - a homomorphic mapped application — `Partial` / `Required` /
+    ///   `Readonly`, or an alias declaring one — keeps the MAPPED name
+    ///   unless its declared source is a union (`type P<T> = Partial<T>`
+    ///   prints `P<{ a: 1 }>` as `Partial<{ a: 1; }>`, `type PP<T> = P<T>`
+    ///   too, `type MpA<T> = Mp<T>` over `type Mp<T> = { [K in keyof T]:
+    ///   T[K] }` prints `Mp<{ a: 1; }>`, `type PFace = Partial<Face>` prints
+    ///   `Partial<Face>`, while `type PU = Partial<Face | Obj>` prints `PU`);
+    /// - a keyed mapped application is named by the alias (`type PickA<T> =
+    ///   Pick<T, 'a'>` prints `PickA<{ a: 1; b: 2; }>`, `type Rec<K> =
+    ///   Record<K, number>` prints `Rec<"x">`, `type PickAB = Pick<…>`
+    ///   prints `PickAB`);
+    /// - a generic alias application is named by the outer alias unless the
+    ///   target itself prints as what it resolves to (`type G<U> = F<U[]>`
+    ///   prints `G<boolean>`, `type OuterCond<T> = Cond<T>` prints the
+    ///   selected branch);
+    /// - any other builtin (a conditional utility) is what it resolves to.
+    fn printed_alias_reference(
+        &self,
+        target: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        visited: &mut rustc_hash::FxHashSet<crate::semantic_query::DeclIdentity>,
+    ) -> PrintedDeclaration {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        if is_builtin(target) {
+            return match BuiltinMappedUtility::of(&target.decl_name) {
+                Some(BuiltinMappedUtility::Homomorphic) if !self.declared_union(args.first()) => {
+                    PrintedDeclaration::AliasThrough
+                }
+                Some(_) => PrintedDeclaration::AliasNamed,
+                None if self.runtime_nominal_identity(target).is_some() => {
+                    PrintedDeclaration::AliasNamed
+                }
+                None => PrintedDeclaration::AliasTransparent,
+            };
+        }
+        let (Some(kind), Some(generic)) = (
+            self.prepared_decl_kind(target),
+            self.prepared_decl_is_generic(target),
+        ) else {
+            return PrintedDeclaration::AliasTransparent;
+        };
+        match kind {
+            _ if !generic => PrintedDeclaration::AliasThrough,
+            TypeDeclKind::Interface | TypeDeclKind::Class => PrintedDeclaration::AliasNamed,
+            TypeDeclKind::Alias if self.alias_declares_homomorphic_mapping(target) => {
+                PrintedDeclaration::AliasThrough
+            }
+            TypeDeclKind::Alias => match self.printed_declaration_within(target, visited) {
+                Some(PrintedDeclaration::AliasTransparent) | None => {
+                    PrintedDeclaration::AliasTransparent
+                }
+                Some(_) => PrintedDeclaration::AliasNamed,
+            },
+        }
+    }
+
+    /// Whether the alias `identity` declares a homomorphic mapped type — a
+    /// mapping over `keyof` one of its type parameters, a `Partial` /
+    /// `Required` / `Readonly` application over a source that is not a
+    /// union, or an application of another alias that does. The checker
+    /// gives such a declaration the mapped type's own name, so an alias of
+    /// it is printed by that name.
+    fn alias_declares_homomorphic_mapping(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> bool {
         use verter_semantic::analysis::type_eval::TypeDeclKind;
         let mut visited = rustc_hash::FxHashSet::default();
         let mut current = identity.clone();
         loop {
             if !visited.insert(current.clone()) {
-                // An alias cycle names nothing.
-                return Some(PrintedDeclaration::AliasTransparent);
+                return false;
             }
-            match self.prepared_decl_kind(&current)? {
-                TypeDeclKind::Interface | TypeDeclKind::Class => {
-                    return Some(if current == *identity {
-                        PrintedDeclaration::Named
-                    } else {
-                        PrintedDeclaration::AliasTransparent
-                    });
+            let Some(Some(body)) = self.declared_alias_body(&current) else {
+                return false;
+            };
+            let graph = self.graph();
+            let next = match graph.node_data(body).as_deref() {
+                Some(SemanticNodeData::Mapped { mapper, .. }) => {
+                    return match graph.node_data(mapper.key_space).as_deref() {
+                        Some(SemanticNodeData::KeyOf { base }) => matches!(
+                            graph.node_data(*base).as_deref(),
+                            Some(SemanticNodeData::TypeParam { .. })
+                        ),
+                        _ => false,
+                    };
                 }
-                TypeDeclKind::Alias => {}
-            }
-            let mut body = self.declared_body_shape(&current)?;
-            let mut aliases = rustc_hash::FxHashSet::default();
-            while let Some(SemanticNodeData::Alias(target)) =
-                self.graph().node_data(body).as_deref()
-            {
-                if !aliases.insert(body) {
-                    return Some(PrintedDeclaration::AliasTransparent);
+                Some(SemanticNodeData::InstantiationRef { base, args }) if is_builtin(base) => {
+                    return BuiltinMappedUtility::of(&base.decl_name)
+                        == Some(BuiltinMappedUtility::Homomorphic)
+                        && !self.declared_union(args.first());
                 }
-                body = *target;
+                Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
+                _ => return false,
+            };
+            if self.prepared_decl_kind(&next) != Some(TypeDeclKind::Alias) {
+                return false;
             }
-            match self.graph().node_data(body).as_deref() {
-                Some(
-                    SemanticNodeData::Object(_)
-                    | SemanticNodeData::Signature { .. }
-                    | SemanticNodeData::Mapped { .. }
-                    | SemanticNodeData::Array { .. }
-                    | SemanticNodeData::Tuple { .. }
-                    | SemanticNodeData::Union(_)
-                    | SemanticNodeData::Intersection(_),
-                ) => return Some(PrintedDeclaration::AliasNamed),
-                Some(
-                    SemanticNodeData::DeclRef { identity: inner }
-                    | SemanticNodeData::InstantiationRef { base: inner, .. },
-                ) if inner.canonical_id.as_ref() != "__builtin__" => current = inner.clone(),
-                _ => return Some(PrintedDeclaration::AliasTransparent),
+            current = next;
+        }
+    }
+
+    /// Whether a declared (unsubstituted) type argument is a union.
+    fn declared_union(&self, argument: Option<&SemanticNodeId>) -> bool {
+        argument.is_some_and(|argument| {
+            matches!(
+                self.graph().node_data(*argument).as_deref(),
+                Some(SemanticNodeData::Union(_))
+            )
+        })
+    }
+
+    /// How the checker prints a builtin application reached directly: a
+    /// mapped utility is printed by its name (`Partial<{ a: 1 }>` prints
+    /// `Partial<{ a: 1; }>`, `Pick<…, 'a'>` prints `Pick<{ a: 1; b: 2; },
+    /// "a">`, `Partial<Face | Obj>` prints `Partial<Face | Obj>`) except a
+    /// homomorphic one over a primitive, array or tuple, which the checker
+    /// maps into that type (`Partial<string>` prints `string`). `None` for
+    /// every other builtin, which resolves as before.
+    fn printed_builtin_application(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        context: ProjectionReductionContext,
+    ) -> Option<PrintedDeclaration> {
+        match BuiltinMappedUtility::of(&identity.decl_name)? {
+            BuiltinMappedUtility::Keyed => Some(PrintedDeclaration::Named),
+            BuiltinMappedUtility::Homomorphic => {
+                let source = self
+                    .normalize_node_for_structural_fact_demand(*args.first()?, context)
+                    .into_complete_node()?;
+                (!matches!(
+                    self.graph().node_data(source).as_deref(),
+                    Some(
+                        SemanticNodeData::Primitive(_)
+                            | SemanticNodeData::Literal(_)
+                            | SemanticNodeData::TemplateLiteral { .. }
+                            | SemanticNodeData::Array { .. }
+                            | SemanticNodeData::Tuple { .. }
+                    )
+                ))
+                .then_some(PrintedDeclaration::Named)
             }
         }
+    }
+
+    /// An alias's declared body shape with `Alias` wrappers peeled: `None`
+    /// when the body cannot be recovered, `Some(None)` for an alias cycle.
+    fn declared_alias_body(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<Option<SemanticNodeId>> {
+        let mut body = self.declared_body_shape(identity)?;
+        let mut aliases = rustc_hash::FxHashSet::default();
+        while let Some(SemanticNodeData::Alias(target)) = self.graph().node_data(body).as_deref() {
+            if !aliases.insert(body) {
+                return Some(None);
+            }
+            body = *target;
+        }
+        Some(Some(body))
     }
 
     /// The declaration's own unsubstituted body shape, through the
@@ -965,20 +1610,92 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Whether a named alias application still names the type it settled
-    /// on: one of the constructed types the checker attaches an alias to.
-    fn alias_names_settled_type(&self, settled: SemanticNodeId) -> bool {
+    /// Whether the alias application `named` declares a mapped type and
+    /// settled on an array or tuple: the checker maps a homomorphic mapped
+    /// type over an array or tuple to an array or tuple type
+    /// (`instantiateMappedType`), which no alias names (`type Boxed<T> = {
+    /// [K in keyof T]: { v: T[K] } }` prints `Boxed<[1, 2]>` as `[{ v: 1; },
+    /// { v: 2; }]`).
+    fn mapped_alias_over_array(&self, named: SemanticNodeId, settled: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        if !matches!(
+            graph.node_data(settled).as_deref(),
+            Some(SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. })
+        ) {
+            return false;
+        }
+        let identity = match graph.node_data(named).as_deref() {
+            Some(
+                SemanticNodeData::InstantiationRef { base: identity, .. }
+                | SemanticNodeData::DeclRef { identity },
+            ) => identity.clone(),
+            _ => return false,
+        };
         matches!(
-            self.graph().node_data(settled).as_deref(),
+            self.declared_alias_body(&identity),
+            Some(Some(body)) if matches!(
+                graph.node_data(body).as_deref(),
+                Some(SemanticNodeData::Mapped { .. })
+            )
+        )
+    }
+
+    /// Whether a named alias application still names the type it settled
+    /// on: one of the constructed types the checker attaches an alias to,
+    /// a lib interface application (`Promise<number>`) included.
+    fn alias_names_settled_type(&self, settled: SemanticNodeId) -> bool {
+        match self.graph().node_data(settled).as_deref() {
             Some(
                 SemanticNodeData::Object(_)
-                    | SemanticNodeData::Signature { .. }
-                    | SemanticNodeData::Mapped { .. }
-                    | SemanticNodeData::Array { .. }
-                    | SemanticNodeData::Tuple { .. }
-                    | SemanticNodeData::Union(_)
-                    | SemanticNodeData::Intersection(_)
+                | SemanticNodeData::Signature { .. }
+                | SemanticNodeData::Mapped { .. }
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Union(_)
+                | SemanticNodeData::Intersection(_),
+            ) => true,
+            Some(SemanticNodeData::InstantiationRef { base, .. }) => {
+                self.runtime_nominal_identity(base).is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// The application `application` with each argument read as the checker
+    /// prints it ([`Self::resolve_structural_fact_demand`] keeping
+    /// declaration names): the checker instantiates an application's
+    /// arguments as types, resolving the operators they write
+    /// (`Promise<Awaited<T>>` at `T = string` prints `Promise<string>`). An
+    /// argument that does not settle stays as written.
+    fn application_over_printed_arguments(
+        &self,
+        application: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let (base, args) = match self.graph().node_data(application).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                (base.clone(), Arc::clone(args))
+            }
+            _ => return application,
+        };
+        let printed: Vec<SemanticNodeId> = args
+            .iter()
+            .map(
+                |&arg| match self.resolve_structural_fact_demand(arg, context, true, false) {
+                    StructuralFactDemandOutcome::Complete(node) => node,
+                    _ => arg,
+                },
             )
+            .collect();
+        if printed.as_slice() == args.as_ref() {
+            return application;
+        }
+        self.graph().intern_preserving_scope(
+            application,
+            SemanticNodeData::InstantiationRef {
+                base,
+                args: Arc::from(printed.into_boxed_slice()),
+            },
         )
     }
 
@@ -1003,6 +1720,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
             _ => carrier,
         }
+    }
+
+    /// The keys a `keyof` carrier over a declaration, an application or a
+    /// mapped type settles to under a demand that reduces operators
+    /// ([`Self::key_of_through_carrier`]); `None` when `keys` is no such
+    /// carrier or its keys stay the carrier.
+    fn settled_key_of_carrier(
+        &self,
+        keys: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        if !crate::semantic_query::may_reduce_operator(context) {
+            return None;
+        }
+        let base = match self.graph().node_data(keys).as_deref() {
+            Some(SemanticNodeData::KeyOf { base }) => *base,
+            _ => return None,
+        };
+        if !matches!(
+            self.graph().node_data(base).as_deref(),
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::Mapped { .. }
+                    | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
+            )
+        ) {
+            return None;
+        }
+        self.key_of_through_carrier(base, context)
     }
 
     /// Entry-scoped workhorse for the deferred-shell evaluator. Returns the
@@ -1099,10 +1846,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match std::mem::replace(&mut frame.stage, DeferredEvaluationStage::EvaluateCurrent)
                 {
                     DeferredEvaluationStage::AwaitKeyOfBase => {
-                        let read = self.execute_read(SemanticQueryKey::KeyOf {
+                        let mut read = self.execute_read(SemanticQueryKey::KeyOf {
                             base: child.node,
                             context: frame.context,
                         });
+                        // A `keyof` the builder kept as a carrier over a
+                        // declaration, an application or a mapped type is
+                        // evaluated here, at a demand for its value: its
+                        // keys where they settle, as the checker prints
+                        // them.
+                        if let QueryResult::Value(keys) = read.value {
+                            if let Some(settled) = self.settled_key_of_carrier(keys, frame.context)
+                            {
+                                read.value = QueryResult::Value(settled);
+                            }
+                        }
                         let fallback = self.opaque(QueryError::Miss);
                         self.deferred_read_action(frame, read, fallback)
                     }
@@ -1354,6 +2112,567 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
+    }
+
+    /// The union or intersection `node` reduced over its arms' RESOLVED
+    /// types, as the checker's `getUnionType` / `getIntersectionType`
+    /// construct it: an arm written as a name (an alias, an enum, an
+    /// application, a `typeof`) takes part in literal subsumption, the
+    /// `any` / `unknown` / `never` lattice, disjoint-literal collapse and
+    /// intersection distribution as the type it names. `None` when the
+    /// reduction changes nothing, or no arm is such a name.
+    ///
+    /// A union reads a named arm that resolves to a union as that union's
+    /// members; any other arm is read as its resolved type only where that
+    /// type is made of literals, primitives and enum members (an
+    /// intersection distributes over a named union of them only): an object
+    /// type takes part in no reduction here, so its arm keeps its name. A union keeps its written names as the checker keeps its
+    /// origin (`getUnionType`): one named union holding every other
+    /// member is that name (`A | 1` is `A`), and named unions that do not
+    /// overlap stay beside the remaining members (`A | 3 | S` is `A | S`);
+    /// a reduction that removed a member of a named union answers the
+    /// reduced set (`A | number` is `number`). An intersection arm that
+    /// resolves to the missing-member marker makes the intersection that
+    /// marker: its value is unknown.
+    ///
+    /// A composite whose reduction re-enters itself (an alias union naming
+    /// itself through its arms) stays as written: the re-entry reads
+    /// through the same `carrier_normalizing` in-progress record the
+    /// carrier normalizer keeps, never a depth limit.
+    pub(super) fn composite_over_resolved_arms(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let reduction = self.begin_composite(node)?;
+        match self.drive_structural_fact_demands(DemandFrame::Composite(reduction)) {
+            DrivenRoot::Composite(reduced) => reduced,
+            DrivenRoot::Demand(_) => unreachable!("a composite root finishes as a composite"),
+        }
+    }
+
+    /// Run `root`, and every structural-fact demand it suspends on, from
+    /// one explicit stack of frames. A composite reduction that needs a
+    /// name's demand suspends; the demand is begun, and when it settles on
+    /// a composite of its own, that reduction runs above it; a finished
+    /// demand's outcome resumes the reduction below. The frames run in
+    /// exactly the order the nested calls would, with the same connected
+    /// demand held open and the same `carrier_normalizing` record, so a
+    /// chain of names of any length spends no native stack per name.
+    ///
+    /// A name's completed demand is read once per run. A reduction reads
+    /// the demand of every name its arms write, and the walk over a named
+    /// union's members reads the names that union writes — the same names
+    /// the arm's own demand already read — so without reuse a chain of
+    /// union aliases demanded every link once per link above it, and the
+    /// work doubled per link (18 links exhausted the connected budget).
+    /// A completed outcome is reused only when its demand met no composite
+    /// already being reduced below it: such a re-entry leaves that composite
+    /// as written, which is where the demand ran, not what it names. The
+    /// reuse record lives for this run only.
+    fn drive_structural_fact_demands<'s>(&'s self, root: DemandFrame<'s>) -> DrivenRoot {
+        let transit =
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+        let mut stack = vec![root];
+        let mut delivered: Option<StructuralFactDemandOutcome> = None;
+        let mut completed: rustc_hash::FxHashMap<SemanticNodeId, StructuralFactDemandOutcome> =
+            rustc_hash::FxHashMap::default();
+        loop {
+            let top = stack
+                .last_mut()
+                .expect("the driver runs while a frame is open");
+            let reduction = match top {
+                DemandFrame::Composite(reduction) => reduction,
+                DemandFrame::Demand {
+                    settled,
+                    composite,
+                    reentered,
+                    ..
+                } => {
+                    if composite.is_none() {
+                        // A chain that did not settle is not reduced.
+                        let started = if settled.exit_reasons.is_none() {
+                            let started = self.begin_composite(settled.n);
+                            if started.is_none()
+                                && self.carrier_normalizing.borrow().contains(&settled.n)
+                            {
+                                *reentered = true;
+                            }
+                            started
+                        } else {
+                            None
+                        };
+                        match started {
+                            Some(reduction) => *composite = Some(reduction),
+                            None => {
+                                let finished = stack.pop();
+                                delivered = Some(self.finish_demand_frame(
+                                    finished,
+                                    None,
+                                    ResultCompleteness::Complete,
+                                    &mut stack,
+                                    &mut completed,
+                                ));
+                                if stack.is_empty() {
+                                    return DrivenRoot::Demand(
+                                        delivered.take().expect("the root's outcome"),
+                                    );
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    composite.as_mut().expect("the reduction is started")
+                }
+            };
+            match self.step_composite(reduction, delivered.take()) {
+                CompositeStep::Demand(name) => {
+                    if let Some(outcome) = completed.get(&name) {
+                        delivered = Some(*outcome);
+                        continue;
+                    }
+                    match self.begin_structural_fact_demand(name, transit, true, true) {
+                        BegunDemand::Finished(outcome) => delivered = Some(outcome),
+                        BegunDemand::Settled(settled) => stack.push(DemandFrame::Demand {
+                            settled,
+                            composite: None,
+                            name: Some(name),
+                            reentered: false,
+                        }),
+                    }
+                }
+                CompositeStep::Done(reduced, completeness) => {
+                    let finished = stack.pop();
+                    if let Some(DemandFrame::Composite(_)) = finished {
+                        // A composite asked for on its own answers its node;
+                        // the demands it read folded their partials where
+                        // they finished.
+                        return DrivenRoot::Composite(reduced);
+                    }
+                    delivered = Some(self.finish_demand_frame(
+                        finished,
+                        reduced,
+                        completeness,
+                        &mut stack,
+                        &mut completed,
+                    ));
+                    if stack.is_empty() {
+                        return DrivenRoot::Demand(delivered.take().expect("the root's outcome"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Finish the demand frame just popped, record its outcome for reuse when
+    /// it completed with no re-entry, and hand a re-entry down to the frame
+    /// below, whose outcome is built from this one.
+    fn finish_demand_frame<'s>(
+        &'s self,
+        finished: Option<DemandFrame<'s>>,
+        reduced: Option<SemanticNodeId>,
+        completeness: ResultCompleteness,
+        stack: &mut [DemandFrame<'s>],
+        completed: &mut rustc_hash::FxHashMap<SemanticNodeId, StructuralFactDemandOutcome>,
+    ) -> StructuralFactDemandOutcome {
+        let Some(DemandFrame::Demand {
+            settled,
+            name,
+            reentered,
+            ..
+        }) = finished
+        else {
+            unreachable!("a demand frame finishes as a demand")
+        };
+        let outcome = self.finish_structural_fact_demand(settled, reduced, completeness);
+        if reentered {
+            if let Some(DemandFrame::Demand {
+                reentered: below, ..
+            }) = stack.last_mut()
+            {
+                *below = true;
+            }
+        } else if let (Some(name), StructuralFactDemandOutcome::Complete(_)) = (name, outcome) {
+            completed.insert(name, outcome);
+        }
+        outcome
+    }
+
+    /// Whether `arm` is written as a name: a union or intersection reads it
+    /// as the type it names.
+    fn is_composite_name(&self, arm: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(arm).as_deref(),
+            Some(
+                SemanticNodeData::Alias(_)
+                    | SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::TypeOf(_)
+                    | SemanticNodeData::Conditional { .. }
+                    | SemanticNodeData::IndexedAccess { .. }
+                    | SemanticNodeData::BareRef(_)
+                    | SemanticNodeData::ImportType(_)
+                    | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
+            )
+        )
+    }
+
+    /// Whether a resolved type is a literal, a primitive or an enum member
+    /// — the types the composite reductions act on.
+    fn is_composite_scalar(&self, view: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(view).as_deref(),
+            Some(
+                SemanticNodeData::Primitive(_)
+                    | SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_)
+                    | SemanticNodeData::Opaque(_)
+            )
+        )
+    }
+
+    /// Start the composite reduction of `node`: `None` when it is not a
+    /// union or a reducible intersection, no arm is a name, or its reduction
+    /// is already in progress (an alias union naming itself through its
+    /// arms stays as written — the re-entry reads the same
+    /// `carrier_normalizing` record the carrier normalizer keeps, never a
+    /// depth limit). A started reduction is on that record until it is done.
+    fn begin_composite(&self, node: SemanticNodeId) -> Option<CompositeReduction> {
+        use crate::semantic_query::composite::CompositeOriginCategory as Category;
+        let (arms, is_union) = match self.graph().node_data(node)?.as_ref() {
+            SemanticNodeData::Union(members) => (members.members_arc(), true),
+            SemanticNodeData::Intersection(members)
+                if matches!(
+                    members.origin_category(),
+                    Category::Canonical(_) | Category::CanonicalUnproven | Category::AuthoredShell
+                ) =>
+            {
+                (members.members_arc(), false)
+            }
+            _ => return None,
+        };
+        if !arms.iter().any(|arm| self.is_composite_name(*arm)) {
+            return None;
+        }
+        if self.carrier_normalizing.borrow().contains(&node) {
+            return None;
+        }
+        self.carrier_normalizing.borrow_mut().push(node);
+        let capacity = arms.len();
+        Some(CompositeReduction {
+            node,
+            arms,
+            is_union,
+            next: 0,
+            views: Vec::with_capacity(capacity),
+            named_unions: Vec::new(),
+            waiting: None,
+            completeness: ResultCompleteness::Complete,
+        })
+    }
+
+    /// The reduction is done: off the `carrier_normalizing` record.
+    fn end_composite(
+        &self,
+        reduction: &CompositeReduction,
+        reduced: Option<SemanticNodeId>,
+    ) -> CompositeStep {
+        let popped = self.carrier_normalizing.borrow_mut().pop();
+        verter_debug_assert!(
+            popped == Some(reduction.node),
+            "composite reductions finish in the order they start"
+        );
+        CompositeStep::Done(reduced, reduction.completeness)
+    }
+
+    /// Advance `reduction` with `delivered`, the outcome of the demand it
+    /// was waiting for, to its next demand or its result: each arm read as
+    /// the reduction reads it, and the resolved union a named arm stands for.
+    fn step_composite(
+        &self,
+        reduction: &mut CompositeReduction,
+        delivered: Option<StructuralFactDemandOutcome>,
+    ) -> CompositeStep {
+        if let Some(outcome) = delivered {
+            let (arm, members) = match reduction.waiting.take() {
+                Some(ArmWait::Resolved(arm)) => {
+                    let resolved = match outcome {
+                        StructuralFactDemandOutcome::Complete(resolved) => resolved,
+                        StructuralFactDemandOutcome::Partial(reasons) => {
+                            reduction.completeness = reduction
+                                .completeness
+                                .merge(ResultCompleteness::partial(reasons));
+                            return self.end_composite(reduction, None);
+                        }
+                    };
+                    // A union joins a named union's members, whatever they
+                    // are; an intersection distributes over one made of
+                    // scalars only.
+                    let is_named_union = matches!(
+                        self.graph().node_data(resolved).as_deref(),
+                        Some(SemanticNodeData::Union(_))
+                    );
+                    if !is_named_union {
+                        let view = if self.is_composite_scalar(resolved) {
+                            resolved
+                        } else {
+                            arm
+                        };
+                        reduction.views.push(view);
+                        (arm, None)
+                    } else {
+                        let mut walk = MembersWalk::new(arm, resolved);
+                        match self.step_members(&mut walk, None) {
+                            MembersStep::Demand(name) => {
+                                reduction.waiting = Some(ArmWait::Members { arm, walk });
+                                return CompositeStep::Demand(name);
+                            }
+                            MembersStep::Done(members) => {
+                                reduction.take_walk_partial(&walk);
+                                (arm, Some(members))
+                            }
+                        }
+                    }
+                }
+                Some(ArmWait::Members { arm, mut walk }) => {
+                    match self.step_members(&mut walk, Some(outcome)) {
+                        MembersStep::Demand(name) => {
+                            reduction.waiting = Some(ArmWait::Members { arm, walk });
+                            return CompositeStep::Demand(name);
+                        }
+                        MembersStep::Done(members) => {
+                            reduction.take_walk_partial(&walk);
+                            (arm, Some(members))
+                        }
+                    }
+                }
+                None => unreachable!("an outcome is delivered only to a waiting reduction"),
+            };
+            if let Some(members) = members {
+                let Some(members) = members else {
+                    return self.end_composite(reduction, None);
+                };
+                if !reduction.is_union
+                    && !members
+                        .iter()
+                        .all(|member| self.is_composite_scalar(*member))
+                {
+                    reduction.views.push(arm);
+                } else {
+                    reduction
+                        .views
+                        .push(self.intern_normalized_union_or_intersection(&members, true));
+                    reduction.named_unions.push((arm, members));
+                }
+            }
+        }
+        while reduction.next < reduction.arms.len() {
+            let arm = reduction.arms[reduction.next];
+            reduction.next += 1;
+            if !self.is_composite_name(arm) {
+                reduction.views.push(arm);
+                continue;
+            }
+            reduction.waiting = Some(ArmWait::Resolved(arm));
+            return CompositeStep::Demand(arm);
+        }
+        let reduced = self.reduce_over_resolved_arms(reduction);
+        self.end_composite(reduction, reduced)
+    }
+
+    /// The composite once every arm is read: the reduced node, or `None`
+    /// when it stays as written.
+    fn reduce_over_resolved_arms(&self, reduction: &CompositeReduction) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let node = reduction.node;
+        let arms: &[SemanticNodeId] = &reduction.arms;
+        let views = &reduction.views;
+        let named_unions = &reduction.named_unions;
+        if views.as_slice() == arms {
+            return None;
+        }
+        let is_opaque = |view: SemanticNodeId| {
+            matches!(
+                graph.node_data(view).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            )
+        };
+        if !reduction.is_union {
+            if let Some(marker) = views.iter().copied().find(|view| is_opaque(*view)) {
+                return Some(marker);
+            }
+            let reduced = self
+                .distributed_intersection(views)
+                .unwrap_or_else(|| self.intern_normalized_union_or_intersection(views, false));
+            return (reduced != node).then_some(reduced);
+        }
+        // An arm this demand could not type leaves the union's member set
+        // unknown: it stays as written.
+        if views.iter().any(|view| is_opaque(*view)) {
+            return None;
+        }
+        let reduced = self.intern_normalized_union_or_intersection(views, true);
+        let type_set: Vec<SemanticNodeId> = match graph.node_data(reduced).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown)) => {
+                return Some(reduced)
+            }
+            _ => vec![reduced],
+        };
+        // The checker's union origin: the named unions, when they do not
+        // overlap and the reduction kept every member they name.
+        let in_named = |member: &SemanticNodeId| {
+            named_unions
+                .iter()
+                .any(|(_, members)| members.contains(member))
+        };
+        let remaining: Vec<SemanticNodeId> = type_set
+            .iter()
+            .copied()
+            .filter(|member| !in_named(member))
+            .collect();
+        let named_count: usize = named_unions.iter().map(|(_, members)| members.len()).sum();
+        let result = match named_unions.as_slice() {
+            [(named, _)] if remaining.is_empty() => *named,
+            [] => reduced,
+            _ if named_count + remaining.len() == type_set.len() => {
+                let origin: Vec<SemanticNodeId> = remaining
+                    .into_iter()
+                    .chain(named_unions.iter().map(|(named, _)| *named))
+                    .collect();
+                // The written arms ARE the origin: the union stays as written.
+                if origin.len() == arms.len() && origin.iter().all(|arm| arms.contains(arm)) {
+                    return None;
+                }
+                self.intern_normalized_union_or_intersection(&origin, true)
+            }
+            _ => reduced,
+        };
+        (result != node).then_some(result)
+    }
+
+    /// Advance `walk` — the members of the resolved union a named arm
+    /// stands for, with every member that is itself a named union read as
+    /// that union's members, flattened as the checker's union holds them —
+    /// with `delivered`, the outcome of the name it was waiting for. `None`
+    /// members when a name's demand did not complete, or when the walk
+    /// reaches a name on its own active path: a union that contains itself
+    /// is the checker's circularity, and it stays deferred.
+    fn step_members(
+        &self,
+        walk: &mut MembersWalk,
+        delivered: Option<StructuralFactDemandOutcome>,
+    ) -> MembersStep {
+        let graph = self.graph();
+        if let Some(outcome) = delivered {
+            let node = walk
+                .awaiting
+                .take()
+                .expect("an outcome is delivered only to a waiting walk");
+            let resolved = match outcome {
+                StructuralFactDemandOutcome::Complete(resolved) => resolved,
+                StructuralFactDemandOutcome::Partial(reasons) => {
+                    walk.partial = Some(reasons);
+                    return MembersStep::Done(None);
+                }
+            };
+            match graph.node_data(resolved).as_deref() {
+                Some(SemanticNodeData::Union(_)) => {
+                    walk.active.insert(node);
+                    walk.pending.push(MemberStep::Leave(node));
+                    walk.pending.push(MemberStep::Read(resolved));
+                }
+                // A name for a primitive or a literal is that type.
+                Some(
+                    SemanticNodeData::Primitive(_)
+                    | SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_),
+                ) => walk.members.push(resolved),
+                _ => walk.members.push(node),
+            }
+        }
+        while let Some(step) = walk.pending.pop() {
+            let node = match step {
+                MemberStep::Read(node) => node,
+                MemberStep::Leave(node) => {
+                    walk.active.remove(&node);
+                    walk.read.insert(node);
+                    continue;
+                }
+            };
+            if let Some(SemanticNodeData::Union(arms)) = graph.node_data(node).as_deref() {
+                walk.pending
+                    .extend(arms.iter().rev().map(|arm| MemberStep::Read(*arm)));
+                continue;
+            }
+            if !self.is_composite_name(node) {
+                walk.members.push(node);
+                continue;
+            }
+            if walk.active.contains(&node) {
+                return MembersStep::Done(None);
+            }
+            if walk.read.contains(&node) {
+                continue;
+            }
+            walk.awaiting = Some(node);
+            return MembersStep::Demand(node);
+        }
+        MembersStep::Done(Some(std::mem::take(&mut walk.members)))
+    }
+
+    /// The union `node` with each `keyof` arm read as the keys it settles
+    /// to under `context`: the checker resolves `keyof` over a type that is
+    /// not generic when it builds the type, so the union holds those keys
+    /// (`keyof { a: 1 } | keyof { b: 2 }` is `"a" | "b"`). An arm whose keys
+    /// keep their `keyof` origin (`keyof Face` over an interface) or do not
+    /// settle stays as written. `None` when no arm changes, and the
+    /// completeness of the arms' evaluations: an evaluation that stopped on
+    /// an operational limit makes it partial.
+    fn union_over_evaluated_key_arms(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> (Option<SemanticNodeId>, ResultCompleteness) {
+        let graph = self.graph();
+        let arms = match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.members_arc(),
+            _ => return (None, ResultCompleteness::Complete),
+        };
+        let mut changed = false;
+        let mut completeness = ResultCompleteness::Complete;
+        let views: Vec<SemanticNodeId> = arms
+            .iter()
+            .map(|&arm| {
+                if !matches!(
+                    graph.node_data(arm).as_deref(),
+                    Some(SemanticNodeData::KeyOf { .. })
+                ) {
+                    return arm;
+                }
+                let keys = self.evaluate_deferred_outcome(arm, context);
+                completeness = completeness.merge(keys.completeness);
+                let settled = matches!(keys.completeness, ResultCompleteness::Complete)
+                    && !matches!(
+                        graph.node_data(keys.node).as_deref(),
+                        Some(SemanticNodeData::KeyOf { .. } | SemanticNodeData::Opaque(_))
+                    );
+                if settled {
+                    changed = true;
+                    keys.node
+                } else {
+                    arm
+                }
+            })
+            .collect();
+        if completeness.is_partial() {
+            // An arm whose keys did not settle for want of work leaves the
+            // union unresolved: the demand is partial, its node unused.
+            return (None, completeness);
+        }
+        (
+            changed.then(|| self.intern_normalized_union_or_intersection(&views, true)),
+            completeness,
+        )
     }
 
     /// Fold a LOCALLY-PRODUCED partial — one no `CacheRead` carried (a step

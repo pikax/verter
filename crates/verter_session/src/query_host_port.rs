@@ -191,7 +191,6 @@ fn neutral_error(error: LocatorBodyDerefError) -> QueryHostError {
         | LocatorBodyDerefError::TypeParamOrdinalOutOfRange { .. }
         | LocatorBodyDerefError::TypeParamBoundStepMisplaced
         | LocatorBodyDerefError::NamespaceBodyUnrouted
-        | LocatorBodyDerefError::AugmentationBodySpaceUnrouted
         | LocatorBodyDerefError::MacroTypeArgumentHasSoleHotMirrorProducer
         | LocatorBodyDerefError::MacroPayloadPositionUnrouted => QueryHostError::LocatorUnroutable,
     }

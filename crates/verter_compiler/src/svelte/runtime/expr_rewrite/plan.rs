@@ -152,7 +152,9 @@ pub(super) fn plan_script_statement_edits(
         member_write_target_spans: rustc_hash::FxHashSet::default(),
         member_assign_rhs_verbatim_spans: rustc_hash::FxHashSet::default(),
     };
-    collector.visit_statement(statement);
+    verter_parser::oxc_parse::with_span_stack(source, statement.span(), || {
+        collector.visit_statement(statement)
+    });
     if let Some(surface) = collector.refusal {
         return Err(surface);
     }
@@ -206,7 +208,7 @@ pub(super) struct BindingOccurrenceCollector<'s> {
     stmt_effect_spans: rustc_hash::FxHashSet<(u32, u32)>,
     /// The parsed `({source})` text the AST spans index — the slice source for
     /// re-emitting comment trivia a head rewrite would otherwise overwrite.
-    wrapped: &'s str,
+    pub(super) wrapped: &'s str,
     /// The parse's comment table (spans index `wrapped`, delimiters included) —
     /// the trivia authority for the invocation-head rewrites.
     comments: &'s [Comment],
@@ -969,20 +971,15 @@ impl<'a> Visit<'a> for BindingOccurrenceCollector<'_> {
 
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
         self.locals.push(arrow_scope_names(it));
-        if it.r#expression {
-            // A CONCISE (expression-bodied) arrow: OXC models the body as ONE
-            // synthetic `ExpressionStatement`, but it is an EXPRESSION position,
-            // not a droppable statement — dropping it would remove the whole
-            // body (`() => )`, invalid JS). Visit the params and the body
+        if let Some(expression) = it.get_expression() {
+            // A CONCISE (expression-bodied) arrow: its body is an EXPRESSION
+            // position, not a droppable statement — dropping it would remove the
+            // whole body (`() => )`, invalid JS). Visit the params and the body
             // EXPRESSION directly so the statement-drop never fires; a concise
             // `$inspect.trace()` then refuses via the identifier walk (matching
             // the official `inspect_trace_invalid_placement` error).
             self.visit_formal_parameters(&it.params);
-            if let [Statement::ExpressionStatement(stmt)] = it.body.statements.as_slice() {
-                self.visit_expression(&stmt.expression);
-            } else {
-                self.visit_function_body(&it.body);
-            }
+            self.visit_expression(expression);
         } else {
             walk::walk_arrow_function_expression(self, it);
         }

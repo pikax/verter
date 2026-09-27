@@ -69,12 +69,14 @@ export default { props: ['msg'], emits: ['click'] }
     // OXC validation
     let full = format!("{}\n{}", code, type_constructs);
     let val_alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&val_alloc, &full, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&val_alloc, &full, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Full TSX must be valid: {:?}\n---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -382,14 +384,15 @@ export default {
 
     // Should parse as valid JSX
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC JSX ERROR: {err}");
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "generated JSX should have no parse errors, got {}:\n{code}",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 
@@ -435,11 +438,12 @@ const count = ref(0)
 
     // Should parse as valid JSX
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "generated JSX should have no parse errors, got {}:\n{code}",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 
@@ -471,11 +475,12 @@ const count = ref(0)
 
     // Should parse as valid JSX
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "generated JSX should have no parse errors, got {}:\n{code}",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 
@@ -500,11 +505,12 @@ const count = ref(SHARED)
 
     // Should parse as valid JSX
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "generated JSX should have no parse errors, got {}:\n{code}",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 
@@ -539,11 +545,12 @@ export default {
 
     // Should parse as valid JSX
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "generated JSX should have no parse errors, got {}:\n{code}",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 
@@ -603,13 +610,14 @@ inheritAttrs: false,
 
     // Should parse as valid JSX
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC JSX ERROR: {err}");
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "generated JSX should have no parse errors, got {}:\n{code}",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }

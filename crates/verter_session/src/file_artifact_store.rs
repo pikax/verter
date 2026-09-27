@@ -84,6 +84,21 @@ pub struct FileArtifactKey {
     pub file_language_id: FileLanguage,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many keys this thread derived by hashing a plain script's whole
+    /// source ([`FileArtifactKey::for_source_identity`]); test-only.
+    static SOURCE_PARSE_IDENTITY_DERIVATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// How many artifact keys this thread derived from a plain script's whole
+/// source text so far (test-only).
+#[cfg(test)]
+pub(crate) fn source_parse_identity_derivations_for_tests() -> usize {
+    SOURCE_PARSE_IDENTITY_DERIVATIONS.with(std::cell::Cell::get)
+}
+
 impl FileArtifactKey {
     /// Builds the exact key for an already-materialized artifact.
     pub(crate) fn for_indexed(
@@ -100,6 +115,26 @@ impl FileArtifactKey {
             parse_env_hash,
         )
         .expect("IndexedReady retains a compatible runtime language and parse artifact")
+    }
+
+    /// [`Self::for_source_identity`] for a plain script whose parse identity
+    /// the source stage already derived: no pass over the source bytes.
+    pub(crate) fn for_script_parse_identity(
+        canonical: Arc<str>,
+        content_hash: Hash16,
+        parse_key: verter_language::ParseKey,
+        file_language_id: FileLanguage,
+        parse_env_hash: Hash16,
+    ) -> Self {
+        Self {
+            canonical,
+            content_hash,
+            parse_env_hash,
+            parse_key,
+            build_toolchain_fingerprint:
+                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+            file_language_id,
+        }
     }
 
     /// Builds an exact key from the source-stage identity that produced an artifact.
@@ -121,6 +156,8 @@ impl FileArtifactKey {
                 artifact.parse_key().clone()
             }
             None => {
+                #[cfg(test)]
+                SOURCE_PARSE_IDENTITY_DERIVATIONS.with(|count| count.set(count.get() + 1));
                 verter_language::default_parse_identity_for(source, &file_language_id)
                     .ok()?
                     .1

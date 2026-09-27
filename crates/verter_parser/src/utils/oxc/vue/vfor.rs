@@ -5,11 +5,11 @@
 //! The parser splits on ` of ` or ` in ` and parses left and right sides separately,
 //! which properly handles Vue's multi-variable syntax.
 
+use crate::oxc_parse::Parser;
 use memchr::memmem::find;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{ArrayExpressionElement, Expression, ObjectPropertyKind, PropertyKey};
 use oxc_diagnostics::OxcDiagnostic;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 
@@ -282,7 +282,7 @@ fn extract_vfor_bindings_internal(
         // outside the source expression, so partition here by name: non-ignored
         // names feed liveness, ignored (template-scope) names feed the
         // scope-local reference set for the slot-flag `hasScopeRef` decision.
-        for name in collect_expression_free_refs(right) {
+        for name in collect_expression_free_refs(right, input) {
             if ignored.contains(name.as_bytes()) {
                 scope_local_reference_names.push(name.to_string());
             } else {

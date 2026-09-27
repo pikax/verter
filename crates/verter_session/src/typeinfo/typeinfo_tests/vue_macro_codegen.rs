@@ -698,7 +698,7 @@ fn tsc_class_return_replay_fails_closed_for_unsupported_and_nested_unsafe_infere
     for (file, method) in [
         (
             "/src/UnsupportedReturn.vue",
-            "method(flag: boolean) { while (flag) { return 1 } return 0 }",
+            "method(flag: boolean) { let r = 0; (() => { r = 1 })(); return r }",
         ),
         (
             "/src/NestedUnsafeReturn.vue",
@@ -743,7 +743,7 @@ defineProps<Payload>()
         // The non-cacheable read channel (`OutputMaterializationLoss`) fires
         // exactly when the materialization loses typed degradation:
         // `UnsupportedReturn.vue`'s method type carries a degraded leaf (the
-        // while-loop return path is unresolvable) ⇒ refused; the nested
+        // invoked closure's write is unmodelled) ⇒ refused; the nested
         // `[] as any[]` lowers to a concrete `any[]` with NOTHING lost ⇒
         // cacheable (declaration-local failure only).
         let expect_cacheable = file.contains("NestedUnsafe");

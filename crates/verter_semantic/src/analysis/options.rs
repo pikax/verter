@@ -439,19 +439,17 @@ fn extract_data_fields(value: &Expression<'_>) -> Vec<AnalyzedOptionsField> {
         }
         // data: () => ({ ... })
         Expression::ArrowFunctionExpression(arrow) => {
-            if arrow.expression {
+            if let Some(expression) = arrow.get_expression() {
                 // Expression body: data: () => ({ count: 0 })
-                for stmt in &arrow.body.statements {
-                    if let Statement::ExpressionStatement(es) = stmt {
-                        let inner = unwrap_parens(&es.expression);
-                        if let Expression::ObjectExpression(obj) = inner {
-                            return extract_fields_from_object(obj);
-                        }
-                    }
+                let inner = unwrap_parens(expression);
+                if let Expression::ObjectExpression(obj) = inner {
+                    return extract_fields_from_object(obj);
                 }
                 Vec::new()
+            } else if let Some(body) = arrow.get_function_body() {
+                extract_return_object_keys(&body.statements)
             } else {
-                extract_return_object_keys(&arrow.body.statements)
+                Vec::new()
             }
         }
         _ => Vec::new(),
@@ -536,18 +534,16 @@ fn extract_provide_keys(value: &Expression<'_>) -> Vec<AnalyzedOptionsField> {
         }
         // provide: () => ({ ... })
         Expression::ArrowFunctionExpression(arrow) => {
-            if arrow.expression {
-                for stmt in &arrow.body.statements {
-                    if let Statement::ExpressionStatement(es) = stmt {
-                        let inner = unwrap_parens(&es.expression);
-                        if let Expression::ObjectExpression(obj) = inner {
-                            return extract_fields_from_object(obj);
-                        }
-                    }
+            if let Some(expression) = arrow.get_expression() {
+                let inner = unwrap_parens(expression);
+                if let Expression::ObjectExpression(obj) = inner {
+                    return extract_fields_from_object(obj);
                 }
                 Vec::new()
+            } else if let Some(body) = arrow.get_function_body() {
+                extract_return_object_keys(&body.statements)
             } else {
-                extract_return_object_keys(&arrow.body.statements)
+                Vec::new()
             }
         }
         _ => Vec::new(),

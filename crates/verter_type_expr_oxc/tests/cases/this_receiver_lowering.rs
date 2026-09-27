@@ -25,7 +25,7 @@ use verter_type_expr_oxc::lower_ts_type;
 fn lower_alias(source: &str) -> TypeExpr {
     let allocator = oxc_allocator::Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!ret.panicked, "OXC parser panicked on `{source}`");
+    assert!(!ret.fatal_error, "OXC parser panicked on `{source}`");
     let alias = ret
         .program
         .body
@@ -137,7 +137,7 @@ fn nested_function_typed_member_preserves_the_authored_this_receiver() {
     let source = "type __T = { row: (this: void, item: number) => string };";
     let allocator = oxc_allocator::Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!ret.panicked);
+    assert!(!ret.fatal_error);
     let has_this_param = ret.program.body.iter().any(|stmt| match stmt {
         Statement::TSTypeAliasDeclaration(alias) => match &alias.type_annotation {
             TSType::TSTypeLiteral(literal) => literal.members.iter().any(|member| match member {

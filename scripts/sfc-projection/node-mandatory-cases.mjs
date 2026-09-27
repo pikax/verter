@@ -118,12 +118,63 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP15-unused",
     "STP15-mutation",
   ]),
+  STP16: Object.freeze([
+    "STP16-required-api",
+    "STP16-public-members",
+    "STP16-private-leak",
+    "STP16-generic-constraint",
+    "STP16-public-callable",
+    "STP16-type-precision",
+    "STP16-public-specialization",
+  ]),
   STP17: Object.freeze([
     "STP17-spellings",
     "STP17-merge",
     "STP17-overwrite",
     "STP17-optional-spread",
     "STP17-collision",
+  ]),
+  STP18: Object.freeze([
+    "STP18-single-witness",
+    "STP18-uncoupled",
+    "STP18-contextual",
+    "STP18-literal",
+    "STP18-handler-check",
+    "STP18-fresh-id",
+    "STP18-script-template-parity",
+  ]),
+  STP19: Object.freeze([
+    "STP19-explicit",
+    "STP19-higher-rank",
+    "STP19-forward",
+    "STP19-overloads",
+    "STP19-foreign",
+    "STP19-erasure",
+    "STP19-instantiation-alias",
+  ]),
+  STP20: Object.freeze([
+    "STP20-default",
+    "STP20-required",
+    "STP20-spread-extra",
+    "STP20-union",
+    "STP20-optional",
+    "STP20-overwritten",
+  ]),
+  STP21: Object.freeze([
+    "STP21-event-alias",
+    "STP21-model-key",
+    "STP21-static-handler",
+    "STP21-modifier",
+    "STP21-dynamic-name",
+    "STP21-collision",
+  ]),
+  STP32: Object.freeze([
+    "STP32-dynamic-correlated",
+    "STP32-async",
+    "STP32-recursive",
+    "STP32-global",
+    "STP32-namespace",
+    "STP32-missing",
   ]),
   STS0: Object.freeze([
     "STS0-svelte-inventory",
@@ -148,5 +199,11 @@ export const STP12_MANDATORY_CASES = NODE_MANDATORY_CASES.STP12;
 export const STP13_MANDATORY_CASES = NODE_MANDATORY_CASES.STP13;
 export const STP14_MANDATORY_CASES = NODE_MANDATORY_CASES.STP14;
 export const STP15_MANDATORY_CASES = NODE_MANDATORY_CASES.STP15;
+export const STP16_MANDATORY_CASES = NODE_MANDATORY_CASES.STP16;
 export const STP17_MANDATORY_CASES = NODE_MANDATORY_CASES.STP17;
+export const STP18_MANDATORY_CASES = NODE_MANDATORY_CASES.STP18;
+export const STP19_MANDATORY_CASES = NODE_MANDATORY_CASES.STP19;
+export const STP20_MANDATORY_CASES = NODE_MANDATORY_CASES.STP20;
+export const STP21_MANDATORY_CASES = NODE_MANDATORY_CASES.STP21;
+export const STP32_MANDATORY_CASES = NODE_MANDATORY_CASES.STP32;
 export const STS0_MANDATORY_CASES = NODE_MANDATORY_CASES.STS0;

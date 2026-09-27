@@ -567,6 +567,7 @@ pub(super) fn body_root_is_resolvable(body: SemanticNodeId, ctx: &PolicyCtx<'_, 
             | SemanticNodeData::Intersection(_)
             | SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Array { .. }
             | SemanticNodeData::Tuple { .. }
             | SemanticNodeData::TemplateLiteral { .. }

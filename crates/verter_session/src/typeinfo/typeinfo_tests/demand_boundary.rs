@@ -58,7 +58,6 @@ fn demand_boundary_barrel_resolution_does_not_load_unrequested_reexport() {
 }
 
 #[test]
-#[ignore = "typeinfo currently keeps imported aliases shallow and does not attribute the selected leaf when projecting through DemandSurface['keep']; keep as the future demand-loaded selected-branch contract"]
 fn demand_boundary_projection_into_selected_alias_loads_needed_but_not_unused() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/demand-needed.ts", DEMAND_NEEDED);
@@ -95,7 +94,6 @@ fn demand_boundary_projection_into_selected_alias_loads_needed_but_not_unused() 
 }
 
 #[test]
-#[ignore = "typeinfo currently cannot reduce a terminal property through a shallow imported alias reached via indexed access; keep as the future demand terminal projection contract"]
 fn demand_boundary_terminal_projection_resolves_value_without_unused_branch() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/demand-needed.ts", DEMAND_NEEDED);

@@ -325,7 +325,16 @@ fn prepare_local_type_decl_outcome_with_base(
     // TYPE-augmentation siblings; the body carries no classified deps — it
     // stitches onto another module's surface). A broken-lease body demand
     // surfaces the DISTINCT `LeaseMiss`, never collapsed into a cacheable miss.
-    let global_scope = AugmentationScopeKind::Global;
+    // A `declare module "…"` block's own type is the block member its
+    // references read, under the same identity (`Module` origin).
+    let fallback_scope: AugmentationScopeKind = if state.has_type_symbol_in(owner, symbol_name) {
+        AugmentationScopeKind::Global
+    } else {
+        match state.type_fallback_augmentation_scope(owner, symbol_name) {
+            Some(scope) => scope,
+            None => return PreparedDeclOutcome::Ready(None),
+        }
+    };
     let (lowered, deps, origin): (Arc<LoweredTypeDecl>, _, Option<&AugmentationScopeKind>) =
         if state.has_type_symbol_in(owner, symbol_name) {
             match state.type_decl_outcome_in(owner, symbol_name) {
@@ -336,7 +345,7 @@ fn prepare_local_type_decl_outcome_with_base(
                 }
             }
         } else {
-            match state.augmentation_type_decl_outcome_in(&global_scope, owner, symbol_name) {
+            match state.augmentation_type_decl_outcome_in(&fallback_scope, owner, symbol_name) {
                 DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
                 DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
                 DemandOutcome::Ready(Some(lowered)) => {
@@ -348,7 +357,7 @@ fn prepare_local_type_decl_outcome_with_base(
                     // Complete surface.
                     let deps =
                         state.classify_lowered_type_deps(owner, symbol_name, lowered.as_ref());
-                    (lowered, Some(deps), Some(&global_scope))
+                    (lowered, Some(deps), Some(&fallback_scope))
                 }
             }
         };
@@ -697,10 +706,24 @@ fn prepare_local_value_decl_outcome_with_base(
     shared_name_resolution_base: Option<&SharedNameResolutionBase>,
     interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedValueDecl> {
+    // A name absent from the file surface but declared in one of the
+    // file's ambient blocks — a MODULE's own `declare global { ... }`
+    // value, or the one `declare module "..." { ... }` block declaring it —
+    // is that block's value declaration, prepared under the same
+    // `(canonical, name)` identity the type space's global fallback uses.
     let lowered: Arc<LoweredValueDecl> = match state.value_decl_outcome_in(owner, symbol_name) {
         DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
-        DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
         DemandOutcome::Ready(Some(lowered)) => lowered,
+        DemandOutcome::Ready(None) => {
+            let Some(scope) = state.value_fallback_augmentation_scope(owner, symbol_name) else {
+                return PreparedDeclOutcome::Ready(None);
+            };
+            match state.augmentation_value_decl_outcome_in(&scope, owner, symbol_name) {
+                DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
+                DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
+                DemandOutcome::Ready(Some(lowered)) => lowered,
+            }
+        }
     };
     if state.is_import_local_in(owner, symbol_name) {
         return PreparedDeclOutcome::Ready(None);
@@ -1130,6 +1153,59 @@ impl PreparedValueDeclCache {
         self.slots.len()
     }
 
+    /// Prepare an augmentation-scoped VALUE contribution: its function
+    /// signatures, in the file's value-space name environment (the same
+    /// per-owner base every value declaration of the file shares).
+    fn prepare_augmentation_value_decl_outcome_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> PreparedDeclOutcome<PreparedValueDecl> {
+        let lowered = match self
+            .state
+            .augmentation_value_decl_outcome_in(scope, owner, symbol_name)
+        {
+            DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
+            DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
+            DemandOutcome::Ready(Some(lowered)) => lowered,
+        };
+        let name_resolution = match self
+            .name_resolution_bases
+            .get(&owner)
+            .and_then(|cell| cell.get())
+        {
+            Some(base) => Arc::clone(base),
+            None => match build_value_name_resolution_base(
+                &self.canonical_id,
+                self.state.as_ref(),
+                owner,
+                (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
+                &self.import_canonicalization,
+                &self.interner,
+            ) {
+                Ok(base) => Arc::new(base),
+                Err(failure) => return PreparedDeclOutcome::Failed(failure),
+            },
+        };
+        let mut prepared = PreparedValueDecl::new(
+            ResolvedRootIdentity::new_in_owner(
+                Arc::clone(&self.canonical_id),
+                owner,
+                self.interner.intern(symbol_name),
+            ),
+            lowered.kind,
+        );
+        prepared.type_annotation = lowered.type_annotation.clone();
+        prepared.signatures = lowered.signatures.clone();
+        prepared.name_resolution = name_resolution;
+        let hash_u64 =
+            u64::from_le_bytes(self.state.whole_hash[..8].try_into().unwrap_or_default());
+        prepared.cache_deps.defining_file =
+            Some((self.canonical_id.as_ref().to_string(), hash_u64));
+        PreparedDeclOutcome::Ready(Some(prepared))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }
@@ -1316,6 +1392,32 @@ impl PreparedDeclBundle {
             .prepare_augmentation_type_decl_outcome_in(scope, owner, symbol_name)
     }
 
+    /// Prepare the function declarations one augmentation block contributes
+    /// to a value, against the same pinned state and value-space name
+    /// environment as this bundle's own value declarations.
+    pub(crate) fn prepare_augmentation_value_decl_outcome_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> PreparedDeclOutcome<PreparedValueDecl> {
+        self.prepared_value_decls
+            .prepare_augmentation_value_decl_outcome_in(scope, owner, symbol_name)
+    }
+
+    /// Plain result-shaped sibling of
+    /// [`Self::prepare_augmentation_value_decl_outcome_in`] for locator
+    /// replay.
+    pub(crate) fn prepare_augmentation_value_decl_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> Result<Option<PreparedValueDecl>, PreparationFailure> {
+        self.prepare_augmentation_value_decl_outcome_in(scope, owner, symbol_name)
+            .into_result()
+    }
+
     /// Plain result-shaped sibling for locator replay. Lease misses retain the
     /// existing non-cacheability fan-out performed by `into_result`.
     pub(crate) fn prepare_augmentation_type_decl_in(
@@ -1452,11 +1554,18 @@ pub fn build_prepared_type_decl_cache(
     // fallback, so they need a prepared-decl slot even though they never enter
     // the file surface. (A name that IS a file symbol already has a slot and
     // takes precedence.)
+    // A `declare module "…"` block's type prepares through the same
+    // fallback when it is the one block declaring the name.
     for (scope, key) in state.augmentation_type_decl_keys() {
-        if matches!(
-            scope,
-            verter_semantic::analysis::type_eval::AugmentationScopeKind::Global
-        ) && !slots.contains_key(key)
+        let addressable = match scope {
+            verter_semantic::analysis::type_eval::AugmentationScopeKind::Global => true,
+            verter_semantic::analysis::type_eval::AugmentationScopeKind::Module(_) => {
+                state.type_fallback_augmentation_scope(key.owner, key.name.as_ref())
+                    == Some(scope.clone())
+            }
+        };
+        if addressable
+            && !slots.contains_key(key)
             && !state.is_import_local_in(key.owner, key.name.as_ref())
         {
             slots.insert(key.clone(), Arc::new(PreparedDeclSlot::new()));
@@ -1493,7 +1602,7 @@ pub fn build_prepared_value_decl_cache(
     import_canonicalization: Arc<ImportCanonicalization>,
     interner: &Arc<IdentityInterner>,
 ) -> PreparedValueDeclCache {
-    let slots: FxHashMap<verter_type_expr::DeclBindingKey, PreparedValueDeclSlot> = state
+    let mut slots: FxHashMap<verter_type_expr::DeclBindingKey, PreparedValueDeclSlot> = state
         .decl_bodies()
         .header_index()
         .value_headers
@@ -1503,6 +1612,29 @@ pub fn build_prepared_value_decl_cache(
         .chain(state.synthesised_value_bodies().map(|(key, _)| key.clone()))
         .map(|key| (key, Arc::new(PreparedDeclSlot::new())))
         .collect();
+    // An ambient block's values (`declare global { var x }` in a module,
+    // `declare module "m" { const x }`) prepare through
+    // `prepare_local_value_decl`'s ambient fallback, so they need a slot
+    // although they never enter the file surface; a file symbol of the same
+    // name keeps its own slot and takes precedence.
+    let ambient_keys: Vec<verter_type_expr::DeclBindingKey> = state
+        .decl_bodies()
+        .header_index()
+        .augmentation_value_headers
+        .values()
+        .flat_map(|values| values.keys())
+        .filter(|key| {
+            !slots.contains_key(*key)
+                && !state.is_import_local_in(key.owner, key.name.as_ref())
+                && state
+                    .value_fallback_augmentation_scope(key.owner, key.name.as_ref())
+                    .is_some()
+        })
+        .cloned()
+        .collect();
+    for key in ambient_keys {
+        slots.insert(key, Arc::new(PreparedDeclSlot::new()));
+    }
     let name_resolution_bases = slots
         .keys()
         .map(|key| key.owner)

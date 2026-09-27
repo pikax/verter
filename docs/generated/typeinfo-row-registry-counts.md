@@ -15,8 +15,8 @@ preserved by a named equivalent-or-stronger successor row).
 | Count | Value |
 | --- | --- |
 | baseline (registry cardinality) | 365 |
-| ignored | 284 |
-| running_unratified | 14 |
+| ignored | 95 |
+| running_unratified | 203 |
 | lifted | 67 |
 | superseded | 0 |
 
@@ -31,33 +31,33 @@ preserved by a named equivalent-or-stronger successor row).
 | U8.WIRE_SURFACE_CLOSURE | 0 | 0 | 0 | 0 | 0 |
 | U12.EXPORTER | 0 | 0 | 0 | 0 | 0 |
 | U13.PROJECTION | 0 | 0 | 0 | 0 | 0 |
-| U2.RELATION_INFER | 20 | 19 | 1 | 0 | 0 |
-| U2.UTILITIES | 32 | 32 | 0 | 0 | 0 |
-| U2.INDEXED_ACCESS | 24 | 9 | 0 | 15 | 0 |
-| U2.MAPPED_TEMPLATE | 18 | 13 | 0 | 5 | 0 |
-| U2.CLASS_SURFACES | 38 | 29 | 4 | 5 | 0 |
-| U2.ENUMS | 7 | 7 | 0 | 0 | 0 |
-| U2.MODULE_AUGMENTATION | 4 | 4 | 0 | 0 | 0 |
-| U2.JSX_FOUNDATIONS | 7 | 7 | 0 | 0 | 0 |
-| U6.FLOW_RETURN_SUBSTRATE | 8 | 3 | 1 | 4 | 0 |
-| U6.NARROW_TYPEOF | 15 | 15 | 0 | 0 | 0 |
-| U6.NARROW_EQUALITY | 15 | 15 | 0 | 0 | 0 |
-| U6.NARROW_TRUTHINESS | 15 | 15 | 0 | 0 | 0 |
-| U6.NARROW_IN | 15 | 15 | 0 | 0 | 0 |
-| U6.NARROW_INSTANCEOF | 14 | 14 | 0 | 0 | 0 |
-| U6.NARROW_DISCRIMINATED | 14 | 14 | 0 | 0 | 0 |
-| U6.NARROW_SUBSTITUTION | 11 | 11 | 0 | 0 | 0 |
-| U6.NARROW_INVALIDATION | 5 | 5 | 0 | 0 | 0 |
-| U6.PREDICATE_ASSERTION | 3 | 3 | 0 | 0 | 0 |
-| U6.CALL_RESOLVE | 20 | 4 | 0 | 16 | 0 |
-| U6.CONTEXTUAL_CALLBACK | 17 | 15 | 2 | 0 | 0 |
+| U2.RELATION_INFER | 20 | 9 | 11 | 0 | 0 |
+| U2.UTILITIES | 32 | 9 | 23 | 0 | 0 |
+| U2.INDEXED_ACCESS | 25 | 4 | 5 | 16 | 0 |
+| U2.MAPPED_TEMPLATE | 18 | 6 | 7 | 5 | 0 |
+| U2.CLASS_SURFACES | 37 | 21 | 12 | 4 | 0 |
+| U2.ENUMS | 7 | 0 | 7 | 0 | 0 |
+| U2.MODULE_AUGMENTATION | 4 | 0 | 4 | 0 | 0 |
+| U2.JSX_FOUNDATIONS | 7 | 0 | 7 | 0 | 0 |
+| U6.FLOW_RETURN_SUBSTRATE | 8 | 1 | 3 | 4 | 0 |
+| U6.NARROW_TYPEOF | 15 | 0 | 15 | 0 | 0 |
+| U6.NARROW_EQUALITY | 15 | 0 | 15 | 0 | 0 |
+| U6.NARROW_TRUTHINESS | 15 | 1 | 14 | 0 | 0 |
+| U6.NARROW_IN | 15 | 1 | 14 | 0 | 0 |
+| U6.NARROW_INSTANCEOF | 14 | 6 | 8 | 0 | 0 |
+| U6.NARROW_DISCRIMINATED | 14 | 2 | 12 | 0 | 0 |
+| U6.NARROW_SUBSTITUTION | 11 | 7 | 4 | 0 | 0 |
+| U6.NARROW_INVALIDATION | 5 | 0 | 5 | 0 | 0 |
+| U6.PREDICATE_ASSERTION | 3 | 2 | 1 | 0 | 0 |
+| U6.CALL_RESOLVE | 20 | 1 | 3 | 16 | 0 |
+| U6.CONTEXTUAL_CALLBACK | 17 | 4 | 13 | 0 | 0 |
 | U6.VALUE_INFERENCE | 1 | 1 | 0 | 0 | 0 |
-| U6.ASYNC_GENERATOR | 1 | 1 | 0 | 0 | 0 |
-| U6.CROSS_FILE | 6 | 6 | 0 | 0 | 0 |
-| U6.LOOP_CLOSURE | 3 | 3 | 0 | 0 | 0 |
-| U3.CACHE_FACT_MODEL | 3 | 3 | 0 | 0 | 0 |
+| U6.ASYNC_GENERATOR | 1 | 0 | 1 | 0 | 0 |
+| U6.CROSS_FILE | 6 | 1 | 5 | 0 | 0 |
+| U6.LOOP_CLOSURE | 3 | 1 | 2 | 0 | 0 |
+| U3.CACHE_FACT_MODEL | 3 | 0 | 3 | 0 | 0 |
 | U3.ADAPTIVE_FAMILY_RETENTION | 0 | 0 | 0 | 0 | 0 |
-| U10.RESULT_DB | 12 | 12 | 0 | 0 | 0 |
+| U10.RESULT_DB | 12 | 9 | 3 | 0 | 0 |
 | U11.PUBLIC_RELATION_SESSION | 9 | 3 | 6 | 0 | 0 |
 | U14.MACRO_ADAPTER | 1 | 1 | 0 | 0 | 0 |
 | U15.FINAL_LIFT | 5 | 5 | 0 | 0 | 0 |

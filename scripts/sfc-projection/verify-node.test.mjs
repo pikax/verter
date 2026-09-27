@@ -19,7 +19,10 @@ import {
   STP11_MANDATORY_CASES,
   STP14_MANDATORY_CASES,
   STP15_MANDATORY_CASES,
+  STP16_MANDATORY_CASES,
   STP17_MANDATORY_CASES,
+  STP18_MANDATORY_CASES,
+  STP19_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
   assertCheckCounts,
   assertCleanTwin,
@@ -1246,6 +1249,41 @@ test("STP15 verify: live read/write views on both engines", async () => {
   assert.equal(result.incremental, "fresh");
 });
 
+test("STP16 node manifest is runnable without STP1 mandatory cases", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP16/manifest.json");
+  assert.equal(node.errors.length, 0, JSON.stringify(node.errors));
+  for (const id of STP16_MANDATORY_CASES) {
+    assert.ok(node.manifest.mandatoryCases.includes(id), `missing ${id}`);
+  }
+  assert.ok(!node.manifest.mandatoryCases.includes("STP1-harness"));
+});
+
+test("STP16 verify: public constructor and instance contract on both engines", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP16",
+    engine: "all",
+    requireAll: true,
+    json: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual([...STP16_MANDATORY_CASES].sort(), [...result.mandatoryCases].sort());
+  for (const id of STP16_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing selected case ${id}`);
+  }
+  assert.equal(result.harnessRuns.length, 2);
+  for (const run of result.harnessRuns) {
+    // Every rejected design is an `@ts-expect-error` in the positive probe,
+    // so a permissive constructor surfaces as an unused-directive error here.
+    assert.equal(run.positiveDiagnostics.length, 0, JSON.stringify(run));
+    // A setup-private binding stays a customer diagnostic on the instance.
+    assert.ok(run.negativeDiagnostics.some((diag) => diag.code === 2339));
+    assert.equal(run.hover, "number", JSON.stringify(run));
+    assert.ok(run.definition, JSON.stringify(run));
+  }
+  assert.equal(result.incremental, "fresh");
+});
+
 test("STP17 node manifest is runnable without STP1 mandatory cases", () => {
   const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP17/manifest.json");
   assert.equal(node.errors.length, 0, JSON.stringify(node.errors));
@@ -1275,6 +1313,76 @@ test("STP17 verify: attribute operations and consumer channels on both engines",
     // callback prop instead of passing through an attrs object.
     assert.ok(run.negativeDiagnostics.some((diag) => diag.code === 2322));
     assert.equal(run.hover, "number", JSON.stringify(run));
+    assert.ok(run.definition, JSON.stringify(run));
+  }
+  assert.equal(result.incremental, "fresh");
+});
+
+test("STP18 node manifest is runnable without STP1 mandatory cases", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP18/manifest.json");
+  assert.equal(node.errors.length, 0, JSON.stringify(node.errors));
+  for (const id of STP18_MANDATORY_CASES) {
+    assert.ok(node.manifest.mandatoryCases.includes(id), `missing ${id}`);
+  }
+  assert.ok(!node.manifest.mandatoryCases.includes("STP1-harness"));
+});
+
+test("STP18 verify: one inference transaction per use on both engines", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP18",
+    engine: "all",
+    requireAll: true,
+    json: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual([...STP18_MANDATORY_CASES].sort(), [...result.mandatoryCases].sort());
+  for (const id of STP18_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing selected case ${id}`);
+  }
+  assert.equal(result.harnessRuns.length, 2);
+  for (const run of result.harnessRuns) {
+    assert.equal(run.positiveDiagnostics.length, 0, JSON.stringify(run));
+    // A collected listener contradicting the specialized payload is a
+    // customer diagnostic at its validation check.
+    assert.ok(run.negativeDiagnostics.some((diag) => diag.code === 2322));
+    // Slot props read the use's own specialization (T = Row).
+    assert.equal(run.hover, "number", JSON.stringify(run));
+    assert.ok(run.definition, JSON.stringify(run));
+  }
+  assert.equal(result.incremental, "fresh");
+});
+
+test("STP19 node manifest is runnable without STP1 mandatory cases", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP19/manifest.json");
+  assert.equal(node.errors.length, 0, JSON.stringify(node.errors));
+  for (const id of STP19_MANDATORY_CASES) {
+    assert.ok(node.manifest.mandatoryCases.includes(id), `missing ${id}`);
+  }
+  assert.ok(!node.manifest.mandatoryCases.includes("STP1-harness"));
+});
+
+test("STP19 verify: advanced generic uses and foreign contracts on both engines", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP19",
+    engine: "all",
+    requireAll: true,
+    json: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual([...STP19_MANDATORY_CASES].sort(), [...result.mandatoryCases].sort());
+  for (const id of STP19_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing selected case ${id}`);
+  }
+  assert.equal(result.harnessRuns.length, 2);
+  for (const run of result.harnessRuns) {
+    assert.equal(run.positiveDiagnostics.length, 0, JSON.stringify(run));
+    // Functional props, collected listeners, a higher-rank slot misuse and
+    // an erased generic are customer diagnostics.
+    assert.ok(run.negativeDiagnostics.some((diag) => diag.code === 2322));
+    // The forwarded slot's own binder maps ids to numbers.
+    assert.equal(run.hover, "number[]", JSON.stringify(run));
     assert.ok(run.definition, JSON.stringify(run));
   }
   assert.equal(result.incremental, "fresh");

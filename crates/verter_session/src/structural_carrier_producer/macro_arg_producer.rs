@@ -714,7 +714,17 @@ fn lower_node(
             ..
         } => {
             let mapper_display_name: Arc<str> = Arc::from(parameter.as_str());
-            let mapper_decl = DeclIdentity::from_scope(scope, Arc::from("<mapper-param>"));
+            let mapper_decl = DeclIdentity::from_scope(
+                scope,
+                crate::mapper_binder_registry::mapper_binder_decl_name(
+                    graph,
+                    source,
+                    value,
+                    *optional,
+                    *readonly,
+                    name_type.as_ref(),
+                ),
+            );
             let parameter_node = graph.intern_node_with_scope(
                 SemanticNodeData::TypeParam {
                     decl: mapper_decl,
@@ -792,6 +802,12 @@ fn lower_node(
                 readonly,
                 name_remap,
                 kind,
+                over_type_variable: match source.as_ref() {
+                    TypeExpr::KeyOf(_) => {
+                        crate::semantic_query::keyof_operand_is_type_variable(graph, source_node)
+                    }
+                    _ => false,
+                },
             };
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::Mapped {
@@ -975,6 +991,7 @@ fn lower_function_signature(
             optional: p.optional,
             rest: p.rest,
             span: p.span,
+            declared_literal: crate::semantic_query::declares_literal_type(&p.ty),
         });
     }
     let return_type = match func.return_type.as_deref() {
@@ -1010,6 +1027,7 @@ fn lower_function_signature(
             signature_span: func.spans.signature,
             return_type_span: func.spans.return_type,
             predicate,
+            is_abstract: func.is_abstract,
         },
         scope.clone(),
     ))

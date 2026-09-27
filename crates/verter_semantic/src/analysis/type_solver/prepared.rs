@@ -197,15 +197,16 @@ pub struct PreparedTypeDecl {
     /// arguments are content-free locators of the authored argument positions.
     pub projection_class: PreparedProjectionClassFact,
 
-    /// The producer-minted content-free heritage-base FACTS of a CLASS
-    /// declaration body's Intersection fold (heritage `Ref` arms before the
-    /// own `Object` arm): the authored base NAME (also the `name_resolution`
-    /// routing key the dispatch head-resolution uses) plus one content-free
-    /// [`TypeArgLocator`] per authored heritage type argument. Minted ONCE at
-    /// lazy decl-body lowering by [`collect_heritage_base_facts`]; NEVER a
-    /// resolved identity (heads resolve at dispatch time) and NEVER an
-    /// embedded body (arguments deref + lower on demand). Empty for non-class
-    /// declarations and heritage-free classes.
+    /// The producer-minted content-free heritage-base FACTS of a CLASS or
+    /// INTERFACE declaration body's Intersection fold (heritage `Ref` arms
+    /// before the own `Object` arm): the authored base NAME (also the
+    /// `name_resolution` routing key the dispatch head-resolution uses)
+    /// plus one content-free [`TypeArgLocator`] per authored heritage type
+    /// argument. Minted ONCE at lazy decl-body lowering by
+    /// [`collect_heritage_base_facts`]; NEVER a resolved identity (heads
+    /// resolve at dispatch time) and NEVER an embedded body (arguments deref
+    /// and lower on demand). Empty for other declarations and heritage-free
+    /// classes and interfaces.
     pub heritage_bases: Arc<[HeritageBaseFact]>,
 
     /// Whether this CLASS declaration authors a heritage clause the fact
@@ -1437,6 +1438,7 @@ impl PreparedValueDecl {
                 annotation: None,
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
                 expression_source: None,
+                literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
             },
             signatures: Vec::new(),
             object_shape: None,
@@ -2012,10 +2014,12 @@ mod tests {
                 EnumMemberEntry {
                     name: "Red".to_string(),
                     value: EnumScalar::Number("0".to_string()),
+                    initializer: None,
                 },
                 EnumMemberEntry {
                     name: "Green".to_string(),
                     value: EnumScalar::Number("1".to_string()),
+                    initializer: None,
                 },
             ]),
         });
@@ -2535,6 +2539,7 @@ mod tests {
             constraint: None,
             default: None,
             is_const: false,
+            variance: verter_type_expr::facts::TypeParamVariance::Unannotated,
         }
     }
 

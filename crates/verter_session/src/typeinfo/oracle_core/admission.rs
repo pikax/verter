@@ -63,8 +63,8 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Statement, TSSignature, TSTupleElement, TSType, TSTypeName, TSTypeOperatorOperator,
 };
-use oxc_parser::Parser;
 use oxc_span::SourceType;
+use verter_parser::oxc_parse::Parser;
 
 use verter_type_expr::{LiteralValue, MemberVisibility, ObjectMember, PrimitiveName, TypeExpr};
 
@@ -862,7 +862,7 @@ pub(crate) fn admit_hover_text(rhs: &str) -> AdmissionVerdict {
     let allocator = Allocator::default();
     let wrapped = format!("type __oracle_probe__ = {rhs};");
     let ret = Parser::new(&allocator, &wrapped, SourceType::ts()).parse();
-    if ret.panicked {
+    if ret.fatal_error {
         return AdmissionVerdict::Reject(RejectReason::HoverUnparsable);
     }
     let alias = ret.program.body.iter().find_map(|stmt| match stmt {
@@ -898,7 +898,7 @@ pub(crate) fn lower_hover_rhs(rhs: &str) -> Option<TypeExpr> {
     let allocator = Allocator::default();
     let wrapped = format!("type __oracle_probe__ = {rhs};");
     let ret = Parser::new(&allocator, &wrapped, SourceType::ts()).parse();
-    if ret.panicked {
+    if ret.fatal_error {
         return None;
     }
     let ts_type = ret.program.body.iter().find_map(|stmt| match stmt {

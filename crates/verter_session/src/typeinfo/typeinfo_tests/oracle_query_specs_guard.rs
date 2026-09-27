@@ -783,15 +783,15 @@ fn relation_registry_holds_the_26_identities_and_maps_the_28_contracts() {
         ]
     );
 
-    // The known-mismatch ledger is exactly 7 rows: 6 `UnsupportedKey` pins
-    // (exactly the binder-carrying infer rows — a direct inference target is
-    // outside the engine's supported key) + 1 named `MismatchedVerdict` pin
-    // with its source-proven engine answer.
+    // The known-mismatch ledger is exactly 6 rows: the 6 `UnsupportedKey`
+    // pins (exactly the binder-carrying infer rows — a direct inference
+    // target is outside the engine's supported key). No `MismatchedVerdict`
+    // pin remains: the engine answers every other row as the oracle does.
     let pins: Vec<(&str, EngineObservationPin)> = RELATION_QUERY_SPECS
         .iter()
         .filter_map(|s| s.engine_pin.map(|p| (s.row_function, p)))
         .collect();
-    assert_eq!(pins.len(), 7, "the ledger seats exactly 7 rows");
+    assert_eq!(pins.len(), 6, "the ledger seats exactly 6 rows");
     let unsupported: Vec<&str> = RELATION_QUERY_SPECS
         .iter()
         .filter(|s| s.engine_pin == Some(EngineObservationPin::UnsupportedKey))
@@ -806,19 +806,6 @@ fn relation_registry_holds_the_26_identities_and_maps_the_28_contracts() {
     assert_eq!(
         unsupported, binder_rows,
         "the UnsupportedKey pins are exactly the 6 infer rows"
-    );
-    let (row, pinned) = (
-        "relation_fixed_to_first_rest",
-        RelationEngineVerdict::NotAssignable,
-    );
-    let spec = RELATION_QUERY_SPECS
-        .iter()
-        .find(|s| s.row_function == row)
-        .unwrap_or_else(|| panic!("registry seats {row}"));
-    assert_eq!(
-        spec.engine_pin,
-        Some(EngineObservationPin::MismatchedVerdict(pinned)),
-        "{row}: the pinned engine answer is the source-proven mismatch"
     );
 }
 

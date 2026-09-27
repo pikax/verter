@@ -11,8 +11,8 @@
 //! * every `oxc`-prefixed crate — forbidden, with ONE pinned exception:
 //!   the span-primitive subtree. `verter_span` (the workspace-wide span
 //!   primitive) depends unconditionally on `oxc_span`, which carries its
-//!   own small oxc-prefixed tail (the miette diagnostics fork, the arena
-//!   allocator, string/estree primitives). The sanctioned set is computed
+//!   own small oxc-prefixed tail (the arena allocator, string/estree
+//!   primitives). The sanctioned set is computed
 //!   STRUCTURALLY as `oxc_span`'s own production closure and then
 //!   equality-pinned: its `oxc`-prefixed membership must EQUAL the audited
 //!   allowlist ([`OXC_SANCTIONED_ALLOWLIST`]), so an `oxc_span` release
@@ -52,16 +52,13 @@ const OXC_EXCEPTION_ROOT: &str = "oxc_span";
 const OXC_EXCEPTION_SOLE_PARENT: &str = "verter_span";
 
 /// The AUDITED `oxc`-prefixed membership of the sanctioned span-primitive
-/// subtree: `oxc_span` itself plus its production tail (the miette
-/// diagnostics fork, the arena allocator, string/estree/data-structure
-/// primitives and the ast-macros proc-macro crate — every one a leaf
-/// utility, none a parser or resolver). Equality-pinned against the live
-/// closure: an `oxc_span` release that introduces a NEW `oxc_*` crate (or
+/// subtree: `oxc_span` itself plus its production tail (the arena
+/// allocator, string/estree/data-structure primitives and the ast-macros
+/// proc-macro crate — every one a leaf utility, none a parser or
+/// resolver). Equality-pinned against the live closure: an `oxc_span` release that introduces a NEW `oxc_*` crate (or
 /// drops one) fails the guard and forces a deliberate re-audit of this
 /// list, instead of being silently permitted by the structural walk alone.
-const OXC_SANCTIONED_ALLOWLIST: [&str; 8] = [
-    "oxc-miette",
-    "oxc-miette-derive",
+const OXC_SANCTIONED_ALLOWLIST: [&str; 6] = [
     "oxc_allocator",
     "oxc_ast_macros",
     "oxc_data_structures",

@@ -252,6 +252,11 @@ impl ProjectSemanticDispatch<'_> {
                     | PrimitiveKind::Void
                     | PrimitiveKind::Never => push_unknown(&mut kinds),
                 },
+                // An enum member's runtime value is its base value.
+                SemanticNodeData::EnumLiteral(literal) => work.push(RuntimeWork {
+                    node: literal.base,
+                    filter_unknown: item.filter_unknown,
+                }),
                 SemanticNodeData::Literal(literal) => match literal {
                     LiteralValue::String(_) => kinds.push(BroadRuntimeKind::String),
                     LiteralValue::Number(_) => kinds.push(BroadRuntimeKind::Number),

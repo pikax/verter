@@ -80,7 +80,7 @@ fn lower(span: Span, source: &str) -> Option<IndexedValueExpression> {
     }
     let leading = u32::try_from(raw.len().saturating_sub(raw.trim_start().len())).ok()?;
     let allocator = Allocator::default();
-    let expression = oxc_parser::Parser::new(&allocator, trimmed, SourceType::ts())
+    let expression = verter_parser::oxc_parse::Parser::new(&allocator, trimmed, SourceType::ts())
         .parse_expression()
         .ok()?;
     let mut indexed = verter_semantic::analysis::type_eval_build::lower_indexed_value_expression(

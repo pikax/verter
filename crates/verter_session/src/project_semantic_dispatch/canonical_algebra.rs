@@ -12,7 +12,10 @@
 //!    `Signature.signature_span` / `return_type_span`, `FunctionParam.span`)
 //!    — two arms that differ only by where they were written are ONE
 //!    constituent, so `T | T = T` fires for object arms produced by
-//!    distinct `return` statements. Scope-bearing semantic PAYLOAD fields
+//!    distinct `return` statements. The one exception is an `ImportType`
+//!    carrier, whose specifier resolves against the canonical file of its
+//!    scope: that file is identity, so one spelling written in two files
+//!    stays two constituents. Scope-bearing semantic PAYLOAD fields
 //!    (`BareRef` scope, declaration identity — `declaration_origin`
 //!    included — value roots, infer-binder identity, signature occurrence)
 //!    remain identity, and declaration-site INTERNING is untouched: spans
@@ -761,7 +764,7 @@ pub(crate) struct CanonicalComposite {
 /// of shallowly-distinct arms costs no budget — so exhaustion means genuine
 /// deep structural work, and it marks the evidence incomplete (ReturnOnly),
 /// never a wrong collapse.
-const COMPARE_WORK_BUDGET: u32 = 4096;
+pub(super) const COMPARE_WORK_BUDGET: u32 = 4096;
 
 /// Arm cap of the pairwise structural (tier-2) dedup: it runs only among
 /// CHILD-BEARING arms (childless payloads are fully deduplicated by the
@@ -810,6 +813,65 @@ pub(crate) fn numeric_literal_values_disjoint(a: f64, b: f64) -> bool {
     !same_value_zero
 }
 
+/// Whether an intersection's object-type arms declare one property whose
+/// types intersect to `never` while some of them is a literal — the
+/// checker's `isNeverReducedProperty` (`isDiscriminantWithNeverType`),
+/// which reduces the whole intersection to `never` (`{ a: 1 } & { a: 2 }`,
+/// `{ k: "x" } & { k: "y" }`). A property optional in some arm is left to
+/// the relation: its type there also holds `undefined`.
+fn object_arms_conflict_on_a_literal_property(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+) -> bool {
+    let views: Vec<crate::semantic_query::SurfaceView> = arms
+        .iter()
+        .filter_map(|arm| match graph.node_data(*arm).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some(view.clone()),
+            _ => None,
+        })
+        .collect();
+    if views.len() < 2 {
+        return false;
+    }
+    let is_literal = |value: SemanticNodeId| {
+        matches!(
+            graph.node_data(value).as_deref(),
+            Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_))
+        )
+    };
+    for (index, view) in views.iter().enumerate() {
+        for member in view.positive_members() {
+            if member.optional || member.method_kind.is_some() {
+                continue;
+            }
+            let mut values = vec![member.value];
+            let mut settled = true;
+            for other in &views[index + 1..] {
+                for candidate in other.positive_members() {
+                    if candidate.key != member.key {
+                        continue;
+                    }
+                    if candidate.optional || candidate.method_kind.is_some() {
+                        settled = false;
+                    }
+                    values.push(candidate.value);
+                }
+            }
+            if !settled || values.len() < 2 || !values.iter().any(|value| is_literal(*value)) {
+                continue;
+            }
+            let property = intern_ordered_intersection(graph, &values).node;
+            if matches!(
+                graph.node_data(property).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Canonical union construction over `members` under `nullability`.
 pub(crate) fn intern_ordered_union(
     graph: &SemanticGraphStore,
@@ -820,16 +882,20 @@ pub(crate) fn intern_ordered_union(
 }
 
 /// Private ordered-intersection intern. Operand order is preserved. An
-/// intersection runs the strict-null algebra.
+/// intersection runs the strict-null algebra. The intersection is one the
+/// construction derives (an instantiation, a merge), so every redundant
+/// supertype drops: the written `string & {}` the checker keeps is an
+/// authored shell, reduced by [`reduced_authored_intersection`].
 pub(crate) fn intern_ordered_intersection(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],
 ) -> CanonicalComposite {
-    canonicalize(
+    canonicalize_with(
         graph,
         members,
         /* is_union */ false,
         NullabilityPolicy::Strict,
+        SupertypeReduction::Always,
     )
 }
 
@@ -839,12 +905,52 @@ fn canonicalize(
     is_union: bool,
     nullability: NullabilityPolicy,
 ) -> CanonicalComposite {
+    canonicalize_with(
+        graph,
+        members,
+        is_union,
+        nullability,
+        SupertypeReduction::ExceptPrimitiveOverEmptyObject,
+    )
+}
+
+/// Whether an intersection drops its redundant supertypes
+/// ([`remove_redundant_supertypes`]) in every shape, or keeps the one
+/// shape the checker keeps as written.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SupertypeReduction {
+    /// Every shape — an intersection the construction itself produced
+    /// (an instantiation, a merge, a constituent of a distributed
+    /// intersection).
+    Always,
+    /// Every shape but exactly `string & {}` (`number`, `bigint`) as
+    /// WRITTEN: the checker keeps that authored pair
+    /// (`NoSupertypeReduction`), the idiom that keeps a literal union's
+    /// suggestions open, and reduces it once instantiated (`type NN<T> = T
+    /// & {}` makes `NN<string>` `string`).
+    ExceptPrimitiveOverEmptyObject,
+}
+
+fn canonicalize_with(
+    graph: &SemanticGraphStore,
+    members: &[SemanticNodeId],
+    is_union: bool,
+    nullability: NullabilityPolicy,
+    supertype_reduction: SupertypeReduction,
+) -> CanonicalComposite {
     let mut evidence = CanonicalEvidence::default();
 
     // 1. Recursive same-kind flattening: a union is never an arm of a union,
     //    an intersection never an arm of an intersection (mirrors the
     //    checker's own `getUnionType` flattening). Source order preserved.
     let flat = flatten_members(graph, members, is_union, &mut evidence);
+    // A union's constituents are types as the checker holds them: an
+    // authored intersection the checker reduces is that reduced type.
+    let flat = if is_union {
+        reduce_authored_intersection_arms(graph, flat, nullability, &mut evidence)
+    } else {
+        flat
+    };
 
     // 1a. Singleton normalization returns its retained member UNCHANGED —
     //     with that member's own scope — BEFORE the absorbers run: a
@@ -990,15 +1096,98 @@ fn canonicalize(
                 #[cfg(test)]
                 literal_provenance_tests::SUBSUMPTION_READS
                     .with(|count| count.set(count.get() + 1));
+                fn literal_bit(literal: &LiteralValue) -> u8 {
+                    match literal {
+                        LiteralValue::String(_) => 1,
+                        LiteralValue::Number(_) => 2,
+                        LiteralValue::BigInt(_) => 4,
+                        LiteralValue::Boolean(_) => 8,
+                    }
+                }
                 let base = match graph.node_data(*member).as_deref() {
-                    Some(SemanticNodeData::Literal(LiteralValue::String(_))) => 1,
-                    Some(SemanticNodeData::Literal(LiteralValue::Number(_))) => 2,
-                    Some(SemanticNodeData::Literal(LiteralValue::BigInt(_))) => 4,
-                    Some(SemanticNodeData::Literal(LiteralValue::Boolean(_))) => 8,
+                    Some(SemanticNodeData::Literal(literal)) => literal_bit(literal),
+                    // An enum member's literal is a literal of its value's
+                    // kind; a member whose value is not a constant is not a
+                    // literal and stays.
+                    Some(SemanticNodeData::EnumLiteral(enum_literal)) => {
+                        match graph.node_data(enum_literal.base).as_deref() {
+                            Some(SemanticNodeData::Literal(literal)) => literal_bit(literal),
+                            _ => 0,
+                        }
+                    }
                     _ => 0,
                 };
                 base & primitives == 0
             });
+        }
+        // 3a. `true | false` IS `boolean` — the checker's `boolean` is that
+        //     very union, so the pair folds to the primitive (at the first
+        //     literal's position) in display and identity alike.
+        let is_bool_literal = |member: SemanticNodeId, value: bool| {
+            graph.node_data(member).as_deref()
+                == Some(&SemanticNodeData::Literal(LiteralValue::Boolean(value)))
+        };
+        if arms.iter().any(|arm| is_bool_literal(*arm, true))
+            && arms.iter().any(|arm| is_bool_literal(*arm, false))
+        {
+            let boolean = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+            let mut folded = false;
+            arms.retain_mut(|arm| {
+                if !is_bool_literal(*arm, true) && !is_bool_literal(*arm, false) {
+                    return true;
+                }
+                if folded {
+                    return false;
+                }
+                folded = true;
+                *arm = boolean;
+                true
+            });
+            if let [only] = arms.as_slice() {
+                return CanonicalComposite {
+                    node: *only,
+                    evidence,
+                };
+            }
+        }
+    }
+
+    // 3b. Intersection literal absorption, mirroring the checker's
+    //     `removeRedundantSupertypes`: a base primitive beside a literal of
+    //     that base adds no constraint (`"a" & string` is `"a"`). An enum
+    //     member is a literal of its value's kind (`E.A & number` is `E.A`).
+    if !is_union {
+        fn literal_base(literal: &LiteralValue) -> PrimitiveKind {
+            match literal {
+                LiteralValue::String(_) => PrimitiveKind::String,
+                LiteralValue::Number(_) => PrimitiveKind::Number,
+                LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
+                LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
+            }
+        }
+        let base_of = |member: SemanticNodeId| match graph.node_data(member).as_deref() {
+            Some(SemanticNodeData::Literal(literal)) => Some(literal_base(literal)),
+            Some(SemanticNodeData::EnumLiteral(enum_literal)) => {
+                match graph.node_data(enum_literal.base).as_deref() {
+                    Some(SemanticNodeData::Literal(literal)) => Some(literal_base(literal)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let literal_bases: Vec<PrimitiveKind> =
+            arms.iter().filter_map(|arm| base_of(*arm)).collect();
+        if !literal_bases.is_empty() {
+            arms.retain(|arm| match graph.node_data(*arm).as_deref() {
+                Some(SemanticNodeData::Primitive(kind)) => !literal_bases.contains(kind),
+                _ => true,
+            });
+            if let [only] = arms.as_slice() {
+                return CanonicalComposite {
+                    node: *only,
+                    evidence,
+                };
+            }
         }
     }
 
@@ -1048,10 +1237,9 @@ fn canonicalize(
             if candidate == m {
                 continue 'tier1;
             }
-            if graph
-                .node_data(candidate)
-                .is_some_and(|cand| *cand == *data)
-            {
+            if graph.node_data(candidate).is_some_and(|cand| {
+                *cand == *data && same_importing_unit(graph, candidate, m, &data)
+            }) {
                 // Content-identical cross-scope duplicate — discarded. The
                 // payload-equality claim rests on the SHARED CHILD ids, so
                 // the discarded arm's transitive structure roots enter the
@@ -1168,11 +1356,41 @@ fn canonicalize(
     //    undecided relation is never guessed. Single pass over the deduped
     //    arms — exactly the pairwise [`tag_level_disjoint`] judgement,
     //    computed in O(n) over the childless scalar domain.
-    if !is_union && scalar_domain_provably_empty(graph, &kept) {
+    if !is_union
+        && (scalar_domain_provably_empty(graph, &kept)
+            || nullable_beside_object_type(graph, &kept, &mut evidence)
+            || object_arms_conflict_on_a_literal_property(graph, &kept))
+    {
         return CanonicalComposite {
             node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
             evidence,
         };
+    }
+
+    // 5a. Intersection redundant supertypes and union distribution — the
+    //     checker's `getIntersectionType` over what is left.
+    //     A single surviving arm is the intersection itself (the checker's
+    //     `typeSet.length === 1`): a union arm left alone is returned as
+    //     it is, never rebuilt by distributing over it.
+    if !is_union {
+        remove_redundant_supertypes(graph, &mut kept, supertype_reduction);
+        let distributed = if kept.len() < 2 {
+            None
+        } else {
+            distribute_over_unions(
+                graph,
+                &kept,
+                nullability,
+                DistributionOrigin::KeepWrittenIntersection,
+                &mut evidence,
+            )
+        };
+        if let Some(distributed) = distributed {
+            return CanonicalComposite {
+                node: distributed,
+                evidence,
+            };
+        }
     }
 
     // 6. Folds + interning. Empty ⇒ `Primitive(Never)`; singleton ⇒ the
@@ -1187,14 +1405,6 @@ fn canonicalize(
     //    — never skip-eligible.
     if is_union {
         crate::semantic_query::stable_key::sort_union_members_by_stable_key(graph, &mut kept);
-        // An over-deep arm cannot be proven equal to anything within the
-        // encoder's depth budget: keep every arm and refuse canonical warm
-        // admission rather than collapsing on the shared marker.
-        if kept.iter().any(|id| {
-            !crate::semantic_query::stable_key::stable_key_for_node(graph, *id).is_complete()
-        }) {
-            evidence.incomplete = true;
-        }
         kept.dedup_by(|a, b| crate::semantic_query::stable_key::provably_equal(graph, *a, *b));
     } else {
         // Intersection preserves construction order. First-occurrence
@@ -1230,6 +1440,288 @@ fn canonicalize(
         }
     };
     CanonicalComposite { node, evidence }
+}
+
+/// The checker's `removeRedundantSupertypes` over an intersection's arms:
+/// a primitive beside a literal of it adds no constraint (`string & "a"` is
+/// `"a"`, `boolean & true` is `true`), nor does `void` beside
+/// `undefined`, `symbol` beside a `unique symbol`, or an empty object
+/// `{}` beside an arm that is provably never `null` or `undefined` (`{} &
+/// 1` is `1`). A written `string & {}` keeps both arms when
+/// `supertype_reduction` says so.
+fn remove_redundant_supertypes(
+    graph: &SemanticGraphStore,
+    arms: &mut Vec<SemanticNodeId>,
+    supertype_reduction: SupertypeReduction,
+) {
+    let data: Vec<Option<Arc<SemanticNodeData>>> =
+        arms.iter().map(|arm| graph.node_data(*arm)).collect();
+    let is_empty_object = |d: &SemanticNodeData| matches!(d, SemanticNodeData::Object(view) if view.closed().is_empty());
+    let present = |test: &dyn Fn(&SemanticNodeData) -> bool| data.iter().flatten().any(|d| test(d));
+    let string_literal = present(&|d| {
+        matches!(
+            d,
+            SemanticNodeData::Literal(LiteralValue::String(_))
+                | SemanticNodeData::TemplateLiteral { .. }
+        )
+    });
+    let number_literal =
+        present(&|d| matches!(d, SemanticNodeData::Literal(LiteralValue::Number(_))));
+    let bigint_literal =
+        present(&|d| matches!(d, SemanticNodeData::Literal(LiteralValue::BigInt(_))));
+    let boolean_literal =
+        present(&|d| matches!(d, SemanticNodeData::Literal(LiteralValue::Boolean(_))));
+    let unique_symbol = present(&|d| matches!(d, SemanticNodeData::TypeOfNominal(_)));
+    let undefined =
+        present(&|d| matches!(d, SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
+    let definitely_non_nullable = present(&|d| {
+        !is_empty_object(d)
+            && matches!(
+                d,
+                SemanticNodeData::Literal(_)
+                    | SemanticNodeData::TemplateLiteral { .. }
+                    | SemanticNodeData::TypeOfNominal(_)
+                    | SemanticNodeData::Object(_)
+                    | SemanticNodeData::Array { .. }
+                    | SemanticNodeData::Tuple { .. }
+                    | SemanticNodeData::Signature { .. }
+                    | SemanticNodeData::Primitive(
+                        PrimitiveKind::String
+                            | PrimitiveKind::Number
+                            | PrimitiveKind::BigInt
+                            | PrimitiveKind::Boolean
+                            | PrimitiveKind::Symbol
+                            | PrimitiveKind::Object
+                    )
+            )
+    });
+    let written_pair_kept = supertype_reduction
+        == SupertypeReduction::ExceptPrimitiveOverEmptyObject
+        && matches!(
+            data.as_slice(),
+            [Some(first), Some(second)]
+                if matches!(
+                    first.as_ref(),
+                    SemanticNodeData::Primitive(
+                        PrimitiveKind::String | PrimitiveKind::Number | PrimitiveKind::BigInt
+                    )
+                ) && is_empty_object(second)
+        );
+    if written_pair_kept {
+        return;
+    }
+    let mut position = 0usize;
+    arms.retain(|_| {
+        let redundant = match data[position].as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => string_literal,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => number_literal,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => bigint_literal,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => boolean_literal,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => unique_symbol,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Void)) => undefined,
+            Some(d) if is_empty_object(d) => definitely_non_nullable,
+            _ => false,
+        };
+        position += 1;
+        !redundant
+    });
+}
+
+/// A union's AUTHORED intersection arms as the checker holds them: an arm
+/// whose canonical intersection reduces (`1 & (1 | 2)` is `1`, `number &
+/// string` is `never`, `QA & QA` is `QA`) is replaced by the reduced type,
+/// a distributed union spliced into the arms. An arm the canonical
+/// intersection keeps as it is stays the authored node; the canonical
+/// intersection keeps its arms in their written order.
+fn reduce_authored_intersection_arms(
+    graph: &SemanticGraphStore,
+    arms: Vec<SemanticNodeId>,
+    nullability: NullabilityPolicy,
+    evidence: &mut CanonicalEvidence,
+) -> Vec<SemanticNodeId> {
+    if !arms
+        .iter()
+        .any(|arm| authored_intersection_members(graph, *arm).is_some())
+    {
+        return arms;
+    }
+    let mut out: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+    for arm in arms {
+        let Some(reduced) = reduce_authored_intersection(graph, arm, nullability) else {
+            out.push(arm);
+            continue;
+        };
+        evidence.absorb(reduced.evidence);
+        match graph.node_data(reduced.node).as_deref() {
+            Some(SemanticNodeData::Union(constituents)) => out.extend(constituents.iter().copied()),
+            _ => out.push(reduced.node),
+        }
+    }
+    out
+}
+
+/// The members of `node` when it is an AUTHORED intersection shell.
+fn authored_intersection_members(
+    graph: &SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Option<Vec<SemanticNodeId>> {
+    match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Intersection(members))
+            if members.origin_category()
+                == crate::semantic_query::composite::CompositeOriginCategory::AuthoredShell =>
+        {
+            Some(members.iter().copied().collect())
+        }
+        _ => None,
+    }
+}
+
+/// The canonical intersection of an AUTHORED intersection shell when it
+/// differs from the shell as written; `None` for any other node and for a
+/// shell the canonical intersection keeps as it is.
+fn reduce_authored_intersection(
+    graph: &SemanticGraphStore,
+    node: SemanticNodeId,
+    nullability: NullabilityPolicy,
+) -> Option<CanonicalComposite> {
+    let members = authored_intersection_members(graph, node)?;
+    let reduced = canonicalize(graph, &members, false, nullability);
+    let kept_as_written = match graph.node_data(reduced.node).as_deref() {
+        Some(SemanticNodeData::Intersection(kept)) => kept.iter().eq(members.iter()),
+        _ => false,
+    };
+    (!kept_as_written).then_some(reduced)
+}
+
+/// The type the checker constructs from an AUTHORED intersection shell
+/// (`getIntersectionType`), when it differs from the shell as written:
+/// `string & ("a" | 1)` is `"a"` and `number & string` is `never`. `None`
+/// for any other node and for a shell the canonical intersection keeps as
+/// written (`QA & QB`). The shell itself stays the authored display form;
+/// a consumer that DECIDES on the type reads this.
+pub(super) fn reduced_authored_intersection(
+    graph: &SemanticGraphStore,
+    node: SemanticNodeId,
+    nullability: NullabilityPolicy,
+) -> Option<SemanticNodeId> {
+    reduce_authored_intersection(graph, node, nullability).map(|reduced| reduced.node)
+}
+
+/// The most constituents a distributed intersection may have; a wider
+/// cross product keeps the intersection.
+const MAX_DISTRIBUTED_CONSTITUENTS: usize = 64;
+
+/// Whether a distributed intersection keeps its written form as the
+/// printed origin ([`distribute_over_unions`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DistributionOrigin {
+    /// The canonical construction: the written intersection stays the
+    /// node when the distributed union is wider (the checker's origin).
+    KeepWrittenIntersection,
+    /// A reader of the type the intersection denotes: always the
+    /// distributed union.
+    Distributed,
+}
+
+/// The checker's distribution of an intersection over its union arms
+/// (`getIntersectionType`): `X & (A | B)` is `(X & A) | (X & B)`, each
+/// constituent an intersection reduced on its own, so `1 & (1 | 2)` is
+/// `1` and `string & ("a" | 1)` is `"a"`. `None` when no arm is a union,
+/// or — under [`DistributionOrigin::KeepWrittenIntersection`] — when the
+/// distributed union keeps an intersection constituent and has more
+/// constituents than the intersection has: the checker then keeps the
+/// intersection as the type's printed origin (`(QA | QB) & Z`), and both
+/// forms denote one type.
+pub(super) fn distribute_over_unions(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+    nullability: NullabilityPolicy,
+    origin: DistributionOrigin,
+    evidence: &mut CanonicalEvidence,
+) -> Option<SemanticNodeId> {
+    let choices: Vec<Vec<SemanticNodeId>> = arms
+        .iter()
+        .map(|arm| match graph.node_data(*arm).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            _ => vec![*arm],
+        })
+        .collect();
+    if choices.iter().all(|choice| choice.len() < 2) {
+        return None;
+    }
+    let width = choices
+        .iter()
+        .try_fold(1usize, |width, choice| width.checked_mul(choice.len()))?;
+    if width > MAX_DISTRIBUTED_CONSTITUENTS {
+        return None;
+    }
+    let mut constituents: Vec<SemanticNodeId> = Vec::with_capacity(width);
+    let mut term_evidence = CanonicalEvidence::default();
+    let mut positions = vec![0usize; choices.len()];
+    'product: loop {
+        let term: Vec<SemanticNodeId> = choices
+            .iter()
+            .zip(&positions)
+            .map(|(choice, &position)| choice[position])
+            .collect();
+        let reduced =
+            canonicalize_with(graph, &term, false, nullability, SupertypeReduction::Always);
+        term_evidence.absorb(reduced.evidence);
+        if !matches!(
+            graph.node_data(reduced.node).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+        ) {
+            constituents.push(reduced.node);
+        }
+        let mut digit = choices.len();
+        loop {
+            if digit == 0 {
+                break 'product;
+            }
+            digit -= 1;
+            positions[digit] += 1;
+            if positions[digit] < choices[digit].len() {
+                continue 'product;
+            }
+            positions[digit] = 0;
+        }
+    }
+    let keeps_intersection = constituents.iter().any(|node| {
+        matches!(
+            graph.node_data(*node).as_deref(),
+            Some(SemanticNodeData::Intersection(_))
+        )
+    });
+    if origin == DistributionOrigin::KeepWrittenIntersection
+        && keeps_intersection
+        && constituent_count(graph, &constituents, 0) > constituent_count(graph, arms, 0)
+    {
+        return None;
+    }
+    evidence.absorb(term_evidence);
+    let union = canonicalize(graph, &constituents, true, nullability);
+    evidence.absorb(union.evidence);
+    Some(union.node)
+}
+
+/// The checker's constituent count of a type list: a union or an
+/// intersection counts its constituents, anything else counts one.
+fn constituent_count(graph: &SemanticGraphStore, nodes: &[SemanticNodeId], depth: usize) -> usize {
+    const MAX_NESTING: usize = 8;
+    nodes
+        .iter()
+        .map(|node| match graph.node_data(*node).as_deref() {
+            Some(SemanticNodeData::Union(members)) if depth < MAX_NESTING => {
+                let members: Vec<SemanticNodeId> = members.iter().copied().collect();
+                constituent_count(graph, &members, depth + 1)
+            }
+            Some(SemanticNodeData::Intersection(members)) if depth < MAX_NESTING => {
+                let members: Vec<SemanticNodeId> = members.iter().copied().collect();
+                constituent_count(graph, &members, depth + 1)
+            }
+            _ => 1,
+        })
+        .sum()
 }
 
 /// Iterative recursive same-kind flattening. Preserves source order; records
@@ -1415,8 +1907,35 @@ pub(crate) fn tag_level_disjoint(
         | (SemanticNodeData::Primitive(prim), SemanticNodeData::Literal(lit)) => {
             concrete(*prim) && literal_base(lit) != *prim
         }
+        // Two members' literals are distinct types when each stands for a
+        // constant; a member whose value is not a constant is undecided.
+        (SemanticNodeData::EnumLiteral(x), SemanticNodeData::EnumLiteral(y)) => {
+            x != y && enum_literal_is_unit(graph, x) && enum_literal_is_unit(graph, y)
+        }
+        // A member's literal against a literal or a primitive shares an
+        // inhabitant exactly when its value does.
+        (SemanticNodeData::EnumLiteral(literal), SemanticNodeData::Literal(_))
+        | (SemanticNodeData::EnumLiteral(literal), SemanticNodeData::Primitive(_)) => {
+            tag_level_disjoint(graph, literal.base, b)
+        }
+        (SemanticNodeData::Literal(_), SemanticNodeData::EnumLiteral(literal))
+        | (SemanticNodeData::Primitive(_), SemanticNodeData::EnumLiteral(literal)) => {
+            tag_level_disjoint(graph, a, literal.base)
+        }
         _ => false,
     }
+}
+
+/// Whether an enum member's literal is a UNIT type: its member stands for a
+/// constant value.
+pub(crate) fn enum_literal_is_unit(
+    graph: &SemanticGraphStore,
+    literal: &crate::semantic_query::EnumLiteralType,
+) -> bool {
+    matches!(
+        graph.node_data(literal.base).as_deref(),
+        Some(SemanticNodeData::Literal(_))
+    )
 }
 
 /// Whether a payload carries NO child node ids — for such a payload,
@@ -1427,6 +1946,9 @@ fn payload_is_childless(data: &SemanticNodeData) -> bool {
     use SemanticNodeData as D;
     match data {
         D::Primitive(_) | D::Literal(_) | D::Opaque(_) | D::RawFallback { .. } => true,
+        // The base is a value leaf interned by its value, so payload
+        // equality is structural identity.
+        D::EnumLiteral(_) => true,
         D::Infer { .. } | D::InferRef { .. } | D::DeclRef { .. } => true,
         // Carries its operand ids — payload equality is NOT identity.
         D::IntrinsicApplication { .. } => false,
@@ -1741,6 +2263,7 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
             mapper.optionality.hash(hasher);
             mapper.readonly.hash(hasher);
             mapper.kind.hash(hasher);
+            mapper.over_type_variable.hash(hasher);
             mapper.name_remap.is_some().hash(hasher);
         }
         carrier @ (D::TypeOf(_) | D::BareRef(_) | D::ImportType(_)) => {
@@ -1802,8 +2325,10 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
             return_type_span: _,
             return_type: _,
             predicate,
+            is_abstract,
         } => {
             kind.hash(hasher);
+            is_abstract.hash(hasher);
             occurrence.hash(hasher);
             // The predicate target is a pushed child; its subject and
             // assertion flag are the shallow identity.
@@ -1815,6 +2340,7 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
                 param.name.hash(hasher);
                 param.optional.hash(hasher);
                 param.rest.hash(hasher);
+                param.declared_literal.hash(hasher);
             }
             type_parameters.len().hash(hasher);
             for decl in type_parameters.iter() {
@@ -1837,15 +2363,23 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
             base.hash(hasher);
             args.len().hash(hasher);
         }
-        // The class identity; the instance surface hashes through the
-        // shared child walk.
-        D::ClassExpressionInstance { identity, .. } => identity.hash(hasher),
+        // The class identity and the reference's arity; the type arguments
+        // and the instance surface hash through the shared child walk.
+        D::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            ..
+        } => {
+            identity.hash(hasher);
+            type_arguments.len().hash(hasher);
+        }
         // Childless payloads (whole-payload hashed by the caller before
         // this function is ever reached) and the opaque payloads (same):
         // deliberately unreachable here, hashed as their full payload for
         // defense in depth.
         D::Primitive(_)
         | D::Literal(_)
+        | D::EnumLiteral(_)
         | D::Opaque(_)
         | D::RawFallback { .. }
         | D::Infer { .. }
@@ -1860,7 +2394,10 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
 /// true" over the whole arm set: the intersection's scalar tag-level
 /// domain is PROVABLY empty. Non-scalar arms contribute nothing (they are
 /// never tag-level decidable); an undecided shape is never guessed.
-fn scalar_domain_provably_empty(graph: &SemanticGraphStore, arms: &[SemanticNodeId]) -> bool {
+pub(crate) fn scalar_domain_provably_empty(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+) -> bool {
     fn concrete(kind: PrimitiveKind) -> bool {
         !matches!(
             kind,
@@ -1875,11 +2412,41 @@ fn scalar_domain_provably_empty(graph: &SemanticGraphStore, arms: &[SemanticNode
             LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
         }
     }
+    // The base primitive kind of an enum member's value: a member is
+    // number-like or string-like whether or not its value is a constant.
+    let enum_base_kind = |literal: &crate::semantic_query::EnumLiteralType| match graph
+        .node_data(literal.base)
+        .as_deref()
+    {
+        Some(SemanticNodeData::Literal(value)) => Some(literal_base(value)),
+        Some(SemanticNodeData::Primitive(kind)) if concrete(*kind) => Some(*kind),
+        _ => None,
+    };
     let mut seen_concrete: Option<PrimitiveKind> = None;
     let mut seen_literal: Option<LiteralValue> = None;
+    // An enum member's type is a unit type of its own, distinct from every
+    // other member's and from every plain literal, whatever its value.
+    let mut seen_enum: Option<(SemanticNodeId, Option<PrimitiveKind>)> = None;
     for &arm in arms {
         match graph.node_data(arm).as_deref() {
+            Some(SemanticNodeData::EnumLiteral(literal)) => {
+                if seen_literal.is_some() || seen_enum.is_some_and(|(other, _)| other != arm) {
+                    return true;
+                }
+                let kind = enum_base_kind(literal);
+                if let (Some(kind), Some(concrete_kind)) = (kind, seen_concrete) {
+                    if kind != concrete_kind {
+                        return true;
+                    }
+                }
+                seen_enum = Some((arm, kind));
+            }
             Some(SemanticNodeData::Primitive(kind)) if concrete(*kind) => {
+                if let Some((_, Some(enum_kind))) = seen_enum {
+                    if enum_kind != *kind {
+                        return true;
+                    }
+                }
                 if let Some(prev) = seen_concrete {
                     let widening_pair = matches!(
                         (prev, *kind),
@@ -1904,6 +2471,9 @@ fn scalar_domain_provably_empty(graph: &SemanticGraphStore, arms: &[SemanticNode
                 }
             }
             Some(SemanticNodeData::Literal(value)) => {
+                if seen_enum.is_some() {
+                    return true;
+                }
                 if let Some(prev) = &seen_literal {
                     // TS literal identity: numeric pairs compare
                     // SameValueZero (`0` / `-0` are one literal type).
@@ -1931,12 +2501,68 @@ fn scalar_domain_provably_empty(graph: &SemanticGraphStore, arms: &[SemanticNode
     false
 }
 
-/// The scope-insensitive structural comparator. See the module docs for the
-/// identity contract. Iterative bisimulation: a worklist of node-id pairs, a
-/// visited-pair set (a revisited pair is assumed equal — the coinductive
-/// cycle rule), and a caller-owned work budget shared across one
-/// canonicalization. Every inspected node's file root is recorded on
-/// `evidence` — including nodes of a comparison that ends `Distinct`.
+/// Whether an intersection's arms hold `null` or `undefined` beside an
+/// object type — an object, array, tuple or function type, the empty
+/// object `{}` or `object` — which the checker's strict `null` algebra
+/// makes empty (`getIntersectionType`: `null & {}` and `undefined &
+/// { a: 1 }` are `never`, so `(string | null) & {}` distributes to
+/// `string`). Only structure read off the arms decides: a declaration
+/// carrier is not an object type here.
+fn nullable_beside_object_type(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+    evidence: &mut CanonicalEvidence,
+) -> bool {
+    let nullable = arms
+        .iter()
+        .any(|arm| peek_nullable_via_graph(graph, *arm, evidence).is_some());
+    nullable
+        && arms.iter().any(|arm| {
+            matches!(
+                graph.node_data(*arm).as_deref(),
+                Some(
+                    SemanticNodeData::Object(_)
+                        | SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Tuple { .. }
+                        | SemanticNodeData::Signature { .. }
+                        | SemanticNodeData::Primitive(PrimitiveKind::Object)
+                )
+            )
+        })
+}
+
+/// Whether two nodes of one payload kind share the importing unit that
+/// kind's identity needs. The arena scope is provenance for every node kind
+/// — two arms written in two places are one constituent — except an
+/// import-type carrier: its specifier resolves against the logical source
+/// unit it is scoped to, so one spelling written in two files can name two
+/// modules. Only that unit (the scope's canonical file) is compared; the rest
+/// of the scope stays provenance.
+fn same_importing_unit(
+    graph: &SemanticGraphStore,
+    x: SemanticNodeId,
+    y: SemanticNodeId,
+    data: &SemanticNodeData,
+) -> bool {
+    if !matches!(data, SemanticNodeData::ImportType(_)) {
+        return true;
+    }
+    let unit = |node| {
+        graph
+            .node_scope(node)
+            .as_ref()
+            .and_then(NodeScopeId::canonical_file)
+    };
+    unit(x) == unit(y)
+}
+
+/// The scope-insensitive structural comparator (an import-type carrier's
+/// importing unit excepted). See the module docs for the identity contract.
+/// Iterative bisimulation: a worklist of node-id pairs, a visited-pair set
+/// (a revisited pair is assumed equal — the coinductive cycle rule), and a
+/// caller-owned work budget shared across one canonicalization. Every
+/// inspected node's file root is recorded on `evidence` — including nodes
+/// of a comparison that ends `Distinct`.
 pub(crate) fn compare_structural(
     graph: &SemanticGraphStore,
     a: SemanticNodeId,
@@ -1969,6 +2595,9 @@ pub(crate) fn compare_structural(
         };
         evidence.record_file_root(graph, x);
         evidence.record_file_root(graph, y);
+        if !same_importing_unit(graph, x, y, &dx) {
+            return StructuralIdentity::Distinct;
+        }
         // Fast path: payload-equal (child ids included) — identical subtrees
         // by arena content identity, no descent needed.
         if dx == dy {
@@ -2154,6 +2783,7 @@ fn compare_shallow(
         // pair is Distinct.
         (D::Primitive(_), D::Primitive(_))
         | (D::Literal(_), D::Literal(_))
+        | (D::EnumLiteral(_), D::EnumLiteral(_))
         | (D::Opaque(_), D::Opaque(_))
         | (D::RawFallback { .. }, D::RawFallback { .. }) => false,
         (
@@ -2250,7 +2880,12 @@ fn compare_shallow(
                 mapper: mb,
             },
         ) => {
-            if ma.optionality != mb.optionality || ma.readonly != mb.readonly || ma.kind != mb.kind
+            // A homomorphic mapping passes a primitive source through where a
+            // concrete-key mapping enumerates its properties.
+            if ma.optionality != mb.optionality
+                || ma.readonly != mb.readonly
+                || ma.kind != mb.kind
+                || ma.over_type_variable != mb.over_type_variable
             {
                 return false;
             }
@@ -2427,6 +3062,7 @@ fn compare_shallow(
                 signature_span: _,
                 return_type_span: _,
                 predicate: da,
+                is_abstract: aa,
             },
             D::Signature {
                 kind: kb,
@@ -2438,12 +3074,13 @@ fn compare_shallow(
                 signature_span: _,
                 return_type_span: _,
                 predicate: db,
+                is_abstract: ab,
             },
         ) => {
             // Occurrence and the return-carrier discriminant participate in
             // identity (declaration/position identity, not a raw source
             // coordinate); the span payloads do not.
-            if ka != kb || oa != ob || pa.len() != pb.len() || ta.len() != tb.len() {
+            if ka != kb || aa != ab || oa != ob || pa.len() != pb.len() || ta.len() != tb.len() {
                 return false;
             }
             match (ca, cb) {
@@ -2457,8 +3094,14 @@ fn compare_shallow(
                 }
                 _ => return false,
             }
+            // A parameter written as a literal type makes the signature a
+            // specialized one, which overload priority reads.
             for (fa, fb) in pa.iter().zip(pb.iter()) {
-                if fa.name != fb.name || fa.optional != fb.optional || fa.rest != fb.rest {
+                if fa.name != fb.name
+                    || fa.optional != fb.optional
+                    || fa.rest != fb.rest
+                    || fa.declared_literal != fb.declared_literal
+                {
                     return false;
                 }
                 work.push((fa.ty, fb.ty));
@@ -2490,21 +3133,25 @@ fn compare_shallow(
         // payload-Eq fast path already admitted identical pairs).
         (D::DeferredCallable(_), D::DeferredCallable(_)) => false,
         (D::DeclRef { identity: a }, D::DeclRef { identity: b }) => a == b,
-        // One class expression, compared through its instance surface (an
-        // instantiation of its outer type parameters).
+        // One class expression, compared through the reference's type
+        // arguments and its instance surface (an instantiation of the type
+        // parameters the class can see).
         (
             D::ClassExpressionInstance {
                 identity: ia,
+                type_arguments: ta,
                 surface: sa,
             },
             D::ClassExpressionInstance {
                 identity: ib,
+                type_arguments: tb,
                 surface: sb,
             },
         ) => {
-            if ia != ib {
+            if ia != ib || ta.len() != tb.len() {
                 return false;
             }
+            work.extend(ta.iter().copied().zip(tb.iter().copied()));
             work.push((*sa, *sb));
             true
         }

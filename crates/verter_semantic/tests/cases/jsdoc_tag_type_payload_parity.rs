@@ -152,7 +152,7 @@ fn lower_via_ast(input: &str) -> TypeExpr {
     panic!(
         "Path A: failed to find `type __T = ...;` in parsed wrapper for fixture {input:?}; \
          parser errors: {:?}",
-        ret.errors,
+        ret.diagnostics,
     );
 }
 

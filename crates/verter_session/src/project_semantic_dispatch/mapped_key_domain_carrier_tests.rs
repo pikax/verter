@@ -76,6 +76,7 @@ fn computed_mapper(
 ) -> MapperKey {
     let k_param = outer_type_param(dispatch, "K");
     MapperKey {
+        over_type_variable: false,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -873,6 +874,7 @@ fn nullary_function(
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     })
 }
 

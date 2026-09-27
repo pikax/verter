@@ -1232,3 +1232,275 @@ fn attribute_operations_reads_admitted_carrier_blocks() {
         SetupProjectionRefusal::MissingParse
     );
 }
+
+/// The production public-constructor path runs on real Vue SFC carrier
+/// bytes and is the backend's `PublicApi`: one generic construct signature
+/// over the authored binder, exposed members only on the instance, and the
+/// rendered declaration the public-constructor tsc probes check through both
+/// engines.
+#[test]
+fn public_constructor_reads_admitted_carrier_blocks() {
+    use verter_compiler::framework_common::vue_projection_backend::{
+        ConstructorSource, PropsDefaults, PropsRequirement, PublicSurface,
+        VuePublicConstructorContract,
+    };
+    use verter_compiler::framework_common::SetupProjectionRefusal;
+
+    const FIXTURE: &str =
+        include_str!("../../../../tests/sfc-projection/STP16/probes/components/Picker.vue.ts");
+    const SFC: &str = concat!(
+        "<template>\n",
+        "<slot :item=\"props.test\" />\n",
+        "</template>\n",
+        "<script setup lang=\"ts\" generic=\"const T extends string | number = string\">\n",
+        "import { ref, type VNode } from \"vue\";\n",
+        "const props = defineProps<{ test: T; label?: string }>();\n",
+        "const emit = defineEmits<{ change: [value: T]; close: [] }>();\n",
+        "defineSlots<{ default(props: { item: T }): VNode[] }>();\n",
+        "const open = defineModel<boolean>(\"open\");\n",
+        "const secret = ref(0);\n",
+        "const current = ref<T>();\n",
+        "function reset(): void { secret.value = 0; }\n",
+        "defineExpose({ reset, current });\n",
+        "defineOptions({ name: \"Picker\", inheritAttrs: false });\n",
+        "</script>\n",
+    );
+    fn public_api(
+        contract: <VueProjectionBackend as ProjectionBackend>::PublicApi,
+    ) -> VuePublicConstructorContract {
+        contract
+    }
+
+    let artifact = registered_artifact("file:///Picker.vue", SFC);
+    let contract = public_api(
+        VueProjectionBackend
+            .public_constructor(SFC, &artifact)
+            .expect("projects"),
+    );
+    assert_eq!(contract.source, ConstructorSource::ScriptSetup);
+    assert_eq!(contract.props_requirement, PropsRequirement::Required);
+    // Every public field type of the contract is nameable outside the crate.
+    let defaults: Option<&PropsDefaults> = contract.props_defaults.as_ref();
+    assert!(defaults.is_none());
+    assert!(!contract.instance.publishes("secret"));
+    assert!(contract.instance.publishes("reset") && contract.instance.publishes("current"));
+    let receipt = contract.receipt();
+    assert_eq!(
+        (receipt.construct_signatures, receipt.call_signatures),
+        (1, 0)
+    );
+    assert_eq!(
+        receipt.binder_dependent_surfaces,
+        vec![
+            PublicSurface::Props,
+            PublicSurface::Events,
+            PublicSurface::Slots,
+            PublicSurface::Expose,
+        ]
+    );
+    let rendered = contract.declaration().expect("rendered");
+    assert!(
+        FIXTURE.replace("\r\n", "\n").ends_with(&rendered),
+        "the probe fixture must end with the carrier's rendered declaration:\n{rendered}"
+    );
+    assert_eq!(
+        VueProjectionBackend
+            .public_constructor("<script></script>", &artifact)
+            .unwrap_err(),
+        SetupProjectionRefusal::MissingParse
+    );
+}
+
+/// The production component-use path runs on real Vue SFC carrier bytes:
+/// each use renders one construction carrying its callback, discriminant,
+/// model value and first listener; a collected listener is a check against
+/// the specialized contract; observations read the use's own witness; and
+/// sibling uses never share a witness.
+#[test]
+fn component_uses_reads_admitted_carrier_blocks() {
+    use verter_compiler::framework_common::vue_projection_backend::{
+        ObservationKind, TransactionMember, USE_LISTENER, USE_PRELUDE,
+    };
+    use verter_compiler::framework_common::SetupProjectionRefusal;
+
+    const SFC: &str = concat!(
+        "<script setup lang=\"ts\">\n",
+        "import Table from './Table.vue';\n",
+        "const rows = [{ id: 1, name: 'a' }];\n",
+        "const selected = 'a';\n",
+        "function log(value: string) {}\n",
+        "function count(value: number) {}\n",
+        "</script>\n",
+        "<template>\n",
+        "<Table :rows=\"rows\" :project=\"(row) => row.name\" kind=\"list\" v-model=\"selected\" @change=\"log\" v-on:change=\"count\">\n",
+        "  <template #default=\"{ row }\">{{ row.id }}</template>\n",
+        "</Table>\n",
+        "<Table :rows=\"[1]\" :project=\"(n) => n\" kind=\"grid\" :columns=\"2\" />\n",
+        "</template>\n",
+    );
+    let artifact = registered_artifact("file:///uses.vue", SFC);
+    let projection = VueProjectionBackend
+        .component_uses(SFC, &artifact, "file:///uses.vue")
+        .expect("projects");
+    assert!(projection.complete);
+    assert_eq!(projection.witnesses.len(), 2);
+    let (first, second) = (&projection.witnesses[0], &projection.witnesses[1]);
+    assert_ne!(first.binding, second.binding);
+
+    let keys: Vec<Option<&str>> = first
+        .transaction
+        .members
+        .iter()
+        .map(TransactionMember::key)
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            Some("rows"),
+            Some("project"),
+            Some("kind"),
+            Some("modelValue"),
+            Some("onChange"),
+        ]
+    );
+    let rendered = first.render();
+    assert_eq!(rendered.matches("= new (").count(), 1);
+    assert!(rendered.contains("\"project\": ((row) => row.name), \"kind\": \"list\""));
+    assert!(rendered.contains(&format!(
+        "const {b}_check0: {USE_LISTENER}<typeof {b}, \"onChange\"> = (count);",
+        b = first.binding
+    )));
+    let owner = format!("typeof {}", first.binding);
+    assert!(first.observations.iter().any(|o| o.kind
+        == ObservationKind::Slot {
+            name: "default".to_string()
+        }
+        && o.type_text.contains(&owner)));
+    assert!(first
+        .observations
+        .iter()
+        .all(|o| o.type_text == owner || o.type_text.contains(&format!("<{owner}, "))));
+    assert!(!second.render().contains(&first.binding));
+    let whole = projection.render();
+    assert!(whole.starts_with(USE_PRELUDE));
+    assert_eq!(whole.matches("= new (").count(), 2);
+
+    assert_eq!(
+        VueProjectionBackend
+            .component_uses("<template></template>", &artifact, "file:///uses.vue")
+            .unwrap_err(),
+        SetupProjectionRefusal::MissingParse
+    );
+}
+
+/// The production advanced generic use path runs on real Vue SFC carrier
+/// bytes: every use sits in one scope over the authored binder and is
+/// constructed through the foreign contract adapter (exact contract first,
+/// tolerant signature second); an unnameable use is recorded unavailable
+/// rather than fabricated; a binder that does not parse and a parse of
+/// other bytes are refused.
+#[test]
+fn advanced_generic_uses_reads_admitted_carrier_blocks() {
+    use verter_compiler::framework_common::vue_projection_backend::{
+        ForeignComponentContractAdapter, UseContractAvailability, USE_COMPONENT, USE_CONSTRUCTOR,
+        USE_PRELUDE, USE_SCOPE,
+    };
+    use verter_compiler::framework_common::SetupProjectionRefusal;
+
+    const SFC: &str = concat!(
+        "<script setup lang=\"ts\" generic=\"const T extends { id: number }, K extends keyof T = keyof T\">\n",
+        "import Picker from './Picker.vue';\n",
+        "import { Badge } from './foreign';\n",
+        "const props = defineProps<{ items: T[] }>();\n",
+        "</script>\n",
+        "<template>\n",
+        "<Picker :items=\"props.items\" field=\"id\" />\n",
+        "<Badge :level=\"2\" />\n",
+        "<component :is=\"\" />\n",
+        "</template>\n",
+    );
+    let artifact = registered_artifact("file:///Parent.vue", SFC);
+    let projection = VueProjectionBackend
+        .advanced_generic_uses(SFC, &artifact, "file:///Parent.vue")
+        .expect("projects");
+    assert!(!projection.complete);
+    assert_eq!(
+        projection.scope_binder(),
+        "<const T extends { id: number }, K extends keyof T = keyof T>"
+    );
+    assert_eq!(projection.uses.len(), 3);
+    assert_eq!(projection.witnesses.witnesses.len(), 2);
+    assert_eq!(
+        projection.uses[2].availability,
+        UseContractAvailability::Unavailable
+    );
+    let rendered = projection.render("const props = defineProps<{ items: T[] }>();\n");
+    assert!(rendered.starts_with(USE_PRELUDE));
+    assert!(rendered.contains(&format!(
+        "function {USE_SCOPE}<const T extends {{ id: number }}, K extends keyof T = keyof T>() {{\nconst props = defineProps<{{ items: T[] }}>();\n"
+    )));
+    for (record, component) in projection.uses.iter().zip(["Picker", "Badge"]) {
+        let UseContractAvailability::Witnessed { binding } = &record.availability else {
+            panic!("use {component} has no witness");
+        };
+        assert!(rendered.contains(&format!(
+            "const {binding} = new ({}",
+            ForeignComponentContractAdapter.construction_callee(component)
+        )));
+        assert!(rendered.contains(&format!(
+            "new ({USE_COMPONENT}({component}, {USE_CONSTRUCTOR}({component})))"
+        )));
+    }
+    assert!(rendered.ends_with("}\n"));
+
+    const BAD_GENERIC: &str =
+        "<script setup lang=\"ts\" generic=\"T extends\">\n</script>\n<template><Picker /></template>\n";
+    let bad = registered_artifact("file:///Bad.vue", BAD_GENERIC);
+    assert_eq!(
+        VueProjectionBackend
+            .advanced_generic_uses(BAD_GENERIC, &bad, "file:///Bad.vue")
+            .unwrap_err(),
+        SetupProjectionRefusal::InvalidGeneric
+    );
+    assert_eq!(
+        VueProjectionBackend
+            .advanced_generic_uses("<template></template>", &artifact, "file:///Parent.vue")
+            .unwrap_err(),
+        SetupProjectionRefusal::MissingParse
+    );
+}
+
+/// `VueProjectionBackend::props` is the qualification consumer of the
+/// caller/setup contract. The STP20 positive probe pins its witness.
+#[test]
+fn props_reads_the_caller_contract_from_the_admitted_carrier() {
+    use verter_compiler::framework_common::SetupProjectionRefusal;
+
+    const SFC: &str = concat!(
+        "<script setup lang=\"ts\">\n",
+        "const { title = \"fallback\" } = defineProps<{ title: string; count: number; flag?: boolean }>();\n",
+        "</script>\n",
+    );
+    let artifact = registered_artifact("file:///stp20-defaults.vue", SFC);
+    let (_projection, contract) = VueProjectionBackend
+        .props(SFC, &artifact, "file:///stp20-defaults.vue")
+        .expect("projects");
+    assert_eq!(contract.caller_optional_keys, ["title", "flag"]);
+    assert_eq!(contract.setup_defined_keys, ["title", "flag"]);
+    assert_eq!(contract.caller_required_keys, ["count"]);
+    assert_eq!(contract.reactive_default_keys, ["title"]);
+    assert_eq!(contract.boolean_cast_keys, ["flag"]);
+    let probe = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/sfc-projection/STP20/probes/positive.ts"
+    ));
+    assert!(probe
+        .replace("\r\n", "\n")
+        .contains(&contract.witness_types()));
+    assert_eq!(
+        VueProjectionBackend
+            .props("<script></script>", &artifact, "file:///stp20-defaults.vue")
+            .unwrap_err(),
+        SetupProjectionRefusal::MissingParse
+    );
+}

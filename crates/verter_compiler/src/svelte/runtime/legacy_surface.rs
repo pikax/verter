@@ -78,7 +78,7 @@ pub(super) fn refuse_unsupported_legacy_surfaces(
                 found: None,
                 store_exempt,
             };
-            scan.visit_program(&program);
+            verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
             if let Some((rune, span)) = scan.found {
                 return Err(UnsupportedSvelteRuntimeSurface::LegacyRuneReference { rune, span });
             }
@@ -132,10 +132,10 @@ pub(super) fn refuse_runes_mode_legacy_script_constructs(
     };
     for stmt in &program.body {
         match stmt {
-            Statement::ExportNamedDeclaration(export)
+            Statement::ExportDeclaration(export)
                 if matches!(
                     export.declaration,
-                    Some(oxc_ast::ast::Declaration::VariableDeclaration(ref decl))
+                    oxc_ast::ast::Declaration::VariableDeclaration(ref decl)
                         if decl.kind == oxc_ast::ast::VariableDeclarationKind::Let
                 ) =>
             {

@@ -37,7 +37,6 @@ fn resolve_alias(alias: &str) -> TypeExpr {
 // ----- 1) typeof === "string" on string | number ------------------------
 // TS7: if-branch returns string, else returns number. Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate `typeof`-narrowing through `ReturnType<typeof fn>` to the joined return type; keep as the future Nt01 typeof-narrowing string-on-binary-union contract"]
 fn narrow_typeof_nt01_string_on_binary_union() {
     let expr = resolve_alias("Nt01StringOnUnionResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -48,7 +47,6 @@ fn narrow_typeof_nt01_string_on_binary_union() {
 // TS7: if-branch returns number, else returns string | boolean.
 // Joined: string | number | boolean.
 #[test]
-#[ignore = "typeinfo currently does not propagate `typeof`-narrowing through `ReturnType<typeof fn>` to the joined return type; keep as the future Nt02 typeof-narrowing number-on-triple-union contract"]
 fn narrow_typeof_nt02_number_on_triple_union() {
     let expr = resolve_alias("Nt02NumberOnTripleResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -59,7 +57,6 @@ fn narrow_typeof_nt02_number_on_triple_union() {
 // ----- 3) typeof === "boolean" on string | boolean ----------------------
 // TS7: if-branch returns boolean, else returns string. Joined: string | boolean.
 #[test]
-#[ignore = "typeinfo currently does not propagate `typeof`-narrowing through `ReturnType<typeof fn>` to the joined return type; keep as the future Nt03 typeof-narrowing boolean-on-union contract"]
 fn narrow_typeof_nt03_boolean_on_union() {
     let expr = resolve_alias("Nt03BooleanOnUnionResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -74,7 +71,6 @@ fn narrow_typeof_nt03_boolean_on_union() {
 // projects to an object/intersection — its precise shape is left to the
 // resolver and is not the contract under test here).
 #[test]
-#[ignore = "typeinfo currently does not propagate `typeof`-narrowing through `ReturnType<typeof fn>` to the joined return type; keep as the future Nt04 typeof-narrowing object-on-union contract (null NOT introduced when absent from original)"]
 fn narrow_typeof_nt04_object_on_union_keeps_no_null() {
     let expr = resolve_alias("Nt04ObjectOnUnionResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -95,7 +91,6 @@ fn narrow_typeof_nt04_object_on_union_keeps_no_null() {
 // TS7: if-branch is the function type, else is string. Joined: (() => void) | string.
 // We assert the union contains both a function arm and a string primitive arm.
 #[test]
-#[ignore = "typeinfo currently does not propagate `typeof`-narrowing through `ReturnType<typeof fn>` to the joined return type; keep as the future Nt05 typeof-narrowing function-on-union contract"]
 fn narrow_typeof_nt05_function_on_union() {
     let expr = resolve_alias("Nt05FunctionOnUnionResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -112,7 +107,6 @@ fn narrow_typeof_nt05_function_on_union() {
 // ----- 6) typeof === "undefined" on string | undefined ------------------
 // TS7: if-branch: undefined; else: string. Joined: string | undefined.
 #[test]
-#[ignore = "typeinfo currently does not propagate `typeof`-narrowing through `ReturnType<typeof fn>` to the joined return type; keep as the future Nt06 typeof-narrowing undefined-on-union contract"]
 fn narrow_typeof_nt06_undefined_on_union() {
     let expr = resolve_alias("Nt06UndefinedOnUnionResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -122,7 +116,6 @@ fn narrow_typeof_nt06_undefined_on_union() {
 // ----- 7) typeof === "bigint" on bigint | string ------------------------
 // TS7: if-branch: bigint; else: string. Joined: bigint | string.
 #[test]
-#[ignore = "typeinfo currently does not propagate `typeof`-narrowing through `ReturnType<typeof fn>` to the joined return type; keep as the future Nt07 typeof-narrowing bigint-on-union contract"]
 fn narrow_typeof_nt07_bigint_on_union() {
     let expr = resolve_alias("Nt07BigintOnUnionResult");
     assert_union_contains_primitive(&expr, PrimitiveName::BigInt);
@@ -132,7 +125,6 @@ fn narrow_typeof_nt07_bigint_on_union() {
 // ----- 8) typeof === "symbol" on symbol | string ------------------------
 // TS7: if-branch: symbol; else: string. Joined: symbol | string.
 #[test]
-#[ignore = "typeinfo currently does not propagate `typeof`-narrowing through `ReturnType<typeof fn>` to the joined return type; keep as the future Nt08 typeof-narrowing symbol-on-union contract"]
 fn narrow_typeof_nt08_symbol_on_union() {
     let expr = resolve_alias("Nt08SymbolOnUnionResult");
     assert_union_contains_primitive(&expr, PrimitiveName::Symbol);
@@ -143,7 +135,6 @@ fn narrow_typeof_nt08_symbol_on_union() {
 // TS7: if-branch narrows to string; else stays unknown. Both branches
 // return x, so the joined return is unknown (string is subsumed).
 #[test]
-#[ignore = "typeinfo currently does not propagate `typeof`-narrowing through `ReturnType<typeof fn>` to the joined return type; keep as the future Nt09 typeof-narrowing string-on-unknown contract (joined return collapses to unknown)"]
 fn narrow_typeof_nt09_string_on_unknown() {
     let expr = resolve_alias("Nt09StringOnUnknownResult");
     assert_primitive(&expr, PrimitiveName::Unknown);
@@ -154,7 +145,6 @@ fn narrow_typeof_nt09_string_on_unknown() {
 // over `nt10StringOnGeneric` with no type argument supplied, T defaults
 // to unknown and the joined return is unknown.
 #[test]
-#[ignore = "typeinfo currently does not propagate `typeof`-narrowing through `ReturnType<typeof fn>` to the joined return type; keep as the future Nt10 typeof-narrowing string-on-unbound-generic contract (collapses to unknown when T unspecified)"]
 fn narrow_typeof_nt10_string_on_unbound_generic() {
     let expr = resolve_alias("Nt10StringOnGenericResult");
     assert_primitive(&expr, PrimitiveName::Unknown);
@@ -163,7 +153,6 @@ fn narrow_typeof_nt10_string_on_unbound_generic() {
 // ----- 11) typeof !== "string" on string | number -----------------------
 // TS7: if-branch (negated): number; else: string. Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate negated `typeof`-narrowing through `ReturnType<typeof fn>` to the joined return type; keep as the future Nt11 negated-typeof-narrowing on-binary-union contract"]
 fn narrow_typeof_nt11_negated_on_binary_union() {
     let expr = resolve_alias("Nt11NegatedOnUnionResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -175,7 +164,6 @@ fn narrow_typeof_nt11_negated_on_binary_union() {
 // boolean. default is unreachable (`const _exhaustive: never = x`) and
 // contributes `never` to the join (absorbed). Joined: string | number | boolean.
 #[test]
-#[ignore = "typeinfo currently does not propagate switch-on-typeof narrowing across exhaustive case arms with a never-typed default through `ReturnType<typeof fn>`; keep as the future Nt12 switch-typeof-exhaustive contract"]
 fn narrow_typeof_nt12_switch_exhaustive() {
     let expr = resolve_alias("Nt12SwitchTypeofResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -199,7 +187,6 @@ fn narrow_typeof_nt12_switch_exhaustive() {
 // `number` (negated arm), and the trailing `return x` sees x as `string`
 // (only path past the guard). Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate post-guard `typeof`-narrowing across an early-return into the trailing return through `ReturnType<typeof fn>`; keep as the future Nt13 negated-typeof-guard-early-return contract"]
 fn narrow_typeof_nt13_negated_guard_early_return() {
     let expr = resolve_alias("Nt13NegatedEarlyReturnResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -213,7 +200,6 @@ fn narrow_typeof_nt13_negated_guard_early_return() {
 // declared type is the literal `"string"`). Both branches see the full
 // original `string | number` union. Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not faithfully model the TS7 quirk that `typeof x === tag` (with tag a literal-typed variable) does NOT narrow through `ReturnType<typeof fn>`; keep as the future Nt14 typeof-vs-literal-variable contract"]
 fn narrow_typeof_nt14_compare_literal_var_does_not_narrow() {
     let expr = resolve_alias("Nt14CompareLiteralVarResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -226,7 +212,6 @@ fn narrow_typeof_nt14_compare_literal_var_does_not_narrow() {
 // (TS cannot represent "string with length===0" as a distinct arm).
 // Both branches return x. Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate compound `typeof && property-guard` narrowing through `ReturnType<typeof fn>`; keep as the future Nt15 compound-typeof-and-property contract"]
 fn narrow_typeof_nt15_compound_and_property() {
     let expr = resolve_alias("Nt15CompoundAndResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);

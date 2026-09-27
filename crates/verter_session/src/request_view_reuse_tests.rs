@@ -645,3 +645,95 @@ fn completion_writers_publish_presence_under_the_map_lock_before_insertion() {
     );
     assert!(overlay.tracks_file_for_tests("/facts.ts"));
 }
+
+/// Every serve of a file completes its canonical into the request overlay
+/// (`ensure_indexed_ready_serve` → `complete_canonical`), so a request that
+/// serves one file once per query completes it once per query. Only the
+/// first completion of a content version promotes it: a repeat finds the
+/// same `whole_hash` and the same facts already shadowing and writes
+/// nothing, so a request's completion work does not grow with its query
+/// count — promoting again compared the stored facts with the artifact's
+/// structurally, a walk over every fact the file registers per serve.
+#[test]
+fn repeated_completion_of_one_content_version_promotes_once() {
+    let (host, canonical) = small_host_with_one_script();
+    assert!(
+        host.ensure_indexed_ready_serve(&canonical).is_some(),
+        "the script must index"
+    );
+    let view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::new(&host, &view, overlay.clone());
+    for _ in 0..50 {
+        ctx.complete_canonical(&canonical);
+    }
+    let probe = crate::resolver_core::RequestStoreView::new(&view, Arc::clone(&overlay));
+    assert!(
+        probe.peek_whole_hash_for_tests(&canonical).is_some(),
+        "the canonical is completed"
+    );
+    assert_eq!(
+        overlay.completion_promotions_for_tests(),
+        1,
+        "fifty completions of one content version promote it once"
+    );
+}
+
+/// A plain script's artifact key reuses the parse identity its source
+/// snapshot derived once, and that key is exactly the one the source bytes
+/// derive: every serve reads the key, so re-hashing the whole source per
+/// serve made each read cost the file's size. Reading the key fifty times
+/// hashes the source no time at all; deriving it from the source (the
+/// control) hashes it once.
+#[test]
+fn a_script_artifact_key_reuses_the_snapshot_parse_identity() {
+    let (host, canonical) = small_host_with_one_script();
+    assert!(host
+        .authoritative_current_artifact_key(&canonical)
+        .is_some());
+    let before = crate::file_artifact_store::source_parse_identity_derivations_for_tests();
+    for _ in 0..50 {
+        assert!(host
+            .authoritative_current_artifact_key(&canonical)
+            .is_some());
+    }
+    assert_eq!(
+        crate::file_artifact_store::source_parse_identity_derivations_for_tests() - before,
+        0,
+        "fifty key reads hash the script's source no time at all"
+    );
+    let state = host
+        .effective_file_state(&canonical, None)
+        .expect("the script has a source state");
+    let parse_key = state
+        .script_parse_key
+        .clone()
+        .expect("a plain script's snapshot carries its parse identity");
+    let from_source = crate::file_artifact_store::FileArtifactKey::for_source_identity(
+        Arc::from(canonical.as_str()),
+        state.whole_hash,
+        state.source.as_ref(),
+        state.file_language.clone(),
+        None,
+        crate::file_artifact_store::BASE_PARSE_ENV_HASH,
+    )
+    .expect("the script's language has a parse identity");
+    assert_eq!(
+        crate::file_artifact_store::source_parse_identity_derivations_for_tests() - before,
+        1,
+        "deriving the key from the source hashes it once"
+    );
+    assert_eq!(from_source.parse_key, parse_key);
+    assert_eq!(
+        host.authoritative_current_artifact_key(&canonical),
+        Some(from_source)
+    );
+    let (host, component) = small_host_with_one_component();
+    assert_eq!(
+        host.effective_file_state(&component, None)
+            .expect("the component has a source state")
+            .script_parse_key,
+        None,
+        "a framework carrier's parse identity is its framework parse key"
+    );
+}

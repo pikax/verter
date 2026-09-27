@@ -700,3 +700,178 @@ fn cancellation_before_admission_remains_cancelled_and_unpublished() {
     assert_eq!(store.memo_budget_tracked_len_for_test(), 0);
     assert_eq!(store.canonical_to_entries_count("/w/pre-admission.ts"), 0);
 }
+
+/// A joiner parked on a flight whose winner's build panics retries the
+/// query cold: the panic answered nothing, so the joiner neither returns
+/// the panic's error as a finished answer nor caches one. Its own build
+/// runs and is the only value the memo keeps.
+#[test]
+fn a_joiner_parked_when_the_winner_panics_retries_cold() {
+    let store = Arc::new(SemanticGraphStore::new());
+    let query = key("PanickingWinner");
+    let builds = Arc::new(AtomicUsize::new(0));
+    let winner_context = RequestContext::new(6, Arc::from("/w/cancel.ts"), false, None);
+    let joiner_context = RequestContext::new(7, Arc::from("/w/cancel.ts"), false, None);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+    let winner = {
+        let store = Arc::clone(&store);
+        let query = query.clone();
+        let builds = Arc::clone(&builds);
+        let context = Arc::clone(&winner_context);
+        std::thread::spawn(move || {
+            let _guard = RequestContextGuard::install(context);
+            let host = host();
+            store.execute_cooperative(
+                &host,
+                query,
+                || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                move || -> (QueryResult<SemanticNodeId>, DepSignature) {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    panic!("the winner's build panics");
+                },
+            )
+        })
+    };
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("winner must enter cold build");
+
+    let joiner = {
+        let store = Arc::clone(&store);
+        let store_for_build = Arc::clone(&store);
+        let query = query.clone();
+        let builds = Arc::clone(&builds);
+        let context = Arc::clone(&joiner_context);
+        std::thread::spawn(move || {
+            let _guard = RequestContextGuard::install(context);
+            let host = host();
+            store.execute_cooperative(
+                &host,
+                query,
+                || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                move || {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    let node = store_for_build
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                    (QueryResult::Value(node), empty_signature())
+                },
+            )
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while store.test_joiner_on_condvar_count() == 0 && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        store.test_joiner_on_condvar_count() > 0,
+        "the joiner is parked on the winner's flight"
+    );
+
+    release_tx.send(()).unwrap();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(winner.join().is_err());
+    });
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the winner finishes"),
+        "the winner's build panicked"
+    );
+    let joined = join_within(joiner, "joiner of a panicked winner");
+    let node = match joined.value {
+        QueryResult::Value(node) => node,
+        other => panic!("the joiner retries cold and answers, got {other:?}"),
+    };
+    assert!(matches!(
+        *store.node_data(node).unwrap(),
+        SemanticNodeData::Primitive(PrimitiveKind::Number)
+    ));
+    assert!(!joined.cache_suppress && !joined.result_is_partial);
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        2,
+        "the joiner ran its own build"
+    );
+    assert_eq!(
+        store.memo_entry_count(),
+        1,
+        "only the joiner's value is kept"
+    );
+}
+
+/// A top-level caller that joined an inline SCC member's flight retries
+/// cold when the member's owner is cancelled and aborts the flight: the
+/// member was never decided, so the joiner runs its own build, answers
+/// its own value and is the only thing the memo keeps.
+#[test]
+fn a_joiner_of_an_inline_member_flight_aborted_under_cancellation_retries_cold() {
+    let store = Arc::new(SemanticGraphStore::new());
+    let query = key("CancelledInlineMember");
+    let builds = Arc::new(AtomicUsize::new(0));
+    let owner_context = RequestContext::new(8, Arc::from("/w/cancel.ts"), false, None);
+    let joiner_context = RequestContext::new(9, Arc::from("/w/cancel.ts"), false, None);
+    let flight = {
+        let _guard = RequestContextGuard::install(Arc::clone(&owner_context));
+        store
+            .begin_inline_member_flight(query.clone())
+            .expect("the inline member claims the family flight")
+    };
+
+    let joiner = {
+        let store = Arc::clone(&store);
+        let store_for_build = Arc::clone(&store);
+        let query = query.clone();
+        let builds = Arc::clone(&builds);
+        let context = Arc::clone(&joiner_context);
+        std::thread::spawn(move || {
+            let _guard = RequestContextGuard::install(context);
+            let host = host();
+            store.execute_cooperative(
+                &host,
+                query,
+                || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                move || {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    let node = store_for_build
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                    (QueryResult::Value(node), empty_signature())
+                },
+            )
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while store.test_joiner_on_condvar_count() == 0 && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        store.test_joiner_on_condvar_count() > 0,
+        "the joiner is parked on the inline member's flight"
+    );
+
+    owner_context.cancel();
+    store.abort_inline_member_flight(&flight);
+    let joined = join_within(joiner, "joiner of an aborted inline member");
+    let node = match joined.value {
+        QueryResult::Value(node) => node,
+        other => panic!("the joiner retries cold and answers, got {other:?}"),
+    };
+    assert!(matches!(
+        *store.node_data(node).unwrap(),
+        SemanticNodeData::Primitive(PrimitiveKind::Number)
+    ));
+    assert!(!joined.cache_suppress && !joined.result_is_partial);
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        1,
+        "the joiner ran its own build"
+    );
+    assert_eq!(
+        store.memo_entry_count(),
+        1,
+        "only the joiner's value is kept"
+    );
+}

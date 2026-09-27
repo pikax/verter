@@ -731,7 +731,7 @@ fn typeof_resolution_stays_within_instantiate_window() {
     // thread + bounded-termination join above remains the anti-stack-overflow
     // discriminator.
     assert!(
-        shape.contains("RecursiveRef { name: \"SelfT\" }"),
+        shape.contains("RecursiveRef { name: \"SelfT\", args: [] }"),
         "the self-referential `type SelfT = typeof selfV` instantiation must terminate with the \
          SPECIFIC active-identity `RecursiveRef {{ name: \"SelfT\" }}` sentinel produced WHILE the \
          identity was pushed (a plain `Miss`/`Opaque` from an unrelated failure or a post-pop \

@@ -25,7 +25,6 @@ fn direct_parameters_tuple_preserves_function_arguments() {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `indexed_utilities_parameters_and_element_reducer_regression`); NOT oracle-liftable — the declared source body is an indexed-access construct the oracle's source-side positive allowlist rejects (measured Reject(DeferredConstruct(indexed-access)) on the tuple_labels generation probe) — `Parameters<...>[0]` shares the probe row's source shape. Lift pending an oracle source-walk carve-out for utility-rooted indexed-access chains"]
 fn direct_parameters_payload_extracts_function_argument() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/indexed-utilities.ts", INDEXED_UTILITIES);
@@ -48,7 +47,6 @@ fn direct_parameters_payload_extracts_function_argument() {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `indexed_utilities_parameters_and_element_reducer_regression`); NOT oracle-liftable — the declared source body is an indexed-access construct the oracle's source-side positive allowlist rejects (measured Reject(DeferredConstruct(indexed-access)) on the tuple_labels generation probe) — `Parameters<...>[1]` shares the probe row's source shape. Lift pending an oracle source-walk carve-out for utility-rooted indexed-access chains"]
 fn direct_parameters_second_extracts_number_argument() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/indexed-utilities.ts", INDEXED_UTILITIES);

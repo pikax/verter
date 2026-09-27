@@ -50,9 +50,9 @@ mod comments;
 use std::collections::BTreeSet;
 
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
+use verter_parser::oxc_parse::{with_program_stack, Parser};
 
 use canonize::Canonizer;
 use classify::Classifier;
@@ -147,9 +147,9 @@ pub struct CanonModule {
 pub fn canonicalize_module(code: &str, authored: &BTreeSet<String>) -> Result<CanonModule, String> {
     let allocator = Allocator::new();
     let parse = Parser::new(&allocator, code, SourceType::mjs()).parse();
-    if parse.panicked || !parse.errors.is_empty() {
+    if parse.fatal_error || !parse.diagnostics.is_empty() {
         let messages = parse
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>()
@@ -157,10 +157,15 @@ pub fn canonicalize_module(code: &str, authored: &BTreeSet<String>) -> Result<Ca
         return Err(format!("module does not parse as ESM JS: {messages}"));
     }
     let program = parse.program;
-    let built = SemanticBuilder::new().build(&program);
-    if !built.errors.is_empty() {
+    // The canonizer reads the node store, which oxc 0.151 builds only on request.
+    let built = with_program_stack(&program, || {
+        SemanticBuilder::new()
+            .with_build_nodes(true)
+            .build(&program)
+    });
+    if !built.diagnostics.is_empty() {
         let messages = built
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>()

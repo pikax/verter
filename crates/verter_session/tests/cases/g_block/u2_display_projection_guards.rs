@@ -274,6 +274,7 @@ fn func_node(
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     })
 }
 
@@ -605,6 +606,7 @@ fn mapped_type_renders_modifiers_and_name_remap() {
         store.intern_node(SemanticNodeData::Mapped {
             source: t,
             mapper: MapperKey {
+                over_type_variable: false,
                 parameter_node: k,
                 key_space,
                 value_expr: v,
@@ -669,6 +671,7 @@ fn function_type_parameters_render_constraint_and_default() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     // DISCRIMINATING: the name-only impl renders `<T>() => void`.
     assert_eq!(

@@ -31,6 +31,18 @@
 
 use super::*;
 
+/// The structural bits memoized for ONE node id — the value of the store's
+/// single per-node sidecar. Each bit is an inductive function of the node's
+/// immutable payload, decided on first demand; sharing one entry gives them
+/// one lifecycle, so a release of the node id drops them together.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct NodeStructureBits {
+    /// [`SemanticGraphStore::node_reaches_unresolved`], once decided.
+    pub(crate) unresolved: Option<bool>,
+    /// [`SemanticGraphStore::node_is_inert_structure`], once decided.
+    pub(crate) inert: Option<bool>,
+}
+
 impl SemanticGraphStore {
     /// Whether the VALUE `root` denotes REACHES a semantic-miss carrier —
     /// a node whose own resolution answered "not known".
@@ -54,7 +66,12 @@ impl SemanticGraphStore {
     /// Carrier TYPE ARGUMENTS are locally-supplied structure and do
     /// descend, through the one sanctioned accessor.
     pub(crate) fn node_reaches_unresolved(&self, root: SemanticNodeId) -> bool {
-        if let Some(&bit) = self.unresolved_reach.lock().get(&root) {
+        if let Some(bit) = self
+            .unresolved_reach
+            .lock()
+            .get(&root)
+            .and_then(|bits| bits.unresolved)
+        {
             return bit;
         }
         struct Frame {
@@ -86,8 +103,12 @@ impl SemanticGraphStore {
                 stack.pop();
                 on_path.remove(&node);
                 local.insert(node, bit);
-                if !cycle_seen {
-                    self.unresolved_reach.lock().insert(node, bit);
+                if !cycle_seen && self.keeps_structure_bits(node) {
+                    self.unresolved_reach
+                        .lock()
+                        .entry(node)
+                        .or_default()
+                        .unresolved = Some(bit);
                 }
                 if let Some(parent) = stack.last_mut() {
                     parent.bit |= bit;
@@ -100,7 +121,11 @@ impl SemanticGraphStore {
                 frame.bit |= known;
                 continue;
             }
-            let memoized = self.unresolved_reach.lock().get(&child).copied();
+            let memoized = self
+                .unresolved_reach
+                .lock()
+                .get(&child)
+                .and_then(|bits| bits.unresolved);
             if let Some(known) = memoized {
                 frame.bit |= known;
                 continue;
@@ -225,10 +250,18 @@ impl SemanticGraphStore {
                 children.extend(predicate.and_then(|predicate| predicate.ty));
             }
             SemanticNodeData::InstantiationRef { args, .. } => children.extend_from_slice(args),
-            // A class expression's instance surface is structure the class
-            // expression's own evaluation produced — never a declaration a
-            // later query materialises — so a miss inside it is this value's.
-            SemanticNodeData::ClassExpressionInstance { surface, .. } => children.push(*surface),
+            // A class expression's type arguments and instance surface are
+            // structure the class expression's own evaluation produced —
+            // never a declaration a later query materialises — so a miss
+            // inside them is this value's.
+            SemanticNodeData::ClassExpressionInstance {
+                type_arguments,
+                surface,
+                ..
+            } => {
+                children.extend_from_slice(type_arguments);
+                children.push(*surface);
+            }
             // A deferred intrinsic application is a KNOWN value whose operands
             // are locally-supplied structure: descend them, and never set the
             // unresolved bit for the application itself.
@@ -251,6 +284,7 @@ impl SemanticGraphStore {
             // admission problem.
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::TypeParam { .. }
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::InferRef { .. }
@@ -265,5 +299,82 @@ impl SemanticGraphStore {
             | SemanticNodeData::SyntheticBinding { .. } => {}
         }
         (children, unresolved)
+    }
+
+    /// Whether `root` is an INERT STRUCTURE: a primitive or literal, or an
+    /// array or rest-free tuple whose elements are inert structures.
+    ///
+    /// Nothing in such a node names a declaration, a binder or a deferred
+    /// operator, so the declaration-body projection rebuilds it unchanged
+    /// under every context and need not walk into it. The same inductive,
+    /// per-id memo as [`Self::node_reaches_unresolved`] (`self_bit(n) &&
+    /// all(bit(child))` over the append-only arena), in the same per-node
+    /// entry ([`NodeStructureBits`]), so an argument that a generic
+    /// instantiation grows by one level at every step costs one step to
+    /// classify, not its whole depth.
+    pub(crate) fn node_is_inert_structure(&self, root: SemanticNodeId) -> bool {
+        let mut stack: Vec<(SemanticNodeId, bool)> = vec![(root, false)];
+        while let Some((node, expanded)) = stack.pop() {
+            if self.inert_bit(node).is_some() {
+                continue;
+            }
+            let children = match self.node_data(node).as_deref() {
+                Some(SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_)) => {
+                    Some(Vec::new())
+                }
+                Some(SemanticNodeData::Array { element, .. }) => Some(vec![*element]),
+                Some(SemanticNodeData::Tuple { elements, .. })
+                    if elements.iter().all(|element| !element.rest) =>
+                {
+                    Some(elements.iter().map(|element| element.value).collect())
+                }
+                _ => None,
+            };
+            let Some(children) = children else {
+                self.set_inert_bit(node, false);
+                continue;
+            };
+            if expanded {
+                let bit = children
+                    .iter()
+                    .all(|child| self.inert_bit(*child).unwrap_or(false));
+                self.set_inert_bit(node, bit);
+                continue;
+            }
+            stack.push((node, true));
+            stack.extend(children.into_iter().map(|child| (child, false)));
+        }
+        self.inert_bit(root).unwrap_or(false)
+    }
+
+    fn inert_bit(&self, node: SemanticNodeId) -> Option<bool> {
+        self.unresolved_reach
+            .lock()
+            .get(&node)
+            .and_then(|bits| bits.inert)
+    }
+
+    fn set_inert_bit(&self, node: SemanticNodeId, bit: bool) {
+        if self.keeps_structure_bits(node) {
+            self.unresolved_reach.lock().entry(node).or_default().inert = Some(bit);
+        }
+    }
+
+    /// Whether `node`'s structure bits are memoized. A released id is
+    /// answered (it reads the placeholder) but never memoized: no later
+    /// release names it, so its entry would be a residue for the life of
+    /// the store. Until the first release every id is live and this is one
+    /// relaxed load.
+    fn keeps_structure_bits(&self, node: SemanticNodeId) -> bool {
+        !self.released_any.load(std::sync::atomic::Ordering::Relaxed) || self.arena.is_live(node)
+    }
+
+    /// The memoized structural bits of `node`, if any was decided.
+    #[cfg(test)]
+    pub(crate) fn node_structure_bits_for_tests(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<NodeStructureBits> {
+        self.unresolved_reach.lock().get(&node).copied()
     }
 }

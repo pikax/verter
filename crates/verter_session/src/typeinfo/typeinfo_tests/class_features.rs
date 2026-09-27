@@ -76,7 +76,6 @@ fn class_features_abstract_subclass_instance_includes_inherited_and_own_members(
 }
 
 #[test]
-#[ignore = "typeinfo currently does not evaluate ReturnType<Class[\"method\"]> through indexed access on a class instance and the `as const` literal return is widened away; keep as the future class-method literal ReturnType contract"]
 fn class_features_dog_sound_return_type_is_literal_woof() {
     // TS7 contract: `ReturnType<Dog["sound"]>` = `"woof"`. The method body
     // returns `"woof" as const`, so the inferred return type is the literal,
@@ -149,7 +148,6 @@ fn class_features_extends_plus_implements_projects_union_of_members() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not substitute generic type parameters along an `extends Base<Concrete>` chain into the InstanceType projection; keep as the future generic-class inheritance contract"]
 fn class_features_generic_subclass_substitutes_type_parameter_on_inherited_field() {
     // TS7 contract: `StringBox extends Box<string>`. The base `Box<T>`
     // declares `value: T`. After substituting `T = string`, the inherited
@@ -250,7 +248,6 @@ fn class_features_protected_inherited_member_drives_subclass_method_inference() 
 }
 
 #[test]
-#[ignore = "reducer composes the two-hop dual-space substitution correctly (Verter expands `Wrapper<string>` to `{ tag(): \"wrapped\" } & { value: string }`) but the row is NOT oracle-liftable — tsgo's hover displays a generic class instance type NOMINALLY (`Wrapper<string>`, a bare ref), so the snapshot value cannot discriminate the structural substitution the row contracts (measured ValueMismatch: verter structural vs oracle nominal ref). Lift pending an oracle probe/grammar extension that elicits structural display for class instance types"]
 fn class_features_generic_subclass_with_own_type_param_substitutes_through_base() {
     // TS7 contract: `class Wrapper<U> extends Box<U>` declares its own type
     // parameter `U` and forwards it through to the base `Box<T>`. When

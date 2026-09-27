@@ -705,7 +705,8 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
                         return_type: function.return_type_span,
                     },
                 )
-                .with_predicate(predicate),
+                .with_predicate(predicate)
+                .with_abstract(function.is_abstract),
             ),
             degraded_leaves,
         }

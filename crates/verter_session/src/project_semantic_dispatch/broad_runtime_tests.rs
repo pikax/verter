@@ -151,6 +151,7 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let explosive_members: Vec<_> = (0_u64..4_096)
         .map(|index| SurfaceMember {
@@ -181,6 +182,7 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let object = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
         members: Arc::from(explosive_members.into_boxed_slice()),
@@ -779,6 +781,7 @@ fn recursive_runtime_carrier_is_typed_partial_and_return_only() {
     let subject = graph.intern_node_with_scope(
         SemanticNodeData::Opaque(QueryError::RecursiveRef {
             name: Arc::from("RuntimeRecursive"),
+            args: std::sync::Arc::from([]),
         }),
         file_scope(&dispatch, "/recursive-runtime.ts"),
     );

@@ -14,11 +14,11 @@
 //! close tags and recovers on a mismatch.
 
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use verter_language::{
     compare_language_diagnostic_fields, LanguageDiagnosticOrderKey, LanguageDiagnosticSeverity,
 };
+use verter_parser::oxc_parse::Parser;
 use verter_span::Span;
 
 use super::options_custom_element::{CustomElementDescriptor, CustomElementShadow};
@@ -70,7 +70,7 @@ fn valid_binding_pattern(source: &str, grammar: ScriptBodyGrammar) -> bool {
     let alloc = Allocator::default();
     let wrapped = format!("const {source} = null;");
     let parsed = Parser::new(&alloc, &wrapped, template_source_type(grammar)).parse();
-    !parsed.panicked && parsed.errors.is_empty()
+    !parsed.fatal_error && parsed.diagnostics.is_empty()
 }
 
 /// Whether an unclosed top-level `<style>` block's raw CSS content ends at a

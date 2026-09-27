@@ -162,6 +162,25 @@ fn component_like_utility_aliases_extract_pick_and_omit_surfaces() {
     assert_query_mode(&omitted_record, ProjectionModeTag::Expanded);
 }
 
+/// The object arm of `expr`, which must be exactly `object | undefined`.
+fn object_arm_beside_undefined(expr: &TypeExpr) -> &TypeExpr {
+    let TypeExpr::Union(arms) = expr else {
+        panic!("expected `object | undefined`, got {expr:?}");
+    };
+    assert_eq!(arms.len(), 2, "expected `object | undefined`, got {expr:?}");
+    assert!(
+        arms.contains(&TypeExpr::Primitive(PrimitiveName::Undefined)),
+        "expected `object | undefined`, got {expr:?}"
+    );
+    arms.iter()
+        .find(|arm| !matches!(arm, TypeExpr::Primitive(PrimitiveName::Undefined)))
+        .expect("an object arm")
+}
+
+/// `status` is OPTIONAL on `ComponentSurface`, so indexing it reads the
+/// selected branch plus `undefined` (TypeScript 7.0.2, strict by default:
+/// `StatusForString` is `{ kind: "text"; value: string; } | undefined` and
+/// `StatusForNumber` is `{ kind: "other"; value: number; } | undefined`).
 #[test]
 fn component_like_conditional_aliases_select_concrete_branches() {
     let host = make_host_with_footprint();
@@ -174,7 +193,7 @@ fn component_like_conditional_aliases_select_concrete_branches() {
         &[],
         ProjectionMode::Expanded,
     );
-    let string_props = object_props(&string_status);
+    let string_props = object_props(object_arm_beside_undefined(&string_status));
     assert_string_literal(&string_props["kind"].ty, "text");
     assert_primitive(&string_props["value"].ty, PrimitiveName::String);
 
@@ -185,7 +204,7 @@ fn component_like_conditional_aliases_select_concrete_branches() {
         &[],
         ProjectionMode::Expanded,
     );
-    let number_props = object_props(&number_status);
+    let number_props = object_props(object_arm_beside_undefined(&number_status));
     assert_string_literal(&number_props["kind"].ty, "other");
     assert_primitive(&number_props["value"].ty, PrimitiveName::Number);
     assert_query_mode(&string_record, ProjectionModeTag::Expanded);

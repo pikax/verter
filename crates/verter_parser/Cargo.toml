@@ -35,9 +35,20 @@ oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_ast_visit = { workspace = true }
 oxc_parser = { workspace = true }
+stacker = "0.1.25"
+psm = "0.1.32"
 oxc_span = { workspace = true }
 oxc_syntax = { workspace = true }
-oxc_diagnostics = "0.126.0"
+oxc_diagnostics = "0.151.0"
 bumpalo = { version = "3.20.3", features = ["collections"] }
 serde = { workspace = true }
 phf = { version = "0.13.1", features = ["macros"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_System_Threading"] }

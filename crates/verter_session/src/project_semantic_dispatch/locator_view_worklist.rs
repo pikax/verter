@@ -184,7 +184,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             identity.owner,
             identity.decl_name.as_ref(),
         )
-        .then(|| self.recursive_ref_sentinel(identity))
+        .then(|| self.recursive_ref_sentinel(identity, Arc::from([])))
     }
 
     fn plan_reference_projection(
@@ -207,6 +207,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let path = Arc::clone(path);
                 let type_args: Arc<[SemanticNodeId]> =
                     Arc::from(data.carrier_type_args().to_vec().into_boxed_slice());
+                // A value's own type named inside its declared body — a
+                // static method returning its class, a literal's method
+                // returning the literal — is the type being declared, read
+                // by reference as the checker reads it: its members resolve
+                // one at a time where a consumer demands them. Resolving it
+                // here would build the very surface this body is part of.
+                if path.is_empty()
+                    && type_args.is_empty()
+                    && inputs.self_value.is_some_and(|anchor| {
+                        value_root.scope.local_scope.is_none()
+                            && value_root.scope.canonical_id == anchor.canonical_id
+                            && value_root.scope.owner == anchor.owner
+                            && value_root.name == anchor.symbol
+                    })
+                {
+                    return ReferenceProjectionPlan::Ready(node);
+                }
                 let result = match self.execute_type_node(self.typeof_key_with_path(
                     value_root.clone(),
                     Arc::clone(&path),
@@ -254,7 +271,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     identity.owner,
                     identity.decl_name.as_ref(),
                 ) {
-                    return ReferenceProjectionPlan::Ready(self.recursive_ref_sentinel(identity));
+                    return ReferenceProjectionPlan::Ready(
+                        self.recursive_ref_sentinel(identity, Arc::from([])),
+                    );
                 }
                 if matches!(
                     context.mode,
@@ -360,6 +379,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match root_data.as_ref() {
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::InferRef { .. }
@@ -927,6 +947,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match data.as_ref() {
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::InferRef { .. }
@@ -942,6 +963,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::loop5_instrumentation::watchdog_beat();
                 crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
                 memo.insert((node, context), self.opaque(QueryError::Miss));
+                Ok(None)
+            }
+            // An inert structure is its own projection under every context.
+            SemanticNodeData::Tuple { .. } | SemanticNodeData::Array { .. }
+                if self.graph().node_is_inert_structure(node) =>
+            {
+                work_credit.consume()?;
+                crate::loop5_instrumentation::watchdog_beat();
+                crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+                memo.insert((node, context), node);
                 Ok(None)
             }
             SemanticNodeData::DeclRef { .. } => {
@@ -1001,6 +1032,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             match child_data.as_ref() {
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
+                | SemanticNodeData::EnumLiteral(_)
                 | SemanticNodeData::Opaque(_)
                 | SemanticNodeData::Infer { .. }
                 | SemanticNodeData::InferRef { .. }
@@ -1020,6 +1052,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         "project_view_node_worklist",
                     );
                     vacant.insert(self.opaque(QueryError::Miss));
+                    continue;
+                }
+                // An inert structure is its own projection under every context.
+                SemanticNodeData::Tuple { .. } | SemanticNodeData::Array { .. }
+                    if self.graph().node_is_inert_structure(child) =>
+                {
+                    work_credit.consume()?;
+                    crate::loop5_instrumentation::watchdog_beat();
+                    crate::loop5_instrumentation::watchdog_check_and_dump(
+                        "project_view_node_worklist",
+                    );
+                    vacant.insert(child);
                     continue;
                 }
                 SemanticNodeData::DeclRef { .. } => {
@@ -1096,6 +1140,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             value_expr,
             optionality: mapper.optionality,
             readonly: mapper.readonly,
+            over_type_variable: mapper.over_type_variable,
             name_remap,
             kind: crate::semantic_query::MapperKind::classify_value_expr(
                 self.graph(),
@@ -1139,6 +1184,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match data.as_ref() {
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::InferRef { .. }
@@ -1239,9 +1285,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .get(index)
                 .map(|argument| (*argument, context.into_structural_provenance())),
             SemanticNodeData::Alias(target) => (index == 0).then_some((*target, context)),
-            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
-                (index == 0).then_some((*surface, context))
-            }
+            // The reference's type arguments, then the instance surface.
+            SemanticNodeData::ClassExpressionInstance {
+                type_arguments,
+                surface,
+                ..
+            } => match type_arguments.get(index) {
+                Some(argument) => Some((*argument, context)),
+                None => (index == type_arguments.len()).then_some((*surface, context)),
+            },
             SemanticNodeData::TypeParam {
                 constraint,
                 default,
@@ -1342,6 +1394,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::RawFallback { .. }
             | SemanticNodeData::Infer { .. }

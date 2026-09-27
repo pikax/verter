@@ -110,16 +110,148 @@ against the **live** `SemanticNodeData` declaration by
 `stable_key_table_enumerates_every_semantic_node_data_category`: a new variant
 cannot land without a registration row in the same change.
 
-Every variant now has a `VerterStableV1` encoding. Four rows carry a
-`residual` — an identity input the encoder **approximates** rather than
-consumes, so the row's identity claim is weaker than its `inputs` column reads:
+Every variant has a `VerterStableV1` encoding built from explicit, versioned
+fields; no encoding is Rust `Debug` text
+(`stable_key_encoder_formats_no_debug_text`). One row carries a `residual` —
+an identity input the encoder **approximates** rather than consumes, so the
+row's identity claim is weaker than its `inputs` column reads:
 
 | Variant | Residual |
 |---|---|
-| `DeferredCallable` | The encoder walks the carrier type arguments only; the deferred subject reference is not an encoding input. |
-| `ImportType` | The encoder consumes the authored specifier text, not a resolved module logical identity. |
-| `RawFallback` | The encoder serialises the opaque payload's `Debug` form rather than a stable reference to the failed input. |
-| `SyntheticBinding` | The encoder serialises the content-free binding id's `Debug` form; the synthesizing operation's owner/role anchor is not an encoding input. |
+| `ImportType` | The encoder consumes the resolver's inputs — the importing logical source unit and the authored specifier — not the resolved module logical identity. One spelling written in two files keys as two identities; two spellings of one module key apart until the carrier resolves, because key construction never resolves a module (§5.4). See "Unresolved import-type identity" below. |
+
+The encoder works on heap stacks, never the native stack: every finite
+structure gets its complete key at any depth, a true cycle ends at a
+back-reference to its open frame's level, and no key is incomplete. A key is
+linear in the structure it describes: a subtree longer than
+`SHARED_SUBTREE_MIN_BYTES` (256) that equals one already written earlier in
+the key is written as a reference to it. Sharing is decided by structure, never
+by node identity, so equal structures keep equal keys however their subtrees
+are shared. `Eq`, `Ord` and `Hash` all read the same `(fingerprint, exact)`
+pair.
+
+### Encoding revisions under `VerterStableV1`
+
+The schema version byte stays `1`. No stable key outlives its process — the
+persisted-cache axis is dormant (above), and nothing serializes a key — so no
+stored key can be read under a different encoding. The revisions below change
+bytes only where the previous encoding was not a defined schema or depended on
+discovery order, and they are registered here rather than changed silently:
+
+| Encoding | Previous bytes | Defined bytes |
+|---|---|---|
+| Depth past 256 levels | one shared depth-exhausted marker, `RECURSIVE` sub-tag 2 | the complete structure; the marker is retired |
+| `IntrinsicApplication` op | a hash of the op's `Debug` spelling | the frozen `CompilerIntrinsicTypeOp::stable_hash_tag` |
+| `DeferredCallable` | the header alone | bucket, parameters, binder declarations, served position, return carrier |
+| `ImportType` | specifier, qualifier, role, arguments | the importing logical source unit first, then the same fields |
+| `RawFallback` | the payload's `Debug` form, including its provenance | the raw text |
+| `SyntheticBinding` | the binding id's `Debug` form | scope, surface role, slot, bound name, and the bound value's key |
+| `Signature` occurrence, `TypeOfNominal` identity, numeric and unique-symbol property keys | `Debug` forms | explicit anchor, owner, name, path and ordinal fields; a numeric key as its integer |
+| `TypeParam` mapped binder | the `<mapper-param>` sentinel name and the registry ordinal, handed out in discovery order | the binding mapping's identity (a 128-bit digest over its source, value, name-type and modifier structure, every leaf by its logical identity: a synthetic slot binding by its identity fields and its backing value's stable key, never an arena ordinal) as the declaration name; the ordinal is not encoded |
+| `Signature` and `DeferredCallable` binder declarations | each declaration's name and binder only | the name, the binder, the constraint and default (presence and keys) and the `const` modifier |
+| `Signature` return carrier | not encoded | a trailing section, present only when the carrier is not structurally the declared return type (decided on the two children's classes, never on node identity) |
+| Repeated subtree longer than 256 bytes | written in full at every occurrence, doubling per level of sharing | written once; each later occurrence is a `RECURSIVE` sub-tag 3 reference numbering shared subtrees in the order they finish being written |
+
+Every other encoding, and with it every existing union order over those
+variants, is byte-identical.
+
+### Unresolved import-type identity (current contract)
+
+This records the contract the tree implements. It is provisional: whether
+§5.4 accepts it, or requires the successor below, is an operator decision,
+and the contract text is unchanged.
+
+**Identity.** An unresolved `ImportType` carrier is identified by its
+importing logical source unit (the carrier's interning scope, the unit the
+dispatch resolves the specifier against), its authored specifier, its role
+(`typeof import(…)` or type position), its qualifier path and its type
+arguments' stable keys. Every input is fixed for a fixed logical snapshot and
+none depends on loading or resolution progress: key construction resolves
+nothing, so the key a carrier gets is the key it keeps.
+
+**Convergence.** Two spellings of one module — `./a` and `../x/a` written in
+`/x/b.ts` — are two carriers with two keys. They converge once demand-time
+resolution (`resolve_import_type_head`) turns each into the declaration or
+namespace node it names, whose key is the declaration's own identity. The
+desired pre-resolution convergence is pinned by the ignored
+`stable_key_tests::two_spellings_of_one_module_key_alike`.
+
+**What observes the difference.** Only a structure that still holds the
+carriers unresolved:
+
+* A union over two unresolved spellings of one module keeps both arms: the
+  keys differ, and the union reducer's structural comparator compares the
+  carrier heads, whose specifiers differ. tsc 7.0.2 emits one arm —
+  `declare const p: import("./a").G; declare const q: import("../x/a").G;
+  export const u = Math.random() ? p : q;` in `x/b.ts` declares
+  `u: import("./a").G` under every `strictNullChecks` × `noImplicitAny`
+  setting. Their relative order is the order of their spelling keys.
+* A stable-key equality collapse (`provably_equal`) never merges them.
+
+**Published answers can hold unresolved carriers.** The inductive
+not-known bit (`SemanticGraphStore::node_reaches_unresolved`) stops at every
+shallow carrier, `ImportType` included, so a flow-return value that holds one
+is not refused as unresolved. The raise classifier treats a raised
+`ImportType` as a materialized leaf
+(`raised_shape_tests::parity_carriers_with_type_args_and_raise_miss`:
+"an ImportType<number> raises to an ImportType leaf ⇒ NOT a miss"), and the
+query-free macro hot mirror returns a macro payload's carrier verbatim, which
+the projector resolves only one Navigate hop at the payload's head. A
+published observation can therefore contain an unresolved import type, and a
+union of two spellings inside one is observable as two arms.
+
+**One spelling from two importers.** One spelling written in two importing
+units can name two modules; tsc 7.0.2 keeps both (`u = Math.random() ? x : y` over values of
+`import("./m").G` from `src/a.ts` and `src/lib/b.ts`, with `src/m.ts` and
+`src/lib/m.ts` declaring different `G`, declares
+`u: import("./m").G | import("./lib/m").G` under every setting). The stable
+keys differ, and the union reducer keeps both arms: its structural comparator
+treats the arena scope as provenance for every node kind except an import-type
+carrier, whose scope's canonical file is identity (the rest of that scope stays
+provenance). `stable_key_tests::one_spelling_from_two_importers_keeps_two_union_arms`
+and `one_spelling_from_one_importer_is_one_union_arm` pin both directions.
+
+### Successor proposal: an indexing-time resolved-module producer
+
+Pre-resolution convergence needs the resolved module identity to exist before
+any carrier from the importing unit is lowered, without key construction or the
+structural producer resolving anything.
+
+* **Producer.** At indexing time, beside the resolved-import-facts producer,
+  collect every `import("…")` specifier the unit's type expressions spell
+  (the route-fact walk skips them today: their dependency edge is the deferred
+  read-set follow-up), resolve each through the one type-dependency resolution
+  authority the dispatch uses (`resolve_type_dependency_canonical`), and admit
+  per importing unit a bundle of `(specifier → resolved logical module id |
+  unresolved)` entries with the import-route resolution witness in its read
+  set. An unresolved entry is an explicit identity — "unresolved from importer
+  X, spelling S" — never a guess.
+* **Table.** A store-owned lookup keyed by `(importing unit, specifier)`,
+  read by the stable-key encoder for an `ImportType` carrier in place of the
+  specifier. The encoder only reads it.
+* **Ordering guarantee.** The unit's bundle is admitted before the unit's
+  types can be lowered — the macro hot mirror and the locator-shape lowering
+  both gate on it — so no key is computed from a missing entry and a
+  carrier's key is fixed at its first computation. The structural producer
+  stays query-free: it neither resolves nor reads the table.
+* **Owner, lifetime, release.** The project type store owns the table, one
+  bundle per importing unit. A bundle is replaced when its witness stops
+  validating (a file added or removed, a `tsconfig` `paths` edit, a package
+  manifest change) and released when its unit is removed or the epoch is
+  rebuilt. A replacement re-keys that unit's carriers, so the replacement
+  runs through the existing invalidation of the unit's dependents; memoized
+  unions and union views over the old keys go with them, and no resident
+  structure keeps an order computed from a replaced entry.
+* **Tests.** `./a` and `../x/a` from one importer key alike (the ignored test
+  above); one spelling from two importers resolving to two modules stays
+  distinct; a `paths` edit re-keys; a unit lowered before its bundle is an
+  ordering violation the gate rejects.
+
+A related residual belongs to the same successor: a rootless signature's
+binder space is named from its exact stable-key bytes, but the kernel stores
+that identity as a 128-bit hash (`SignatureStore::claim_space_key`), so two
+distinct keys whose 128-bit hashes collide would share a binder space. The
+authored path has the same width. An exact-bytes owner record would close it.
 
 ## Class 3 admission
 

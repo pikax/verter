@@ -37,7 +37,6 @@ fn resolve_alias(alias: &str) -> TypeExpr {
 // flow narrows to `number` (literal `1` widened to its declared union arm).
 // The else branch is `number`. Joined return: `number`.
 #[test]
-#[ignore = "typeinfo currently does not invalidate string-narrowing on a same-scope reassignment of the narrowed local; keep as the future Fi01 reassignment-invalidation contract"]
 fn flow_invalidations_fi01_reassignment_invalidates_string_narrowing() {
     let expr = resolve_alias("Fi01ReassignInvalidatesResult");
     assert_primitive(&expr, PrimitiveName::Number);
@@ -48,7 +47,6 @@ fn flow_invalidations_fi01_reassignment_invalidates_string_narrowing() {
 // the local narrowing. The if-branch returns the narrowed `string`; the
 // else returns `number`. Joined: `string | number`.
 #[test]
-#[ignore = "typeinfo currently does not preserve the local string-narrowing across an opaque call before the return point; keep as the future Fi02 opaque-call preservation contract"]
 fn flow_invalidations_fi02_narrowing_preserved_across_opaque_call() {
     let expr = resolve_alias("Fi02PreservedAcrossCallResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -66,7 +64,6 @@ fn flow_invalidations_fi02_narrowing_preserved_across_opaque_call() {
 // a deliberate cross-check against LR10/CF11 through a slightly different
 // fixture shape (parameter callback vs `let` initialiser).
 #[test]
-#[ignore = "typeinfo currently does not preserve the narrowed local return type after registering a capturing callback (mirrors LR10/CF11); keep as the future Fi03 closure-capture preservation contract"]
 fn flow_invalidations_fi03_closure_capture_preserves_narrowing_at_return() {
     let expr = resolve_alias("Fi03CaptureInvalidatesResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -79,7 +76,6 @@ fn flow_invalidations_fi03_closure_capture_preserves_narrowing_at_return() {
 // returns `string` for the if-branch and `number` for the else. Joined:
 // `string | number`.
 #[test]
-#[ignore = "typeinfo currently does not propagate discriminated-union narrowing through `const { kind } = s` correlation (mirrors CN16); keep as the future Fi04 destructured-discriminant preservation contract"]
 fn flow_invalidations_fi04_destructured_discriminant_preserves_correlation() {
     let expr = resolve_alias("Fi04DestructPreservesResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -92,7 +88,6 @@ fn flow_invalidations_fi04_destructured_discriminant_preserves_correlation() {
 // union (NOT the `kind: "a"` arm). The function returns `s` in both
 // branches, so the joined return type is the full `Fi04Shape` union,
 // proving narrowing was lost. The result is a 2-arm union of object arms.
-#[ignore = "`ReturnType<typeof fi05DestructLoses>` materialises both structural union arms (`{ kind, a }` and `{ kind, b }`) — the reassignment loses the destructured discriminant exactly as TS7 emits — and the row PASSES under --include-ignored; it stays ignored because it has no `ORACLE_QUERY_SPECS` seat: `ProofRequirement::Ts7Oracle` requires a registry entry, a vendored source, a checked-in tsgo snapshot, and retained lift-migration provenance from the audited lift command. Lift under U6.NARROW_INVALIDATION when the row is seated"]
 #[test]
 fn flow_invalidations_fi05_destructured_discriminant_loses_on_reassignment() {
     let expr = resolve_alias("Fi05DestructLosesResult");
@@ -116,7 +111,6 @@ fn flow_invalidations_fi06_finally_return_overrides_try_catch_returns() {
 // TS7: a finally block that does NOT contain a top-level return does NOT
 // override. The function's inferred return is `"from-try" | "from-catch"`.
 #[test]
-#[ignore = "typeinfo currently does not preserve try/catch returns when finally contains a non-return statement (mirrors CF06); keep as the future Fi07 finally-preserve contract"]
 fn flow_invalidations_fi07_finally_without_return_preserves_try_catch() {
     let expr = resolve_alias("Fi07FinallyPreservesResult");
     assert_literal_union(&expr, &["from-try", "from-catch"]);
@@ -138,7 +132,6 @@ fn flow_invalidations_fi08_asserts_narrows_dotted_member_path() {
 // `never` to the return-type join. The function still returns the union
 // of the handled cases: `string | number`.
 #[test]
-#[ignore = "typeinfo currently does not subtract the never-returning exhaustive default from the join while accumulating the handled case returns; keep as the future Fi09 exhaustive-tail contract"]
 fn flow_invalidations_fi09_exhaustive_never_tail_does_not_widen_return() {
     let expr = resolve_alias("Fi09ExhaustiveResult");
     assert_union_contains_primitive(&expr, PrimitiveName::String);

@@ -563,9 +563,16 @@ fn display_resolved_type_node(
             // A union arm only parenthesises a LOOSER binder (Conditional /
             // Function). A same-kind nested union arm (`A | (B | C)`) and a
             // tighter intersection arm (`A | B & C`) both render bare.
-            let rendered: Vec<String> = arms
-                .iter()
-                .map(|a| render_operand(store, *a, needs, child_depth, visited, Prec::Union))
+            let rendered: Vec<String> = crate::semantic_query::printed_union_arms(store, arms)
+                .into_iter()
+                .map(|arm| match arm {
+                    crate::semantic_query::PrintedUnionArm::Node(a) => {
+                        render_operand(store, a, needs, child_depth, visited, Prec::Union)
+                    }
+                    crate::semantic_query::PrintedUnionArm::Enum(decl) => {
+                        decl.decl_name.to_string()
+                    }
+                })
                 .collect();
             if needs.contains(DisplayFacet::TruncateLargeUnions)
                 && rendered.len() > UNION_TRUNCATION_THRESHOLD
@@ -599,6 +606,7 @@ fn display_resolved_type_node(
         }
         SemanticNodeData::Primitive(kind) => primitive_keyword(*kind).to_string(),
         SemanticNodeData::Literal(value) => literal_token(value),
+        SemanticNodeData::EnumLiteral(literal) => literal.printed_name(),
         // Error carrier riding through display — a concise token, NOT a panic.
         SemanticNodeData::Opaque(_) => "<error>".to_string(),
         SemanticNodeData::Array { element, readonly } => {
@@ -804,10 +812,12 @@ fn display_resolved_type_node(
             return_type,
             type_parameters,
             predicate,
+            is_abstract,
             ..
         } => {
             let new_prefix = match kind {
                 crate::semantic_query::SignatureKind::Call => "",
+                crate::semantic_query::SignatureKind::Construct if *is_abstract => "abstract new ",
                 crate::semantic_query::SignatureKind::Construct => "new ",
             };
             let tps = render_type_parameters(store, type_parameters, needs, child_depth, visited);
@@ -829,11 +839,35 @@ fn display_resolved_type_node(
         SemanticNodeData::DeclRef { identity } => {
             qualified_name(needs, &identity.canonical_id, &identity.decl_name)
         }
-        // A class expression renders by the name the checker prints for it
-        // (`Mixin.(Anonymous class)`) — like a lazy reference, its body is
-        // never re-rendered here.
-        SemanticNodeData::ClassExpressionInstance { identity, .. } => {
-            qualified_name(needs, &identity.canonical_id, &identity.printed_name())
+        // A class expression renders by the name the checker prints for a
+        // reference to it (`Mixin.(Anonymous class)`, `(Anonymous
+        // class)<string>`) — like a lazy reference, its body is never
+        // re-rendered here. An object literal's recursive anonymous type has
+        // no name: it renders as its surface, whose own `this` renders as
+        // `this`.
+        SemanticNodeData::ClassExpressionInstance {
+            identity, surface, ..
+        } if identity.object_literal => display_type_node(store, *surface, needs, depth, visited).0,
+        SemanticNodeData::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            ..
+        } => {
+            let name = qualified_name(
+                needs,
+                &identity.canonical_id,
+                &identity.printed_name_in(store, type_arguments),
+            );
+            let own = identity.own_type_arguments(type_arguments);
+            if own.is_empty() {
+                name
+            } else {
+                let rendered: Vec<String> = own
+                    .iter()
+                    .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
+                    .collect();
+                format!("{name}<{}>", rendered.join(", "))
+            }
         }
         // A compiler-native operation renders by its OP name — there is no
         // declaration to qualify, because none was applied.
@@ -1124,7 +1158,7 @@ fn display_program_analysis(
 fn back_ref_token(data: &SemanticNodeData) -> String {
     match data {
         SemanticNodeData::DeclRef { identity } => identity.decl_name.to_string(),
-        SemanticNodeData::ClassExpressionInstance { identity, .. } => identity.printed_name(),
+        SemanticNodeData::ClassExpressionInstance { identity, .. } => identity.name.to_string(),
         SemanticNodeData::InstantiationRef { base, .. } => base.decl_name.to_string(),
         SemanticNodeData::IntrinsicApplication { op, .. } => op.display_name().to_string(),
         SemanticNodeData::TypeParam { display_name, .. } => display_name.to_string(),
@@ -1424,6 +1458,7 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         | SemanticNodeData::ObjectSpreadProgram(_)
         | SemanticNodeData::Primitive(_)
         | SemanticNodeData::Literal(_)
+        | SemanticNodeData::EnumLiteral(_)
         | SemanticNodeData::Opaque(_)
         | SemanticNodeData::Tuple { .. }
         | SemanticNodeData::TemplateLiteral { .. }

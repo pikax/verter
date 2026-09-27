@@ -25,7 +25,7 @@ use verter_type_expr_oxc::{lower_return_annotation, lower_ts_type};
 fn with_alias<R>(source: &str, read: impl FnOnce(&TSType<'_>) -> R) -> R {
     let allocator = oxc_allocator::Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
-    assert!(!ret.panicked, "OXC parser panicked on `{source}`");
+    assert!(!ret.fatal_error, "OXC parser panicked on `{source}`");
     let alias = ret
         .program
         .body

@@ -1205,6 +1205,12 @@ pub struct FunctionExpr {
     /// the predicate rides here. `None` for an ordinary signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate: Option<Arc<TypePredicate>>,
+    /// Whether a constructor type is ABSTRACT (`abstract new () => T`, and
+    /// an abstract class's construct signatures): the checker's
+    /// `SignatureFlags.Abstract`, which an assignment of a constructor type
+    /// to a non-abstract one refuses. Always `false` for a call signature.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_abstract: bool,
 }
 
 impl FunctionExpr {
@@ -1222,6 +1228,7 @@ impl FunctionExpr {
             spans: FunctionSpans::default(),
             flow_return: None,
             predicate: None,
+            is_abstract: false,
         }
     }
 
@@ -1240,7 +1247,15 @@ impl FunctionExpr {
             spans,
             flow_return: None,
             predicate: None,
+            is_abstract: false,
         }
+    }
+
+    /// This constructor type marked abstract (or not).
+    #[must_use]
+    pub fn with_abstract(mut self, is_abstract: bool) -> Self {
+        self.is_abstract = is_abstract;
+        self
     }
 
     /// This function expression carrying `predicate` beside its return.

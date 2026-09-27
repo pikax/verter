@@ -505,6 +505,7 @@ fn a_joiner_never_takes_a_retired_epoch_value_from_the_build_it_joined() {
                 signature_span: None,
                 return_type_span: None,
                 predicate: None,
+                is_abstract: false,
             },
             scope.clone(),
         );

@@ -736,6 +736,7 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
     // control flow is preserved — never Assignable.
     let recursive = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Self"),
+        args: std::sync::Arc::from([]),
     }));
     assert!(
         !is_assignable(recursive, string),

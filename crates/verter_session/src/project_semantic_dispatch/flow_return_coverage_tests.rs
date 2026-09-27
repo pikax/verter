@@ -1342,27 +1342,13 @@ fn vue_define_props_member_read_resolves_to_the_payload_member_type() {
     );
 }
 
-/// CANARY — a `$props()`-destructured binding read from a `.svelte`
-/// instance script must resolve to its destructuring annotation.
+/// A `$props()`-destructured binding read from a `.svelte` instance
+/// script resolves to its destructuring annotation.
 ///
 /// Oracle: the projected TS analogue is
 /// `function f(p: { msg: string; count: number }) { const { msg } = p; return msg; }`
 /// — tsgo `string`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed
-///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnresolvedValue), candidates: 0 }
-///  right: Value { ty: Primitive(String), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: the same evaluator arm as the Vue twin. The `$props()`
-/// destructuring binds `msg` as a carrier-scope destructured `let`, which
-/// the evaluator answers with an opaque miss rather than the
-/// annotation's member.
 #[test]
-#[ignore = "a `$props()`-destructured binding read evaluates to Opaque(Miss) (ReturnOnly): the flow evaluator has no destructuring-element arm for a carrier-scope binding"]
 fn svelte_runes_props_binding_read_resolves_to_its_annotation() {
     let host = carrier_host();
     assert_eq!(
@@ -1603,30 +1589,12 @@ fn cross_file_mutual_recursion_fails_closed_like_tsc_declines_to_infer() {
     assert_fails_closed(&host, XF_SCC_B, "sccB");
 }
 
-/// CANARY — an imported GENERIC callee must infer its type argument from
-/// the call site.
+/// An imported GENERIC callee infers its type argument from the call
+/// site.
 ///
 /// Oracle: `ReturnType<typeof xfCallGenericValueRoute>` is
 /// `{ g: string; }`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: the callee's `T` must be inferred as `string` from the call argument
-///   left: Primitive(Unknown)
-///  right: Primitive(String)
-/// ```
-///
-/// Owning layer: the call carrier's argument-driven type inference.
-/// Adjacent to — but distinct from — the recorded "explicit type
-/// arguments collapse to `unknown`" debt: here the type argument is
-/// IMPLICIT and inferable from the sole call argument, and it still lands
-/// as `unknown`, warm. NOT a cross-file defect: the same-file twin
-/// (`same_file_generic_callee_infers_its_type_argument_from_the_call_site`)
-/// fails identically, which isolates the missing capability to the shared
-/// carrier rather than to the barrel / import hop.
 #[test]
-#[ignore = "an imported generic callee's IMPLICIT type argument is not inferred from the call argument: the instantiation collapses to `unknown` and is admitted warm"]
 fn imported_generic_callee_infers_its_type_argument_from_the_call_site() {
     let host = ts_host();
     let ty = value_of(&host, XF_MAIN, "xfCallGenericValueRoute");
@@ -1678,39 +1646,12 @@ fn template_literal_expression_return_is_string() {
     assert_clean_warm(&host, LEAF, "leafTemplate", string());
 }
 
-/// An `UpdateExpression` (`a++`) in return position carries a WRITE
-/// EFFECT the evaluator does not apply, so the result is a DEGRADED
-/// SUCCESS that admits nothing. This is the fail-safe half of the
-/// `UpdateExpression` arm; the value half is the canary below.
-#[test]
-fn update_expression_return_degrades_as_an_unapplied_write_effect() {
-    let host = ts_host();
-    assert_degraded(
-        &host,
-        LEAF,
-        "leafUpdate",
-        FlowReturnDegradation::UnappliedWriteEffect,
-    );
-}
-
-/// CANARY — an `UpdateExpression` in return position is `number`.
+/// An `UpdateExpression` (`a++`) in return position is the checker's
+/// unary numeric result over the target's value, and its write applies in
+/// evaluation order: clean and warm.
 ///
 /// Oracle: `ReturnType<typeof leafUpdate>` is `number`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: leafUpdate
-///   left: Value { ty: Primitive(Any), degradation: Some(UnappliedWriteEffect), candidates: 0 }
-///  right: Value { ty: Primitive(Number), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: `flow_slice_content`'s leaf arm — `UpdateExpression`
-/// falls into `lower_leaf` and no prefix/postfix numeric rule exists. The
-/// `ReturnOnly` degradation makes this one fail-SAFE today, unlike the
-/// warm `any` rows below.
 #[test]
-#[ignore = "UpdateExpression has no numeric leaf rule: it evaluates to `any` and degrades as UnappliedWriteEffect"]
 fn update_expression_return_is_number() {
     let host = ts_host();
     assert_clean_warm(&host, LEAF, "leafUpdate", number());
@@ -1743,22 +1684,11 @@ fn instantiation_expression_return_is_the_instantiated_signature() {
     );
 }
 
-/// CANARY — a `BigIntLiteral` in return position is `bigint`.
+/// A `BigIntLiteral` in return position is `bigint`: the literal is a
+/// fresh `bigint` literal the return join widens.
 ///
 /// Oracle: `ReturnType<typeof leafBigInt>` is `bigint`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: leafBigInt
-///   left: Value { ty: Primitive(Any), degradation: None, candidates: 1 }
-///  right: Value { ty: Primitive(BigInt), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: the flow evaluator's literal rules — `BigIntLiteral` has
-/// no arm, so the shallow leaf answers `any` and it is admitted WARM.
 #[test]
-#[ignore = "BigIntLiteral has no literal rule: it evaluates to `any` and is admitted warm"]
 fn bigint_literal_return_is_bigint() {
     let host = ts_host();
     assert_clean_warm(
@@ -1790,24 +1720,11 @@ fn regexp_literal_return_is_the_regexp_lib_type() {
     assert_clean_warm(&host, LEAF, "leafRegExp", type_ref("RegExp"));
 }
 
-/// CANARY — an `AssignmentExpression` (`(a = 2)`) in return position is
-/// the assigned value's type.
+/// An `AssignmentExpression` (`(a = 2)`) in return position is the
+/// assigned value's type.
 ///
 /// Oracle: `ReturnType<typeof leafAssign>` is `number`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: leafAssign
-///   left: Value { ty: Primitive(Any), degradation: None, candidates: 1 }
-///  right: Value { ty: Primitive(Number), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: `flow_slice_content::lower_leaf`. Note the contrast with
-/// `leafUpdate`: the assignment form produces the SAME `any` but is
-/// admitted WARM with no degradation, while the update form degrades.
 #[test]
-#[ignore = "AssignmentExpression has no leaf rule: it evaluates to `any` and — unlike UpdateExpression — is admitted warm with no degradation"]
 fn assignment_expression_return_is_the_assigned_type() {
     let host = ts_host();
     assert_clean_warm(&host, LEAF, "leafAssign", number());
@@ -1818,11 +1735,15 @@ fn assignment_expression_return_is_the_assigned_type() {
 ///
 /// Oracle: `ReturnType<typeof leafClassExpr>` is
 /// `typeof (Anonymous class)`, declaration-emitted as `{ new (): {}; }`.
+/// The constructor type carries the `prototype` property the checker
+/// gives every class (`keyof ReturnType<typeof leafClassExpr>` is
+/// `"prototype"`, and the lane's graph keeps it for member reads); the
+/// raised type is the declaration emitter's spelling, which omits it, as
+/// the raise already spells the anonymous instance structurally.
 ///
-/// The value is complete and undegraded, and still `ReturnOnly`: the
-/// class body's constructor, members and field initializers are callables
-/// no indexed function position serves, so the capture family keeps its
-/// typed gap over them and the result never warms.
+/// The value is complete and undegraded, and warms: the class's implicit
+/// constructor only runs its field initializers, which are the enclosing
+/// frame's own footprint, so no capture obligation is left open over it.
 #[test]
 fn class_expression_return_is_its_constructor_type() {
     let host = ts_host();
@@ -1839,10 +1760,10 @@ fn class_expression_return_is_its_constructor_type() {
                         Some(Arc::new(instance)),
                         Vec::new(),
                     ),
-                )],
+                ),],
             })),
             degradation: None,
-            candidates: 0,
+            candidates: 1,
         },
         "leafClassExpr"
     );
@@ -2053,11 +1974,13 @@ fn generic_chain_work(levels: usize) -> (Outcome, usize) {
 /// own transaction, every repeat re-evaluated the body and the work
 /// DOUBLED per level (20504 units at eleven levels, against 306 now); the
 /// host's audited entry ran out of connected-work budget at eleven. Every
-/// added level must now cost the same.
+/// added level must now cost the same — at nine, ten and eleven levels,
+/// and on through 32, 64 and 128, which the callee schedule evaluates
+/// without nesting a level per call.
 ///
-/// Runs on the production worker stack (`host_cpu_pool`'s 8 MiB): eleven
-/// levels nest 22 connected queries, deeper than a default test thread
-/// holds in an unoptimized build.
+/// Runs on the production worker stack (`host_cpu_pool`'s 8 MiB), so a
+/// chain evaluated recursively reaches its typed depth refusal rather than
+/// the end of an unoptimized build's default test-thread stack.
 #[test]
 fn a_generic_call_chain_reuses_each_completed_callee() {
     let worker = std::thread::Builder::new()
@@ -2088,6 +2011,22 @@ fn a_generic_call_chain_reuses_each_completed_callee() {
                 work_ten - work_nine,
                 "every added level must cost the same connected work \
                  ({work_nine} / {work_ten} / {work_eleven} at 9 / 10 / 11 levels)"
+            );
+            let (thirty_two, work_32) = generic_chain_work(32);
+            let (sixty_four, work_64) = generic_chain_work(64);
+            let (long, work_128) = generic_chain_work(128);
+            for (levels, outcome) in [(32, thirty_two), (64, sixty_four), (128, long)] {
+                assert_eq!(
+                    outcome, short,
+                    "a {levels}-level chain answers exactly like a two-level one"
+                );
+            }
+            let per_level = work_eleven - work_ten;
+            assert_eq!(
+                (work_64 - work_32, work_128 - work_64),
+                (32 * per_level, 64 * per_level),
+                "every added level must cost the same connected work \
+                 ({work_32} / {work_64} / {work_128} at 32 / 64 / 128 levels)"
             );
         })
         .expect("spawn the chain worker");
@@ -2124,6 +2063,133 @@ fn a_reused_callee_still_invalidates_its_consumers_on_edit() {
         "an edit to the reused callee must reach the chain's answer: {after:?}"
     );
 }
+
+/// A generic function returned from a generic function keeps its own
+/// clause when the outer function is instantiated, even when both clauses
+/// name it `T`: a nested function value's or class expression's clause is
+/// its own declaration, so its binder is a node distinct from the outer
+/// `T` and the instantiated return read off the uninstantiated one leaves
+/// it alone. A function TYPE written in the body with a same-name clause
+/// shares the outer binder's node; that return is evaluated under the
+/// instantiation instead, and keeps its parameter too.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike): `w` is
+/// `{ v: boolean; id: <T>(z: T) => T; }`, `wm` is
+/// `{ v: boolean; pair: <U>(u: U) => { t: boolean; u: U; }; }`, `wh` is
+/// `{ v: boolean; id: <T>(z: T) => T; }` and `wk` is
+/// `{ new <T>(): { own: T; outer: boolean; }; }`.
+#[test]
+fn an_instantiated_return_keeps_a_nested_clause_of_the_same_name() {
+    const PATH: &str = "/ws/cov/transfer/nested_clause.ts";
+    let host = host_with(&[(
+        PATH,
+        "function g<T>(x: T) { return { v: x, id: <T,>(z: T) => z }; }\n\
+         export function w(v: boolean) { return g(v); }\n\
+         function m<T>(x: T) { return { v: x, pair: <U,>(u: U) => ({ t: x, u }) }; }\n\
+         export function wm(v: boolean) { return m(v); }\n\
+         function h<T>(x: T) { const id: <T>(z: T) => T = (z) => z; return { v: x, id }; }\n\
+         export function wh(v: boolean) { return h(v); }\n\
+         function k<T>(x: T) { return class<T> { own!: T; outer = x; }; }\n\
+         export function wk(v: boolean) { return k(v); }\n",
+    )]);
+    let binder = |ty: &TypeExpr, name: &str| matches!(ty, TypeExpr::TypeParameter(param) if param.name == name);
+    // `<name>(z: name) => name`, its clause printed.
+    let identity = |ty: &TypeExpr, name: &str| {
+        matches!(ty, TypeExpr::Function(function)
+            if function.type_parameters.len() == 1
+                && function.type_parameters[0].name == name
+                && function.parameters.len() == 1
+                && binder(&function.parameters[0].ty, name)
+                && function.return_type.as_deref().is_some_and(|ret| binder(ret, name)))
+    };
+    for name in ["w", "wh"] {
+        let value = value_of(&host, PATH, name);
+        assert_eq!(projected_member(&value, "v"), &boolean(), "{value:?}");
+        assert!(
+            identity(projected_member(&value, "id"), "T"),
+            "`id` keeps its own `<T>(z: T) => T`: {value:?}"
+        );
+    }
+    let value = value_of(&host, PATH, "wm");
+    assert_eq!(projected_member(&value, "v"), &boolean(), "{value:?}");
+    let TypeExpr::Function(pair) = projected_member(&value, "pair") else {
+        panic!("`pair` is a function: {value:?}");
+    };
+    let returned = pair.return_type.as_deref().expect("a return");
+    assert!(
+        pair.type_parameters.len() == 1
+            && pair.type_parameters[0].name == "U"
+            && binder(&pair.parameters[0].ty, "U")
+            && projected_member(returned, "t") == &boolean()
+            && binder(projected_member(returned, "u"), "U"),
+        "`pair` is `<U>(u: U) => {{ t: boolean; u: U; }}`: {value:?}"
+    );
+    let value = value_of(&host, PATH, "wk");
+    let TypeExpr::Object(constructor) = &value else {
+        panic!("`wk` is a constructor type: {value:?}");
+    };
+    // Beside its construct signature a class's constructor type carries
+    // its `prototype` property.
+    let signatures: Vec<&verter_type_expr::ObjectMember> = constructor
+        .properties
+        .iter()
+        .filter(|member| {
+            !matches!(member, verter_type_expr::ObjectMember::Property(property)
+                if property.key == "prototype".into())
+        })
+        .collect();
+    let [verter_type_expr::ObjectMember::ConstructSignature(construct)] = signatures.as_slice()
+    else {
+        panic!("`wk` has one construct signature: {value:?}");
+    };
+    let instance = construct.return_type.as_deref().expect("an instance type");
+    assert!(
+        construct.type_parameters.len() == 1
+            && construct.type_parameters[0].name == "T"
+            && binder(projected_member(instance, "own"), "T")
+            && projected_member(instance, "outer") == &boolean(),
+        "`wk` is `{{ new <T>(): {{ own: T; outer: boolean; }}; }}`: {value:?}"
+    );
+}
+
+/// A same-file call that swaps the caller's binders into the callee's
+/// clause binds both at once: `g(b, a)` inside `f<A, B>` instantiates
+/// `g<A, B>` at `[B, A]`, and in one file the flow lane interns each
+/// root function's binders by name, so `f`'s and `g`'s of one name are
+/// one node. `f`'s return is read off `g`'s uninstantiated one with the
+/// binding simultaneous; one binder after the other would collapse both
+/// onto one.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike): `f` is `<A, B>(a: A, b: B) => { a: B;
+/// b: A; }` and `w` is `{ a: string; b: number; }`.
+#[test]
+fn an_instantiation_swapping_same_file_binders_binds_them_at_once() {
+    const PATH: &str = "/ws/cov/transfer/swap.ts";
+    let host = host_with(&[(
+        PATH,
+        "function g<A, B>(a: A, b: B) { return { a, b }; }\n\
+         export function f<A, B>(a: A, b: B) { return g(b, a); }\n\
+         export function w(n: number, s: string) { return f(n, s); }\n",
+    )]);
+    let generic = value_of(&host, PATH, "f");
+    let binder = |ty: &TypeExpr, name: &str| matches!(ty, TypeExpr::TypeParameter(param) if param.name == name);
+    assert!(
+        binder(projected_member(&generic, "a"), "B")
+            && binder(projected_member(&generic, "b"), "A"),
+        "{generic:?}"
+    );
+    let value = value_of(&host, PATH, "w");
+    assert_eq!(projected_member(&value, "a"), &string(), "{value:?}");
+    assert_eq!(projected_member(&value, "b"), &number(), "{value:?}");
+}
+
+/// The callee schedule's chains: deep, on a small stack, under a reduced
+/// budget, through other call shapes, and around recursive components.
+#[path = "flow_return_schedule_tests.rs"]
+mod schedule;
+
 /// CANARY (landed) — a `super.m()` call in a derived class method
 /// resolves to the base member's declared return.
 ///
@@ -2212,25 +2278,14 @@ fn super_method_call_over_generic_base_fails_closed_not_uninstantiated() {
     }
 }
 
-/// CANARY — a `PrivateInExpression` (`#x in o`) in return position is
-/// `boolean`.
+/// A `PrivateInExpression` (`#x in o`) in return position is `boolean`: the
+/// test narrows `o` as `o instanceof LeafPrivIn` would, and over `object`
+/// its false edge excludes nothing, so no predicate is inferred.
 ///
-/// Oracle: `ReturnType<typeof LeafPrivIn.has>` is `boolean`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed
-///   left: Value { ty: Primitive(Any), degradation: None, candidates: 1 }
-///  right: Value { ty: Primitive(Boolean), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: `flow_slice_content::lower_leaf` — `PrivateInExpression`
-/// is in the leaf fall-through set with no `in`-operator rule. Member
-/// ordinal 1 is the static `has`; ordinal 0 is the `#x` field, which
-/// correctly misses because a field is not a callable member.
+/// Oracle: `ReturnType<typeof LeafPrivIn.has>` is `boolean`. Member ordinal
+/// 1 is the static `has`; ordinal 0 is the `#x` field, which misses because
+/// a field is not a callable member.
 #[test]
-#[ignore = "PrivateInExpression has no leaf rule: the `in` test evaluates to `any` and is admitted warm"]
 fn private_in_expression_return_is_boolean() {
     let host = ts_host();
     assert_eq!(
@@ -2374,23 +2429,10 @@ fn jsx_element_fragment_and_attribute_call_returns_are_not_any() {
     for name in ["jsxElem", "jsxFrag"] {
         assert_clean_warm(&host, JSX, name, type_ref("JSX.Element"));
     }
-    // `jsxAttrCall`'s attribute value is itself a call the surrounding
-    // narrowing pass cannot model precisely, so the whole return degrades
-    // with the unrelated `FlowGap::GuardNarrowing` gap (a general
-    // narrowing limitation, not specific to JSX or to this charter). The
-    // JSX leaf's own answer still resolves to the same typed
-    // `JSX.Element` reference rather than a fabricated `any`, so the full
-    // outcome is pinned exactly — still discriminating the typed leaf
-    // from both `any` and the `UnmodeledExpression` gap marker.
-    assert_eq!(
-        eval(&host, JSX, "jsxAttrCall"),
-        Outcome::Value {
-            ty: type_ref("JSX.Element"),
-            degradation: Some(FlowReturnDegradation::FlowGap(FlowGap::GuardNarrowing)),
-            candidates: 0,
-        },
-        "jsxAttrCall"
-    );
+    // `jsxAttrCall`'s attribute value is itself a call, which the checker
+    // never enters into control flow: it narrows nothing, so the element
+    // publishes the same typed `JSX.Element` reference, clean and warm.
+    assert_clean_warm(&host, JSX, "jsxAttrCall", type_ref("JSX.Element"));
     // Negative control: with no `JSX` namespace configured anywhere in
     // scope, the leaf still publishes the same honest unresolved
     // `Ref { name: "JSX.Element" }` carrier — never a fabricated `any`,
@@ -2493,52 +2535,26 @@ fn generic_overload_group_callee_resolves_by_arity_and_inference() {
     );
 }
 
-/// CANARY — a `new` expression's return is the constructed instance type.
+/// CANARY (landed) — a `new` expression's return is the constructed
+/// instance type.
 ///
 /// Oracle: `ReturnType<typeof callNew>` is `CtorC`.
 ///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: callNew
-///   left: Value { ty: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
-///  right: Value { ty: Ref { name: "CtorC", type_arguments: [] }, degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: the CONSTRUCT-CALL capability — there is no arm that
-/// resolves a class's construct signature to its instance type. The
-/// ADMISSION half is settled: `NewExpression` is a
-/// `ValueDescent::UnmodeledCall`, so it fails closed rather than
-/// publishing the shallow pass's `any` warm (see
-/// `an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered`).
+/// The construction rides the one call carrier to the class's construct
+/// signatures (`SliceCall::Construct`), so the value is the instance,
+/// clean and warm.
 #[test]
-#[ignore = "NewExpression has no construct-call arm: it fails closed as an unmodeled call position instead of resolving the instance type"]
 fn construct_expression_return_is_the_instance_type() {
     let host = ts_host();
     assert_clean_warm(&host, CALLS, "callNew", type_ref("CtorC"));
 }
 
-/// CANARY — a CONSTRUCT-SIGNATURE call (`new ctorSig(1)` where `ctorSig`
-/// is a value carrying a `new (…)` signature) returns the signature's
-/// instance type.
+/// CANARY (landed) — a CONSTRUCT-SIGNATURE call (`new ctorSig(1)` where
+/// `ctorSig` is a value carrying a `new (…)` signature) returns the
+/// signature's instance type.
 ///
 /// Oracle: `ReturnType<typeof callCtorSigNew>` is `{ q: string; }`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// expected an object answer, got Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection })
-/// ```///
-/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
-/// result is a degraded success and nothing warms — so the row observes a
-/// VALUE rather than `Miss`. The capability gap named below is unchanged.
-///
-/// Owning layer: same as the `new` row above — the construct-signature
-/// group is never consulted. It now FAILS CLOSED rather than publishing
-/// `any` warm, so the canary asserts the value it should produce.
 #[test]
-#[ignore = "construct signatures are never consulted: `new ctorSig(1)` fails closed as an unmodeled call position"]
 fn construct_signature_call_return_is_the_signature_instance_type() {
     let host = ts_host();
     let value = value_of(&host, CALLS, "callCtorSigNew");
@@ -2579,28 +2595,16 @@ fn optional_chained_call_return_unions_undefined() {
     );
 }
 
-/// CANARY — a TAGGED TEMPLATE call returns the tag function's return.
+/// CANARY (landed) — a TAGGED TEMPLATE call returns the tag function's
+/// return.
 ///
 /// Oracle: `ReturnType<typeof callTagged>` is `boolean`.
 ///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: callTagged
-///   left: Value { ty: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
-///  right: Value { ty: Primitive(Boolean), degradation: None, candidates: 1 }
-/// ```///
-/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
-/// result is a degraded success and nothing warms — so the row observes a
-/// VALUE rather than `Miss`. The capability gap named below is unchanged.
-///
-/// Owning layer: the TAGGED-TEMPLATE call capability — the tag
-/// function's signature is never consulted. The admission half is
-/// settled: it fails closed as a `ValueDescent::UnmodeledCall` rather
-/// than publishing `any` warm.
+/// The tagged template rides the one call carrier as a call of its tag
+/// (`SliceCall::TaggedTemplate`), whose first argument is the template
+/// strings and whose remaining arguments are the substitutions, so the
+/// value is the tag's return, clean and warm.
 #[test]
-#[ignore = "TaggedTemplateExpression has no call arm: the tag call fails closed as an unmodeled call position"]
 fn tagged_template_call_return_is_the_tag_return() {
     let host = ts_host();
     assert_clean_warm(&host, CALLS, "callTagged", boolean());
@@ -3143,18 +3147,15 @@ fn wrapped_async_return_admits_warm_and_replay_equal_to_fresh() {
     assert_clean_warm(&host, CALLS, "callAsyncPlain", expected);
 }
 
-/// BOUNDED WORK: one awaited-relation build PER UNWRAP LEVEL, and
+/// BOUNDED WORK: one awaited-relation build PER DEMANDED OPERAND, and
 /// identical warm demand adds ZERO builds.
 ///
 /// `callAwait` is `return await asyncSrc()` where `asyncSrc(): Promise<number>`,
-/// so the cold demand measures 2: `AwaitedNormalize(Promise<number>)` and, via
-/// that arm's re-entry on the payload, `AwaitedNormalize(number)`. Two is the
-/// CORRECT bound, not an accounting slip — the composite arms re-enter the
-/// family rather than recursing privately, which is what puts every unwrap
-/// level under its own memo entry. The predecessor did the whole chain inside
-/// one `Instantiate` and cost 1; the second entry here is independently
-/// reusable by any other await of `number`, which the private recursion could
-/// never offer.
+/// so the cold demand measures 1: `AwaitedNormalize(Promise<number>)`, whose
+/// run unwraps the payload `number` as a TAIL step in its own loop rather
+/// than re-entering the family — the shape that lets a chain of any length
+/// cost no query depth. A union arm is the one nested unwrap that still
+/// re-enters the family, under its own memo entry.
 ///
 /// The load-bearing half is the SECOND assertion: warm repeats add ZERO. A
 /// warm family hit returns before the builder runs, so the per-family counter
@@ -3190,8 +3191,8 @@ fn wrapped_await_demand_adds_one_cold_instantiation_and_zero_warm() {
         .awaited_normalize_count;
     assert_eq!(
         cold - before,
-        2,
-        "the cold awaited-unwrap demand pays exactly one build per unwrap level"
+        1,
+        "the cold awaited-unwrap demand pays exactly one build: the payload is a tail step"
     );
     // bounded-loop: three warm repeats, a fixed demand count
     for _ in 0..3 {
@@ -3539,12 +3540,10 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
     let host = ts_host();
     assert_clean_warm(&host, TL, "tlPlainMember", string());
     // The same read at the nesting depths the evaluation composes as
-    // FLOW expressions: an object-literal member value and a nested
-    // function's return. Each resolves through the parameter's
-    // annotation — clean, warm, the checker's own answer (`{ q: string }`,
-    // `() => string`). (An ARRAY element rides inside the array literal's
-    // single composite leaf — a different ingress, still declined; see
-    // `a_value_reaching_a_miss_carrier_is_never_admitted_warm`.)
+    // FLOW expressions: an object-literal member value, an array element
+    // and a nested function's return. Each resolves through the
+    // parameter's annotation — clean, warm, the checker's own answer
+    // (`{ q: string }`, `string[]`, `() => string`).
     let assert_clean = |name: &str| -> TypeExpr {
         match eval(&host, TL, name) {
             Outcome::Value {
@@ -3566,6 +3565,15 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
     assert_eq!(
         projected_member(&object, "q"),
         &TypeExpr::Primitive(PrimitiveName::String)
+    );
+    let array = assert_clean("tlMissCarrierInArray");
+    assert!(
+        matches!(
+            &array,
+            TypeExpr::Array { element, readonly: false }
+                if **element == TypeExpr::Primitive(PrimitiveName::String)
+        ),
+        "tlMissCarrierInArray: {array:?}"
     );
     let nested = assert_clean("tlMissCarrierInNestedFunction");
     assert_eq!(
@@ -3779,28 +3787,13 @@ fn a_returned_arrows_fresh_literal_widens_at_its_own_return_position() {
     );
 }
 
-/// CANARY — a DEFAULT-PARAMETER arrow's fresh literal widens too.
+/// A DEFAULT-PARAMETER arrow's fresh literal widens too.
 ///
 /// Oracle: `ReturnType<typeof geoDefaultParamArrow>` is `() => number`
-/// for `function geoDefaultParamArrow(cb = () => 7) { return cb; }`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: the default-parameter arrow's fresh literal must widen
-///   left: Literal(Number(7.0))
-///  right: Primitive(Number)
-/// ```
-///
-/// Owning layer: the return-position widening rule. The IDENTICAL arrow
-/// widens correctly when it is RETURNED
-/// (`a_returned_arrows_fresh_literal_widens_at_its_own_return_position`
-/// passes) but not when it is a parameter DEFAULT — so the widening is
-/// applied on the returned-value path only, and the default-initialiser
-/// path that feeds the parameter's inferred type is missed. Admitted
-/// WARM.
+/// for `function geoDefaultParamArrow(cb = () => 7) { return cb; }`: the
+/// parameter declares the arrow's return widened, as the arrow's own return
+/// inference widens it.
 #[test]
-#[ignore = "a default-parameter arrow's fresh literal is not widened: the parameter's inferred type keeps `() => 7` where the language says `() => number`"]
 fn a_default_parameter_arrows_fresh_literal_widens_too() {
     let host = ts_host();
     let ty = value_of(&host, GEO, "geoDefaultParamArrow");
@@ -3961,28 +3954,15 @@ fn a_derived_constructor_with_a_super_call_is_not_served() {
     );
 }
 
-/// CANARY — a `this.<field>` read inside an instance method resolves to
-/// the field's declared type.
+/// A `this.<field>` read inside an instance method resolves to the
+/// field's declared type, complete and warm: `this` is the class's
+/// receiver, and the inherited field is read off the base where it is
+/// declared.
 ///
 /// Oracle: `ReturnType<typeof SuperCtorDerived.prototype.read>` is
 /// `number` — the parameter-property `public v: number` inherited from
 /// the base constructor.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed
-///   left: Value { ty: Primitive(Any), degradation: None, candidates: 1 }
-///  right: Value { ty: Primitive(Number), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: the flow evaluator's member arm again, this time with a
-/// `this` root rather than a parameter root. Note the answer differs from
-/// the parameter-root family: `this.v` lands on a WARM `any` rather than
-/// the warm `Opaque(Miss)` a parameter root produces, so the two roots
-/// take different paths to the same missing capability.
 #[test]
-#[ignore = "a `this.<field>` read has no member arm: it evaluates to `any` and is admitted warm"]
 fn this_field_read_inside_an_instance_method_resolves_to_the_field_type() {
     let host = host_with(&[(EXTRA, EXTRA_SRC)]);
     assert_eq!(
@@ -3995,28 +3975,13 @@ fn this_field_read_inside_an_instance_method_resolves_to_the_field_type() {
     );
 }
 
-/// CANARY — a SAME-FILE generic callee infers its type argument from the
-/// call site. This is the isolating twin of
-/// `imported_generic_callee_infers_its_type_argument_from_the_call_site`:
-/// both fail identically, which proves the collapse is NOT a cross-file
-/// hop defect but the shared call carrier's missing argument-driven
-/// inference.
+/// A SAME-FILE generic callee infers its type argument from the call
+/// site, as its imported twin
+/// (`imported_generic_callee_infers_its_type_argument_from_the_call_site`)
+/// does.
 ///
 /// Oracle: `ReturnType<typeof localGenericInfer>` is `{ g: string; }`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: the same-file callee's `T` must be inferred as `string`
-///   left: Primitive(Unknown)
-///  right: Primitive(String)
-/// ```
-///
-/// Owning layer: the direct-call carrier's instantiation — every free
-/// clause parameter instantiates at `unknown`, warm, with no argument
-/// inference step.
 #[test]
-#[ignore = "a same-file generic callee's IMPLICIT type argument is not inferred from the call argument: the instantiation collapses to `unknown` and is admitted warm"]
 fn same_file_generic_callee_infers_its_type_argument_from_the_call_site() {
     let host = host_with(&[(EXTRA, EXTRA_SRC)]);
     let ty = value_of(&host, EXTRA, "localGenericInfer");
@@ -4118,28 +4083,24 @@ fn assert_unresolved_value(
 /// function's return): each declined a frame-rooted `x.q` read as a
 /// miss-carrier value. The frame-rooted member-path projection now
 /// resolves the reads the evaluation composes as FLOW expressions (the
-/// plain read, the object member, the nested-function return — clean,
-/// warm, the checker's own `string`), so those moved to the canary
+/// plain read, the object member, the array element, the nested-function
+/// return — clean, warm, the checker's own `string`), so those moved to
+/// the canary
 /// `member_read_off_an_annotated_parameter_resolves_to_the_member_type`.
-/// What remains is the genuinely unresolvable read and the
-/// composite-leaf interior the projection never sees:
+/// What remains is the genuinely unresolvable read:
 ///
 /// ```text
 /// tlFreeUnresolvedRead           the FREE-leaf arm — no FrameShadowed
 ///                                carrier is involved at all
-/// tlMissCarrierInArray           nested inside ONE leaf lowering's own
-///                                answer (`Array{element}`), which no
-///                                shallow ingress check could see
 /// ```
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `tlFreeUnresolvedRead` is a program tsgo REJECTS
 /// (`Cannot find name 'noSuchGlobalValue'.`), so there is no honest value
-/// to publish for it at all. The array row's `string[]` is the answer
-/// the composite-leaf ingress still declines to produce.
+/// to publish for it at all.
 ///
 /// Mutation recipe: returning `false` unconditionally from
-/// `flow_return_value_is_unresolved` flips each row to a warm
+/// `flow_return_value_is_unresolved` flips the row to a warm
 /// `candidates: 1`.
 #[test]
 fn a_value_reaching_a_miss_carrier_is_never_admitted_warm() {
@@ -4148,19 +4109,6 @@ fn a_value_reaching_a_miss_carrier_is_never_admitted_warm() {
     // Top-level miss, reached through the FREE-leaf arm.
     assert_unresolved_value(&host, TL, "tlFreeUnresolvedRead", |dispatch, node| {
         assert_eq!(node_shape(dispatch, node), NodeShape::Opaque);
-    });
-    // Nested inside ONE leaf lowering's own composite answer: the array
-    // literal lowers as ONE leaf (`Array{element: typeof x.q}`), so the
-    // frame-rooted member path never reaches the evaluator's projection
-    // — a composite-leaf interior is a distinct, still-declined ingress.
-    assert_unresolved_value(&host, TL, "tlMissCarrierInArray", |dispatch, node| {
-        let data = dispatch.graph().node_data(node);
-        let Some(SemanticNodeData::Array { element, .. }) = data.as_deref() else {
-            panic!("the array row must still produce an Array node");
-        };
-        let element = *element;
-        drop(data);
-        assert_eq!(node_shape(dispatch, element), NodeShape::Opaque);
     });
 }
 
@@ -4222,34 +4170,32 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// therefore broader than the mechanism, which is the defect.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
-/// --ignoreConfig`) — the answers the fail-closed arm declines to
-/// produce, every one of them different from `any`:
+/// --ignoreConfig`) — the answer the fail-closed arm declines to
+/// produce, different from `any`:
 ///
 /// ```text
-/// callNew         new CtorC(1)                    CtorC
-/// callCtorSigNew  new ctorSig(1)                  { q: string; }
 /// callOptional    maybeFn?.()                     number | undefined
-/// callTagged      tag`a${1}b`                     boolean
 /// ```
 ///
 /// `await asyncSrc()` is NOT in this set: an awaited
 /// call is a modelled form (`ValueDescent::Awaited`) whose operand rides
 /// the call carrier, so `callAwait` publishes `Promise<number>` (see
-/// `awaited_call_return_is_the_awaited_value_wrapped_again`).
+/// `awaited_call_return_is_the_awaited_value_wrapped_again`). Neither is
+/// `new` nor a tagged template: a construction rides the call carrier to
+/// the construct signatures (see
+/// `construct_expression_return_is_the_instance_type`), and a tagged
+/// template to its tag's call signatures (see
+/// `tagged_template_call_return_is_the_tag_return`).
 ///
 /// Mutation recipe: `value_is_unmodeled_call` is the single authority
 /// (both `value_descent`'s guarded arm and the content half's residual
 /// type-carrier check delegate to it), so flipping one of its arms flips
-/// exactly the matching rows — `NewExpression` /
-/// `TaggedTemplateExpression` to `false` flips `callNew` /
-/// `callCtorSigNew` / `callTagged` back to a warm `any`, and
-/// `ChainElement::CallExpression` to `false` flips `callOptional`.
+/// exactly the matching rows — `ChainElement::CallExpression` to `false`
+/// flips `callOptional` back to a warm `any`.
 #[test]
 fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() {
     let host = ts_host();
-    for name in ["callNew", "callCtorSigNew", "callOptional", "callTagged"] {
-        assert_fails_closed(&host, CALLS, name);
-    }
+    assert_fails_closed(&host, CALLS, "callOptional");
 }
 
 /// D7 — the SEQUENCE wrapping of a call does not change the call's
@@ -4258,12 +4204,15 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// The sequence's value is its last operand, so a call there lowers
 /// through the SAME structural call rails its bare spelling takes:
 /// `(0, restFn(1, 2, 3))` surfaces `restFn`'s `"rest"` clean and warm,
-/// exactly like the bare `callRest` twin — the sequence context never
-/// converts a resolved call into a fail-closed marker.
+/// exactly like the bare `callRest` twin, `(0, new CtorC(1))` surfaces
+/// the constructed `CtorC` exactly like the bare `callNew`, and
+/// `` (0, tag`a${1}b`) `` surfaces the tag's `boolean` exactly like the
+/// bare `callTagged` — the sequence context never converts a resolved
+/// call into a fail-closed marker.
 ///
-/// The discriminator runs the other way with the same fixture: every
-/// call form with NO structural arm (`new`, an optional call, a tagged
-/// template) keeps the fail-closed verdict when a sequence wraps it —
+/// The discriminator runs the other way with the same fixture: a call
+/// form with NO structural arm (an optional call) keeps the fail-closed
+/// verdict when a sequence wraps it —
 /// the sequence context never converts an unmodeled call into a
 /// published value either. The delegation answers the CALL's own
 /// question; it invents no arm. An `await` last operand is a MODELLED
@@ -4272,25 +4221,27 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// the sequence exactly as the resolved bare call's is.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
-/// --ignoreConfig`) — the answers the fail-closed rows decline to
-/// produce:
+/// --ignoreConfig`):
 ///
 /// ```text
-/// callSeqNew       CtorC
-/// callSeqOptional  number | undefined
-/// callSeqTagged    boolean
+/// callSeqNew       CtorC                (published)
+/// callSeqTagged    boolean              (published)
+/// callSeqOptional  number | undefined   (declined — fails closed)
 /// ```
 ///
 /// Mutation recipe: dropping the sequence delegation from the content
-/// half's sequence arm flips `callSeqRest` and `callSeqAwait` to the
-/// fail-closed marker; widening the delegation past the
-/// paren-transparent `CallExpression` form (a `New` / chain / tagged
-/// last operand) flips the three negative rows to a published value.
+/// half's sequence arm flips `callSeqRest`, `callSeqNew`, `callSeqTagged`
+/// and `callSeqAwait` to the fail-closed marker; widening the delegation
+/// past the paren-transparent `CallExpression` / `NewExpression` /
+/// `TaggedTemplateExpression` forms (a chain last operand) flips the
+/// negative row to a published value.
 #[test]
 fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
     let host = ts_host();
     // A resolved call surfaces through the sequence, clean and warm.
     assert_clean_warm(&host, CALLS, "callSeqRest", string_lit("rest"));
+    assert_clean_warm(&host, CALLS, "callSeqNew", type_ref("CtorC"));
+    assert_clean_warm(&host, CALLS, "callSeqTagged", boolean());
     // An awaited call keeps its own modelled verdict through the
     // sequence: resolved operand, `Awaited` unwrap, async re-wrap.
     assert_clean_warm(
@@ -4302,10 +4253,8 @@ fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
             type_arguments: Arc::from(vec![number()].into_boxed_slice()),
         },
     );
-    // Every form with no structural arm keeps failing closed.
-    for name in ["callSeqNew", "callSeqOptional", "callSeqTagged"] {
-        assert_fails_closed(&host, CALLS, name);
-    }
+    // A form with no structural arm keeps failing closed.
+    assert_fails_closed(&host, CALLS, "callSeqOptional");
 }
 
 /// The DISCRIMINATOR for the call-position rule: the forms that are NOT
@@ -5739,14 +5688,36 @@ export function libNumberThen() { const x: Awaited<NumberThen> = null as any; re
 export function libChain() { const x: Awaited<Chain> = null as any; return x; }
 export function libHolderBox() { const x: Awaited<Holder['box']> = null as any; return x; }
 export function libLinked() { const x: Awaited<Linked> = null as any; return x; }
-// The lib async-generator surface this standalone host has no `lib*.d.ts` for
+// The lib generator surfaces this standalone host has no `lib*.d.ts` for
 // (measured against the real lib).
+interface Generator<T, TReturn, TNext> {}
 interface AsyncGenerator<T, TReturn, TNext> {}
 export async function* yieldRec(r: Rec) { yield r; }
+export async function* yieldRecTwice(r: Rec) { yield r; yield r; }
+export async function* yieldRecAndPing(r: Rec, a: PingThen) { yield r; yield a; }
+export async function* yieldSelfOrText(a: SelfOrText) { yield a; }
+export async function* yieldRecOrNumber(a: Rec | number) { yield a; }
+export async function* yieldAwaitedRec(r: Rec) { yield await r; }
+export async function* returnRecFromGenerator(r: Rec) { return r; }
+export async function* yieldNumberReturnRec(r: Rec) { yield 1; return r; }
+export async function* yieldRecAndNumber(r: Rec, n: number) { yield r; yield n; }
 export async function* yieldNumberThen(a: NumberThen) { yield a; }
+export function* syncYieldRec(r: Rec) { yield r; }
 interface GenericRec<T> { then(onfulfilled: (v: GenericRec<T>) => void): void }
+interface GenericBox<T> { then(onfulfilled: (v: T) => void): void }
+interface GenericTree<T> { children: GenericTree<T>[]; value: T }
+interface GrowThen<T> { then(onfulfilled: (v: GrowThen<[T]>) => void): void }
 export async function awaitGenericRec(a: GenericRec<string>) { const value = await a; return value; }
 export async function returnGenericRec(a: GenericRec<string>) { return a; }
+export function libGenericRec() { const x: Awaited<GenericRec<string>> = null as any; return x; }
+export async function awaitGenericBox(a: GenericBox<number>) { const value = await a; return value; }
+export function libGenericBox() { const x: Awaited<GenericBox<number>> = null as any; return x; }
+export async function awaitGenericTree(a: GenericTree<string>) { const value = await a; return value; }
+export function libGenericTree() { const x: Awaited<GenericTree<string>> = null as any; return x; }
+export function libGrowThen() { const x: Awaited<GrowThen<string>> = null as any; return x; }
+export async function awaitGrowThen(a: GrowThen<string>) { const value = await a; return value; }
+export async function returnGrowThen(a: GrowThen<string>) { return a; }
+export async function awaitRecInArray(r: Rec) { return [await r]; }
 "#;
 
 /// The checker diagnostic a recovery carrier names, if `node` is one.
@@ -5828,8 +5799,18 @@ fn any() -> TypeExpr {
 /// lane's structural-fact demand reduces it), and that node raised.
 #[track_caller]
 fn reduced_annotation(host: &Arc<VerterHost>, name: &str) -> (SemanticNodeData, TypeExpr) {
+    reduced_annotation_in(host, RECURSIVE_THENABLE, name)
+}
+
+/// [`reduced_annotation`] over a function of `canonical`.
+#[track_caller]
+fn reduced_annotation_in(
+    host: &Arc<VerterHost>,
+    canonical: &str,
+    name: &str,
+) -> (SemanticNodeData, TypeExpr) {
     with_dispatch(host, |dispatch| {
-        let key = key_of(dispatch, RECURSIVE_THENABLE, name);
+        let key = key_of(dispatch, canonical, name);
         let QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::FlowReturn(result),
             ..
@@ -6132,52 +6113,503 @@ fn recursive_thenable_answers_do_not_depend_on_demand_order() {
     assert_eq!(first, again, "repeated demand");
 }
 
-/// Where no recovery is modelled, a recursive thenable stays a TYPED GAP —
-/// never an `any` taken from the recursion itself.
+/// `AsyncGenerator<yield, return, unknown>` with no spans.
+fn async_generator_of(yielded: TypeExpr, returned: TypeExpr) -> TypeExpr {
+    TypeExpr::Ref {
+        name: Arc::from("AsyncGenerator"),
+        type_arguments: Arc::from(
+            vec![
+                yielded,
+                returned,
+                TypeExpr::Primitive(PrimitiveName::Unknown),
+            ]
+            .into_boxed_slice(),
+        ),
+    }
+}
+
+fn void() -> TypeExpr {
+    TypeExpr::Primitive(PrimitiveName::Void)
+}
+
+fn never() -> TypeExpr {
+    TypeExpr::Primitive(PrimitiveName::Never)
+}
+
+/// An async generator's YIELD of a recursive thenable contributes no yield
+/// type, and its RETURN is the checker's error type.
 ///
-/// tsc 7.0.2: `yieldRec` (an async generator yielding the recursive
-/// thenable) is `AsyncGenerator<never, void, unknown>` under TS1062 at the
-/// `yield`, and a second such yield crashes the checker, so the async
-/// iteration has no recovery to carry; the control `yieldNumberThen` is
-/// `AsyncGenerator<number, void, unknown>`. `awaitGenericRec` /
-/// `returnGenericRec` are `Promise<any>` under TS1062, but the generic
-/// declaration's self-reference inside its own body does not record which
-/// instantiation it stands for, so the relation cannot follow it.
+/// tsc 7.0.2, each with TS1062 ("Type is referenced directly or indirectly
+/// in the fulfillment callback of its own 'then' method.") at every failing
+/// `yield` operand, and at the name for a failing return:
+/// `yieldRec` (`yield r`), `yieldRecTwice` (`yield r; yield r`) and
+/// `yieldRecAndPing` (`yield r; yield a`, both recursive) are
+/// `AsyncGenerator<never, void, unknown>`; `yieldSelfOrText` is
+/// `AsyncGenerator<string, void, unknown>` and `yieldRecOrNumber` (`yield a`
+/// over `Rec | number`) `AsyncGenerator<number, void, unknown>`, the failing
+/// union arm dropped; `yieldAwaitedRec` (`yield await r`) is
+/// `AsyncGenerator<any, void, unknown>`, the yield of the await's recovery;
+/// `returnRecFromGenerator` (`return r`) is `AsyncGenerator<never, any,
+/// unknown>` and `yieldNumberReturnRec` (`yield 1; return r`)
+/// `AsyncGenerator<number, any, unknown>`. The controls: `yieldNumberThen`
+/// is `AsyncGenerator<number, void, unknown>`, and a SYNC generator awaits
+/// nothing — `syncYieldRec` is `Generator<Rec, void, unknown>`.
 #[test]
-fn recursive_thenable_positions_without_a_modelled_recovery_stay_typed_gaps() {
+fn async_generator_yields_of_a_recursive_thenable_follow_the_checker() {
     let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    for (name, yielded, returned, warm) in [
+        ("yieldRec", never(), void(), false),
+        ("yieldRecTwice", never(), void(), false),
+        ("yieldRecAndPing", never(), void(), false),
+        ("yieldSelfOrText", string(), void(), false),
+        ("yieldRecOrNumber", number(), void(), false),
+        ("yieldAwaitedRec", any(), void(), false),
+        ("returnRecFromGenerator", never(), any(), false),
+        ("yieldNumberReturnRec", number(), any(), false),
+        ("yieldNumberThen", number(), void(), true),
+    ] {
+        assert_eq!(
+            eval(&host, RECURSIVE_THENABLE, name),
+            Outcome::Value {
+                ty: async_generator_of(yielded, returned),
+                degradation: None,
+                candidates: usize::from(warm),
+            },
+            "{name}"
+        );
+    }
     assert_clean_warm(
         &host,
         RECURSIVE_THENABLE,
-        "yieldNumberThen",
+        "syncYieldRec",
         TypeExpr::Ref {
-            name: Arc::from("AsyncGenerator"),
+            name: Arc::from("Generator"),
             type_arguments: Arc::from(
                 vec![
-                    number(),
-                    TypeExpr::Primitive(PrimitiveName::Void),
+                    type_ref("Rec"),
+                    void(),
                     TypeExpr::Primitive(PrimitiveName::Unknown),
                 ]
                 .into_boxed_slice(),
             ),
         },
     );
-    for name in ["yieldRec", "awaitGenericRec", "returnGenericRec"] {
-        match eval(&host, RECURSIVE_THENABLE, name) {
+}
+
+/// Two DISTINCT yields of which one is a recursive thenable have no oracle:
+/// tsc 7.0.2 itself crashes on `async function* g(r: Rec, n: number) {
+/// yield r; yield n; }` (a nil-pointer panic in `getUnionTypeEx` under
+/// `getReturnTypeFromBody`, whichever order the two yields come in, and
+/// for `yield r; yield "s"` as well). This is an INTERNAL CONTRACT, not a
+/// measured answer: the yield join drops the failing yield exactly as it
+/// does in every program the checker does answer (a lone failing yield
+/// contributes `never`, a failing arm of a yielded union is dropped), so
+/// `yieldRecAndNumber` is `AsyncGenerator<number, void, unknown>`.
+#[test]
+fn a_failing_yield_beside_another_yield_drops_out_of_the_join() {
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    assert_eq!(
+        eval(&host, RECURSIVE_THENABLE, "yieldRecAndNumber"),
+        Outcome::Value {
+            ty: async_generator_of(number(), void()),
+            degradation: None,
+            candidates: 0,
+        }
+    );
+}
+
+/// A GENERIC thenable whose fulfillment callback takes its own
+/// instantiation: the self-reference inside the generic body records the
+/// instantiation it stands for, so the relations see `GenericRec<string>`
+/// promise `GenericRec<string>` itself.
+///
+/// tsc 7.0.2: `awaitGenericRec` is `Promise<any>` under TS1062 at the
+/// `await`, `returnGenericRec` `Promise<any>` under TS1062 at its name, and
+/// `Awaited<GenericRec<string>>` is `any` under TS2589. The controls: a
+/// generic thenable promising its argument (`GenericBox<number>`) is
+/// `number` both ways, and a generic interface referencing itself without
+/// a `then` (`GenericTree<string>`) is itself — `Promise<GenericTree<string>>`
+/// awaited, `GenericTree<string>` through `Awaited`.
+#[test]
+fn a_generic_self_referencing_thenable_follows_its_recorded_instantiation() {
+    use crate::semantic_query::{
+        CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
+    };
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    for (name, operation) in [
+        ("awaitGenericRec", CheckerDiagnosticOperation::AwaitOperand),
+        (
+            "returnGenericRec",
+            CheckerDiagnosticOperation::AsyncReturnPayload,
+        ),
+    ] {
+        assert_eq!(
+            eval(&host, RECURSIVE_THENABLE, name),
+            Outcome::Value {
+                ty: promise_of(any()),
+                degradation: None,
+                candidates: 0,
+            },
+            "{name}"
+        );
+        let recovery = async_payload(&host, name, false, checker_recovery_of);
+        assert_eq!(recovery, Some(recursive_fulfillment(operation)), "{name}");
+    }
+    let (data, raised) = reduced_annotation(&host, "libGenericRec");
+    assert_eq!(
+        data,
+        SemanticNodeData::Opaque(QueryError::CheckerRecovery(CheckerDiagnostic {
+            code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+            operation: CheckerDiagnosticOperation::LibAwaited,
+        }))
+    );
+    assert_eq!(raised, any());
+    assert_clean_warm(
+        &host,
+        RECURSIVE_THENABLE,
+        "awaitGenericBox",
+        promise_of(number()),
+    );
+    let (data, _) = reduced_annotation(&host, "libGenericBox");
+    assert_eq!(data, SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let tree = TypeExpr::Ref {
+        name: Arc::from("GenericTree"),
+        type_arguments: Arc::from(vec![string()].into_boxed_slice()),
+    };
+    assert_clean_warm(
+        &host,
+        RECURSIVE_THENABLE,
+        "awaitGenericTree",
+        promise_of(tree),
+    );
+    let (data, _) = reduced_annotation(&host, "libGenericTree");
+    assert!(
+        matches!(&data, SemanticNodeData::InstantiationRef { base, .. } if base.decl_name.as_ref() == "GenericTree"),
+        "`Awaited<GenericTree<string>>` is `GenericTree<string>`, got {data:?}"
+    );
+}
+
+/// A thenable that GROWS without ever repeating a type.
+///
+/// The lib conditional: tsc 7.0.2 answers `Awaited<GrowThen<string>>` with
+/// `any` under TS2589 in about a second — its tail run reaches the
+/// checker's 1000-step limit — and so does the relation here, through the
+/// same count.
+///
+/// The runtime relation has NO such rule in the checker: a 5000-deep chain
+/// of distinct thenables awaits to its value, and neither `await` of a
+/// `GrowThen<string>` nor returning one from an async function terminated
+/// within 25 minutes (0.9 GB and climbing) on tsc 7.0.2 — no oracle answer
+/// exists for them. The relation here charges every tail step to the
+/// connected-work budget and stops where it runs out: the `await` has no
+/// value and the async return publishes the typed gap — never the thenable
+/// the relation stopped at, never warm, and never the checker's diagnostic.
+/// (The runtime half runs under a reduced budget so the test stays fast;
+/// the production budget's cost is recorded in the ledger.)
+#[test]
+fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
+    use crate::semantic_query::{
+        CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
+    };
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    let (data, raised) = reduced_annotation(&host, "libGrowThen");
+    assert_eq!(
+        data,
+        SemanticNodeData::Opaque(QueryError::CheckerRecovery(CheckerDiagnostic {
+            code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+            operation: CheckerDiagnosticOperation::LibAwaited,
+        }))
+    );
+    assert_eq!(raised, any());
+    let under_budget = |name: &str| {
+        with_dispatch(&host, |dispatch| {
+            dispatch.set_connected_limits_for_tests(
+                8_000,
+                super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
+            );
+            let key = key_of(dispatch, RECURSIVE_THENABLE, name);
+            eval_key_on(&host, dispatch, key)
+        })
+    };
+    assert_eq!(under_budget("awaitGrowThen"), Outcome::Miss);
+    match under_budget("returnGrowThen") {
+        Outcome::Value {
+            ty,
+            degradation,
+            candidates,
+        } => {
+            assert_eq!(
+                (degradation, candidates),
+                (Some(FlowReturnDegradation::UnresolvedValue), 0),
+                "returnGrowThen: the typed gap, never warm, got {ty:?}"
+            );
+            assert!(
+                !format!("{ty:?}").contains("GrowThen"),
+                "returnGrowThen: never the thenable the relation stopped at, got {ty:?}"
+            );
+        }
+        other => panic!("returnGrowThen: the typed gap, got {other:?}"),
+    }
+}
+
+/// A chain of DISTINCT thenables `C0 → C1 → … → number`: the runtime
+/// relation runs its tail steps in one loop, so a chain's length costs no
+/// query depth, and a long chain awaits to its value as the checker's does.
+/// tsc 7.0.2 has no depth rule here (5000 steps measured for `await`; at 8,
+/// 40 and 200 steps `awaitChain` and `returnChain` are `Promise<number>`,
+/// `yieldChain` `AsyncGenerator<number, void, unknown>` and
+/// `returnFromGenerator` `AsyncGenerator<never, number, unknown>`).
+///
+/// The connected-work budget stays this substrate's typed incompleteness
+/// for work it cannot finish: a demand whose budget runs out part-way down
+/// the chain has no `await` value, and every wrap publishes the typed gap —
+/// never the thenable the relation stopped at, which a budget-cut read used
+/// to hand the wrap as its payload (`Promise<C14>`).
+#[test]
+fn a_long_thenable_chain_awaits_to_its_value_within_the_work_budget() {
+    let chain = |steps: usize| {
+        let mut source = String::new();
+        for index in 0..steps {
+            let next = if index + 1 == steps {
+                "number".to_owned()
+            } else {
+                format!("C{}", index + 1)
+            };
+            source.push_str(&format!(
+                "interface C{index} {{ then(onfulfilled: (v: {next}) => void): void }}\n"
+            ));
+        }
+        source
+            .push_str("export async function awaitChain(c: C0) { const v = await c; return v; }\n");
+        source.push_str("export async function returnChain(c: C0) { return c; }\n");
+        // The lib generator surface this standalone host has no
+        // `lib*.d.ts` for.
+        source.push_str("interface AsyncGenerator<T, TReturn, TNext> {}\n");
+        source.push_str("export async function* yieldChain(c: C0) { yield c; }\n");
+        source.push_str("export async function* returnFromGenerator(c: C0) { return c; }\n");
+        source
+    };
+    const SHORT: &str = "/ws/cov/thenable_chain_short.ts";
+    const LONG: &str = "/ws/cov/thenable_chain_long.ts";
+    let short = chain(8);
+    let long = chain(200);
+    let host = host_with(&[(SHORT, short.as_str()), (LONG, long.as_str())]);
+    for file in [SHORT, LONG] {
+        for name in ["awaitChain", "returnChain"] {
+            assert_clean_warm(&host, file, name, promise_of(number()));
+        }
+        assert_clean_warm(
+            &host,
+            file,
+            "yieldChain",
+            async_generator_of(number(), void()),
+        );
+        assert_clean_warm(
+            &host,
+            file,
+            "returnFromGenerator",
+            async_generator_of(never(), number()),
+        );
+    }
+    // The budget's measure: a cold chain charges 16 units per element plus
+    // 6, every tail step among them, so under a budget of 806 units a
+    // 50-element chain answers and a 51-element one does not.
+    for (steps, answers) in [(50, true), (51, false)] {
+        let file = format!("/ws/cov/thenable_chain_{steps}.ts");
+        let source = chain(steps);
+        let host = host_with(&[(file.as_str(), source.as_str())]);
+        let outcome = with_dispatch(&host, |dispatch| {
+            dispatch.set_connected_limits_for_tests(
+                16 * 50 + 6,
+                super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
+            );
+            let key = key_of(dispatch, &file, "awaitChain");
+            eval_key_on(&host, dispatch, key)
+        });
+        if answers {
+            assert!(
+                matches!(&outcome, Outcome::Value { ty, degradation: None, .. } if *ty == promise_of(number())),
+                "{steps} elements answer within 806 units, got {outcome:?}"
+            );
+        } else {
+            assert_eq!(outcome, Outcome::Miss, "{steps} elements exceed 806 units");
+        }
+    }
+    // The same 200-step chain under a work budget it cannot finish within:
+    // each tail step is charged, so the relation stops as a typed partial.
+    let budgeted = host_with(&[(LONG, long.as_str())]);
+    let under_budget = |name: &str| {
+        with_dispatch(&budgeted, |dispatch| {
+            dispatch.set_connected_limits_for_tests(
+                600,
+                super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
+            );
+            let key = key_of(dispatch, LONG, name);
+            eval_key_on(&budgeted, dispatch, key)
+        })
+    };
+    for name in [
+        "awaitChain",
+        "returnChain",
+        "yieldChain",
+        "returnFromGenerator",
+    ] {
+        match under_budget(name) {
             Outcome::Value {
                 ty,
                 degradation,
                 candidates,
             } => {
                 assert!(
-                    degradation.is_some(),
-                    "{name} must stay a typed gap, got {ty:?}"
+                    degradation.is_some() && candidates == 0,
+                    "{name}: a budget-cut relation read is never a clean payload, got {ty:?}"
                 );
-                assert_eq!(candidates, 0, "{name}: a gap never warms");
+                assert!(
+                    !format!("{ty:?}").contains("C1"),
+                    "{name}: never the thenable the relation stopped at, got {ty:?}"
+                );
             }
-            other => panic!("{name} must produce a degraded value, got {other:?}"),
+            Outcome::Miss => {}
+            other => panic!("{name}: a typed incompleteness, got {other:?}"),
         }
     }
+}
+
+/// A chain of distinct thenables `C0 → C1 → … → number`, one step per
+/// character of `steps`, each step's `then` in the given shape:
+///
+/// - `t`: `then(onfulfilled: (v: Next) => void)` — a single callback into a
+///   non-union value, the checker's TAIL step;
+/// - `n`: `then(onfulfilled?: ((v: Next) => void) | null)` — a callback
+///   union, one NESTED step;
+/// - `u`: `then(onfulfilled: (v: Next | string) => void)` — a union value,
+///   one nested step;
+/// - `b`: `then(onfulfilled?: ((v: Next | string) => void) | null)` — both,
+///   two nested steps.
+///
+/// `probe` reads `Awaited<C0>`.
+fn thenable_chain(steps: &str) -> String {
+    let count = steps.len();
+    let mut source = String::new();
+    for (index, kind) in steps.chars().enumerate() {
+        let next = if index + 1 < count {
+            format!("C{}", index + 1)
+        } else {
+            "number".to_owned()
+        };
+        let callback = match kind {
+            't' => format!("onfulfilled: (v: {next}) => void"),
+            'n' => format!("onfulfilled?: ((v: {next}) => void) | null"),
+            'u' => format!("onfulfilled: (v: {next} | string) => void"),
+            _ => format!("onfulfilled?: ((v: {next} | string) => void) | null"),
+        };
+        source.push_str(&format!(
+            "interface C{index} {{ then({callback}): void }}\n"
+        ));
+    }
+    source.push_str("export function probe() { const x: Awaited<C0> = null as any; return x; }\n");
+    source
+}
+
+/// The lib conditional's reduction of `probe` in `source`.
+fn lib_awaited_probe(source: &str) -> SemanticNodeData {
+    const CHAIN: &str = "/ws/cov/thenable_chain.ts";
+    let host = host_with(&[(CHAIN, source)]);
+    reduced_annotation_in(&host, CHAIN, "probe").0
+}
+
+fn is_ts2589(data: &SemanticNodeData) -> bool {
+    matches!(
+        data,
+        SemanticNodeData::Opaque(QueryError::CheckerRecovery(diagnostic))
+            if diagnostic.code
+                == crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+    )
+}
+
+/// The lib conditional's TAIL runs stop where the checker's do.
+///
+/// tsc 7.0.2 (`Awaited<C0>` through the tuple wrapper, `--strict`) over
+/// chains of distinct thenables: 999 tail steps are `number` and 1000 are
+/// `any` under TS2589 at the `Awaited` reference. A run entered through a
+/// callback union starts with one step counted: one nested step then 998
+/// tail steps are `number`, then 999 are `any` under TS2589.
+#[test]
+fn lib_awaited_tail_runs_stop_at_the_checker_limit() {
+    let tails = |count: usize| "t".repeat(count);
+    assert_eq!(
+        lib_awaited_probe(&thenable_chain(&tails(999))),
+        SemanticNodeData::Primitive(PrimitiveKind::Number)
+    );
+    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&tails(1000)))));
+    assert_eq!(
+        lib_awaited_probe(&thenable_chain(&format!("n{}", tails(998)))),
+        SemanticNodeData::Primitive(PrimitiveKind::Number)
+    );
+    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&format!(
+        "n{}",
+        tails(999)
+    )))));
+}
+
+/// The lib conditional's NESTED steps stop where the checker's instantiation
+/// depth does.
+///
+/// tsc 7.0.2: 97 nested steps through callback unions are `number` (the
+/// checker reports TS2589 there while keeping the value) and 98 are `any`
+/// under TS2589; 97 steps into union values are `string | number` and 98
+/// `any`; a step that is both counts twice — 48 such steps then a tail
+/// step are `string | number`, 49 are `any`. `Awaited` over `Promise`
+/// nested 96 or 97 deep is `number`, 98 deep `any` under TS2589 (every
+/// `Promise`'s `onfulfilled` is optional and nullable).
+#[test]
+fn lib_awaited_nested_steps_stop_at_the_checker_limit() {
+    let number = || SemanticNodeData::Primitive(PrimitiveKind::Number);
+    let string_or_number = |data: &SemanticNodeData| matches!(data, SemanticNodeData::Union(members) if members.len() == 2);
+    assert_eq!(
+        lib_awaited_probe(&thenable_chain(&"n".repeat(97))),
+        number()
+    );
+    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(
+        &"n".repeat(98)
+    ))));
+    assert!(string_or_number(&lib_awaited_probe(&thenable_chain(
+        &"u".repeat(97)
+    ))));
+    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(
+        &"u".repeat(98)
+    ))));
+    assert!(string_or_number(&lib_awaited_probe(&thenable_chain(
+        &format!("{}t", "b".repeat(48))
+    ))));
+    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&format!(
+        "{}t",
+        "b".repeat(49)
+    )))));
+    // Lowering a type argument nested this deep recurses per level, so the
+    // probes run on the serve thread's stack size, as production does.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let promise_chain = |depth: usize| {
+                let ty = (0..depth).fold("number".to_owned(), |ty, _| format!("Promise<{ty}>"));
+                format!(
+                    "export function probe() {{ const x: Awaited<{ty}> = null as any; return x; }}\n"
+                )
+            };
+            assert_eq!(
+                lib_awaited_probe(&promise_chain(96)),
+                SemanticNodeData::Primitive(PrimitiveKind::Number)
+            );
+            assert_eq!(
+                lib_awaited_probe(&promise_chain(97)),
+                SemanticNodeData::Primitive(PrimitiveKind::Number)
+            );
+            assert!(is_ts2589(&lib_awaited_probe(&promise_chain(98))));
+        })
+        .expect("spawn the probe thread")
+        .join()
+        .expect("the Promise-chain probes");
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -6235,15 +6667,13 @@ export function instantiatedOverloads() { const x: ReturnType<typeof O<string>> 
 
 /// How a CLASSES probe's answer is admitted.
 ///
-/// An answer read through a class expression's value is `ReturnOnly`: the
-/// class body's constructor, members and field initializers are callables
-/// no indexed function position serves, so the capture family keeps its
-/// typed gap over them — the answer is complete and undegraded, and it
-/// never warms.
+/// An answer read through a class expression's value warms: the class's
+/// methods and declared constructor are nested callables the index serves,
+/// and its field initializers are the enclosing frame's own footprint, so
+/// no capture obligation is left open over it.
 #[derive(Clone, Copy, Debug)]
 enum ClassProbeAdmission {
     Warm,
-    ReturnOnly,
 }
 
 /// Evaluate one CLASSES probe CLEAN (undegraded) under `admission`, and
@@ -6273,7 +6703,6 @@ fn with_class_probe<R>(
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
             match admission {
                 ClassProbeAdmission::Warm => 1,
-                ClassProbeAdmission::ReturnOnly => 0,
             },
             "{name} must be admitted {admission:?}"
         );
@@ -6312,7 +6741,7 @@ fn assert_class_probe(name: &str, admission: ClassProbeAdmission, expected: &str
 fn class_probe_tuple(name: &str) -> Vec<(Option<String>, bool, bool)> {
     with_class_probe(
         name,
-        ClassProbeAdmission::ReturnOnly,
+        ClassProbeAdmission::Warm,
         |dispatch, node| match dispatch.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Tuple { elements, .. }) => elements
                 .iter()
@@ -6349,19 +6778,15 @@ fn class_probe_tuple(name: &str) -> Vec<(Option<String>, bool, bool)> {
 fn class_expression_value_is_its_constructor_over_its_own_members() {
     assert_class_probe(
         "plainInstance",
-        ClassProbeAdmission::ReturnOnly,
+        ClassProbeAdmission::Warm,
         "(Anonymous class)",
     );
-    assert_class_probe("plainExtra", ClassProbeAdmission::ReturnOnly, "number");
-    assert_class_probe("plainLit", ClassProbeAdmission::ReturnOnly, "1");
-    assert_class_probe(
-        "plainMethod",
-        ClassProbeAdmission::ReturnOnly,
-        "() => number",
-    );
-    assert_class_probe("plainGetter", ClassProbeAdmission::ReturnOnly, "boolean");
-    assert_class_probe("plainStatic", ClassProbeAdmission::ReturnOnly, "string");
-    assert_class_probe("protoRead", ClassProbeAdmission::ReturnOnly, "C");
+    assert_class_probe("plainExtra", ClassProbeAdmission::Warm, "number");
+    assert_class_probe("plainLit", ClassProbeAdmission::Warm, "1");
+    assert_class_probe("plainMethod", ClassProbeAdmission::Warm, "() => number");
+    assert_class_probe("plainGetter", ClassProbeAdmission::Warm, "boolean");
+    assert_class_probe("plainStatic", ClassProbeAdmission::Warm, "string");
+    assert_class_probe("protoRead", ClassProbeAdmission::Warm, "C");
     assert_eq!(class_probe_tuple("plainCtorParams"), Vec::new());
 }
 
@@ -6380,7 +6805,7 @@ fn class_expression_declared_constructor_types_the_construct_signature() {
             (Some("b".to_owned()), true, false),
         ]
     );
-    assert_class_probe("ctorProperty", ClassProbeAdmission::ReturnOnly, "string");
+    assert_class_probe("ctorProperty", ClassProbeAdmission::Warm, "string");
 }
 
 /// A class expression extending a named class inherits the base
@@ -6396,7 +6821,7 @@ fn class_expression_declared_constructor_types_the_construct_signature() {
 fn class_expression_extending_a_class_inherits_its_constructor_and_members() {
     assert_class_probe(
         "derivedInstance",
-        ClassProbeAdmission::ReturnOnly,
+        ClassProbeAdmission::Warm,
         "(Anonymous class)",
     );
     assert_eq!(
@@ -6406,13 +6831,9 @@ fn class_expression_extending_a_class_inherits_its_constructor_and_members() {
             (Some("b".to_owned()), true, false),
         ]
     );
-    assert_class_probe(
-        "derivedInherited",
-        ClassProbeAdmission::ReturnOnly,
-        "number",
-    );
-    assert_class_probe("derivedOwn", ClassProbeAdmission::ReturnOnly, "number");
-    assert_class_probe("derivedStatic", ClassProbeAdmission::ReturnOnly, "string");
+    assert_class_probe("derivedInherited", ClassProbeAdmission::Warm, "number");
+    assert_class_probe("derivedOwn", ClassProbeAdmission::Warm, "number");
+    assert_class_probe("derivedStatic", ClassProbeAdmission::Warm, "string");
 }
 
 /// The mixin form: a class expression extending a parameter typed by a
@@ -6432,12 +6853,12 @@ fn class_expression_extending_a_class_inherits_its_constructor_and_members() {
 fn mixin_class_expression_composes_with_its_instantiated_base() {
     assert_class_probe(
         "mixinInstance",
-        ClassProbeAdmission::ReturnOnly,
+        ClassProbeAdmission::Warm,
         "Mixin.(Anonymous class) & Base",
     );
-    assert_class_probe("mixinCtorParams", ClassProbeAdmission::ReturnOnly, "any[]");
-    assert_class_probe("mixinInherited", ClassProbeAdmission::ReturnOnly, "string");
-    assert_class_probe("mixinOwn", ClassProbeAdmission::ReturnOnly, "number");
+    assert_class_probe("mixinCtorParams", ClassProbeAdmission::Warm, "any[]");
+    assert_class_probe("mixinInherited", ClassProbeAdmission::Warm, "string");
+    assert_class_probe("mixinOwn", ClassProbeAdmission::Warm, "number");
 }
 
 /// A DECLARED mixin factory's result composes the same way: the
@@ -6494,4 +6915,269 @@ fn class_expression_static_block_assertion_is_not_dropped() {
         "staticBlockAssertion",
         FlowReturnDegradation::FlowGap(FlowGap::GuardNarrowing),
     );
+}
+
+/// An array literal's element is a flow value, so `[await r]` over a
+/// recursive thenable carries the await's recovery as its element.
+///
+/// tsc 7.0.2: `awaitRecInArray` (`return [await r]`) is `Promise<any[]>`,
+/// with TS1062 at the `await`. The element is the `AwaitOperand` recovery
+/// carrier; like every answer built over a TS1062 failure it never warms.
+#[test]
+fn an_awaited_recursive_thenable_in_an_array_literal_is_the_recovery_element() {
+    use crate::semantic_query::CheckerDiagnosticOperation;
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    assert_eq!(
+        eval(&host, RECURSIVE_THENABLE, "awaitRecInArray"),
+        Outcome::Value {
+            ty: promise_of(TypeExpr::Array {
+                element: Arc::new(any()),
+                readonly: false,
+            }),
+            degradation: None,
+            candidates: 0,
+        }
+    );
+    let element = async_payload(
+        &host,
+        "awaitRecInArray",
+        false,
+        |dispatch, payload| match dispatch.graph().node_data(payload).as_deref() {
+            Some(SemanticNodeData::Array { element, .. }) => {
+                checker_recovery_of(dispatch, *element)
+            }
+            other => panic!("`[await r]` is an array, got {other:?}"),
+        },
+    );
+    assert_eq!(
+        element,
+        Some(recursive_fulfillment(
+            CheckerDiagnosticOperation::AwaitOperand
+        ))
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// A declaration's self-reference read through a member path
+// ──────────────────────────────────────────────────────────────────────
+
+/// Declarations that reference themselves inside their own bodies. Every
+/// expected answer below is measured on tsc 7.0.2 over this module
+/// (`--noEmit --strict --target es2022`, each type read through the tuple
+/// wrapper quoted by TS2322).
+const SELF_REFERENCE: &str = "/ws/cov/self_reference.ts";
+const SELF_REFERENCE_SRC: &str = r#"
+interface Chain { next: Chain; v: number }
+interface Holder { self: Holder; items: Holder[] }
+interface Box<T> { inner: Box<T>; value: T }
+export function readNext(a: Chain) { return a.next; }
+export function readNextNext(a: Chain) { return a.next.next.v; }
+export function readSelf(h: Holder) { return h.self; }
+export function readSelfItems(h: Holder) { return h.self.items; }
+export function readBoxInnerValue(b: Box<string>) { return b.inner.inner.value; }
+export function indexedNext() { const x: Chain['next'] = null as any; return x; }
+export function indexedNextV() { const x: Chain['next']['v'] = null as any; return x; }
+"#;
+
+/// A member read whose member is its declaration's own self-reference
+/// (`next: Chain` inside `Chain`) reads that declaration, and a longer
+/// path walks on through it.
+///
+/// tsc 7.0.2: `readNext` (`a.next`) is `Chain`, `readNextNext`
+/// (`a.next.next.v`) `number`, `readSelf` (`h.self`) `Holder`,
+/// `readSelfItems` (`h.self.items`) `Holder[]`, and the generic
+/// `readBoxInnerValue` (`b.inner.inner.value` over `Box<string>`)
+/// `string`. A declaration's body lowers the self-reference as the
+/// `RecursiveRef` sentinel, and the path walk used to end at it in a miss.
+#[test]
+fn a_member_read_through_a_self_reference_walks_on_through_the_declaration() {
+    let host = host_with(&[(SELF_REFERENCE, SELF_REFERENCE_SRC)]);
+    assert_clean_warm(&host, SELF_REFERENCE, "readNext", type_ref("Chain"));
+    assert_clean_warm(&host, SELF_REFERENCE, "readNextNext", number());
+    assert_clean_warm(&host, SELF_REFERENCE, "readSelf", type_ref("Holder"));
+    assert_clean_warm(&host, SELF_REFERENCE, "readBoxInnerValue", string());
+    match &eval(&host, SELF_REFERENCE, "readSelfItems") {
+        Outcome::Value {
+            ty:
+                TypeExpr::Array {
+                    element,
+                    readonly: false,
+                },
+            degradation: None,
+            candidates: 1,
+        } => assert!(
+            matches!(element.as_ref(), TypeExpr::RecursiveRef { name, .. }
+                | TypeExpr::Ref { name, .. } if name.as_ref() == "Holder"),
+            "`h.self.items` is `Holder[]`, got {element:?}"
+        ),
+        other => panic!("`h.self.items` is a clean, warm `Holder[]`, got {other:?}"),
+    }
+    // A projected path that crosses the self-reference MID-walk: the flow
+    // reads above project one member at a time, a type path does not. The
+    // base is `Chain`'s own expanded surface, whose `next` is the sentinel.
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch, SELF_REFERENCE, "indexedNext");
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
+        else {
+            panic!("indexedNext must produce a value");
+        };
+        let surface = dispatch
+            .normalize_node_keeping_declaration_refs_for_tests(
+                result.return_type(),
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Expanded,
+                ),
+            )
+            .into_complete_node()
+            .expect("`Chain['next']` reduces");
+        let member = |name: &str| {
+            crate::semantic_query::PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier(name),
+            )
+        };
+        let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+            base: surface,
+            path: Arc::from(vec![member("next"), member("next"), member("v")].into_boxed_slice()),
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+            other => panic!("`Chain` projects `next.next.v`, got {other:?}"),
+        };
+        assert_eq!(
+            dispatch.graph().node_data(projected).as_deref(),
+            Some(&SemanticNodeData::Primitive(PrimitiveKind::Number)),
+            "`Chain['next']['next']['v']` is `number`"
+        );
+    });
+}
+
+/// An indexed access whose member is its declaration's self-reference is
+/// that declaration.
+///
+/// tsc 7.0.2: `Chain['next']` is `Chain` and `Chain['next']['v']` is
+/// `number`. The flow lane publishes the authored annotation; a consumer
+/// that reduces it (the corpus lane's structural-fact demand) used to read
+/// a miss at the self-reference. The printing demand keeps the
+/// declaration by its name, as the checker prints it; the fully resolving
+/// demand reduces `Chain['next']` to `Chain`'s own surface, `next` the
+/// self-reference and `v` a `number`.
+#[test]
+fn an_indexed_access_of_a_self_reference_is_the_declaration() {
+    let host = host_with(&[(SELF_REFERENCE, SELF_REFERENCE_SRC)]);
+    let (data, raised) = reduced_annotation_in(&host, SELF_REFERENCE, "indexedNextV");
+    assert_eq!(data, SemanticNodeData::Primitive(PrimitiveKind::Number));
+    assert_eq!(raised, number());
+    let (data, raised) = reduced_annotation_in(&host, SELF_REFERENCE, "indexedNext");
+    assert!(
+        matches!(&data, SemanticNodeData::DeclRef { identity } if identity.decl_name.as_ref() == "Chain"),
+        "`Chain['next']` prints `Chain`, got {data:?}"
+    );
+    assert!(
+        matches!(&raised, TypeExpr::Ref { name, .. } if name.as_ref() == "Chain"),
+        "`Chain['next']` raises to `Chain`, got {raised:?}"
+    );
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch, SELF_REFERENCE, "indexedNext");
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
+        else {
+            panic!("indexedNext must produce a value");
+        };
+        let node = dispatch
+            .normalize_node_for_structural_fact_demand(
+                result.return_type(),
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Expanded,
+                ),
+            )
+            .into_complete_node()
+            .expect("the resolving demand completes");
+        let raised = host
+            .project_node_to_type_expr_for_test(node)
+            .expect("the surface raises");
+        assert!(
+            matches!(
+                dispatch.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            ),
+            "the resolving demand reduces `Chain['next']` to `Chain`'s surface, got {raised:?}"
+        );
+        assert_eq!(projected_member(&raised, "v"), &number());
+        assert!(
+            matches!(projected_member(&raised, "next"), TypeExpr::RecursiveRef { name, .. }
+                | TypeExpr::Ref { name, .. } if name.as_ref() == "Chain"),
+            "`next` is the self-reference, got {raised:?}"
+        );
+    });
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// The checker's evolving array
+// ──────────────────────────────────────────────────────────────────────
+
+/// Unannotated declarations initialised to an empty array literal. Every
+/// expected answer below is measured on tsc 7.0.2 over this module
+/// (`--noEmit --strict --target es2022`, each type read through the tuple
+/// wrapper quoted by TS2322).
+const EVOLVING: &str = "/ws/cov/evolving_array.ts";
+const EVOLVING_SRC: &str = r#"
+export function readWhole() { const a = []; return a; }
+export function readParenthesized() { const a = ([]); return a; }
+export function readInElement() { const a = []; return [a]; }
+export function readThroughLocal() { const a = []; const b = a; return b; }
+export function readVar() { var a = []; return a; }
+export function pushed() { const a = []; a.push(1); return a; }
+export function reassigned() { let a = []; a = [1]; return a; }
+export function captured() { const a = []; const f = () => a; return f(); }
+export function annotated() { const a: number[] = []; return a; }
+export function literal() { return []; }
+"#;
+
+fn array_of(element: TypeExpr) -> TypeExpr {
+    TypeExpr::Array {
+        element: Arc::new(element),
+        readonly: false,
+    }
+}
+
+/// An empty array literal initialising an unannotated declaration is the
+/// checker's EVOLVING array under `noImplicitAny`: its type follows the
+/// `push` / `unshift` / element writes / reassignments that reach each
+/// read, and a read with nothing added is `any[]`.
+///
+/// tsc 7.0.2 (`--strict`; each `any[]` read with TS7034 at the declaration
+/// and TS7005 at the read): `readWhole`, `readThroughLocal` and `readVar`
+/// are `any[]`, `readInElement` (`[a]`) is `any[][]`; `pushed`
+/// (`a.push(1)`) and `reassigned` (`a = [1]`) are `number[]`, and
+/// `captured` (a `const` read inside an arrow) is `any[]`. The controls:
+/// `annotated` is `number[]`, a bare `return []` is `never[]`, and so is
+/// `readParenthesized` — `const a = ([])` is not the evolving form (no
+/// TS7034; the checker does not look through the parentheses).
+#[test]
+fn an_empty_array_initializer_is_the_checkers_evolving_array() {
+    let host = host_with(&[(EVOLVING, EVOLVING_SRC)]);
+    let any_array = array_of(any());
+    for name in ["readWhole", "readThroughLocal", "readVar", "captured"] {
+        assert_clean_warm(&host, EVOLVING, name, any_array.clone());
+    }
+    assert_clean_warm(&host, EVOLVING, "readInElement", array_of(any_array));
+    for name in ["pushed", "reassigned"] {
+        assert_clean_warm(&host, EVOLVING, name, array_of(number()));
+    }
+    assert_clean_warm(&host, EVOLVING, "annotated", array_of(number()));
+    for name in ["literal", "readParenthesized"] {
+        assert_clean_warm(
+            &host,
+            EVOLVING,
+            name,
+            array_of(TypeExpr::Primitive(PrimitiveName::Never)),
+        );
+    }
 }

@@ -80,8 +80,8 @@ function rich(x) {
 /// installs the family's accepted typed gap.
 const CAPTURE_FIXTURE_SOURCE: &str = r#"
 function with_capture(x) {
-  function helper() { return x; }
-  return helper();
+  class Helper { m() { return x; } }
+  return new Helper();
 }
 "#;
 
@@ -133,6 +133,9 @@ fn flow_return_query_named(env_tag: u8, name: &str) -> SemanticQueryKey {
             type_substitution: CanonicalTypeSubstitution::empty(),
             policy: FlowReturnPolicy {
                 nullability: NullabilityPolicy::Strict,
+                no_implicit_any: true,
+                use_unknown_in_catch_variables: true,
+                no_implicit_this: true,
             },
         },
         demand: ReturnProjectionDemand::whole_return(),
@@ -2002,9 +2005,9 @@ fn every_call_occurrence_has_its_own_identity() {
     assert!(outcome.warm_candidate().is_some());
 }
 
-/// A required subject the structural authority cannot name — a nested
-/// function's capture set — installs the family's accepted typed gap at
-/// install, anchored on the nested function's real binding identity. It is
+/// A required subject the structural authority cannot name — a local
+/// class declaration's capture set — installs the family's accepted typed
+/// gap at install, anchored on the class's real binding identity. It is
 /// never omitted and never discharged, so the solve can never complete.
 #[test]
 fn unnameable_capture_subject_installs_the_family_typed_gap() {
@@ -2017,19 +2020,15 @@ fn unnameable_capture_subject_installs_the_family_typed_gap() {
         .iter()
         .filter(|spec| matches!(spec.basis(), FlowObligationBasis::Capture { .. }))
         .collect();
-    assert_eq!(
-        captures.len(),
-        1,
-        "the nested function is one capture subject"
-    );
+    assert_eq!(captures.len(), 1, "the local class is one capture subject");
     let FlowObligationBasis::Capture { identity, .. } = captures[0].basis() else {
         unreachable!()
     };
     // Anchored on the capturer's real FlowBindingIdentity.
     let identity = identity
         .as_ref()
-        .expect("the nested function resolves an identity");
-    assert_eq!(identity.name.as_ref(), "helper");
+        .expect("the local class resolves an identity");
+    assert_eq!(identity.name.as_ref(), "Helper");
 
     let mut runtime = ObligationRuntime::default();
     let handle = runtime.install_flow_demand(&plan);
@@ -2781,12 +2780,14 @@ fn flow_demand_handle_fails_closed_on_a_foreign_runtime() {
 // ── Retained-selection provenance ───────────────────────────────────────
 
 /// A smaller matched-demand foreign body: its retained selection's node
-/// ids stay in range of the richer fixture's graph, so a foreign-graph
-/// selection fails on PROVENANCE (the minted slice identity), never on
-/// bounds and never on a panic.
+/// ids stay in range of the richer fixture's graph, and its single return
+/// is an object literal like the fixture's (so neither demand selects a
+/// parameter for an inferred predicate), so a foreign-graph selection
+/// fails on PROVENANCE (the minted slice identity), never on the demand,
+/// on bounds, or on a panic.
 const SMALLER_FIXTURE_SOURCE: &str = r#"
 function smaller(a) {
-  return a;
+  return { a };
 }
 "#;
 
@@ -2864,8 +2865,8 @@ fn demand_planner_rejects_a_selection_of_another_demand() {
 
 /// A selection referencing a node id outside the bound graph is a typed
 /// planning error — never a panic on the graph-local id space. (The
-/// smaller fixture's graph has 4 nodes; the richer fixture's selection
-/// reaches node 6.)
+/// richer fixture's selection reaches node 6, past the smaller fixture's
+/// graph.)
 #[test]
 fn demand_planner_rejects_an_out_of_range_selection_node() {
     let fixture = flow_graph_fixture_for_tests(SMALLER_FIXTURE_SOURCE, 11);
@@ -3201,13 +3202,9 @@ function two_callbacks(x, y) {
 "#;
 
 /// Classes create callables the indexed program serves no record for: a
-/// class passed as an argument, a local class declaration, and a served
-/// callback whose body evaluates a class. Each really retains `a`.
-const UNSERVED_CLASS_FIXTURE_SOURCES: [(&str, &str); 3] = [
-    (
-        "class_argument",
-        "function class_argument() { const a = 1; return sink(class { m() { return a; } }); }",
-    ),
+/// local class declaration, and a served callback whose body evaluates a
+/// class. Each really retains `a`.
+const UNSERVED_CLASS_FIXTURE_SOURCES: [(&str, &str); 2] = [
     (
         "class_declaration",
         "function class_declaration() { const a = 1; class C { m() { return a; } } return new C(); }",
@@ -3520,6 +3517,45 @@ fn an_unserved_callable_fails_closed_as_a_capture_gap_not_as_capture_free() {
             .iter()
             .any(|record| matches!(record.state, ObligationState::Gap(FlowGap::ClosureCapture))),
         "the unknown installs directly in the capture family's typed gap"
+    );
+}
+
+/// A class expression passed as an argument runs nothing an index record
+/// cannot serve: its method is a served callable of the frame, and the
+/// capture it retains is named exactly — never the family's typed gap and
+/// never proved capture-free.
+#[test]
+fn a_class_expression_argument_names_its_methods_capture() {
+    let fixture = flow_graph_fixture_for_tests(
+        "function class_argument() { const a = 1; return sink(class { m() { return a; } }); }",
+        75,
+    );
+    let plan = fixture
+        .build_plan(request_named("class_argument"))
+        .expect("class_argument plans");
+    assert!(
+        plan.obligation_specs().iter().any(|spec| matches!(
+            spec.basis(),
+            FlowObligationBasis::CapturedBinding { identity, .. } if identity.name.as_ref() == "a"
+        )),
+        "the method's capture of `a` is named"
+    );
+    assert!(
+        !plan
+            .obligation_specs()
+            .iter()
+            .any(|spec| matches!(spec.basis(), FlowObligationBasis::CaptureFreeClosure { .. })),
+        "a callable retaining `a` is never proved capture-free"
+    );
+    let mut runtime = ObligationRuntime::default();
+    let handle = runtime.install_flow_demand(&plan);
+    assert!(
+        !runtime
+            .flow_obligations(handle)
+            .expect("the demand is installed")
+            .iter()
+            .any(|record| matches!(record.state, ObligationState::Gap(FlowGap::ClosureCapture))),
+        "a served capture is no typed gap"
     );
 }
 

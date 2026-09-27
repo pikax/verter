@@ -13,6 +13,7 @@ use oxc_ast::{
 };
 use oxc_ast_visit::Visit;
 use oxc_span::GetSpan;
+use verter_parser::oxc_parse::with_program_stack;
 
 /// A raw emitted module could not be parsed as JavaScript, so no semantic
 /// comment oracle can be produced safely.
@@ -29,10 +30,15 @@ pub fn semantic_comment_signature(
     code: &str,
 ) -> Result<Vec<String>, SemanticCommentSignatureError> {
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, code, oxc_span::SourceType::mjs()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, code, oxc_span::SourceType::mjs())
+            .parse();
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(SemanticCommentSignatureError {
-            diagnostic_count: parsed.errors.len().max(usize::from(parsed.panicked)),
+            diagnostic_count: parsed
+                .diagnostics
+                .len()
+                .max(usize::from(parsed.fatal_error)),
         });
     }
     Ok(semantic_comment_signature_from_program(
@@ -78,15 +84,24 @@ fn semantic_comment_class(comment: &Comment, raw: &str) -> Option<&'static str> 
     match comment.content {
         CommentContent::Pure => return Some("Pure"),
         CommentContent::PureNotApplied => return Some("PureNotApplied"),
-        CommentContent::NoSideEffects => return Some("NoSideEffects"),
+        // oxc 0.151 marks a `#__NO_SIDE_EFFECTS__` comment that annotates no
+        // declaration as not applied; before 0.151 it was `NoSideEffects`
+        // either way.
+        CommentContent::NoSideEffects | CommentContent::NoSideEffectsNotApplied => {
+            return Some("NoSideEffects")
+        }
         CommentContent::Legal => return Some("Legal"),
         CommentContent::JsdocLegal => return Some("JsdocLegal"),
         CommentContent::Jsdoc => return Some("Jsdoc"),
         CommentContent::Webpack => return Some("Webpack"),
         CommentContent::Vite => return Some("Vite"),
         CommentContent::Turbopack => return Some("Turbopack"),
-        CommentContent::CoverageIgnore => return Some("CoverageIgnore"),
-        CommentContent::None => {}
+        // oxc 0.151 splits a file-level coverage-ignore comment out.
+        CommentContent::CoverageIgnore | CommentContent::CoverageIgnoreFile => {
+            return Some("CoverageIgnore")
+        }
+        // A `#__KEY__` comment had no class before 0.151.
+        CommentContent::PropertyKey | CommentContent::None => {}
     }
 
     let inner = if let Some(rest) = raw.strip_prefix("/*") {
@@ -200,13 +215,15 @@ impl CommentAnchorIndex {
             top_index: 0,
             top_segment_kind: TopSegmentKind::Statement,
         };
-        for (position, directive) in program.directives.iter().enumerate() {
-            index.top_index = position;
-            index.top_segment_kind = TopSegmentKind::Directive;
-            index.visit_directive(directive);
-        }
-        index.top_segment_kind = TopSegmentKind::Statement;
-        index.normalize_statement_list(&program.body);
+        with_program_stack(program, || {
+            for (position, directive) in program.directives.iter().enumerate() {
+                index.top_index = position;
+                index.top_segment_kind = TopSegmentKind::Directive;
+                index.visit_directive(directive);
+            }
+            index.top_segment_kind = TopSegmentKind::Statement;
+            index.normalize_statement_list(&program.body);
+        });
         index
     }
 

@@ -401,8 +401,9 @@ pub struct SemanticGraphStore {
     /// stamping it unresolved propagates a factually false permanent warm
     /// refusal into every enclosing result. Memoizing removes the reason
     /// the bound existed (re-walking the same structure per SCC fixpoint
-    /// iteration) instead of trading correctness for it.
-    unresolved_reach: Mutex<FxHashMap<SemanticNodeId, bool>>,
+    /// iteration) instead of trading correctness for it. ONE per-node sidecar:
+    /// the entry holds every bit memoized for the id, released together.
+    unresolved_reach: Mutex<FxHashMap<SemanticNodeId, unresolved_reach::NodeStructureBits>>,
     /// Set (and never cleared) by the first [`Self::release_canonical`]
     /// that tombstones a node. Until then every id ever handed out is
     /// live, so the warm-read liveness check ([`Self::result_is_live`])
@@ -412,12 +413,7 @@ pub struct SemanticGraphStore {
     /// The `VerterStableV1` member view of each union built in this store's
     /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
     /// contract with a payload-retiring holder: `union_views.rs`.
-    union_views: Mutex<
-        FxHashMap<
-            crate::semantic_query::semantic_context::SemanticUnionMembersKey,
-            Arc<[SemanticNodeId]>,
-        >,
-    >,
+    union_views: Mutex<union_views::UnionViews>,
     /// Test-only: order union members by DESCENDING stable key. Reversing the
     /// one union order in a fresh store — an isolated cache namespace, its
     /// views and memo entries included — is the §5.8 counterfactual that
@@ -1925,21 +1921,22 @@ impl SemanticGraphStore {
         // validity oracle: project-shape invalidation rides
         // `FactVersionRef::ProjectGeneration` on the carrier.
         let validated = snapshot.and_then(|list| {
-            list.into_iter()
-                .find(|entry| self.warm_candidate_serves(entry, requested, ctx))
+            let back = list.len().checked_sub(1); // the freshest in LRU order
+            let mut candidates = list.into_iter().enumerate();
+            let (index, hit) =
+                candidates.find(|(_, entry)| self.warm_candidate_serves(entry, requested, ctx))?;
+            Some((Some(index) != back, hit))
         });
-        if let Some(entry) = &validated {
-            // Brief LRU bookkeeping — reacquire ONLY to update the
-            // slot's LRU order so subsequent lookups treat this
-            // candidate as freshest. The match is by discriminant
-            // identity; if a concurrent invalidation drained it between
-            // snapshot and here, the update is a no-op.
+        if let Some((true, entry)) = &validated {
+            // Brief LRU bookkeeping for a hit that is not the snapshot's
+            // freshest: reacquire to move it to the LRU back. Matched by
+            // discriminant identity; a candidate drained meanwhile is a no-op.
             let mut entries = self.entries_lock_diagnosed();
             if let Some(slots) = entries.get_mut(family) {
                 slots.mark_validated_freshest(slot, entry);
             }
         }
-        let result = validated.map(|entry| {
+        let result = validated.map(|(_, entry)| {
             if let Some(capture) = operand_evidence {
                 *capture = semantic_operand_evidence(
                     &entry.read_set_signature,

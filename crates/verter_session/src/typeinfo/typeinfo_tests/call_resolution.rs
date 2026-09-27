@@ -36,7 +36,6 @@ fn upsert(host: &crate::VerterHost) {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "typeinfo currently does not pick the overload whose callback return type matches the contextual literal; keep as the future contextual-callback overload-selection contract"]
 fn call_resolution_contextual_callback_return_picks_first_overload() {
     // TS7 contract: `pick("hello", (v) => "ok")` against the overload set
     //   <T extends string>(value: T, cb: (v: T) => "ok"): T
@@ -268,7 +267,6 @@ fn call_resolution_constructor_parameters_uses_last_overload() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "`InstanceType<abstract new (name: string) => AbstractBase>` reduces to the abstract class instance shape (`name: string` plus `describe(): string`) and the row PASSES under --include-ignored; it stays ignored because it has no `ORACLE_QUERY_SPECS` seat: `ProofRequirement::Ts7Oracle` requires a registry entry, a vendored source, a checked-in tsgo snapshot, and retained lift-migration provenance from the audited lift command. Lift under U2.CLASS_SURFACES when the row is seated"]
 fn call_resolution_abstract_constructor_instance_type_projects_class_shape() {
     // TS7 contract: `InstanceType<abstract new (name: string) => AbstractBase>`
     // reduces to `AbstractBase` (an abstract class). The instance shape
@@ -329,7 +327,6 @@ fn call_resolution_abstract_constructor_instance_type_projects_class_shape() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "port gap: the flow lane does not model `new` construction calls (the classifier's UnmodeledCall arm — corpus debts D10/D11) nor the `this` receiver in class method bodies (`this` is not modeled — the receiver capability is separate work, see flow_return_substrate.rs). The demand path: wrapper body -> `instance.run()` frame-rooted member call -> the local `instance` binding's `new` initializer is unmodeled, so the member projection misses and the position fails closed with `unmodeledPosition`. tsgo pins `string`."]
 fn call_resolution_class_this_member_call_returns_declared_return() {
     // TS7 contract: `class ThisMemberCaller { helper(): string; run() { return
     // this.helper() } }`. `run` carries no return annotation, so its return is
