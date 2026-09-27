@@ -889,6 +889,18 @@ Recorded plainly so no reader mistakes absence for a pass:
   the same chain reads in 85 ms
   (`module_receiver_chains_10000_deep_read_on_production_stacks`).
 
+* **Call expressions are found from an explicit stack.** The function
+  index's call walker (`for_each_call_expression_root`) recursed through
+  its statement, expression, argument and assignment-target walks, one
+  native level per nested node, so a receiver chain 10,000 links long
+  (`return b.m().m()…`) overflowed the declaration-lowering thread. It
+  now walks one `Work` per node from an explicit stack, children pushed
+  last first and a call fired when it is reached, in the recursive
+  walk's pre-order. `deep_input_tests.rs` →
+  `receiver_chains_10000_deep_return_on_production_stacks` returns what
+  three links return on a 1 MiB caller; with the recursive walker
+  restored it overflows.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the

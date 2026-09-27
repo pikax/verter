@@ -1925,379 +1925,379 @@ fn for_each_call_expression_root<'a>(
     root: CallExpressionWalkRoot<'a>,
     mut fire: impl FnMut(&'a CallExpression<'a>),
 ) {
-    fn walk_statements<'a>(
-        statements: &'a [Statement<'a>],
-        fire: &mut impl FnMut(&'a CallExpression<'a>),
-    ) {
-        for stmt in statements {
-            walk_statement(stmt, fire);
-        }
+    // The syntax walks from an explicit stack in the same pre-order a
+    // recursive walk takes (each node's children pushed last first, a call
+    // fired when it is reached): a call nested in a callee, an argument or
+    // a receiver (`a.m().m()`) costs no native level.
+    enum Work<'a> {
+        Statement(&'a Statement<'a>),
+        Expression(&'a Expression<'a>),
+        Argument(&'a oxc_ast::ast::Argument<'a>),
+        ForInit(&'a oxc_ast::ast::ForStatementInit<'a>),
+        Simple(&'a oxc_ast::ast::SimpleAssignmentTarget<'a>),
+        Target(&'a oxc_ast::ast::AssignmentTarget<'a>),
+        MaybeDefault(&'a oxc_ast::ast::AssignmentTargetMaybeDefault<'a>),
     }
-
-    fn walk_statement<'a>(stmt: &'a Statement<'a>, fire: &mut impl FnMut(&'a CallExpression<'a>)) {
-        match stmt {
-            Statement::ExpressionStatement(expr) => walk_expr(&expr.expression, fire),
-            Statement::BlockStatement(block) => walk_statements(&block.body, fire),
-            Statement::IfStatement(if_stmt) => {
-                walk_expr(&if_stmt.test, fire);
-                walk_statement(&if_stmt.consequent, fire);
-                if let Some(alternate) = &if_stmt.alternate {
-                    walk_statement(alternate, fire);
-                }
-            }
-            Statement::ForStatement(for_stmt) => {
-                if let Some(init) = &for_stmt.init {
-                    walk_for_init(init, fire);
-                }
-                if let Some(test) = &for_stmt.test {
-                    walk_expr(test, fire);
-                }
-                if let Some(update) = &for_stmt.update {
-                    walk_expr(update, fire);
-                }
-                walk_statement(&for_stmt.body, fire);
-            }
-            Statement::ForInStatement(for_stmt) => {
-                walk_expr(&for_stmt.right, fire);
-                walk_statement(&for_stmt.body, fire);
-            }
-            Statement::ForOfStatement(for_stmt) => {
-                walk_expr(&for_stmt.right, fire);
-                walk_statement(&for_stmt.body, fire);
-            }
-            Statement::WhileStatement(while_stmt) => {
-                walk_expr(&while_stmt.test, fire);
-                walk_statement(&while_stmt.body, fire);
-            }
-            Statement::DoWhileStatement(do_stmt) => {
-                walk_statement(&do_stmt.body, fire);
-                walk_expr(&do_stmt.test, fire);
-            }
-            Statement::ReturnStatement(ret) => {
-                if let Some(argument) = &ret.argument {
-                    walk_expr(argument, fire);
-                }
-            }
-            Statement::SwitchStatement(switch) => {
-                walk_expr(&switch.discriminant, fire);
-                for case in &switch.cases {
-                    if let Some(test) = &case.test {
-                        walk_expr(test, fire);
+    let mut work: Vec<Work<'a>> = match root {
+        CallExpressionWalkRoot::Statements(statements) => {
+            statements.iter().rev().map(Work::Statement).collect()
+        }
+        CallExpressionWalkRoot::Expression(expression) => vec![Work::Expression(expression)],
+    };
+    let mut c: Vec<Work<'a>> = Vec::new();
+    while let Some(item) = work.pop() {
+        match item {
+            Work::Statement(stmt) => {
+                match stmt {
+                    Statement::ExpressionStatement(expr) => {
+                        c.push(Work::Expression(&expr.expression))
                     }
-                    walk_statements(&case.consequent, fire);
-                }
-            }
-            Statement::TryStatement(try_stmt) => {
-                walk_statements(&try_stmt.block.body, fire);
-                if let Some(handler) = &try_stmt.handler {
-                    walk_statements(&handler.body.body, fire);
-                }
-                if let Some(finalizer) = &try_stmt.finalizer {
-                    walk_statements(&finalizer.body, fire);
-                }
-            }
-            Statement::LabeledStatement(labeled) => walk_statement(&labeled.body, fire),
-            Statement::ThrowStatement(throw) => walk_expr(&throw.argument, fire),
-            Statement::VariableDeclaration(decl) => {
-                for declarator in &decl.declarations {
-                    if let Some(init) = &declarator.init {
-                        walk_expr(init, fire);
+                    Statement::BlockStatement(block) => {
+                        c.extend(block.body.iter().map(Work::Statement))
                     }
+                    Statement::IfStatement(if_stmt) => {
+                        c.push(Work::Expression(&if_stmt.test));
+                        c.push(Work::Statement(&if_stmt.consequent));
+                        if let Some(alternate) = &if_stmt.alternate {
+                            c.push(Work::Statement(alternate));
+                        }
+                    }
+                    Statement::ForStatement(for_stmt) => {
+                        if let Some(init) = &for_stmt.init {
+                            c.push(Work::ForInit(init));
+                        }
+                        if let Some(test) = &for_stmt.test {
+                            c.push(Work::Expression(test));
+                        }
+                        if let Some(update) = &for_stmt.update {
+                            c.push(Work::Expression(update));
+                        }
+                        c.push(Work::Statement(&for_stmt.body));
+                    }
+                    Statement::ForInStatement(for_stmt) => {
+                        c.push(Work::Expression(&for_stmt.right));
+                        c.push(Work::Statement(&for_stmt.body));
+                    }
+                    Statement::ForOfStatement(for_stmt) => {
+                        c.push(Work::Expression(&for_stmt.right));
+                        c.push(Work::Statement(&for_stmt.body));
+                    }
+                    Statement::WhileStatement(while_stmt) => {
+                        c.push(Work::Expression(&while_stmt.test));
+                        c.push(Work::Statement(&while_stmt.body));
+                    }
+                    Statement::DoWhileStatement(do_stmt) => {
+                        c.push(Work::Statement(&do_stmt.body));
+                        c.push(Work::Expression(&do_stmt.test));
+                    }
+                    Statement::ReturnStatement(ret) => {
+                        if let Some(argument) = &ret.argument {
+                            c.push(Work::Expression(argument));
+                        }
+                    }
+                    Statement::SwitchStatement(switch) => {
+                        c.push(Work::Expression(&switch.discriminant));
+                        for case in &switch.cases {
+                            if let Some(test) = &case.test {
+                                c.push(Work::Expression(test));
+                            }
+                            c.extend(case.consequent.iter().map(Work::Statement));
+                        }
+                    }
+                    Statement::TryStatement(try_stmt) => {
+                        c.extend(try_stmt.block.body.iter().map(Work::Statement));
+                        if let Some(handler) = &try_stmt.handler {
+                            c.extend(handler.body.body.iter().map(Work::Statement));
+                        }
+                        if let Some(finalizer) = &try_stmt.finalizer {
+                            c.extend(finalizer.body.iter().map(Work::Statement));
+                        }
+                    }
+                    Statement::LabeledStatement(labeled) => c.push(Work::Statement(&labeled.body)),
+                    Statement::ThrowStatement(throw) => c.push(Work::Expression(&throw.argument)),
+                    Statement::VariableDeclaration(decl) => {
+                        for declarator in &decl.declarations {
+                            if let Some(init) = &declarator.init {
+                                c.push(Work::Expression(init));
+                            }
+                        }
+                    }
+                    Statement::ExportDeclaration(export) => {
+                        if let oxc_ast::ast::Declaration::VariableDeclaration(decl) =
+                            &export.declaration
+                        {
+                            for declarator in &decl.declarations {
+                                if let Some(init) = &declarator.init {
+                                    c.push(Work::Expression(init));
+                                }
+                            }
+                        }
+                    }
+                    Statement::ExportDefaultDeclaration(export) => {
+                        if let Some(expression) = export.declaration.as_expression() {
+                            c.push(Work::Expression(expression));
+                        }
+                    }
+                    // Nested frames (function / class bodies) and type-space
+                    // declarations carry no call sites of THIS frame.
+                    _ => {}
                 }
             }
-            Statement::ExportDeclaration(export) => {
-                if let oxc_ast::ast::Declaration::VariableDeclaration(decl) = &export.declaration {
+            Work::ForInit(init) => match init {
+                oxc_ast::ast::ForStatementInit::VariableDeclaration(decl) => {
                     for declarator in &decl.declarations {
                         if let Some(init) = &declarator.init {
-                            walk_expr(init, fire);
+                            c.push(Work::Expression(init));
                         }
                     }
                 }
-            }
-            Statement::ExportDefaultDeclaration(export) => {
-                if let Some(expression) = export.declaration.as_expression() {
-                    walk_expr(expression, fire);
-                }
-            }
-            // Nested frames (function / class bodies) and type-space
-            // declarations carry no call sites of THIS frame.
-            _ => {}
-        }
-    }
-
-    fn walk_for_init<'a>(
-        init: &'a oxc_ast::ast::ForStatementInit<'a>,
-        fire: &mut impl FnMut(&'a CallExpression<'a>),
-    ) {
-        match init {
-            oxc_ast::ast::ForStatementInit::VariableDeclaration(decl) => {
-                for declarator in &decl.declarations {
-                    if let Some(init) = &declarator.init {
-                        walk_expr(init, fire);
-                    }
-                }
-            }
-            other => walk_expr(other.as_expression().unwrap(), fire),
-        }
-    }
-
-    fn walk_simple_assignment_target<'a>(
-        target: &'a oxc_ast::ast::SimpleAssignmentTarget<'a>,
-        fire: &mut impl FnMut(&'a CallExpression<'a>),
-    ) {
-        match target {
-            oxc_ast::ast::SimpleAssignmentTarget::ComputedMemberExpression(member) => {
-                walk_expr(&member.object, fire);
-                walk_expr(&member.expression, fire);
-            }
-            oxc_ast::ast::SimpleAssignmentTarget::StaticMemberExpression(member) => {
-                walk_expr(&member.object, fire);
-            }
-            oxc_ast::ast::SimpleAssignmentTarget::PrivateFieldExpression(member) => {
-                walk_expr(&member.object, fire);
-            }
-            oxc_ast::ast::SimpleAssignmentTarget::TSAsExpression(ts) => {
-                walk_expr(&ts.expression, fire);
-            }
-            oxc_ast::ast::SimpleAssignmentTarget::TSSatisfiesExpression(ts) => {
-                walk_expr(&ts.expression, fire);
-            }
-            oxc_ast::ast::SimpleAssignmentTarget::TSNonNullExpression(ts) => {
-                walk_expr(&ts.expression, fire);
-            }
-            oxc_ast::ast::SimpleAssignmentTarget::TSTypeAssertion(ts) => {
-                walk_expr(&ts.expression, fire);
-            }
-            oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(_) => {}
-        }
-    }
-
-    fn walk_assignment_target<'a>(
-        target: &'a oxc_ast::ast::AssignmentTarget<'a>,
-        fire: &mut impl FnMut(&'a CallExpression<'a>),
-    ) {
-        match target {
-            oxc_ast::ast::AssignmentTarget::TSAsExpression(ts) => {
-                walk_expr(&ts.expression, fire);
-            }
-            oxc_ast::ast::AssignmentTarget::TSSatisfiesExpression(ts) => {
-                walk_expr(&ts.expression, fire);
-            }
-            oxc_ast::ast::AssignmentTarget::TSNonNullExpression(ts) => {
-                walk_expr(&ts.expression, fire);
-            }
-            oxc_ast::ast::AssignmentTarget::TSTypeAssertion(ts) => {
-                walk_expr(&ts.expression, fire);
-            }
-            oxc_ast::ast::AssignmentTarget::ComputedMemberExpression(member) => {
-                walk_expr(&member.object, fire);
-                walk_expr(&member.expression, fire);
-            }
-            oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) => {
-                walk_expr(&member.object, fire);
-            }
-            oxc_ast::ast::AssignmentTarget::PrivateFieldExpression(member) => {
-                walk_expr(&member.object, fire);
-            }
-            oxc_ast::ast::AssignmentTarget::ArrayAssignmentTarget(array) => {
-                for element in array.elements.iter().flatten() {
-                    walk_assignment_target_maybe_default(element, fire);
-                }
-                if let Some(rest) = &array.rest {
-                    walk_assignment_target(&rest.target, fire);
-                }
-            }
-            oxc_ast::ast::AssignmentTarget::ObjectAssignmentTarget(object) => {
-                for property in &object.properties {
-                    match property {
-                        oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(
-                            identifier,
-                        ) => {
-                            if let Some(init) = &identifier.init {
-                                walk_expr(init, fire);
-                            }
-                        }
-                        oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(
-                            property,
-                        ) => {
-                            walk_assignment_target_maybe_default(&property.binding, fire);
-                        }
-                    }
-                }
-                if let Some(rest) = &object.rest {
-                    walk_assignment_target(&rest.target, fire);
-                }
-            }
-            oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(_) => {}
-        }
-    }
-
-    fn walk_assignment_target_maybe_default<'a>(
-        target: &'a oxc_ast::ast::AssignmentTargetMaybeDefault<'a>,
-        fire: &mut impl FnMut(&'a CallExpression<'a>),
-    ) {
-        match target {
-            oxc_ast::ast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(
-                with_default,
-            ) => {
-                walk_assignment_target(&with_default.binding, fire);
-                walk_expr(&with_default.init, fire);
-            }
-            other => walk_assignment_target(other.to_assignment_target(), fire),
-        }
-    }
-
-    fn walk_argument<'a>(
-        argument: &'a oxc_ast::ast::Argument<'a>,
-        fire: &mut impl FnMut(&'a CallExpression<'a>),
-    ) {
-        match argument {
-            oxc_ast::ast::Argument::SpreadElement(spread) => walk_expr(&spread.argument, fire),
-            other => walk_expr(other.to_expression(), fire),
-        }
-    }
-
-    fn walk_expr<'a>(expr: &'a Expression<'a>, fire: &mut impl FnMut(&'a CallExpression<'a>)) {
-        match expr {
-            Expression::CallExpression(call) => {
-                fire(call);
-                walk_expr(&call.callee, fire);
-                for argument in &call.arguments {
-                    walk_argument(argument, fire);
-                }
-            }
-            Expression::NewExpression(new_expr) => {
-                walk_expr(&new_expr.callee, fire);
-                for argument in &new_expr.arguments {
-                    walk_argument(argument, fire);
-                }
-            }
-            Expression::ArrayExpression(array) => {
-                for element in &array.elements {
-                    match element {
-                        oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
-                            walk_expr(&spread.argument, fire);
-                        }
-                        oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
-                        other => walk_expr(other.to_expression(), fire),
-                    }
-                }
-            }
-            Expression::ObjectExpression(object) => {
-                for property in &object.properties {
-                    match property {
-                        ObjectPropertyKind::ObjectProperty(property) => {
-                            if let Some(key) = property.key.as_expression() {
-                                walk_expr(key, fire);
-                            }
-                            walk_expr(&property.value, fire);
-                        }
-                        ObjectPropertyKind::SpreadProperty(spread) => {
-                            walk_expr(&spread.argument, fire);
-                        }
-                    }
-                }
-            }
-            Expression::AssignmentExpression(assignment) => {
-                walk_assignment_target(&assignment.left, fire);
-                walk_expr(&assignment.right, fire);
-            }
-            Expression::AwaitExpression(await_expr) => walk_expr(&await_expr.argument, fire),
-            Expression::UnaryExpression(unary) => walk_expr(&unary.argument, fire),
-            Expression::UpdateExpression(update) => {
-                walk_simple_assignment_target(&update.argument, fire);
-            }
-            Expression::BinaryExpression(binary) => {
-                walk_expr(&binary.left, fire);
-                walk_expr(&binary.right, fire);
-            }
-            Expression::LogicalExpression(logical) => {
-                walk_expr(&logical.left, fire);
-                walk_expr(&logical.right, fire);
-            }
-            Expression::ConditionalExpression(conditional) => {
-                walk_expr(&conditional.test, fire);
-                walk_expr(&conditional.consequent, fire);
-                walk_expr(&conditional.alternate, fire);
-            }
-            Expression::ChainExpression(chain) => match &chain.expression {
-                oxc_ast::ast::ChainElement::CallExpression(call) => {
-                    fire(call);
-                    walk_expr(&call.callee, fire);
-                    for argument in &call.arguments {
-                        walk_argument(argument, fire);
-                    }
-                }
-                oxc_ast::ast::ChainElement::TSNonNullExpression(ts) => {
-                    walk_expr(&ts.expression, fire);
-                }
-                oxc_ast::ast::ChainElement::ComputedMemberExpression(member) => {
-                    walk_expr(&member.object, fire);
-                    walk_expr(&member.expression, fire);
-                }
-                oxc_ast::ast::ChainElement::StaticMemberExpression(member) => {
-                    walk_expr(&member.object, fire);
-                }
-                oxc_ast::ast::ChainElement::PrivateFieldExpression(member) => {
-                    walk_expr(&member.object, fire);
-                }
+                other => c.push(Work::Expression(other.as_expression().unwrap())),
             },
-            Expression::ParenthesizedExpression(paren) => walk_expr(&paren.expression, fire),
-            Expression::SequenceExpression(sequence) => {
-                for expression in &sequence.expressions {
-                    walk_expr(expression, fire);
+            Work::Simple(target) => match target {
+                oxc_ast::ast::SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+                    c.push(Work::Expression(&member.object));
+                    c.push(Work::Expression(&member.expression));
+                }
+                oxc_ast::ast::SimpleAssignmentTarget::StaticMemberExpression(member) => {
+                    c.push(Work::Expression(&member.object));
+                }
+                oxc_ast::ast::SimpleAssignmentTarget::PrivateFieldExpression(member) => {
+                    c.push(Work::Expression(&member.object));
+                }
+                oxc_ast::ast::SimpleAssignmentTarget::TSAsExpression(ts) => {
+                    c.push(Work::Expression(&ts.expression));
+                }
+                oxc_ast::ast::SimpleAssignmentTarget::TSSatisfiesExpression(ts) => {
+                    c.push(Work::Expression(&ts.expression));
+                }
+                oxc_ast::ast::SimpleAssignmentTarget::TSNonNullExpression(ts) => {
+                    c.push(Work::Expression(&ts.expression));
+                }
+                oxc_ast::ast::SimpleAssignmentTarget::TSTypeAssertion(ts) => {
+                    c.push(Work::Expression(&ts.expression));
+                }
+                oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(_) => {}
+            },
+            Work::Target(target) => match target {
+                oxc_ast::ast::AssignmentTarget::TSAsExpression(ts) => {
+                    c.push(Work::Expression(&ts.expression));
+                }
+                oxc_ast::ast::AssignmentTarget::TSSatisfiesExpression(ts) => {
+                    c.push(Work::Expression(&ts.expression));
+                }
+                oxc_ast::ast::AssignmentTarget::TSNonNullExpression(ts) => {
+                    c.push(Work::Expression(&ts.expression));
+                }
+                oxc_ast::ast::AssignmentTarget::TSTypeAssertion(ts) => {
+                    c.push(Work::Expression(&ts.expression));
+                }
+                oxc_ast::ast::AssignmentTarget::ComputedMemberExpression(member) => {
+                    c.push(Work::Expression(&member.object));
+                    c.push(Work::Expression(&member.expression));
+                }
+                oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) => {
+                    c.push(Work::Expression(&member.object));
+                }
+                oxc_ast::ast::AssignmentTarget::PrivateFieldExpression(member) => {
+                    c.push(Work::Expression(&member.object));
+                }
+                oxc_ast::ast::AssignmentTarget::ArrayAssignmentTarget(array) => {
+                    for element in array.elements.iter().flatten() {
+                        c.push(Work::MaybeDefault(element));
+                    }
+                    if let Some(rest) = &array.rest {
+                        c.push(Work::Target(&rest.target));
+                    }
+                }
+                oxc_ast::ast::AssignmentTarget::ObjectAssignmentTarget(object) => {
+                    for property in &object.properties {
+                        match property {
+                                oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(
+                                    identifier,
+                                ) => {
+                                    if let Some(init) = &identifier.init {
+                                        c.push(Work::Expression(init));
+                                    }
+                                }
+                                oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(
+                                    property,
+                                ) => {
+                                    c.push(Work::MaybeDefault(&property.binding));
+                                }
+                            }
+                    }
+                    if let Some(rest) = &object.rest {
+                        c.push(Work::Target(&rest.target));
+                    }
+                }
+                oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(_) => {}
+            },
+            Work::MaybeDefault(target) => match target {
+                oxc_ast::ast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(
+                    with_default,
+                ) => {
+                    c.push(Work::Target(&with_default.binding));
+                    c.push(Work::Expression(&with_default.init));
+                }
+                other => c.push(Work::Target(other.to_assignment_target())),
+            },
+            Work::Argument(argument) => match argument {
+                oxc_ast::ast::Argument::SpreadElement(spread) => {
+                    c.push(Work::Expression(&spread.argument))
+                }
+                other => c.push(Work::Expression(other.to_expression())),
+            },
+            Work::Expression(expr) => {
+                match expr {
+                    Expression::CallExpression(call) => {
+                        fire(call);
+                        c.push(Work::Expression(&call.callee));
+                        for argument in &call.arguments {
+                            c.push(Work::Argument(argument));
+                        }
+                    }
+                    Expression::NewExpression(new_expr) => {
+                        c.push(Work::Expression(&new_expr.callee));
+                        for argument in &new_expr.arguments {
+                            c.push(Work::Argument(argument));
+                        }
+                    }
+                    Expression::ArrayExpression(array) => {
+                        for element in &array.elements {
+                            match element {
+                                oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
+                                    c.push(Work::Expression(&spread.argument));
+                                }
+                                oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
+                                other => c.push(Work::Expression(other.to_expression())),
+                            }
+                        }
+                    }
+                    Expression::ObjectExpression(object) => {
+                        for property in &object.properties {
+                            match property {
+                                ObjectPropertyKind::ObjectProperty(property) => {
+                                    if let Some(key) = property.key.as_expression() {
+                                        c.push(Work::Expression(key));
+                                    }
+                                    c.push(Work::Expression(&property.value));
+                                }
+                                ObjectPropertyKind::SpreadProperty(spread) => {
+                                    c.push(Work::Expression(&spread.argument));
+                                }
+                            }
+                        }
+                    }
+                    Expression::AssignmentExpression(assignment) => {
+                        c.push(Work::Target(&assignment.left));
+                        c.push(Work::Expression(&assignment.right));
+                    }
+                    Expression::AwaitExpression(await_expr) => {
+                        c.push(Work::Expression(&await_expr.argument))
+                    }
+                    Expression::UnaryExpression(unary) => c.push(Work::Expression(&unary.argument)),
+                    Expression::UpdateExpression(update) => {
+                        c.push(Work::Simple(&update.argument));
+                    }
+                    Expression::BinaryExpression(binary) => {
+                        c.push(Work::Expression(&binary.left));
+                        c.push(Work::Expression(&binary.right));
+                    }
+                    Expression::LogicalExpression(logical) => {
+                        c.push(Work::Expression(&logical.left));
+                        c.push(Work::Expression(&logical.right));
+                    }
+                    Expression::ConditionalExpression(conditional) => {
+                        c.push(Work::Expression(&conditional.test));
+                        c.push(Work::Expression(&conditional.consequent));
+                        c.push(Work::Expression(&conditional.alternate));
+                    }
+                    Expression::ChainExpression(chain) => match &chain.expression {
+                        oxc_ast::ast::ChainElement::CallExpression(call) => {
+                            fire(call);
+                            c.push(Work::Expression(&call.callee));
+                            for argument in &call.arguments {
+                                c.push(Work::Argument(argument));
+                            }
+                        }
+                        oxc_ast::ast::ChainElement::TSNonNullExpression(ts) => {
+                            c.push(Work::Expression(&ts.expression));
+                        }
+                        oxc_ast::ast::ChainElement::ComputedMemberExpression(member) => {
+                            c.push(Work::Expression(&member.object));
+                            c.push(Work::Expression(&member.expression));
+                        }
+                        oxc_ast::ast::ChainElement::StaticMemberExpression(member) => {
+                            c.push(Work::Expression(&member.object));
+                        }
+                        oxc_ast::ast::ChainElement::PrivateFieldExpression(member) => {
+                            c.push(Work::Expression(&member.object));
+                        }
+                    },
+                    Expression::ParenthesizedExpression(paren) => {
+                        c.push(Work::Expression(&paren.expression))
+                    }
+                    Expression::SequenceExpression(sequence) => {
+                        for expression in &sequence.expressions {
+                            c.push(Work::Expression(expression));
+                        }
+                    }
+                    Expression::TaggedTemplateExpression(tagged) => {
+                        c.push(Work::Expression(&tagged.tag));
+                        for expression in &tagged.quasi.expressions {
+                            c.push(Work::Expression(expression));
+                        }
+                    }
+                    Expression::TemplateLiteral(template) => {
+                        for expression in &template.expressions {
+                            c.push(Work::Expression(expression));
+                        }
+                    }
+                    Expression::YieldExpression(yield_expr) => {
+                        if let Some(argument) = &yield_expr.argument {
+                            c.push(Work::Expression(argument));
+                        }
+                    }
+                    Expression::PrivateInExpression(private_in) => {
+                        c.push(Work::Expression(&private_in.right));
+                    }
+                    Expression::ComputedMemberExpression(member) => {
+                        c.push(Work::Expression(&member.object));
+                        c.push(Work::Expression(&member.expression));
+                    }
+                    Expression::StaticMemberExpression(member) => {
+                        c.push(Work::Expression(&member.object))
+                    }
+                    Expression::PrivateFieldExpression(member) => {
+                        c.push(Work::Expression(&member.object))
+                    }
+                    Expression::ImportExpression(import) => {
+                        c.push(Work::Expression(&import.source));
+                        if let Some(options) = &import.options {
+                            c.push(Work::Expression(options));
+                        }
+                    }
+                    Expression::TSAsExpression(ts) => c.push(Work::Expression(&ts.expression)),
+                    Expression::TSSatisfiesExpression(ts) => {
+                        c.push(Work::Expression(&ts.expression))
+                    }
+                    Expression::TSTypeAssertion(ts) => c.push(Work::Expression(&ts.expression)),
+                    Expression::TSNonNullExpression(ts) => c.push(Work::Expression(&ts.expression)),
+                    Expression::TSInstantiationExpression(ts) => {
+                        c.push(Work::Expression(&ts.expression))
+                    }
+                    Expression::V8IntrinsicExpression(intrinsic) => {
+                        for argument in &intrinsic.arguments {
+                            c.push(Work::Argument(argument));
+                        }
+                    }
+                    // Nested frames (function / arrow / class bodies) and leaves
+                    // carry no call sites of THIS frame.
+                    _ => {}
                 }
             }
-            Expression::TaggedTemplateExpression(tagged) => {
-                walk_expr(&tagged.tag, fire);
-                for expression in &tagged.quasi.expressions {
-                    walk_expr(expression, fire);
-                }
-            }
-            Expression::TemplateLiteral(template) => {
-                for expression in &template.expressions {
-                    walk_expr(expression, fire);
-                }
-            }
-            Expression::YieldExpression(yield_expr) => {
-                if let Some(argument) = &yield_expr.argument {
-                    walk_expr(argument, fire);
-                }
-            }
-            Expression::PrivateInExpression(private_in) => {
-                walk_expr(&private_in.right, fire);
-            }
-            Expression::ComputedMemberExpression(member) => {
-                walk_expr(&member.object, fire);
-                walk_expr(&member.expression, fire);
-            }
-            Expression::StaticMemberExpression(member) => walk_expr(&member.object, fire),
-            Expression::PrivateFieldExpression(member) => walk_expr(&member.object, fire),
-            Expression::ImportExpression(import) => {
-                walk_expr(&import.source, fire);
-                if let Some(options) = &import.options {
-                    walk_expr(options, fire);
-                }
-            }
-            Expression::TSAsExpression(ts) => walk_expr(&ts.expression, fire),
-            Expression::TSSatisfiesExpression(ts) => walk_expr(&ts.expression, fire),
-            Expression::TSTypeAssertion(ts) => walk_expr(&ts.expression, fire),
-            Expression::TSNonNullExpression(ts) => walk_expr(&ts.expression, fire),
-            Expression::TSInstantiationExpression(ts) => walk_expr(&ts.expression, fire),
-            Expression::V8IntrinsicExpression(intrinsic) => {
-                for argument in &intrinsic.arguments {
-                    walk_argument(argument, fire);
-                }
-            }
-            // Nested frames (function / arrow / class bodies) and leaves
-            // carry no call sites of THIS frame.
-            _ => {}
         }
-    }
-
-    match root {
-        CallExpressionWalkRoot::Statements(statements) => walk_statements(statements, &mut fire),
-        CallExpressionWalkRoot::Expression(expression) => walk_expr(expression, &mut fire),
+        work.extend(c.drain(..).rev());
     }
 }
 
