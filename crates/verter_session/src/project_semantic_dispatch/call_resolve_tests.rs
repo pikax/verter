@@ -4511,3 +4511,121 @@ fn call_utility_and_flow_consumers_read_one_signature_list() {
         }
     }
 }
+
+/// A generic call whose declared return closes an operator on
+/// instantiation (`<T>(o: T) => (keyof T)[]` over `{ data: string }`)
+/// evaluates that operator inside its own build. When the evaluation ends
+/// partial — a trip inside it, injected here on the work rail — the call
+/// keeps the unevaluated operator, and its build must then be partial and
+/// never admitted: the kept operator is not the answer the complete
+/// evaluation gives. Without the fold the call admitted
+/// `(keyof { data: string })[]` as a warm value. The same call with the
+/// evaluation completing answers `"data"[]` and warms.
+#[test]
+fn a_partial_closed_operator_leaves_the_enclosing_call_partial_and_cold() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = dispatch.graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let data_object = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(
+                vec![crate::semantic_query::SurfaceMember {
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                    key: crate::semantic_query::AuthoredPropertyKey::string("data"),
+                    value: string,
+                    optional: false,
+                    readonly: false,
+                    method_kind: None,
+                    has_implementation_body: false,
+                    visibility: verter_type_expr::MemberVisibility::Public,
+                    spans: Default::default(),
+                    declaration_origin: None,
+                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                }]
+                .into_boxed_slice(),
+            ),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ));
+    let t = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("KeysT"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let keys_of_t = graph.intern_node(SemanticNodeData::KeyOf { base: t });
+    let ret = graph.intern_node(SemanticNodeData::Array {
+        element: keys_of_t,
+        readonly: false,
+    });
+    let call_of = |name: &str| {
+        let sig = signature(
+            &dispatch,
+            name,
+            0,
+            SignatureKind::Call,
+            vec![FunctionParam::synthetic(None, t, false, false)],
+            vec![TypeParamDecl {
+                name: Arc::from("T"),
+                param: t,
+                constraint: None,
+                default: None,
+                is_const: false,
+            }],
+            ret,
+        );
+        let callee = callable(&dispatch, vec![sig], Vec::new());
+        call_key(
+            &dispatch,
+            callee,
+            CallKind::Call,
+            None,
+            vec![eager(data_object)],
+        )
+    };
+    let element_of = |step: super::call_resolve::ResolveCallStep| {
+        let ResolvedCallResult::Selected { return_type, .. } = selected(step) else {
+            panic!("the generic candidate selects")
+        };
+        match graph.node_data(return_type).as_deref() {
+            Some(SemanticNodeData::Array { element, .. }) => graph.node_data(*element),
+            other => panic!("an array return, got {other:?}"),
+        }
+    };
+    let cached = |key: &ResolveCallKey| {
+        graph.slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(key.clone())))
+    };
+
+    let tripped = call_of("keysTripped");
+    {
+        let _partial = super::evaluate::force_partial_closed_operator_evaluation_for_tests();
+        let _completeness = crate::request_context::ColdComputeCompletenessScope::enter();
+        let element = element_of(dispatch.execute_resolve_call(tripped.clone()));
+        assert!(
+            matches!(element.as_deref(), Some(SemanticNodeData::KeyOf { .. })),
+            "the call keeps the operator it could not evaluate, got {element:?}"
+        );
+        assert!(
+            crate::request_context::current_cold_compute_completeness().is_partial(),
+            "the kept operator makes the enclosing compute partial"
+        );
+    }
+    assert_eq!(cached(&tripped), 0, "a partial call is never admitted");
+
+    // Control: the same call with the evaluation completing answers the
+    // key union and warms.
+    let control = call_of("keysComplete");
+    let element = element_of(dispatch.execute_resolve_call(control.clone()));
+    assert!(
+        !matches!(element.as_deref(), Some(SemanticNodeData::KeyOf { .. })),
+        "the complete evaluation closes the operator, got {element:?}"
+    );
+    assert_eq!(cached(&control), 1, "the complete call warms");
+}

@@ -168,6 +168,14 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP21-dynamic-name",
     "STP21-collision",
   ]),
+  STP32: Object.freeze([
+    "STP32-dynamic-correlated",
+    "STP32-async",
+    "STP32-recursive",
+    "STP32-global",
+    "STP32-namespace",
+    "STP32-missing",
+  ]),
   STS0: Object.freeze([
     "STS0-svelte-inventory",
     "STS0-svelte-abi",
@@ -197,4 +205,5 @@ export const STP18_MANDATORY_CASES = NODE_MANDATORY_CASES.STP18;
 export const STP19_MANDATORY_CASES = NODE_MANDATORY_CASES.STP19;
 export const STP20_MANDATORY_CASES = NODE_MANDATORY_CASES.STP20;
 export const STP21_MANDATORY_CASES = NODE_MANDATORY_CASES.STP21;
+export const STP32_MANDATORY_CASES = NODE_MANDATORY_CASES.STP32;
 export const STS0_MANDATORY_CASES = NODE_MANDATORY_CASES.STS0;

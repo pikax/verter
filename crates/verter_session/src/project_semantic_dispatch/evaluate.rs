@@ -219,15 +219,52 @@ impl EvaluateDeferredOutcome {
 
     /// The evaluated node of a complete evaluation, released as
     /// [`Self::into_active_query_build_node`] releases it; `None` for a
-    /// partial one, whose caller keeps the operand it asked about and
-    /// folds nothing.
+    /// partial one, whose caller keeps the operand it asked about. The
+    /// partial still folds into the enclosing build and the request: the
+    /// build that keeps the unevaluated operand is partial and never
+    /// admitted, whatever else its caller reads afterwards.
     pub(super) fn into_complete_active_query_build_node(
         self,
         dispatch: &ProjectSemanticDispatch<'_>,
     ) -> Option<SemanticNodeId> {
-        matches!(self.completeness, ResultCompleteness::Complete)
-            .then(|| self.into_active_query_build_node(dispatch))
+        #[cfg(test)]
+        let this = if FORCE_PARTIAL_CLOSED_EVALUATION.get() {
+            Self {
+                completeness: ResultCompleteness::partial(PartialReasonSet::PROJECTION_WORK_LIMIT),
+                ..self
+            }
+        } else {
+            self
+        };
+        #[cfg(not(test))]
+        let this = self;
+        match this.completeness {
+            ResultCompleteness::Complete => Some(this.into_active_query_build_node(dispatch)),
+            ResultCompleteness::Partial(reasons) => {
+                dispatch.fold_local_partial_completeness(reasons);
+                None
+            }
+        }
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static FORCE_PARTIAL_CLOSED_EVALUATION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Test-only: every closed-operator evaluation on this thread ends partial
+/// on the work rail, as a trip inside it does, while the guard lives.
+#[cfg(test)]
+pub(crate) fn force_partial_closed_operator_evaluation_for_tests() -> impl Drop {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCE_PARTIAL_CLOSED_EVALUATION.set(self.0);
+        }
+    }
+    Restore(FORCE_PARTIAL_CLOSED_EVALUATION.replace(true))
 }
 
 /// Heap-owned continuation for one deferred-operator evaluation entry. A

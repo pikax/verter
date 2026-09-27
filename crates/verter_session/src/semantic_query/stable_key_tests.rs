@@ -3,6 +3,9 @@
 
 use std::sync::Arc;
 
+use crate::project_semantic_dispatch::canonical_algebra::{
+    compare_structural, CanonicalEvidence, StructuralIdentity,
+};
 use crate::semantic_query::composite::{CompositeList, UnionKind};
 use crate::semantic_query::stable_key::{
     fingerprint_v1, sort_by_stable_key, stable_key_for_node, StableKey,
@@ -932,4 +935,149 @@ fn stable_key_encoder_formats_no_debug_text() {
             line.trim()
         );
     }
+}
+
+/// `import("<specifier>").G` written in `importer`.
+fn import_type_spelled(
+    graph: &SemanticGraphStore,
+    importer: &str,
+    specifier: &str,
+) -> SemanticNodeId {
+    import_type_at(graph, importer, specifier, [3u8; 16])
+}
+
+/// `import("<specifier>").G` written in `importer`, whose content is
+/// `whole_hash`: two hashes of one importer are two arena scopes of one
+/// importing unit.
+fn import_type_at(
+    graph: &SemanticGraphStore,
+    importer: &str,
+    specifier: &str,
+    whole_hash: [u8; 16],
+) -> SemanticNodeId {
+    graph.intern_node_with_scope(
+        SemanticNodeData::new_import_type(
+            Arc::from(specifier),
+            Arc::from([Arc::<str>::from("G")]),
+            Arc::from(Vec::new()),
+            false,
+        ),
+        crate::semantic_query::NodeScopeId::File {
+            canonical_id: Arc::from(importer),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash,
+            local_scope: None,
+        },
+    )
+}
+
+/// Two spellings of one module from one importer — `./a` and `../x/a`
+/// written in `/x/b.ts` both name `/x/a` — should key as one identity. The
+/// key of an unresolved carrier is its importing unit plus its authored
+/// specifier, so today the two key apart and converge only once
+/// demand-time resolution produces the declaration node.
+#[test]
+#[ignore = "import-type identity converges only after resolution; needs an indexing-time resolved-module producer"]
+fn two_spellings_of_one_module_key_alike() {
+    let graph = SemanticGraphStore::new();
+    let direct = import_type_spelled(&graph, "/x/b.ts", "./a");
+    let roundabout = import_type_spelled(&graph, "/x/b.ts", "../x/a");
+    assert!(
+        stable_key_for_node(&graph, direct) == stable_key_for_node(&graph, roundabout),
+        "`./a` and `../x/a` from `/x/b.ts` name one module and key alike"
+    );
+}
+
+/// One spelling written in two importing units can name two modules, so a
+/// union of the two unresolved carriers keeps both arms, directly and nested
+/// in a structure the comparator descends. Measured with tsc 7.0.2
+/// (`--declaration --emitDeclarationOnly`, every `strictNullChecks` x
+/// `noImplicitAny` setting): with `src/m.ts` exporting `G = { a: 1 }`,
+/// `src/lib/m.ts` exporting `G = { b: 2 }`, `src/a.ts` and `src/lib/b.ts`
+/// each exporting a value of `import("./m").G`, and `src/c.ts` exporting
+/// `u = Math.random() ? x : y`, the emitted type is
+/// `import("./m").G | import("./lib/m").G`.
+#[test]
+fn one_spelling_from_two_importers_keeps_two_union_arms() {
+    let graph = SemanticGraphStore::new();
+    let from_a = import_type_spelled(&graph, "/src/a.ts", "./m");
+    let from_lib = import_type_spelled(&graph, "/src/lib/b.ts", "./m");
+    assert_eq!(
+        reduced_union_arms(&graph, from_a, from_lib),
+        2,
+        "`import(\"./m\").G` from two importing units keeps two arms"
+    );
+    assert_eq!(
+        reduced_union_arms(
+            &graph,
+            array_of_node(&graph, from_a),
+            array_of_node(&graph, from_lib)
+        ),
+        2,
+        "`import(\"./m\").G[]` from two importing units keeps two arms"
+    );
+    assert_eq!(
+        structural_identity(&graph, from_a, from_lib),
+        StructuralIdentity::Distinct,
+        "the comparator tells the two importing units apart"
+    );
+}
+
+/// One spelling written in one importing unit is one module: two carriers
+/// of it that sit in two arena scopes of that unit (here, two content
+/// hashes) are one union arm, directly and nested, because the rest of the
+/// scope stays provenance.
+#[test]
+fn one_spelling_from_one_importer_is_one_union_arm() {
+    let graph = SemanticGraphStore::new();
+    let before = import_type_at(&graph, "/src/a.ts", "./m", [3u8; 16]);
+    let after = import_type_at(&graph, "/src/a.ts", "./m", [4u8; 16]);
+    assert_ne!(before, after, "premise: two arena scopes, two nodes");
+    assert_eq!(
+        reduced_union_arms(&graph, before, after),
+        1,
+        "`import(\"./m\").G` from one importing unit is one arm"
+    );
+    assert_eq!(
+        reduced_union_arms(
+            &graph,
+            array_of_node(&graph, before),
+            array_of_node(&graph, after)
+        ),
+        1,
+        "`import(\"./m\").G[]` from one importing unit is one arm"
+    );
+    assert_eq!(
+        structural_identity(&graph, before, after),
+        StructuralIdentity::Equal,
+        "the comparator reads only the importing unit of the scope"
+    );
+}
+
+fn array_of_node(graph: &SemanticGraphStore, element: SemanticNodeId) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::Array {
+        element,
+        readonly: false,
+    })
+}
+
+/// The union reducer's structural comparator verdict on `a` and `b`.
+fn structural_identity(
+    graph: &SemanticGraphStore,
+    a: SemanticNodeId,
+    b: SemanticNodeId,
+) -> StructuralIdentity {
+    let mut evidence = CanonicalEvidence::default();
+    let mut budget = u32::MAX;
+    compare_structural(graph, a, b, &mut evidence, &mut budget)
+}
+
+/// The arm count of the union reducer's answer over `a | b`.
+fn reduced_union_arms(graph: &SemanticGraphStore, a: SemanticNodeId, b: SemanticNodeId) -> usize {
+    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+        graph,
+        &[a, b],
+        crate::semantic_query::NullabilityPolicy::Strict,
+    );
+    union_arms(graph, union.node).len()
 }
