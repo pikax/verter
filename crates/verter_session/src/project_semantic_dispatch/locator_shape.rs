@@ -216,10 +216,33 @@ pub(crate) enum BinderSlot {
 /// One lexical binder frame of the locator-shape lowering: declared
 /// type-parameter / `infer` / mapped-binder names in scope at one nesting
 /// level, each mapped to its [`BinderSlot`].
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub(crate) struct LocatorBinderFrame {
     names: FxHashMap<Arc<str>, BinderSlot>,
     infer_declarations: FxHashMap<Arc<str>, SemanticNodeId>,
+}
+
+impl Clone for LocatorBinderFrame {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        BINDER_FRAME_CLONES.with(|clones| clones.set(clones.get() + 1));
+        Self {
+            names: self.names.clone(),
+            infer_declarations: self.infer_declarations.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The binder frames this thread's locator lowerings copied.
+    static BINDER_FRAME_CLONES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The binder frames this thread's locator lowerings copied so far.
+#[cfg(test)]
+pub(crate) fn binder_frame_clones_for_tests() -> u64 {
+    BINDER_FRAME_CLONES.with(std::cell::Cell::get)
 }
 
 impl LocatorBinderFrame {
@@ -244,6 +267,60 @@ impl LocatorBinderFrame {
 
     fn lookup_infer_declaration(&self, name: &str) -> Option<SemanticNodeId> {
         self.infer_declarations.get(name).copied()
+    }
+}
+
+/// A binder frame pushed on the frames a lowering entered with, over the
+/// ones pushed before it. Pushing a frame shares the chain below it, so a
+/// position nested `n` binder frames deep holds `n` links, never `n`
+/// copies of the frames around it.
+#[derive(Debug)]
+pub(crate) struct BinderLink {
+    frame: LocatorBinderFrame,
+    parent: Option<std::rc::Rc<BinderLink>>,
+}
+
+/// The binder frames in scope at one position, innermost last: the frames
+/// the lowering entered with, and the chain of frames pushed since.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BinderStack<'a> {
+    entry: &'a [LocatorBinderFrame],
+    pushed: Option<&'a std::rc::Rc<BinderLink>>,
+}
+
+impl<'a> BinderStack<'a> {
+    /// The frames a lowering enters with.
+    pub(crate) fn entry(frames: &'a [LocatorBinderFrame]) -> Self {
+        Self {
+            entry: frames,
+            pushed: None,
+        }
+    }
+
+    /// The frames in scope, innermost first.
+    fn innermost_first(self) -> impl Iterator<Item = &'a LocatorBinderFrame> {
+        std::iter::successors(self.pushed.map(|link| &**link), |link| {
+            link.parent.as_deref()
+        })
+        .map(|link| &link.frame)
+        .chain(self.entry.iter().rev())
+    }
+
+    /// `frame` pushed on this stack, as the link a stack over it borrows
+    /// ([`Self::over`]).
+    fn push(self, frame: LocatorBinderFrame) -> std::rc::Rc<BinderLink> {
+        std::rc::Rc::new(BinderLink {
+            frame,
+            parent: self.pushed.cloned(),
+        })
+    }
+
+    /// This stack's entry frames under the pushed chain `link`.
+    fn over(self, link: &'a std::rc::Rc<BinderLink>) -> Self {
+        Self {
+            entry: self.entry,
+            pushed: Some(link),
+        }
     }
 }
 
@@ -327,7 +404,7 @@ pub struct LocatorShapeCtx<'a> {
     scope: &'a NodeScopeId,
     /// Innermost-last stack of binder frames; lookup scans from the top
     /// (last) frame outward so an inner binder shadows an outer one.
-    binders: &'a [LocatorBinderFrame],
+    binders: BinderStack<'a>,
     /// The declaration's own bare-name → root-identity map (import /
     /// namespace-sibling aware) — the SAME fast path the reducing entry
     /// consults first. `None` when no prepared declaration exists for the
@@ -348,6 +425,21 @@ impl<'a> LocatorShapeCtx<'a> {
     pub(crate) fn new(
         scope: &'a NodeScopeId,
         binders: &'a [LocatorBinderFrame],
+        name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
+        scope_payload: Option<&'a DeclarationScopePayload>,
+    ) -> Self {
+        Self::on(
+            scope,
+            BinderStack::entry(binders),
+            name_resolution,
+            scope_payload,
+        )
+    }
+
+    /// [`Self::new`] over a binder stack a lowering has pushed on.
+    fn on(
+        scope: &'a NodeScopeId,
+        binders: BinderStack<'a>,
         name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
         scope_payload: Option<&'a DeclarationScopePayload>,
     ) -> Self {
@@ -375,7 +467,7 @@ impl<'a> LocatorShapeCtx<'a> {
 #[derive(Clone, Copy)]
 struct ShapeLowerCtx<'a> {
     scope: &'a NodeScopeId,
-    binders: &'a [LocatorBinderFrame],
+    binders: BinderStack<'a>,
     name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
     scope_payload: Option<&'a DeclarationScopePayload>,
     infer_binders: &'a crate::semantic_query::InferBinderFactory,
@@ -386,7 +478,7 @@ impl<'a> ShapeLowerCtx<'a> {
     /// Swap the binder stack (the surrounding scope + resolution inputs are
     /// preserved) — used when a function's own generics / a mapper binder /
     /// an `infer` frame extends the stack for a sub-position.
-    fn with_binders<'b>(&self, binders: &'b [LocatorBinderFrame]) -> ShapeLowerCtx<'b>
+    fn with_binders<'b>(&self, binders: BinderStack<'b>) -> ShapeLowerCtx<'b>
     where
         'a: 'b,
     {
@@ -405,15 +497,13 @@ impl<'a> ShapeLowerCtx<'a> {
     /// an outer one; a shadow-only entry shadows without being usable).
     fn lookup_binder(&self, name: &str) -> Option<BinderSlot> {
         self.binders
-            .iter()
-            .rev()
+            .innermost_first()
             .find_map(|frame| frame.lookup(name))
     }
 
     fn lookup_infer_declaration(&self, name: &str) -> Option<SemanticNodeId> {
         self.binders
-            .iter()
-            .rev()
+            .innermost_first()
             .find_map(|frame| frame.lookup_infer_declaration(name))
     }
 }
@@ -422,27 +512,36 @@ impl<'a> ShapeLowerCtx<'a> {
 mod binder;
 
 /// The binder stack one node of the explicit-stack locator lowering is
-/// lowered under: the stack the lowering entered with, or one a
-/// conditional extended for its `extends` clause or its true branch.
+/// lowered under: the stack the lowering entered with, extended by the
+/// frames a conditional, a signature or a mapped type pushed for the
+/// positions it declares binders over.
 #[derive(Clone)]
-enum LocatorBinders<'r> {
-    Entry(&'r [LocatorBinderFrame]),
-    Extended(std::rc::Rc<[LocatorBinderFrame]>),
+struct LocatorBinders<'r> {
+    entry: &'r [LocatorBinderFrame],
+    pushed: Option<std::rc::Rc<BinderLink>>,
 }
 
-impl LocatorBinders<'_> {
-    fn frames(&self) -> &[LocatorBinderFrame] {
-        match self {
-            LocatorBinders::Entry(frames) => frames,
-            LocatorBinders::Extended(frames) => frames,
+impl<'r> LocatorBinders<'r> {
+    fn of(stack: BinderStack<'r>) -> Self {
+        Self {
+            entry: stack.entry,
+            pushed: stack.pushed.cloned(),
         }
     }
 
-    /// This stack with `frame` innermost.
+    fn frames(&self) -> BinderStack<'_> {
+        BinderStack {
+            entry: self.entry,
+            pushed: self.pushed.as_ref(),
+        }
+    }
+
+    /// This stack with `frame` innermost (sharing the frames below it).
     fn extended(&self, frame: LocatorBinderFrame) -> Self {
-        let mut frames = self.frames().to_vec();
-        frames.push(frame);
-        LocatorBinders::Extended(std::rc::Rc::from(frames.into_boxed_slice()))
+        Self {
+            entry: self.entry,
+            pushed: Some(self.frames().push(frame)),
+        }
     }
 }
 
@@ -503,6 +602,13 @@ enum LocatorFrame<'e, 'r> {
         arguments: &'e [TypeExpr],
         binders: LocatorBinders<'r>,
         lowered: Vec<SemanticNodeId>,
+    },
+    /// A mapped type at `stage`, under the binder stack it was entered
+    /// with.
+    Mapped {
+        mapped: &'e TypeExpr,
+        binders: LocatorBinders<'r>,
+        stage: LocatorMappedStage<'r>,
     },
     /// A conditional at `stage`, under its own binder stack.
     Conditional {
@@ -604,6 +710,33 @@ enum LocatorConditionalStage {
     },
 }
 
+/// Which child of a mapped type is being lowered, with what the earlier
+/// ones produced.
+enum LocatorMappedStage<'r> {
+    /// Its source (a `keyof`'s operand when `keyof`).
+    Source {
+        parameter_node: SemanticNodeId,
+        keyof: bool,
+    },
+    /// Its value, under the body's binder stack.
+    Value(LocatorMappedHead<'r>),
+    /// Its `as` clause, under the body's binder stack.
+    NameType {
+        head: LocatorMappedHead<'r>,
+        value_expr: SemanticNodeId,
+    },
+}
+
+/// A mapped type's lowered source, the parameter it maps over and the
+/// binder stack its body lowers under.
+struct LocatorMappedHead<'r> {
+    parameter_node: SemanticNodeId,
+    source_node: SemanticNodeId,
+    key_space: SemanticNodeId,
+    over_type_variable: bool,
+    body: LocatorBinders<'r>,
+}
+
 /// The head half of a named reference's locator lowering.
 enum LocatorRefPlan {
     /// The node the reference is, with no carrier to intern.
@@ -662,15 +795,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// native level.
     fn lower_locator_shape_node(&self, expr: &TypeExpr, ctx: &ShapeLowerCtx<'_>) -> SemanticNodeId {
         let mut frames: Vec<LocatorFrame<'_, '_>> = Vec::new();
-        let (mut next, mut next_binders) = (expr, LocatorBinders::Entry(ctx.binders));
+        // The mapped types this drive digests for their binders' identity,
+        // each read once (a nest of mapped types reads each nested one
+        // once, not once per enclosing mapper).
+        let mut digests = crate::mapper_binder_registry::MappedDigests::default();
+        let (mut next, mut next_binders) = (expr, LocatorBinders::of(ctx.binders));
         loop {
-            let mut value = match self.locator_shape_step(ctx, next, next_binders, &mut frames) {
-                LocatorStep::Value(value) => value,
-                LocatorStep::Descend(child, binders) => {
-                    (next, next_binders) = (child, binders);
-                    continue;
-                }
-            };
+            let mut value =
+                match self.locator_shape_step(ctx, next, next_binders, &mut frames, &mut digests) {
+                    LocatorStep::Value(value) => value,
+                    LocatorStep::Descend(child, binders) => {
+                        (next, next_binders) = (child, binders);
+                        continue;
+                    }
+                };
             // Deliver the value to the node waiting for it, until one
             // needs another child or the outermost node completes.
             loop {
@@ -698,6 +836,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expr: &'e TypeExpr,
         binders: LocatorBinders<'r>,
         frames: &mut Vec<LocatorFrame<'e, 'r>>,
+        digests: &mut crate::mapper_binder_registry::MappedDigests<'e>,
     ) -> LocatorStep<'e, 'r> {
         let graph = self.graph();
         let ctx = entry.with_binders(binders.frames());
@@ -781,6 +920,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     stage: LocatorConditionalStage::Check,
                 });
                 LocatorStep::Descend(check, binders)
+            }
+            // A deferred mapped-type shell — the per-key value surface is
+            // NEVER enumerated here. Its source, value and `as` clause
+            // lower as children.
+            TypeExpr::Mapped { source, .. } => {
+                let parameter_node = self.locator_mapper_parameter(expr, ctx.scope, digests);
+                let (keyof, first) = match source.as_ref() {
+                    TypeExpr::KeyOf(inner) => (true, &**inner),
+                    source => (false, source),
+                };
+                frames.push(LocatorFrame::Mapped {
+                    mapped: expr,
+                    binders: binders.clone(),
+                    stage: LocatorMappedStage::Source {
+                        parameter_node,
+                        keyof,
+                    },
+                });
+                LocatorStep::Descend(first, binders)
             }
             // Interned DIRECTLY: an intrinsic names no declaration, so it
             // must never go through `resolve_locator_ref_head` (name
@@ -1196,6 +1354,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 binders,
                 stage,
             } => self.resume_locator_conditional(entry, conditional, binders, stage, value, frames),
+            LocatorFrame::Mapped {
+                mapped,
+                binders,
+                stage,
+            } => self.resume_locator_mapped(entry, mapped, binders, stage, value, frames),
             LocatorFrame::Object {
                 object,
                 next,
@@ -1445,6 +1608,220 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// The type parameter a mapped type maps over. The mapper binder
+    /// ordinal comes from the host-owned registry — the SAME identity
+    /// authority the reducing lowering entry consults — so two lowerings of
+    /// the same source mapper share one binder identity while distinct
+    /// mappers in one file stay distinct.
+    fn locator_mapper_parameter<'e>(
+        &self,
+        mapped: &'e TypeExpr,
+        scope: &NodeScopeId,
+        digests: &mut crate::mapper_binder_registry::MappedDigests<'e>,
+    ) -> SemanticNodeId {
+        let TypeExpr::Mapped {
+            parameter,
+            source,
+            value,
+            optional,
+            readonly,
+            name_type,
+            ..
+        } = mapped
+        else {
+            unreachable!("a mapped type's parameter")
+        };
+        let graph = self.graph();
+        let mapper_display_name: Arc<str> = Arc::from(parameter.as_str());
+        let mapper_decl = DeclIdentity::from_scope(
+            scope,
+            crate::mapper_binder_registry::mapper_binder_decl_name_in(
+                graph,
+                source,
+                value,
+                *optional,
+                *readonly,
+                name_type.as_ref(),
+                digests,
+            ),
+        );
+        let fingerprint = crate::mapper_binder_registry::MapperFingerprint::from_components_in(
+            source,
+            value,
+            *optional,
+            *readonly,
+            name_type.as_ref(),
+            digests,
+        );
+        let mapper_ordinal = self
+            .ctx
+            .project_type_store()
+            .mapper_binder_registry()
+            .ordinal_for(&mapper_decl.canonical_id, &mapper_display_name, fingerprint);
+        graph.intern_node_with_scope(
+            SemanticNodeData::TypeParam {
+                decl: mapper_decl,
+                param_index: mapper_ordinal,
+                constraint: None,
+                default: None,
+                display_name: mapper_display_name,
+            },
+            scope.clone(),
+        )
+    }
+
+    /// Resume a mapped type with its child's `value`: its source's, then
+    /// its value's under the body's binder stack, then its `as` clause's.
+    fn resume_locator_mapped<'e, 'r>(
+        &self,
+        entry: &ShapeLowerCtx<'r>,
+        mapped: &'e TypeExpr,
+        binders: LocatorBinders<'r>,
+        stage: LocatorMappedStage<'r>,
+        value: SemanticNodeId,
+        frames: &mut Vec<LocatorFrame<'e, 'r>>,
+    ) -> LocatorStep<'e, 'r> {
+        let scope = entry.scope;
+        let TypeExpr::Mapped {
+            parameter,
+            value: value_type,
+            optional,
+            readonly,
+            name_type,
+            ..
+        } = mapped
+        else {
+            unreachable!("a mapped type's frame")
+        };
+        let graph = self.graph();
+        let (head, value_expr) = match stage {
+            LocatorMappedStage::Source {
+                parameter_node,
+                keyof,
+            } => {
+                let (source_node, key_space, base_infer, over_type_variable) = if keyof {
+                    let inner_id = value;
+                    let key_space = graph.intern_node_with_scope(
+                        SemanticNodeData::KeyOf { base: inner_id },
+                        scope.clone(),
+                    );
+                    let base_infer = match graph.node_data(inner_id).as_deref() {
+                        Some(SemanticNodeData::Infer { name, binder }) => {
+                            Some((Arc::clone(name), binder.clone()))
+                        }
+                        _ => None,
+                    };
+                    let over_type_variable =
+                        crate::semantic_query::keyof_operand_is_type_variable(graph, inner_id);
+                    (inner_id, key_space, base_infer, over_type_variable)
+                } else {
+                    (value, value, None, false)
+                };
+                // Bind only the exact `Infer` declaration selected by the
+                // lowered `keyof` operand. Its scoped `InferRef` is visible
+                // to the mapped body, while the mapper frame is pushed last
+                // so an equal mapper name shadows it.
+                let mut body = binders;
+                if let Some((base_infer_name, binder)) = base_infer {
+                    let reference = graph.intern_node_with_scope(
+                        SemanticNodeData::InferRef {
+                            name: Arc::clone(&base_infer_name),
+                            binder,
+                        },
+                        scope.clone(),
+                    );
+                    let mut base_infer_frame = LocatorBinderFrame::default();
+                    base_infer_frame.bind(base_infer_name, reference);
+                    body = body.extended(base_infer_frame);
+                }
+                let mut mapper_frame = LocatorBinderFrame::default();
+                mapper_frame.bind(Arc::from(parameter.as_str()), parameter_node);
+                let body = body.extended(mapper_frame);
+                frames.push(LocatorFrame::Mapped {
+                    mapped,
+                    binders: body.clone(),
+                    stage: LocatorMappedStage::Value(LocatorMappedHead {
+                        parameter_node,
+                        source_node,
+                        key_space,
+                        over_type_variable,
+                        body: body.clone(),
+                    }),
+                });
+                return LocatorStep::Descend(value_type, body);
+            }
+            LocatorMappedStage::Value(head) => match name_type.as_deref() {
+                Some(name_type) => {
+                    let body = head.body.clone();
+                    frames.push(LocatorFrame::Mapped {
+                        mapped,
+                        binders,
+                        stage: LocatorMappedStage::NameType {
+                            head,
+                            value_expr: value,
+                        },
+                    });
+                    return LocatorStep::Descend(name_type, body);
+                }
+                None => (head, value),
+            },
+            LocatorMappedStage::NameType { head, value_expr } => {
+                let name_remap = Some(value);
+                return LocatorStep::Value(self.intern_locator_mapped(
+                    &head, value_expr, name_remap, *optional, *readonly, scope,
+                ));
+            }
+        };
+        LocatorStep::Value(
+            self.intern_locator_mapped(&head, value_expr, None, *optional, *readonly, scope),
+        )
+    }
+
+    /// Intern a mapped type's deferred shell.
+    fn intern_locator_mapped(
+        &self,
+        head: &LocatorMappedHead<'_>,
+        value_expr: SemanticNodeId,
+        name_remap: Option<SemanticNodeId>,
+        optional: MappedModifier,
+        readonly: MappedModifier,
+        scope: &NodeScopeId,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let optionality = match optional {
+            MappedModifier::Add => OptionalityMod::Add,
+            MappedModifier::Remove => OptionalityMod::Remove,
+            MappedModifier::None => OptionalityMod::Keep,
+        };
+        let readonly = match readonly {
+            MappedModifier::Add => ReadonlyMod::Add,
+            MappedModifier::Remove => ReadonlyMod::Remove,
+            MappedModifier::None => ReadonlyMod::Keep,
+        };
+        let kind = MapperKind::classify_value_expr(
+            graph,
+            value_expr,
+            head.source_node,
+            head.parameter_node,
+        );
+        graph.intern_node_with_scope(
+            SemanticNodeData::Mapped {
+                source: head.source_node,
+                mapper: MapperKey {
+                    parameter_node: head.parameter_node,
+                    key_space: head.key_space,
+                    value_expr,
+                    optionality,
+                    readonly,
+                    name_remap,
+                    kind,
+                    over_type_variable: head.over_type_variable,
+                },
+            },
+            scope.clone(),
+        )
+    }
+
     /// Lower one node that is not a structural position of
     /// [`Self::lower_locator_shape_node`]'s explicit stack: its children
     /// lower through that entry, one native level beneath this one.
@@ -1459,136 +1836,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
             TypeExpr::Literal(value) => graph
                 .intern_node_with_scope(SemanticNodeData::Literal(value.clone()), scope.clone()),
-
-            // Deferred mapped-type shell — the per-key value surface is
-            // NEVER enumerated here.
-            TypeExpr::Mapped {
-                parameter,
-                source,
-                value,
-                optional,
-                readonly,
-                name_type,
-                ..
-            } => {
-                let mapper_display_name: Arc<str> = Arc::from(parameter.as_str());
-                let mapper_decl = DeclIdentity::from_scope(
-                    scope,
-                    crate::mapper_binder_registry::mapper_binder_decl_name(
-                        graph,
-                        source,
-                        value,
-                        *optional,
-                        *readonly,
-                        name_type.as_ref(),
-                    ),
-                );
-                // The mapper binder ordinal comes from the host-owned
-                // registry — the SAME identity authority the reducing
-                // lowering entry consults — so two lowerings of the same
-                // source mapper share one binder identity while distinct
-                // mappers in one file stay distinct.
-                let fingerprint = crate::mapper_binder_registry::MapperFingerprint::from_components(
-                    source,
-                    value,
-                    *optional,
-                    *readonly,
-                    name_type.as_ref(),
-                );
-                let mapper_ordinal = self
-                    .ctx
-                    .project_type_store()
-                    .mapper_binder_registry()
-                    .ordinal_for(&mapper_decl.canonical_id, &mapper_display_name, fingerprint);
-                let parameter_node = graph.intern_node_with_scope(
-                    SemanticNodeData::TypeParam {
-                        decl: mapper_decl,
-                        param_index: mapper_ordinal,
-                        constraint: None,
-                        default: None,
-                        display_name: Arc::clone(&mapper_display_name),
-                    },
-                    scope.clone(),
-                );
-                let mut over_type_variable = false;
-                let (source_node, key_space, base_infer_name) = match source.as_ref() {
-                    TypeExpr::KeyOf(inner) => {
-                        let inner_id = self.lower_locator_shape_node(inner, ctx);
-                        over_type_variable =
-                            crate::semantic_query::keyof_operand_is_type_variable(graph, inner_id);
-                        let key_space = graph.intern_node_with_scope(
-                            SemanticNodeData::KeyOf { base: inner_id },
-                            scope.clone(),
-                        );
-                        let base_infer = match graph.node_data(inner_id).as_deref() {
-                            Some(SemanticNodeData::Infer { name, binder }) => {
-                                Some((Arc::clone(name), binder.clone()))
-                            }
-                            _ => None,
-                        };
-                        (inner_id, key_space, base_infer)
-                    }
-                    _ => {
-                        let lowered = self.lower_locator_shape_node(source, ctx);
-                        (lowered, lowered, None)
-                    }
-                };
-
-                // Bind only the exact `Infer` declaration selected by the
-                // lowered `keyof` operand. Its scoped `InferRef` is visible to
-                // the mapped body, while the mapper frame is pushed last so an
-                // equal mapper name shadows it.
-                let mut frames: Vec<LocatorBinderFrame> = ctx.binders.to_vec();
-                if let Some((base_infer_name, binder)) = base_infer_name {
-                    let reference = graph.intern_node_with_scope(
-                        SemanticNodeData::InferRef {
-                            name: Arc::clone(&base_infer_name),
-                            binder,
-                        },
-                        scope.clone(),
-                    );
-                    let mut base_infer_frame = LocatorBinderFrame::default();
-                    base_infer_frame.bind(base_infer_name, reference);
-                    frames.push(base_infer_frame);
-                }
-                let mut mapper_frame = LocatorBinderFrame::default();
-                mapper_frame.bind(Arc::clone(&mapper_display_name), parameter_node);
-                frames.push(mapper_frame);
-                let body_ctx = ctx.with_binders(&frames);
-
-                let value_expr = self.lower_locator_shape_node(value, &body_ctx);
-                let name_remap = name_type
-                    .as_deref()
-                    .map(|nt| self.lower_locator_shape_node(nt, &body_ctx));
-                let optionality = match optional {
-                    MappedModifier::Add => OptionalityMod::Add,
-                    MappedModifier::Remove => OptionalityMod::Remove,
-                    MappedModifier::None => OptionalityMod::Keep,
-                };
-                let readonly = match readonly {
-                    MappedModifier::Add => ReadonlyMod::Add,
-                    MappedModifier::Remove => ReadonlyMod::Remove,
-                    MappedModifier::None => ReadonlyMod::Keep,
-                };
-                let kind =
-                    MapperKind::classify_value_expr(graph, value_expr, source_node, parameter_node);
-                graph.intern_node_with_scope(
-                    SemanticNodeData::Mapped {
-                        source: source_node,
-                        mapper: MapperKey {
-                            parameter_node,
-                            key_space,
-                            value_expr,
-                            optionality,
-                            readonly,
-                            name_remap,
-                            kind,
-                            over_type_variable,
-                        },
-                    },
-                    scope.clone(),
-                )
-            }
 
             // -- Declared type parameters stay SHELLS --
             TypeExpr::TypeParameter(param) => {
@@ -1610,13 +1857,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     has_constraint: param.constraint.is_some(),
                     has_default: param.default.is_some(),
                 }];
-                let base = LocatorShapeCtx::new(
-                    scope,
-                    ctx.binders,
-                    ctx.name_resolution,
-                    ctx.scope_payload,
-                )
-                .with_optional_infer_source(ctx.infer_source);
+                let base =
+                    LocatorShapeCtx::on(scope, ctx.binders, ctx.name_resolution, ctx.scope_payload)
+                        .with_optional_infer_source(ctx.infer_source);
                 let (_frame, built) = self.build_type_param_binder_frame(
                     &base,
                     BinderIdentityMode::Signature,
@@ -1803,6 +2046,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | TypeExpr::IntrinsicApplication { .. }
             | TypeExpr::Function(_)
             | TypeExpr::ConstructorType(_)
+            | TypeExpr::Mapped { .. }
             | TypeExpr::Ref { .. } => self.lower_locator_shape_node(expr, ctx),
         }
     }
@@ -1896,7 +2140,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 has_default: tp.default.is_some(),
             })
             .collect();
-        let base = LocatorShapeCtx::new(scope, ctx.binders, ctx.name_resolution, ctx.scope_payload)
+        let base = LocatorShapeCtx::on(scope, ctx.binders, ctx.name_resolution, ctx.scope_payload)
             .with_optional_infer_source(ctx.infer_source);
         // The declaring anchor entity qualifies the clause's binder
         // identity so same-name parameters of different declared functions

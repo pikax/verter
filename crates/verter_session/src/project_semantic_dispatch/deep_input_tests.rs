@@ -649,14 +649,41 @@ fn template_literal_types_nested_10000_deep_answer_on_production_stacks() {
     );
 }
 
+fn mapped_types(depth: usize) -> String {
+    format!("type D = {};\n", wrap(depth, "{ [K in \"a\"]: ", " }"))
+}
+
+/// A mapped-type nest the connected-demand work budget admits.
+const MAPPED_TYPES_UNDER_THE_WORK_BUDGET: usize = 1_000;
+
+/// Mapped types nested deep lower as frames of the locator lowering's
+/// stack (their binder frames a shared chain) and are judged open by a
+/// walk whose levels carry only the arm they take. 10,000 deep the probe
+/// returns the connected-demand work budget's typed failure; under it
+/// TypeScript 7.0.2 answers `"a"`, under every setting.
+#[test]
+fn mapped_types_nested_10000_deep_return_on_production_stacks() {
+    assert!(!returns_on_a_small_stack(format!(
+        "{}export function pf() {{ const p: keyof D = null as any; return p; }}\n",
+        mapped_types(DEPTH)
+    )));
+    assert_eq!(
+        mismatches_on_a_small_stack(
+            mapped_types(MAPPED_TYPES_UNDER_THE_WORK_BUDGET),
+            "keyof D",
+            "\"a\""
+        ),
+        Vec::<String>::new()
+    );
+}
+
 /// Mapped types nested 10,000 deep. TypeScript 7.0.2: `"a"`, under every
 /// setting.
 #[test]
-#[ignore = "a mapped type nested in a mapped type lowers its locator shape a native level per nesting"]
+#[ignore = "the connected-demand work budget admits no 10,000-deep mapped-type nest"]
 fn mapped_types_nested_10000_deep_answer_on_production_stacks() {
-    let source = format!("type D = {};\n", wrap(DEPTH, "{ [K in \"a\"]: ", " }"));
     assert_eq!(
-        mismatches_on_a_small_stack(source, "keyof D", "\"a\""),
+        mismatches_on_a_small_stack(mapped_types(DEPTH), "keyof D", "\"a\""),
         Vec::<String>::new()
     );
 }
@@ -750,5 +777,34 @@ fn code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks(
     assert_eq!(
         mismatches_on_a_small_stack(source(UNDER_THE_RETURN_SITE_BUDGET), RETURN, "number"),
         Vec::<String>::new()
+    );
+}
+
+/// A nest of mapped types lowers in work that grows with the nest, not its
+/// square: each binder's identity reads the mapped types nested in it once
+/// (each hashed its whole value subtree), and each body's binder stack
+/// shares the frames around it (each copied them).
+#[test]
+fn a_mapped_type_nest_lowers_in_linear_work() {
+    let work = |depth: usize| {
+        let walked = crate::mapper_binder_registry::type_expr_visits_for_tests();
+        let copied = super::locator_shape::binder_frame_clones_for_tests();
+        assert_eq!(
+            mismatches(&mapped_types(depth), &[("keyof D", "\"a\"")]),
+            Vec::<String>::new()
+        );
+        (
+            crate::mapper_binder_registry::type_expr_visits_for_tests() - walked,
+            super::locator_shape::binder_frame_clones_for_tests() - copied,
+        )
+    };
+    let ((shallow_walked, shallow_copied), (deep_walked, deep_copied)) = (work(50), work(500));
+    assert!(
+        deep_walked <= 20 * shallow_walked,
+        "a ten-times-deeper nest walked {deep_walked} nodes against {shallow_walked}"
+    );
+    assert!(
+        deep_copied <= 20 * shallow_copied,
+        "a ten-times-deeper nest copied {deep_copied} binder frames against {shallow_copied}"
     );
 }
