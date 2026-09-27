@@ -357,9 +357,12 @@ mod tests {
             .spawn(move || {
                 let allocator = oxc_allocator::Allocator::default();
                 let source = format!("const x = {initializer};");
-                let parsed =
-                    oxc_parser::Parser::new(&allocator, &source, oxc_span::SourceType::ts())
-                        .parse();
+                let parsed = verter_parser::oxc_parse::Parser::new(
+                    &allocator,
+                    &source,
+                    oxc_span::SourceType::ts(),
+                )
+                .parse();
                 let Some(oxc_ast::ast::Statement::VariableDeclaration(declaration)) =
                     parsed.program.body.first()
                 else {
