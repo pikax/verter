@@ -866,6 +866,18 @@ Recorded plainly so no reader mistakes absence for a pass:
   nest's depth where a nested evaluation's input basis keeps its
   parent's full canonical bytes (collision-safe identity equality).
 
+* **Binding usages collect from an explicit stack.** The script
+  analysis's usage collector (`build.rs`'s `collect_usages_in_statement`
+  and the expression and assignment-target walks it recursed through)
+  took a native level per nested expression, so a module constant
+  initialized by nested calls (`const v = f(f(…f(1)…))`) overflowed its
+  thread at 10,000 levels. It now runs from an explicit stack
+  (`collect_usages`, one `UsageWork` per node, each node's parts pushed
+  last first and a shadowing scope opened and closed around the parts it
+  covers, in the recursive walk's order). With the recursive walk
+  restored, `deep_input_tests.rs` →
+  `module_calls_nested_10000_deep_return_on_production_stacks` overflows.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the

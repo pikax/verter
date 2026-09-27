@@ -3368,272 +3368,475 @@ fn collect_usages_in_statement(
     occurrences: &mut Vec<ScriptBindingOccurrence>,
     shadow_stack: &mut Vec<FxHashSet<String>>,
 ) {
-    match stmt {
-        Statement::BlockStatement(block) => {
-            let mut block_bindings = FxHashSet::default();
-            // Pre-scan for block-scoped declarations
-            for s in &block.body {
-                collect_declared_names(s, &mut block_bindings);
-            }
-            shadow_stack.push(block_bindings);
-            for s in &block.body {
-                collect_usages_in_statement(
-                    s,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                );
-            }
-            shadow_stack.pop();
-        }
-        Statement::ExpressionStatement(expr_stmt) => {
-            collect_usages_in_expression(
-                &expr_stmt.expression,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-        }
-        Statement::VariableDeclaration(decl) => {
-            for declarator in &decl.declarations {
-                if let Some(init) = &declarator.init {
-                    collect_usages_in_expression(
-                        init,
-                        binding_names,
-                        binding_spans,
-                        occurrences,
-                        shadow_stack,
-                        UsageContext::Value,
-                    );
+    collect_usages(
+        UsageWork::Stmt(stmt),
+        binding_names,
+        binding_spans,
+        occurrences,
+        shadow_stack,
+    );
+}
+
+/// One step of [`collect_usages`]'s walk: a node to visit, or a shadowing
+/// scope to open or close where a recursive walk would.
+enum UsageWork<'w, 'a> {
+    Stmt(&'w Statement<'a>),
+    Expr(&'w Expression<'a>, UsageContext),
+    Target(&'w AssignmentTarget<'a>),
+    MaybeDefault(&'w AssignmentTargetMaybeDefault<'a>),
+    Push(FxHashSet<String>),
+    Pop,
+}
+
+/// Collect the binding usages under `first` from an explicit stack, in the
+/// order a recursive walk visits them (each node's parts pushed last
+/// first, a scope opened and closed around the parts it covers): an
+/// expression nested in an expression (`f(f(f(1)))`) costs no native
+/// level.
+fn collect_usages<'w, 'a>(
+    first: UsageWork<'w, 'a>,
+    binding_names: &FxHashSet<&str>,
+    binding_spans: &FxHashMap<&str, Span>,
+    occurrences: &mut Vec<ScriptBindingOccurrence>,
+    shadow_stack: &mut Vec<FxHashSet<String>>,
+) {
+    use UsageWork as Work;
+    let mut work = vec![first];
+    let mut c: Vec<UsageWork<'w, 'a>> = Vec::new();
+    while let Some(item) = work.pop() {
+        match item {
+            Work::Stmt(stmt) => {
+                match stmt {
+                    Statement::BlockStatement(block) => {
+                        let mut block_bindings = FxHashSet::default();
+                        // Pre-scan for block-scoped declarations
+                        for s in &block.body {
+                            collect_declared_names(s, &mut block_bindings);
+                        }
+                        c.push(Work::Push(block_bindings));
+                        for s in &block.body {
+                            c.push(Work::Stmt(s));
+                        }
+                        c.push(Work::Pop);
+                    }
+                    Statement::ExpressionStatement(expr_stmt) => {
+                        c.push(Work::Expr(&expr_stmt.expression, UsageContext::Value));
+                    }
+                    Statement::VariableDeclaration(decl) => {
+                        for declarator in &decl.declarations {
+                            if let Some(init) = &declarator.init {
+                                c.push(Work::Expr(init, UsageContext::Value));
+                            }
+                        }
+                    }
+                    Statement::ReturnStatement(ret) => {
+                        if let Some(arg) = &ret.argument {
+                            c.push(Work::Expr(arg, UsageContext::Value));
+                        }
+                    }
+                    Statement::IfStatement(if_stmt) => {
+                        c.push(Work::Expr(&if_stmt.test, UsageContext::Value));
+                        c.push(Work::Stmt(&if_stmt.consequent));
+                        if let Some(alt) = &if_stmt.alternate {
+                            c.push(Work::Stmt(alt));
+                        }
+                    }
+                    Statement::ForStatement(for_stmt) => {
+                        let mut block_bindings = FxHashSet::default();
+                        if let Some(ForStatementInit::VariableDeclaration(decl)) = &for_stmt.init {
+                            for d in &decl.declarations {
+                                collect_pattern_names(&d.id, &mut block_bindings);
+                            }
+                        }
+                        c.push(Work::Push(block_bindings));
+                        if let Some(ForStatementInit::VariableDeclaration(decl)) = &for_stmt.init {
+                            for d in &decl.declarations {
+                                if let Some(init) = &d.init {
+                                    c.push(Work::Expr(init, UsageContext::Value));
+                                }
+                            }
+                        }
+                        if let Some(test) = &for_stmt.test {
+                            c.push(Work::Expr(test, UsageContext::Value));
+                        }
+                        if let Some(update) = &for_stmt.update {
+                            c.push(Work::Expr(update, UsageContext::Value));
+                        }
+                        c.push(Work::Stmt(&for_stmt.body));
+                        c.push(Work::Pop);
+                    }
+                    Statement::WhileStatement(w) => {
+                        c.push(Work::Expr(&w.test, UsageContext::Value));
+                        c.push(Work::Stmt(&w.body));
+                    }
+                    Statement::DoWhileStatement(w) => {
+                        c.push(Work::Stmt(&w.body));
+                        c.push(Work::Expr(&w.test, UsageContext::Value));
+                    }
+                    Statement::SwitchStatement(sw) => {
+                        c.push(Work::Expr(&sw.discriminant, UsageContext::Value));
+                        for case in &sw.cases {
+                            if let Some(test) = &case.test {
+                                c.push(Work::Expr(test, UsageContext::Value));
+                            }
+                            for s in &case.consequent {
+                                c.push(Work::Stmt(s));
+                            }
+                        }
+                    }
+                    Statement::ThrowStatement(t) => {
+                        c.push(Work::Expr(&t.argument, UsageContext::Value));
+                    }
+                    Statement::TryStatement(t) => {
+                        c.push(Work::Push(FxHashSet::default()));
+                        for s in &t.block.body {
+                            c.push(Work::Stmt(s));
+                        }
+                        c.push(Work::Pop);
+                        if let Some(handler) = &t.handler {
+                            let mut handler_bindings = FxHashSet::default();
+                            if let Some(param) = &handler.param {
+                                collect_pattern_names(&param.pattern, &mut handler_bindings);
+                            }
+                            c.push(Work::Push(handler_bindings));
+                            for s in &handler.body.body {
+                                c.push(Work::Stmt(s));
+                            }
+                            c.push(Work::Pop);
+                        }
+                        if let Some(finalizer) = &t.finalizer {
+                            c.push(Work::Push(FxHashSet::default()));
+                            for s in &finalizer.body {
+                                c.push(Work::Stmt(s));
+                            }
+                            c.push(Work::Pop);
+                        }
+                    }
+                    // Function/class declarations at statement level — skip body (own scope)
+                    Statement::FunctionDeclaration(_) | Statement::ClassDeclaration(_) => {}
+                    // Skip: import/export declarations are already handled by first pass
+                    Statement::ImportDeclaration(_)
+                    | Statement::ExportDeclaration(_)
+                    | Statement::ExportNamedDeclaration(_)
+                    | Statement::ExportFromDeclaration(_)
+                    | Statement::ExportDefaultDeclaration(_)
+                    | Statement::ExportAllDeclaration(_) => {}
+                    // Skip type declarations
+                    Statement::TSTypeAliasDeclaration(_)
+                    | Statement::TSInterfaceDeclaration(_)
+                    | Statement::TSEnumDeclaration(_)
+                    | Statement::TSExternalModuleDeclaration(_)
+                    | Statement::TSNamespaceDeclaration(_) => {}
+                    _ => {}
                 }
             }
-        }
-        Statement::ReturnStatement(ret) => {
-            if let Some(arg) = &ret.argument {
-                collect_usages_in_expression(
-                    arg,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                    UsageContext::Value,
-                );
-            }
-        }
-        Statement::IfStatement(if_stmt) => {
-            collect_usages_in_expression(
-                &if_stmt.test,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-            collect_usages_in_statement(
-                &if_stmt.consequent,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-            );
-            if let Some(alt) = &if_stmt.alternate {
-                collect_usages_in_statement(
-                    alt,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                );
-            }
-        }
-        Statement::ForStatement(for_stmt) => {
-            let mut block_bindings = FxHashSet::default();
-            if let Some(ForStatementInit::VariableDeclaration(decl)) = &for_stmt.init {
-                for d in &decl.declarations {
-                    collect_pattern_names(&d.id, &mut block_bindings);
+            Work::Expr(expr, ctx) => {
+                match expr {
+                    Expression::Identifier(ident) => {
+                        let name = ident.name.as_str();
+                        if binding_names.contains(name) && !is_shadowed(name, shadow_stack) {
+                            // Don't track references at the declaration span itself
+                            let ident_span: Span = ident.span.into();
+                            if let Some(&decl_span) = binding_spans.get(name) {
+                                if ident_span == decl_span {
+                                    continue;
+                                }
+                            }
+                            let usage_kind = match ctx {
+                                UsageContext::AssignTarget => ScriptUsageKind::Write,
+                                UsageContext::UpdateTarget => ScriptUsageKind::ReadWrite,
+                                UsageContext::CallCallee => ScriptUsageKind::Call,
+                                UsageContext::MemberObject => ScriptUsageKind::MemberAccess,
+                                UsageContext::TypeofOperand => ScriptUsageKind::Typeof,
+                                UsageContext::Value => ScriptUsageKind::Read,
+                            };
+                            occurrences.push(ScriptBindingOccurrence {
+                                name: name.to_string(),
+                                span: ident_span,
+                                usage_kind,
+                            });
+                        }
+                    }
+                    Expression::AssignmentExpression(assign) => {
+                        // Left side
+                        match &assign.left {
+                            AssignmentTarget::AssignmentTargetIdentifier(ident) => {
+                                let target_ctx = if assign.operator == AssignmentOperator::Assign {
+                                    UsageContext::AssignTarget
+                                } else {
+                                    UsageContext::UpdateTarget // +=, -=, etc.
+                                };
+                                // Create a synthetic identifier expression context
+                                let name = ident.name.as_str();
+                                if binding_names.contains(name) && !is_shadowed(name, shadow_stack)
+                                {
+                                    let ident_span: Span = ident.span.into();
+                                    let usage_kind = match target_ctx {
+                                        UsageContext::AssignTarget => ScriptUsageKind::Write,
+                                        UsageContext::UpdateTarget => ScriptUsageKind::ReadWrite,
+                                        _ => ScriptUsageKind::Read,
+                                    };
+                                    occurrences.push(ScriptBindingOccurrence {
+                                        name: name.to_string(),
+                                        span: ident_span,
+                                        usage_kind,
+                                    });
+                                }
+                            }
+                            _ => {
+                                // Complex assignment target (member access, destructuring)
+                                c.push(Work::Target(&assign.left));
+                            }
+                        }
+                        // Right side
+                        c.push(Work::Expr(&assign.right, UsageContext::Value));
+                    }
+                    Expression::UpdateExpression(update) => {
+                        if let SimpleAssignmentTarget::AssignmentTargetIdentifier(ident) =
+                            &update.argument
+                        {
+                            let name = ident.name.as_str();
+                            if binding_names.contains(name) && !is_shadowed(name, shadow_stack) {
+                                occurrences.push(ScriptBindingOccurrence {
+                                    name: name.to_string(),
+                                    span: ident.span.into(),
+                                    usage_kind: ScriptUsageKind::ReadWrite,
+                                });
+                            }
+                        }
+                    }
+                    Expression::CallExpression(call) => {
+                        c.push(Work::Expr(&call.callee, UsageContext::CallCallee));
+                        for arg in &call.arguments {
+                            match arg {
+                                Argument::SpreadElement(spread) => {
+                                    c.push(Work::Expr(&spread.argument, UsageContext::Value));
+                                }
+                                _ => {
+                                    c.push(Work::Expr(arg.to_expression(), UsageContext::Value));
+                                }
+                            }
+                        }
+                    }
+                    Expression::StaticMemberExpression(member) => {
+                        c.push(Work::Expr(&member.object, UsageContext::MemberObject));
+                    }
+                    Expression::ComputedMemberExpression(member) => {
+                        c.push(Work::Expr(&member.object, UsageContext::MemberObject));
+                        c.push(Work::Expr(&member.expression, UsageContext::Value));
+                    }
+                    Expression::UnaryExpression(unary) => {
+                        let inner_ctx = if unary.operator == UnaryOperator::Typeof {
+                            UsageContext::TypeofOperand
+                        } else {
+                            UsageContext::Value
+                        };
+                        c.push(Work::Expr(&unary.argument, inner_ctx));
+                    }
+                    Expression::BinaryExpression(binary) => {
+                        c.push(Work::Expr(&binary.left, UsageContext::Value));
+                        c.push(Work::Expr(&binary.right, UsageContext::Value));
+                    }
+                    Expression::LogicalExpression(logical) => {
+                        c.push(Work::Expr(&logical.left, UsageContext::Value));
+                        c.push(Work::Expr(&logical.right, UsageContext::Value));
+                    }
+                    Expression::ConditionalExpression(cond) => {
+                        c.push(Work::Expr(&cond.test, UsageContext::Value));
+                        c.push(Work::Expr(&cond.consequent, UsageContext::Value));
+                        c.push(Work::Expr(&cond.alternate, UsageContext::Value));
+                    }
+                    Expression::SequenceExpression(seq) => {
+                        for e in &seq.expressions {
+                            c.push(Work::Expr(e, UsageContext::Value));
+                        }
+                    }
+                    Expression::TemplateLiteral(tpl) => {
+                        for e in &tpl.expressions {
+                            c.push(Work::Expr(e, UsageContext::Value));
+                        }
+                    }
+                    Expression::TaggedTemplateExpression(tagged) => {
+                        c.push(Work::Expr(&tagged.tag, UsageContext::CallCallee));
+                        for e in &tagged.quasi.expressions {
+                            c.push(Work::Expr(e, UsageContext::Value));
+                        }
+                    }
+                    Expression::ArrayExpression(arr) => {
+                        for elem in &arr.elements {
+                            match elem {
+                                ArrayExpressionElement::SpreadElement(spread) => {
+                                    c.push(Work::Expr(&spread.argument, UsageContext::Value));
+                                }
+                                ArrayExpressionElement::Elision(_) => {}
+                                _ => {
+                                    c.push(Work::Expr(elem.to_expression(), UsageContext::Value));
+                                }
+                            }
+                        }
+                    }
+                    Expression::ObjectExpression(obj) => {
+                        for prop in &obj.properties {
+                            match prop {
+                                ObjectPropertyKind::ObjectProperty(p) => {
+                                    if p.computed {
+                                        c.push(Work::Expr(
+                                            p.key.to_expression(),
+                                            UsageContext::Value,
+                                        ));
+                                    }
+                                    c.push(Work::Expr(&p.value, UsageContext::Value));
+                                }
+                                ObjectPropertyKind::SpreadProperty(spread) => {
+                                    c.push(Work::Expr(&spread.argument, UsageContext::Value));
+                                }
+                            }
+                        }
+                    }
+                    Expression::ArrowFunctionExpression(arrow) => {
+                        // Arrow functions create a new scope
+                        let mut fn_bindings = FxHashSet::default();
+                        for param in &arrow.params.items {
+                            collect_pattern_names(&param.pattern, &mut fn_bindings);
+                        }
+                        c.push(Work::Push(fn_bindings));
+                        match &arrow.body {
+                            ArrowFunctionBody::FunctionBody(body) => {
+                                for s in &body.statements {
+                                    c.push(Work::Stmt(s));
+                                }
+                            }
+                            // An expression body is walked as its one expression statement.
+                            body => {
+                                if let Some(expression) = body.as_expression() {
+                                    c.push(Work::Expr(expression, UsageContext::Value));
+                                }
+                            }
+                        }
+                        c.push(Work::Pop);
+                    }
+                    Expression::FunctionExpression(_) => {
+                        // Function expressions create own scope — skip (don't track closures)
+                    }
+                    Expression::ParenthesizedExpression(paren) => {
+                        c.push(Work::Expr(&paren.expression, ctx));
+                    }
+                    Expression::AwaitExpression(a) => {
+                        c.push(Work::Expr(&a.argument, UsageContext::Value));
+                    }
+                    Expression::YieldExpression(y) => {
+                        if let Some(arg) = &y.argument {
+                            c.push(Work::Expr(arg, UsageContext::Value));
+                        }
+                    }
+                    Expression::NewExpression(n) => {
+                        c.push(Work::Expr(&n.callee, UsageContext::CallCallee));
+                        for arg in &n.arguments {
+                            match arg {
+                                Argument::SpreadElement(spread) => {
+                                    c.push(Work::Expr(&spread.argument, UsageContext::Value));
+                                }
+                                _ => {
+                                    c.push(Work::Expr(arg.to_expression(), UsageContext::Value));
+                                }
+                            }
+                        }
+                    }
+                    Expression::ChainExpression(chain) => match &chain.expression {
+                        ChainElement::CallExpression(call) => {
+                            c.push(Work::Expr(&call.callee, UsageContext::CallCallee));
+                            for arg in &call.arguments {
+                                match arg {
+                                    Argument::SpreadElement(spread) => {
+                                        c.push(Work::Expr(&spread.argument, UsageContext::Value));
+                                    }
+                                    _ => {
+                                        c.push(Work::Expr(
+                                            arg.to_expression(),
+                                            UsageContext::Value,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        ChainElement::StaticMemberExpression(member) => {
+                            c.push(Work::Expr(&member.object, UsageContext::MemberObject));
+                        }
+                        ChainElement::ComputedMemberExpression(member) => {
+                            c.push(Work::Expr(&member.object, UsageContext::MemberObject));
+                            c.push(Work::Expr(&member.expression, UsageContext::Value));
+                        }
+                        ChainElement::PrivateFieldExpression(pf) => {
+                            c.push(Work::Expr(&pf.object, UsageContext::MemberObject));
+                        }
+                        _ => {}
+                    },
+                    Expression::TSAsExpression(as_expr) => {
+                        c.push(Work::Expr(&as_expr.expression, ctx));
+                    }
+                    Expression::TSSatisfiesExpression(sat) => {
+                        c.push(Work::Expr(&sat.expression, ctx));
+                    }
+                    Expression::TSNonNullExpression(nn) => {
+                        c.push(Work::Expr(&nn.expression, ctx));
+                    }
+                    Expression::TSTypeAssertion(ta) => {
+                        c.push(Work::Expr(&ta.expression, ctx));
+                    }
+                    // Literals, `this`, `super`, etc. — no binding references
+                    _ => {}
                 }
             }
-            shadow_stack.push(block_bindings);
-            if let Some(ForStatementInit::VariableDeclaration(decl)) = &for_stmt.init {
-                for d in &decl.declarations {
-                    if let Some(init) = &d.init {
-                        collect_usages_in_expression(
-                            init,
-                            binding_names,
-                            binding_spans,
-                            occurrences,
-                            shadow_stack,
-                            UsageContext::Value,
-                        );
+            Work::Target(target) => match target {
+                AssignmentTarget::AssignmentTargetIdentifier(ident) => {
+                    let name = ident.name.as_str();
+                    if binding_names.contains(name) && !is_shadowed(name, shadow_stack) {
+                        occurrences.push(ScriptBindingOccurrence {
+                            name: name.to_string(),
+                            span: ident.span.into(),
+                            usage_kind: ScriptUsageKind::Write,
+                        });
                     }
                 }
-            }
-            if let Some(test) = &for_stmt.test {
-                collect_usages_in_expression(
-                    test,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                    UsageContext::Value,
-                );
-            }
-            if let Some(update) = &for_stmt.update {
-                collect_usages_in_expression(
-                    update,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                    UsageContext::Value,
-                );
-            }
-            collect_usages_in_statement(
-                &for_stmt.body,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-            );
-            shadow_stack.pop();
-        }
-        Statement::WhileStatement(w) => {
-            collect_usages_in_expression(
-                &w.test,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-            collect_usages_in_statement(
-                &w.body,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-            );
-        }
-        Statement::DoWhileStatement(w) => {
-            collect_usages_in_statement(
-                &w.body,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-            );
-            collect_usages_in_expression(
-                &w.test,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-        }
-        Statement::SwitchStatement(sw) => {
-            collect_usages_in_expression(
-                &sw.discriminant,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-            for case in &sw.cases {
-                if let Some(test) = &case.test {
-                    collect_usages_in_expression(
-                        test,
-                        binding_names,
-                        binding_spans,
-                        occurrences,
-                        shadow_stack,
-                        UsageContext::Value,
-                    );
+                AssignmentTarget::StaticMemberExpression(member) => {
+                    c.push(Work::Expr(&member.object, UsageContext::MemberObject));
                 }
-                for s in &case.consequent {
-                    collect_usages_in_statement(
-                        s,
-                        binding_names,
-                        binding_spans,
-                        occurrences,
-                        shadow_stack,
-                    );
+                AssignmentTarget::ComputedMemberExpression(member) => {
+                    c.push(Work::Expr(&member.object, UsageContext::MemberObject));
+                    c.push(Work::Expr(&member.expression, UsageContext::Value));
                 }
-            }
-        }
-        Statement::ThrowStatement(t) => {
-            collect_usages_in_expression(
-                &t.argument,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-        }
-        Statement::TryStatement(t) => {
-            shadow_stack.push(FxHashSet::default());
-            for s in &t.block.body {
-                collect_usages_in_statement(
-                    s,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                );
-            }
-            shadow_stack.pop();
-            if let Some(handler) = &t.handler {
-                let mut handler_bindings = FxHashSet::default();
-                if let Some(param) = &handler.param {
-                    collect_pattern_names(&param.pattern, &mut handler_bindings);
+                AssignmentTarget::ArrayAssignmentTarget(arr) => {
+                    for elem in arr.elements.iter().flatten() {
+                        c.push(Work::MaybeDefault(elem));
+                    }
                 }
-                shadow_stack.push(handler_bindings);
-                for s in &handler.body.body {
-                    collect_usages_in_statement(
-                        s,
-                        binding_names,
-                        binding_spans,
-                        occurrences,
-                        shadow_stack,
-                    );
+                AssignmentTarget::ObjectAssignmentTarget(obj) => {
+                    for prop in &obj.properties {
+                        match prop {
+                            AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(_) => {}
+                            AssignmentTargetProperty::AssignmentTargetPropertyProperty(p) => {
+                                c.push(Work::MaybeDefault(&p.binding));
+                            }
+                        }
+                    }
                 }
-                shadow_stack.pop();
-            }
-            if let Some(finalizer) = &t.finalizer {
-                shadow_stack.push(FxHashSet::default());
-                for s in &finalizer.body {
-                    collect_usages_in_statement(
-                        s,
-                        binding_names,
-                        binding_spans,
-                        occurrences,
-                        shadow_stack,
-                    );
+                _ => {}
+            },
+            Work::MaybeDefault(target) => match target {
+                AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {
+                    c.push(Work::Target(&with_default.binding));
+                    c.push(Work::Expr(&with_default.init, UsageContext::Value));
                 }
+                _ => {
+                    c.push(Work::Target(target.to_assignment_target()));
+                }
+            },
+            Work::Push(scope) => shadow_stack.push(scope),
+            Work::Pop => {
                 shadow_stack.pop();
             }
         }
-        // Function/class declarations at statement level — skip body (own scope)
-        Statement::FunctionDeclaration(_) | Statement::ClassDeclaration(_) => {}
-        // Skip: import/export declarations are already handled by first pass
-        Statement::ImportDeclaration(_)
-        | Statement::ExportDeclaration(_)
-        | Statement::ExportNamedDeclaration(_)
-        | Statement::ExportFromDeclaration(_)
-        | Statement::ExportDefaultDeclaration(_)
-        | Statement::ExportAllDeclaration(_) => {}
-        // Skip type declarations
-        Statement::TSTypeAliasDeclaration(_)
-        | Statement::TSInterfaceDeclaration(_)
-        | Statement::TSEnumDeclaration(_)
-        | Statement::TSExternalModuleDeclaration(_)
-        | Statement::TSNamespaceDeclaration(_) => {}
-        _ => {}
+        work.extend(c.drain(..).rev());
     }
 }
 
@@ -3646,682 +3849,6 @@ enum UsageContext {
     CallCallee,
     MemberObject,
     TypeofOperand,
-}
-
-fn collect_usages_in_expression(
-    expr: &Expression<'_>,
-    binding_names: &FxHashSet<&str>,
-    binding_spans: &FxHashMap<&str, Span>,
-    occurrences: &mut Vec<ScriptBindingOccurrence>,
-    shadow_stack: &mut Vec<FxHashSet<String>>,
-    ctx: UsageContext,
-) {
-    match expr {
-        Expression::Identifier(ident) => {
-            let name = ident.name.as_str();
-            if binding_names.contains(name) && !is_shadowed(name, shadow_stack) {
-                // Don't track references at the declaration span itself
-                let ident_span: Span = ident.span.into();
-                if let Some(&decl_span) = binding_spans.get(name) {
-                    if ident_span == decl_span {
-                        return;
-                    }
-                }
-                let usage_kind = match ctx {
-                    UsageContext::AssignTarget => ScriptUsageKind::Write,
-                    UsageContext::UpdateTarget => ScriptUsageKind::ReadWrite,
-                    UsageContext::CallCallee => ScriptUsageKind::Call,
-                    UsageContext::MemberObject => ScriptUsageKind::MemberAccess,
-                    UsageContext::TypeofOperand => ScriptUsageKind::Typeof,
-                    UsageContext::Value => ScriptUsageKind::Read,
-                };
-                occurrences.push(ScriptBindingOccurrence {
-                    name: name.to_string(),
-                    span: ident_span,
-                    usage_kind,
-                });
-            }
-        }
-        Expression::AssignmentExpression(assign) => {
-            // Left side
-            match &assign.left {
-                AssignmentTarget::AssignmentTargetIdentifier(ident) => {
-                    let target_ctx = if assign.operator == AssignmentOperator::Assign {
-                        UsageContext::AssignTarget
-                    } else {
-                        UsageContext::UpdateTarget // +=, -=, etc.
-                    };
-                    // Create a synthetic identifier expression context
-                    let name = ident.name.as_str();
-                    if binding_names.contains(name) && !is_shadowed(name, shadow_stack) {
-                        let ident_span: Span = ident.span.into();
-                        let usage_kind = match target_ctx {
-                            UsageContext::AssignTarget => ScriptUsageKind::Write,
-                            UsageContext::UpdateTarget => ScriptUsageKind::ReadWrite,
-                            _ => ScriptUsageKind::Read,
-                        };
-                        occurrences.push(ScriptBindingOccurrence {
-                            name: name.to_string(),
-                            span: ident_span,
-                            usage_kind,
-                        });
-                    }
-                }
-                _ => {
-                    // Complex assignment target (member access, destructuring)
-                    collect_usages_in_assignment_target(
-                        &assign.left,
-                        binding_names,
-                        binding_spans,
-                        occurrences,
-                        shadow_stack,
-                    );
-                }
-            }
-            // Right side
-            collect_usages_in_expression(
-                &assign.right,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-        }
-        Expression::UpdateExpression(update) => {
-            if let SimpleAssignmentTarget::AssignmentTargetIdentifier(ident) = &update.argument {
-                let name = ident.name.as_str();
-                if binding_names.contains(name) && !is_shadowed(name, shadow_stack) {
-                    occurrences.push(ScriptBindingOccurrence {
-                        name: name.to_string(),
-                        span: ident.span.into(),
-                        usage_kind: ScriptUsageKind::ReadWrite,
-                    });
-                }
-            }
-        }
-        Expression::CallExpression(call) => {
-            collect_usages_in_expression(
-                &call.callee,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::CallCallee,
-            );
-            for arg in &call.arguments {
-                match arg {
-                    Argument::SpreadElement(spread) => {
-                        collect_usages_in_expression(
-                            &spread.argument,
-                            binding_names,
-                            binding_spans,
-                            occurrences,
-                            shadow_stack,
-                            UsageContext::Value,
-                        );
-                    }
-                    _ => {
-                        collect_usages_in_expression(
-                            arg.to_expression(),
-                            binding_names,
-                            binding_spans,
-                            occurrences,
-                            shadow_stack,
-                            UsageContext::Value,
-                        );
-                    }
-                }
-            }
-        }
-        Expression::StaticMemberExpression(member) => {
-            collect_usages_in_expression(
-                &member.object,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::MemberObject,
-            );
-        }
-        Expression::ComputedMemberExpression(member) => {
-            collect_usages_in_expression(
-                &member.object,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::MemberObject,
-            );
-            collect_usages_in_expression(
-                &member.expression,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-        }
-        Expression::UnaryExpression(unary) => {
-            let inner_ctx = if unary.operator == UnaryOperator::Typeof {
-                UsageContext::TypeofOperand
-            } else {
-                UsageContext::Value
-            };
-            collect_usages_in_expression(
-                &unary.argument,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                inner_ctx,
-            );
-        }
-        Expression::BinaryExpression(binary) => {
-            collect_usages_in_expression(
-                &binary.left,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-            collect_usages_in_expression(
-                &binary.right,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-        }
-        Expression::LogicalExpression(logical) => {
-            collect_usages_in_expression(
-                &logical.left,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-            collect_usages_in_expression(
-                &logical.right,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-        }
-        Expression::ConditionalExpression(cond) => {
-            collect_usages_in_expression(
-                &cond.test,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-            collect_usages_in_expression(
-                &cond.consequent,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-            collect_usages_in_expression(
-                &cond.alternate,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-        }
-        Expression::SequenceExpression(seq) => {
-            for e in &seq.expressions {
-                collect_usages_in_expression(
-                    e,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                    UsageContext::Value,
-                );
-            }
-        }
-        Expression::TemplateLiteral(tpl) => {
-            for e in &tpl.expressions {
-                collect_usages_in_expression(
-                    e,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                    UsageContext::Value,
-                );
-            }
-        }
-        Expression::TaggedTemplateExpression(tagged) => {
-            collect_usages_in_expression(
-                &tagged.tag,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::CallCallee,
-            );
-            for e in &tagged.quasi.expressions {
-                collect_usages_in_expression(
-                    e,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                    UsageContext::Value,
-                );
-            }
-        }
-        Expression::ArrayExpression(arr) => {
-            for elem in &arr.elements {
-                match elem {
-                    ArrayExpressionElement::SpreadElement(spread) => {
-                        collect_usages_in_expression(
-                            &spread.argument,
-                            binding_names,
-                            binding_spans,
-                            occurrences,
-                            shadow_stack,
-                            UsageContext::Value,
-                        );
-                    }
-                    ArrayExpressionElement::Elision(_) => {}
-                    _ => {
-                        collect_usages_in_expression(
-                            elem.to_expression(),
-                            binding_names,
-                            binding_spans,
-                            occurrences,
-                            shadow_stack,
-                            UsageContext::Value,
-                        );
-                    }
-                }
-            }
-        }
-        Expression::ObjectExpression(obj) => {
-            for prop in &obj.properties {
-                match prop {
-                    ObjectPropertyKind::ObjectProperty(p) => {
-                        if p.computed {
-                            collect_usages_in_expression(
-                                p.key.to_expression(),
-                                binding_names,
-                                binding_spans,
-                                occurrences,
-                                shadow_stack,
-                                UsageContext::Value,
-                            );
-                        }
-                        collect_usages_in_expression(
-                            &p.value,
-                            binding_names,
-                            binding_spans,
-                            occurrences,
-                            shadow_stack,
-                            UsageContext::Value,
-                        );
-                    }
-                    ObjectPropertyKind::SpreadProperty(spread) => {
-                        collect_usages_in_expression(
-                            &spread.argument,
-                            binding_names,
-                            binding_spans,
-                            occurrences,
-                            shadow_stack,
-                            UsageContext::Value,
-                        );
-                    }
-                }
-            }
-        }
-        Expression::ArrowFunctionExpression(arrow) => {
-            // Arrow functions create a new scope
-            let mut fn_bindings = FxHashSet::default();
-            for param in &arrow.params.items {
-                collect_pattern_names(&param.pattern, &mut fn_bindings);
-            }
-            shadow_stack.push(fn_bindings);
-            match &arrow.body {
-                ArrowFunctionBody::FunctionBody(body) => {
-                    for s in &body.statements {
-                        collect_usages_in_statement(
-                            s,
-                            binding_names,
-                            binding_spans,
-                            occurrences,
-                            shadow_stack,
-                        );
-                    }
-                }
-                // An expression body is walked as its one expression statement.
-                body => {
-                    if let Some(expression) = body.as_expression() {
-                        collect_usages_in_expression(
-                            expression,
-                            binding_names,
-                            binding_spans,
-                            occurrences,
-                            shadow_stack,
-                            UsageContext::Value,
-                        );
-                    }
-                }
-            }
-            shadow_stack.pop();
-        }
-        Expression::FunctionExpression(_) => {
-            // Function expressions create own scope — skip (don't track closures)
-        }
-        Expression::ParenthesizedExpression(paren) => {
-            collect_usages_in_expression(
-                &paren.expression,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                ctx,
-            );
-        }
-        Expression::AwaitExpression(a) => {
-            collect_usages_in_expression(
-                &a.argument,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-        }
-        Expression::YieldExpression(y) => {
-            if let Some(arg) = &y.argument {
-                collect_usages_in_expression(
-                    arg,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                    UsageContext::Value,
-                );
-            }
-        }
-        Expression::NewExpression(n) => {
-            collect_usages_in_expression(
-                &n.callee,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::CallCallee,
-            );
-            for arg in &n.arguments {
-                match arg {
-                    Argument::SpreadElement(spread) => {
-                        collect_usages_in_expression(
-                            &spread.argument,
-                            binding_names,
-                            binding_spans,
-                            occurrences,
-                            shadow_stack,
-                            UsageContext::Value,
-                        );
-                    }
-                    _ => {
-                        collect_usages_in_expression(
-                            arg.to_expression(),
-                            binding_names,
-                            binding_spans,
-                            occurrences,
-                            shadow_stack,
-                            UsageContext::Value,
-                        );
-                    }
-                }
-            }
-        }
-        Expression::ChainExpression(chain) => match &chain.expression {
-            ChainElement::CallExpression(call) => {
-                collect_usages_in_expression(
-                    &call.callee,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                    UsageContext::CallCallee,
-                );
-                for arg in &call.arguments {
-                    match arg {
-                        Argument::SpreadElement(spread) => {
-                            collect_usages_in_expression(
-                                &spread.argument,
-                                binding_names,
-                                binding_spans,
-                                occurrences,
-                                shadow_stack,
-                                UsageContext::Value,
-                            );
-                        }
-                        _ => {
-                            collect_usages_in_expression(
-                                arg.to_expression(),
-                                binding_names,
-                                binding_spans,
-                                occurrences,
-                                shadow_stack,
-                                UsageContext::Value,
-                            );
-                        }
-                    }
-                }
-            }
-            ChainElement::StaticMemberExpression(member) => {
-                collect_usages_in_expression(
-                    &member.object,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                    UsageContext::MemberObject,
-                );
-            }
-            ChainElement::ComputedMemberExpression(member) => {
-                collect_usages_in_expression(
-                    &member.object,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                    UsageContext::MemberObject,
-                );
-                collect_usages_in_expression(
-                    &member.expression,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                    UsageContext::Value,
-                );
-            }
-            ChainElement::PrivateFieldExpression(pf) => {
-                collect_usages_in_expression(
-                    &pf.object,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                    UsageContext::MemberObject,
-                );
-            }
-            _ => {}
-        },
-        Expression::TSAsExpression(as_expr) => {
-            collect_usages_in_expression(
-                &as_expr.expression,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                ctx,
-            );
-        }
-        Expression::TSSatisfiesExpression(sat) => {
-            collect_usages_in_expression(
-                &sat.expression,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                ctx,
-            );
-        }
-        Expression::TSNonNullExpression(nn) => {
-            collect_usages_in_expression(
-                &nn.expression,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                ctx,
-            );
-        }
-        Expression::TSTypeAssertion(ta) => {
-            collect_usages_in_expression(
-                &ta.expression,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                ctx,
-            );
-        }
-        // Literals, `this`, `super`, etc. — no binding references
-        _ => {}
-    }
-}
-
-fn collect_usages_in_assignment_target(
-    target: &AssignmentTarget<'_>,
-    binding_names: &FxHashSet<&str>,
-    binding_spans: &FxHashMap<&str, Span>,
-    occurrences: &mut Vec<ScriptBindingOccurrence>,
-    shadow_stack: &mut Vec<FxHashSet<String>>,
-) {
-    match target {
-        AssignmentTarget::AssignmentTargetIdentifier(ident) => {
-            let name = ident.name.as_str();
-            if binding_names.contains(name) && !is_shadowed(name, shadow_stack) {
-                occurrences.push(ScriptBindingOccurrence {
-                    name: name.to_string(),
-                    span: ident.span.into(),
-                    usage_kind: ScriptUsageKind::Write,
-                });
-            }
-        }
-        AssignmentTarget::StaticMemberExpression(member) => {
-            collect_usages_in_expression(
-                &member.object,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::MemberObject,
-            );
-        }
-        AssignmentTarget::ComputedMemberExpression(member) => {
-            collect_usages_in_expression(
-                &member.object,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::MemberObject,
-            );
-            collect_usages_in_expression(
-                &member.expression,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-        }
-        AssignmentTarget::ArrayAssignmentTarget(arr) => {
-            for elem in arr.elements.iter().flatten() {
-                collect_usages_in_assignment_target_maybe_default(
-                    elem,
-                    binding_names,
-                    binding_spans,
-                    occurrences,
-                    shadow_stack,
-                );
-            }
-        }
-        AssignmentTarget::ObjectAssignmentTarget(obj) => {
-            for prop in &obj.properties {
-                match prop {
-                    AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(_) => {}
-                    AssignmentTargetProperty::AssignmentTargetPropertyProperty(p) => {
-                        collect_usages_in_assignment_target_maybe_default(
-                            &p.binding,
-                            binding_names,
-                            binding_spans,
-                            occurrences,
-                            shadow_stack,
-                        );
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_usages_in_assignment_target_maybe_default(
-    target: &AssignmentTargetMaybeDefault<'_>,
-    binding_names: &FxHashSet<&str>,
-    binding_spans: &FxHashMap<&str, Span>,
-    occurrences: &mut Vec<ScriptBindingOccurrence>,
-    shadow_stack: &mut Vec<FxHashSet<String>>,
-) {
-    match target {
-        AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {
-            collect_usages_in_assignment_target(
-                &with_default.binding,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-            );
-            collect_usages_in_expression(
-                &with_default.init,
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-                UsageContext::Value,
-            );
-        }
-        _ => {
-            collect_usages_in_assignment_target(
-                target.to_assignment_target(),
-                binding_names,
-                binding_spans,
-                occurrences,
-                shadow_stack,
-            );
-        }
-    }
 }
 
 /// Collect declared names from a statement (for block-scope shadowing detection).
