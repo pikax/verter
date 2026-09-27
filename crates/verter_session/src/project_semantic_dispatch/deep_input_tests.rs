@@ -637,10 +637,10 @@ fn a_nest_derives_its_source_parse_identity_a_fixed_number_of_times() {
     assert_eq!(derivations(20), derivations(200));
 }
 
-/// Template literal types nested 10,000 deep. TypeScript 7.0.2: `"1"`,
+/// Template literal types nested 10,000 deep: a template in a template's
+/// hole splices into it from an explicit stack. TypeScript 7.0.2: `"1"`,
 /// under every setting.
 #[test]
-#[ignore = "a template literal type nested in a template literal type evaluates a query a native level per nesting"]
 fn template_literal_types_nested_10000_deep_answer_on_production_stacks() {
     let source = format!("type D = {};\n", wrap(DEPTH, "`${", "}`"));
     assert_eq!(
