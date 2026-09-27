@@ -120,9 +120,20 @@ row's identity claim is weaker than its `inputs` column reads:
 |---|---|
 | `ImportType` | The encoder consumes the resolver's inputs — the importing logical source unit and the authored specifier — not the resolved module logical identity. One spelling written in two files keys as two identities; two spellings of one module key apart until the carrier resolves, because key construction never resolves a module (§5.4). See "Unresolved import-type identity" below. |
 
-The encoder works on heap stacks, never the native stack: every finite
-structure gets its complete key at any depth, a true cycle ends at a
-back-reference to its open frame's level, and no key is incomplete. A key is
+The semantic node arena is acyclic by contract: a payload may name only children
+the arena already holds (ids below its own) or never-allocated sentinels (ids
+from 2^62 up). A payload naming a child the arena could still allocate is a
+forward reference, the only way to close a cycle, and interns as the typed
+`Opaque(ForeignSemanticOperand)` refusal; a synthetic slot binding over a
+backing value the arena could still allocate is the typed
+`StaleSemanticOperand` refusal. A real TypeScript recursive type never needs a structural cycle: it
+recurses through declaration and alias references
+(`a_resolved_workload_arena_is_a_dag` pins the arena of a resolved workload).
+
+The encoder works on heap stacks, never the native stack: every structure
+gets its complete key at any depth, each node is classified once, the walk
+descends only to children below their parent (any other child keys as
+absent), and no key is incomplete. A key is
 linear in the structure it describes: a subtree longer than
 `SHARED_SUBTREE_MIN_BYTES` (256) that equals one already written earlier in
 the key is written as a reference to it. Sharing is decided by structure, never
@@ -151,6 +162,7 @@ discovery order, and they are registered here rather than changed silently:
 | `Signature` and `DeferredCallable` binder declarations | each declaration's name and binder only | the name, the binder, the constraint and default (presence and keys) and the `const` modifier |
 | `Signature` return carrier | not encoded | a trailing section, present only when the carrier is not structurally the declared return type (decided on the two children's classes, never on node identity) |
 | Repeated subtree longer than 256 bytes | written in full at every occurrence, doubling per level of sharing | written once; each later occurrence is a `RECURSIVE` sub-tag 3 reference numbering shared subtrees in the order they finish being written |
+| Cycle back-reference | `RECURSIVE` sub-tag 1 with the level of the open ancestor, the cycle unfolded along each path | retired: the arena is acyclic by contract, and a child at or above its parent keys as absent |
 
 Every other encoding, and with it every existing union order over those
 variants, is byte-identical.

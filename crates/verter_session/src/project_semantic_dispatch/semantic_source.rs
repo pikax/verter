@@ -1136,10 +1136,7 @@ impl ProjectSemanticDispatch<'_> {
         }
         let scope = self.raise_scope(ctx);
         let node = self.graph().intern_node_with_scope(
-            SemanticNodeData::SyntheticBinding {
-                id: crate::semantic_query::SyntheticBindingId::from_carrier_key(key),
-                value_node: key.value_node,
-            },
+            SemanticNodeData::synthetic_binding(key, self.graph().node_count()),
             scope,
         );
         HotTypeRef::new(node)
