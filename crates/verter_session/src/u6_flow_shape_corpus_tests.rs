@@ -1840,6 +1840,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "9a4b4247b867ee52ca9b88aeeb0d0699ba0600899668f133f4f5ade8977d2ffa",
     ),
     (
+        "X91_assert_never_default_arm_contributes_nothing",
+        "e555619f54e3d947bbc26877530dd5cbb060d71a7628baebf614472cc5ddf88f",
+    ),
+    (
         "X92_if_false_branch_still_contributes_return",
         "d9f042edc82799e267929c202c6a63b2956f4ec2cf8fdc8711d2dcd7982f2b70",
     ),
@@ -5474,7 +5478,6 @@ const OPEN_DEBTS: &[&str] = &[
     // Evolving `let` bindings, the `never`-default switch admission, the
     // `??` short circuit, index-signature reads, and a closure created
     // inside a narrowed arm.
-    "X91_assert_never_default_arm_contributes_nothing",
     "X101_optional_chain_nullish_coalesce",
     "X108_record_index_read_has_no_undefined",
     "X109_optional_index_read_through_optional_chain",
@@ -5571,7 +5574,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // through the constructed instance matches too. Loops iterate to the
     // checker's fixed point: D05 and the X58–X60 loop transfers match the
     // checker.
-    (Owner::U6FlowReturnSubstrate, 67, 59, 2),
+    (Owner::U6FlowReturnSubstrate, 67, 60, 1),
     // A `typeof` test over an `unknown` / `any` arm substitutes the kind's
     // implied type (N44, N46), and a comparison value is `boolean`, so the
     // `let`-aliased condition control (N84) publishes complete. A `const`

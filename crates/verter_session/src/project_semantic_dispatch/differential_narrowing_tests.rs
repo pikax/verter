@@ -416,6 +416,7 @@ export function dElemAccess(s: Shape) { if (s["kind"] === "tri") return s; throw
 export function dTernary(s: Shape) { return s.kind === "circle" ? s.r : s.kind === "square" ? s.s : s.t; }
 export function dExhaust(s: Shape) { switch (s.kind) { case "circle": return 1; case "square": return 2; case "tri": return 3; } }
 export function dExhaustNever(s: Shape) { switch (s.kind) { case "circle": case "square": case "tri": throw 0; default: return s; } }
+export function dExhaustDefault(s: Shape) { switch (s.kind) { case "circle": return 1; case "square": return 2; case "tri": return 3; default: return "z"; } }
 export function dIn(s: Shape) { if ("r" in s) return s; throw 0; }
 export function dTypeofMember(x: { v: string } | { v: number }) { if (typeof x.v === "string") return x; throw 0; }
 export function dTruthyMember(x: { v: string; a: 1 } | { v?: undefined; b: 2 }) { if (x.v) return x; throw 0; }
@@ -505,16 +506,16 @@ fn an_optional_chain_discriminant_narrows_the_chain_root() {
 }
 
 /// The `default` clause of a `switch` whose cases name every discriminant value
-/// reads the union as `never`.
-///
-/// What the lane gives:
-/// - `dExhaustNever`: the checker answers `never`; the lane measured `void`
-///   degraded by FlowGap(GuardNarrowing).
+/// is still reachable and reads the union as `never`: a return of the
+/// reference there is `never`, and any other value it returns joins the return
+/// type (`dExhaustDefault` is `"z" | 1 | 2 | 3`).
 #[test]
-#[ignore = "the default clause of an exhaustive discriminant switch sees never"]
 fn an_exhaustive_switch_default_is_never() {
     let matrix = Matrix::new(DISCRIMINANTS);
-    let failures = matrix.returns(&[("dExhaustNever", "never")]);
+    let failures = matrix.returns(&[
+        ("dExhaustNever", "never"),
+        ("dExhaustDefault", "\"z\" | 1 | 2 | 3"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

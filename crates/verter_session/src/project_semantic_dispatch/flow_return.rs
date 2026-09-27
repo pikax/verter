@@ -8174,110 +8174,6 @@ enum CalleeStatementEffect {
     Undecided,
 }
 
-fn slice_expr_is_exact_subject_read(
-    expr: &crate::flow_slice_content::SliceExpr,
-    subject: &crate::flow_slice_content::SliceNarrowSubject,
-) -> bool {
-    if !subject.path.is_empty() {
-        return false;
-    }
-    match (expr, &subject.root) {
-        (
-            crate::flow_slice_content::SliceExpr::Param { binding, .. },
-            crate::flow_slice_content::SliceNarrowRoot::Param {
-                binding: subject_binding,
-                ..
-            },
-        ) => binding == subject_binding,
-        (
-            crate::flow_slice_content::SliceExpr::Local { binding, .. },
-            crate::flow_slice_content::SliceNarrowRoot::Local {
-                binding: subject_binding,
-                ..
-            },
-        ) => binding == subject_binding,
-        _ => false,
-    }
-}
-
-fn slice_region_has_non_subject_return(
-    region: &crate::flow_slice_content::SliceRegion,
-    is_exact_subject_read: &impl Fn(&crate::flow_slice_content::SliceExpr) -> bool,
-) -> bool {
-    slice_statements_have_non_subject_return(region.statements.iter(), is_exact_subject_read)
-}
-
-fn slice_statements_have_non_subject_return<'a>(
-    statements: impl Iterator<Item = &'a crate::flow_slice_content::SliceStatement>,
-    is_exact_subject_read: &impl Fn(&crate::flow_slice_content::SliceExpr) -> bool,
-) -> bool {
-    use crate::flow_slice_content::SliceStatement;
-    statements.into_iter().any(|statement| match statement {
-        SliceStatement::Return { argument, .. } => argument
-            .as_ref()
-            .is_none_or(|expr| !is_exact_subject_read(expr)),
-        SliceStatement::If {
-            consequent,
-            alternate,
-            ..
-        } => {
-            slice_region_has_non_subject_return(consequent, is_exact_subject_read)
-                || alternate.as_deref().is_some_and(|alternate| {
-                    slice_region_has_non_subject_return(alternate, is_exact_subject_read)
-                })
-        }
-        SliceStatement::Block(region) => {
-            slice_region_has_non_subject_return(region, is_exact_subject_read)
-        }
-        SliceStatement::Labeled { body, .. } => {
-            slice_region_has_non_subject_return(body, is_exact_subject_read)
-        }
-        SliceStatement::Loop(lowered) => {
-            slice_region_has_non_subject_return(&lowered.init, is_exact_subject_read)
-                || slice_region_has_non_subject_return(&lowered.body, is_exact_subject_read)
-        }
-        SliceStatement::Unreachable(unreachable) => {
-            slice_region_has_non_subject_return(unreachable, is_exact_subject_read)
-        }
-        SliceStatement::Switch { cases, .. } => cases
-            .iter()
-            .any(|case| slice_region_has_non_subject_return(&case.region, is_exact_subject_read)),
-        SliceStatement::Try {
-            block,
-            catch,
-            finally,
-            ..
-        } => {
-            slice_region_has_non_subject_return(block, is_exact_subject_read)
-                || catch.as_deref().is_some_and(|catch| {
-                    slice_region_has_non_subject_return(&catch.region, is_exact_subject_read)
-                })
-                || finally.as_deref().is_some_and(|finally| {
-                    slice_region_has_non_subject_return(finally, is_exact_subject_read)
-                })
-        }
-        SliceStatement::Gap(_)
-        | SliceStatement::Assignment { .. }
-        | SliceStatement::EvolvingArray(_)
-        | SliceStatement::Assertion { .. }
-        | SliceStatement::CallEffect { .. }
-        | SliceStatement::CalleeEffect { .. }
-        | SliceStatement::Break { .. }
-        | SliceStatement::Continue { .. }
-        | SliceStatement::CompoundAssignment { .. }
-        | SliceStatement::MemberWrite { .. }
-        | SliceStatement::Destructure { .. }
-        | SliceStatement::DestructureAssign { .. }
-        | SliceStatement::Yield { .. }
-        | SliceStatement::Throw
-        | SliceStatement::ThrowPoint
-        | SliceStatement::Binding { .. }
-        | SliceStatement::TransparentLoop
-        | SliceStatement::DivergentLoop
-        | SliceStatement::Unsupported(_) => false,
-    })
-}
-
 /// Immutable values prepared for one selected child capture. Source annotation
 /// resolution completes before these values define the child input basis.
 struct PreparedFlowCaptureInput {
@@ -20004,7 +19900,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     for case in cases.iter() {
                         // The dispatch component of this clause's start.
                         let mut dispatch = entry.clone();
-                        let mut dead_dispatch = false;
                         match &case.test {
                             // The clause's own guard, beneath every earlier
                             // clause's guard negated (`narrowTypeBySwitchOnTrue`;
@@ -20025,9 +19920,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             {
                                 let applied: Vec<(&crate::flow_slice_content::SliceGuard, bool)> =
                                     guards.iter().map(|guard| (*guard, false)).collect();
-                                let (state, dead) = self.guarded_switch_state(&entry, &applied);
-                                dispatch = state;
-                                dead_dispatch = dead;
+                                // Reachable even when the guards leave the
+                                // reference `never`: the clause is typed
+                                // through it.
+                                dispatch = self.guarded_switch_state(&entry, &applied).0;
                             }
                             _ => {}
                         }
@@ -20076,14 +19972,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     if let Some((remainder, total)) =
                                         self.switch_discriminant_remainder(subject, &tests)
                                     {
-                                        if remainder.is_empty() {
-                                            // Every arm is covered: the
-                                            // clause is DEAD on this edge
-                                            // — it contributes nothing and
-                                            // falls through nowhere.
-                                            dead_dispatch = true;
-                                        } else if remainder.len() < total {
-                                            let node = self.union(&remainder);
+                                        if remainder.len() < total {
+                                            // Every arm covered leaves the
+                                            // clause reachable with the
+                                            // reference `never`: its
+                                            // contributors are typed through
+                                            // it, as the checker keeps them.
+                                            let node = if remainder.is_empty() {
+                                                self.dispatch.graph().intern_node(
+                                                    SemanticNodeData::Primitive(
+                                                        PrimitiveKind::Never,
+                                                    ),
+                                                )
+                                            } else {
+                                                self.union(&remainder)
+                                            };
                                             // The remainder's arms are the
                                             // PARENT reference's, so the
                                             // fact lands there — the root
@@ -20122,28 +20025,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 }
                             }
                         }
-                        let start = match (dead_dispatch, &chain_end) {
-                            // The dispatch edge is dead, but a preceding
-                            // clause may still fall through into this body.
-                            // Exhaustiveness kills only the dispatch
-                            // component, never that live chain edge.
-                            (true, Some(end)) => end.clone(),
-                            (true, None) => {
-                                if let Some(subject) = discriminant {
-                                    if slice_region_has_non_subject_return(&case.region, &|expr| {
-                                        slice_expr_is_exact_subject_read(expr, subject)
-                                    }) {
-                                        self.record_degradation(FlowReturnDegradation::FlowGap(
-                                            crate::semantic_query::FlowGap::GuardNarrowing,
-                                        ));
-                                    }
-                                }
-                                last_end = None;
-                                last_falls = false;
-                                continue;
-                            }
-                            (false, None) => dispatch,
-                            (false, Some(end)) => {
+                        let start = match &chain_end {
+                            None => dispatch,
+                            Some(end) => {
                                 let mut start =
                                     self.join_states(&[&dispatch, end], &entry.write_observation);
                                 // A `var` the fall-through edge first
