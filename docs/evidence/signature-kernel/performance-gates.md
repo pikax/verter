@@ -90,6 +90,10 @@ cargo run --release -p verter_session --example signature_kernel_bench -- \
 cargo run --release -p verter_session --example signature_kernel_cancel_probe
 cargo run --release -p verter_session --example signature_kernel_cancel_probe -- \
     --modules 4 --depth 4 --cold-samples 3 --rounds 3
+# the contention probe (candidate only, not run by the runner), full and quick
+cargo run --release -p verter_session --example signature_kernel_contention_probe
+cargo run --release -p verter_session --example signature_kernel_contention_probe -- \
+    --modules 4 --depth 4 --samples 5 --queries 200
 ```
 
 The harness prints one JSON document (`harness_version` 3). What each number
@@ -156,7 +160,7 @@ means:
 * **`census`**, **`census_by_witness`** and **`outcomes`** — what every
   witness answers, untimed (see *Matched work* below).
 
-The cancellation probe prints its own document (`harness_version` 2):
+The cancellation probe prints its own document (`harness_version` 3):
 `cold_request`, `cancel_stop` and `restart` samples in aggregate, and
 `by_fraction`, one entry per injection point (10, 30, 50, 70 and 90% of
 the invocation's median cold request, `cold_request_median_ns`), each with
@@ -168,6 +172,40 @@ canceller thread is parked before the request starts and counts from the
 request's own start instant, so where a cancellation lands does not depend
 on thread creation. The runner reports p50 / p95 / p99 per point beside the
 aggregate.
+
+Each stop is also split into **phases** (`phases`, per point and in
+aggregate), from a trace the cancelled request records on its own thread
+through the `test-support` seam the examples are built with (never in a
+production build):
+
+* `poll_delay` — from `cancel()` to the first poll on the request's thread
+  that observed it (the resolver context's, the connected demand's or the
+  request context's cancellation check);
+* `unwind` — from that poll to the request returning, split at two
+  lifecycle marks into `evaluation` (until the dispatch step returned),
+  `teardown` (until the dispatch and its transaction dropped) and `finish`
+  (the audit record and return);
+* `by_family` — both keyed by the semantic query family innermost when
+  `cancel()` landed (families open at the cold-build choke point), and
+  `by_poll_site` — by the observing poll's `file:line`;
+* `evaluation_by_family_ns` — the post-poll evaluation time by the family
+  open while it ran; `unobserved` counts cancelled requests no poll on
+  the request's thread observed.
+
+The **contention probe** (`signature_kernel_contention_probe`,
+`harness_version` 1) isolates the parts of a warm query on one host at
+1/2/4/8/16 callers: `A0` the public audited query, `A1` many dispatch
+steps inside one request, `A2` the carrier-validated memo read alone, `A3`
+the request setup and teardown with no semantic work; `A0` and `A2` also
+run with every caller on the same witness (`keys: same`). Per point:
+`samples_ns`, `qps`, and `store_view_reads_per_query` (from the host's
+provenance counter, which must not grow with callers). It asserts, and
+reports as `answers_agree_across_callers`, that every witness answers the
+same when read by 1/2/4/8/16 concurrent callers as when read by one. What
+it found, what was fixed and what is proposed is recorded in
+[`warm-query-concurrency.md`](warm-query-concurrency.md); the single-caller
+batch API the scheduler-scaling section motivates is designed in
+[`check-root-batch.md`](check-root-batch.md).
 
 Lock evidence requires, beyond an idle machine and a control drift inside the
 gate:
@@ -204,8 +242,13 @@ Recorded plainly so no reader mistakes absence for a pass:
   exists; the candidate-only probe
   (`crates/verter_session/examples/signature_kernel_cancel_probe.rs`), which
   the runner runs inside the same session, records the stop and restart
-  distributions, in aggregate and per injection point. No locked session
-  has run it yet.
+  distributions, in aggregate and per injection point, and splits each stop
+  into its poll delay and unwind. No locked session has run it yet. The
+  poll delay is short (tens of microseconds at the median); the unwind
+  after the poll grows with how far the request had progressed — the
+  read-set finalisation of the cancelled build and the teardown of the
+  dispatch transaction — so the stop is not yet bounded by one small work
+  chunk (see [`warm-query-concurrency.md`](warm-query-concurrency.md)).
 * Completion and diagnostic agreement rates against the pinned official
   compiler on a full project check.
 * A LOCKED cell: `performance-gates.toml` has no signature-kernel cell.
