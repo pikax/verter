@@ -44,7 +44,9 @@
 //! count, the wall samples, queries per second, and the host's
 //! store-view reads per query (`store_view_reads_per_query`, from the
 //! host's own provenance counter), which must not grow with the caller
-//! count. The corpus is the comparative harness's module shape, written
+//! count; and `answers_agree_across_callers`, the check (asserted) that
+//! every witness answers the same when read by 1/2/4/8/16 concurrent
+//! callers as when read by one. The corpus is the comparative harness's module shape, written
 //! here again because the harness must stay a single file the runner can
 //! drop into the baseline tree.
 
@@ -316,6 +318,44 @@ fn run(
     }
 }
 
+/// Whether every witness answers the same on the warm host when read by
+/// 1/2/4/8/16 concurrent callers as when read by one: each caller reads
+/// every witness once, from its own offset, and each answer's fingerprint
+/// (returned node, degradation or typed failure) must equal the
+/// single-caller one.
+fn answers_agree_across_callers(
+    host: &VerterHost,
+    witnesses: &[FlowFunctionReturnIdentity],
+) -> bool {
+    let expected: Vec<String> = witnesses
+        .iter()
+        .map(|witness| support::flow_return_answer(host, witness))
+        .collect();
+    CALLER_COUNTS.iter().all(|&callers| {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..callers)
+                .map(|caller| {
+                    let expected = &expected;
+                    std::thread::Builder::new()
+                        .stack_size(WORK_STACK_BYTES)
+                        .spawn_scoped(scope, move || {
+                            let offset = caller * witnesses.len() / callers;
+                            (0..witnesses.len()).all(|k| {
+                                let index = (offset + k) % witnesses.len();
+                                support::flow_return_answer(host, &witnesses[index])
+                                    == expected[index]
+                            })
+                        })
+                        .expect("spawn a checking caller")
+                })
+                .collect();
+            handles
+                .into_iter()
+                .all(|handle| handle.join().expect("a checking caller"))
+        })
+    })
+}
+
 fn arg(args: &[String], flag: &str, default: usize) -> usize {
     args.iter()
         .position(|a| a == flag)
@@ -419,6 +459,12 @@ fn probe() {
         }));
     }
 
+    let answers_agree = answers_agree_across_callers(&host, &witnesses);
+    assert!(
+        answers_agree,
+        "concurrent callers read the answers one caller reads"
+    );
+
     let document = serde_json::json!({
         "harness": "signature_kernel_contention_probe",
         "harness_version": 1,
@@ -432,6 +478,7 @@ fn probe() {
         "host_workers": host_workers,
         "queries_per_caller": queries,
         "points": points,
+        "answers_agree_across_callers": answers_agree,
     });
     println!("{document}");
 }

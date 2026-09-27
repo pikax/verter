@@ -426,3 +426,63 @@ test("the invocation minimum is read from the interleave policy", () => {
   assert.equal(minInvocationsOf("A,B,B,A order, at least four invocations per arm, idle"), 4);
   assert.throws(() => minInvocationsOf("alternate the arms"));
 });
+
+test("the cancellation summary splits each stop into its phases", () => {
+  const phases = (poll, unwind) => ({
+    poll_delay: { samples_ns: poll },
+    unwind: { samples_ns: unwind },
+    evaluation: { samples_ns: unwind.map((ns) => ns / 2) },
+    teardown: { samples_ns: unwind.map((ns) => ns / 4) },
+    finish: { samples_ns: unwind.map(() => 10) },
+    evaluation_by_family_ns: { FlowReturn: 100 },
+    by_family: { FlowReturn: { poll_delay: { samples_ns: poll }, unwind: { samples_ns: unwind } } },
+    by_poll_site: {
+      "connected_demand.rs:120": {
+        poll_delay: { samples_ns: poll },
+        unwind: { samples_ns: unwind },
+      },
+    },
+    unobserved: 0,
+  });
+  const probe = {
+    corpus: { modules: 2, depth: 2 },
+    fractions: [0.5],
+    rounds: 2,
+    cold_request_median_ns: 1000,
+    completed_before_cancel: 0,
+    workloads: {
+      cold_request: { samples_ns: [1000] },
+      cancel_stop: { samples_ns: [200, 400] },
+      restart: { samples_ns: [900, 950] },
+    },
+    by_fraction: [
+      {
+        fraction: 0.5,
+        delay_ns: 500,
+        completed_before_cancel: 0,
+        landed_ns: { samples_ns: [500, 500] },
+        cancel_stop: { samples_ns: [200, 400] },
+        restart: { samples_ns: [900, 950] },
+        phases: phases([20, 40], [180, 360]),
+      },
+    ],
+    phases: phases([20, 40], [180, 360]),
+  };
+  const s = summary(runs(same, same), [], [probe, probe]);
+  const point = s.cancellation.by_fraction[0].phases;
+  assert.equal(point.poll_delay.n, 4);
+  assert.equal(point.poll_delay.p50, 30);
+  assert.equal(point.unwind.p50, 270);
+  assert.equal(point.evaluation.p50, 135);
+  assert.equal(s.cancellation.phases.by_family.FlowReturn.poll_delay.n, 4);
+  assert.equal(s.cancellation.phases.by_poll_site["connected_demand.rs:120"].unwind.n, 4);
+
+  s.machine = MACHINE;
+  const markdown = renderMarkdown(s);
+  const has = (text) => assert.ok(markdown.includes(text), text);
+  has("Stop phases per injection point");
+  has("| 50% | 0.00003 / ");
+  has("Query family innermost when `cancel()` landed:");
+  has("| `FlowReturn` | 4 |");
+  has("| `connected_demand.rs:120` | 4 |");
+});

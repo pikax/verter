@@ -39,14 +39,24 @@
 //! records where its cancellations actually landed (`landed_ns`, from the
 //! request's start to `cancel()`).
 //!
+//! Each stop is also split at the first poll on the request's thread that
+//! observed the cancellation (`phases`, per point and in aggregate): the
+//! poll delay from `cancel()` to that poll and the unwind from it to the
+//! request returning, keyed by the semantic query family innermost when
+//! `cancel()` landed and by the poll site (`file:line`). The trace comes
+//! from the `test-support` seam this crate's examples are built with and
+//! is recorded only for the cancelled requests.
+//!
 //! A cancellation that lands after the request completed is not a stop
 //! sample; the probe counts those separately, per point, so a reader sees
 //! how many fractions actually interrupted work.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Barrier, OnceLock};
 use std::time::{Duration, Instant};
 
 use verter_scheduler::cancellation::CancellationToken;
+use verter_session::for_tests::signature_kernel_bench_support::cancel_trace::{self, CancelTrace};
 use verter_session::host_flow_return_audit::FlowReturnError;
 use verter_session::semantic_query::ReturnProjectionDemand;
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
@@ -181,6 +191,121 @@ struct Point {
     cancel_stop_ns: Vec<u64>,
     restart_ns: Vec<u64>,
     completed_before_cancel: u64,
+    phases: Phases,
+}
+
+/// A stop split at the first poll that observed the cancellation: the
+/// poll delay (from `cancel()` to that poll) and the unwind (from that
+/// poll to the request returning), in aggregate and keyed by the query
+/// family innermost when `cancel()` landed and by the observing poll
+/// site.
+#[derive(Default)]
+struct Phases {
+    poll_delay_ns: Vec<u64>,
+    unwind_ns: Vec<u64>,
+    /// The unwind split at the request's lifecycle marks: from the poll
+    /// to the dispatch step returning (`evaluation`), from there to the
+    /// dispatch and its transaction dropped (`teardown`), and from there
+    /// to the request returning (`finish`).
+    evaluation_ns: Vec<u64>,
+    teardown_ns: Vec<u64>,
+    finish_ns: Vec<u64>,
+    /// Time the evaluation spent after the poll, until the dispatch step
+    /// returned, by the innermost query family open (`none`: the
+    /// evaluator's own work between queries).
+    evaluation_by_family_ns: BTreeMap<String, u64>,
+    by_family: BTreeMap<String, (Vec<u64>, Vec<u64>)>,
+    by_poll_site: BTreeMap<String, (Vec<u64>, Vec<u64>)>,
+    /// Cancelled requests no poll on the request's thread observed (the
+    /// cancellation was read elsewhere, e.g. on a scheduler worker).
+    unobserved: u64,
+}
+
+impl Phases {
+    fn record(&mut self, landing: &Landing) {
+        let Some((site, observed_at)) = landing.trace.first_observed else {
+            self.unobserved += 1;
+            return;
+        };
+        let poll = observed_at
+            .saturating_duration_since(landing.cancelled_at)
+            .as_nanos() as u64;
+        let unwind = landing
+            .returned_at
+            .saturating_duration_since(observed_at)
+            .as_nanos() as u64;
+        self.poll_delay_ns.push(poll);
+        self.unwind_ns.push(unwind);
+        let mark = |label: &str| {
+            landing
+                .trace
+                .marks
+                .iter()
+                .find(|(seen, _)| *seen == label)
+                .map(|(_, at)| *at)
+        };
+        if let (Some(evaluated), Some(released)) = (mark("evaluated"), mark("released")) {
+            let span =
+                |from: Instant, to: Instant| to.saturating_duration_since(from).as_nanos() as u64;
+            self.evaluation_ns.push(span(observed_at, evaluated));
+            let transitions = &landing.trace.transitions;
+            let mut cursor = observed_at;
+            let mut open = landing.trace.active_at(observed_at);
+            for (at, family) in transitions
+                .iter()
+                .filter(|(at, _)| *at > observed_at && *at <= evaluated)
+            {
+                let name = open.map_or_else(|| "none".to_owned(), |tag| format!("{tag:?}"));
+                *self.evaluation_by_family_ns.entry(name).or_default() += span(cursor, *at);
+                cursor = *at;
+                open = *family;
+            }
+            let name = open.map_or_else(|| "none".to_owned(), |tag| format!("{tag:?}"));
+            *self.evaluation_by_family_ns.entry(name).or_default() += span(cursor, evaluated);
+            self.teardown_ns.push(span(evaluated, released));
+            self.finish_ns.push(span(released, landing.returned_at));
+        }
+        let family = match landing.trace.active_at(landing.cancelled_at) {
+            Some(tag) => format!("{tag:?}"),
+            None => "none".to_owned(),
+        };
+        let site = format!("{}:{}", site.file().replace('\\', "/"), site.line());
+        for (key, map) in [
+            (family, &mut self.by_family),
+            (site, &mut self.by_poll_site),
+        ] {
+            let entry = map.entry(key).or_default();
+            entry.0.push(poll);
+            entry.1.push(unwind);
+        }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        let keyed = |map: &BTreeMap<String, (Vec<u64>, Vec<u64>)>| {
+            map.iter()
+                .map(|(key, (poll, unwind))| {
+                    (
+                        key.clone(),
+                        serde_json::json!({
+                            "poll_delay": { "samples_ns": poll },
+                            "unwind": { "samples_ns": unwind },
+                        }),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>()
+        };
+        serde_json::json!({
+            "poll_delay": { "samples_ns": self.poll_delay_ns },
+            "unwind": { "samples_ns": self.unwind_ns },
+            "evaluation": { "samples_ns": self.evaluation_ns },
+            "teardown": { "samples_ns": self.teardown_ns },
+            "finish": { "samples_ns": self.finish_ns },
+            "evaluation_by_family_ns": self.evaluation_by_family_ns,
+            "by_family": keyed(&self.by_family),
+            "by_poll_site": keyed(&self.by_poll_site),
+            "unobserved": self.unobserved,
+        })
+    }
 }
 
 /// One cancelled request and the instants its latencies are read from.
@@ -189,6 +314,10 @@ struct Landing {
     started: Instant,
     cancelled_at: Instant,
     returned_at: Instant,
+    /// What the request's own thread recorded: the innermost query
+    /// family at every instant and the first poll that saw the
+    /// cancellation.
+    trace: CancelTrace,
 }
 
 /// Run the request on `host` and cancel it `delay` after it starts.
@@ -226,7 +355,7 @@ fn cancelled_request(host: &VerterHost, delay: Duration) -> Landing {
     ready.wait();
     let started = Instant::now();
     origin.set(started).expect("the origin is published once");
-    let outcome = request(host, token);
+    let (outcome, trace) = cancel_trace::traced(|| request(host, token));
     let returned_at = Instant::now();
     let cancelled_at = canceller.join().expect("the canceller finishes");
     Landing {
@@ -234,6 +363,7 @@ fn cancelled_request(host: &VerterHost, delay: Duration) -> Landing {
         started,
         cancelled_at,
         returned_at,
+        trace,
     }
 }
 
@@ -295,6 +425,9 @@ fn run() {
                     .saturating_duration_since(landing.started)
                     .as_nanos() as u64,
             );
+            if landing.outcome == Outcome::Cancelled {
+                point.phases.record(&landing);
+            }
             match landing.outcome {
                 Outcome::Cancelled => point.cancel_stop_ns.push(
                     landing
@@ -324,6 +457,37 @@ fn run() {
         restart_ns.extend_from_slice(&point.restart_ns);
     }
     let completed_before_cancel: u64 = points.iter().map(|p| p.completed_before_cancel).sum();
+    let mut phases = Phases::default();
+    for point in &points {
+        phases
+            .poll_delay_ns
+            .extend_from_slice(&point.phases.poll_delay_ns);
+        phases.unwind_ns.extend_from_slice(&point.phases.unwind_ns);
+        phases
+            .evaluation_ns
+            .extend_from_slice(&point.phases.evaluation_ns);
+        phases
+            .teardown_ns
+            .extend_from_slice(&point.phases.teardown_ns);
+        phases.finish_ns.extend_from_slice(&point.phases.finish_ns);
+        for (family, ns) in &point.phases.evaluation_by_family_ns {
+            *phases
+                .evaluation_by_family_ns
+                .entry(family.clone())
+                .or_default() += ns;
+        }
+        phases.unobserved += point.phases.unobserved;
+        for (all, own) in [
+            (&mut phases.by_family, &point.phases.by_family),
+            (&mut phases.by_poll_site, &point.phases.by_poll_site),
+        ] {
+            for (key, (poll, unwind)) in own {
+                let entry = all.entry(key.clone()).or_default();
+                entry.0.extend_from_slice(poll);
+                entry.1.extend_from_slice(unwind);
+            }
+        }
+    }
     let by_fraction: Vec<serde_json::Value> = points
         .iter()
         .map(|point| {
@@ -334,13 +498,14 @@ fn run() {
                 "landed_ns": { "samples_ns": point.landed_ns },
                 "cancel_stop": { "samples_ns": point.cancel_stop_ns },
                 "restart": { "samples_ns": point.restart_ns },
+                "phases": point.phases.json(),
             })
         })
         .collect();
 
     let document = serde_json::json!({
         "harness": "signature_kernel_cancel_probe",
-        "harness_version": 2,
+        "harness_version": 3,
         "rev": std::env::var("SK_BENCH_REV").unwrap_or_default(),
         "machine": {
             "os": std::env::consts::OS,
@@ -359,6 +524,7 @@ fn run() {
             "restart": { "samples_ns": restart_ns },
         },
         "by_fraction": by_fraction,
+        "phases": phases.json(),
     });
     println!("{document}");
 }

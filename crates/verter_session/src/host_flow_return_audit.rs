@@ -132,7 +132,10 @@ impl VerterHost {
     ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
         self.flow_return_request(function, cancellation, |dispatch| {
             let key = dispatch.flow_return_key_with_demand(function, demand);
-            match dispatch.execute_flow_return(key) {
+            let step = dispatch.execute_flow_return(key);
+            #[cfg(feature = "test-support")]
+            crate::for_tests::signature_kernel_bench_support::cancel_trace::mark("evaluated");
+            match step {
                 crate::semantic_query::FlowReturnStep::Complete(result) => Ok(Arc::new(result)),
                 crate::semantic_query::FlowReturnStep::NoValue(failure) => {
                     Err(FlowReturnError::Failure(failure))
@@ -244,6 +247,8 @@ impl VerterHost {
                     attempts: crate::typeinfo::TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS as u8,
                 }),
             };
+        #[cfg(feature = "test-support")]
+        crate::for_tests::signature_kernel_bench_support::cancel_trace::mark("released");
         // A cancelled request's incomplete answer IS the cancellation: the
         // evaluation stops at its next check with a budget trip, or a nested
         // read stops and degrades the value it feeds. Neither says anything

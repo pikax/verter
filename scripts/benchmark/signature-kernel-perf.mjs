@@ -1158,6 +1158,7 @@ function summarizeCancellation(probe, runs) {
       completed_before_cancel: points.reduce((sum, p) => sum + p.completed_before_cancel, 0),
       cancel_stop: distribution(pooledOf("cancel_stop")),
       restart: distribution(pooledOf("restart")),
+      ...(point.phases ? { phases: summarizePhases(points.map((p) => p.phases)) } : {}),
     };
   });
   return {
@@ -1168,6 +1169,40 @@ function summarizeCancellation(probe, runs) {
     completed_before_cancel: runs.reduce((sum, r) => sum + r.completed_before_cancel, 0),
     distributions,
     by_fraction: byFraction,
+    ...(runs[0].phases ? { phases: summarizePhases(runs.map((r) => r.phases)) } : {}),
+  };
+}
+
+/**
+ * The cancellation probe's stop phases pooled across invocations: the poll delay (from
+ * `cancel()` to the first poll that observed it) and the unwind after it, the unwind
+ * split at the request's lifecycle marks, and both keyed by the query family innermost
+ * when `cancel()` landed and by the observing poll site.
+ */
+function summarizePhases(phases) {
+  const distribution = (xs) => (xs.length === 0 ? { n: 0 } : stats(xs));
+  const pooled = (name) => distribution(phases.flatMap((p) => p[name]?.samples_ns ?? []));
+  const keyed = (key) => {
+    const names = [...new Set(phases.flatMap((p) => Object.keys(p[key] ?? {})))].sort();
+    return Object.fromEntries(
+      names.map((name) => {
+        const of = (leg) => phases.flatMap((p) => p[key]?.[name]?.[leg].samples_ns ?? []);
+        return [
+          name,
+          { poll_delay: distribution(of("poll_delay")), unwind: distribution(of("unwind")) },
+        ];
+      }),
+    );
+  };
+  return {
+    poll_delay: pooled("poll_delay"),
+    unwind: pooled("unwind"),
+    evaluation: pooled("evaluation"),
+    teardown: pooled("teardown"),
+    finish: pooled("finish"),
+    unobserved: phases.reduce((sum, p) => sum + (p.unobserved ?? 0), 0),
+    by_family: keyed("by_family"),
+    by_poll_site: keyed("by_poll_site"),
   };
 }
 
@@ -1423,6 +1458,42 @@ function renderMarkdown(s) {
         lines.push(
           `| ${Math.round(p.fraction * 100)}% | ${landed} | ${cell(p.cancel_stop)} | ${p.cancel_stop.n} | ${p.completed_before_cancel} | ${cell(p.restart)} |`,
         );
+      }
+      if (c.by_fraction.some((p) => p.phases)) {
+        lines.push(
+          "",
+          "Stop phases per injection point: the poll delay runs from `cancel()` to the first poll that observed it; the unwind from that poll to the request returning, split into the rest of the evaluation, the teardown of the dispatch and its transaction, and the finish.",
+          "",
+          "| Injection point | poll delay p50 / p95 / p99 | unwind p50 / p95 / p99 | evaluation p50 | teardown p50 | finish p50 |",
+          "|---|---|---|---|---|---|",
+        );
+        const median = (d) => (d.n === 0 ? "n/a" : ms(d.p50));
+        for (const p of c.by_fraction.filter((p) => p.phases)) {
+          const ph = p.phases;
+          lines.push(
+            `| ${Math.round(p.fraction * 100)}% | ${cell(ph.poll_delay)} | ${cell(ph.unwind)} | ${median(ph.evaluation)} | ${median(ph.teardown)} | ${median(ph.finish)} |`,
+          );
+        }
+      }
+      if (c.phases) {
+        const tables = [
+          ["by_family", "Query family innermost when `cancel()` landed"],
+          ["by_poll_site", "Poll site that first observed the cancellation"],
+        ];
+        for (const [key, title] of tables) {
+          lines.push(
+            "",
+            `${title}:`,
+            "",
+            "| | n | poll delay p50 / p95 / p99 | unwind p50 / p95 / p99 |",
+            "|---|---|---|---|",
+          );
+          for (const [name, d] of Object.entries(c.phases[key])) {
+            lines.push(
+              `| \`${name}\` | ${d.poll_delay.n} | ${cell(d.poll_delay)} | ${cell(d.unwind)} |`,
+            );
+          }
+        }
       }
     }
     lines.push(

@@ -1538,8 +1538,16 @@ impl RequestContext {
 
     /// Whether this request has been cancelled.
     #[must_use]
+    #[cfg_attr(feature = "test-support", track_caller)]
     pub fn is_cancelled(&self) -> bool {
-        self.cancellation.is_cancelled()
+        let cancelled = self.cancellation.is_cancelled();
+        #[cfg(feature = "test-support")]
+        if cancelled {
+            crate::for_tests::signature_kernel_bench_support::cancel_trace::observed(
+                std::panic::Location::caller(),
+            );
+        }
+        cancelled
     }
 
     /// Clone the stable token carried by this request.
