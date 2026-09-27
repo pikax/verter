@@ -68,18 +68,53 @@ fn dynamic_contract_recovers_only_one_shared_discriminated_source() {
         result.dynamic[0].correlated_source.as_deref(),
         Some("choice")
     );
+    assert_eq!(
+        result.dynamic[0].component_key.as_deref(),
+        Some("component")
+    );
+    assert_eq!(result.dynamic[0].props_key.as_deref(), Some("props"));
     assert_eq!(result.dynamic[1].correlated_source, None);
+    assert_eq!(result.dynamic[1].component_key, None);
+    assert_eq!(result.dynamic[1].props_key, None);
     assert!(result.dynamic[0]
         .render(&result.observations[0].witness)
         .contains("__VerterDynamicCorrelated(choice, \"component\", \"props\")"));
 
-    let changed = resolve(
-        "<component :is=\"choice.component\" v-bind=\"choice.otherProps\"/>",
-        &["choice"],
+    let renamed = resolve(
+        "<component :is=\"choice.view\" v-bind=\"choice.data\"/><component :is=\"item.comp\" v-bind=\"item.props\"/><component :is=\"row.choice.view\" v-bind=\"row.choice.data\"/>",
+        &["choice", "item", "row"],
     );
-    assert!(changed.complete);
-    assert_eq!(changed.dynamic[0].correlated_source, None);
-    assert_ne!(result.snapshot, changed.snapshot);
+    assert!(renamed.complete);
+    assert_eq!(
+        renamed.dynamic[0].correlated_source.as_deref(),
+        Some("choice")
+    );
+    assert_eq!(renamed.dynamic[0].component_key.as_deref(), Some("view"));
+    assert_eq!(renamed.dynamic[0].props_key.as_deref(), Some("data"));
+    assert!(renamed.dynamic[0]
+        .render(&renamed.observations[0].witness)
+        .contains("__VerterDynamicCorrelated(choice, \"view\", \"data\")"));
+    assert_eq!(
+        renamed.dynamic[1].correlated_source.as_deref(),
+        Some("item")
+    );
+    assert_eq!(renamed.dynamic[1].component_key.as_deref(), Some("comp"));
+    assert_eq!(renamed.dynamic[1].props_key.as_deref(), Some("props"));
+    assert_eq!(
+        renamed.dynamic[2].correlated_source.as_deref(),
+        Some("row.choice")
+    );
+    assert_eq!(renamed.dynamic[2].component_key.as_deref(), Some("view"));
+    assert_eq!(renamed.dynamic[2].props_key.as_deref(), Some("data"));
+
+    let uncorrelated = resolve(
+        "<component :is=\"current\" v-bind=\"current.props\"/><component :is=\"choice.component\" v-bind=\"choice.props.extra\"/>",
+        &["current", "choice"],
+    );
+    assert!(uncorrelated.complete);
+    assert_eq!(uncorrelated.dynamic[0].correlated_source, None);
+    assert_eq!(uncorrelated.dynamic[1].correlated_source, None);
+    assert_ne!(result.snapshot, renamed.snapshot);
 }
 
 #[test]

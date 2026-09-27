@@ -88,20 +88,32 @@ pub struct DynamicComponentUseContract {
     pub use_id: ComponentUseId,
     /// Authored component expression.
     pub expression: String,
-    /// Shared source of `.component` and `.props`, for a single pure spread.
+    /// Shared object of the component property and the props property.
+    ///
+    /// Set only for one pure spread whose component expression and spread
+    /// expression are simple member paths of that same object. The property
+    /// names are the authored ones (`view`/`data` as well as `component`/`props`).
     pub correlated_source: Option<String>,
+    /// Property of [`Self::correlated_source`] that holds the constructor.
+    pub component_key: Option<String>,
+    /// Property of [`Self::correlated_source`] that holds that constructor's props.
+    pub props_key: Option<String>,
 }
 
 impl DynamicComponentUseContract {
     /// Render exactly one check in the use's lexical scope.
     #[must_use]
     pub fn render(&self, witness: &ComponentUseWitness) -> String {
-        match &self.correlated_source {
-            Some(source) => format!(
-                "const {} = __VerterDynamicCorrelated({source}, \"component\", \"props\");\n",
+        match (
+            &self.correlated_source,
+            &self.component_key,
+            &self.props_key,
+        ) {
+            (Some(source), Some(component_key), Some(props_key)) => format!(
+                "const {} = __VerterDynamicCorrelated({source}, \"{component_key}\", \"{props_key}\");\n",
                 witness.binding
             ),
-            None => witness.render(),
+            _ => witness.render(),
         }
     }
 }
@@ -265,11 +277,13 @@ pub fn project_component_resolution(
         let mut witness = original.clone();
         witness.component = expression.clone();
         if source == ComponentSource::Dynamic {
-            let correlated_source = correlated_source(spelling, &witness);
+            let choice = correlated_choice(spelling, &witness);
             dynamic.push(DynamicComponentUseContract {
                 use_id: use_.id.clone(),
                 expression: spelling.to_string(),
-                correlated_source,
+                correlated_source: choice.as_ref().map(|choice| choice.source.clone()),
+                component_key: choice.as_ref().map(|choice| choice.component_key.clone()),
+                props_key: choice.as_ref().map(|choice| choice.props_key.clone()),
             });
         }
         observations.push(ComponentResolutionObservation {
@@ -309,7 +323,16 @@ fn resolution_specialization(
     ResolutionSpecializationKey(encoder.digest())
 }
 
-fn correlated_source(component: &str, witness: &ComponentUseWitness) -> Option<String> {
+struct CorrelatedChoice {
+    source: String,
+    component_key: String,
+    props_key: String,
+}
+
+/// One pure `v-bind` of a sibling property on the same simple member object
+/// as the `:is` expression. Any other shape stays on the uncorrelated
+/// construction, which does not claim a finite-union correlation.
+fn correlated_choice(component: &str, witness: &ComponentUseWitness) -> Option<CorrelatedChoice> {
     if !witness.transaction.validations.is_empty() || witness.transaction.members.len() != 1 {
         return None;
     }
@@ -320,7 +343,40 @@ fn correlated_source(component: &str, witness: &ComponentUseWitness) -> Option<S
     else {
         return None;
     };
-    let base = component.strip_suffix(".component")?;
-    (spelling.trim() == format!("{base}.props") && is_member_expression(base))
-        .then(|| base.to_string())
+    let (component_base, component_key) = split_member_key(component)?;
+    let (props_base, props_key) = split_member_key(spelling)?;
+    if component_base != props_base {
+        return None;
+    }
+    Some(CorrelatedChoice {
+        source: component_base.to_string(),
+        component_key: component_key.to_string(),
+        props_key: props_key.to_string(),
+    })
+}
+
+/// Base and final property of a simple member path (`choice.view`, `a.b.data`).
+fn split_member_key(expr: &str) -> Option<(&str, &str)> {
+    let expr = expr.trim();
+    if !is_simple_member(expr) {
+        return None;
+    }
+    let (base, key) = expr.rsplit_once('.')?;
+    if !is_simple_member(base) || !is_property_name(key) {
+        return None;
+    }
+    Some((base, key))
+}
+
+fn is_simple_member(expr: &str) -> bool {
+    is_member_expression(expr) && expr.split('.').all(is_property_name)
+}
+
+fn is_property_name(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_' || first == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
