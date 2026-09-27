@@ -2587,6 +2587,12 @@ impl SliceCallArguments {
         self.0.get(ordinal).and_then(Option::as_ref)
     }
 
+    /// How many argument positions this records (lowered or not).
+    #[must_use]
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
     /// Every frame-lowered argument, in argument order.
     pub fn iter(&self) -> impl Iterator<Item = &SliceExpr> {
         self.0.iter().flatten()

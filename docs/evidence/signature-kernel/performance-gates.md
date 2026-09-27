@@ -723,6 +723,28 @@ Recorded plainly so no reader mistakes absence for a pass:
   call and the call site at each span, and each call's verdict is decided
   once and shared by the calls inside it (600 nested calls take 1.1 s).
 
+* **Calls evaluate from the flow evaluator's explicit stack.** The
+  evaluator evaluated a call's callee operand (an IIFE's function value, a
+  receiver, a constructed value's member object, a tag) and, on its
+  executor route, each frame-lowered argument by recursing into
+  `eval_expr`, about 40 KiB per nested call unoptimized: 30 nested calls
+  `f(f(…))` overflowed a 1 MiB caller. A call is now frames of
+  `eval_expr`'s stack (`flow_return_call_stack.rs`): it suspends while
+  its callee operand evaluates, its value computation runs with the
+  operand's value in hand and stops at an executor route over a lowered
+  argument, the route types the arguments one at a time and suspends for
+  each lowered one, and the computation runs again with the route's
+  answer (everything before the route reads the graph and the frame and
+  records nothing, so it reaches the route again exactly). A second
+  route over the same arguments reads the values the first evaluated
+  instead of evaluating the nest inside them again (1,100 nested calls
+  took 238 s, 3.4 s now, unoptimized). `deep_input_tests.rs` answers 500
+  nested calls on a 1 MiB caller with 8 MiB workers (TypeScript 7.0.2's
+  `number`); evaluating the arguments in place overflows the caller. At
+  10,000 levels the call resolutions exceed the connected-demand work
+  budget, so the return is its typed budget failure; it returns on the
+  production stacks, in about 6 s unoptimized.
+
 * **Route facts walk a declaration body from explicit stacks.** The
   shallow route-fact producer (`verter_semantic`'s `route_facts`) walked a
   declaration's body recursively: the whole-route walk overflowed the

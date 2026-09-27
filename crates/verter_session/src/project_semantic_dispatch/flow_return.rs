@@ -5579,6 +5579,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             collect_throw_points: false,
             scope_shadows: Vec::new(),
             call_evidence: Vec::new(),
+            call_drive: None,
             expression_write_nodes: rustc_hash::FxHashMap::default(),
             capture_write_lookahead: rustc_hash::FxHashMap::default(),
             executed_walk: ExecutedSliceWalk::default(),
@@ -8382,8 +8383,11 @@ impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
 #[path = "flow_return_class.rs"]
 mod class_expression;
 
+#[path = "flow_return_call_stack.rs"]
+mod call_stack;
 #[path = "flow_return_operators.rs"]
 mod operators;
+use call_stack::{CallArgumentWait, CallDrive, CallInFlight, CallStep};
 
 #[path = "flow_return_call_effects.rs"]
 mod call_effects;
@@ -8635,6 +8639,10 @@ struct FlowEvaluator<'d, 'b> {
     /// nothing, so its obligations stay unclaimed and the demand
     /// finalizes unproven.
     call_evidence: Vec<FlowCallEvidence>,
+    /// The drive of the call whose value computes from
+    /// [`FlowEvaluator::eval_expr`]'s stack
+    /// ([`call_stack`]); `None` outside one.
+    call_drive: Option<CallDrive>,
     /// Expression-position write application (the R2 source-order rule):
     /// the pre-scanned right-hand-side verdicts of the CURRENT statement's
     /// [`SliceExpr::Assignment`] writes, keyed by the write's frame span.
@@ -22643,6 +22651,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 collect_throw_points: false,
                 scope_shadows: Vec::new(),
                 call_evidence: Vec::new(),
+                call_drive: None,
                 expression_write_nodes: rustc_hash::FxHashMap::default(),
                 capture_write_lookahead: rustc_hash::FxHashMap::default(),
                 executed_walk: ExecutedSliceWalk::default(),
@@ -23065,6 +23074,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 holds_before: usize,
                 mark: NarrowingSnapshot,
             },
+            /// A call waiting on its callee operand ([`call_stack`]).
+            CallOperand(CallInFlight<'e>),
+            /// A call waiting on a lowered argument its executor route
+            /// asked for ([`call_stack`]).
+            CallArgument(Box<CallArgumentWait<'e>>),
         }
         let mut waiting = vec![Waiting::Erase];
         let mut current = expr;
@@ -23117,6 +23131,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             waiting.push(Waiting::Object(frame));
                             waiting.push(Waiting::Erase);
                             current = child;
+                            continue;
+                        }
+                    }
+                }
+                // EVERY call form, through the ONE call sink, from this
+                // stack: its callee operand and the lowered arguments its
+                // executor route types evaluate here ([`call_stack`]).
+                SliceExpr::Call(call, site, arguments) => {
+                    match self.begin_call(call, *site, arguments) {
+                        CallStep::Done(value) => value,
+                        CallStep::Operand(flight, operand) => {
+                            waiting.push(Waiting::CallOperand(flight));
+                            waiting.push(Waiting::Erase);
+                            current = operand;
+                            continue;
+                        }
+                        CallStep::Argument(wait) => {
+                            current = wait.lowered;
+                            waiting.push(Waiting::CallArgument(wait));
+                            waiting.push(Waiting::Erase);
                             continue;
                         }
                     }
@@ -23208,6 +23242,34 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             self.unwidened_views.insert(node, view);
                         }
                         value = Positional::Value(node);
+                    }
+                    Some(Waiting::CallOperand(flight)) => {
+                        match self.resume_call_operand(flight, value) {
+                            CallStep::Done(done) => value = done,
+                            CallStep::Argument(wait) => {
+                                current = wait.lowered;
+                                waiting.push(Waiting::CallArgument(wait));
+                                waiting.push(Waiting::Erase);
+                                break;
+                            }
+                            CallStep::Operand(..) => {
+                                unreachable!("a call evaluates its operand once")
+                            }
+                        }
+                    }
+                    Some(Waiting::CallArgument(wait)) => {
+                        match self.resume_call_argument(*wait, value) {
+                            CallStep::Done(done) => value = done,
+                            CallStep::Argument(wait) => {
+                                current = wait.lowered;
+                                waiting.push(Waiting::CallArgument(wait));
+                                waiting.push(Waiting::Erase);
+                                break;
+                            }
+                            CallStep::Operand(..) => {
+                                unreachable!("a call evaluates its operand once")
+                            }
+                        }
                     }
                 }
             }
@@ -24084,237 +24146,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         site: crate::flow_slice_content::SliceCallSite,
         arguments: &crate::flow_slice_content::SliceCallArguments,
     ) -> Option<Positional<super::call_resolve::ResolveCallStep>> {
-        let serve = self
-            .dispatch
-            .ctx
-            .ensure_indexed_ready_serve(self.canonical)?;
-        let memo = serve.indexed.shallow_state.decl_bodies();
-        let indexed = memo.indexed_call_expression_at(site.span())?;
-        let call = &indexed.call;
-        let frame_arguments = self.call_arguments.get(&site.span()).cloned();
-        let mut args = Vec::with_capacity(call.args.len());
-        // Each function-value argument's frame lowering, typed again under
-        // its contextual signature when the executor asks for it.
-        let mut function_arguments: Vec<Option<crate::flow_slice_content::SliceExpr>> =
-            Vec::with_capacity(call.args.len());
-        for (ordinal, argument) in call.args.iter().enumerate() {
-            let root = indexed.argument_roots.get(ordinal)?;
-            let binding = self.indexed_argument_binding(*root);
-            // An argument that is itself a call, or a member read,
-            // evaluates through this frame's carriers, against the frame's
-            // bindings: a hold on its callee holds this call too. Any other
-            // argument that is no bare binding read is a value THIS frame
-            // computes (`c ? a : b`, `twin(c)`, `[twin(c)]`): its frame
-            // lowering reads the frame's own bindings, which the indexed
-            // program resolves in owner scope and cannot.
-            // A literal argument this frame computes is also evaluated in its
-            // const context: the value a `const` type parameter it is passed
-            // to infers from.
-            function_arguments.push(
-                arguments
-                    .get(ordinal)
-                    .or_else(|| {
-                        frame_arguments
-                            .as_deref()
-                            .and_then(|frame| frame.get(ordinal))
-                            .map(|frame| &frame.value)
-                    })
-                    .filter(|expr| {
-                        matches!(
-                            expr,
-                            crate::flow_slice_content::SliceExpr::NestedFunctionValue { .. }
-                        )
-                    })
-                    .cloned(),
-            );
-            let mut const_view = None;
-            // Whether the argument is a call whose result is wholly the
-            // fresh literal its inference kept: a fresh literal source, as
-            // a bare literal is.
-            let mut fresh_call = false;
-            // A function value whose parameters are all annotated is typed
-            // with the call's first pass, its body return read under the
-            // parameter's contextual return type.
-            let function_value = match function_arguments.last().and_then(Option::as_ref) {
-                Some(expr) if !argument.context_sensitive => {
-                    self.eval_function_argument_under_parameter(expr, callee, ordinal)
+        // The route types its arguments one at a time
+        // ([`call_stack`]); a lowered one evaluates here.
+        let mut progress = self.start_resolve_call(callee, site, arguments);
+        loop {
+            match progress {
+                call_stack::ResolveCallProgress::Done(step) => return step,
+                call_stack::ResolveCallProgress::Argument(route, lowered) => {
+                    let value = self.eval_expr(lowered);
+                    progress = self.deliver_resolve_call_argument(route, lowered, value);
                 }
-                _ => None,
-            };
-            let evaluated = match (function_value, arguments.get(ordinal)) {
-                (Some(node), _) => Some(node),
-                (None, lowered) => match lowered {
-                    Some(lowered) => match self.eval_expr(lowered) {
-                        Positional::Value(node) => {
-                            fresh_call = self.is_fresh_call_value(lowered, node);
-                            Some(node)
-                        }
-                        Positional::Hold => return Some(Positional::Hold),
-                        Positional::Unmodeled => None,
-                    },
-                    None => {
-                        let frame_value = match (&binding, frame_arguments.as_deref()) {
-                            (
-                                FlowIndexedArgumentBinding::NonBindingExpression,
-                                Some(frame_arguments),
-                            ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
-                                let value = self.eval_frame_call_argument(&frame_argument.value)?;
-                                const_view = frame_argument
-                                    .const_context
-                                    .as_ref()
-                                    .and_then(|expr| self.eval_frame_call_argument(expr));
-                                Some(value)
-                            }),
-                            _ => None,
-                        };
-                        frame_value.or_else(|| {
-                            let value =
-                                self.eval_indexed_call_argument(&argument.expression, &binding)?;
-                            fresh_call = value.fresh;
-                            Some(value.node)
-                        })
-                    }
-                },
-            };
-            let Some(ty) = evaluated else {
-                // An argument this substrate cannot type leaves
-                // applicability without its evidence: the executor
-                // refuses as surely, and degrading here is the same
-                // typed marker with one less hop.
-                return None;
-            };
-            // A read of a WIDENING-literal `const` is a FRESH literal
-            // source exactly as a bare literal argument is (the checker
-            // widens `wrap(a)` for `const a = "x"` identically to
-            // `wrap("x")`); the indexed lowering classifies every
-            // reference as pinned because only this frame knows the
-            // binding's widening membership.
-            let reads_widening_local = match &binding {
-                FlowIndexedArgumentBinding::ValueRead(binding) => self.widening_of(binding),
-                // A value declared outside the frame (`const c = 1` read as
-                // `c`) widens by its declared type.
-                FlowIndexedArgumentBinding::Free => match &argument.expression {
-                    verter_type_expr::IndexedValueExpression::Value(
-                        verter_type_expr::TypeExpr::TypeOf(value),
-                    ) => {
-                        value.type_args.is_empty()
-                            && !self.top_level_literal_nodes(ty).is_empty()
-                            && self.dispatch.value_read_widens(
-                                self.canonical,
-                                self.owner,
-                                &value.path,
-                            )
-                    }
-                    _ => false,
-                },
-                _ => false,
-            };
-            args.push(crate::semantic_query::CallArgKey::Eager {
-                ty,
-                spread: argument.spread,
-                context_sensitive: argument.context_sensitive,
-                const_view,
-                literal_mode: indexed_argument_literal_mode(
-                    argument.literal_mode,
-                    reads_widening_local || fresh_call,
-                ),
-            });
-        }
-        let mut explicit_type_args = Vec::with_capacity(call.explicit_type_args.len());
-        for argument in call.explicit_type_args.iter() {
-            let node = self.dispatch.lower_type_expr_in_owner_scope_with_mode(
-                self.canonical,
-                self.owner,
-                argument,
-                crate::semantic_query::ProjectionMode::Navigate,
-            )?;
-            explicit_type_args.push(node);
-        }
-        // A member call's receiver rides the key: `.call` / `.apply`
-        // rebase and `this`-typed methods read it — the same indexed
-        // lowering the callee came from, evaluated in the same scope.
-        let receiver = match call.receiver.as_deref() {
-            Some(receiver) => {
-                let root = indexed.receiver_root?;
-                let receiver_binding = self.indexed_argument_binding(root);
-                Some(
-                    self.eval_indexed_call_argument(receiver, &receiver_binding)?
-                        .node,
-                )
             }
-            None => None,
-        };
-        let mut key = crate::semantic_query::ResolveCallKey {
-            point: crate::semantic_query::ProgramPointId {
-                canonical_id: Arc::from(self.canonical),
-                offset: call.point,
-            },
-            callee,
-            kind: match call.kind {
-                verter_type_expr::IndexedValueCallKind::Call => {
-                    crate::semantic_query::CallKind::Call
-                }
-                verter_type_expr::IndexedValueCallKind::Construct => {
-                    crate::semantic_query::CallKind::Construct
-                }
-            },
-            receiver,
-            args: Arc::from(args.clone().into_boxed_slice()),
-            explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
-            flow: crate::semantic_query::FlowNarrowingKey::empty(),
-            context: self.dispatch.resolve_call_context_for(self.canonical),
-        };
-        let mut step = Positional::Value(self.dispatch.execute_resolve_call(key.clone()));
-        // The checker's second inference pass: a context-sensitive argument
-        // the executor names is typed under the contextual type it hands
-        // back, and the call is asked again with that argument's type. Each
-        // round types one argument that no round types again.
-        let mut retyped = false;
-        // bounded-loop: at most one round per argument — each round retypes one context-sensitive argument, which is no longer context-sensitive after it.
-        for _ in 0..args.len() {
-            let Some((position, contextual)) = Self::contextual_argument_request(&step) else {
-                break;
-            };
-            let Some(Some(expr)) = function_arguments.get(position).cloned() else {
-                break;
-            };
-            let Some(ty) = self.eval_function_argument_in_context(&expr, contextual) else {
-                break;
-            };
-            let Some(crate::semantic_query::CallArgKey::Eager { spread, .. }) = args.get(position)
-            else {
-                break;
-            };
-            retyped = true;
-            args[position] = crate::semantic_query::CallArgKey::Eager {
-                ty,
-                spread: *spread,
-                context_sensitive: false,
-                const_view: None,
-                literal_mode: crate::semantic_query::ArgumentLiteralMode::Literal,
-            };
-            function_arguments[position] = None;
-            key.args = Arc::from(args.clone().into_boxed_slice());
-            step = Positional::Value(self.dispatch.execute_resolve_call(key.clone()));
         }
-        // A call asked again after a retyped argument that still does not
-        // decide answers no uninferred parameter's fallback either.
-        if retyped
-            && matches!(
-                step,
-                Positional::Value(super::call_resolve::ResolveCallStep::Degraded(
-                    crate::semantic_query::ResolveCallFailure::Undecidable
-                        | crate::semantic_query::ResolveCallFailure::Budget
-                ))
-            )
-        {
-            step = Positional::Value(super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::ContextSensitiveInference {
-                    contextual: None,
-                },
-            ));
-        }
-        Some(step)
     }
 
     /// The call-executor route of one authored call or `new` expression:
@@ -24335,7 +24178,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         site: crate::flow_slice_content::SliceCallSite,
         arguments: &crate::flow_slice_content::SliceCallArguments,
     ) -> Option<Positional<CallValue>> {
-        let step = match self.resolve_call_step(callee, site, arguments) {
+        if let Some(answer) = self.driven_call_route(callee, site, arguments) {
+            return answer;
+        }
+        let step = self.resolve_call_step(callee, site, arguments);
+        self.fold_resolve_call_step(step, site)
+    }
+
+    /// Fold a call's executor route `step` into the frame's vocabulary
+    /// ([`Self::eval_call_via_resolve_call`]).
+    fn fold_resolve_call_step(
+        &mut self,
+        step: Option<Positional<super::call_resolve::ResolveCallStep>>,
+        site: crate::flow_slice_content::SliceCallSite,
+    ) -> Option<Positional<CallValue>> {
+        let step = match step {
             Some(Positional::Value(step)) => step,
             Some(Positional::Hold) => return Some(Positional::Hold),
             Some(Positional::Unmodeled) | None => {
@@ -24419,23 +24276,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         site: crate::flow_slice_content::SliceCallSite,
         arguments: &crate::flow_slice_content::SliceCallArguments,
     ) -> Positional<CallValue> {
-        let undecided_before = self.dispatch.dispatch_txn.borrow().call.undecided_relations;
-        let degradation_before = self.degradation;
+        let mark = self.call_evidence_mark();
         let value = self.eval_call_value(call, site, arguments);
-        // A call whose evaluation minted the frame's FIRST degradation
-        // did not decide its occurrence (an already-degraded frame never
-        // seals, so evidence accuracy past the first degradation cannot
-        // affect admission).
-        let newly_degraded = degradation_before.is_none() && self.degradation.is_some();
-        if !matches!(value, Positional::Unmodeled) && !newly_degraded {
-            let relations_decided =
-                self.dispatch.dispatch_txn.borrow().call.undecided_relations == undecided_before;
-            self.call_evidence.push(FlowCallEvidence {
-                span: site.span(),
-                relations_decided,
-            });
-        }
-        value
+        self.finish_call_evidence(site, mark, value)
     }
 
     /// The call sink's value computation ([`Self::eval_call`] records the
@@ -24463,7 +24306,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // resolved-callee route applies has to apply here, and it
                 // does, because both routes take their value from the ONE
                 // signature reader.
-                let signature = match self.eval_expr(function) {
+                let signature = match self.call_operand_value(function, site) {
                     Positional::Value(signature) => signature,
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
@@ -25023,7 +24866,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // `this.m()`: the member of the receiver's value, called
                 // through the executor that reads its receiver-bound
                 // signatures, else the lone signature read.
-                let receiver = match self.eval_expr(receiver) {
+                let receiver = match self.call_operand_value(receiver, site) {
                     Positional::Value(node) => node,
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
@@ -25067,7 +24910,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // callee, resolved through the executor (receiver included)
                 // exactly like a frame-rooted member callee, else through
                 // the one call sink.
-                let object = match self.eval_expr(object) {
+                let object = match self.call_operand_value(object, site) {
                     Positional::Value(node) => node,
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
@@ -25096,7 +24939,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // choice, argument inference and explicit type arguments
                 // included). There is no lone-signature read to fall back
                 // to, so an undecided executor degrades the position.
-                let constructor = match self.eval_expr(constructor) {
+                let constructor = match self.call_operand_value(constructor, site) {
                     Positional::Value(node) => node,
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
@@ -25111,7 +24954,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // routes an ordinary call over a resolved callee takes: an
                 // overloaded or inference-bearing tag resolves through the
                 // executor, a lone signature through the one call sink.
-                let tag = match self.eval_expr(tag) {
+                let tag = match self.call_operand_value(tag, site) {
                     Positional::Value(node) => node,
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,

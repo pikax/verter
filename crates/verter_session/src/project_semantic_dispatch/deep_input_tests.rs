@@ -206,3 +206,42 @@ fn function_and_constructor_types_nested_10000_deep_answer_on_production_stacks(
         );
     }
 }
+
+/// Nested generic calls, `f(f(…f(1)…))`: each call's callee operand and
+/// the frame-lowered argument its executor route types evaluate from the
+/// evaluator's stack.
+fn calls(depth: usize) -> String {
+    format!(
+        "function f<T>(v: T): T {{ return v; }}\nexport function pf() {{ return {}1{}; }}\n",
+        "f(".repeat(depth),
+        ")".repeat(depth)
+    )
+}
+
+/// A depth whose nested calls the connected-demand work budget admits.
+const CALLS_UNDER_THE_WORK_BUDGET: usize = 500;
+
+#[test]
+fn calls_nested_500_deep_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(calls(CALLS_UNDER_THE_WORK_BUDGET), RETURN, "number"),
+        Vec::<String>::new()
+    );
+}
+
+/// Calls nested 10,000 deep return on the production stacks (their call
+/// resolutions exceed the connected-demand work budget, so the return is
+/// its typed budget failure).
+#[test]
+fn calls_nested_10000_deep_return_on_production_stacks() {
+    assert!(!returns_on_a_small_stack(calls(DEPTH)));
+}
+
+#[test]
+#[ignore = "the connected-demand work budget admits no 10,000 nested call resolutions"]
+fn calls_nested_10000_deep_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(calls(DEPTH), RETURN, "number"),
+        Vec::<String>::new()
+    );
+}
