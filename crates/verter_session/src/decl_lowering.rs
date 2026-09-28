@@ -227,11 +227,11 @@ impl SnapshotShard {
         (true, refused)
     }
 
-    /// Release one pin on `key`. At refcount zero the entry — and its
+    /// Release `count` pins on `key`. At refcount zero the entry — and its
     /// retained `Rc` — is dropped.
-    fn release(&mut self, key: &SnapshotKey) {
+    fn release(&mut self, key: &SnapshotKey, count: usize) {
         if let Some(entry) = self.entries.get_mut(key) {
-            entry.refcount = entry.refcount.saturating_sub(1);
+            entry.refcount = entry.refcount.saturating_sub(count);
             if entry.refcount == 0 {
                 self.entries.remove(key);
             }
@@ -459,33 +459,82 @@ fn shard_index(key: &SnapshotKey, worker_count: usize) -> usize {
     (hasher.finish() as usize) % worker_count
 }
 
+/// Capacity of each decl-lowering worker's job queue.
+///
+/// A rendezvous caller occupies at most one slot while it waits for its
+/// own result, so the bound only decides whether an over-subscribed caller
+/// waits for a slot or in the queue; a job is pure and never waits on the
+/// host, so a full queue always drains. Lease releases never take a slot
+/// they would have to wait for (see [`DeclWorker::releases`]).
+#[cfg(not(target_arch = "wasm32"))]
+const DECL_WORKER_QUEUE_CAPACITY: usize = 32;
+
+/// One decl-lowering worker's inbound side: its bounded job queue plus the
+/// lease releases waiting to be applied to its shard.
+#[cfg(not(target_arch = "wasm32"))]
+struct DeclWorker {
+    jobs: crossbeam_channel::Sender<WorkerJob>,
+    /// A coalesced notification, separate from the bounded job queue.
+    wake: crossbeam_channel::Sender<()>,
+    /// Lease releases not yet applied, coalesced per key. Dropping a lease
+    /// must not block, so a release is recorded here instead of queued as
+    /// a job; the worker applies every recorded release before it runs its
+    /// next job, so a release recorded before a job is enqueued is applied
+    /// before that job runs. A key appears at most once, and only while
+    /// its snapshot is retained, so this holds no more entries than the
+    /// shard does.
+    releases: Arc<parking_lot::Mutex<FxHashMap<SnapshotKey, usize>>>,
+}
+
 /// Spawn `worker_count` decl-lowering worker threads, each owning its own
-/// retained-parse [`SnapshotShard`] and looping on a job channel. Returns
-/// the per-worker job senders. The 8 MiB stack matches the host CPU pool:
+/// retained-parse [`SnapshotShard`] and looping on a bounded job queue of
+/// `queue_capacity`. The 8 MiB stack matches the host CPU pool:
 /// lowering recursion over deeply nested type bodies must not regress
 /// stack capacity vs. the former inline path. This is the eager-or-lazy
 /// spawn body — called at construction for an eager service, or on first
 /// demand (through [`DeclLoweringService::workers`]) for a lazy one.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_decl_workers(worker_count: usize) -> Vec<std::sync::mpsc::Sender<WorkerJob>> {
+fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWorker> {
     assert!(
         worker_count > 0,
         "decl-lowering worker count must be nonzero"
     );
     let mut workers = Vec::with_capacity(worker_count);
     for index in 0..worker_count {
-        let (tx, rx) = std::sync::mpsc::channel::<WorkerJob>();
+        let (jobs, rx) = crossbeam_channel::bounded::<WorkerJob>(queue_capacity);
+        let (wake, wake_rx) = crossbeam_channel::bounded::<()>(1);
+        let releases = Arc::new(parking_lot::Mutex::new(FxHashMap::default()));
+        let pending = Arc::clone(&releases);
         std::thread::Builder::new()
             .name(format!("verter-decl-lower-{index}"))
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let mut shard = SnapshotShard::new();
-                while let Ok(job) = rx.recv() {
-                    job(&mut shard);
+                loop {
+                    let job = crossbeam_channel::select! {
+                        recv(rx) -> job => match job {
+                            Ok(job) => Some(job),
+                            Err(_) => break,
+                        },
+                        recv(wake_rx) -> _ => None,
+                    };
+                    // Drain after receiving a job: a release recorded
+                    // before that job was sent must take effect first.
+                    let released = std::mem::take(&mut *pending.lock());
+                    for (key, count) in released {
+                        shard.release(&key, count);
+                    }
+                    if let Some(job) = job {
+                        job(&mut shard);
+                    }
                 }
             })
             .expect("failed to spawn decl-lowering worker");
-        workers.push(tx);
+        workers.push(DeclWorker {
+            jobs,
+            wake,
+            releases,
+        });
     }
     workers
 }
@@ -503,7 +552,11 @@ pub(crate) struct DeclLoweringService {
     /// `lsp_interactive` policy). The single spawn point is the
     /// `get_or_init` in [`Self::workers`].
     #[cfg(not(target_arch = "wasm32"))]
-    workers: std::sync::OnceLock<Vec<std::sync::mpsc::Sender<WorkerJob>>>,
+    workers: std::sync::OnceLock<Vec<DeclWorker>>,
+    /// Per-worker job-queue capacity the workers spawn with
+    /// ([`DECL_WORKER_QUEUE_CAPACITY`] outside tests).
+    #[cfg(not(target_arch = "wasm32"))]
+    queue_capacity: usize,
     /// Env-gated handoff rendezvous profile sink, resolved ONCE at
     /// construction from the global gate ([`global_handoff_stats`]).
     /// `None` (the default) keeps both rendezvous paths byte-identical
@@ -584,11 +637,12 @@ impl DeclLoweringService {
         if !lazy {
             // Eager policy: spawn the workers now. `set` on a fresh
             // `OnceLock` always succeeds.
-            let _ = workers.set(spawn_decl_workers(worker_count));
+            let _ = workers.set(spawn_decl_workers(worker_count, DECL_WORKER_QUEUE_CAPACITY));
         }
         Self {
             worker_count,
             workers,
+            queue_capacity: DECL_WORKER_QUEUE_CAPACITY,
             profile: global_handoff_stats().cloned(),
             account,
             live_leases: std::sync::atomic::AtomicUsize::new(0),
@@ -650,9 +704,9 @@ impl DeclLoweringService {
     /// run pure lowering jobs), so a lazy spawn under a resolve demand
     /// cannot deadlock.
     #[cfg(not(target_arch = "wasm32"))]
-    fn workers(&self) -> &[std::sync::mpsc::Sender<WorkerJob>] {
+    fn workers(&self) -> &[DeclWorker] {
         self.workers
-            .get_or_init(|| spawn_decl_workers(self.worker_count))
+            .get_or_init(|| spawn_decl_workers(self.worker_count, self.queue_capacity))
     }
 
     /// Whether the worker threads have spawned yet. `false` for a
@@ -694,6 +748,7 @@ impl DeclLoweringService {
                         let _ = result_tx.send(parsed_now);
                     });
                     workers[shard_index]
+                        .jobs
                         .send(job)
                         .expect("decl-lowering worker channel must outlive the service");
                     result_rx
@@ -715,6 +770,7 @@ impl DeclLoweringService {
                         let _ = result_tx.send((parsed_now, started, std::time::Instant::now()));
                     });
                     workers[shard_index]
+                        .jobs
                         .send(job)
                         .expect("decl-lowering worker channel must outlive the service");
                     let ((parsed_now, refused), started, finished) = result_rx
@@ -776,17 +832,15 @@ impl DeclLoweringService {
             // spawned the workers), so `workers()` here is always a cheap
             // `get` — it never spawns on a release.
             let workers = self.workers();
-            let shard_index = shard_index(key, workers.len());
-            let key_for_job = key.clone();
-            let job: WorkerJob = Box::new(move |shard| shard.release(&key_for_job));
-            // Ignore a send error: the only way the channel is closed is
-            // the worker (and its shard, including this key's entry) is
-            // already gone.
-            let _ = workers[shard_index].send(job);
+            let worker = &workers[shard_index(key, workers.len())];
+            *worker.releases.lock().entry(key.clone()).or_insert(0) += 1;
+            // Coalesce notifications without taking capacity from real jobs.
+            // A busy worker drains releases before its next job regardless.
+            let _ = worker.wake.try_send(());
         }
         #[cfg(target_arch = "wasm32")]
         {
-            WASM_DECL_LOWERING_SHARD.with(|cell| cell.borrow_mut().release(key));
+            WASM_DECL_LOWERING_SHARD.with(|cell| cell.borrow_mut().release(key, 1));
         }
     }
 
@@ -852,6 +906,7 @@ impl DeclLoweringService {
                 let _ = result_tx.send(value.map(|value| LoweringOutcome { value, parsed_now }));
             });
             workers[shard_index]
+                .jobs
                 .send(worker_job)
                 .expect("decl-lowering worker channel must outlive the service");
             match result_rx
@@ -931,6 +986,7 @@ impl DeclLoweringService {
                         let _ = result_tx.send(result);
                     });
                     workers[shard_index]
+                        .jobs
                         .send(worker_job)
                         .expect("decl-lowering worker channel must outlive the service");
                     result_rx
@@ -953,6 +1009,7 @@ impl DeclLoweringService {
                         let _ = result_tx.send((result, started, std::time::Instant::now()));
                     });
                     workers[shard_index]
+                        .jobs
                         .send(worker_job)
                         .expect("decl-lowering worker channel must outlive the service");
                     let (result, started, finished) = result_rx
@@ -1033,6 +1090,115 @@ mod tests {
         assert_eq!(second.value, 2);
 
         drop(lease.lease);
+    }
+
+    /// Dropping a lease never waits for its worker, and its release is never
+    /// lost. With the worker busy and its bounded queue full, the drop still
+    /// returns at once — a release queued as a job would block here — and
+    /// the worker applies it before the next job it runs — a release that
+    /// only offered a job to the full queue would be dropped, leaving the
+    /// snapshot retained with no lease.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_lease_drop_neither_waits_on_a_full_queue_nor_is_lost() {
+        use crossbeam_channel::TrySendError;
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        let mut service = DeclLoweringService::new_with(/* lazy = */ true, 1);
+        service.queue_capacity = 1;
+        let service = Arc::new(service);
+        let source: Arc<str> = Arc::from("type A = 1;\n");
+        let st = oxc_span::SourceType::ts();
+        let released = key("/ws/released.ts", 1);
+        let busy = key("/ws/busy.ts", 2);
+        let released_lease = service.acquire_lease(&released, &source, st);
+        let busy_lease = service.acquire_lease(&busy, &source, st);
+
+        let (started_tx, started_rx) = channel::<()>();
+        let (finish_tx, finish_rx) = channel::<()>();
+        let blocker = {
+            let service = Arc::clone(&service);
+            let busy = busy.clone();
+            std::thread::spawn(move || {
+                service.run_leased(&busy, move |_| {
+                    started_tx.send(()).unwrap();
+                    finish_rx.recv().unwrap();
+                })
+            })
+        };
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker starts the blocking job");
+        let worker = &service.workers()[0];
+        loop {
+            match worker.jobs.try_send(Box::new(|_| {})) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => break,
+                Err(TrySendError::Disconnected(_)) => panic!("the worker is alive"),
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = channel::<()>();
+        let dropper = std::thread::spawn(move || {
+            drop(released_lease.lease);
+            dropped_tx.send(()).unwrap();
+        });
+        dropped_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a lease drop must not wait for a busy worker's full queue");
+        dropper.join().unwrap();
+
+        finish_tx.send(()).unwrap();
+        assert_eq!(blocker.join().unwrap(), Some(()));
+        assert!(
+            service.run_leased(&released, |_| ()).is_none(),
+            "the release must be applied before the worker's next job"
+        );
+        assert!(
+            service.run_leased(&busy, |_| ()).is_some(),
+            "a still-leased snapshot stays retained"
+        );
+        drop(busy_lease.lease);
+    }
+
+    /// Releasing a lease must not consume the one queued slot reserved for
+    /// real work while a worker is occupied.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_lease_release_does_not_enqueue_a_dummy_job() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        let mut service = DeclLoweringService::new_with(true, 1);
+        service.queue_capacity = 1;
+        let service = Arc::new(service);
+        let source: Arc<str> = Arc::from("type A = 1;\n");
+        let busy = key("/ws/busy.ts", 1);
+        let released = key("/ws/released.ts", 2);
+        let busy_lease = service.acquire_lease(&busy, &source, oxc_span::SourceType::ts());
+        let released_lease = service.acquire_lease(&released, &source, oxc_span::SourceType::ts());
+        let (started_tx, started_rx) = channel();
+        let (finish_tx, finish_rx) = channel();
+        let worker = {
+            let service = Arc::clone(&service);
+            std::thread::spawn(move || {
+                service.run_leased(&busy, move |_| {
+                    started_tx.send(()).unwrap();
+                    finish_rx.recv().unwrap();
+                })
+            })
+        };
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        drop(released_lease.lease);
+        let real_job_enqueued = service.workers()[0].jobs.try_send(Box::new(|_| {})).is_ok();
+        finish_tx.send(()).unwrap();
+        worker.join().unwrap();
+        drop(busy_lease.lease);
+        assert!(
+            real_job_enqueued,
+            "lease release consumed the real job slot"
+        );
     }
 
     /// `run_leased` NEVER parses: on a lease miss it returns `None` (the job

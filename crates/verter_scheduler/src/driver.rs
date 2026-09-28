@@ -93,7 +93,11 @@ pub enum Submission {
     },
 }
 
-/// Lock-free MPSC inbox: workers/callers produce, driver consumes.
+/// Maximum queued submissions awaiting driver admission. A batch occupies
+/// one slot and remains atomic when drained.
+pub const SUBMISSION_INBOX_CAPACITY: usize = 1024;
+
+/// Bounded MPSC inbox: workers/callers produce, driver consumes.
 pub struct SubmissionInbox {
     pub sender: Sender<Submission>,
     pub receiver: Receiver<Submission>,
@@ -101,7 +105,7 @@ pub struct SubmissionInbox {
 
 impl SubmissionInbox {
     pub fn new() -> Self {
-        let (sender, receiver) = crossbeam_channel::unbounded();
+        let (sender, receiver) = crossbeam_channel::bounded(SUBMISSION_INBOX_CAPACITY);
         Self { sender, receiver }
     }
 }
@@ -109,5 +113,22 @@ impl SubmissionInbox {
 impl Default for SubmissionInbox {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submission_inbox_rejects_work_at_capacity() {
+        let inbox = SubmissionInbox::new();
+        for _ in 0..SUBMISSION_INBOX_CAPACITY {
+            inbox.sender.try_send(Submission::Wake).unwrap();
+        }
+        assert!(matches!(
+            inbox.sender.try_send(Submission::Wake),
+            Err(crossbeam_channel::TrySendError::Full(Submission::Wake))
+        ));
     }
 }

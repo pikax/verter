@@ -176,10 +176,15 @@ fn admit_work(
 ///   is constructed inline from the same match and the work runs through the
 ///   file-stage executor chokepoint [`Scheduler::execute_stage_on_worker`].
 ///
+/// File-stage work returns its terminal `StageComplete` (cache-node work
+/// returns `None`); the caller owns delivery so a sole inbox consumer can
+/// drain rather than park on its own full inbox.
+///
 /// `file_node` is the resolved [`FileNode`] for file-stage work (the caller
 /// looks it up and applies the removed-node / generation-mismatch guards
 /// first); it is `None` for cache-node work, which has no file node.
 #[allow(clippy::too_many_arguments)]
+#[must_use = "the terminal StageComplete must be delivered to the inbox"]
 fn dispatch_ready_job_to_executor(
     job: &ReadyJob,
     file_node: Option<&FileNode>,
@@ -191,7 +196,7 @@ fn dispatch_ready_job_to_executor(
     dag: Arc<DagMutex>,
     source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
     cancellation: &CancellationToken,
-) {
+) -> Option<Submission> {
     let _cancellation_guard =
         crate::cancellation::JobCancellationGuard::install(cancellation.clone());
     match (&job.kind, &job.identity) {
@@ -272,24 +277,23 @@ fn dispatch_ready_job_to_executor(
                     );
                 }
             }
+            None
         }
         // File-stage / artifact work. The owned execution descriptor is built
         // from the same `(kind, identity)` match and handed to the file-stage
         // executor chokepoint.
-        (WorkKind::Load, WorkNodeIdentity::FileStage { .. }) => {
-            run_file_stage(
-                TaskKind::Load,
-                job,
-                file_node,
-                generation,
-                failed_blocker_deps,
-                executor,
-                source_loader,
-                inbox_sender,
-                dag,
-                source_root,
-            );
-        }
+        (WorkKind::Load, WorkNodeIdentity::FileStage { .. }) => run_file_stage(
+            TaskKind::Load,
+            job,
+            file_node,
+            generation,
+            failed_blocker_deps,
+            executor,
+            source_loader,
+            inbox_sender,
+            dag,
+            source_root,
+        ),
         // `Parse` is NEVER admitted as a runnable DAG node: it is a label for
         // the future CPU split, not a request-target file stage, so `admit_work`
         // (the file-stage admission path) `unreachable!()`s on `TaskKind::Parse`
@@ -308,36 +312,32 @@ fn dispatch_ready_job_to_executor(
                  can never observe one.",
             )
         }
-        (WorkKind::Analysis, WorkNodeIdentity::FileStage { .. }) => {
-            run_file_stage(
-                TaskKind::Analysis,
-                job,
-                file_node,
-                generation,
-                failed_blocker_deps,
-                executor,
-                source_loader,
-                inbox_sender,
-                dag,
-                source_root,
-            );
-        }
-        (WorkKind::Artifact, WorkNodeIdentity::Artifact { profile_hash, .. }) => {
-            run_file_stage(
-                TaskKind::Artifact {
-                    profile_hash: profile_hash_from_bytes(*profile_hash),
-                },
-                job,
-                file_node,
-                generation,
-                failed_blocker_deps,
-                executor,
-                source_loader,
-                inbox_sender,
-                dag,
-                source_root,
-            );
-        }
+        (WorkKind::Analysis, WorkNodeIdentity::FileStage { .. }) => run_file_stage(
+            TaskKind::Analysis,
+            job,
+            file_node,
+            generation,
+            failed_blocker_deps,
+            executor,
+            source_loader,
+            inbox_sender,
+            dag,
+            source_root,
+        ),
+        (WorkKind::Artifact, WorkNodeIdentity::Artifact { profile_hash, .. }) => run_file_stage(
+            TaskKind::Artifact {
+                profile_hash: profile_hash_from_bytes(*profile_hash),
+            },
+            job,
+            file_node,
+            generation,
+            failed_blocker_deps,
+            executor,
+            source_loader,
+            inbox_sender,
+            dag,
+            source_root,
+        ),
         // The DAG's admission paths only produce the `(kind, identity)`
         // pairings handled above; any other combination is a corrupt ready
         // job (e.g. a `Load` kind on an `Artifact` identity), which the
@@ -355,6 +355,7 @@ fn dispatch_ready_job_to_executor(
 /// shares the node-presence assertion and the single call into
 /// [`Scheduler::execute_stage_on_worker`]. Cache-node work never reaches here.
 #[allow(clippy::too_many_arguments)]
+#[must_use = "the terminal StageComplete must be delivered to the inbox"]
 fn run_file_stage(
     task_kind: TaskKind,
     job: &ReadyJob,
@@ -366,7 +367,7 @@ fn run_file_stage(
     inbox_sender: &crossbeam_channel::Sender<Submission>,
     dag: Arc<DagMutex>,
     source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
-) {
+) -> Option<Submission> {
     let node = file_node.unwrap_or_else(|| {
         unreachable!(
             "file-stage dispatch ({:?}) requires a resolved FileNode; the caller \
@@ -385,7 +386,7 @@ fn run_file_stage(
         inbox_sender,
         dag,
         source_root,
-    );
+    )
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1096,7 +1097,7 @@ pub struct Scheduler {
     scoped_cache_gate: Mutex<()>,
     /// Process-local owner id source for aggregate job-liveness registrations.
     next_scoped_owner_id: AtomicU64,
-    /// Lock-free inbox for submissions.
+    /// Bounded inbox for submissions.
     pub(crate) inbox: SubmissionInbox,
     /// Current resolver snapshot (atomically swappable).
     pub(crate) overlay: Arc<OverlayMap>,
@@ -1714,7 +1715,7 @@ impl Scheduler {
             flight: Arc::clone(&flight),
             request_context: request.request_context.clone(),
         };
-        if self.inbox.sender.send(submission).is_err() {
+        if self.send_submission(submission).is_err() {
             self.terminalize_scoped_cache_flight(
                 &identity,
                 &flight,
@@ -1966,6 +1967,75 @@ impl Scheduler {
             .map_or(0, |flight| flight.owner_count())
     }
 
+    /// Enqueue without parking the sole driver (or a single-threaded inline
+    /// pump) behind its own full inbox. Other callers wait for bounded
+    /// capacity; the driver can consume one older submission to free a slot.
+    fn send_submission(&self, submission: Submission) -> Result<(), Box<Submission>> {
+        #[cfg(not(target_arch = "wasm32"))]
+        use crate::caller_kind::CallerKind;
+        let mut submission = submission;
+        loop {
+            submission = match self.inbox.sender.try_send(submission) {
+                Ok(()) => return Ok(()),
+                Err(crossbeam_channel::TrySendError::Full(submission)) => submission,
+                Err(crossbeam_channel::TrySendError::Disconnected(submission)) => {
+                    return Err(Box::new(submission))
+                }
+            };
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err(Box::new(submission));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if !matches!(
+                CallerKind::current(),
+                CallerKind::Driver | CallerKind::Inline
+            ) && self.driver_handle.lock().is_some()
+            {
+                return self
+                    .inbox
+                    .sender
+                    .send(submission)
+                    .map_err(|error| Box::new(error.0));
+            }
+            let mut select = crossbeam_channel::Select::new();
+            let send = select.send(&self.inbox.sender);
+            select.recv(&self.inbox.receiver);
+            let operation = select.select();
+            if operation.index() == send {
+                return operation
+                    .send(&self.inbox.sender, submission)
+                    .map_err(|error| Box::new(error.0));
+            }
+            if let Ok(older) = operation.recv(&self.inbox.receiver) {
+                self.process_submission(older);
+            }
+        }
+    }
+
+    /// Deliver a stage's terminal `StageComplete` from a thread that holds
+    /// the scheduler: the inline pump, or a pool worker that inline-ran a
+    /// dependency. Routing through [`Self::send_submission`] lets a sole
+    /// inbox consumer drain an older submission instead of parking on its
+    /// own full inbox.
+    fn deliver_stage_completion(&self, completion: Option<Submission>) {
+        if let Some(completion) = completion {
+            let _ = self.send_submission(completion);
+        }
+    }
+
+    /// Deliver a stage's terminal `StageComplete` from a pool task. A pool
+    /// worker is never the inbox's consumer, so it waits for capacity while
+    /// the driver drains.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn deliver_stage_completion_from_pool(
+        inbox_sender: &crossbeam_channel::Sender<Submission>,
+        completion: Option<Submission>,
+    ) {
+        if let Some(completion) = completion {
+            let _ = inbox_sender.send(completion);
+        }
+    }
+
     /// Submit a request. Returns a handle that resolves when the target stage is reached.
     pub fn submit_request(&self, request: Request) -> CompletionHandle<RequestResult> {
         verter_audit::attribute!(SchedulerSubmitRequest);
@@ -1990,7 +2060,7 @@ impl Scheduler {
             submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
             request_context: request.request_context,
         };
-        match self.inbox.sender.send(submission) {
+        match self.send_submission(submission) {
             Ok(()) => {
                 // Record the submission + update the peak inbox depth
                 // observed (contention instrumentation).
@@ -2069,11 +2139,7 @@ impl Scheduler {
             return BatchHandle { handles };
         }
 
-        match self
-            .inbox
-            .sender
-            .send(Submission::NewRequestBatch { requests: queued })
-        {
+        match self.send_submission(Submission::NewRequestBatch { requests: queued }) {
             Ok(()) => {
                 // ONE batch == ONE submission for contention accounting,
                 // regardless of how many items it carries.
@@ -2087,10 +2153,10 @@ impl Scheduler {
                         .fetch_max(depth, Ordering::Relaxed);
                 }
             }
-            Err(crossbeam_channel::SendError(submission)) => {
+            Err(submission) => {
                 // Inbox closed (scheduler shutting down): signal every
                 // handle so callers don't hang.
-                Self::shutdown_drained_submission(submission);
+                Self::shutdown_drained_submission(*submission);
             }
         }
         BatchHandle { handles }
@@ -2237,7 +2303,7 @@ impl Scheduler {
         //    is what guarantees a parked driver observes this.
         self.shutdown.store(true, Ordering::Release);
         let _ = self.driver_teardown.0.try_send(());
-        let _ = self.inbox.sender.send(Submission::Wake);
+        let _ = self.inbox.sender.try_send(Submission::Wake);
         #[cfg(any(test, feature = "test-support"))]
         self.reset_wake_posts.fetch_add(1, Ordering::Release);
         if let Some(handle) = self.driver_handle.lock().take() {
@@ -2539,7 +2605,7 @@ impl Scheduler {
                 });
             }
             if created_generation.is_some() {
-                let _ = self.inbox.sender.send(Submission::NewRequest {
+                let _ = self.send_submission(Submission::NewRequest {
                     file_id: dep_id.clone(),
                     target: TargetStage::Analysis,
                     priority: std::cmp::min(inherited_priority, Priority::Interactive),
@@ -3182,7 +3248,7 @@ impl Scheduler {
         // We re-trigger the dispatch by sending a Wake into the
         // inbox; the driver picks it up, re-runs the cooperative
         // pump, and the now-ungated artifact nodes go out.
-        let _ = self.inbox.sender.send(Submission::Wake);
+        let _ = self.inbox.sender.try_send(Submission::Wake);
     }
 
     /// Close a file: clear overlay + pending_source, keep node alive.
@@ -3215,7 +3281,7 @@ impl Scheduler {
         drop(dag);
 
         // Enqueue a Source job at Background priority to reload from disk
-        let _ = self.inbox.sender.send(Submission::NewRequest {
+        let _ = self.send_submission(Submission::NewRequest {
             file_id: id.to_string(),
             target: TargetStage::Analysis,
             priority: Priority::Background,
@@ -5420,7 +5486,7 @@ impl Scheduler {
             let task: crate::pool::SchedulerPoolTask = Box::new(move || {
                 let job = job.started(&inbox_for_cache);
                 let cancellation = job.cancellation.clone();
-                dispatch_ready_job_to_executor(
+                let completion = dispatch_ready_job_to_executor(
                     &job,
                     None,
                     0,
@@ -5432,6 +5498,7 @@ impl Scheduler {
                     source_root_for_cache,
                     &cancellation,
                 );
+                Self::deliver_stage_completion_from_pool(&inbox_for_cache, completion);
             });
             return match self.try_submit_cpu(task) {
                 Ok(crate::pool::SchedulerPoolSubmitResult::Submitted) => {
@@ -5636,16 +5703,17 @@ impl Scheduler {
                         Arc::clone(&dag_handle),
                         Arc::clone(&source_root_handle),
                         &cancellation,
-                    );
+                    )
                 }));
-                if result.is_err() {
-                    Self::surface_stage_panic_as_failed(
+                match result {
+                    Ok(completion) => self.deliver_stage_completion(completion),
+                    Err(_) => Self::surface_stage_panic_as_failed(
                         &node,
                         generation,
                         &task_kind,
                         &inbox_sender,
                         Arc::clone(&dag_handle),
-                    );
+                    ),
                 }
             });
             return DispatchOutcome::ExecutedInline;
@@ -5693,17 +5761,20 @@ impl Scheduler {
                             Arc::clone(&dag_handle),
                             Arc::clone(&source_root_handle),
                             &cancellation,
-                        );
-                    });
+                        )
+                    })
                 }));
-                if result.is_err() {
-                    Self::surface_stage_panic_as_failed(
+                match result {
+                    Ok(completion) => {
+                        Self::deliver_stage_completion_from_pool(&inbox_sender, completion)
+                    }
+                    Err(_) => Self::surface_stage_panic_as_failed(
                         &node_for_panic,
                         generation,
                         &task_kind_for_panic,
                         &inbox_sender,
                         dag_for_panic,
-                    );
+                    ),
                 }
             });
             match self.try_submit_io(task) {
@@ -5750,17 +5821,20 @@ impl Scheduler {
                             Arc::clone(&dag_handle),
                             Arc::clone(&source_root_handle),
                             &cancellation,
-                        );
-                    });
+                        )
+                    })
                 }));
-                if result.is_err() {
-                    Self::surface_stage_panic_as_failed(
+                match result {
+                    Ok(completion) => {
+                        Self::deliver_stage_completion_from_pool(&inbox_sender, completion)
+                    }
+                    Err(_) => Self::surface_stage_panic_as_failed(
                         &node_for_panic,
                         generation,
                         &task_kind_for_panic,
                         &inbox_sender,
                         dag_for_panic,
-                    );
+                    ),
                 }
             });
             match self.try_submit_cpu(task) {
@@ -6125,7 +6199,7 @@ impl Scheduler {
                 return;
             }
             let identity = job.identity.clone();
-            crate::caller_kind::with_active_path(identity, || {
+            let completion = crate::caller_kind::with_active_path(identity, || {
                 let cancellation = job.cancellation.clone();
                 dispatch_ready_job_to_executor(
                     &job,
@@ -6138,8 +6212,9 @@ impl Scheduler {
                     self.dag.clone(),
                     self.source_root.clone(),
                     &cancellation,
-                );
+                )
             });
+            self.deliver_stage_completion(completion);
             return;
         }
         let (file_id, generation) = match &job.identity {
@@ -6197,7 +6272,10 @@ impl Scheduler {
         // `(kind, identity)`.
         let identity = job.identity.clone();
         let failed_blocker_deps = job.failed_blocker_deps.clone();
-        crate::caller_kind::with_active_path(identity, || {
+        // The terminal `StageComplete` is delivered after the stage returns
+        // and off the active path: this thread may be the inbox's sole
+        // consumer, so a full inbox must be drained, never waited on.
+        let completion = crate::caller_kind::with_active_path(identity, || {
             let cancellation = job.cancellation.clone();
             dispatch_ready_job_to_executor(
                 &job,
@@ -6210,8 +6288,9 @@ impl Scheduler {
                 self.dag.clone(),
                 self.source_root.clone(),
                 &cancellation,
-            );
+            )
         });
+        self.deliver_stage_completion(completion);
     }
 
     /// Construct the [`WorkNodeIdentity`] for `(canonical, generation,
@@ -6412,7 +6491,7 @@ impl Scheduler {
         stranded: &[crate::dag::SubmissionToken],
     ) {
         if !stranded.is_empty() {
-            let _ = inbox_sender.send(Submission::Wake);
+            let _ = inbox_sender.try_send(Submission::Wake);
         }
     }
 
@@ -6482,7 +6561,12 @@ impl Scheduler {
     /// class the short-circuit was introduced to close. The
     /// `failed_blocker_deps` parameter is therefore consumed before
     /// the dispatch and is NOT forwarded to the per-kind arms.
+    ///
+    /// Returns the stage's terminal `StageComplete`; the caller delivers it
+    /// with the discipline its thread requires (see
+    /// [`Scheduler::deliver_stage_completion`]).
     #[allow(clippy::too_many_arguments)]
+    #[must_use = "the terminal StageComplete must be delivered to the inbox"]
     fn execute_stage_on_worker(
         node: &FileNode,
         generation: u64,
@@ -6496,7 +6580,7 @@ impl Scheduler {
         inbox_sender: &crossbeam_channel::Sender<Submission>,
         dag: Arc<DagMutex>,
         source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
-    ) {
+    ) -> Option<Submission> {
         // Typed dependency-failure short-circuit BEFORE task-kind
         // dispatch. The marker survives both the fan-out path (a
         // producer terminalization after the consumer admitted) and
@@ -6530,7 +6614,7 @@ impl Scheduler {
                 },
             );
             Self::requeue_terminalize_stranded(inbox_sender, &stranded);
-            return;
+            return None;
         }
         match task_kind {
             // The source stage runs under the `Load` label (the live
@@ -6551,7 +6635,7 @@ impl Scheduler {
                     inbox_sender,
                     dag,
                     source_root,
-                );
+                )
             }
             TaskKind::Analysis => {
                 verter_debug_assert!(
@@ -6560,7 +6644,7 @@ impl Scheduler {
                      short-circuit must consume the marker before kind-dispatch \
                      (fan-out target invariant violated)",
                 );
-                Self::execute_analysis_stage(node, generation, executor, inbox_sender, dag);
+                Self::execute_analysis_stage(node, generation, executor, inbox_sender, dag)
             }
             TaskKind::Artifact { profile_hash } => {
                 verter_debug_assert!(
@@ -6576,7 +6660,7 @@ impl Scheduler {
                     executor,
                     inbox_sender,
                     dag,
-                );
+                )
             }
             // `execute_stage_on_worker` is the file-stage executor chokepoint.
             // `Parse` is intrinsic to the source stage (never dispatched as a
@@ -6594,7 +6678,9 @@ impl Scheduler {
     }
 
     /// Execute the Source stage: load content, run executor, commit.
+    /// Returns the terminal `StageComplete` for the caller to deliver.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[must_use = "the terminal StageComplete must be delivered to the inbox"]
     fn execute_source_stage(
         node: &FileNode,
         generation: u64,
@@ -6603,7 +6689,7 @@ impl Scheduler {
         inbox_sender: &crossbeam_channel::Sender<Submission>,
         dag: Arc<DagMutex>,
         source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
-    ) {
+    ) -> Option<Submission> {
         use crate::job::SchedulerError;
 
         let canonical: Arc<str> = Arc::from(node.canonical_id.as_str());
@@ -6634,7 +6720,7 @@ impl Scheduler {
                     },
                 );
                 Self::requeue_terminalize_stranded(inbox_sender, &stranded);
-                return;
+                return None;
             }
         };
 
@@ -6672,7 +6758,7 @@ impl Scheduler {
                 let stranded =
                     Self::terminalize_failure(&dag, &canonical, generation, &TaskKind::Load, error);
                 Self::requeue_terminalize_stranded(inbox_sender, &stranded);
-                return;
+                return None;
             }
         };
 
@@ -6707,31 +6793,33 @@ impl Scheduler {
                 }
             }
 
-            let _ = inbox_sender.send(Submission::StageComplete {
+            Some(Submission::StageComplete {
                 file_id: node.canonical_id.clone(),
                 generation,
                 task_kind: TaskKind::Load,
                 incarnation: node.incarnation_id(),
-            });
+            })
+        } else {
+            None
         }
     }
 
     /// Execute the Analysis stage via the executor.
+    /// Returns the terminal `StageComplete` for the caller to deliver.
+    #[must_use = "the terminal StageComplete must be delivered to the inbox"]
     fn execute_analysis_stage(
         node: &FileNode,
         generation: u64,
         executor: &dyn StageExecutor,
         inbox_sender: &crossbeam_channel::Sender<Submission>,
         dag: Arc<DagMutex>,
-    ) {
+    ) -> Option<Submission> {
         use crate::job::SchedulerError;
 
         let canonical: Arc<str> = Arc::from(node.canonical_id.as_str());
 
-        let source = match node.current_source() {
-            Some(s) => s,
-            None => return, // Source not ready — will be retried after Source completes
-        };
+        // Source not ready — will be retried after Source completes.
+        let source = node.current_source()?;
 
         let snapshot = match executor.execute_analysis(&node.canonical_id, &source, generation) {
             Ok(snap) => Arc::new(snap),
@@ -6748,7 +6836,7 @@ impl Scheduler {
                     },
                 );
                 Self::requeue_terminalize_stranded(inbox_sender, &stranded);
-                return;
+                return None;
             }
         };
 
@@ -6759,12 +6847,14 @@ impl Scheduler {
             dag.lock()
                 .signal_stage_complete(&canonical, generation, &TaskKind::Analysis, &result);
 
-            let _ = inbox_sender.send(Submission::StageComplete {
+            Some(Submission::StageComplete {
                 file_id: node.canonical_id.clone(),
                 generation,
                 task_kind: TaskKind::Analysis,
                 incarnation: node.incarnation_id(),
-            });
+            })
+        } else {
+            None
         }
     }
 
@@ -6797,6 +6887,9 @@ impl Scheduler {
     /// marker. Adding a per-arm `failed_blocker_deps` check back here
     /// would resurrect the divergent silent-success class the
     /// single-chokepoint short-circuit was introduced to close.
+    ///
+    /// Returns the terminal `StageComplete` for the caller to deliver.
+    #[must_use = "the terminal StageComplete must be delivered to the inbox"]
     fn execute_artifact_stage(
         node: &FileNode,
         generation: u64,
@@ -6804,7 +6897,7 @@ impl Scheduler {
         executor: &dyn StageExecutor,
         inbox_sender: &crossbeam_channel::Sender<Submission>,
         dag: Arc<DagMutex>,
-    ) {
+    ) -> Option<Submission> {
         use crate::job::SchedulerError;
 
         let canonical: Arc<str> = Arc::from(node.canonical_id.as_str());
@@ -6836,17 +6929,11 @@ impl Scheduler {
                 "race-safe pre-executor skip must not strand DAG waiters: \
                  Artifact identities are graph leaves"
             );
-            return;
+            return None;
         }
 
-        let source = match node.current_source() {
-            Some(s) => s,
-            None => return,
-        };
-        let analysis = match node.current_analysis() {
-            Some(a) => a,
-            None => return,
-        };
+        let source = node.current_source()?;
+        let analysis = node.current_analysis()?;
 
         let snapshot = match executor.execute_artifact(
             &node.canonical_id,
@@ -6877,7 +6964,7 @@ impl Scheduler {
                     },
                 );
                 Self::requeue_terminalize_stranded(inbox_sender, &stranded);
-                return;
+                return None;
             }
         };
 
@@ -6897,7 +6984,7 @@ impl Scheduler {
             if let Some(existing) = node.artifacts.get(&profile_hash) {
                 if existing.generation == generation {
                     drop(guard);
-                    return;
+                    return None;
                 }
             }
             node.artifacts.insert(profile_hash, Arc::clone(&snapshot));
@@ -6914,12 +7001,14 @@ impl Scheduler {
             // terminal so handle_stage_complete can release the
             // DAG identity (and its capacity permit) via
             // dag.complete(&artifact_id).
-            let _ = inbox_sender.send(Submission::StageComplete {
+            Some(Submission::StageComplete {
                 file_id: node.canonical_id.clone(),
                 generation,
                 task_kind: TaskKind::Artifact { profile_hash },
                 incarnation: node.incarnation_id(),
-            });
+            })
+        } else {
+            None
         }
     }
 
@@ -7375,7 +7464,7 @@ impl Drop for Scheduler {
         // by a cooperative pump before the driver parks on it.
         #[cfg(not(target_arch = "wasm32"))]
         let _ = self.driver_teardown.0.try_send(());
-        let _ = self.inbox.sender.send(Submission::Wake);
+        let _ = self.inbox.sender.try_send(Submission::Wake);
         self.shutdown_all_scoped_cache_flights();
 
         // Close inbox (causes driver recv to return Disconnected)
@@ -7844,6 +7933,97 @@ mod tests {
     }
 
     // ── Basic Pipeline ──
+
+    #[test]
+    fn driver_submission_makes_room_in_a_full_inbox() {
+        let loader = Arc::new(MemorySourceLoader::new());
+        loader.insert("/a.vue".to_string(), Arc::from("<template>hi</template>"));
+        let sched = test_scheduler_with_loader(loader);
+        for _ in 0..crate::driver::SUBMISSION_INBOX_CAPACITY {
+            sched.inbox.sender.try_send(Submission::Wake).unwrap();
+        }
+        let handle = {
+            let _driver = crate::caller_kind::CallerKindGuard::install(
+                crate::caller_kind::CallerKind::Driver,
+            );
+            sched.submit_request(Request {
+                file_id: "/a.vue".to_string(),
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                source: None,
+                file_language: None,
+                request_context: None,
+            })
+        };
+        sched.drive_all();
+        assert!(handle.try_get().unwrap().is_ready());
+    }
+
+    /// Source executor that fills the inbox to capacity while its stage runs,
+    /// so the stage's terminal `StageComplete` meets a full inbox.
+    struct InboxFillingSourceExecutor {
+        inbox: std::sync::OnceLock<crossbeam_channel::Sender<Submission>>,
+    }
+    impl StageExecutor for InboxFillingSourceExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn execute_source(
+            &self,
+            canonical_id: &str,
+            file_language: FileLanguage,
+            content: Arc<str>,
+            generation: u64,
+        ) -> Result<SourceSnapshot, crate::executor::StageError> {
+            let inbox = self.inbox.get().expect("inbox installed before driving");
+            while inbox.try_send(Submission::Wake).is_ok() {}
+            assert!(inbox.is_full());
+            crate::executor::DefaultExecutor.execute_source(
+                canonical_id,
+                file_language,
+                content,
+                generation,
+            )
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn inline_stage_completing_into_a_full_inbox_does_not_park_its_sole_consumer() {
+        let loader = Arc::new(MemorySourceLoader::new());
+        loader.insert("/a.vue".to_string(), Arc::from("<template>hi</template>"));
+        let executor = Arc::new(InboxFillingSourceExecutor {
+            inbox: std::sync::OnceLock::new(),
+        });
+        let sched = Scheduler::test_new_sync_with_executor(
+            SchedulerConfig::default(),
+            loader,
+            Arc::clone(&executor) as Arc<dyn StageExecutor>,
+        );
+        assert!(!sched.has_driver_thread());
+        executor
+            .inbox
+            .set(sched.inbox.sender.clone())
+            .expect("inbox installed once");
+        let handle = sched.submit_request(Request {
+            file_id: "/a.vue".to_string(),
+            target: TargetStage::Source,
+            priority: Priority::Interactive,
+            source: None,
+            file_language: None,
+            request_context: None,
+        });
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let pump = Arc::clone(&sched);
+        std::thread::spawn(move || {
+            let state = pump.wait_or_drive(&handle);
+            let _ = done_tx.send(state.is_ready());
+        });
+        let ready = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the sole inline consumer must not park on its own full inbox");
+        assert!(ready);
+    }
 
     #[test]
     fn submit_source_request_and_drive() {
@@ -13694,7 +13874,7 @@ mod tests {
         let dag_b = Arc::clone(&sched_b.dag);
         let t_skip = thread::spawn(move || {
             while !stop_b.load(Ordering::Acquire) {
-                Scheduler::execute_artifact_stage(
+                let _ = Scheduler::execute_artifact_stage(
                     &node_b,
                     5,
                     42,

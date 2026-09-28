@@ -3819,6 +3819,7 @@ dependencies = [
  "blake3",
  "boxcar",
  "criterion",
+ "crossbeam-channel",
  "dashmap",
  "hotpath",
  "imbl",
