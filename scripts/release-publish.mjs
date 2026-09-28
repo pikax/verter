@@ -42,8 +42,9 @@
  *   node scripts/release-publish.mjs local [--run <id>] [--tag v<version>]
  *       [--dir <path>] [--skip-crates] [--dry-run] [--redownload]
  *       [--allow-head-mismatch] [--otp <code>]
- *       The whole local release: preflight, download the tag's release-run
- *       artifacts with `gh`, then stage → prepare → publish-npm (interactive
+ *       The whole local release: preflight, prove the tag (scripts/release-proof.mjs:
+ *       its release pull request's CI run, or the proven run named by --run),
+ *       download that run's artifacts with `gh`, then stage → prepare → publish-npm (interactive
  *       OTP) → verify-npm → publish-crates.
  *
  * Artifacts directory layout (what `gh run download` and
@@ -58,6 +59,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -598,7 +600,7 @@ async function publishCrates(flags) {
 }
 
 // ---------------------------------------------------------------------------
-// local — the whole release from a tag's release-run artifacts
+// local — the whole release from the proven run's artifacts
 // ---------------------------------------------------------------------------
 
 function ghJson(args) {
@@ -682,8 +684,9 @@ async function local(flags) {
     log(`npm user: ${who.stdout.trim()}`);
   }
 
-  // --- Download the tag's release-run artifacts (the exact binaries CI built
-  // for this tag), unless a previous invocation already did.
+  // --- Prove the tag and download the proven run's artifacts (the exact
+  // binaries the release pull request's CI built for the tagged tree), unless a
+  // previous invocation already downloaded that same run.
   const named = flags.get("run");
   const proven = await findReleaseRun(tag, tagSha, named);
   const runId = proven.runId;
@@ -701,15 +704,29 @@ async function local(flags) {
   }
   log(`Release run: ${runId} (${runInfo.workflowName}, ${runInfo.status}/${runInfo.conclusion})`);
 
+  // The download is reused only when it is the proven run's: its run id is
+  // recorded beside it (not inside, where staging would read it) once the
+  // download completes, and any other or unrecorded download is replaced.
+  const cachedRunFile = `${artifactsDir}.run-id`;
+  const cachedRun = existsSync(cachedRunFile) ? readFileSync(cachedRunFile, "utf8").trim() : null;
   const haveArtifacts =
     existsSync(artifactsDir) &&
     readdirSync(artifactsDir, { withFileTypes: true }).some((d) => d.isDirectory());
-  if (haveArtifacts && flags.get("redownload") !== true) {
-    log(`Reusing downloaded artifacts in ${artifactsDir} (pass --redownload to fetch again)`);
+  if (haveArtifacts && cachedRun === String(runId) && flags.get("redownload") !== true) {
+    log(
+      `Reusing run ${runId}'s downloaded artifacts in ${artifactsDir} (pass --redownload to fetch again)`,
+    );
   } else {
+    if (haveArtifacts && cachedRun !== String(runId))
+      log(
+        `Discarding the artifacts of run ${cachedRun ?? "(unrecorded)"}: the proven run is ${runId}`,
+      );
     heading(`Download run ${runId} artifacts to ${artifactsDir}`);
+    rmSync(cachedRunFile, { force: true });
+    rmSync(artifactsDir, { recursive: true, force: true });
     mkdirSync(artifactsDir, { recursive: true });
     run("gh", ["run", "download", String(runId), "-D", artifactsDir]);
+    writeFileSync(cachedRunFile, `${runId}\n`);
   }
 
   // --- The shared publish path.

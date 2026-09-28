@@ -2,14 +2,16 @@
 
 Step-by-step guide for bumping from alpha to beta (or between beta releases).
 
-The current flow is `pnpm bump` → push to `main` → `release-tag.yml` tags →
-`release.yml` publishes; see [Publishing a Release](ci-cd.md#publishing-a-release).
-When `release.yml` finishes its build matrix but cannot publish (a red test
-lane), publish from the run's artifacts with
+The current flow is `pnpm bump` → a `release: v<version>` pull request, whose
+CI runs every lane and the `Release Check` rehearsal → squash-merge it with that
+exact subject → `release-tag.yml` tags → `release.yml` proves the pull
+request's CI and publishes its artifacts; see
+[Publishing a Release](ci-cd.md#publishing-a-release). When `release.yml` cannot
+publish, publish the same proven artifacts with
 `node scripts/release-publish.mjs local` — see
-[Publishing locally](ci-cd.md#publishing-locally). The manual version-bump and
-tagging steps below are the pre-`pnpm bump` procedure, kept for reference; they
-are superseded by the script-driven flow above.
+[Publishing locally](ci-cd.md#publishing-locally). The manual version-bump steps
+below (sections 1–3) are the pre-`pnpm bump` procedure, kept for reference;
+sections 4–5 are how any release lands, through its pull request.
 
 ## Prerequisites
 

@@ -317,7 +317,10 @@ Pre-releases are published with `--tag <channel>` to avoid polluting the `latest
 The repository publishes on two independent version lines — the monorepo
 (crates.io + npm) and the editor distribution (the Marketplace + the engine
 binaries every other editor launches) — and both follow the same shape: bump
-locally, push to `main`, `release-tag.yml` tags, the lane's workflow publishes.
+locally, open the release pull request (its CI runs the lanes and the lane's
+rehearsal), squash-merge it with the exact release subject, `release-tag.yml`
+tags, and the lane's workflow proves that pull request's CI and publishes its
+artifacts.
 `node scripts/release-lanes.mjs list` prints them.
 
 #### The monorepo
@@ -406,14 +409,15 @@ cannot reach the Marketplace.
 
 ### Publishing locally
 
-When `release.yml` cannot finish a release the build matrix already completed
-(a red test lane, a publish credential problem), the npm and crates.io publish
+When `release.yml` cannot finish publishing a release its pull request already
+proved (a publish credential problem, a registry outage), the npm and crates.io publish
 runs locally through the SAME code the workflow runs —
 `scripts/release-publish.mjs` — against the SAME build artifacts: the release
 pull request's CI run, found by the same proof (its `native-*`, `tsc-*`,
 `lsp-*`, `mcp-*`, `wasm` and `native-loader` artifacts are retained for 90
-days). Nothing is rebuilt from a developer machine: the
-binaries are the tag's CI builds, and the TypeScript packages are built from
+days), and downloaded again whenever the cached download is not that run's.
+Nothing is rebuilt from a developer machine: the binaries are the release pull
+request's CI builds, and the TypeScript packages are built from
 the tagged commit, which the script requires to be checked out.
 
 ```bash
