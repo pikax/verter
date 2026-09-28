@@ -502,10 +502,10 @@ fn a_retained_parse_snapshot_charges_its_pin_once_per_snapshot() {
     use crate::decl_lowering::{DeclLoweringService, SnapshotKey};
 
     let account = account(usize::MAX, usize::MAX, usize::MAX);
-    // ONE worker, so every job — including the fire-and-forget releases —
-    // is serviced in submission order on a single channel. That ordering
-    // is what makes the post-release observation below deterministic
-    // rather than a sleep.
+    // ONE worker, so every job is serviced in submission order on a single
+    // queue, and the worker applies every lease release recorded before a
+    // job is enqueued ahead of that job. That ordering is what makes the
+    // post-release observation below deterministic rather than a sleep.
     let service = Arc::new(DeclLoweringService::new_with_account(
         false,
         1,
@@ -542,7 +542,7 @@ fn a_retained_parse_snapshot_charges_its_pin_once_per_snapshot() {
     );
 
     drop(second.lease);
-    // A rendezvous acquire is serviced AFTER the queued release, so its
+    // A rendezvous acquire is serviced AFTER the recorded release is applied, so its
     // return proves the release has been applied.
     let flush = service.acquire_lease(&flush_key, &source, source_type);
     assert_eq!(

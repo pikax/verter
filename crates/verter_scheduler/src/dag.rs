@@ -530,7 +530,7 @@ impl ReadyJob {
     ) -> Self {
         if let Some(reservation) = self.capacity.take().and_then(Arc::into_inner) {
             drop(reservation);
-            let _ = inbox_sender.send(crate::driver::Submission::Wake);
+            let _ = inbox_sender.try_send(crate::driver::Submission::Wake);
         }
         self
     }
