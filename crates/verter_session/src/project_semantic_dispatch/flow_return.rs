@@ -5712,6 +5712,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             call_arguments: Arc::clone(&ir.call_arguments),
             self_slot: Some(key),
             resolving_functions: std::rc::Rc::default(),
+            this_free_values: std::rc::Rc::default(),
             canonical,
             owner,
             nullability: key.context.policy.nullability,
@@ -8583,6 +8584,13 @@ struct FlowEvaluator<'d, 'b> {
     /// (`pushTypeResolution`), shared by every nested evaluator of one
     /// root evaluation.
     resolving_functions: std::rc::Rc<std::cell::RefCell<nested::ResolvingFunctions>>,
+    /// The values an object literal's recursion check has walked and found
+    /// to hold no polymorphic `this` binder at all
+    /// ([`FlowEvaluator::value_mentions_receiver`]), shared by every nested
+    /// evaluator of one root evaluation and dropped with it. Request-scoped:
+    /// it holds only nodes this evaluation walked, so it is bounded by the
+    /// evaluation's own work.
+    this_free_values: std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashSet<SemanticNodeId>>>,
     canonical: &'d str,
     owner: verter_type_expr::TopLevelOwnerId,
     /// The `null` / `undefined` algebra of the function's own project
@@ -9105,6 +9113,20 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn guard_applications_for_tests() -> usize {
     GUARD_APPLICATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many nodes this thread's object-literal recursion checks
+    /// ([`FlowEvaluator::value_mentions_receiver`]) walked; test-only.
+    static RECEIVER_WALK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many nodes this thread's object-literal recursion checks walked so
+/// far (test-only).
+#[cfg(test)]
+pub(super) fn receiver_walk_visits_for_tests() -> usize {
+    RECEIVER_WALK_VISITS.with(std::cell::Cell::get)
 }
 
 /// What one loop pass produced on the evaluator's side outputs beyond its
@@ -10526,6 +10548,50 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         ObjectEvalStep::Done(Positional::Unmodeled)
     }
 
+    /// Whether `value` mentions the receiver `binder` anywhere below it
+    /// ([`ProjectSemanticDispatch::mentions_node`]), skipping every node an
+    /// earlier walk of this evaluation found to hold no polymorphic `this`
+    /// binder at all. A walk that meets none records every node it visited
+    /// so: a literal nested in a method of another is walked once, not
+    /// again for every literal around it.
+    fn value_mentions_receiver(&self, value: SemanticNodeId, binder: SemanticNodeId) -> bool {
+        let graph = self.dispatch.graph();
+        let mut free = self.this_free_values.borrow_mut();
+        let mut visited: Vec<SemanticNodeId> = Vec::new();
+        let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut holds_a_binder = false;
+        let mut stack = vec![value];
+        while let Some(current) = stack.pop() {
+            if current == binder {
+                return true;
+            }
+            if free.contains(&current) || !seen.insert(current) {
+                continue;
+            }
+            #[cfg(test)]
+            RECEIVER_WALK_VISITS.with(|visits| visits.set(visits.get() + 1));
+            visited.push(current);
+            let Some(data) = graph.node_data(current) else {
+                holds_a_binder = true;
+                continue;
+            };
+            if matches!(
+                data.as_ref(),
+                SemanticNodeData::TypeParam {
+                    param_index: super::substitute::THIS_BINDER_INDEX,
+                    ..
+                }
+            ) {
+                holds_a_binder = true;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        if !holds_a_binder {
+            free.extend(visited);
+        }
+        false
+    }
+
     /// An object literal whose members, methods and accessors all
     /// evaluated: its surface built.
     fn object_eval_finish(
@@ -10552,7 +10618,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let recursive = receiver.as_ref().is_some_and(|receiver| {
             surface_members
                 .iter()
-                .any(|member| self.dispatch.mentions_node(member.value, receiver.binder))
+                .any(|member| self.value_mentions_receiver(member.value, receiver.binder))
         });
         self.receiver = enclosing_receiver;
         if spread_seen {
