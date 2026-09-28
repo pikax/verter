@@ -129,6 +129,13 @@ impl QueryWatch {
         self.quarantined.contains(fp)
     }
 
+    /// Consecutive crash implications currently held for `fp` (0 when none).
+    /// Test seam for asserting strike persistence.
+    #[cfg(test)]
+    pub(super) fn strike_count(&self, fp: &QueryFingerprint) -> u32 {
+        self.strikes.get(fp).copied().unwrap_or(0)
+    }
+
     /// Attribute a crash: strike everything in flight now plus everything that
     /// errored within the race window; quarantine repeat offenders.
     pub(super) fn record_crash_implications(&mut self) {

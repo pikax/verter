@@ -318,11 +318,15 @@ impl ProjectTsserverProvider {
         self.binding_for_path(source)
     }
 
-    /// Every tsserver process this router has actually started.
+    /// Every hub this router has ALLOCATED — including one whose first
+    /// establishment is still in flight. Lifecycle updates and teardown must
+    /// reach those too: an establishing hub records desired state for the
+    /// engine it will install, and a shutdown that skips it abandons the
+    /// in-flight establishment (its install is rejected and its engine torn
+    /// down) instead of leaking a live engine after teardown returned.
     fn providers_snapshot(&self) -> Vec<Arc<dyn TypeProvider>> {
         self.providers
             .iter()
-            .filter(|entry| entry.value().has_served())
             .map(|entry| Arc::clone(entry.value()) as Arc<dyn TypeProvider>)
             .collect()
     }
@@ -803,9 +807,10 @@ impl TypeProvider for ProjectTsserverProvider {
     fn shutdown(&self) -> ProviderFuture<'_, ()> {
         let providers = self.providers_snapshot();
         Box::pin(async move {
-            // Every started engine is shut down; the FIRST failure is reported
-            // only after the rest have been asked to stop, so one wedged
-            // tsserver cannot strand its siblings.
+            // Every allocated hub is shut down — a fully established engine or
+            // an establishment still in flight (which it abandons); the FIRST
+            // failure is reported only after the rest have been asked to stop,
+            // so one wedged tsserver cannot strand its siblings.
             let mut first_error = None;
             for provider in providers {
                 if let Err(error) = provider.shutdown().await {

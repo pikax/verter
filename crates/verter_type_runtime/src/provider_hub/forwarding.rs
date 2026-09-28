@@ -210,6 +210,43 @@ where
         })
     }
 
+    fn get_completion_details<'a>(
+        &'a self,
+        path: &'a str,
+        offset: u32,
+        items: &'a [Completion],
+    ) -> ProviderFuture<'a, Vec<Completion>> {
+        let path_owned = path.to_string();
+        let items = items.to_vec();
+        // The fail-closed answer for a quarantined detail request is the
+        // un-enriched list itself (mirrors the engine-less shape).
+        let passthrough = items.clone();
+        let fp = QueryFingerprint::new(
+            "completion_details",
+            path,
+            u64::from(offset),
+            hash_extra(
+                &items
+                    .iter()
+                    .map(|item| item.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\u{0}"),
+            ),
+        );
+        Box::pin(async move {
+            self.run_guarded(
+                fp,
+                move || passthrough,
+                move |provider| async move {
+                    provider
+                        .get_completion_details(&path_owned, offset, &items)
+                        .await
+                },
+            )
+            .await
+        })
+    }
+
     fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
         let path_owned = path.to_string();
         let fp = QueryFingerprint::new("hover", path, u64::from(offset), 0);

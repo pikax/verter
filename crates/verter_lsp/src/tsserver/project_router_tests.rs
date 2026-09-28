@@ -509,3 +509,164 @@ fn plain_node_modules_install_resolves_for_its_own_project() {
 
     assert_eq!(Path::new(&spec.key.tsserver_path), expected);
 }
+
+// ─── Lifecycle updates and teardown reach hubs still establishing ────────────
+
+/// An establisher that parks on a gate before handing out its engine — a hub
+/// whose FIRST establishment is still in flight (`has_served() == false`).
+struct GatedEngine {
+    engine: Arc<dyn TypeProvider>,
+    gate: Arc<tokio::sync::Semaphore>,
+    entered: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crate::resilient_provider::ProviderEstablisher<dyn TypeProvider> for GatedEngine {
+    fn log_name(&self) -> &'static str {
+        "gated-tsserver"
+    }
+
+    fn user_label(&self) -> &'static str {
+        "tsserver"
+    }
+
+    fn restarting_error(&self) -> &'static str {
+        "gated tsserver is restarting"
+    }
+
+    fn supports_completion_resolve(&self) -> bool {
+        true
+    }
+
+    fn establish<'a>(
+        &'a self,
+        _crash_signal: Arc<tokio::sync::Notify>,
+    ) -> crate::resilient_provider::EstablishFuture<'a, dyn TypeProvider> {
+        self.entered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let engine = Arc::clone(&self.engine);
+        let gate = Arc::clone(&self.gate);
+        Box::pin(async move {
+            gate.acquire()
+                .await
+                .map_err(|_| TypeProviderError::new("gate closed"))?
+                .forget();
+            Ok(engine)
+        })
+    }
+}
+
+/// Spin (cooperatively) until `cond` holds, failing loudly instead of hanging.
+async fn await_until(mut cond: impl FnMut() -> bool, what: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !cond() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("condition never held: {what}"));
+}
+
+/// Insert a hub whose first establishment parks on a gate, mirroring the
+/// in-flight establishment `provider_for_binding` leaves behind when a cold
+/// demand is still resolving. Returns the hub, its engine, the gate and the
+/// in-flight demand's join handle.
+async fn cold_establishing_hub(
+    router: &ProjectTsserverProvider,
+) -> (
+    Arc<ProviderHub<dyn TypeProvider>>,
+    Arc<MockTypeProvider>,
+    Arc<tokio::sync::Semaphore>,
+    tokio::task::JoinHandle<
+        Result<verter_type_runtime::provider_hub::ProviderEpoch, TypeProviderError>,
+    >,
+) {
+    let engine = Arc::new(MockTypeProvider::new());
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hub = Arc::new(ProviderHub::new(
+        GatedEngine {
+            engine: engine.clone(),
+            gate: Arc::clone(&gate),
+            entered: Arc::clone(&entered),
+        },
+        Arc::new(verter_type_runtime::provider_hub::TracingNotifier),
+        crate::resilient_provider::HubPolicy::explicit(3),
+    ));
+    router.providers.insert(
+        ProjectEngineKey {
+            project: "/cold/tsconfig.json".to_string(),
+            tsserver_path: "/cold/tsserver.js".to_string(),
+        },
+        Arc::clone(&hub),
+    );
+    // The cold demand runs detached, exactly like the in-flight establishment
+    // a `provider_for_binding` call leaves behind.
+    let demand = tokio::spawn({
+        let hub = Arc::clone(&hub);
+        async move { hub.establish().await }
+    });
+    await_until(
+        || entered.load(std::sync::atomic::Ordering::SeqCst) == 1,
+        "the cold establishment started",
+    )
+    .await;
+    (hub, engine, gate, demand)
+}
+
+/// Router shutdown must reach a hub whose first establishment is still in
+/// flight: the shutdown abandons it (the install is rejected and the engine
+/// torn down) instead of letting a fresh engine come live — orphaned — after
+/// teardown already returned.
+#[tokio::test]
+async fn shutdown_reaches_a_hub_whose_first_establishment_is_in_flight() {
+    let fixture = batch_router_fixture().await;
+    let (hub, _engine, gate, demand) = cold_establishing_hub(&fixture.router).await;
+    // The demand is still parked on the gate, exactly like a cold
+    // `provider_for_binding` establishment that has not resolved yet.
+    TypeProvider::shutdown(&fixture.router).await.unwrap();
+
+    gate.add_permits(1);
+    let outcome = demand
+        .await
+        .expect("the abandoned establishment must still settle");
+    assert!(
+        outcome.is_err(),
+        "an establishment abandoned by router shutdown must fail, got {outcome:?}"
+    );
+    assert!(
+        !hub.has_served(),
+        "a hub shut down mid-establishment must not end up with a served engine"
+    );
+}
+
+/// A workspace-folder update that lands while a hub is still establishing must
+/// be recorded in that hub's desired state, so the engine it later installs is
+/// replayed WITH the folder update instead of operating without its project
+/// roots.
+#[tokio::test]
+async fn workspace_folder_updates_reach_a_hub_whose_first_establishment_is_in_flight() {
+    let fixture = batch_router_fixture().await;
+    let (_hub, engine, gate, demand) = cold_establishing_hub(&fixture.router).await;
+
+    fixture
+        .router
+        .update_workspace_folders(vec![serde_json::json!({ "uri": "file:///ws" })], vec![])
+        .await
+        .unwrap();
+
+    gate.add_permits(1);
+    demand
+        .await
+        .expect("the establishment must still settle")
+        .expect("the released establishment must install its engine");
+
+    assert!(
+        engine.calls().iter().any(
+            |call| matches!(call, MockCall::UpdateWorkspaceFolders { added, .. }
+                if added.iter().any(|folder| folder.get("uri") == Some(&serde_json::json!("file:///ws"))))
+        ),
+        "the folder update recorded while the hub was still establishing must reach its \
+         engine through the replay, got {:?}",
+        engine.calls()
+    );
+}

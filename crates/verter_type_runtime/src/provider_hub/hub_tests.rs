@@ -158,6 +158,9 @@ struct MockInner {
     /// liveness probes (`await_down`/`await_live`) never park on the gate.
     hover_gate: parking_lot::Mutex<Option<(String, Arc<Semaphore>)>>,
     configure_gate: parking_lot::Mutex<Option<Arc<Semaphore>>>,
+    /// When set, `update_file` BLOCKS on the gate before recording — an engine
+    /// holding a state update beyond its submitter's deadline.
+    update_gate: parking_lot::Mutex<Option<Arc<Semaphore>>>,
     shutdowns: AtomicUsize,
     /// When set, a gated hover SUCCEEDS once released (an answer that was in
     /// flight when its engine was retired) instead of failing.
@@ -184,6 +187,7 @@ impl MockProvider {
                 tap: parking_lot::Mutex::new(None),
                 hover_gate: parking_lot::Mutex::new(None),
                 configure_gate: parking_lot::Mutex::new(None),
+                update_gate: parking_lot::Mutex::new(None),
                 shutdowns: AtomicUsize::new(0),
                 gated_hover_succeeds: std::sync::atomic::AtomicBool::new(false),
                 configure_fails: std::sync::atomic::AtomicBool::new(false),
@@ -218,10 +222,16 @@ impl MockProvider {
 
     /// Record a call. Synchronous — no guard is ever held across an `.await`.
     fn record(&self, call: MockCall) {
-        self.inner.calls.lock().push(call.clone());
-        if let Some(tap) = self.inner.tap.lock().as_ref() {
-            let _ = tap.send(call);
-        }
+        record_call(&self.inner, call);
+    }
+}
+
+/// `MockProvider::record` on the shared handle alone, so a future that owns
+/// only the `Arc<MockInner>` (a gated forward) records identically.
+fn record_call(inner: &Arc<MockInner>, call: MockCall) {
+    inner.calls.lock().push(call.clone());
+    if let Some(tap) = inner.tap.lock().as_ref() {
+        let _ = tap.send(call);
     }
 }
 
@@ -251,11 +261,17 @@ impl TypeProvider for MockProvider {
     }
 
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
-        self.record(MockCall::UpdateFile {
-            path: path.to_string(),
-            content: content.to_string(),
-        });
-        Box::pin(async { Ok(()) })
+        let inner = Arc::clone(&self.inner);
+        let gate = inner.update_gate.lock().clone();
+        let path = path.to_string();
+        let content = content.to_string();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                let _permit = gate.acquire().await;
+            }
+            record_call(&inner, MockCall::UpdateFile { path, content });
+            Ok(())
+        })
     }
 
     fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
@@ -293,6 +309,25 @@ impl TypeProvider for MockProvider {
                 is_incomplete: false,
             })
         })
+    }
+
+    fn get_completion_details<'a>(
+        &'a self,
+        _path: &'a str,
+        _offset: u32,
+        items: &'a [Completion],
+    ) -> ProviderFuture<'a, Vec<Completion>> {
+        // Enrichment observable from the outside: only the ENGINE that receives
+        // the request can attach this documentation.
+        let enriched = items
+            .iter()
+            .map(|item| {
+                let mut enriched = item.clone();
+                enriched.documentation = Some("engine-attached documentation".to_string());
+                enriched
+            })
+            .collect();
+        Box::pin(async move { Ok(enriched) })
     }
 
     fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
@@ -520,13 +555,9 @@ async fn a_respawned_provider_is_announced_structurally() {
     harness.spawn_gate.add_permits(1);
     await_down(&harness.provider).await;
 
-    // The respawn is gated on a backoff sleep; wait for the fresh generation.
-    for _ in 0..600 {
-        if harness.notifier.started().len() > 1 {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    // The respawn is gated on a backoff sleep; the fresh generation's
+    // announcement is the observed completion event.
+    harness.notifier.await_started(2).await;
 
     assert_eq!(
         harness.notifier.started().len(),
@@ -543,6 +574,9 @@ async fn a_respawned_provider_is_announced_structurally() {
 struct RecordingNotifier {
     messages: parking_lot::Mutex<Vec<(NotifySeverity, String)>>,
     started: parking_lot::Mutex<Vec<Option<u32>>>,
+    /// Signalled on every structural start announcement — event-driven
+    /// synchronization for tests awaiting a respawn.
+    started_signal: Notify,
 }
 
 impl RecordingNotifier {
@@ -553,6 +587,28 @@ impl RecordingNotifier {
     fn started(&self) -> Vec<Option<u32>> {
         self.started.lock().clone()
     }
+
+    /// Wait, driven by the announcement event itself, until `count` engines
+    /// were structurally announced. The bound is a failsafe that makes a
+    /// missing announcement fail loudly instead of hanging.
+    async fn await_started(&self, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if self.started().len() >= count {
+                    return;
+                }
+                self.started_signal.notified().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "only {} engine(s) were structurally announced within 30s: {:?}",
+                self.started().len(),
+                self.messages()
+            )
+        });
+    }
 }
 
 impl ProviderNotifier for RecordingNotifier {
@@ -562,6 +618,7 @@ impl ProviderNotifier for RecordingNotifier {
 
     fn provider_started(&self, pid: Option<u32>) {
         self.started.lock().push(pid);
+        self.started_signal.notify_one();
     }
 }
 
@@ -1681,6 +1738,52 @@ async fn open_forwards_to_the_live_provider() {
     );
 }
 
+/// A completion item with no optional payload — the hub must enrich it, so
+/// whatever the engine attaches is observable as a diff against this.
+fn bare_completion(label: &str) -> Completion {
+    Completion {
+        label: label.to_string(),
+        kind: None,
+        detail: None,
+        documentation: None,
+        edit_range_start: None,
+        edit_range_end: None,
+        text_edit_new_text: None,
+        insert_text: None,
+        sort_text: None,
+        insert_text_format: None,
+        commit_characters: None,
+        filter_text: None,
+        preselect: None,
+        label_details: None,
+        data: None,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_details_forward_to_the_serving_engine() {
+    // DISCRIMINATION: the trait's default `get_completion_details` body returns
+    // the items unchanged, so a hub that fails to forward them silently drops
+    // documentation and enrichment — this stays RED until the hub forwards.
+    let initial = MockProvider::new("tsserver");
+    let (provider, _crash_notify, _spawn_gate) =
+        make_resilient(initial, MockProvider::new("tsserver")).await;
+
+    let enriched = provider
+        .get_completion_details("/p/App.vue.tsx", 8, &[bare_completion("alpha")])
+        .await
+        .expect("completion details must answer");
+
+    assert_eq!(
+        enriched
+            .iter()
+            .map(|item| item.documentation.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("engine-attached documentation")],
+        "the hub must forward completion details to the serving engine for enrichment"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn register_carrier_forwards_to_the_live_provider() {
     // A carrier registered against a live wrapper must forward to the live inner
@@ -1874,6 +1977,41 @@ async fn persistently_failing_respawn_exhausts_budget_and_stays_down() {
     );
 }
 
+/// A query against a hub that exhausted its restart budget reports the
+/// TERMINAL state — never an eternal "restarting" that claims a recovery is
+/// under way when the recovery has permanently given up.
+#[tokio::test(start_paused = true)]
+async fn an_exhausted_hub_reports_exhaustion_not_eternal_restarting() {
+    let (provider, crash_notify, _spawn_attempts) = make_flaky(
+        MockProvider::new("tsserver"),
+        MockProvider::new("tsserver"),
+        usize::MAX >> 1,
+    )
+    .await;
+
+    crash_notify.notify_one();
+    assert!(
+        spin_until(&provider, false).await,
+        "the live cell must be cleared after a crash"
+    );
+    // Run the monitor through its whole (failing) budget under the paused clock.
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+    let error = provider
+        .get_hover("/probe.vue.tsx", 0)
+        .await
+        .expect_err("an exhausted hub fails closed");
+    assert!(
+        error.message.contains("exhausted its restart budget"),
+        "an exhausted hub must say it stays down for the session, got: {}",
+        error.message
+    );
+    assert_ne!(
+        error.message, "flaky provider is restarting",
+        "an exhausted hub must not claim a restart is in progress"
+    );
+}
+
 // ─── Deliberate-teardown vs crash discrimination + killer-request quarantine ───
 
 /// Spin (cooperatively) until `cond` holds, failing loudly instead of hanging.
@@ -2024,6 +2162,50 @@ async fn deliberate_shutdown_is_not_reported_as_a_crash_and_never_respawns() {
     );
 }
 
+/// A shutdown that lands while recovery sleeps out its restart backoff must
+/// abandon the respawn BEFORE any process is spawned or the user is told about
+/// a restart failure — `shutdown().await` having returned means teardown.
+#[tokio::test(start_paused = true)]
+async fn shutdown_during_restart_backoff_never_respawns_or_notifies() {
+    let initial = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(initial, replacement.clone()).await;
+
+    harness.crash_notify.notify_one();
+    await_down(&harness.provider).await;
+    // Let the monitor pass its loop-head teardown check and park inside the
+    // 1s backoff sleep (t+0.5s < t+1s, paused clock).
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    harness.provider.shutdown().await.unwrap();
+
+    // Permit any (buggy) respawn attempt and give it its full backoff horizon.
+    harness.spawn_gate.add_permits(4);
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+    let restart_failures = harness
+        .notifier
+        .messages()
+        .iter()
+        .filter(|(_, message)| message.contains("Failed to restart"))
+        .count();
+    assert_eq!(
+        restart_failures,
+        0,
+        "a recovery abandoned by teardown must not report restart failures, got {:?}",
+        harness.notifier.messages()
+    );
+    assert_eq!(
+        replacement.inner.shutdowns.load(Ordering::SeqCst),
+        0,
+        "a recovery abandoned by teardown must never spawn (and tear down) an engine"
+    );
+    assert!(
+        !harness.provider.is_serving(),
+        "a hub shut down mid-backoff stays down"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn killer_request_is_quarantined_and_never_replayed_into_restarted_engine() {
     // DISCRIMINATION: without quarantine, the identical (method, path, offset)
@@ -2104,6 +2286,121 @@ async fn quarantine_clears_when_the_file_content_changes() {
     assert!(
         hover_count(&replacement, companion, 42) > replays_before,
         "after a content change the same position must reach the engine again"
+    );
+}
+
+/// An answer that the epoch REJECTED (the engine was retired before the result
+/// settled) is not a successful completion: it must not erase the crash strikes
+/// the fingerprint accumulated — only a strike-free quarantine can self-heal a
+/// bystander, and a discarded answer proves nothing about the request.
+#[tokio::test(start_paused = true)]
+async fn a_discarded_answer_from_a_retired_engine_keeps_its_crash_strikes() {
+    let initial = MockProvider::new("tsgo");
+    let harness = make_harness(initial.clone(), MockProvider::new("tsgo")).await;
+    let provider = Arc::clone(&harness.provider);
+    let companion = "/p/Struck.svelte.jsx";
+    let offset = 42u32;
+    let fp = QueryFingerprint::new("hover", companion, u64::from(offset), 0);
+
+    // The hover is in flight against the first engine and will SUCCEED — but
+    // only after that engine has been retired.
+    let answer_gate = Arc::new(Semaphore::new(0));
+    initial.set_blocking_failing_hover(companion, Arc::clone(&answer_gate));
+    initial
+        .inner
+        .gated_hover_succeeds
+        .store(true, Ordering::SeqCst);
+    let in_flight = tokio::spawn({
+        let provider = Arc::clone(&provider);
+        async move { provider.get_hover(companion, offset).await }
+    });
+    await_cond(
+        || hover_count(&initial, companion, offset) == 1,
+        "the hover reached the first engine",
+    )
+    .await;
+
+    harness.crash_notify.notify_one();
+    await_down(&provider).await;
+    // The crash struck the in-flight fingerprint once.
+    assert_eq!(
+        provider
+            .state
+            .shared
+            .query_watch
+            .lock()
+            .unwrap()
+            .strike_count(&fp),
+        1,
+        "the crash must strike the in-flight request"
+    );
+
+    answer_gate.add_permits(1);
+    let settled = in_flight.await.unwrap();
+    assert!(
+        settled.is_err(),
+        "an answer from a retired engine must not settle as a result, got {settled:?}"
+    );
+    assert_eq!(
+        provider
+            .state
+            .shared
+            .query_watch
+            .lock()
+            .unwrap()
+            .strike_count(&fp),
+        1,
+        "a discarded answer must not erase the crash strikes of its fingerprint"
+    );
+}
+
+/// A state update whose submitter deadline elapses before the actor settles the
+/// forward still applies (in order) — so the touched paths' crash attribution
+/// must still lift. A timeout must not leave stale quarantine behind forever.
+#[tokio::test(start_paused = true)]
+async fn a_deadline_elapsed_update_still_lifts_the_paths_quarantine() {
+    let initial = MockProvider::new("tsserver");
+    let engine = initial.clone();
+    let (provider, _crash_notify, _spawn_gate) =
+        make_resilient(initial, MockProvider::new("tsserver")).await;
+    let path = "/workspace/App.vue.tsx";
+
+    // Quarantine the path's diagnostics (two crash implications).
+    {
+        let mut watch = provider.state.shared.query_watch.lock().unwrap();
+        let fingerprint = QueryFingerprint::new("diagnostics", path, 0, 0);
+        watch.begin(&fingerprint);
+        for _ in 0..super::quarantine::QUARANTINE_STRIKE_THRESHOLD {
+            watch.record_crash_implications();
+        }
+        watch.end(&fingerprint, false);
+    }
+    assert!(
+        provider.get_diagnostics(path).await.is_err(),
+        "the seeded quarantine must fail the path closed"
+    );
+
+    // The engine holds the update beyond its submitter's deadline.
+    let update_gate = Arc::new(Semaphore::new(0));
+    *engine.inner.update_gate.lock() = Some(update_gate);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(50);
+    let timed_out = crate::deadline::with_deadline_at(
+        deadline,
+        provider.update_file(path, "const changed = true"),
+    )
+    .await
+    .expect_err("the submitter deadline must elapse while the engine holds the update");
+    assert!(
+        timed_out.message.contains("deadline elapsed"),
+        "got: {}",
+        timed_out.message
+    );
+
+    // The mutation is recorded (it applies in order) — the quarantine lifted
+    // with it, even though the submitter gave up waiting.
+    assert!(
+        provider.get_diagnostics(path).await.is_ok(),
+        "a timed-out update must still lift the touched path's quarantine"
     );
 }
 

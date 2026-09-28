@@ -314,6 +314,18 @@ struct HubState<P: ?Sized> {
     policy: HubPolicy,
 }
 
+impl<P: ?Sized + 'static> HubState<P> {
+    /// The terminal-state error of an instance whose recovery exhausted its
+    /// restart budget: it stays down for the rest of the session, and no
+    /// caller may be told a restart is in progress.
+    fn exhausted(&self) -> TypeProviderError {
+        TypeProviderError::new(format!(
+            "{} exhausted its restart budget and stays down for this session",
+            self.establisher.log_name()
+        ))
+    }
+}
+
 impl<P: ?Sized> Drop for HubState<P> {
     fn drop(&mut self) {
         // Release the parked crash monitor of the serving incarnation: it holds
@@ -410,12 +422,16 @@ where
     }
 
     /// Record `mutation` and forward it to the serving engine.
+    ///
+    /// The mutation's effect on the crash quarantine (a content change lifts
+    /// the touched paths' attribution) is applied by the actor when it records
+    /// the mutation, so it holds even when the submitter's deadline elapses
+    /// before the settlement — the mutation stays queued and applies in order.
     async fn submit_mutation(
         &self,
         mutation: DesiredMutation,
         lane: Lane,
     ) -> Result<AppliedReceipt, TypeProviderError> {
-        let touched = mutation.touched_paths();
         let deadline = crate::deadline::current();
         let (ack, ack_rx) = oneshot::channel();
         self.state
@@ -437,17 +453,7 @@ where
             })?,
             None => ack_rx.await,
         };
-        let receipt = settled.map_err(|_| self.restarting())??;
-        let mut watch = self
-            .state
-            .shared
-            .query_watch
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for path in &touched {
-            watch.clear_path(path);
-        }
-        Ok(receipt)
+        settled.map_err(|_| self.restarting())?
     }
 
     async fn mutate(&self, mutation: DesiredMutation, lane: Lane) -> Result<(), TypeProviderError> {
@@ -465,7 +471,15 @@ where
             return Ok(serving);
         }
         if self.state.policy.on_demand.is_none() {
-            return Err(self.restarting());
+            // An explicit hub cannot establish on demand: fail closed with the
+            // LIFECYCLE's truth — a hub that exhausted its restart budget is
+            // terminal, not "restarting".
+            let exhausted = matches!(self.state.shared.lifecycle().phase, Phase::Exhausted);
+            return Err(if exhausted {
+                self.state.exhausted()
+            } else {
+                self.restarting()
+            });
         }
         self.establish().await?;
         self.state.shared.serving().ok_or_else(|| self.restarting())
@@ -542,8 +556,12 @@ where
         }
         let guard = InFlightGuard::begin(Arc::clone(&self.state.shared.query_watch), fp);
         let result = run(serving.provider).await;
-        guard.complete(result.is_ok());
-        self.settle(serving.epoch, result)
+        // Settle FIRST, and only a settlement the serving epoch accepted counts
+        // as a success: an answer the epoch discarded proves nothing about the
+        // request and must not erase its crash strikes.
+        let settled = self.settle(serving.epoch, result);
+        guard.complete(settled.is_ok());
+        settled
     }
 
     /// Deliberate teardown: retire the serving engine and abandon any
@@ -582,12 +600,7 @@ where
             Phase::Recovering => {
                 return Err(TypeProviderError::new(state.establisher.restarting_error()))
             }
-            Phase::Exhausted => {
-                return Err(TypeProviderError::new(format!(
-                    "{} exhausted its restart budget and stays down for this session",
-                    state.establisher.log_name()
-                )))
-            }
+            Phase::Exhausted => return Err(state.exhausted()),
             Phase::Idle => {
                 if let (Some(cooldown), Some((failed_at, message))) =
                     (state.policy.on_demand, &lifecycle.last_failure)
@@ -851,6 +864,16 @@ where
         tracing::info!("{log_name} restart attempt {attempt}/{max_restarts} after {delay_secs}s");
         tokio::time::sleep(Duration::from_secs(delay_secs)).await;
 
+        // A shutdown that completed while the backoff slept (or raced the
+        // spawn) abandons the respawn BEFORE any process is spawned: recovery
+        // must never raise an engine — or a user-visible failure — after
+        // `shutdown().await` has returned.
+        if state.shared.teardown_generation() != teardown_generation {
+            tracing::debug!("{log_name} teardown during restart backoff — abandoning respawn");
+            state.shared.lifecycle().phase = Phase::Idle;
+            return;
+        }
+
         match establish_once(&state, teardown_generation).await {
             Ok(installed) => {
                 state.shared.lifecycle().phase = Phase::Idle;
@@ -868,6 +891,12 @@ where
             }
             Err(error) => {
                 tracing::error!("Failed to restart {log_name} (attempt {attempt}): {error}");
+                if state.shared.teardown_generation() != teardown_generation {
+                    // Teardown raced the attempt (its install was rejected and
+                    // its engine torn down): report nothing, abandon quietly.
+                    state.shared.lifecycle().phase = Phase::Idle;
+                    return;
+                }
                 state.notifier.notify(
                     NotifySeverity::Error,
                     format!("Failed to restart TypeScript server: {error}"),
@@ -943,7 +972,22 @@ async fn run_actor<P>(
                 deadline,
                 ack,
             } => {
+                let touched = mutation.touched_paths();
                 let disposition = desired.apply(&mutation, lane);
+                // The content change is RECORDED: lift the touched paths' crash
+                // attribution here, on the actor — the mutation applies in
+                // order regardless of whether its submitter was still waiting
+                // for the settlement, so a submitter deadline can never leave
+                // stale quarantine behind.
+                {
+                    let mut watch = shared
+                        .query_watch
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    for path in &touched {
+                        watch.clear_path(path);
+                    }
+                }
                 let result = match (shared.serving(), disposition) {
                     (None, _) => Ok(AppliedReceipt { epoch: None }),
                     (Some(serving), Disposition::Shadowed) => Ok(AppliedReceipt {
