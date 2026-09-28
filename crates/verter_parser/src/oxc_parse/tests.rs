@@ -1630,6 +1630,56 @@ fn deep_source() -> String {
     )
 }
 
+/// A parse and a walk that need a stack region run on one (a fiber on
+/// Windows, switched to and back through the region's handoff), many times
+/// over, and each answers what it would on an unbounded stack: one
+/// statement, whose expression the walk reaches 1,000 levels down.
+#[test]
+fn a_parse_and_a_walk_on_a_region_answer_on_it_again_and_again() {
+    use oxc_ast_visit::Visit;
+    #[derive(Default)]
+    struct Deepest(usize, usize);
+    impl<'a> Visit<'a> for Deepest {
+        fn enter_node(&mut self, _kind: oxc_ast::AstKind<'a>) {
+            self.0 += 1;
+            self.1 = self.1.max(self.0);
+        }
+        fn leave_node(&mut self, _kind: oxc_ast::AstKind<'a>) {
+            self.0 -= 1;
+        }
+    }
+    let (reserved, answers) = on_a_small_thread(|| {
+        let source = format!(
+            "export const x = {}0{};",
+            "(".repeat(1_000),
+            ")".repeat(1_000)
+        );
+        let _ = super::faults::take_reservations();
+        let answers: Vec<(usize, usize)> = (0..4)
+            .map(|_| {
+                let allocator = Allocator::default();
+                let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
+                let program = &parsed.program;
+                let mut deepest = Deepest::default();
+                super::with_program_stack(program, || deepest.visit_program(program));
+                (program.body.len(), deepest.1)
+            })
+            .collect();
+        (super::faults::take_reservations(), answers)
+    });
+    assert!(
+        reserved >= 4,
+        "the parses and walks ran on regions: {reserved}"
+    );
+    for (statements, depth) in answers {
+        assert_eq!(statements, 1);
+        assert!(
+            depth > 1_000,
+            "the walk reached the innermost level: {depth}"
+        );
+    }
+}
+
 /// A parse whose region cannot be reserved returns the typed diagnostic in
 /// place of the program, marked fatal, and the thread goes on: the same
 /// parse retried, and a shallow one, parse.
@@ -1770,14 +1820,17 @@ fn a_leased_walk_refused_its_lease_is_the_typed_refusal() {
         let walked = std::cell::Cell::new(false);
         let walk = || walked.set(true);
         super::faults::fail_next_reservations(1);
+        let recorded_site = format!("oxc_parse/tests.rs:{}", line!() + 1);
         let recorded = super::refusals_within(|| super::leased_program_walk(&program, walk));
         let recorded = (recorded.0.is_err(), recorded.1.is_some(), walked.get());
         super::faults::fail_next_reservations(1);
         let site = format!("oxc_parse/tests.rs:{}", line!() + 1);
         let unrecorded = super::leased_program_walk(&program, walk).is_err();
         let unrecorded = (unrecorded, walked.get(), site);
+        let retried_site = format!("oxc_parse/tests.rs:{}", line!() + 1);
         let retried = super::refusals_within(|| super::leased_program_walk(&program, walk));
         let retried = (retried.0.is_ok(), retried.1.is_none(), walked.get());
+        let recorded = (recorded, [recorded_site, retried_site]);
         (
             recorded,
             unrecorded,
@@ -1786,6 +1839,7 @@ fn a_leased_walk_refused_its_lease_is_the_typed_refusal() {
         )
     });
     let (unrecorded, unrecorded_walked, site) = unrecorded;
+    let (recorded, recording_sites) = recorded;
     assert_eq!(recorded, (true, true, false), "refused, recorded, not run");
     assert_eq!(
         (unrecorded, unrecorded_walked),
@@ -1797,12 +1851,19 @@ fn a_leased_walk_refused_its_lease_is_the_typed_refusal() {
         (true, true, true),
         "granted, nothing recorded, run"
     );
-    assert_eq!(
-        reported.len(),
-        1,
-        "the unrecorded walk's site: {reported:?}"
+    // The report is the process's: other tests' walks may be in it too.
+    assert!(
+        reported.iter().any(|reported| reported.ends_with(&site)),
+        "the unrecorded walk's site {site}: {reported:?}"
     );
-    assert!(reported[0].ends_with(&site), "{reported:?} vs {site}");
+    for recording in recording_sites {
+        assert!(
+            !reported
+                .iter()
+                .any(|reported| reported.ends_with(&recording)),
+            "a walk inside a recording operation is not reported: {recording}"
+        );
+    }
 }
 
 /// An operation that unwinds restores the record of the one enclosing it,

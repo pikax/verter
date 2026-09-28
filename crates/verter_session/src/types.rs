@@ -3236,6 +3236,9 @@ impl PublicApiProjectionError {
             verter_compiler::tsc::TscFailureSubject::ScriptSetupAttrs { source_range } => {
                 crate::PublicApiProjectionSubject::ScriptSetupAttrs { source_range }
             }
+            verter_compiler::tsc::TscFailureSubject::Source => {
+                crate::PublicApiProjectionSubject::Source
+            }
         }
     }
 

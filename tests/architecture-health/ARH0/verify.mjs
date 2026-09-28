@@ -448,6 +448,9 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** A capability row's version when it ships at the workspace's own release version. */
+const WORKSPACE_RELEASE = "workspace";
+
 function validateCapabilityMatrix(matrix, errors) {
   const caseId = "ARH0-capability";
   if (matrix.schema !== "ARH0CapabilityMatrix") {
@@ -480,7 +483,19 @@ function validateCapabilityMatrix(matrix, errors) {
         caseId,
         row.capability,
       );
-      if (pin.ok && (typeof pin.actual !== "string" || pin.actual !== row.version)) {
+      // A capability that ships at the workspace release version ("version":
+      // "workspace") names no literal pin: every release bump moves it, and a
+      // literal here failed every release pull request. The property must
+      // still resolve; its value is the release, not a tool revision.
+      if (row.version === WORKSPACE_RELEASE) {
+        if (pin.ok && typeof pin.actual !== "string") {
+          errors.push({
+            caseId,
+            code: "version-not-pinned-in-source",
+            detail: `${row.capability}: ${row.versionSource} property ${row.versionProperty} does not resolve to the workspace release version`,
+          });
+        }
+      } else if (pin.ok && (typeof pin.actual !== "string" || pin.actual !== row.version)) {
         errors.push({
           caseId,
           code: "version-not-pinned-in-source",

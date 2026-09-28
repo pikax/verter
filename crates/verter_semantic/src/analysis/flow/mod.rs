@@ -992,8 +992,8 @@ impl FunctionBodySkeleton {
 /// plus the body statement list of exactly one function / arrow, borrowed
 /// from the retained parse snapshot for the duration of the build only.
 pub struct FunctionBodySource<'a, 'ast> {
-    /// The formal parameters.
-    pub params: &'a oxc_ast::ast::FormalParameters<'ast>,
+    /// The formal parameters (`None` for a class field initializer).
+    pub params: Option<&'a oxc_ast::ast::FormalParameters<'ast>>,
     /// The function's authored kind (`async` / `generator` flags).
     pub kind: FunctionBodyKind,
     /// The body statements.
@@ -1041,7 +1041,7 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
     pub fn from_function(function: &'a Function<'ast>) -> Option<Self> {
         let body = function.body.as_ref()?;
         Some(Self {
-            params: &function.params,
+            params: Some(&function.params),
             kind: function_body_kind(function.r#async, function.generator),
             statements: &body.statements,
             expression_body: None,
@@ -1066,7 +1066,7 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
     #[must_use]
     pub fn from_arrow(arrow: &'a ArrowFunctionExpression<'ast>) -> Self {
         Self {
-            params: &arrow.params,
+            params: Some(&arrow.params),
             kind: function_body_kind(arrow.r#async, false),
             statements: arrow
                 .get_function_body()
@@ -1074,6 +1074,22 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
             expression_body: arrow.get_expression(),
             body_span: arrow.body.span().into(),
             anchor: arrow.span.start,
+            self_binding: None,
+        }
+    }
+
+    /// The source positions of a class field's initializer served as its own
+    /// position: no parameters, the one expression its value.
+    #[must_use]
+    pub fn from_initializer(expression: &'a oxc_ast::ast::Expression<'ast>) -> Self {
+        let span = expression.span();
+        Self {
+            params: None,
+            kind: FunctionBodyKind::Plain,
+            statements: &[],
+            expression_body: Some(expression),
+            body_span: span.into(),
+            anchor: span.start,
             self_binding: None,
         }
     }
@@ -1396,7 +1412,9 @@ fn build_body_skeleton_contained(
             false,
         );
     }
-    builder.collect_params(source.params);
+    if let Some(params) = source.params {
+        builder.collect_params(params);
+    }
     if let Some(expression) = source.expression_body {
         let argument = builder.open_root_site(expression);
         builder.push_implicit_return(argument, expression.span().into());

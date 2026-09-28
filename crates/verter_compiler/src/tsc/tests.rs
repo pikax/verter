@@ -3519,6 +3519,7 @@ import type { Attrs } from './types'
     assert_eq!(result.unwrap_err(), expected);
 
     let extracted = extract_tsc_state(source, "TestComp", &TscExtractOptions::default())
+        .expect("the stack is had")
         .expect("script setup syntax must still produce a cached extraction");
     assert_eq!(
         generate_tsc_from_state(
@@ -3562,6 +3563,7 @@ defineProps<Payload>()
     assert_eq!(direct, expected);
 
     let extracted = extract_tsc_state(source, "TestComp", &TscExtractOptions::default())
+        .expect("the stack is had")
         .expect("script setup syntax must still produce a cached extraction");
     let cached = generate_tsc_from_state(
         &extracted,
@@ -4615,6 +4617,7 @@ defineEmits<{ (e: 'change', val: number): void }>()
             filename: Some("/test/TestComp.vue".to_string()),
         },
     )
+    .expect("the stack is had")
     .expect("should extract from SFC with script setup");
 
     let bundle = fixture_bundle(&[
@@ -4671,6 +4674,7 @@ defineEmits(['click', 'update'])
             filename: Some("/test/TestComp.vue".to_string()),
         },
     )
+    .expect("the stack is had")
     .expect("should extract from SFC with runtime macros");
 
     let from_cache = generate_tsc_from_state(
@@ -4693,7 +4697,8 @@ defineEmits(['click', 'update'])
 fn extract_returns_none_without_script_setup() {
     let sfc = r#"<template><div>hello</div></template>"#;
 
-    let result = extract_tsc_state(sfc, "TestComp", &TscExtractOptions::default());
+    let result = extract_tsc_state(sfc, "TestComp", &TscExtractOptions::default())
+        .expect("the stack is had");
     assert!(
         result.is_none(),
         "should return None for SFC without script setup"
@@ -8180,4 +8185,54 @@ fn testing_surface_reports_the_dialect_of_the_code_it_carries() {
         "a TypeScript body stays TypeScript: {}",
         ts.code
     );
+}
+
+/// The standalone checker's `tsc` generation, one-shot and extracted then
+/// generated, whose parse of the script is refused its stack is the typed
+/// [`TscGenerationError::StackUnavailable`], never declarations read off the
+/// empty program; retried, it generates. Its subject is the whole source.
+#[test]
+fn a_tsc_generation_whose_parse_is_refused_is_the_typed_refusal() {
+    use verter_parser::oxc_parse::faults::fail_next_reservations;
+    let sfc = format!(
+        "<script setup lang=\"ts\">const v = {}1{}\nconst w = 2</script>\n<template><div /></template>\n",
+        "(".repeat(157),
+        ")".repeat(157)
+    );
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn_scoped(scope, || {
+                use super::script::{extract_tsc_state, TscExtractOptions, TscGenerationError};
+                let refused = |error: &TscGenerationError| {
+                    matches!(error, TscGenerationError::StackUnavailable { .. })
+                        && error.subject() == super::script::TscFailureSubject::Source
+                        && error.code() == "stack-unavailable"
+                };
+                fail_next_reservations(1);
+                let generated = super::script::generate_tsc_output(&sfc, "Deep");
+                assert!(
+                    generated.as_ref().is_err_and(refused),
+                    "{:?}",
+                    generated.err()
+                );
+                let retried = super::script::generate_tsc_output(&sfc, "Deep");
+                assert!(retried.is_ok(), "{:?}", retried.err());
+
+                fail_next_reservations(1);
+                let extracted = extract_tsc_state(&sfc, "Deep", &TscExtractOptions::default());
+                assert!(
+                    extracted.as_ref().is_err_and(refused),
+                    "{:?}",
+                    extracted.err()
+                );
+                let state = extract_tsc_state(&sfc, "Deep", &TscExtractOptions::default())
+                    .expect("the stack is had")
+                    .expect("the component has a script setup");
+                let _ = state;
+            })
+            .expect("spawn the thread")
+            .join()
+            .expect("the generations return");
+    });
 }

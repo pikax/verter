@@ -20,7 +20,7 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -66,8 +66,24 @@ pub(super) const LOOSE_IMPLICIT: Setting = Setting {
 /// The four settings, in the order a four-answer row lists them.
 pub(super) const ALL: [Setting; 4] = [STRICT, LOOSE, STRICT_IMPLICIT, LOOSE_IMPLICIT];
 
-/// How long one row may take before it is reported overdue.
-const ROW_DEADLINE: Duration = Duration::from_secs(60);
+/// The CPU time one row's evaluating thread may spend before the row is
+/// reported overdue. A hang detector, not a speed budget: it catches a row
+/// that loops or whose work blows up super-linearly, never a slow but
+/// healthy machine. It is the thread's own CPU time, not the time on the
+/// clock, so a row slowed by the tests running beside it in the same
+/// process is not reported. On a platform with no reader of a thread's CPU
+/// time it is the time on the clock.
+const ROW_CPU_BUDGET: Duration = Duration::from_secs(60);
+
+/// The time on the clock after which a row is reported overdue whatever
+/// CPU time it spent: the backstop for a row that makes no progress (a
+/// thread blocked on a lock or a channel spends no CPU time, so the budget
+/// above never trips for it). It sits below the test runner's own
+/// five-minute terminator, so the row reports its own diagnostic.
+const ROW_NO_PROGRESS_BACKSTOP: Duration = Duration::from_secs(240);
+
+/// How often the row's CPU time is read while it runs.
+const ROW_POLL: Duration = Duration::from_millis(50);
 
 /// What a row reads.
 #[derive(Clone, Copy)]
@@ -94,6 +110,9 @@ pub(super) struct Matrix<'a> {
     lib: Option<&'a str>,
     script: bool,
     files: &'a [(&'a str, &'a str)],
+    /// A file whose source differs per project, one source per setting in
+    /// setting order.
+    file_per_setting: Option<(&'a str, &'a [&'a str])>,
 }
 
 impl<'a> Matrix<'a> {
@@ -105,13 +124,27 @@ impl<'a> Matrix<'a> {
             lib: None,
             script: false,
             files: &[],
+            file_per_setting: None,
         }
+    }
+
+    /// With a file `name` beside the probe module whose source is
+    /// `sources[i]` in the i-th setting's project.
+    pub(super) fn file_per_setting(mut self, name: &'a str, sources: &'a [&'a str]) -> Self {
+        self.file_per_setting = Some((name, sources));
+        self
     }
 
     /// With `(file name, source)` modules beside the probe module in
     /// each project.
     pub(super) fn files(mut self, files: &'a [(&'a str, &'a str)]) -> Self {
         self.files = files;
+        self
+    }
+
+    /// Checked in `settings` only, in place of all four.
+    pub(super) fn settings(mut self, settings: &'a [Setting]) -> Self {
+        self.settings = settings;
         self
     }
 
@@ -206,8 +239,17 @@ impl<'a> Matrix<'a> {
     pub(super) fn verdicts(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Vec<Vec<Verdict>> {
         let host = Arc::new(matrix_host(self.settings));
         let module = self.module(rows);
-        for setting in self.settings {
+        for (index, setting) in self.settings.iter().enumerate() {
             let canonical = format!("{}/probe.ts", setting.root);
+            if let Some((name, sources)) = self.file_per_setting {
+                let path = format!("{}/{name}", setting.root);
+                crate::u6_flow_shape_corpus_tests::upsert(
+                    &host,
+                    &path,
+                    sources[index],
+                    crate::FileLanguage::script_ts(),
+                );
+            }
             if let Some(lib) = self.lib {
                 crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::register_lib_environment(
                     &host,
@@ -331,8 +373,9 @@ enum Observed {
     NoValue(String),
     /// The evaluation panicked.
     Panicked(String),
-    /// The evaluation outran [`ROW_DEADLINE`].
-    Overdue,
+    /// The evaluation spent more than [`ROW_CPU_BUDGET`] of CPU time, or
+    /// made no progress for [`ROW_NO_PROGRESS_BACKSTOP`].
+    Overdue(String),
 }
 
 impl Observed {
@@ -340,7 +383,7 @@ impl Observed {
         match self {
             Observed::Clean(text) if !text.contains('<') || is_generic_print(text) => "WRONG-CLEAN",
             Observed::Panicked(_) => "PANIC",
-            Observed::Overdue => "HANG",
+            Observed::Overdue(_) => "HANG",
             _ => "GAP",
         }
     }
@@ -354,7 +397,7 @@ impl Observed {
             Observed::Partial => "the lane reduced to a partial demand".to_owned(),
             Observed::NoValue(error) => format!("the lane produced no value: {error}"),
             Observed::Panicked(message) => format!("the lane panicked: {message}"),
-            Observed::Overdue => format!("the lane took longer than {ROW_DEADLINE:?}"),
+            Observed::Overdue(reason) => format!("the lane {reason}"),
         }
     }
 }
@@ -378,7 +421,7 @@ fn observe_with_deadline(
     let thread_host = Arc::clone(host);
     let canonical = canonical.to_owned();
     let symbol = symbol.to_owned();
-    std::thread::spawn(move || {
+    let thread = std::thread::spawn(move || {
         let observed = std::panic::catch_unwind(AssertUnwindSafe(|| {
             observe(&thread_host, &canonical, &symbol, scoped)
         }))
@@ -396,9 +439,170 @@ fn observe_with_deadline(
         });
         let _ = sender.send(observed);
     });
-    receiver
-        .recv_timeout(ROW_DEADLINE)
-        .unwrap_or(Observed::Overdue)
+    match await_row(&thread, &receiver, ROW_CPU_BUDGET, ROW_NO_PROGRESS_BACKSTOP) {
+        Ok(observed) => observed,
+        Err(RowOverdue::Disconnected) => {
+            Observed::Panicked("the evaluating thread ended with no answer".to_owned())
+        }
+        Err(overdue) => Observed::Overdue(overdue.to_string()),
+    }
+}
+
+/// Why a row has no answer.
+#[derive(Debug, PartialEq, Eq)]
+enum RowOverdue {
+    /// Its thread spent more than the CPU budget.
+    Cpu(Duration),
+    /// It made no progress for the backstop, spending this much CPU time.
+    NoProgress(Duration, Duration),
+    /// Its thread ended without sending one.
+    Disconnected,
+}
+
+impl std::fmt::Display for RowOverdue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RowOverdue::Cpu(budget) => write!(
+                f,
+                "spent more than {budget:?} of CPU time ({})",
+                thread_cpu::SOURCE.unwrap_or("time on the clock")
+            ),
+            RowOverdue::NoProgress(backstop, spent) => write!(
+                f,
+                "made no progress for {backstop:?} (spent {spent:?} of CPU time)"
+            ),
+            RowOverdue::Disconnected => write!(f, "ended with no answer"),
+        }
+    }
+}
+
+/// The answer `thread` sends on `receiver`, unless the thread spends more
+/// than `cpu_budget` of CPU time first or `backstop` passes on the clock.
+fn await_row<T, R>(
+    thread: &std::thread::JoinHandle<T>,
+    receiver: &mpsc::Receiver<R>,
+    cpu_budget: Duration,
+    backstop: Duration,
+) -> Result<R, RowOverdue> {
+    let started = Instant::now();
+    // bounded-loop: ends at the answer, the CPU budget or the backstop.
+    loop {
+        match receiver.recv_timeout(ROW_POLL) {
+            Ok(answer) => return Ok(answer),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(RowOverdue::Disconnected),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        let spent = thread_cpu::spent(thread).unwrap_or_else(|| started.elapsed());
+        if spent > cpu_budget {
+            return Err(RowOverdue::Cpu(cpu_budget));
+        }
+        if started.elapsed() > backstop {
+            return Err(RowOverdue::NoProgress(backstop, spent));
+        }
+    }
+}
+
+/// The CPU time a running thread has spent, read from another thread.
+#[cfg(target_os = "linux")]
+mod thread_cpu {
+    use std::os::raw::{c_int, c_long};
+    use std::os::unix::thread::{JoinHandleExt, RawPthread};
+    use std::time::Duration;
+
+    /// `struct timespec` on Linux: `time_t` and the nanoseconds are `long`.
+    #[repr(C)]
+    struct Timespec {
+        tv_sec: c_long,
+        tv_nsec: c_long,
+    }
+
+    extern "C" {
+        fn pthread_getcpuclockid(thread: RawPthread, clock: *mut c_int) -> c_int;
+        fn clock_gettime(clock: c_int, time: *mut Timespec) -> c_int;
+    }
+
+    pub(super) const SOURCE: Option<&str> = Some("pthread_getcpuclockid");
+
+    pub(super) fn spent<T>(thread: &std::thread::JoinHandle<T>) -> Option<Duration> {
+        let mut clock: c_int = 0;
+        let mut time = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: the handle is not joined or dropped while it is borrowed,
+        // so its pthread id stays valid; both calls write only the values
+        // they are given.
+        let read = unsafe {
+            pthread_getcpuclockid(thread.as_pthread_t(), &mut clock) == 0
+                && clock_gettime(clock, &mut time) == 0
+        };
+        read.then(|| Duration::new(time.tv_sec as u64, time.tv_nsec as u32))
+    }
+}
+
+/// The CPU time a running thread has spent, read from another thread.
+#[cfg(windows)]
+mod thread_cpu {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    use std::time::Duration;
+
+    /// `FILETIME`: a count of 100-nanosecond intervals, split in halves.
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+
+    impl FileTime {
+        fn nanos(&self) -> u64 {
+            ((u64::from(self.high) << 32) | u64::from(self.low)) * 100
+        }
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetThreadTimes(
+            thread: *mut c_void,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
+    }
+
+    pub(super) const SOURCE: Option<&str> = Some("GetThreadTimes");
+
+    pub(super) fn spent<T>(thread: &std::thread::JoinHandle<T>) -> Option<Duration> {
+        let (mut creation, mut exit) = (FileTime::default(), FileTime::default());
+        let (mut kernel, mut user) = (FileTime::default(), FileTime::default());
+        // SAFETY: the handle stays open while the join handle is borrowed,
+        // and the call writes the four `FILETIME`s it is given.
+        let ok = unsafe {
+            GetThreadTimes(
+                thread.as_raw_handle(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            )
+        };
+        (ok != 0).then(|| Duration::from_nanos(kernel.nanos() + user.nanos()))
+    }
+}
+
+/// No reader of a thread's CPU time here: the budget is the time on the
+/// clock.
+#[cfg(not(any(target_os = "linux", windows)))]
+mod thread_cpu {
+    use std::time::Duration;
+
+    pub(super) const SOURCE: Option<&str> = None;
+
+    pub(super) fn spent<T>(_thread: &std::thread::JoinHandle<T>) -> Option<Duration> {
+        None
+    }
 }
 
 fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> Observed {
@@ -1083,4 +1287,39 @@ fn the_matrix_reads_modules_scripts_and_library_projects() {
             .returns(&[("k", "\"lib\"")]),
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A row whose thread computes past the CPU budget is overdue by it, and a
+/// row whose thread is blocked — spending no CPU time — is overdue by the
+/// backstop on the clock; a row that answers within both is its answer.
+#[test]
+fn a_row_is_overdue_by_its_cpu_time_or_by_the_no_progress_backstop() {
+    let run = |work: fn(), cpu_budget: Duration, backstop: Duration| {
+        let (sender, receiver) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            work();
+            let _ = sender.send(());
+        });
+        await_row(&thread, &receiver, cpu_budget, backstop)
+    };
+    let spin: fn() = || {
+        let started = Instant::now();
+        let mut n: u64 = 0;
+        while started.elapsed() < Duration::from_secs(5) {
+            n = std::hint::black_box(n.wrapping_add(1));
+        }
+    };
+    let block: fn() = || std::thread::sleep(Duration::from_secs(5));
+    let answer: fn() = || {};
+    let cpu_budget = Duration::from_millis(200);
+    assert_eq!(
+        run(spin, cpu_budget, Duration::from_secs(4)),
+        Err(RowOverdue::Cpu(cpu_budget))
+    );
+    let blocked = run(block, cpu_budget, Duration::from_millis(300));
+    assert!(
+        matches!(blocked, Err(RowOverdue::NoProgress(..))) || thread_cpu::SOURCE.is_none(),
+        "{blocked:?}"
+    );
+    assert_eq!(run(answer, cpu_budget, Duration::from_secs(4)), Ok(()));
 }

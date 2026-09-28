@@ -4243,6 +4243,8 @@ mod differential_class_tests;
 #[cfg(test)]
 mod differential_depth_tests;
 #[cfg(test)]
+mod differential_fishing_tests;
+#[cfg(test)]
 mod differential_flow_tests;
 #[cfg(test)]
 mod differential_global_library_tests;

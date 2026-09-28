@@ -137,6 +137,13 @@ pub(super) struct FinishRoute {
     position: usize,
 }
 
+/// One retyping round's outcome: the route's progress, or a
+/// context-sensitive literal to type in place before the next round.
+enum RetypeRound<'e> {
+    Progress(Box<ResolveCallProgress<'e>>),
+    InPlace(Box<FinishRoute>),
+}
+
 /// Where a call's executor route suspends at a function-value argument.
 pub(super) enum RouteAt<'e> {
     /// Typing its arguments.
@@ -557,6 +564,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 })
                                 .filter(|expr| {
                                     matches!(expr, SliceExpr::NestedFunctionValue { .. })
+                                        || (argument.context_sensitive
+                                            && matches!(
+                                                expr,
+                                                SliceExpr::Object { .. } | SliceExpr::Array { .. }
+                                            ))
                                 })
                                 .cloned(),
                         );
@@ -776,9 +788,47 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// round types again, so there are at most as many rounds as arguments.
     fn retype_resolve_call<'e>(
         &mut self,
-        mut finish: Box<FinishRoute>,
+        finish: Box<FinishRoute>,
         delivered: Option<Option<SemanticNodeId>>,
     ) -> ResolveCallProgress<'e> {
+        let (mut finish, mut delivered) = (finish, delivered);
+        loop {
+            match self.retype_resolve_call_round(finish, delivered) {
+                RetypeRound::Progress(progress) => return *progress,
+                // A context-sensitive literal retyped in place, under the
+                // contextual type the executor's step names: its value is
+                // the next round's delivery.
+                RetypeRound::InPlace(next) => {
+                    let expr = next
+                        .function_arguments
+                        .get(next.position)
+                        .cloned()
+                        .flatten();
+                    let contextual =
+                        Self::contextual_argument_request(&next.step).map(|(_, ty)| ty);
+                    delivered = Some(match (expr, contextual) {
+                        (Some(expr), Some(contextual)) => {
+                            match self.eval_in_context(&expr, None, contextual) {
+                                Positional::Value(node) => Some(node),
+                                Positional::Hold | Positional::Unmodeled => None,
+                            }
+                        }
+                        _ => None,
+                    });
+                    finish = next;
+                }
+            }
+        }
+    }
+
+    /// One round of [`Self::retype_resolve_call`]: the delivered retyped
+    /// argument applied and the executor asked again, then the next
+    /// argument to retype.
+    fn retype_resolve_call_round<'e>(
+        &mut self,
+        mut finish: Box<FinishRoute>,
+        delivered: Option<Option<SemanticNodeId>>,
+    ) -> RetypeRound<'e> {
         if let Some(typed) = delivered {
             let position = finish.position;
             let retyped = typed.and_then(|ty| match finish.args.get(position) {
@@ -788,7 +838,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 _ => None,
             });
             let Some((ty, spread)) = retyped else {
-                return ResolveCallProgress::Done(Self::settle_retyped_call(*finish));
+                return RetypeRound::Progress(Box::new(ResolveCallProgress::Done(
+                    Self::settle_retyped_call(*finish),
+                )));
             };
             finish.retyped = true;
             finish.args[position] = crate::semantic_query::CallArgKey::Eager {
@@ -804,35 +856,47 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             finish.rounds += 1;
         }
         match self.next_retyped_argument(&finish) {
-            Some((position, request)) => {
+            Some((position, Some(request))) => {
                 finish.position = position;
-                ResolveCallProgress::Function(Box::new(RouteFunction {
-                    at: RouteAt::Finishing(finish),
-                    request,
-                }))
+                RetypeRound::Progress(Box::new(ResolveCallProgress::Function(Box::new(
+                    RouteFunction {
+                        at: RouteAt::Finishing(finish),
+                        request,
+                    },
+                ))))
             }
-            None => ResolveCallProgress::Done(Self::settle_retyped_call(*finish)),
+            Some((position, None)) => {
+                finish.position = position;
+                RetypeRound::InPlace(finish)
+            }
+            None => RetypeRound::Progress(Box::new(ResolveCallProgress::Done(
+                Self::settle_retyped_call(*finish),
+            ))),
         }
     }
 
     /// The context-sensitive argument the executor's last step names for
     /// retyping, while a round is left: its position, and the request to
-    /// type it under the contextual type the step hands back.
+    /// type it under the contextual type the step hands back — `None` for
+    /// an object or array literal, which is typed in place.
     fn next_retyped_argument(
         &mut self,
         finish: &FinishRoute,
-    ) -> Option<(usize, FunctionArgumentRequest)> {
+    ) -> Option<(usize, Option<FunctionArgumentRequest>)> {
         if finish.rounds >= finish.args.len() {
             return None;
         }
         let (position, contextual) = Self::contextual_argument_request(&finish.step)?;
         let expr = finish.function_arguments.get(position).cloned().flatten()?;
+        if matches!(expr, SliceExpr::Object { .. } | SliceExpr::Array { .. }) {
+            return Some((position, None));
+        }
         if !matches!(expr, SliceExpr::NestedFunctionValue { gap: None, .. }) {
             return None;
         }
         let signature = self.contextual_signature(contextual)?;
         let request = self.function_argument_request(&expr, Some(signature))?;
-        Some((position, request))
+        Some((position, Some(request)))
     }
 
     /// The executor's step for a call once no argument is retyped again.

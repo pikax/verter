@@ -1929,10 +1929,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 let path: Arc<[Arc<str>]> = rest.iter().map(|s| Arc::from(s.as_str())).collect();
                 let type_args = self.lower_locator_shape_args(&value_ref.type_args, ctx);
-                graph.intern_node_with_scope(
+                let is_instance_field_value = rest.is_empty()
+                    && type_args.is_empty()
+                    && root.split(':').nth(1) == Some("field");
+                let canonical = Arc::clone(&value_root.scope.canonical_id);
+                let carrier = graph.intern_node_with_scope(
                     SemanticNodeData::new_typeof(value_root, path, type_args),
                     scope.clone(),
-                )
+                );
+                if is_instance_field_value && ctx.binders.innermost_first().next().is_some() {
+                    return self.class_field_value_under_binders(carrier, canonical.as_ref(), ctx);
+                }
+                carrier
             }
             // Dynamic-import reference stays the deferred ImportType carrier
             // — module resolution is a demand-time concern.
@@ -2251,6 +2259,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return LocatorStep::Descend(target, binders);
         }
         LocatorStep::Value(self.finish_locator_function(entry, *function, None))
+    }
+
+    /// A generic class's instance field value (`C:field:x`) read under the
+    /// class's own binders: a class type parameter its initializer reads
+    /// rebinds to this lowering's binder for it, so the receiver's
+    /// instantiation reaches the field as it reaches a method's
+    /// body-derived return ([`Self::locator_function_flow_return`]). A
+    /// value reading no class type parameter keeps the deferred carrier.
+    fn class_field_value_under_binders(
+        &self,
+        carrier: SemanticNodeId,
+        canonical: &str,
+        ctx: &ShapeLowerCtx<'_>,
+    ) -> SemanticNodeId {
+        let value = self.resolve_carrier_subject_node(
+            carrier,
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        );
+        let bind = |name: &str| match ctx.lookup_binder(name) {
+            Some(BinderSlot::Usable(binder)) => Some(binder),
+            _ => None,
+        };
+        let rebound = self.rebind_flow_return_binders(value, canonical, bind);
+        if rebound == value {
+            carrier
+        } else {
+            rebound
+        }
     }
 
     /// A signature with no return to lower.

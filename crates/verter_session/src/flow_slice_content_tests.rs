@@ -434,6 +434,43 @@ fn calls_nested_10000_deep_lower_on_a_small_stack() {
     assert_eq!(lowerings, 3 * 10_000 - 2);
 }
 
+/// How many classes the same-frame effect scans enter while lowering
+/// `pc`, returning `depth` class expressions whose method returns the
+/// next.
+fn nested_class_scans(depth: usize) -> usize {
+    use std::sync::atomic::Ordering;
+    let source = format!(
+        "function pc() {{ return {}1{}; }}",
+        "class { m() { return ".repeat(depth),
+        "; } }".repeat(depth)
+    );
+    let memo = memo_for(&source);
+    let index = memo.function_program_index();
+    let entry = entry_of(&index, "pc");
+    let (selection, skeleton) = selection_for(&memo, entry, &[]);
+    memo.lowering_work
+        .scanned_classes
+        .store(0, Ordering::Relaxed);
+    memo.flow_slice_content(
+        entry,
+        selection,
+        &skeleton,
+        crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+    )
+    .expect("slice content must build for an indexed function");
+    memo.lowering_work.scanned_classes.load(Ordering::Relaxed)
+}
+
+/// A class expression's effect scan stops at its methods: a method body
+/// is its own frame, which its own lowering scans, so a frame's lowering
+/// enters its own class whatever the nest below it holds. Scanning every
+/// method body entered each class again once per class around it, the
+/// square of the nesting over a nest's evaluation.
+#[test]
+fn a_class_nest_scans_one_class_per_frame() {
+    assert_eq!([1, 8, 64].map(nested_class_scans), [1, 1, 1]);
+}
+
 #[test]
 fn selected_captured_parameters_retrieve_without_repeated_frame_inventory_scans() {
     use std::sync::atomic::Ordering;
@@ -2097,18 +2134,17 @@ fn class_heritage_sequence_calls_are_never_blanket_certified() {
         "a plain heritage mints no gap: {plain:?}"
     );
 
-    // The class BODY stays its own frame: a sequence inside a method
-    // body does not split, and its calls keep the blanket decided-above
-    // treatment they always had.
+    // A method body is its own frame: a sequence inside it does not split,
+    // and its calls are that frame's, recorded by its own lowering and
+    // never here.
     let body = content_for(
         "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
          function f(x: string | number) { return ((class { m() { return (assertString(x), x) } }) as object) }",
         "f",
     );
-    assert_eq!(
-        body.decided_above_call_spans.len(),
-        1,
-        "a class-body call keeps the nested-frame blanket certification: {body:?}"
+    assert!(
+        body.decided_above_call_spans.is_empty(),
+        "a method-body call is its own frame's: {body:?}"
     );
     assert_eq!(
         guard_gap_count(&body),
@@ -2392,9 +2428,10 @@ fn semantic_any_leaf_still_scans_immediate_static_block_calls() {
 /// nor the typed gap: the unnarrowed superset could seal complete and
 /// warm. The statement takes the SAME class discipline a class
 /// EXPRESSION leaf takes: certified only when the callee provably
-/// establishes no narrowing, otherwise the typed gap. Deferred bodies
-/// (a method runs when called, an instance property initializer at
-/// construction) keep the nested-frame blanket treatment.
+/// establishes no narrowing, otherwise the typed gap. An instance
+/// property initializer (run at construction) keeps the nested-frame
+/// blanket treatment; a method body (run when called) is its own frame,
+/// whose calls its own lowering records.
 #[test]
 fn class_declaration_statement_calls_take_enclosing_frame_discipline() {
     let refused = [
@@ -2442,19 +2479,22 @@ fn class_declaration_statement_calls_take_enclosing_frame_discipline() {
             "a method body",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { class C { m() { assertString(x); } } return x }",
+            0,
         ),
         (
             "an instance property initializer",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { class C { p = (assertString(x), 0); } return x }",
+            1,
         ),
     ];
-    for (case, source) in deferred {
+    for (case, source, decided) in deferred {
         let node = content_for(source, "f");
         assert_eq!(
             node.decided_above_call_spans.len(),
-            1,
-            "{case}: a deferred body keeps the nested-frame blanket certification: {node:?}"
+            decided,
+            "{case}: an initializer keeps the nested-frame blanket certification, a method \
+             body's calls are its own frame's: {node:?}"
         );
         assert_eq!(
             guard_gap_count(&node),

@@ -38,7 +38,11 @@ fn svelte_runes_statement(source: &str) -> crate::analysis::type_eval_build::Low
             .parse();
     assert!(!parsed.fatal_error, "fixture must parse: {source}");
     let statement = parsed.program.body.first().expect("one statement fixture");
-    crate::analysis::type_eval_build::lower_svelte_runes_statement_parts(statement, source)
+    crate::analysis::type_eval_build::lower_svelte_runes_statement_parts(
+        statement,
+        source,
+        &Default::default(),
+    )
 }
 
 #[test]
@@ -70,6 +74,7 @@ namespace Ns { export class C { value!: string } }
         source,
         &context,
         &owners,
+        &Default::default(),
     );
 
     let module_group = env
@@ -130,6 +135,7 @@ const instanceMarker = 0;
         source,
         &context,
         &owners,
+        &Default::default(),
     );
     assert_eq!(
         env.type_symbols[&DeclBindingKey::new(module, "Shared")]
@@ -4823,4 +4829,32 @@ fn calls_nested_10000_deep_lower_to_indexed_records_on_a_small_stack() {
         .join()
         .expect("the lowering returns");
     assert_eq!(levels, DEPTH);
+}
+
+/// Whether a call's callback argument derives its value from a call is
+/// answered without a containment scan of the callback: a function value
+/// is its own frame, which the probe never enters. Scanning it read the
+/// text of the whole nest below every level of a callback nest
+/// (`a(() => a(() => …))`), the square of the nesting; the call's scans
+/// read its one-byte callee `a` alone, whatever the depth.
+#[test]
+fn a_callback_nest_lowers_without_scanning_its_callbacks() {
+    use super::type_eval_build::{
+        call_probe_scanned_bytes_for_tests, lower_indexed_call_expression,
+    };
+    let scanned = |depth: usize| {
+        let source = format!("{}1{}", "a(() => ".repeat(depth), ")".repeat(depth));
+        let allocator = oxc_allocator::Allocator::default();
+        let expression =
+            verter_parser::oxc_parse::Parser::new(&allocator, &source, oxc_span::SourceType::ts())
+                .parse_expression()
+                .expect("fixture expression");
+        let oxc_ast::ast::Expression::CallExpression(call) = expression else {
+            panic!("fixture must be a direct call");
+        };
+        let before = call_probe_scanned_bytes_for_tests();
+        let _ = lower_indexed_call_expression(&call, &source);
+        call_probe_scanned_bytes_for_tests() - before
+    };
+    assert_eq!([1, 8, 64].map(scanned), [1, 1, 1]);
 }

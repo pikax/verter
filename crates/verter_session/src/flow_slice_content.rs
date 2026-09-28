@@ -63,8 +63,8 @@
 use std::sync::Arc;
 
 use oxc_ast::ast::{
-    BindingPattern, Expression, FormalParameters, LogicalOperator, Program, Statement, TSType,
-    UnaryOperator, VariableDeclarationKind,
+    BindingPattern, Expression, LogicalOperator, Program, Statement, TSType, UnaryOperator,
+    VariableDeclarationKind,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::GetSpan;
@@ -3722,7 +3722,8 @@ pub(crate) fn build_flow_slice_content(
     };
     let anchor = node_span(&node).start;
     let params = match lower_params(
-        node.params(),
+        node.param_items(),
+        node.param_rest(),
         source,
         &signature_scope,
         skeleton,
@@ -3816,7 +3817,7 @@ pub(crate) fn build_flow_slice_content(
                 &nested_function_bodies(index, entry),
                 anchor,
                 node_span(&node).end,
-                &node.params().items,
+                node.param_items(),
                 body,
                 &bindings,
                 anchor,
@@ -3935,8 +3936,7 @@ pub(crate) fn build_flow_slice_content(
         known_value_rooted: 0,
         aliased_bindings: rustc_hash::FxHashMap::default(),
         annotated_params: node
-            .params()
-            .items
+            .param_items()
             .iter()
             .enumerate()
             .filter(|(_, param)| param.type_annotation.is_some())
@@ -3950,15 +3950,12 @@ pub(crate) fn build_flow_slice_content(
         current_statement_followed_by_return: SuffixReturn::NotGuaranteed,
         nullability,
         no_implicit_this: policy.no_implicit_this,
-        frame_is_async: match node {
-            FunctionNode::Function(function) => function.r#async,
-            FunctionNode::Arrow(arrow) => arrow.r#async,
-        },
+        frame_is_async: node.is_async(),
     };
     if selection.is_some() {
         lowerer.unsafe_invoked_closure_effects = lowerer.index_unsafe_invoked_closure_effects(body);
         lowerer.nested_free_writes = lowerer.build_nested_free_writes();
-        lowerer.record_parameter_pattern_aliases(&node.params().items);
+        lowerer.record_parameter_pattern_aliases(node.param_items());
         match body.expression() {
             // An expression body is the one expression statement it was.
             Some(expression) => lowerer.assignment_extent_statements.push(expression.span()),
@@ -4047,7 +4044,7 @@ pub(crate) fn build_flow_slice_content(
     // value on entry, ahead of the body.
     let region = if selection.is_some() {
         let mut entry = Vec::new();
-        for (ordinal, param) in node.params().items.iter().enumerate() {
+        for (ordinal, param) in node.param_items().iter().enumerate() {
             let pattern = match &param.pattern {
                 BindingPattern::AssignmentPattern(assignment) => &assignment.left,
                 other => other,
@@ -4203,10 +4200,7 @@ fn program_has_module_syntax(program: &Program<'_>) -> bool {
 /// The authored span of one nested function value — the position its
 /// capture scope resolves at.
 fn node_span(node: &FunctionNode<'_>) -> oxc_span::Span {
-    match node {
-        FunctionNode::Function(func) => func.span,
-        FunctionNode::Arrow(arrow) => arrow.span,
-    }
+    node.span()
 }
 
 /// Whether a same-file predicate's TARGET references a name the CALLEE's
@@ -4517,7 +4511,7 @@ fn modelled_pattern_bindings(
     nested_bodies: &[verter_span::Span],
     function_start: u32,
     function_end: u32,
-    params: &oxc_allocator::Vec<'_, oxc_ast::ast::FormalParameter<'_>>,
+    params: &[oxc_ast::ast::FormalParameter<'_>],
     body: verter_semantic::analysis::function_program::FunctionBodyRef<'_>,
     bindings: &verter_semantic::analysis::flow::FlowBindingMap,
     anchor: u32,
@@ -6149,8 +6143,9 @@ pub(crate) mod capture_lookup_probe {
 
 /// Counts one slice lowering's work into the counters its scope installs
 /// on the lowering thread: the tests it classifies as guards
-/// ([`Lowerer::classify_guard`]) and the expressions it lowers
-/// ([`Lowerer::lower_expr`]); test-only.
+/// ([`Lowerer::classify_guard`]), the expressions it lowers
+/// ([`Lowerer::lower_expr`]) and the classes its same-frame effect scans
+/// enter ([`LeafCallScanner`]); test-only.
 #[cfg(test)]
 pub(crate) mod lowering_probe {
     use std::cell::RefCell;
@@ -6163,6 +6158,7 @@ pub(crate) mod lowering_probe {
         pub(crate) guard_classifications: AtomicUsize,
         pub(crate) expressions: AtomicUsize,
         pub(crate) declaration_lookup_visits: AtomicUsize,
+        pub(crate) scanned_classes: AtomicUsize,
     }
     thread_local! {
         static ACTIVE: RefCell<Option<Arc<LoweringWork>>> = const { RefCell::new(None) };
@@ -6192,6 +6188,9 @@ pub(crate) mod lowering_probe {
     /// One node a local function declaration lookup visits.
     pub(super) fn declaration_lookup_visit() {
         record(|work| &work.declaration_lookup_visits);
+    }
+    pub(super) fn scanned_class() {
+        record(|work| &work.scanned_classes);
     }
 }
 
@@ -6359,7 +6358,8 @@ fn is_fresh_literal_expression(expression: &Expression<'_>) -> bool {
 }
 
 fn lower_params(
-    params: &FormalParameters<'_>,
+    param_items: &[oxc_ast::ast::FormalParameter<'_>],
+    param_rest: Option<&oxc_ast::ast::FormalParameterRest<'_>>,
     source: &str,
     scope: &SignatureScope<'_>,
     skeleton: &FunctionBodySkeleton,
@@ -6369,8 +6369,8 @@ fn lower_params(
 ) -> Result<Vec<SliceParam>, verter_type_expr::facts::InferenceUnavailableReason> {
     let binders = scope.param_binders();
     let parameter_bindings = signature_parameter_bindings(skeleton, anchor);
-    let mut out = Vec::with_capacity(params.items.len() + usize::from(params.rest.is_some()));
-    for param in &params.items {
+    let mut out = Vec::with_capacity(param_items.len() + usize::from(param_rest.is_some()));
+    for param in param_items {
         let name = match &param.pattern {
             BindingPattern::BindingIdentifier(id) => Some(Arc::from(id.name.as_str())),
             _ => None,
@@ -6483,7 +6483,7 @@ fn lower_params(
             destructured,
         });
     }
-    if let Some(rest) = &params.rest {
+    if let Some(rest) = param_rest {
         let name = match &rest.rest.argument {
             BindingPattern::BindingIdentifier(id) => Some(Arc::from(id.name.as_str())),
             _ => None,
@@ -15512,6 +15512,23 @@ impl<'a> Lowerer<'a> {
                     links: path.into_iter().map(|name| (name, false)).collect(),
                 }
             }
+            // A private name read off the receiver (`this.#p`) reads the
+            // class's own private member, keyed by its `#` spelling.
+            Expression::PrivateFieldExpression(member)
+                if self.this.is_some()
+                    && matches!(
+                        unwrap_parenthesized(&member.object),
+                        Expression::ThisExpression(_)
+                    ) =>
+            {
+                SliceExpr::OptionalMember {
+                    root: Box::new(SliceExpr::This(self.keyword_this().expect("guarded"))),
+                    links: Arc::from([(
+                        Arc::from(format!("#{}", member.field.name).as_str()),
+                        false,
+                    )]),
+                }
+            }
             // An element read at an integer literal position off a
             // parameter or local reference (`a[0]`, `o.xs[1]`) reads that
             // key of the reference's type through the member-path walk a
@@ -17633,7 +17650,7 @@ impl<'a> Lowerer<'a> {
                 this: match member_this {
                     Some(this) => this,
                     None => match node {
-                        FunctionNode::Arrow(_) => self.this.clone(),
+                        FunctionNode::Arrow(_) | FunctionNode::Initializer(_) => self.this.clone(),
                         FunctionNode::Function(_) => None,
                     },
                 },
@@ -19518,20 +19535,19 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         }
         walk::walk_sequence_expression(self, it);
     }
-    // Nested function / arrow / class bodies are their own frames.
+    // Nested function and arrow bodies are their own frames: nothing in
+    // them runs at this frame's statement, and the flow skeleton records
+    // none of their calls as this frame's (each is its own frame's
+    // footprint, which that frame's own lowering answers for). The walk
+    // stops at them, so a nest of functions is scanned once per frame,
+    // never once per enclosing frame.
     fn visit_function(
         &mut self,
-        it: &oxc_ast::ast::Function<'a>,
-        flags: oxc_syntax::scope::ScopeFlags,
+        _it: &oxc_ast::ast::Function<'a>,
+        _flags: oxc_syntax::scope::ScopeFlags,
     ) {
-        self.nested_frame_nesting += 1;
-        walk::walk_function(self, it, flags);
-        self.nested_frame_nesting -= 1;
     }
-    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
-        self.nested_frame_nesting += 1;
-        walk::walk_arrow_function_expression(self, it);
-        self.nested_frame_nesting -= 1;
+    fn visit_arrow_function_expression(&mut self, _it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
     }
     fn visit_static_block(&mut self, it: &oxc_ast::ast::StaticBlock<'a>) {
         // A static block runs at CLASS EVALUATION — one frame out from
@@ -19632,6 +19648,8 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         //
         // The skeleton records no write of the class subtree, so every
         // write under this visit — heritage included — is skeleton-hidden.
+        #[cfg(test)]
+        lowering_probe::scanned_class();
         self.class_nesting += 1;
         self.visit_decorators(&it.decorators);
         if let Some(super_class) = it.heritage.as_ref().map(|heritage| &heritage.expression) {

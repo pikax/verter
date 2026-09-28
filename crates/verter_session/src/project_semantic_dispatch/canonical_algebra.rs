@@ -819,7 +819,7 @@ pub(crate) fn numeric_literal_values_disjoint(a: f64, b: f64) -> bool {
 /// which reduces the whole intersection to `never` (`{ a: 1 } & { a: 2 }`,
 /// `{ k: "x" } & { k: "y" }`). A property optional in some arm is left to
 /// the relation: its type there also holds `undefined`.
-fn object_arms_conflict_on_a_literal_property(
+pub(crate) fn object_arms_conflict_on_a_literal_property(
     graph: &SemanticGraphStore,
     arms: &[SemanticNodeId],
 ) -> bool {

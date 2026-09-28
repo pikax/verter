@@ -1,9 +1,9 @@
-//! Architecture guard: `.config/nextest.toml` must configure a slow-timeout
-//! period matching the advertised hang-protection budget (60s x 3 = 180s) for
-//! BOTH the `default` and `ci` profiles. A period below the advertised value
-//! terminates valid slow-but-legitimate tests on a memory-constrained host,
-//! corrupting the workspace gate with spurious timeouts. This hermetic guard
-//! parses the committed config and fails if the effective period regresses.
+//! Architecture guard: `.config/nextest.toml` must configure the advertised
+//! hang protection for BOTH the `default` and `ci` profiles: a test is
+//! flagged slow after 60s and terminated after five periods (5 minutes).
+//! The terminator catches a genuinely hung test; it is not a speed gate, so
+//! a shorter one would kill slow but healthy tests on slower runners. This
+//! hermetic guard parses the committed config and fails if it drifts.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -40,15 +40,15 @@ fn nextest_slow_timeout_period_is_60s_for_both_profiles() {
             .unwrap_or_else(|| panic!("profile.{name}.slow-timeout.period missing"));
         assert_eq!(
             period, "60s",
-            "profile.{name} slow-timeout period must equal the advertised 60s budget, got {period:?}"
+            "profile.{name} slow-timeout period must equal the advertised 60s, got {period:?}"
         );
         let terminate_after = st
             .get("terminate-after")
             .and_then(|v| v.as_integer())
             .unwrap_or_else(|| panic!("profile.{name}.slow-timeout.terminate-after missing"));
         assert_eq!(
-            terminate_after, 3,
-            "profile.{name} slow-timeout terminate-after must stay 3"
+            terminate_after, 5,
+            "profile.{name} slow-timeout terminate-after must stay 5"
         );
     }
 }

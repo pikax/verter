@@ -139,7 +139,7 @@
       "capability": "zed-lapce-helix-nvim-hosts",
       "status": "implemented",
       "engine": "editor host adapters",
-      "version": "0.0.1-beta.5",
+      "version": "workspace",
       "versionSource": "Cargo.toml",
       "consumers": [
         "extensions/zed",
@@ -159,7 +159,7 @@
       "capability": "analysis-mcp",
       "status": "implemented",
       "engine": "MCP (stdio + HTTP)",
-      "version": "0.0.1-beta.5",
+      "version": "workspace",
       "versionSource": "Cargo.toml",
       "consumers": [
         "crates/verter_mcp",

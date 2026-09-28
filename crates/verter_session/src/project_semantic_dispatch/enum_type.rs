@@ -193,7 +193,7 @@ impl ProjectSemanticDispatch<'_> {
                         .iter()
                         .filter_map(|step| match step {
                             EnumConstantStep::Reference(path) => {
-                                Some(self.enum_reference_target(evaluation, &frame.key.0, path))
+                                Some(self.enum_reference_target(evaluation, &frame.key, path))
                             }
                             _ => None,
                         })
@@ -256,18 +256,24 @@ impl ProjectSemanticDispatch<'_> {
     /// file — to another enum's member or to a `const` variable. `Infinity`
     /// and `NaN` are the global numbers when they resolve to the global
     /// declaration or to none, as the checker's evaluator reads them.
+    ///
+    /// A declaration of the enum's own file written after the member
+    /// `user` whose initializer this is reads as the checker's
+    /// declared-before-use rule reads it ([`Self::declared_after_use`]): a
+    /// later enum member is `0` (TS2651), a later `const` no constant.
     fn enum_reference_target(
         &self,
         evaluation: &mut EnumEvaluation,
-        enumeration: &DeclIdentity,
+        user: &EnumMemberKey,
         path: &[String],
     ) -> ReferenceTarget {
         #[cfg(test)]
         ENUM_INITIALIZER_EVALUATIONS.with(|count| count.set(count.get() + 1));
+        let enumeration = &user.0;
         if let [member] = path {
             let key = (enumeration.clone(), Arc::<str>::from(member.as_str()));
             if evaluation.member(&key).is_some() {
-                return ReferenceTarget::Member(key);
+                return self.member_target(evaluation, user, key);
             }
         }
         let namespaces: Vec<&str> = enumeration
@@ -295,11 +301,19 @@ impl ProjectSemanticDispatch<'_> {
                 },
                 name: Arc::clone(root),
             };
-            let Some((identity, remaining)) = self.value_path_declaration(
-                &value_root,
-                rest,
-                &mut rustc_hash::FxHashSet::default(),
-            ) else {
+            let resolved = if depth > 0 {
+                self.namespace_private_value(evaluation, user, &candidate[..=depth])
+                    .map(|identity| (identity, candidate[depth + 1..].to_vec()))
+            } else {
+                None
+            };
+            let Some((identity, remaining)) = resolved.or_else(|| {
+                self.value_path_declaration(
+                    &value_root,
+                    rest,
+                    &mut rustc_hash::FxHashSet::default(),
+                )
+            }) else {
                 continue;
             };
             match remaining.as_slice() {
@@ -316,6 +330,16 @@ impl ProjectSemanticDispatch<'_> {
                             return ReferenceTarget::Constant(global);
                         }
                     }
+                    let declared = self.value_declaration_start(&identity);
+                    if self.declared_after_use(
+                        evaluation,
+                        user,
+                        &identity.canonical_id,
+                        identity.owner,
+                        declared,
+                    ) {
+                        return ReferenceTarget::Nothing;
+                    }
                     return self
                         .const_variable_constant(&identity)
                         .map_or(ReferenceTarget::Nothing, ReferenceTarget::Constant);
@@ -324,17 +348,160 @@ impl ProjectSemanticDispatch<'_> {
                     if let Some(other) = self.enum_declaration_raw(&identity) {
                         evaluation.read_enum(&other.decl, &other.members);
                         let key = (other.decl, Arc::<str>::from(member.as_ref()));
-                        return if evaluation.member(&key).is_some() {
-                            ReferenceTarget::Member(key)
-                        } else {
-                            ReferenceTarget::Nothing
-                        };
+                        if evaluation.member(&key).is_none() {
+                            return ReferenceTarget::Nothing;
+                        }
+                        return self.member_target(evaluation, user, key);
                     }
                 }
                 _ => {}
             }
         }
         global_number_spelling(path).map_or(ReferenceTarget::Nothing, ReferenceTarget::Constant)
+    }
+
+    /// The member `key` as the target of a reference in `user`'s
+    /// initializer: `0` when it is declared after its use, the checker's
+    /// value for a member referenced before its declaration (TS2651).
+    fn member_target(
+        &self,
+        evaluation: &mut EnumEvaluation,
+        user: &EnumMemberKey,
+        key: EnumMemberKey,
+    ) -> ReferenceTarget {
+        let declared = self
+            .enum_member_position(evaluation, &key)
+            .map(|position| position.start);
+        if self.declared_after_use(evaluation, user, &key.0.canonical_id, key.0.owner, declared) {
+            ReferenceTarget::Constant(EnumConstant::Number(0.0))
+        } else {
+            ReferenceTarget::Member(key)
+        }
+    }
+
+    /// The private value member `qualified` (`N.k`) of the namespace
+    /// `user`'s enum is declared in, as a reference in the member's
+    /// initializer names it: a class, enum, variable or function the
+    /// namespace does not export is visible inside the block that declares
+    /// it, and only there (another block of a merged namespace does not see
+    /// it). `None` for any other name.
+    fn namespace_private_value(
+        &self,
+        evaluation: &mut EnumEvaluation,
+        user: &EnumMemberKey,
+        qualified: &[Arc<str>],
+    ) -> Option<ResolvedRootIdentity> {
+        let used = self.enum_member_position(evaluation, user)?;
+        let name = qualified.join(".");
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(user.0.canonical_id.as_ref())?
+            .indexed;
+        let block = *indexed
+            .shallow_state
+            .decl_bodies()
+            .header_index()
+            .namespace_private_value_blocks
+            .get(&verter_type_expr::facts::DeclBindingKey::new(
+                user.0.owner,
+                name.as_str(),
+            ))?;
+        (block.start <= used.start && used.start < block.end).then(|| {
+            ResolvedRootIdentity::new_in_owner(
+                Arc::clone(&user.0.canonical_id),
+                user.0.owner,
+                name.as_str(),
+            )
+        })
+    }
+
+    /// Whether a declaration of `canonical`'s `owner` starting at
+    /// `declared` is written after the member `user` reads it — the
+    /// checker's `isBlockScopedNameDeclaredBeforeUse` for an enum member
+    /// initializer. Only a declaration of the user's own file has an order
+    /// (another file's never follows it), and a use in an ambient context
+    /// reads every declaration as declared before it.
+    fn declared_after_use(
+        &self,
+        evaluation: &mut EnumEvaluation,
+        user: &EnumMemberKey,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        declared: Option<u32>,
+    ) -> bool {
+        if user.0.canonical_id.as_ref() != canonical || user.0.owner != owner {
+            return false;
+        }
+        let Some(declared) = declared else {
+            return false;
+        };
+        self.enum_member_position(evaluation, user)
+            .is_some_and(|used| !used.ambient && declared > used.start)
+    }
+
+    /// Where the member `key` names is declared, read off its file's
+    /// enum header (the positions of an enum read once per evaluation).
+    /// `None` when the header records no positions for the member list the
+    /// evaluation read.
+    fn enum_member_position(
+        &self,
+        evaluation: &mut EnumEvaluation,
+        key: &EnumMemberKey,
+    ) -> Option<verter_semantic::analysis::decl_headers::EnumMemberPosition> {
+        let slot = *evaluation.enums.get(&key.0)?.positions.get(&key.1)?;
+        if !evaluation.header_positions.contains_key(&key.0) {
+            let positions = self.enum_header_positions(&key.0, &evaluation.enums[&key.0].members);
+            evaluation.header_positions.insert(key.0.clone(), positions);
+        }
+        evaluation
+            .header_positions
+            .get(&key.0)?
+            .as_ref()?
+            .get(slot)
+            .copied()
+    }
+
+    /// The declared positions of `decl`'s members, in the order of
+    /// `members` — `None` when its file's enum header does not list exactly
+    /// those members.
+    fn enum_header_positions(
+        &self,
+        decl: &DeclIdentity,
+        members: &[EnumMemberEntry],
+    ) -> Option<Arc<[verter_semantic::analysis::decl_headers::EnumMemberPosition]>> {
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(decl.canonical_id.as_ref())?
+            .indexed;
+        let headers = indexed.shallow_state.decl_bodies().header_index();
+        let header = headers
+            .enum_headers
+            .get(&verter_type_expr::facts::DeclBindingKey::new(
+                decl.owner,
+                decl.decl_name.as_ref(),
+            ))?;
+        (header.member_positions.len() == members.len()
+            && header
+                .member_names
+                .iter()
+                .zip(members)
+                .all(|(name, entry)| *name == entry.name))
+        .then(|| Arc::from(header.member_positions.as_slice()))
+    }
+
+    /// Where the value declaration `identity` names starts in its file,
+    /// read off the file's value header.
+    fn value_declaration_start(&self, identity: &ResolvedRootIdentity) -> Option<u32> {
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(identity.canonical_id.as_ref())?
+            .indexed;
+        indexed
+            .shallow_state
+            .decl_bodies()
+            .header_index()
+            .value_header_in(identity.owner, &identity.symbol_name)
+            .map(|header| header.span.start)
     }
 
     /// The enum a resolved value declaration declares, its pending members
@@ -385,9 +552,9 @@ impl ProjectSemanticDispatch<'_> {
         {
             return None;
         }
-        let mut segments = symbol.split('.');
-        let root = segments.next()?;
-        let path: Arc<[Arc<str>]> = segments.map(Arc::from).collect();
+        // The declaration itself, under its qualified name (`N.k`): a
+        // namespace's private member is no member a qualified read names.
+        let path: Arc<[Arc<str>]> = Arc::from(Vec::new().into_boxed_slice());
         let value_root = ValueRootKey {
             scope: crate::semantic_query::ScopeId {
                 canonical_id: canonical,
@@ -395,7 +562,7 @@ impl ProjectSemanticDispatch<'_> {
                 local_scope: None,
                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
             },
-            name: Arc::from(root),
+            name: symbol,
         };
         let QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) = self
             .execute_type_node(self.typeof_key_with_path(
@@ -704,6 +871,12 @@ enum MemberState {
 struct EnumEvaluation {
     enums: rustc_hash::FxHashMap<DeclIdentity, ReadEnum>,
     states: rustc_hash::FxHashMap<EnumMemberKey, MemberState>,
+    /// The declared positions of a read enum's members, read off its
+    /// file's header when a reference first needs one.
+    header_positions: rustc_hash::FxHashMap<
+        DeclIdentity,
+        Option<Arc<[verter_semantic::analysis::decl_headers::EnumMemberPosition]>>,
+    >,
 }
 
 /// An enum an evaluation reads: its members, pending ones unevaluated, and

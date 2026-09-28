@@ -974,7 +974,8 @@ fn det_04_worker_counts_1_2_4_8() {
 /// cold host; the public `clear_compile_cache` advances the store-view epoch
 /// and the same logical snapshot then gives the same observation and bytes;
 /// and a PARTIAL resident cache — the family memo past its retention bound —
-/// re-answers an evicted witness exactly as a cold host does. The
+/// re-answers an evicted witness exactly as a cold host does
+/// (`det_05_partial_resident_cache`, a test of its own). The
 /// cross-process persisted-cache axis is registered DORMANT: the contract
 /// makes it conditional on the product persisting a semantic cache, which it
 /// does not (see `det_05_persisted_axis_is_dormant_while_no_semantic_cache_serializes`).
@@ -982,6 +983,11 @@ fn det_04_worker_counts_1_2_4_8() {
 fn det_05_cache_lifecycle() {
     assert_ready("DET-05", "det_05_cache_lifecycle");
     drive_det_05_subset();
+}
+
+/// DET-05's partial-resident-cache axis ([`det_05_cache_lifecycle`]).
+#[test]
+fn det_05_partial_resident_cache() {
     drive_det_05_partial_resident_cache();
 }
 
@@ -1058,19 +1064,25 @@ fn drive_det_05_partial_resident_cache() {
         ask(&host, canonical, "witness"),
         "DET-05: precondition — the witness is served warm before the flood"
     );
+    // The flood's questions are the functions of one module, each a
+    // distinct question of its own.
+    let flood = "/det/flood.ts";
+    let mut module = String::new();
+    // bounded-loop: FAMILY_EVICTION_FLOOD functions.
+    for i in 0..FAMILY_EVICTION_FLOOD {
+        module.push_str(&format!(
+            "export function flood{i}() {{ return {{ k: {i} }}; }}\n"
+        ));
+    }
+    upsert(&host, flood, &module);
     let mut last = String::new();
     // bounded-loop: FAMILY_EVICTION_FLOOD distinct questions.
     for i in 0..FAMILY_EVICTION_FLOOD {
-        last = format!("/det/flood{i}.ts");
-        upsert(
-            &host,
-            &last,
-            &format!("export function flood() {{ return {{ k: {i} }}; }}\n"),
-        );
-        ask(&host, &last, "flood");
+        last = format!("flood{i}");
+        ask(&host, flood, &last);
     }
     assert!(
-        ask(&host, &last, "flood"),
+        ask(&host, flood, &last),
         "DET-05: precondition — the last question answered is still resident, so the \
          cache is partial rather than empty"
     );

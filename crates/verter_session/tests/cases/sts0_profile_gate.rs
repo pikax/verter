@@ -50,6 +50,11 @@ use verter_language::registered_source_authority::{
 use verter_language::FileLanguage;
 use verter_session::{HostConfig, PublicApiMode, UpsertRequest, VerterHost};
 
+#[allow(clippy::duplicate_mod)]
+#[path = "support/map_in_parallel.rs"]
+mod map_in_parallel;
+use map_in_parallel::map_in_parallel;
+
 /// The crate's shared gate-fixture root (vendored hermetic `svelte` types).
 fn gate_fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/cases/svelte_typecheck_gate")
@@ -776,9 +781,11 @@ fn backend_projection_checks_clean_on_both_claimed_engines() {
         skip_note("STS0 backend projection clean check");
         return;
     }
-    for row in load_profile_rows() {
-        let carrier = carrier_for(&row);
-        let extras = sidecars_for(&row);
+    let rows = load_profile_rows();
+    // Every profile's engine runs are its own: the profiles check at once.
+    map_in_parallel(&rows, |row| {
+        let carrier = carrier_for(row);
+        let extras = sidecars_for(row);
         for engine in &engines {
             let Some(run) = run_engine(engine, &engine.launcher, &carrier, &extras, false) else {
                 return;
@@ -792,7 +799,7 @@ fn backend_projection_checks_clean_on_both_claimed_engines() {
                 carrier.text
             );
         }
-    }
+    });
 }
 
 #[test]
@@ -802,8 +809,10 @@ fn evidence_template_corruption_is_caught_on_both_claimed_engines() {
         skip_note("STS0 evidence template corruption check");
         return;
     }
-    for row in load_profile_rows() {
-        let evidence = evidence_text(&row);
+    let rows = load_profile_rows();
+    // Every profile's engine runs are its own: the profiles check at once.
+    map_in_parallel(&rows, |row| {
+        let evidence = evidence_text(row);
         let corrupted_evidence = if row.file_kind == ".svelte" {
             format!("{evidence}{TEMPLATE_CORRUPTION}")
         } else {
@@ -811,8 +820,8 @@ fn evidence_template_corruption_is_caught_on_both_claimed_engines() {
         };
         // Re-derive the carrier from the corrupted evidence: the corruption
         // travels THROUGH the owned projection, never around it.
-        let carrier = carrier_from_evidence(&row, corrupted_evidence);
-        let extras = sidecars_for(&row);
+        let carrier = carrier_from_evidence(row, corrupted_evidence);
+        let extras = sidecars_for(row);
         for engine in &engines {
             let Some(run) = run_engine(engine, &engine.launcher, &carrier, &extras, false) else {
                 return;
@@ -827,7 +836,7 @@ fn evidence_template_corruption_is_caught_on_both_claimed_engines() {
                 );
             }
         }
-    }
+    });
 }
 
 #[test]
@@ -837,23 +846,25 @@ fn projected_carrier_corruption_is_caught_on_both_claimed_engines() {
         skip_note("STS0 projected carrier corruption check");
         return;
     }
-    for row in load_profile_rows() {
+    let rows = load_profile_rows();
+    // Every profile's engine runs are its own: the profiles check at once.
+    map_in_parallel(&rows, |row| {
         if row.checking != "engine-checked" {
-            continue; // unchecked surfaces must NOT report; the evidence twin covers them
+            return; // unchecked surfaces must NOT report; the evidence twin covers them
         }
-        let clean = carrier_for(&row);
+        let clean = carrier_for(row);
         let corrupted = CarrierSpec {
             text: format!("{}{}", clean.text, type_corruption_for(&row.dialect)),
             ..clean.clone()
         };
-        let extras = sidecars_for(&row);
+        let extras = sidecars_for(row);
         for engine in &engines {
             let Some(run) = run_engine(engine, &engine.launcher, &corrupted, &extras, false) else {
                 return;
             };
             assert_failed(&run, engine.label, &row.id, "projected-carrier corruption");
         }
-    }
+    });
 }
 
 fn sidecars_for(row: &ProfileRow) -> Vec<(&'static str, String)> {
@@ -901,11 +912,13 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
         skip_note("STS0 publication surface check");
         return;
     }
-    for row in load_profile_rows() {
+    let rows = load_profile_rows();
+    // Every profile's engine runs are its own: the profiles check at once.
+    map_in_parallel(&rows, |row| {
         let first = row.published_symbols.first().cloned();
         match row.publishing.as_str() {
             "declarations-published" => {
-                let evidence = evidence_text(&row);
+                let evidence = evidence_text(row);
                 let declaration = host_declaration(&evidence);
                 for symbol in &row.published_symbols {
                     assert!(
@@ -920,7 +933,7 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
                 // behind a still-valid carrier. The pinned symbols must be
                 // keys of the consumed props surface, and the
                 // @ts-expect-error discriminates a collapsed `any` surface.
-                let carrier = carrier_for(&row);
+                let carrier = carrier_for(row);
                 let pinned = row
                     .published_symbols
                     .iter()
@@ -937,7 +950,7 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
                      const notAny: string = Comp;\n\
                      void notAny;\n"
                 );
-                let extras = declaration_consumer_sidecars(&row, &consumer, &declaration);
+                let extras = declaration_consumer_sidecars(row, &consumer, &declaration);
                 for engine in &engines {
                     let Some(run) = run_engine(engine, &engine.launcher, &carrier, &extras, false)
                     else {
@@ -969,7 +982,7 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
                         row.id
                     );
                 }
-                let twin_extras = declaration_consumer_sidecars(&row, &consumer, &corrupted);
+                let twin_extras = declaration_consumer_sidecars(row, &consumer, &corrupted);
                 for engine in &engines {
                     let Some(run) =
                         run_engine(engine, &engine.launcher, &carrier, &twin_extras, false)
@@ -990,8 +1003,8 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
                 }
             }
             "module-exports-published" => {
-                let carrier = carrier_for(&row);
-                let extras = sidecars_for(&row);
+                let carrier = carrier_for(row);
+                let extras = sidecars_for(row);
                 for symbol in &row.published_symbols {
                     assert!(
                         names_symbol(&carrier.text, symbol),
@@ -1022,9 +1035,9 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
                     }
                 }
                 if let Some(symbol) = first {
-                    let renamed = evidence_text(&row)
+                    let renamed = evidence_text(row)
                         .replace(symbol.as_str(), &format!("{symbol}__sts0_removed"));
-                    let renamed_carrier = carrier_from_evidence(&row, renamed);
+                    let renamed_carrier = carrier_from_evidence(row, renamed);
                     for engine in &engines {
                         let Some(run) =
                             run_engine(engine, &engine.launcher, &renamed_carrier, &extras, true)
@@ -1044,7 +1057,7 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
             }
             other => panic!("profile {} claims unknown publishing {other}", row.id),
         }
-    }
+    });
 }
 
 /// The carrier-and-consumer extras shared by every engine run in the
