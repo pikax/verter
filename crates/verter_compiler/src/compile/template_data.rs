@@ -1616,9 +1616,15 @@ fn note_expression_completeness(
         // The expression's spans are relative to its slice at `exp.offset`.
         let span = oxc_span::GetSpan::span(expression);
         let in_source = oxc_span::Span::new(exp.offset + span.start, exp.offset + span.end);
-        verter_parser::oxc_parse::with_span_stack(source, in_source, || {
+        // A walk refused its stack reads nothing: the facts are incomplete,
+        // and the operation around them is refused with the refusal.
+        if verter_parser::oxc_parse::leased_span_walk(source, in_source, || {
             collector.visit_expression(expression)
-        });
+        })
+        .is_err()
+        {
+            data.has_expression_errors = true;
+        }
     }
 }
 
@@ -1731,11 +1737,18 @@ fn extract_binding_occurrences(
                 out: &mut data.member_reads,
             };
             use oxc_ast_visit::Visit;
-            verter_parser::oxc_parse::with_span_stack(
+            // A walk refused its stack reads nothing: the facts are
+            // incomplete, and the operation around them is refused with the
+            // refusal.
+            if verter_parser::oxc_parse::leased_span_walk(
                 source,
                 oxc_span::GetSpan::span(right),
                 || collector.visit_expression(right),
-            );
+            )
+            .is_err()
+            {
+                data.has_expression_errors = true;
+            }
         }
         for reference in &vfor.parsed.references {
             let name = reference.slice(source);

@@ -489,3 +489,302 @@ fn a_refused_public_api_projection_serves_no_wrong_projection() {
         "the read whose own extract was refused serves none"
     );
 }
+
+/// Set in the child process [`every_walk_of_the_host_operations_runs_under_a_lease`]
+/// runs its operations in.
+const UNLEASED_WALK_CHILD: &str = "VERTER_UNLEASED_WALK_GUARD_CHILD";
+
+/// Every walk of oxc's that the host's operations make over syntax nesting
+/// past what the thread's stack holds by its length runs under a
+/// walk-stack lease its operation holds, the operation's one fallible step:
+/// none reserves a region of its own, a failure no operation could report.
+/// The operations (upsert, analysis, a flow return, the runtime compile, a
+/// compile request, the public-API projection) run over TypeScript, Vue
+/// (script setup and options API) and Svelte (runes and legacy) sources
+/// whose constructs nest 201 levels deep, in a child process of their own
+/// so that no other test's walks are counted.
+#[test]
+fn every_walk_of_the_host_operations_runs_under_a_lease() {
+    if std::env::var(UNLEASED_WALK_CHILD).is_ok() {
+        host_operations_over_deep_sources();
+        return;
+    }
+    let exe = std::env::current_exe().expect("the unit-test executable");
+    let module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, module)| module);
+    let child = std::process::Command::new(exe)
+        .arg("--exact")
+        .arg(format!(
+            "{module}::every_walk_of_the_host_operations_runs_under_a_lease"
+        ))
+        .arg("--nocapture")
+        .env(UNLEASED_WALK_CHILD, "1")
+        .output()
+        .expect("spawn the child process");
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    assert!(
+        child.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "the child process runs this test and passes it: {}
+{stdout}
+{stderr}",
+        child.status
+    );
+}
+
+fn host_operations_over_deep_sources() {
+    use verter_compiler::compile_request::{
+        CompileProduct, CompileRequest, FrameworkCompileRequest, VueBackendRequest,
+        VueCompileRequest,
+    };
+    use verter_parser::oxc_parse::faults::take_unleased_walks;
+    let deep = deep_expression(201);
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    let compile = |id: &str| {
+        for node_kind in [
+            crate::types::VirtualNodeKind::Main,
+            crate::types::VirtualNodeKind::Script,
+        ] {
+            let _ = host.get_virtual_file(crate::types::VirtualQuery {
+                raw_id: None,
+                canonical_id: Some(id.to_string()),
+                node_kind: Some(node_kind),
+                compile_profile: crate::types::CompileProfile::default(),
+            });
+        }
+    };
+    let module = format!(
+        "enum E {{ A = {deep} }}\nnamespace N {{ export const x = {deep}; }}\n\
+         class C {{ f = {deep}; m(a = {deep}) {{ return {deep}; }} }}\n\
+         const {{ a = {deep} }} = {{ a: {deep} }};\nconst t = `${{{deep}}}`;\n\
+         const arrow = (b = {deep}) => {deep};\n\
+         export function pf(p = {deep}) {{ if ({deep}) {{ return {deep}; }} return new C().m(); }}\n\
+         export const q = pf();\n"
+    );
+    upsert(&host, "/src/deep.ts", &module).expect("the module parses");
+    let _ = host.get_analysis("/src/deep.ts");
+    let _ = flow_return_of_pf(&host, "/src/deep.ts");
+    let setup = format!(
+        "<script setup lang=\"ts\">\nimport {{ ref, computed }} from 'vue'\n\
+         const props = withDefaults(defineProps<{{ label?: string }}>(), {{ label: () => String({deep}) }})\n\
+         const emit = defineEmits<{{ (e: 'change', v: number): void }}>()\n\
+         const n = ref({deep})\nconst c = computed(() => {deep})\n\
+         function go() {{ emit('change', {deep}) }}\n</script>\n\
+         <template><div :title=\"{deep}\" @click=\"{deep}\" v-if=\"{deep}\">\
+         <span v-for=\"i in {deep}\" :key=\"i\">{{{{ {deep} }}}}</span><slot :v=\"{deep}\" /></div></template>\n"
+    );
+    upsert_component(&host, "/src/Setup.vue", &setup);
+    let _ = host.get_analysis("/src/Setup.vue");
+    compile("/src/Setup.vue");
+    let _ = host.get_public_api("/src/Setup.vue");
+    let request = CompileRequest::new(
+        vec![
+            CompileProduct::RuntimeClient(Default::default()),
+            CompileProduct::IdeCompanion(Default::default()),
+        ],
+        FrameworkCompileRequest::Vue(VueCompileRequest {
+            backend: VueBackendRequest::Inferred,
+            script_custom_element: Some(false),
+            ..VueCompileRequest::default()
+        }),
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .expect("the demand constructs");
+    let _ = host.compile_request("/src/Setup.vue", request);
+    let options = format!(
+        "<script lang=\"ts\">\nexport default {{\n  props: {{ label: {{ type: String, default: () => String({deep}) }} }},\n\
+         data() {{ return {{ n: {deep} }} }},\n  computed: {{ c() {{ return {deep} }} }},\n\
+         methods: {{ go() {{ return {deep} }} }},\n  watch: {{ n() {{ return {deep} }} }},\n}}\n</script>\n\
+         <template><div>{{{{ {deep} }}}}</div></template>\n"
+    );
+    upsert_component(&host, "/src/Options.vue", &options);
+    let _ = host.get_analysis("/src/Options.vue");
+    compile("/src/Options.vue");
+    let _ = host.get_public_api("/src/Options.vue");
+    for (id, source) in [
+        (
+            "/src/Runes.svelte",
+            format!(
+                "<script lang=\"ts\">\nlet {{ a = {deep} }} = $props();\nlet n = $state({deep});\n\
+                 let d = $derived({deep});\n$effect(() => {{ n = {deep}; }});\n</script>\n\
+                 <p title={{{deep}}} onclick={{() => {deep}}}>{{{deep}}}</p>\n\
+                 {{#if {deep}}}<b>{{n}}</b>{{/if}}\n{{#each [{deep}] as item}}<i>{{item}}</i>{{/each}}\n\
+                 <input bind:value={{n}} />\n"
+            ),
+        ),
+        (
+            "/src/Legacy.svelte",
+            format!(
+                "<script>\nimport {{ writable }} from 'svelte/store';\nexport let a = {deep};\n\
+                 const s = writable({deep});\nlet n = {deep};\n$: d = {deep};\n</script>\n\
+                 <p title={{{deep}}} on:click={{() => n = {deep}}}>{{$s}} {{{deep}}}</p>\n"
+            ),
+        ),
+    ] {
+        host.upsert(UpsertRequest {
+            canonical_id: Some(id.to_string()),
+            input_id: id.to_string(),
+            source: Arc::from(source.as_str()),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .map(drop)
+        .expect("the component parses");
+        let _ = host.get_analysis(id);
+        compile(id);
+    }
+    let unleased = take_unleased_walks();
+    assert!(
+        unleased.is_empty(),
+        "walks outside any walk-stack lease (route each through a lease its \
+         operation holds):\n{}",
+        unleased.join("\n")
+    );
+}
+
+/// A Svelte component whose script and markup expressions nest `depth`
+/// parentheses deep.
+fn deep_runes_component(depth: usize) -> String {
+    let deep = deep_expression(depth);
+    format!(
+        "<script lang=\"ts\">\nlet {{ a = {deep} }} = $props();\nlet n = $state({deep});\n</script>\n\
+         <p title={{{deep}}} onclick={{() => n = {deep}}}>{{{deep}}}</p>\n"
+    )
+}
+
+/// Every walk-stack lease a Svelte compile takes on the calling thread (the
+/// compile's own walks, and the materialisation of the inputs it reads),
+/// refused in turn, either fails the compile with the typed stack refusal
+/// or leaves the module the compile serves with every lease granted (a
+/// refused prefetch publishes nothing, and the compile materialises its
+/// input again): never a module read off an empty program. The same
+/// compile once the stack can be had serves the module.
+#[test]
+fn every_refused_lease_of_a_compile_serves_no_module() {
+    // On a 1 MiB thread, where 151 levels need a region.
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(every_refused_lease_of_a_compile_serves_no_module_here)
+        .expect("spawn the thread")
+        .join()
+        .expect("the compiles return");
+}
+
+fn every_refused_lease_of_a_compile_serves_no_module_here() {
+    use verter_parser::oxc_parse::faults::{
+        fail_reservations_here_after, reservations_here_of, ANY_SIZE,
+    };
+    let component = deep_runes_component(151);
+    let id = "/src/Leased.svelte";
+    let host_with_component = || {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        host.upsert(UpsertRequest {
+            canonical_id: Some(id.to_string()),
+            input_id: id.to_string(),
+            source: Arc::from(component.as_str()),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .map(drop)
+        .expect("the component parses");
+        host
+    };
+    let read = |host: &VerterHost| {
+        host.get_virtual_file(crate::types::VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(id.to_string()),
+            node_kind: Some(crate::types::VirtualNodeKind::Main),
+            compile_profile: crate::types::CompileProfile::default(),
+        })
+    };
+    let host = host_with_component();
+    let before = reservations_here_of(Reservation::Lease);
+    let clean = read(&host).expect("the component compiles").code;
+    let leases = reservations_here_of(Reservation::Lease) - before;
+    assert!(leases >= 1, "the compile leases a region on this thread");
+    let mut refusals = 0;
+    for skip in 0..leases {
+        let host = host_with_component();
+        fail_reservations_here_after(Reservation::Lease, ANY_SIZE, skip, 1);
+        let refused = read(&host);
+        fail_reservations_here(Reservation::Lease, ANY_SIZE, 0);
+        match refused {
+            Err(HostError::CompileError(failure)) => {
+                assert!(
+                    refused_its_stack(&failure.diagnostics),
+                    "lease {skip} of {leases}: {failure:?}"
+                );
+                refusals += 1;
+            }
+            Ok(served) => assert_eq!(served.code, clean, "lease {skip} of {leases}"),
+            other => panic!(
+                "lease {skip} of {leases}: expected the typed stack refusal, got {:?}",
+                other.map(|served| served.code)
+            ),
+        }
+        let served = read(&host).expect("the retry compiles");
+        assert_eq!(served.code, clean, "lease {skip}: the retry");
+    }
+    assert!(refusals >= 1, "a compile's own lease refused fails it");
+}
+
+/// Every walk-stack lease the indexed materialisation of a Svelte
+/// component takes on the calling thread, refused in turn, publishes no
+/// indexed artifact (never one whose framework candidates were read off an
+/// empty scan); the materialisation once the stack can be had publishes it.
+#[test]
+fn every_refused_lease_of_an_indexed_materialisation_publishes_nothing() {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            use verter_parser::oxc_parse::faults::{
+                fail_reservations_here_after, reservations_here_of, ANY_SIZE,
+            };
+            let component = deep_runes_component(151);
+            let id = "/src/Indexed.svelte";
+            let host_with_component = || {
+                let host = VerterHost::new_standalone(HostConfig::default());
+                host.upsert(UpsertRequest {
+                    canonical_id: Some(id.to_string()),
+                    input_id: id.to_string(),
+                    source: Arc::from(component.as_str()),
+                    file_language: FileLanguage::svelte(),
+                    aliases: Vec::new(),
+                })
+                .map(drop)
+                .expect("the component parses");
+                host
+            };
+            let before = reservations_here_of(Reservation::Lease);
+            assert!(host_with_component()
+                .ensure_indexed_ready_serve(id)
+                .is_some());
+            let leases = reservations_here_of(Reservation::Lease) - before;
+            assert!(
+                leases >= 1,
+                "the materialisation leases a region on this thread"
+            );
+            for skip in 0..leases {
+                let host = host_with_component();
+                fail_reservations_here_after(Reservation::Lease, ANY_SIZE, skip, 1);
+                let refused = host.ensure_indexed_ready_serve(id);
+                fail_reservations_here(Reservation::Lease, ANY_SIZE, 0);
+                assert!(refused.is_none(), "lease {skip} of {leases}: published");
+                assert!(
+                    host.ensure_indexed_ready_serve(id).is_some(),
+                    "lease {skip}: the retry publishes"
+                );
+            }
+        })
+        .expect("spawn the thread")
+        .join()
+        .expect("the materialisations return");
+}

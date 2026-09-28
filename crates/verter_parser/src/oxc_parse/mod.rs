@@ -227,6 +227,7 @@ fn parse_with_stack_under<R>(
 /// the syntax had as much or more, so that reservation fails only on an
 /// address space exhausted since, which ends the process as any failed
 /// allocation does.
+#[track_caller]
 fn walk_with_stack<R>(needed: usize, walk: impl FnOnce() -> R) -> R {
     match stack::with_stack(needed, stack::Reservation::Walk, walk) {
         Ok(result) => result,
@@ -235,6 +236,72 @@ fn walk_with_stack<R>(needed: usize, walk: impl FnOnce() -> R) -> R {
                 .unwrap_or(std::alloc::Layout::new::<u128>()),
         ),
     }
+}
+
+/// Run `walk` holding a walk-stack lease of `needed` bytes, the walk's own
+/// stack, so the walk reserves nothing past it. A refused lease is
+/// [`StackUnavailable`] and `walk` does not run: the refusal is recorded
+/// for the operation around the walk that records its refusals
+/// ([`refusals_within`]), which reports it as typed incompleteness. Test
+/// builds record by its call site a leased walk that could reserve while no
+/// operation records ([`faults::take_unleased_walks`]): its refusal would
+/// reach no operation.
+#[track_caller]
+fn leased_walk<R>(needed: usize, walk: impl FnOnce() -> R) -> Result<R, StackUnavailable> {
+    #[cfg(any(test, feature = "stack-fault-injection"))]
+    if !stack::recording() && !stack::lease_covers(needed) {
+        stack::faults::unleased_walk(std::panic::Location::caller());
+    }
+    stack::with_walk_stack_lease(needed, || walk_with_stack(needed, walk))
+}
+
+/// [`with_ast_stack`] under a walk-stack lease of its own ([`leased_walk`]):
+/// the walk is its operation's boundary.
+#[track_caller]
+pub fn leased_ast_walk<R>(
+    source_text: &str,
+    source_type: SourceType,
+    walk: impl FnOnce() -> R,
+) -> Result<R, StackUnavailable> {
+    let needed = if covered_by_length(source_text.len()) {
+        stack_bytes(source_text.len())
+    } else {
+        parse_stack_bytes(source_text, source_type)
+    };
+    leased_walk(needed, walk)
+}
+
+/// [`with_program_stack`] under a walk-stack lease of its own
+/// ([`leased_walk`]): the walk is its operation's boundary.
+#[track_caller]
+pub fn leased_program_walk<R>(
+    program: &Program<'_>,
+    walk: impl FnOnce() -> R,
+) -> Result<R, StackUnavailable> {
+    leased_ast_walk(program.source_text, program.source_type, walk)
+}
+
+/// [`with_span_stack`] under a walk-stack lease of its own
+/// ([`leased_walk`]): the walk is its operation's boundary.
+#[track_caller]
+pub fn leased_span_walk<R>(
+    source_text: &str,
+    span: Span,
+    walk: impl FnOnce() -> R,
+) -> Result<R, StackUnavailable> {
+    let text = source_text
+        .get(span.start as usize..span.end as usize)
+        .unwrap_or(source_text);
+    let needed = if covered_by_length(text.len()) {
+        stack_bytes(text.len())
+    } else {
+        stack_bytes(
+            syntax_nesting(text, SourceType::ts())
+                .depth
+                .max(syntax_nesting(text, SourceType::tsx()).depth) as usize,
+        )
+    };
+    leased_walk(needed, walk)
 }
 
 /// Run `operation` holding a walk-stack lease for syntax nesting as
@@ -318,6 +385,7 @@ const STACK_UNAVAILABLE_CODE: &str = "stack-unavailable";
 /// Run `walk`, a walk of oxc's over syntax parsed from `source_text`, with
 /// at least [`parse_stack_bytes`] of stack: in place when the thread has
 /// it, on a new stack segment otherwise.
+#[track_caller]
 pub fn with_ast_stack<R>(
     source_text: &str,
     source_type: SourceType,
@@ -326,10 +394,11 @@ pub fn with_ast_stack<R>(
     if covered_by_length(source_text.len()) {
         return walk_with_stack(stack_bytes(source_text.len()), walk);
     }
-    walk_with_stack(parse_stack_bytes(source_text, source_type), walk)
+    scanned_walk(parse_stack_bytes(source_text, source_type), walk)
 }
 
 /// [`with_ast_stack`] for a walk of `program`, or of any node in it.
+#[track_caller]
 pub fn with_program_stack<R>(program: &Program<'_>, walk: impl FnOnce() -> R) -> R {
     with_ast_stack(program.source_text, program.source_type, walk)
 }
@@ -337,6 +406,7 @@ pub fn with_program_stack<R>(program: &Program<'_>, walk: impl FnOnce() -> R) ->
 /// [`with_ast_stack`] for a walk of the node at `span` in `program`,
 /// sized from the node's own text: a short node walks in place at once, and
 /// a long one costs a scan of its text, no more than the walk itself.
+#[track_caller]
 pub fn with_node_stack<R>(program: &Program<'_>, span: Span, walk: impl FnOnce() -> R) -> R {
     let text = program
         .source_text
@@ -350,6 +420,7 @@ pub fn with_node_stack<R>(program: &Program<'_>, span: Span, walk: impl FnOnce()
 /// `<` can open a JSX element and whether a declaration file's unions
 /// count; the syntax nests no deeper than the larger of a TypeScript and a
 /// TSX scan of it, whichever it is.
+#[track_caller]
 pub fn with_source_stack<R>(source_text: &str, walk: impl FnOnce() -> R) -> R {
     if covered_by_length(source_text.len()) {
         return walk_with_stack(stack_bytes(source_text.len()), walk);
@@ -365,6 +436,7 @@ pub fn with_source_stack<R>(source_text: &str, walk: impl FnOnce() -> R) -> R {
 /// [`with_source_stack`] for a walk of the node at `span` in `source_text`,
 /// the text its spans index (the whole text when the span lies outside
 /// it).
+#[track_caller]
 pub fn with_span_stack<R>(source_text: &str, span: Span, walk: impl FnOnce() -> R) -> R {
     let text = source_text
         .get(span.start as usize..span.end as usize)
@@ -422,6 +494,7 @@ impl<'p> ProgramWalkStack<'p> {
     /// program can need: every walk inside it runs in place, where each
     /// would otherwise take a stack segment sized for the program of its
     /// own.
+    #[track_caller]
     pub fn within<T, R>(
         owner: &mut T,
         stack: impl Fn(&T) -> &ProgramWalkStack<'_>,
@@ -455,6 +528,7 @@ impl<'p> ProgramWalkStack<'p> {
 
     /// Run `walk`, a walk of oxc's over the node at `span`, with the stack
     /// it can need.
+    #[track_caller]
     pub fn with_node_stack<R>(&self, span: Span, walk: impl FnOnce() -> R) -> R {
         if self.inside.get() {
             return walk();
@@ -471,6 +545,7 @@ impl<'p> ProgramWalkStack<'p> {
 /// bodies of the functions nested in the node): the stack is sized from the
 /// node's text with each of those bodies taken out, so a function's walk
 /// costs its own syntax only, not every function nested inside it.
+#[track_caller]
 pub fn with_own_syntax_stack<R>(
     source_text: &str,
     span: Span,
@@ -533,8 +608,23 @@ pub(crate) mod scan_probe {
 
 /// Run `walk`, a walk of oxc's over syntax that nests as `nesting`
 /// measured (a node's, or its program's), with the stack that can need.
+#[track_caller]
 pub fn with_nesting_stack<R>(nesting: Nesting, walk: impl FnOnce() -> R) -> R {
-    walk_with_stack(stack_bytes(nesting.depth as usize), walk)
+    scanned_walk(stack_bytes(nesting.depth as usize), walk)
+}
+
+/// [`walk_with_stack`] for a walk too long to fit the thread's stack by its
+/// length, sized from its scan: one that can reserve a region when no
+/// lease covers it, which test builds record by its call site
+/// ([`faults::take_unleased_walks`]) whether or not this thread's stack
+/// has the bytes.
+#[track_caller]
+fn scanned_walk<R>(needed: usize, walk: impl FnOnce() -> R) -> R {
+    #[cfg(any(test, feature = "stack-fault-injection"))]
+    if !stack::lease_covers(needed) {
+        stack::faults::unleased_walk(std::panic::Location::caller());
+    }
+    walk_with_stack(needed, walk)
 }
 
 /// `oxc_parser::Parser`, parsing on a stack its source cannot exhaust.

@@ -292,6 +292,27 @@ The compiler's entries called outside the host (the `tsc` generation of
 the standalone checker, the standalone compile) have no typed channel for
 the refusal: a refused parse there reads as an empty script.
 
+A walk's stack is taken by a walk-stack lease, the one fallible step, at
+an operation's boundary: the operation holds a lease sized for the
+program it walks (the analysis lanes, the evaluation program's function
+index and the walks over its functions), or a walk takes a lease of its
+own (`oxc_parse::leased_program_walk`, `leased_span_walk`,
+`leased_ast_walk`) inside an operation that records its refusals: the
+source stage, the indexed and overlay materialisations (each on its
+calling thread and in the cold-index job on the declaration-lowering
+worker), the compile and render entries, the compile request, and the
+public-API projection. A refused lease is `StackUnavailable`, recorded
+for the operation, and the walk does not run; nothing ends the process.
+The remaining containment calls reserve a region of their own when no
+lease covers them, which fails only by ending the process; test builds
+report each such walk by its call site, and each leased walk that could
+reserve while no operation records its refusals.
+`every_walk_of_the_host_operations_runs_under_a_lease` runs the host's
+operations (upsert, analysis, a flow return, the runtime compile, a
+compile request, the public-API projection) over TypeScript, Vue and
+Svelte sources nesting 201 levels, in a child process, and fails on any
+reported walk.
+
 ### Hand-written recursions over oxc syntax
 
 The containment guard finds walks of oxc's (`Visit`, `walk_*`,

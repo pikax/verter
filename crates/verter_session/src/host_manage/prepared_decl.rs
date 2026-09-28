@@ -2253,50 +2253,54 @@ impl VerterHost {
             // this stack, so the retained snapshot is pinned for the
             // whole flight and this cold-index job reuses it — the run
             // cannot parse, per the lease-only worker contract.
+            // The job runs on a declaration-lowering worker, so it records its
+            // own refusals: a refused one publishes nothing, as a refused parse.
             let outcome = self.decl_lowering.run_leased(
                 &snapshot_key,
                 move |program: Option<&crate::ParsedEvalProgram>| {
-                    let owner_table = Arc::new(match program {
-                        Some(parsed) => crate::parse::top_level_owner_table(
-                            parsed.borrow_dependent(),
-                            job_framework_parse.as_deref(),
-                        )?,
-                        None => verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0),
-                    });
-                    let svelte_component_runes_mode = program.is_some_and(|parsed| {
-                        job_framework_parse.as_deref().is_some_and(|artifact| {
-                            crate::parse::svelte_component_runes_mode(
-                                artifact,
+                    verter_parser::oxc_parse::refusals_within(|| {
+                        let owner_table = Arc::new(match program {
+                            Some(parsed) => crate::parse::top_level_owner_table(
                                 parsed.borrow_dependent(),
-                            )
+                                job_framework_parse.as_deref(),
+                            )?,
+                            None => verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0),
+                        });
+                        let svelte_component_runes_mode = program.is_some_and(|parsed| {
+                            job_framework_parse.as_deref().is_some_and(|artifact| {
+                                crate::parse::svelte_component_runes_mode(
+                                    artifact,
+                                    parsed.borrow_dependent(),
+                                )
+                            })
+                        });
+                        let (header_index, route_inventory) = match program {
+                            Some(parsed) => {
+                                let body = parsed.borrow_dependent();
+                                let index = build_script_shallow_index_with_owners(
+                                    body,
+                                    parsed.source_str(),
+                                    &owner_table,
+                                )
+                                .map_err(|error| {
+                                    crate::parse::ScriptOwnerIndexError::ParserTable {
+                                        statement_count: error.statement_count(),
+                                        owner_count: error.owner_count(),
+                                    }
+                                })?;
+                                (index.declaration_headers, index.routes)
+                            }
+                            // Fatal parse: empty shallow index — no
+                            // re-parse under a different source type (the
+                            // authoritative `source_type` already failed).
+                            None => Default::default(),
+                        };
+                        Ok::<_, crate::parse::ScriptOwnerIndexError>(ColdIndexProducts {
+                            header_index,
+                            route_inventory,
+                            svelte_component_runes_mode,
+                            owner_table,
                         })
-                    });
-                    let (header_index, route_inventory) = match program {
-                        Some(parsed) => {
-                            let body = parsed.borrow_dependent();
-                            let index = build_script_shallow_index_with_owners(
-                                body,
-                                parsed.source_str(),
-                                &owner_table,
-                            )
-                            .map_err(|error| {
-                                crate::parse::ScriptOwnerIndexError::ParserTable {
-                                    statement_count: error.statement_count(),
-                                    owner_count: error.owner_count(),
-                                }
-                            })?;
-                            (index.declaration_headers, index.routes)
-                        }
-                        // Fatal parse: empty shallow index — no
-                        // re-parse under a different source type (the
-                        // authoritative `source_type` already failed).
-                        None => Default::default(),
-                    };
-                    Ok::<_, crate::parse::ScriptOwnerIndexError>(ColdIndexProducts {
-                        header_index,
-                        route_inventory,
-                        svelte_component_runes_mode,
-                        owner_table,
                     })
                 },
             );
@@ -2315,8 +2319,9 @@ impl VerterHost {
                 return None;
             };
             let products = match products {
-                Ok(products) => products,
-                Err(error) => {
+                (_, Some(_)) => return None,
+                (Ok(products), None) => products,
+                (Err(error), None) => {
                     tracing::error!(
                         canonical = %snapshot_key.canonical,
                         error = %error,
@@ -2534,7 +2539,14 @@ impl VerterHost {
                 // carries no resolved target for a route mutation to
                 // stale.
             }
-            materialize().ok_or(())
+            // The materialisation is one operation: a parse or walk-stack lease
+            // refused its stack anywhere inside it leaves some product read off
+            // an empty program, so the flight publishes nothing and a later
+            // demand materialises again.
+            match verter_parser::oxc_parse::refusals_within(materialize) {
+                (materialized, None) => materialized.ok_or(()),
+                (_, Some(_)) => Err(()),
+            }
         };
 
         // Bounded re-validation loop around the singleflight, mirroring

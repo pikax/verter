@@ -1122,7 +1122,7 @@ const WALK_ENTRIES: [&str; 5] = [
 ];
 
 /// The containments a walk of oxc's runs under.
-const CONTAINMENTS: [&str; 7] = [
+const CONTAINMENTS: [&str; 10] = [
     "with_program_stack",
     "with_node_stack",
     "with_ast_stack",
@@ -1130,6 +1130,9 @@ const CONTAINMENTS: [&str; 7] = [
     "with_span_stack",
     "with_nesting_stack",
     "with_own_syntax_stack",
+    "leased_program_walk",
+    "leased_span_walk",
+    "leased_ast_walk",
 ];
 
 /// `source` with its comments, strings and character literals blanked
@@ -1405,7 +1408,7 @@ fn no_crate_walks_oxc_syntax_around_the_containment() {
     assert!(
         bypasses.is_empty(),
         "walk oxc syntax under `with_program_stack`, `with_node_stack`, `with_ast_stack`, \
-         `with_source_stack`, `with_span_stack` or `with_nesting_stack` ({} sites):\n{}",
+         `with_source_stack`, `with_span_stack`, `with_nesting_stack` or a leased walk ({} sites):\n{}",
         bypasses.len(),
         bypasses.join("\n")
     );
@@ -1747,6 +1750,59 @@ fn an_operation_learns_of_every_stack_refusal_made_inside_it() {
     assert_eq!(complete, (1, None));
     assert_eq!(unrecorded, 0);
     assert_eq!(after, None, "no operation recorded the unrecorded refusal");
+}
+
+/// A walk under a walk-stack lease of its own reserves nothing past the
+/// lease: a refused lease is the typed refusal, the walk does not run, the
+/// operation around it learns of the refusal, and the thread goes on (no
+/// failed reservation ends the process). The lease retried runs the walk.
+/// Test builds report a leased walk that could reserve while no operation
+/// records, whose refusal would reach none.
+#[test]
+fn a_leased_walk_refused_its_lease_is_the_typed_refusal() {
+    let (recorded, unrecorded, retried, reported) = on_a_small_thread(|| {
+        let source = deep_source();
+        let allocator = Allocator::default();
+        let program = Parser::new(&allocator, &source, SourceType::ts())
+            .parse()
+            .program;
+        let _ = super::faults::take_unleased_walks();
+        let walked = std::cell::Cell::new(false);
+        let walk = || walked.set(true);
+        super::faults::fail_next_reservations(1);
+        let recorded = super::refusals_within(|| super::leased_program_walk(&program, walk));
+        let recorded = (recorded.0.is_err(), recorded.1.is_some(), walked.get());
+        super::faults::fail_next_reservations(1);
+        let site = format!("oxc_parse/tests.rs:{}", line!() + 1);
+        let unrecorded = super::leased_program_walk(&program, walk).is_err();
+        let unrecorded = (unrecorded, walked.get(), site);
+        let retried = super::refusals_within(|| super::leased_program_walk(&program, walk));
+        let retried = (retried.0.is_ok(), retried.1.is_none(), walked.get());
+        (
+            recorded,
+            unrecorded,
+            retried,
+            super::faults::take_unleased_walks(),
+        )
+    });
+    let (unrecorded, unrecorded_walked, site) = unrecorded;
+    assert_eq!(recorded, (true, true, false), "refused, recorded, not run");
+    assert_eq!(
+        (unrecorded, unrecorded_walked),
+        (true, false),
+        "refused, not run, not aborted"
+    );
+    assert_eq!(
+        retried,
+        (true, true, true),
+        "granted, nothing recorded, run"
+    );
+    assert_eq!(
+        reported.len(),
+        1,
+        "the unrecorded walk's site: {reported:?}"
+    );
+    assert!(reported[0].ends_with(&site), "{reported:?} vs {site}");
 }
 
 /// An operation that unwinds restores the record of the one enclosing it,

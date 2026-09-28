@@ -80,6 +80,7 @@ pub fn remaining() -> Option<usize> {
 /// place when the stack this thread runs on has them; on the lease's
 /// region, without reserving, when the thread holds a lease covering them;
 /// on a region of `needed` bytes reserved for it otherwise.
+#[track_caller]
 pub fn with_stack<R>(
     needed: usize,
     purpose: Reservation,
@@ -100,11 +101,23 @@ pub fn with_stack<R>(
                 region if !region.busy.get() => Ok(region.run(work)),
                 // Work on the region is suspended under a region reserved
                 // past the lease: this walk gets one of its own.
-                _ => Ok(Region::reserve(needed, purpose)?.run(work)),
+                _ => Ok(reserve_past_lease(needed, purpose)?.run(work)),
             },
         },
-        _ => Ok(Region::reserve(needed, purpose)?.run(work)),
+        _ => Ok(reserve_past_lease(needed, purpose)?.run(work)),
     }
+}
+
+/// Reserve a region for work no lease covers: a parse, or a walk outside
+/// its operation's lease (which test builds record by its call site,
+/// [`faults::take_unleased_walks`]).
+#[track_caller]
+fn reserve_past_lease(needed: usize, purpose: Reservation) -> Result<Region, StackUnavailable> {
+    #[cfg(any(test, feature = "stack-fault-injection"))]
+    if purpose == Reservation::Walk {
+        faults::unleased_walk(std::panic::Location::caller());
+    }
+    Region::reserve(needed, purpose)
 }
 
 /// Run `operation` holding a walk-stack lease of `needed` bytes: the
@@ -166,6 +179,12 @@ pub fn refusals_within<R>(operation: impl FnOnce() -> R) -> (R, Option<StackUnav
     let refused = REFUSALS.with(Cell::get).flatten();
     drop(recording);
     (result, refused)
+}
+
+/// Whether an operation records its refusals on this thread
+/// ([`refusals_within`]).
+pub(super) fn recording() -> bool {
+    REFUSALS.with(Cell::get).is_some()
 }
 
 /// Record `unavailable` for the operation recording its refusals on this
@@ -287,6 +306,35 @@ pub mod faults {
     /// Every reservation on any thread so far, by purpose and bytes.
     static MADE: Mutex<Vec<(Reservation, usize, usize)>> = Mutex::new(Vec::new());
 
+    /// The call sites of the walks, on any thread, whose stack refusal no
+    /// operation would report: a walk no walk-stack lease covered, which can
+    /// reserve a region of its own, and a leased walk that could reserve
+    /// while no operation records its refusals.
+    static UNLEASED: Mutex<Vec<&'static std::panic::Location<'static>>> = Mutex::new(Vec::new());
+
+    pub(in crate::oxc_parse) fn unleased_walk(at: &'static std::panic::Location<'static>) {
+        let mut unleased = UNLEASED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !unleased.contains(&at) {
+            unleased.push(at);
+        }
+    }
+
+    /// The call sites (`file:line`) of the walks, on any thread, whose stack
+    /// refusal no operation would report, since the last call.
+    pub fn take_unleased_walks() -> Vec<String> {
+        let mut unleased = UNLEASED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut sites: Vec<String> = unleased
+            .drain(..)
+            .map(|at| format!("{}:{}", at.file().replace('\\', "/"), at.line()))
+            .collect();
+        sites.sort();
+        sites
+    }
+
     /// Make the next `count` reservations on this thread fail.
     pub fn fail_next_reservations(count: usize) {
         FAILING.with(|failing| failing.set(count));
@@ -309,6 +357,21 @@ pub mod faults {
         count: usize,
     ) {
         HERE.with(|here| here.set((count > 0).then_some((purpose, needed, skip, count))));
+    }
+
+    /// The size [`fail_reservations_here_after`] takes to match a reservation
+    /// of any size.
+    pub const ANY_SIZE: usize = usize::MAX;
+
+    /// The reservations this thread made so far for `purpose`, of any size.
+    pub fn reservations_here_of(purpose: Reservation) -> usize {
+        MADE_HERE.with(|made| {
+            made.borrow()
+                .iter()
+                .filter(|&&(held, _, _)| held == purpose)
+                .map(|&(_, _, count)| count)
+                .sum()
+        })
     }
 
     /// The reservations this thread made so far for `purpose` of exactly
@@ -399,7 +462,9 @@ pub mod faults {
             }
         });
         let here_fails = HERE.with(|here| match here.get() {
-            Some((held, bytes, skip, fail)) if (held, bytes) == (purpose, needed) => {
+            Some((held, bytes, skip, fail))
+                if held == purpose && (bytes == needed || bytes == ANY_SIZE) =>
+            {
                 if skip > 0 {
                     here.set(Some((held, bytes, skip - 1, fail)));
                     return false;

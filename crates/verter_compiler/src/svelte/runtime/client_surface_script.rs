@@ -156,7 +156,9 @@ fn instance_script_writes_a_prop(instance_source: &str, ir: &SvelteRuntimeIr) ->
     // itself: a LEGACY `$:` labeled statement is a SUPPORTED prop-read surface
     // and is skipped whole.
     use oxc_ast_visit::Visit;
-    verter_parser::oxc_parse::with_program_stack(&program, || {
+    // A walk refused its stack is taken as a write, the fail-closed answer;
+    // the compile around it is refused with the refusal.
+    let walked = verter_parser::oxc_parse::leased_program_walk(&program, || {
         let mut frame = rustc_hash::FxHashSet::default();
         super::expr::collect_direct_decls(&program.body, &mut frame);
         super::expr::collect_var_hoists(&program.body, &mut frame);
@@ -175,7 +177,7 @@ fn instance_script_writes_a_prop(instance_source: &str, ir: &SvelteRuntimeIr) ->
             scan.visit_statement(stmt);
         }
     });
-    scan.found
+    walked.is_err() || scan.found
 }
 
 /// A scope-aware scan for an instance-script WRITE to a `$props()` prop local
@@ -694,7 +696,10 @@ fn scan_unsupported_rune_forms(
         store_exempt.clone(),
     );
     use oxc_ast_visit::Visit;
-    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
+    // A walk refused its stack scans nothing; the compile around it is
+    // refused with the refusal.
+    let _ =
+        verter_parser::oxc_parse::leased_program_walk(&program, || scan.visit_program(&program));
     RuneScanOutcome {
         uses_host: scan.uses_host(),
         first_host_span: scan.first_host_span(),
