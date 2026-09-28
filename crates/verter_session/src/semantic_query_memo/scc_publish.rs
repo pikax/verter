@@ -581,6 +581,12 @@ impl SemanticGraphStore {
         dispatch_dep_signature: &DepSignature,
         admission_seq: u64,
     ) -> NewlyKeyedFamily {
+        // Same admission fence as `warm_publish_one`: a member keyed on a
+        // released node is a stale holder's re-dispatch; its flight still
+        // completes with the computed value, only the warm slot is refused.
+        if self.family_names_released_node(family) {
+            return NewlyKeyedFamily(false);
+        }
         let cap = family.candidate_cap();
         let family_was_new = !entries.contains_key(family);
         let outcome = entries.entry(family.clone()).or_default().publish(

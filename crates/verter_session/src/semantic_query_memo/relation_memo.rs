@@ -69,14 +69,7 @@ impl SemanticGraphStore {
         &self,
         proof: crate::semantic_query::RelationProof,
     ) -> crate::semantic_query::RelationProofId {
-        let mut table = self.relation_proof_table.lock();
-        if let Some(id) = table.1.get(&proof) {
-            return *id;
-        }
-        let id = crate::semantic_query::RelationProofId(table.0.len() as u32);
-        table.0.push(proof.clone());
-        table.1.insert(proof, id);
-        id
+        self.relation_proof_table.lock().intern(proof)
     }
 
     /// Intern a COMPLETED full `Relate` key for a `CoinductiveCycle`
@@ -85,38 +78,29 @@ impl SemanticGraphStore {
         &self,
         key: crate::semantic_query::RelateMemoKey,
     ) -> crate::semantic_query::RelateKeyId {
-        let mut table = self.relate_key_table.lock();
-        if let Some(id) = table.1.get(&key) {
-            return *id;
-        }
-        let id = crate::semantic_query::RelateKeyId(table.0.len() as u32);
-        table.0.push(key.clone());
-        table.1.insert(key, id);
-        id
+        self.relate_key_table.lock().intern(key)
     }
 
-    /// Read back a proof by id (test + future display surface).
+    /// Read back a proof by id (test + future display surface). `None`
+    /// for an unknown id and for a slot a document release dropped.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn relation_proof_for(
         &self,
         id: crate::semantic_query::RelationProofId,
     ) -> Option<crate::semantic_query::RelationProof> {
-        self.relation_proof_table
-            .lock()
-            .0
-            .get(id.0 as usize)
-            .cloned()
+        self.relation_proof_table.lock().get(id.0).cloned()
     }
 
-    /// Read back a co-discharged key by id (test surface).
+    /// Read back a co-discharged key by id (test surface). `None` for an
+    /// unknown id and for a slot a document release dropped.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn relate_key_for_id(
         &self,
         id: crate::semantic_query::RelateKeyId,
     ) -> Option<crate::semantic_query::RelateMemoKey> {
-        self.relate_key_table.lock().0.get(id.0 as usize).cloned()
+        self.relate_key_table.lock().get(id.0).cloned()
     }
 
     /// Strict warm-hit read of a published relation payload for the full

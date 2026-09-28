@@ -528,7 +528,7 @@ impl VerterLanguageServer {
         use crate::server::handler_guard::block_in_place_if_available;
 
         let encoding = self.position_encoding.read().clone();
-        let host = &self.documents.host;
+        let host = &self.documents.host();
         let carrier_source_exists = |p: &str| host.get_source(p).is_some();
 
         // The current-request mapper context (the parent's IDE TSX). A foreign

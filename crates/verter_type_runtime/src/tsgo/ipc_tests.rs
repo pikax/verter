@@ -5250,6 +5250,154 @@ async fn content_cached_by_load_file_never_counts_as_delivered_to_the_child() {
     assert_eq!(frames[0].1["textDocument"]["text"], source);
 }
 
+/// A retract for a document the child does not hold sends NOTHING.
+///
+/// The ledger decides a close exactly as it decides a publication. `versions` is
+/// the open set: no row means the child never received a `didOpen` for this path
+/// — because the publication that owed one was refused, or because the document
+/// was already retracted. tsgo answers a `didClose` for such a path by PANICKING
+/// ("overlay not found for closed file"), which kills the engine and takes every
+/// open project's warm state with it; the restart then re-parses the whole
+/// workspace. Repeated open/close editing makes that a recurring cost, so the
+/// frame must not be sent.
+///
+/// The local content cache is still retired: a retract means the caller is done
+/// with the path either way, and `load_file` content for a never-delivered
+/// document is exactly the kind of state a close exists to release.
+#[tokio::test]
+async fn closing_a_document_the_child_never_opened_sends_no_frame() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let path = "/w/NeverOpened.vue.tsx";
+
+    // `load_file` caches content locally and tells the child nothing, so the path
+    // has content but no `versions` row — the child does not hold it.
+    provider
+        .load_file(path, "export const x = 1;\n")
+        .await
+        .unwrap();
+    assert!(drained_notifications(&mut stdin_rx).is_empty());
+
+    provider.close_file(path).await.unwrap();
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "a didClose for a document the child never opened panics tsgo; it must not be sent"
+    );
+    assert!(
+        !provider
+            .contents
+            .lock()
+            .await
+            .contains_key(&contents_key(path)),
+        "the retract must still release the local content cache"
+    );
+
+    // Positive control: a document the child DOES hold still gets its didClose,
+    // so the absence above is a real suppression rather than a dead transport.
+    provider
+        .open_file(path, "export const x = 1;\n")
+        .await
+        .unwrap();
+    assert_eq!(drained_notifications(&mut stdin_rx).len(), 1);
+    provider.close_file(path).await.unwrap();
+    let closed = drained_notifications(&mut stdin_rx);
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].0, "textDocument/didClose");
+
+    // And the suppressed retract leaves no ledger residue that would make the
+    // next open look like a change over a buffer the child does not have.
+    provider.close_file(path).await.unwrap();
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "a duplicate close is a close of a document the child no longer holds"
+    );
+    provider
+        .open_file(path, "export const x = 2;\n")
+        .await
+        .unwrap();
+    let reopened = drained_notifications(&mut stdin_rx);
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(reopened[0].0, "textDocument/didOpen");
+}
+
+/// DISCRIMINATING (ledger identity across equivalent path spellings): one
+/// document opened as `C:\\Ws\\Src\\A.ts` and retracted as the engine's own
+/// `root_files` spelling `c:/Ws/Src/A.ts` is ONE document, so the retract owes a
+/// `didClose` and must clear the open set.
+///
+/// The open set was keyed by the caller's raw string while the content map
+/// canonicalized. The close therefore found no row for the equivalent spelling,
+/// took the "the child never opened this" branch, sent NOTHING, and removed only
+/// the content entry — leaving the `versions` row and the child's overlay alive.
+/// Every later open/close pair under those two spellings added one more permanent
+/// row, and the next update under the original spelling was delivered as a
+/// `didChange` over a buffer the caller believed was closed.
+///
+/// RED before the fix: the close drains no frame and the `versions` row survives.
+/// GREEN after: both maps key by the one canonical document identity.
+#[tokio::test]
+async fn closing_an_equivalent_path_spelling_closes_the_open_document() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let open_form = r"C:\Ws\Src\A.ts";
+    let close_form = "c:/Ws/Src/A.ts";
+    assert_ne!(
+        open_form, close_form,
+        "the two spellings must be textually distinct for the miss to be exercised"
+    );
+
+    provider
+        .open_file(open_form, "export const x = 1;\n")
+        .await
+        .unwrap();
+    let opened = drained_notifications(&mut stdin_rx);
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].0, "textDocument/didOpen");
+
+    provider.close_file(close_form).await.unwrap();
+    let closed = drained_notifications(&mut stdin_rx);
+    assert_eq!(
+        closed.len(),
+        1,
+        "an equivalent spelling names the SAME open document, so the child is \
+         owed its didClose"
+    );
+    assert_eq!(closed[0].0, "textDocument/didClose");
+
+    assert!(
+        provider.versions.lock().await.is_empty(),
+        "the retract must clear the open set, not leave a row keyed by the \
+         spelling the open happened to use"
+    );
+    assert!(
+        provider.contents.lock().await.is_empty(),
+        "the retract must release the content the child no longer holds"
+    );
+
+    // The document really is closed: the next publication under the ORIGINAL
+    // spelling is a didOpen, never a didChange over a buffer that no longer exists.
+    provider
+        .open_file(open_form, "export const x = 2;\n")
+        .await
+        .unwrap();
+    let reopened = drained_notifications(&mut stdin_rx);
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(reopened[0].0, "textDocument/didOpen");
+
+    // And an update under the CLOSE spelling addresses that same reopened
+    // document: one ledger row, delivered as a didChange.
+    provider
+        .open_file(close_form, "export const x = 3;\n")
+        .await
+        .unwrap();
+    let changed = drained_notifications(&mut stdin_rx);
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].0, "textDocument/didChange");
+    assert_eq!(
+        provider.versions.lock().await.len(),
+        1,
+        "two spellings of one path are one ledger row"
+    );
+}
+
 /// tsgo must send NO `workspace/didChangeConfiguration`.
 ///
 /// Native tsgo treats that payload as user preferences: it cannot add compiler
@@ -5609,5 +5757,232 @@ fn client_capabilities_advertise_the_workspace_configuration_channel() {
         serde_json::json!(true),
         "workspace.configuration must be advertised — the engine only requests the \
          inlay-hint preferences over this channel"
+    );
+}
+
+fn published_diagnostic(message: &str) -> TypeDiagnostic {
+    TypeDiagnostic {
+        message: message.into(),
+        severity: TypeDiagnosticSeverity::Error,
+        start: 0,
+        end: 1,
+        code: Some("2322".into()),
+        tags: Vec::new(),
+        related_information: Vec::new(),
+    }
+}
+
+/// A `publishDiagnostics` batch the read loop captured content for BEFORE a
+/// close cannot repopulate the cache AFTER it, nor land on the document's next
+/// incarnation.
+///
+/// Discriminating: the read loop captured the registered content under the
+/// contents lock, released it, and inserted the parsed batch afterwards, while
+/// the close forgot the cached diagnostics without fencing that admission — so
+/// a batch in flight across the close inserted an entry for a closed document
+/// that nothing would forget again (one per document path for the life of the
+/// engine), and one in flight across a close/reopen served diagnostics of the
+/// previous incarnation.
+#[tokio::test]
+async fn diagnostics_captured_before_a_close_never_outlive_it() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let path = "/w/Closing.vue.tsx";
+    let raw_uri = TsgoTypeProvider::path_to_uri(path);
+    let source = "const a: number = 'x';\n";
+    provider.open_file(path, source).await.unwrap();
+    drained_notifications(&mut stdin_rx);
+
+    // The read loop reads a batch and captures the content it parses against...
+    let in_flight = registered_content_for_uri(&*provider.contents.lock().await, &raw_uri)
+        .expect("the open document's content is registered");
+    // ...and the close completes before the batch is admitted.
+    provider.close_file(path).await.unwrap();
+    assert_eq!(
+        drained_notifications(&mut stdin_rx).len(),
+        1,
+        "one didClose"
+    );
+    assert!(
+        !admit_published_diagnostics(
+            &provider.contents,
+            &provider.diagnostics_cache,
+            &raw_uri,
+            &in_flight,
+            normalize_file_uri(&raw_uri),
+            vec![published_diagnostic("computed before the close")],
+        )
+        .await,
+        "a batch computed against a closed incarnation is refused"
+    );
+    assert!(provider.diagnostics_cache.lock().await.is_empty());
+
+    // A reopen with the SAME bytes is a new incarnation: the stale batch still
+    // cannot land on it.
+    provider.open_file(path, source).await.unwrap();
+    assert!(
+        !admit_published_diagnostics(
+            &provider.contents,
+            &provider.diagnostics_cache,
+            &raw_uri,
+            &in_flight,
+            normalize_file_uri(&raw_uri),
+            vec![published_diagnostic("computed before the close")],
+        )
+        .await,
+        "a batch computed against the previous incarnation is refused"
+    );
+    assert!(provider.diagnostics_cache.lock().await.is_empty());
+
+    // A batch read against the live incarnation is admitted, and the next
+    // close forgets it.
+    let live = registered_content_for_uri(&*provider.contents.lock().await, &raw_uri)
+        .expect("the reopened document's content is registered");
+    assert!(
+        admit_published_diagnostics(
+            &provider.contents,
+            &provider.diagnostics_cache,
+            &raw_uri,
+            &live,
+            normalize_file_uri(&raw_uri),
+            vec![published_diagnostic("current")],
+        )
+        .await
+    );
+    assert_eq!(provider.diagnostics_cache.lock().await.len(), 1);
+    provider.close_file(path).await.unwrap();
+    assert!(provider.diagnostics_cache.lock().await.is_empty());
+}
+
+/// The same fence holds for content the child was never told about: a close
+/// with no recorded open sends NO frame, releases the content and still
+/// refuses a batch captured before it.
+#[tokio::test]
+async fn diagnostics_captured_before_a_frameless_close_never_outlive_it() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let path = "/w/CachedOnly.vue.tsx";
+    let raw_uri = TsgoTypeProvider::path_to_uri(path);
+    provider
+        .load_file(path, "export const cached = 1;\n")
+        .await
+        .unwrap();
+    let in_flight = registered_content_for_uri(&*provider.contents.lock().await, &raw_uri)
+        .expect("load_file registers the content");
+    provider.close_file(path).await.unwrap();
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "a close with no recorded open sends nothing"
+    );
+    assert!(
+        !admit_published_diagnostics(
+            &provider.contents,
+            &provider.diagnostics_cache,
+            &raw_uri,
+            &in_flight,
+            normalize_file_uri(&raw_uri),
+            vec![published_diagnostic("computed before the close")],
+        )
+        .await
+    );
+    assert!(provider.diagnostics_cache.lock().await.is_empty());
+}
+
+/// Issue a diagnostics pull for an open document, then close and reopen it
+/// with different text BEFORE the engine answers with ranges valid for the
+/// first text. Returns the pull's outcome and the provider.
+async fn pull_answered_across_a_reopen(
+    background: bool,
+) -> (
+    Result<Vec<TypeDiagnostic>, TypeProviderError>,
+    TsgoTypeProvider,
+) {
+    let (provider_side, mut relay_side) = tokio::io::duplex(64 * 1024);
+    let (read, write) = tokio::io::split(provider_side);
+    let provider = TsgoTypeProvider::from_initialized_transport(read, write);
+    let path = if cfg!(windows) {
+        "D:/w/Reopened.vue.tsx"
+    } else {
+        "/w/Reopened.vue.tsx"
+    };
+    provider
+        .open_file(path, "export const count: number = 'wrong';\n")
+        .await
+        .unwrap();
+
+    let reopen_then_answer = async {
+        let mut framer = MessageFramer::new();
+        let mut chunk = [0u8; 8192];
+        let request = loop {
+            if let Some(message) = framer.next_message().expect("decode") {
+                if message["method"] == "textDocument/diagnostic" {
+                    break message;
+                }
+                continue;
+            }
+            let n = relay_side.read(&mut chunk).await.expect("read request");
+            assert_ne!(n, 0, "provider closed before issuing the pull");
+            framer.push(&chunk[..n]);
+        };
+        provider.close_file(path).await.unwrap();
+        provider.open_file(path, "let b = 1;\n").await.unwrap();
+        relay_side
+            .write_all(&encode_message(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {
+                    "kind": "full",
+                    "items": [{
+                        "range": {
+                            "start": { "line": 0, "character": 29 },
+                            "end": { "line": 0, "character": 36 }
+                        },
+                        "severity": 1,
+                        "code": 2322,
+                        "message": "Type 'string' is not assignable to type 'number'."
+                    }]
+                }
+            })))
+            .await
+            .unwrap();
+        relay_side.flush().await.unwrap();
+    };
+    let pull = async {
+        if background {
+            provider.get_diagnostics_background(path).await
+        } else {
+            provider.get_diagnostics_strict(path).await
+        }
+    };
+    let (pulled, ()) = tokio::join!(pull, reopen_then_answer);
+    (pulled, provider)
+}
+
+/// A strict diagnostics pull answered after its document closed and reopened
+/// is refused as superseded: it is neither returned nor cached.
+///
+/// Discriminating: the pull read the registered content only AFTER the
+/// response arrived, so a response computed for incarnation A was parsed
+/// against B's text (its ranges mapped onto the wrong source) and passed the
+/// admission fence because B was registered by then.
+#[tokio::test]
+async fn a_strict_pull_answered_across_a_close_and_reopen_is_refused() {
+    let (pulled, provider) = pull_answered_across_a_reopen(false).await;
+    assert!(
+        pulled.is_err(),
+        "a response for the previous incarnation must not be served: {pulled:?}"
+    );
+    assert!(
+        provider.diagnostics_cache.lock().await.is_empty(),
+        "nor cached against the reopened document"
+    );
+}
+
+/// The background pull refuses the same superseded response (it caches
+/// nothing, but used to parse the response against the reopened text too).
+#[tokio::test]
+async fn a_background_pull_answered_across_a_close_and_reopen_is_refused() {
+    let (pulled, _provider) = pull_answered_across_a_reopen(true).await;
+    assert!(
+        pulled.is_err(),
+        "a response for the previous incarnation must not be served: {pulled:?}"
     );
 }

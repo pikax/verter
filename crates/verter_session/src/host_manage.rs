@@ -730,6 +730,48 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     pub(in crate::host_manage) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only seam into `intrinsic_members_for_tag`: a ONE-SHOT hook the
+    /// reader fires on its own thread AFTER it has observed a warm intrinsic
+    /// surface strictly older than the generation it sampled and BEFORE it
+    /// retires that surface. The interleaving under test — a reader paused
+    /// exactly there while a concurrent writer advances the generation and
+    /// admits a newer surface under the same key — is staged inside the hook,
+    /// deterministically, with no threads or sleeps. Taken out of the slot
+    /// before it runs, so a re-entrant read cannot fire it twice.
+    static INTRINSIC_RETIREMENT_PAUSE: std::cell::RefCell<Option<IntrinsicRetirementPauseHook>> =
+        std::cell::RefCell::new(None);
+}
+
+/// The one-shot hook [`INTRINSIC_RETIREMENT_PAUSE`] holds: host, the stable
+/// intrinsic key being read, and the generation the reader sampled.
+#[cfg(test)]
+type IntrinsicRetirementPauseHook =
+    Box<dyn FnOnce(&VerterHost, &crate::resolver_core::FallthroughNodeKey, u64)>;
+
+/// Arm [`INTRINSIC_RETIREMENT_PAUSE`] for the next superseded-surface
+/// observation on this thread. The hook receives the host, the stable
+/// intrinsic key being read, and the generation the reader sampled.
+#[cfg(test)]
+pub(in crate::host_manage) fn pause_before_intrinsic_retirement_for_test(
+    hook: impl FnOnce(&VerterHost, &crate::resolver_core::FallthroughNodeKey, u64) + 'static,
+) {
+    INTRINSIC_RETIREMENT_PAUSE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn fire_intrinsic_retirement_pause(
+    host: &VerterHost,
+    key: &crate::resolver_core::FallthroughNodeKey,
+    observed_generation: u64,
+) {
+    let hook = INTRINSIC_RETIREMENT_PAUSE.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook(host, key, observed_generation);
+    }
+}
+
 impl FallthroughResolverHost for HostFallthroughResolver<'_> {
     type ChildResolution = crate::types::FallthroughResolution;
 
@@ -741,11 +783,14 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         verter_debug_assert_eq!(self.parent_canonical_id, canonical_id);
         let (project_anchor, cache_generation) =
             self.host.project_intrinsic_cache_anchor(canonical_id);
-        let cache_key = crate::resolver_core::fallthrough_resolver::intrinsic_surface_key(
-            &project_anchor,
-            cache_generation,
-            tag,
-        );
+        // STABLE key: `(project_anchor, tag)`. The generation the surface was
+        // projected under travels on the VALUE instead, so a superseded
+        // surface is REPLACED here rather than left behind as a dead map entry
+        // — a generation-keyed entry is never superseded by anything, and this
+        // fires once per template element per resolve, so an editing session
+        // retained one whole intrinsic surface per tag per edit.
+        let cache_key =
+            crate::resolver_core::fallthrough_resolver::intrinsic_surface_key(&project_anchor, tag);
 
         // Validate through the request-bound `ctx.store_view()` (a borrow
         // into the cold compute's currentness-gated `RequestStoreView`,
@@ -754,14 +799,41 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         // template element on nuxt-ui's Button. On a non-current cold-seed
         // the view fails its `validates*` closed, so a stale warm hit is
         // never consumed.
+        //
+        // The store view is NOT the version check for THIS node: an intrinsic
+        // surface carries an empty validated-fact signature, so every candidate
+        // validates vacuously. The generation carried on the value is the
+        // check, and a STRICTLY OLDER candidate RETIRES the entry — otherwise
+        // the superseded candidate stays warm under the stable key and shadows
+        // the fresh one.
+        //
+        // Retirement is generation-ORDERED, never unconditional: this reader's
+        // `cache_generation` sample can already be stale by the time it decides,
+        // so it may only retire what it can PROVE it outranks. A candidate at or
+        // beyond the sampled generation is a concurrent writer's newer
+        // completion and survives.
         if let Some(node) = self
             .host
             .resolver_runtime()
             .fallthrough
             .get_cached_node(&cache_key, &self.ctx.store_view())
         {
-            if let Some(members) = self.host.runtime_intrinsic_node_to_members(node) {
-                return members;
+            match self.host.runtime_intrinsic_node_to_members(node) {
+                Some((members, node_generation)) if node_generation == cache_generation => {
+                    return members;
+                }
+                Some((_, node_generation)) if node_generation < cache_generation => {
+                    // The seam a paused-reader test stages the concurrent
+                    // writer in: between the observation above and the
+                    // retirement below. Compiled out of production.
+                    #[cfg(test)]
+                    fire_intrinsic_retirement_pause(self.host, &cache_key, cache_generation);
+                    self.host
+                        .resolver_runtime()
+                        .fallthrough
+                        .retire_superseded_intrinsic_surface(&cache_key, cache_generation);
+                }
+                Some(_) | None => {}
             }
         }
 
@@ -781,7 +853,19 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
                     .host
                     .project_intrinsic_members_for_tag(canonical_id, tag, self.ctx)
                     .unwrap_or_else(|| self.host.intrinsic_members_for_tag(tag));
-                let node = self.host.build_runtime_intrinsic_surface_node(&members);
+                // Re-sample the live generation AFTER the compute. The node is
+                // stamped with the PRE-compute sample, so a surface built
+                // across a content-generation advance would be admitted under
+                // an already-superseded stamp and could publish over a newer
+                // completion. That result is still SERVED to this caller
+                // verbatim; only the shared-cache admission is refused.
+                let (_, generation_after) = self.host.project_intrinsic_cache_anchor(canonical_id);
+                if generation_after != cache_generation {
+                    return (members, None);
+                }
+                let node = self
+                    .host
+                    .build_runtime_intrinsic_surface_node(&members, cache_generation);
                 (members, Some((cache_key, node)))
             })
     }
