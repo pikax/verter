@@ -422,7 +422,8 @@ export function ocNarrowed(o: { m?: () => string }) { if (o.m) { return o.m?.();
 /// the links read off it) with `undefined` beside it exactly when a strip
 /// removed arms, and `undefined` is a strict-null fact. A callee that is
 /// never nullish (`ocDefinite`) adds nothing, and a member called off the
-/// stripped receiver reads that receiver (`f?.call(…)`). The library
+/// stripped receiver reads that receiver (`f?.call(…)`, an interface's
+/// `self(): this` in `o?.self()`). The library
 /// supplies `String` for the `.length` reads and `CallableFunction` for
 /// `call`.
 #[test]
@@ -445,41 +446,34 @@ fn an_optional_chain_call_adds_undefined_on_its_short_circuit_edge() {
         (Read::Return("ocDeep"), "string | undefined", "string"),
         (Read::Return("ocObjThen"), "number | undefined", "number"),
         (Read::Return("ocCallMethod"), "string | undefined", "string"),
+        (Read::Return("pThis"), "S", "S"),
+        (Read::Return("ocThis"), "S | undefined", "S"),
+        (Read::Return("ocThisThen"), "number | undefined", "number"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// An interface method returning `this` returns its receiver's type, and a
-/// guarded root's optional call reads the narrowed member.
+/// A guarded root's optional call reads the narrowed member, and a call
+/// infers its type parameters from a `this` parameter.
 ///
 /// What the lane gives:
-/// - `pThis` (no optional chain): the checker answers `S`; the lane
-///   measured `<unrendered BareRef(BareRefCarrier { name: "this", .. })>`
-///   (the interface's polymorphic `this` is not bound to the receiver on
-///   any call rail).
-/// - `ocThis`, `ocThisThen`: the same unbound `this` under the chain
-///   (`undefined | <unrendered BareRef this>`, and `<opaque Miss> |
-///   undefined` for `.v` read off it).
 /// - `ocNarrowed`: the checker answers `string`; the lane measured
 ///   `<opaque UnmodeledPosition>` degraded by FlowGap(UnmodeledExpression)
 ///   (the write-effect rail every optional chain root takes refuses a root
 ///   an in-frame guard changes).
 /// - `pThisParam` (no optional chain) and `ocThisParam`: the checker infers
 ///   `T` from the receiver (`{ v: number; m<T>(this: T): T; }`, with
-///   `| undefined` under the chain); wrong-but-clean: the lane measured
-///   `unknown` (the call executor infers nothing from a `this` parameter).
+///   `| undefined` under the chain); the lane measured `<opaque
+///   UnmodeledPosition>` degraded by UnrepresentableCallee.
 /// - `ocBind`: the checker answers `(() => string) | undefined`; the lane
 ///   measured `<opaque UnmodeledPosition> | undefined` degraded by
 ///   UnrepresentableCallee (`bind` has no modeled call, chain or not).
 #[test]
-#[ignore = "an interface's this return binds the receiver; a guarded optional-chain root reads its narrowing"]
-fn an_optional_chain_call_binds_interface_this_and_reads_a_guarded_root() {
+#[ignore = "a guarded optional-chain root reads its narrowing; a this parameter infers"]
+fn an_optional_chain_call_reads_a_guarded_root_and_infers_from_this() {
     let matrix =
         Matrix::new(OPTIONAL_CALLS).lib(super::differential_global_library_tests::GLOBALS_LIB);
     let failures = matrix.nullness(&[
-        (Read::Return("pThis"), "S", "S"),
-        (Read::Return("ocThis"), "S | undefined", "S"),
-        (Read::Return("ocThisThen"), "number | undefined", "number"),
         (Read::Return("ocNarrowed"), "string", "string"),
         (
             Read::Return("pThisParam"),
