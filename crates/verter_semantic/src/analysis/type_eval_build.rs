@@ -8229,12 +8229,35 @@ fn value_type_derives_from_a_call(expr: &Expression<'_>, source: &str) -> bool {
             Expression::CallExpression(_)
             | Expression::NewExpression(_)
             | Expression::TaggedTemplateExpression(_) => return true,
+            // A function value is its own frame, which the probe never
+            // enters: it answers at once, not after a containment scan of
+            // the body it skips (a callback nest's every level scanned the
+            // whole nest below it).
+            Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {
+                return false
+            }
             _ => break,
         };
     }
     let mut probe = CallProbe::default();
+    #[cfg(test)]
+    CALL_PROBE_SCANNED.with(|scanned| scanned.set(scanned.get() + expr.span().size() as usize));
     // A walk refused its stack is taken as a call, the conservative answer;
     // the operation around it is refused with the refusal.
     verter_parser::oxc_parse::leased_span_walk(source, expr.span(), || probe.visit_expression(expr))
         .map_or(true, |()| probe.0)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The source bytes [`value_type_derives_from_a_call`]'s containment
+    /// scans read on this thread; test-only.
+    static CALL_PROBE_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The source bytes the call probe's containment scans read on this
+/// thread so far (test-only).
+#[cfg(test)]
+pub(crate) fn call_probe_scanned_bytes_for_tests() -> usize {
+    CALL_PROBE_SCANNED.with(std::cell::Cell::get)
 }
