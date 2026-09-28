@@ -88,8 +88,6 @@ verter_semantic/src/analysis/build.rs static_prefix_from_expression
 verter_semantic/src/analysis/decl_headers.rs collect_alias_member_headers
 verter_semantic/src/analysis/decl_headers.rs leaves
 verter_semantic/src/analysis/decl_headers.rs object_literal_member_headers
-verter_semantic/src/analysis/enum_constant.rs member_path
-verter_semantic/src/analysis/enum_constant.rs push_steps
 verter_semantic/src/analysis/flow/mod.rs collect_binding_pattern
 verter_semantic/src/analysis/flow/mod.rs open_site_at
 verter_semantic/src/analysis/flow/mod.rs record_assignment_targets
