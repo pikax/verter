@@ -783,6 +783,11 @@ pub struct RequestContext {
     /// runtime's `Drop` (which joins the sampler thread from the sampler
     /// thread). A bare counter has no destructor and reaches nothing.
     pub(crate) process_rss_peak_bytes: Arc<AtomicU64>,
+    /// The request's import-route witness builds
+    /// ([`crate::host_manage::import_route_witness::ImportRouteObservationMemo`]):
+    /// request-scoped, dropped with the context.
+    pub(crate) import_route_observations:
+        crate::host_manage::import_route_witness::ImportRouteObservationMemo,
 
     // ─────── Type-resolution counters ───────
     //
@@ -1395,6 +1400,7 @@ impl RequestContext {
             parent_request_id,
             scheduler_audit: Mutex::new(None),
             process_rss_peak_bytes: Arc::new(AtomicU64::new(0)),
+            import_route_observations: Default::default(),
             type_resolution_hops: AtomicU64::new(0),
             type_resolution_navigations: AtomicU64::new(0),
             type_resolution_expansions: AtomicU64::new(0),
