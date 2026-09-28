@@ -6396,15 +6396,15 @@ fn a_long_thenable_chain_awaits_to_its_value_within_the_work_budget() {
         );
     }
     // The budget's measure: a cold chain charges 16 units per element plus
-    // 6, every tail step among them, so under a budget of 806 units a
-    // 50-element chain answers and a 51-element one does not.
+    // 7, every tail step and the return site among them, so under a budget
+    // of 807 units a 50-element chain answers and a 51-element one does not.
     for (steps, answers) in [(50, true), (51, false)] {
         let file = format!("/ws/cov/thenable_chain_{steps}.ts");
         let source = chain(steps);
         let host = host_with(&[(file.as_str(), source.as_str())]);
         let outcome = with_dispatch(&host, |dispatch| {
             dispatch.set_connected_limits_for_tests(
-                16 * 50 + 6,
+                16 * 50 + 7,
                 super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
             );
             let key = key_of(dispatch, &file, "awaitChain");
@@ -6413,10 +6413,10 @@ fn a_long_thenable_chain_awaits_to_its_value_within_the_work_budget() {
         if answers {
             assert!(
                 matches!(&outcome, Outcome::Value { ty, degradation: None, .. } if *ty == promise_of(number())),
-                "{steps} elements answer within 806 units, got {outcome:?}"
+                "{steps} elements answer within 807 units, got {outcome:?}"
             );
         } else {
-            assert_eq!(outcome, Outcome::Miss, "{steps} elements exceed 806 units");
+            assert_eq!(outcome, Outcome::Miss, "{steps} elements exceed 807 units");
         }
     }
     // The same 200-step chain under a work budget it cannot finish within:

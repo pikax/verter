@@ -408,6 +408,7 @@ pub struct RetentionStatistics {
     pub relation_proofs: usize,
     pub relate_keys: usize,
     pub union_views: usize,
+    pub stable_key_classes: usize,
     /// Close-time semantic releases still queued behind in-flight
     /// computations.
     pub deferred_releases: usize,
@@ -464,6 +465,7 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             relation_proofs: snapshot.relation_proofs,
             relate_keys: snapshot.relate_keys,
             union_views: snapshot.union_views,
+            stable_key_classes: snapshot.stable_key_classes,
             deferred_releases: snapshot.deferred_releases,
             resolved_import_facts: snapshot.resolved_import_facts,
             component_meta_states: snapshot.component_meta_states,

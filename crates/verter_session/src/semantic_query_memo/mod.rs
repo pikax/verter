@@ -415,6 +415,9 @@ pub struct SemanticGraphStore {
     /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
     /// contract with a payload-retiring holder: `union_views.rs`.
     union_views: Mutex<union_views::UnionViews>,
+    /// The stable-key classes of this store's nodes. Ownership, lifetime and
+    /// release: [`crate::semantic_query::stable_key::KeyClasses`].
+    key_classes: Mutex<crate::semantic_query::stable_key::KeyClasses>,
     /// Test-only: order union members by DESCENDING stable key. Reversing the
     /// one union order in a fresh store — an isolated cache namespace, its
     /// views and memo entries included — is the §5.8 counterfactual that
@@ -999,6 +1002,14 @@ impl SemanticGraphStore {
     #[must_use]
     pub fn provenance(&self) -> Option<&Arc<crate::types::MetaProvenance>> {
         self.provenance.as_ref()
+    }
+
+    /// Run `f` over this store's stable-key class table.
+    pub(crate) fn with_key_classes<R>(
+        &self,
+        f: impl FnOnce(&mut crate::semantic_query::stable_key::KeyClasses) -> R,
+    ) -> R {
+        f(&mut self.key_classes.lock())
     }
 
     /// Test-only accessor returning the memo's populated-slot count

@@ -288,6 +288,19 @@ pub enum SyntaxReject {
         /// Closed mapping-failure classification.
         reason: DiagnosticSpanRejectReason,
     },
+    /// A parse or walk-stack lease the frontend needed was refused its
+    /// stack: typed operational incompleteness, not a verdict on the
+    /// source. The artifact would be built from an empty program in place
+    /// of the source's, so none is produced; the same source projects once
+    /// the stack can be had.
+    StackUnavailable {
+        /// Exact parse construction identity.
+        parse_key: Arc<ParseKey>,
+        /// Normalized parse-option identity.
+        syntax_profile: Arc<SyntaxProfileId>,
+        /// The bytes of stack the refused work needed.
+        needed: usize,
+    },
     /// The registered projection could not prove its inventory geometry.
     InvalidCarrierGeometry {
         /// Exact parse construction identity.

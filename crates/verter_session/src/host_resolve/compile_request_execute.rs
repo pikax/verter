@@ -215,7 +215,24 @@ impl VerterHost {
             )
             .map_err(CompileRequestFailure::Host)?;
 
-        self.compile_request_entry(&compile_input, request, binding)
+        // The compile is one operation: a parse or walk-stack lease refused
+        // its stack anywhere inside it fails the request with the fatal
+        // `HOST_STACK_UNAVAILABLE` diagnostic, and no product publishes.
+        match verter_parser::oxc_parse::refusals_within(|| {
+            self.compile_request_entry(&compile_input, request, binding)
+        }) {
+            (compiled, None) => compiled,
+            (_, Some(unavailable)) => Err(CompileRequestFailure::Refused {
+                canonical_id: canonical.clone(),
+                diagnostics: compile_input.parse_diagnostics.clone().merge(
+                    crate::host_resolve::compile_request_build::stack_unavailable_diagnostics(
+                        &canonical,
+                        compile_input.source.len() as u32,
+                        unavailable,
+                    ),
+                ),
+            }),
+        }
     }
 
     /// The caller-supplied-request compile lane: execute the ONE admitted

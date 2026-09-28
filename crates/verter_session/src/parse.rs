@@ -2554,11 +2554,21 @@ pub(crate) fn compile_template_data(
     // only pass that parses template expressions on this lane), so every
     // consumer converts both onto the template snapshot identically instead
     // of choosing per-route which half to keep.
-    verter_compiler::framework_common::registered_carrier_projection::template_facts_from_catalog(
-        artifact,
-        compile_source,
-        TemplateFactsBasis::AdmittedArtifact,
-    )
+    //
+    // Facts whose expression parse was refused its stack are absent, and
+    // the result that would have read them is partial: a cache keyed on
+    // the source never retains what was computed without them.
+    let (facts, refused) = verter_parser::oxc_parse::refusals_within(|| {
+        verter_compiler::framework_common::registered_carrier_projection::template_facts_from_catalog(
+            artifact,
+            compile_source,
+            TemplateFactsBasis::AdmittedArtifact,
+        )
+    });
+    if refused.is_some() {
+        crate::request_context::mark_request_result_partial();
+    }
+    facts
 }
 
 pub(crate) fn build_non_sfc_snapshot_from_program(

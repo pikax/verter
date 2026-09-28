@@ -123,6 +123,9 @@ fn reject_response(id: String, source: &str, reject: SyntaxReject) -> Response {
             SyntaxReject::UnmappedDiagnostic { parse_key, .. } => {
                 ("unmapped_diagnostic", parse_key, Vec::new())
             }
+            SyntaxReject::StackUnavailable { parse_key, .. } => {
+                ("stack_unavailable", parse_key, Vec::new())
+            }
             SyntaxReject::InvalidCarrierGeometry { parse_key, .. } => {
                 ("invalid_carrier_geometry", parse_key, Vec::new())
             }

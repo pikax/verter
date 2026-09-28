@@ -3831,6 +3831,7 @@ pub(crate) fn build_flow_slice_content(
         active_guard_bindings: Vec::new(),
         condition_guard_bindings: None,
         open_value_rooted_reads: 0,
+        known_value_rooted: 0,
         aliased_bindings: rustc_hash::FxHashMap::default(),
         annotated_params: node
             .params()
@@ -4639,17 +4640,26 @@ fn member_target_chain<'a>(
 /// (read through its apparent type), a call's result, or a static member
 /// chain rooted at one.
 fn value_rooted_member_object(object: &Expression<'_>) -> bool {
-    match unwrap_parenthesized(object) {
-        Expression::NewExpression(_)
-        | Expression::ObjectExpression(_)
-        | Expression::StringLiteral(_)
-        | Expression::NumericLiteral(_)
-        | Expression::BooleanLiteral(_)
-        | Expression::BigIntLiteral(_) => true,
-        Expression::CallExpression(call) => !call.optional,
-        Expression::StaticMemberExpression(member) => value_rooted_member_object(&member.object),
-        _ => false,
+    let mut object = object;
+    loop {
+        match unwrap_parenthesized(object) {
+            Expression::NewExpression(_)
+            | Expression::ObjectExpression(_)
+            | Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::BigIntLiteral(_) => return true,
+            Expression::CallExpression(call) => return !call.optional,
+            Expression::StaticMemberExpression(member) => object = &member.object,
+            _ => return false,
+        }
     }
+}
+
+/// The address of `expression` in its arena, its identity while the
+/// program it belongs to lives.
+fn expression_address(expression: &Expression<'_>) -> usize {
+    std::ptr::from_ref(expression) as usize
 }
 
 /// Unwrap a parenthesized expression (the IIFE callee shape).
@@ -6121,6 +6131,14 @@ enum ObjectThisMember<'p> {
 }
 
 fn this_member_path(member: &oxc_ast::ast::StaticMemberExpression<'_>) -> Option<Vec<Arc<str>>> {
+    // The chain's root decides first, before any link is copied.
+    let mut root = &member.object;
+    while let Expression::StaticMemberExpression(parent) = root {
+        root = &parent.object;
+    }
+    if !matches!(root, Expression::ThisExpression(_)) {
+        return None;
+    }
     let mut path = vec![Arc::from(member.property.name.as_str())];
     let mut object = &member.object;
     loop {
@@ -7518,6 +7536,12 @@ struct Lowerer<'a> {
     /// lowering: the planner tracks such a read as ONE reference site, so
     /// every value of the literal it reads through is selected with it.
     open_value_rooted_reads: u32,
+    /// The address of the expression lowering next when the member read
+    /// enclosing it already proved it value-rooted
+    /// ([`value_rooted_member_object`]): a chain of such reads is proved
+    /// once, at its outermost link, not again at every link. Zero when
+    /// none; taken by the next lowering.
+    known_value_rooted: usize,
     /// The bindings a test of each destructured element also narrows
     /// ([`Self::record_aliased_bindings`]), by the element's canonical
     /// binding. Owned by the lowering, dropped with it.
@@ -14796,6 +14820,9 @@ impl<'a> Lowerer<'a> {
                 &'e oxc_ast::ast::StaticMemberExpression<'a>,
                 ExprMode,
             ),
+            /// A member read off a value-rooted object, waiting on the
+            /// object: a chain of reads costs no native level.
+            ReadOnValue(&'e oxc_ast::ast::StaticMemberExpression<'a>),
             /// A call lowering its frame-lowered arguments
             /// ([`Lowerer::call_arguments_step`]), waiting on the one it
             /// asked for last.
@@ -14876,21 +14903,35 @@ impl<'a> Lowerer<'a> {
                     }
                     let mut transparent = None;
                     let mut deferred_call = None;
-                    let value =
-                        self.lower_expr_level(expr, mode, &mut transparent, &mut deferred_call);
-                    match (transparent, deferred_call) {
-                        (Some(inner), _) => tasks.push(Task::Lower(inner, mode)),
+                    let mut value_read = None;
+                    let value = self.lower_expr_level(
+                        expr,
+                        mode,
+                        &mut transparent,
+                        &mut deferred_call,
+                        &mut value_read,
+                    );
+                    match (transparent, deferred_call, value_read) {
+                        (Some(inner), _, _) => tasks.push(Task::Lower(inner, mode)),
+                        // A member read off a value-rooted object lowers the
+                        // object first; the object is value-rooted itself.
+                        (None, None, Some(member)) => {
+                            self.open_value_rooted_reads += 1;
+                            self.known_value_rooted = expression_address(&member.object);
+                            tasks.push(Task::ReadOnValue(member));
+                            tasks.push(Task::Lower(&member.object, mode));
+                        }
                         // A call records its arguments as whole values,
                         // then lowers its callee, then its frame-lowered
                         // arguments.
-                        (None, Some(call)) => {
+                        (None, Some(call), _) => {
                             tasks.push(Task::CallCallee(expr, call, mode));
                             if let Some(mut frame) = self.record_call_start(call) {
                                 let child = self.record_call_step(&mut frame, None);
                                 continue_call_record(frame, child, &mut tasks);
                             }
                         }
-                        (None, None) => values.push(value),
+                        (None, None, None) => values.push(value),
                     }
                 }
                 Task::Awaited => {
@@ -14910,6 +14951,7 @@ impl<'a> Lowerer<'a> {
                     match on_value {
                         Some(member) => {
                             self.open_value_rooted_reads += 1;
+                            self.known_value_rooted = expression_address(&member.object);
                             tasks.push(Task::CallOnValue(call, member, mode));
                             tasks.push(Task::Lower(&member.object, mode));
                         }
@@ -14932,6 +14974,15 @@ impl<'a> Lowerer<'a> {
                     );
                     let step = self.call_arguments_frame(lowered, call, mode);
                     continue_call_arguments(step, &mut tasks, &mut values);
+                }
+                Task::ReadOnValue(member) => {
+                    let object = values.pop().expect("the member's object");
+                    self.open_value_rooted_reads -= 1;
+                    values.push(SliceExpr::MemberOf {
+                        object: Box::new(object),
+                        member: Arc::from(member.property.name.as_str()),
+                        span: member.span.into(),
+                    });
                 }
                 Task::CallArguments(frame) => {
                     let delivered = values.pop().expect("the argument the call asked for");
@@ -15136,7 +15187,10 @@ impl<'a> Lowerer<'a> {
         mode: ExprMode,
         transparent: &mut Option<&'e Expression<'x>>,
         deferred_call: &mut Option<&'e oxc_ast::ast::CallExpression<'x>>,
+        value_read: &mut Option<&'e oxc_ast::ast::StaticMemberExpression<'x>>,
     ) -> SliceExpr {
+        let known_value_rooted =
+            std::mem::take(&mut self.known_value_rooted) == expression_address(expr);
         match self.lower_evolving_operation(expr, mode) {
             EvolvingLowering::Operation(operation) => {
                 return SliceExpr::EvolvingArray(Box::new(operation))
@@ -15194,7 +15248,8 @@ impl<'a> Lowerer<'a> {
                 if matches!(
                     self.keyword_this(),
                     Some(SliceThis::Value { .. } | SliceThis::Static { .. })
-                ) && this_member_path(member).is_some() =>
+                ) && !known_value_rooted
+                    && this_member_path(member).is_some() =>
             {
                 let path = this_member_path(member).expect("guarded");
                 self.lower_object_this_read(&path, member.span, mode)
@@ -15202,7 +15257,9 @@ impl<'a> Lowerer<'a> {
             // A member read off the receiver (`this.v`, `this.a.b`) projects
             // through the same member-path walk an optional chain takes.
             Expression::StaticMemberExpression(member)
-                if self.this.is_some() && this_member_path(member).is_some() =>
+                if self.this.is_some()
+                    && !known_value_rooted
+                    && this_member_path(member).is_some() =>
             {
                 let path = this_member_path(member).expect("guarded");
                 SliceExpr::OptionalMember {
@@ -15300,17 +15357,14 @@ impl<'a> Lowerer<'a> {
             }
             // A member read off a constructed value or an object literal
             // (`new C().p`, `({ a: 1 }).a`, `({ o: { x: 1 } }).o.x`).
+            // The read lowers as a frame of `lower_expr`'s task stack
+            // (`Task::ReadOnValue`), waiting on its object, so a chain of
+            // reads costs no native level.
             Expression::StaticMemberExpression(member)
-                if value_rooted_member_object(&member.object) =>
+                if known_value_rooted || value_rooted_member_object(&member.object) =>
             {
-                self.open_value_rooted_reads += 1;
-                let object = self.lower_expr(&member.object, mode);
-                self.open_value_rooted_reads -= 1;
-                SliceExpr::MemberOf {
-                    object: Box::new(object),
-                    member: Arc::from(member.property.name.as_str()),
-                    span: member.span.into(),
-                }
+                *value_read = Some(member);
+                SliceExpr::Elided
             }
             // An element access whose every key is a literal (`a["k"]`,
             // `t[1]`, `o.p["q"]`) is the member reference its names spell:
@@ -15523,6 +15577,13 @@ impl<'a> Lowerer<'a> {
                 }
                 match value_descent(other) {
                     ValueDescent::Transparent(inner) => {
+                        // A parenthesised value-rooted object is value-rooted
+                        // inside its parentheses too.
+                        if known_value_rooted
+                            && matches!(other, Expression::ParenthesizedExpression(_))
+                        {
+                            self.known_value_rooted = expression_address(inner);
+                        }
                         *transparent = Some(inner);
                         SliceExpr::Elided
                     }

@@ -83,21 +83,62 @@ pub enum IndexedCallReadSite {
 }
 
 /// Rebase substring-relative program points to their containing source file.
+/// The records nested in a record are rebased from an explicit stack.
 pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, base: u32) {
-    match expression {
-        IndexedValueExpression::Value(_) => {}
-        IndexedValueExpression::UnsupportedCall { point }
-        | IndexedValueExpression::TemplateStrings { point } => *point = point.saturating_add(base),
-        IndexedValueExpression::Call(call) => {
-            call.point = call.point.saturating_add(base);
-            offset_indexed_value_expression(&mut call.callee, base);
-            if let Some(receiver) = call.receiver.as_mut() {
-                offset_indexed_value_expression(receiver, base);
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        match expression {
+            IndexedValueExpression::Value(_) => {}
+            IndexedValueExpression::UnsupportedCall { point }
+            | IndexedValueExpression::TemplateStrings { point } => {
+                *point = point.saturating_add(base)
             }
-            for argument in Arc::make_mut(&mut call.args) {
-                argument.point = argument.point.saturating_add(base);
-                offset_indexed_value_expression(&mut argument.expression, base);
+            IndexedValueExpression::Member { object, .. } => pending.push(object),
+            IndexedValueExpression::Call(call) => {
+                call.point = call.point.saturating_add(base);
+                let IndexedValueCall {
+                    callee,
+                    receiver,
+                    args,
+                    ..
+                } = call;
+                pending.push(callee);
+                if let Some(receiver) = receiver.as_mut() {
+                    pending.push(receiver);
+                }
+                for argument in Arc::make_mut(args) {
+                    argument.point = argument.point.saturating_add(base);
+                    pending.push(&mut argument.expression);
+                }
             }
+        }
+    }
+}
+
+/// The object and name of a static member read whose object is a value the
+/// indexed domain evaluates: a direct call, construct or tagged template,
+/// or a member read off one (`f().a.b`). Its value is the object's member
+/// ([`IndexedValueExpression::Member`]).
+fn member_of_evaluated_value<'a>(
+    expr: &'a Expression<'a>,
+) -> Option<(&'a Expression<'a>, &'a str)> {
+    let Expression::StaticMemberExpression(member) = unwrap_expression_wrappers(expr) else {
+        return None;
+    };
+    if member.optional {
+        return None;
+    }
+    let mut root = &member.object;
+    loop {
+        match unwrap_expression_wrappers(root) {
+            Expression::CallExpression(call) if !call.optional => {
+                return Some((&member.object, member.property.name.as_str()));
+            }
+            Expression::NewExpression(_) | Expression::TaggedTemplateExpression(_) => {
+                return Some((&member.object, member.property.name.as_str()));
+            }
+            Expression::StaticMemberExpression(inner) if !inner.optional => root = &inner.object,
+            _ => return None,
         }
     }
 }
@@ -7435,7 +7476,10 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
 ) -> IndexedValueExpression {
     match indexed_value_step(expr, source, policy, read_root) {
         IndexedValueStep::Lowered(lowered) => lowered,
-        IndexedValueStep::Call(call) => lower_nested_indexed_calls(call, source),
+        IndexedValueStep::Call(call) => lower_nested_indexed_calls(IndexedNode::Call(call), source),
+        IndexedValueStep::Member(object, name) => {
+            lower_nested_indexed_calls(IndexedNode::Member(object, name), source)
+        }
     }
 }
 
@@ -7448,22 +7492,48 @@ enum IndexedCallNode<'a> {
     Tagged(&'a oxc_ast::ast::TaggedTemplateExpression<'a>),
 }
 
-/// One value expression's indexed lowering: done, or a direct call-like
-/// record to build over its children.
+/// One value expression's indexed lowering: done, a direct call-like
+/// record to build over its children, or a member read off an evaluated
+/// value to build over its object.
 enum IndexedValueStep<'a> {
     Lowered(IndexedValueExpression),
     Call(IndexedCallNode<'a>),
+    Member(&'a Expression<'a>, &'a str),
+}
+
+/// A record [`lower_nested_indexed_calls`] builds over its lowered
+/// children.
+#[derive(Clone, Copy)]
+enum IndexedNode<'a> {
+    Call(IndexedCallNode<'a>),
+    Member(&'a Expression<'a>, &'a str),
+}
+
+/// The receiver a call-like record lowers: its callee's object, unless the
+/// callee is a member read off an evaluated value, whose object the
+/// callee's record already holds.
+fn indexed_record_receiver<'a>(callee: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
+    if member_of_evaluated_value(callee).is_some() {
+        return None;
+    }
+    indexed_call_receiver(callee)
 }
 
 /// Lower a direct call-like expression, and every direct call-like
 /// expression nested in its callee, receiver and arguments, from an
 /// explicit stack: a call nested in an argument of a call (`f(f(f(1)))`) or
-/// in a receiver (`a.m().m()`) costs no native level. The nested records
-/// report no read roots, exactly as their recursive lowering did.
-fn lower_nested_indexed_calls(first: IndexedCallNode<'_>, source: &str) -> IndexedValueExpression {
+/// in a receiver (`a.m().m()`) costs no native level, nor does a member
+/// read off a call's result (`f().a.b`). The nested records report no read
+/// roots, exactly as their recursive lowering did.
+fn lower_nested_indexed_calls(first: IndexedNode<'_>, source: &str) -> IndexedValueExpression {
     enum Task<'a> {
         Value(&'a Expression<'a>, MemberLiteralPolicy),
         Build(IndexedCallNode<'a>),
+        BuildMember(&'a str),
+    }
+    fn push_member<'a>(object: &'a Expression<'a>, name: &'a str, tasks: &mut Vec<Task<'a>>) {
+        tasks.push(Task::BuildMember(name));
+        tasks.push(Task::Value(object, MemberLiteralPolicy::Widen));
     }
     fn push_node<'a>(node: IndexedCallNode<'a>, tasks: &mut Vec<Task<'a>>) {
         tasks.push(Task::Build(node));
@@ -7493,7 +7563,7 @@ fn lower_nested_indexed_calls(first: IndexedCallNode<'_>, source: &str) -> Index
         if let Some(callee) = callee {
             tasks.push(Task::Value(callee, MemberLiteralPolicy::Widen));
             if !matches!(node, IndexedCallNode::New(_)) {
-                if let Some(receiver) = indexed_call_receiver(callee) {
+                if let Some(receiver) = indexed_record_receiver(callee) {
                     tasks.push(Task::Value(receiver, MemberLiteralPolicy::Widen));
                 }
             }
@@ -7501,16 +7571,27 @@ fn lower_nested_indexed_calls(first: IndexedCallNode<'_>, source: &str) -> Index
     }
     let mut tasks = Vec::new();
     let mut values: Vec<IndexedValueExpression> = Vec::new();
-    push_node(first, &mut tasks);
+    match first {
+        IndexedNode::Call(node) => push_node(node, &mut tasks),
+        IndexedNode::Member(object, name) => push_member(object, name, &mut tasks),
+    }
     while let Some(task) = tasks.pop() {
         match task {
             Task::Value(expr, policy) => match indexed_value_step(expr, source, policy, None) {
                 IndexedValueStep::Lowered(lowered) => values.push(lowered),
                 IndexedValueStep::Call(node) => push_node(node, &mut tasks),
+                IndexedValueStep::Member(object, name) => push_member(object, name, &mut tasks),
             },
             Task::Build(node) => {
                 let call = build_indexed_call(node, &mut values, source);
                 values.push(IndexedValueExpression::Call(call));
+            }
+            Task::BuildMember(name) => {
+                let object = values.pop().expect("the member's object");
+                values.push(IndexedValueExpression::Member {
+                    object: Box::new(object),
+                    name: Arc::from(name),
+                });
             }
         }
     }
@@ -7544,8 +7625,8 @@ fn build_indexed_call(
     let lowered_arguments = values.split_off(values.len() - argument_count);
     let callee = values.pop().expect("the callee's record");
     let receiver = match node {
-        IndexedCallNode::Call(call) => indexed_call_receiver(&call.callee),
-        IndexedCallNode::Tagged(tagged) => indexed_call_receiver(&tagged.tag),
+        IndexedCallNode::Call(call) => indexed_record_receiver(&call.callee),
+        IndexedCallNode::Tagged(tagged) => indexed_record_receiver(&tagged.tag),
         IndexedCallNode::New(_) => None,
     }
     .map(|_| Box::new(values.pop().expect("the receiver's record")));
@@ -7700,6 +7781,10 @@ fn indexed_value_step<'a>(
                 .with_predicate(signature.predicate),
             )))
         }
+        unwrapped if member_of_evaluated_value(unwrapped).is_some() => {
+            let (object, name) = member_of_evaluated_value(unwrapped).expect("the member read");
+            return IndexedValueStep::Member(object, name);
+        }
         unwrapped if value_type_derives_from_a_call(unwrapped, source) => {
             IndexedValueExpression::UnsupportedCall {
                 point: unwrapped.span().start,
@@ -7782,7 +7867,7 @@ fn indexed_callee_and_receiver(
     source: &str,
     observe: &mut Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
 ) -> (IndexedValueExpression, Option<Box<IndexedValueExpression>>) {
-    let receiver = indexed_call_receiver(callee).map(|receiver| {
+    let receiver = indexed_record_receiver(callee).map(|receiver| {
         let mut read_root = IndexedValueReadRoot::NonBinding;
         let lowered = lower_indexed_value_expression_with_policy_and_read_root(
             receiver,
@@ -7802,7 +7887,7 @@ pub fn lower_indexed_call_expression(
     call: &oxc_ast::ast::CallExpression<'_>,
     source: &str,
 ) -> IndexedValueCall {
-    match lower_nested_indexed_calls(IndexedCallNode::Call(call), source) {
+    match lower_nested_indexed_calls(IndexedNode::Call(IndexedCallNode::Call(call)), source) {
         IndexedValueExpression::Call(call) => call,
         _ => unreachable!("a call lowers to its call record"),
     }
@@ -7998,7 +8083,10 @@ fn lower_indexed_call_argument(
                 point: expression.span().start,
             }
         }
-        IndexedValueStep::Call(node) => lower_nested_indexed_calls(node, source),
+        IndexedValueStep::Call(node) => lower_nested_indexed_calls(IndexedNode::Call(node), source),
+        IndexedValueStep::Member(object, name) => {
+            lower_nested_indexed_calls(IndexedNode::Member(object, name), source)
+        }
     };
     if let Some(observe) = observe.as_mut() {
         observe(IndexedCallReadSite::Argument(ordinal), read_root);
@@ -8145,6 +8233,8 @@ fn value_type_derives_from_a_call(expr: &Expression<'_>, source: &str) -> bool {
         };
     }
     let mut probe = CallProbe::default();
-    verter_parser::oxc_parse::with_span_stack(source, expr.span(), || probe.visit_expression(expr));
-    probe.0
+    // A walk refused its stack is taken as a call, the conservative answer;
+    // the operation around it is refused with the refusal.
+    verter_parser::oxc_parse::leased_span_walk(source, expr.span(), || probe.visit_expression(expr))
+        .map_or(true, |()| probe.0)
 }

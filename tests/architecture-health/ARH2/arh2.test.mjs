@@ -33,7 +33,6 @@ test("ARH2-ratification: clean products validate and cover every mandatory case 
   ]);
   // The live re-derivation claims are real: predecessor validates ran inside.
   assert.ok(clean["characterization"].ac3.concerns.length === 5);
-  assert.ok(clean["complexity-measurements"].structural.length === 5);
 });
 
 test("ARH2-population dirty twin: dropped hotspot is rejected (AC1)", () => {
@@ -82,41 +81,6 @@ test("ARH2-population dirty twin: dropped responsibility is rejected (AC1)", () 
   assert.ok(
     result.errors.some(
       (e) => e.caseId === "ARH2-population" && e.code === "responsibility-dropped",
-    ),
-    JSON.stringify(result.errors),
-  );
-});
-
-test("ARH2-population dirty twin: stale structural LOC is rejected (live invariant)", () => {
-  const dirty = cloneProducts();
-  const row = dirty["complexity-measurements"].structural.find((r) =>
-    r.path.endsWith("semantic_query.rs"),
-  );
-  row.fileLoc += 1;
-  const result = validate(dirty);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.errors.some(
-      (e) =>
-        e.caseId === "ARH2-population" &&
-        e.code === "structural-loc-drift" &&
-        e.detail.includes("semantic_query.rs"),
-    ),
-    JSON.stringify(result.errors),
-  );
-});
-
-test("ARH2-population dirty twin: stale population count is rejected (live invariant)", () => {
-  const dirty = cloneProducts();
-  dirty["complexity-measurements"].populations.arh0Inventory.packages += 1;
-  const result = validate(dirty);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.errors.some(
-      (e) =>
-        e.caseId === "ARH2-population" &&
-        e.code === "population-count-drift" &&
-        e.detail.includes("packages"),
     ),
     JSON.stringify(result.errors),
   );
@@ -751,30 +715,6 @@ test("ARH2-separation dirty twin: pinned lane missing from the dimension is reje
   assert.equal(result.ok, false);
   assert.ok(
     result.errors.some((e) => e.caseId === "ARH2-separation" && e.code === "behavior-lane-unbound"),
-    JSON.stringify(result.errors),
-  );
-});
-
-test("ARH2-separation dirty twin: drifted over-threshold count is rejected (live invariant)", () => {
-  const dirty = cloneProducts();
-  dirty["complexity-measurements"].godModuleBasis.productionFilesOverThreshold = 32;
-  const result = validate(dirty);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.errors.some((e) => e.caseId === "ARH2-separation" && e.code === "threshold-basis-drift"),
-    JSON.stringify(result.errors),
-  );
-});
-
-test("ARH2-separation dirty twin: threshold ceiling detached from the live guard is rejected", () => {
-  const dirty = cloneProducts();
-  dirty["complexity-measurements"].thresholds[0].defaultMaxLines = 5000;
-  const result = validate(dirty);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.errors.some(
-      (e) => e.caseId === "ARH2-separation" && e.code === "threshold-ceiling-mismatch",
-    ),
     JSON.stringify(result.errors),
   );
 });

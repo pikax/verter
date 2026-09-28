@@ -66,9 +66,6 @@ pub fn record_flow_slice_budget_exceeded(exceeded: &FlowSliceBudgetExceeded) {
     }
     crate::host_manage::push_structured_event(StructuredAuditEvent::FlowSliceBudgetExceeded {
         axis: match exceeded.axis {
-            verter_semantic::analysis::flow::peeker::FlowSliceBudgetAxis::ReturnSites => {
-                FlowSliceBudgetAxisTag::ReturnSites
-            }
             verter_semantic::analysis::flow::peeker::FlowSliceBudgetAxis::SelectedNodes => {
                 FlowSliceBudgetAxisTag::SelectedNodes
             }

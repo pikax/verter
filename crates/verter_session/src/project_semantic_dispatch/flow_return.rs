@@ -1398,38 +1398,77 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expression: &verter_type_expr::IndexedValueExpression,
         hold_flow_result: bool,
     ) -> Option<IndexedValue> {
-        // A call's callee, receiver and arguments evaluate from an explicit
-        // stack of the calls waiting on them, in that order, a call ending
-        // at a callee or argument with no value: a call nested in an
-        // argument or a receiver (`f(f(f(1)))`, `b.m().m()`) costs no
-        // native level.
+        // A call's callee, receiver and arguments, and a member read's
+        // object, evaluate from an explicit stack of the records waiting on
+        // them, in that order, a record ending at a child with no value: a
+        // call nested in an argument or a receiver (`f(f(f(1)))`,
+        // `b.m().m()`) or a member read off a call's result (`f().a.b`)
+        // costs no native level.
         struct Waiting<'e> {
             call: &'e verter_type_expr::IndexedValueCall,
             hold_flow_result: bool,
             callee: Option<crate::semantic_query::SemanticNodeId>,
             receiver: Option<Option<crate::semantic_query::SemanticNodeId>>,
+            /// The object of the member read the call's callee is: its
+            /// receiver.
+            member_receiver: Option<crate::semantic_query::SemanticNodeId>,
             args: Vec<crate::semantic_query::CallArgKey>,
         }
-        let mut waiting: Vec<Waiting<'_>> = Vec::new();
-        let (mut current, mut hold) = (expression, hold_flow_result);
+        enum Pending<'e> {
+            Call(Waiting<'e>),
+            /// A member read waiting on its object; the callee of the call
+            /// below it when `callee`.
+            Member {
+                name: &'e Arc<str>,
+                callee: bool,
+            },
+        }
+        let mut waiting: Vec<Pending<'_>> = Vec::new();
+        let (mut current, mut hold, mut as_callee) = (expression, hold_flow_result, false);
         loop {
             let mut value = match self.indexed_value_leaf(canonical, owner, current) {
                 Ok(value) => value,
-                Err(call) => {
-                    waiting.push(Waiting {
+                Err(IndexedRecord::Call(call)) => {
+                    waiting.push(Pending::Call(Waiting {
                         call,
                         hold_flow_result: hold,
                         callee: None,
                         receiver: None,
+                        member_receiver: None,
                         args: Vec::with_capacity(call.args.len()),
+                    }));
+                    (current, hold, as_callee) = (&call.callee, false, true);
+                    continue;
+                }
+                Err(IndexedRecord::Member(object, name)) => {
+                    waiting.push(Pending::Member {
+                        name,
+                        callee: as_callee,
                     });
-                    (current, hold) = (&call.callee, false);
+                    (current, hold, as_callee) = (object, false, false);
                     continue;
                 }
             };
             loop {
-                let Some(top) = waiting.last_mut() else {
-                    return value;
+                let top = match waiting.last_mut() {
+                    None => return value,
+                    Some(Pending::Member { name, callee }) => {
+                        let (name, callee) = (*name, *callee);
+                        waiting.pop();
+                        let object = value.map(|object| object.node);
+                        value = object
+                            .and_then(|object| self.indexed_member_value(canonical, object, name))
+                            .map(|node| IndexedValue { node, fresh: false });
+                        if callee {
+                            if let (Some(object), Some(Pending::Call(call))) =
+                                (object, waiting.last_mut())
+                            {
+                                call.member_receiver = Some(object);
+                            }
+                        }
+                        continue;
+                    }
+                    Some(Pending::Call(top)) => top,
                 };
                 let call = top.call;
                 if top.callee.is_none() {
@@ -1439,11 +1478,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         continue;
                     };
                     top.callee = Some(callee.node);
-                    if let Some(receiver) = call.receiver.as_deref() {
-                        (current, hold) = (receiver, false);
+                    if let Some(receiver) = top.member_receiver.take() {
+                        top.receiver = Some(Some(receiver));
+                    } else if let Some(receiver) = call.receiver.as_deref() {
+                        (current, hold, as_callee) = (receiver, false, false);
                         break;
+                    } else {
+                        top.receiver = Some(None);
                     }
-                    top.receiver = Some(None);
                 } else if top.receiver.is_none() {
                     top.receiver = Some(value.map(|receiver| receiver.node));
                 } else {
@@ -1465,10 +1507,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     });
                 }
                 if let Some(argument) = call.args.get(top.args.len()) {
-                    (current, hold) = (&argument.expression, false);
+                    (current, hold, as_callee) = (&argument.expression, false, false);
                     break;
                 }
-                let finished = waiting.pop().expect("the call on top");
+                let Some(Pending::Call(finished)) = waiting.pop() else {
+                    unreachable!("the call on top")
+                };
                 value = self.resolve_indexed_call(
                     canonical,
                     owner,
@@ -1482,14 +1526,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// One indexed expression evaluated, unless it is a call, whose
-    /// children [`Self::evaluate_indexed_value`] evaluates first.
+    /// Member `name` of the value `object` an indexed expression evaluated
+    /// (`f().x`, the callee of `b.m().m()`): the shared `ProjectPath {
+    /// Navigate }` member walk, a declaration's self-reference read as the
+    /// declaration it names. None when the member does not project.
+    pub(crate) fn indexed_member_value(
+        &self,
+        canonical: &str,
+        object: crate::semantic_query::SemanticNodeId,
+        name: &Arc<str>,
+    ) -> Option<crate::semantic_query::SemanticNodeId> {
+        let object = self.self_reference_declaration(object).unwrap_or(object);
+        let _demand_scope =
+            super::LexicalDemandScopeGuard::push(&self.lexical_demand_scope, Arc::from(canonical));
+        let path: Arc<[crate::semantic_query::PathSegment]> =
+            Arc::from([crate::semantic_query::PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier(Arc::clone(name)),
+            )]);
+        match self.execute_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
+            base: object,
+            path,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        }) {
+            crate::semantic_query::QueryResult::Value(output)
+                if !matches!(
+                    self.graph().node_data(output.value).as_deref(),
+                    Some(SemanticNodeData::Opaque(_))
+                ) =>
+            {
+                Some(output.value)
+            }
+            _ => None,
+        }
+    }
+
+    /// One indexed expression evaluated, unless it is a call or a member
+    /// read, whose children [`Self::evaluate_indexed_value`] evaluates first.
     fn indexed_value_leaf<'e>(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         expression: &'e verter_type_expr::IndexedValueExpression,
-    ) -> Result<Option<IndexedValue>, &'e verter_type_expr::IndexedValueCall> {
+    ) -> Result<Option<IndexedValue>, IndexedRecord<'e>> {
         use verter_type_expr::IndexedValueExpression;
         let regular = |node: Option<crate::semantic_query::SemanticNodeId>| {
             node.map(|node| IndexedValue { node, fresh: false })
@@ -1510,7 +1590,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             IndexedValueExpression::TemplateStrings { .. } => {
                 regular(self.global_template_strings_array(canonical, owner))
             }
-            IndexedValueExpression::Call(call) => return Err(call),
+            IndexedValueExpression::Call(call) => return Err(IndexedRecord::Call(call)),
+            IndexedValueExpression::Member { object, name } => {
+                return Err(IndexedRecord::Member(object, name))
+            }
         })
     }
 
@@ -5295,6 +5378,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
             };
+        // Each return site the slice plans is a contributor the evaluation
+        // joins: the connected demand pays for them before the evaluation
+        // runs, so a body answers exactly as far as the demand's work
+        // allows, however many returns it has.
+        let return_sites = planned
+            .selection()
+            .origins()
+            .iter()
+            .filter(|origin| {
+                matches!(
+                    origin,
+                    verter_semantic::analysis::flow::peeker::SliceOrigin::Return(_)
+                )
+            })
+            .count();
+        if self.connected_demand().charge_units(return_sites).is_err() {
+            return degraded(
+                FlowReturnFailure::Budget(
+                    verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                ),
+                self_roots,
+            );
+        }
         // The callee returns this body demands are evaluated first,
         // bottom-up, so the body reuses them instead of recursing.
         let _schedule = self.schedule_flow_return_callees(key, &index, entry, &lowered);
@@ -7777,6 +7883,13 @@ pub(crate) struct IndexedValue {
     fresh: bool,
 }
 
+/// An indexed record [`ProjectSemanticDispatch::evaluate_indexed_value`]
+/// evaluates over its children: a call, or a member read off a value.
+enum IndexedRecord<'e> {
+    Call(&'e verter_type_expr::IndexedValueCall),
+    Member(&'e verter_type_expr::IndexedValueExpression, &'e Arc<str>),
+}
+
 /// The inference deposit mode of an indexed call argument: a bare literal,
 /// or a value that is a fresh literal (a call's fresh result), deposits
 /// as the fresh literal source it is; any other authored form pins its
@@ -8442,12 +8555,13 @@ pub(super) mod schedule;
 struct FlowEvaluator<'d, 'b> {
     dispatch: &'d ProjectSemanticDispatch<'d>,
     /// The receiver value of a member call on a value the indexed program
-    /// cannot evaluate (a call's result: `b.m().m()`), by the call's source
-    /// offset: the executor route reads it where it would evaluate the
-    /// authored receiver. Request-scoped: filled by the frame's evaluation
-    /// of the call (one entry per such call site of the frame) and dropped
-    /// with the frame, a cancel or a budget trip included.
-    call_receivers: rustc_hash::FxHashMap<u32, SemanticNodeId>,
+    /// cannot evaluate (a call's result: `b.m().m()`), by the call's whole
+    /// span — every call of a chain starts where the chain does, so only
+    /// the span tells them apart. The call's evaluation writes it before
+    /// its executor route reads it, in the same pass. Request-scoped: one
+    /// entry per such call site of the frame, dropped with the frame, a
+    /// cancel or a budget trip included.
+    call_receivers: rustc_hash::FxHashMap<verter_span::Span, SemanticNodeId>,
     /// The frame-lowered argument values of each call, by the call's span
     /// ([`crate::flow_slice_content::SliceContent::call_arguments`]).
     call_arguments: Arc<
@@ -9478,6 +9592,8 @@ enum Positional<T> {
 /// value of the child it asked for.
 enum Waiting<'e> {
     Erase,
+    /// A member read off a value-rooted object, waiting on the object.
+    MemberOf(&'e Arc<str>, verter_span::Span),
     Not {
         widen: bool,
     },
@@ -22247,6 +22363,48 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// The read of `member` off `object`, the value of a value-rooted
+    /// member read's object: the member's node, or an unmodeled position
+    /// when the object's surface has no modeled member of that name.
+    fn finish_member_of(
+        &mut self,
+        object: SemanticNodeId,
+        member: &Arc<str>,
+        span: verter_span::Span,
+    ) -> Positional<SemanticNodeId> {
+        match self.project_segments_navigate(object, std::slice::from_ref(member)) {
+            Some(node)
+                if !matches!(
+                    self.dispatch.graph().node_data(node).as_deref(),
+                    Some(SemanticNodeData::Opaque(_))
+                ) =>
+            {
+                // A class instance's `readonly` member declared by its
+                // literal initializer holds that fresh literal: the read is
+                // fresh at the position that consumes it (`new K().r`
+                // widens at a return).
+                if matches!(
+                    self.dispatch.graph().node_data(node).as_deref(),
+                    Some(SemanticNodeData::Literal(_))
+                ) && self.dispatch.instance_member_read_widens(object, member)
+                {
+                    self.call_fresh_literal_returns.push(FreshCallReturn {
+                        span,
+                        node,
+                        values: Arc::from([node]),
+                    });
+                }
+                Positional::Value(node)
+            }
+            _ => {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::UnmodeledExpression,
+                ));
+                Positional::Unmodeled
+            }
+        }
+    }
+
     /// [`Self::eval_expr`] from `run`'s explicit stack, with `delivered` the
     /// value of the nested function value it suspended at. With `suspend`, a
     /// nested function value anywhere on the stack suspends the run
@@ -22295,6 +22453,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         run.waiting.push(Waiting::Awaited);
                         run.waiting.push(Waiting::Erase);
                         run.current = operand;
+                        continue;
+                    }
+                    // A member read waits on its object from this stack: a
+                    // chain of reads costs no native level.
+                    SliceExpr::MemberOf {
+                        object,
+                        member,
+                        span,
+                    } => {
+                        run.waiting.push(Waiting::MemberOf(member, *span));
+                        run.waiting.push(Waiting::Erase);
+                        run.current = object;
                         continue;
                     }
                     SliceExpr::Sequence {
@@ -22424,6 +22594,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         };
                     }
                     Some(Waiting::NonNull) => value = self.finish_non_null(value),
+                    Some(Waiting::MemberOf(member, span)) => {
+                        if let Positional::Value(object) = value {
+                            value = self.finish_member_of(object, member, span);
+                        }
+                    }
                     Some(Waiting::Awaited) => {
                         value = match value {
                             Positional::Value(node) => {
@@ -23056,43 +23231,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 object,
                 member,
                 span,
-            } => {
-                let object = match self.eval_expr(object) {
-                    Positional::Value(node) => node,
-                    other => return other,
-                };
-                match self.project_segments_navigate(object, std::slice::from_ref(member)) {
-                    Some(node)
-                        if !matches!(
-                            self.dispatch.graph().node_data(node).as_deref(),
-                            Some(SemanticNodeData::Opaque(_))
-                        ) =>
-                    {
-                        // A class instance's `readonly` member declared by
-                        // its literal initializer holds that fresh literal:
-                        // the read is fresh at the position that consumes
-                        // it (`new K().r` widens at a return).
-                        if matches!(
-                            self.dispatch.graph().node_data(node).as_deref(),
-                            Some(SemanticNodeData::Literal(_))
-                        ) && self.dispatch.instance_member_read_widens(object, member)
-                        {
-                            self.call_fresh_literal_returns.push(FreshCallReturn {
-                                span: *span,
-                                node,
-                                values: Arc::from([node]),
-                            });
-                        }
-                        Positional::Value(node)
-                    }
-                    _ => {
-                        self.record_degradation(FlowReturnDegradation::FlowGap(
-                            crate::semantic_query::FlowGap::UnmodeledExpression,
-                        ));
-                        Positional::Unmodeled
-                    }
-                }
-            }
+            } => match self.eval_expr(object) {
+                Positional::Value(object) => self.finish_member_of(object, member, *span),
+                other => other,
+            },
             crate::flow_slice_content::SliceExpr::ParamValue { ordinal } => {
                 match self.params.get(*ordinal as usize).copied() {
                     Some(node) => Positional::Value(node),
@@ -24321,7 +24463,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
-                self.call_receivers.insert(site.span().start, object);
+                self.call_receivers.insert(site.span(), object);
                 let Some(callee) = self
                     .project_path_navigate(object, std::slice::from_ref(member))
                     .filter(|callee| {

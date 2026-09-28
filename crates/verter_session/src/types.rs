@@ -2736,6 +2736,15 @@ pub(crate) const HOST_MISSING_MACRO_SEMANTIC_BUNDLE: &str =
 pub(crate) const HOST_UNAVAILABLE_MACRO_SEMANTIC_RESULT: &str =
     verter_compiler::diagnostics::X_UNAVAILABLE_MACRO_SEMANTIC_RESULT;
 
+/// A parse or walk-stack lease the compile needed was refused its stack.
+///
+/// One of the [`CompileFailure::blocked_on_unavailable_input`] codes: the
+/// blocker is the stack the host could reserve at that moment, not the
+/// bytes, and nothing the compile produced publishes — its programs were
+/// empty in place of the source's. The same bytes compile once the stack
+/// can be reserved.
+pub(crate) const HOST_STACK_UNAVAILABLE: &str = "HOST_STACK_UNAVAILABLE";
+
 impl CompileFailure {
     /// Whether this compile was blocked on an input OUTSIDE the compiled
     /// bytes, rather than reaching a verdict from those bytes alone.
@@ -2775,6 +2784,7 @@ impl CompileFailure {
                         | HOST_MISSING_MACRO_TYPE_DEP
                         | HOST_MISSING_MACRO_SEMANTIC_BUNDLE
                         | HOST_UNAVAILABLE_MACRO_SEMANTIC_RESULT
+                        | HOST_STACK_UNAVAILABLE
                 )
         })
     }
@@ -4962,6 +4972,9 @@ pub struct HostRetentionSnapshot {
     /// Resident union member views (one per distinct union built, released
     /// with the union's document).
     pub union_views: usize,
+    /// Stable-key classes (distinct subtrees) the semantic store's key
+    /// table holds, forgotten with their released nodes.
+    pub stable_key_classes: usize,
     /// Live shape-cache entries.
     pub shape_cache_entries: usize,
     /// Flow-slice graph bundles.
@@ -5364,6 +5377,7 @@ mod tests {
             HOST_MISSING_EXTERNAL_SOURCE,
             HOST_MISSING_MACRO_TYPE_DEP,
             HOST_UNAVAILABLE_MACRO_SEMANTIC_RESULT,
+            HOST_STACK_UNAVAILABLE,
         ] {
             assert!(
                 failure_with(blocked, HostSeverity::Error).blocked_on_unavailable_input(),
