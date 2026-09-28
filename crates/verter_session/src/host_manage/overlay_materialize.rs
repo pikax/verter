@@ -232,6 +232,11 @@ impl OverlayArtifactIdentity {
     }
 }
 
+/// Marks an overlay (editor content) registration's incarnation, as opposed
+/// to the base registration keyed by the host instance: the bit the close
+/// path uses to retract a document's overlay registrations only.
+pub(crate) const OVERLAY_INCARNATION_BIT: u64 = 1_u64 << 63;
+
 impl VerterHost {
     /// Return the registered carrier structure owned by the active view.
     /// Overlay source is registered through the same authority used by
@@ -267,7 +272,7 @@ impl VerterHost {
         }
         let content_hash = view.content_hash_for(canonical_id)?;
         let generation = u64::from_le_bytes(content_hash[..8].try_into().ok()?).max(1);
-        let incarnation = fingerprint | (1_u64 << 63);
+        let incarnation = fingerprint | OVERLAY_INCARNATION_BIT;
         let registered = self
             .carrier_publication
             .source_authority
@@ -279,6 +284,16 @@ impl VerterHost {
                 source,
             )
             .ok()?;
+        // The registry follows the document's content: this overlay's
+        // predecessor stays (a validation in flight may still hold it), the
+        // overlays before it can never be validated again and go now, and
+        // the base registration is untouched.
+        let _ = self
+            .carrier_publication
+            .source_authority
+            .retain_recent_incarnations(&CanonicalFileId::new(canonical_id), 2, |registered| {
+                registered.get() & OVERLAY_INCARNATION_BIT != 0
+            });
         // Registered-identity fact read: the grammar comes from the file's
         // frontend catalog row, keyed adapter × carrier language. A miss
         // (unregistered carrier, or a row without a grammar fact) fails

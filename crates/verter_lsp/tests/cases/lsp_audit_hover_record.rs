@@ -157,7 +157,7 @@ async fn run_with_audit_publishes_record_when_audit_enabled(
         character: 2,
     };
     let result = audit_harness::run_with_audit::<u8, _, _>(
-        &host,
+        &verter_lsp::documents::SharedHost::new(std::sync::Arc::clone(&host)),
         LspMethodTag::Hover,
         verter_audit::RequestTargetIdentity::RegisteredCanonical(canonical),
         Some(position),
@@ -181,7 +181,7 @@ async fn run_with_audit_short_circuits_when_audit_disabled(
 ) {
     let host = fresh_host(HostConfig::default(), worker_pools);
     let result = audit_harness::run_with_audit::<u8, _, _>(
-        &host,
+        &verter_lsp::documents::SharedHost::new(std::sync::Arc::clone(&host)),
         LspMethodTag::Hover,
         verter_audit::RequestTargetIdentity::RegisteredCanonical("/probe.vue".to_string()),
         Some(tower_lsp_server::ls_types::Position {

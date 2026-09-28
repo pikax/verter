@@ -54,6 +54,32 @@ impl UnionViews {
     pub(super) fn len(&self) -> usize {
         self.views.len()
     }
+
+    /// Take every kept view `retired` selects out of the table, with its
+    /// charge and its place in the admission order. The caller drops what
+    /// is returned after releasing the table's lock, as an eviction does
+    /// (the account a charge returns to takes its own lock).
+    pub(super) fn take_where(
+        &mut self,
+        mut retired: impl FnMut(&SemanticUnionMembersKey, &[SemanticNodeId]) -> bool,
+    ) -> Vec<(Arc<[SemanticNodeId]>, RetentionCharge)> {
+        let keys: Vec<SemanticUnionMembersKey> = self
+            .views
+            .iter()
+            .filter(|(key, (view, _))| retired(key, view))
+            .map(|(key, _)| *key)
+            .collect();
+        if keys.is_empty() {
+            return Vec::new();
+        }
+        let taken = keys
+            .iter()
+            .filter_map(|key| self.views.remove(key))
+            .collect();
+        let views = &self.views;
+        self.admitted.retain(|key| views.contains_key(key));
+        taken
+    }
 }
 
 impl std::fmt::Debug for UnionViews {
@@ -87,12 +113,19 @@ impl SemanticGraphStore {
     /// Keep `view` as `key`'s union view; the first view built wins. The
     /// view is charged to the store's retention account and, past
     /// [`UNION_VIEW_CAP`], the oldest-admitted view leaves the table; a view
-    /// the account refuses is returned without being kept.
+    /// the account refuses is returned without being kept. A view of a union
+    /// a document close already released is served but not kept either: a
+    /// late reader of a released id builds the placeholder's one-element
+    /// view, and keeping it would leave a residue no later release can find
+    /// (the id is never re-minted).
     pub(crate) fn keep_union_view(
         &self,
         key: SemanticUnionMembersKey,
         view: &Arc<[SemanticNodeId]>,
     ) -> Arc<[SemanticNodeId]> {
+        if !self.arena.is_live(key.union()) {
+            return Arc::clone(view);
+        }
         if let Some(kept) = self.union_view(&key) {
             return kept;
         }

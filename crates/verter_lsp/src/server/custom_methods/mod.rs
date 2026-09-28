@@ -168,14 +168,14 @@ impl VerterLanguageServer {
             // corrupts its internal state), and a carrier-less row
             // (`.svelte`) produces no provider sync state at all.
             let Some(file_language) =
-                crate::provider_sync::provider_script_language(&self.documents.host, &path)
+                crate::provider_sync::provider_script_language(&self.documents.host(), &path)
             else {
                 return;
             };
 
             let module_references = self
                 .documents
-                .host
+                .host()
                 .upsert(verter_session::UpsertRequest {
                     canonical_id: Some(path.clone()),
                     input_id: path.clone(),
@@ -243,14 +243,14 @@ impl VerterLanguageServer {
                         self.remove_provider_sync_state(&canonical_id).or_else(|| {
                             let profile = self.documents.tsx_profile.read().clone();
                             self.documents
-                                .host
+                                .host()
                                 .get_ide(&canonical_id, &profile)
                                 .and_then(|ide| self.carrier_close_state(&canonical_id, ide.is_jsx))
                         })
                     {
                         self.close_provider_state(&state).await;
                     }
-                    self.documents.host.remove(&canonical_id);
+                    self.documents.host().remove(&canonical_id);
                 }
                 _ => {}
             }
@@ -473,7 +473,7 @@ impl VerterLanguageServer {
         }
 
         // Merge host metrics (compile/upsert counters)
-        let host_metrics = self.documents.host.metrics_snapshot();
+        let host_metrics = self.documents.host().metrics_snapshot();
         by_type.insert(
             "host:upsert".into(),
             serde_json::json!({
@@ -534,6 +534,7 @@ impl VerterLanguageServer {
             diagnostics,
             enabled: self.statistics.is_enabled(),
             session: StatisticsSession { by_type, by_file },
+            retention: self.documents.host().retention_snapshot().into(),
             interaction_trace,
         })
     }
@@ -548,7 +549,7 @@ impl VerterLanguageServer {
     ) -> Result<ProjectOverviewResponse> {
         tracing::debug!("$/verter/getProjectOverview");
 
-        let file_list = self.documents.host.list_files();
+        let file_list = self.documents.host().list_files();
 
         let mut files = Vec::new();
         let mut component_graph = Vec::new();
@@ -574,7 +575,7 @@ impl VerterLanguageServer {
                 total_component_files += 1;
 
                 // Get analysis for component graph
-                if let Some(analysis) = self.documents.host.get_analysis(canonical_id) {
+                if let Some(analysis) = self.documents.host().get_analysis(canonical_id) {
                     // Component usage
                     if let Some(template) = &analysis.template {
                         let used: Vec<String> =
@@ -624,11 +625,11 @@ impl VerterLanguageServer {
         };
 
         // Collect template components from all framework CARRIER analyses
-        let file_list = self.documents.host.list_files();
+        let file_list = self.documents.host().list_files();
         let mut template_components = Vec::new();
         for (canonical_id, file_language) in &file_list {
             if file_language.is_framework_carrier() {
-                if let Some(analysis) = self.documents.host.get_analysis(canonical_id) {
+                if let Some(analysis) = self.documents.host().get_analysis(canonical_id) {
                     if let Some(template) = &analysis.template {
                         template_components
                             .push((canonical_id.clone(), template.components.clone()));
@@ -637,7 +638,7 @@ impl VerterLanguageServer {
             }
         }
 
-        let workspace = self.documents.host.workspace_read();
+        let workspace = self.documents.host().workspace_read();
         let inputs =
             verter_session::route_analysis_inputs::build_route_analysis_inputs(&*workspace, root);
         let snapshot = verter_semantic::analysis::routes::build_route_analysis(
@@ -771,7 +772,7 @@ impl VerterLanguageServer {
         // owner-canonicalized `c:/…` import resolution.
         let target_normalized = verter_span::path::canonicalize_path(&target_canonical);
 
-        let file_list = self.documents.host.list_files();
+        let file_list = self.documents.host().list_files();
         let mut parents = Vec::new();
         let carrier_count = file_list
             .iter()
@@ -793,7 +794,7 @@ impl VerterLanguageServer {
                 continue;
             }
 
-            if let Some(analysis) = self.documents.host.get_analysis(canonical_id) {
+            if let Some(analysis) = self.documents.host().get_analysis(canonical_id) {
                 if let Some(template) = &analysis.template {
                     for comp in &template.components {
                         if let Some(src) = &comp.import_source {
@@ -884,7 +885,7 @@ impl VerterLanguageServer {
             Err(_) => return Ok(None),
         };
 
-        let host = self.documents.host_arc();
+        let host = self.documents.host();
         let store = host.host_audit_runtime().audit_records_store();
         let mut found: Option<verter_audit::RequestAuditRecord> = None;
         store.for_each_record(&mut |_inserted_at, record| {
@@ -927,7 +928,7 @@ impl VerterLanguageServer {
             .unwrap_or(DEFAULT_LIMIT);
         let kind_filter = params.kind;
 
-        let host = self.documents.host_arc();
+        let host = self.documents.host();
         let store = host.host_audit_runtime().audit_records_store();
         let mut collected: Vec<verter_audit::RequestAuditRecord> = Vec::new();
         store.for_each_record(&mut |_inserted_at, record| {

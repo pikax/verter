@@ -463,6 +463,7 @@ fn capacity_skip_does_not_debit_credit_and_other_class_dispatches() {
     // Free the CPU permit; the deferred Critical CPU job dispatches —
     // proving its credit was NOT burned while it was capacity-skipped.
     let _ = dag.complete(&j1.identity);
+    drop(j1);
     assert_eq!(dag.in_flight_cpu_permits(), 0);
     let j3 = dag.next_ready().expect("deferred cpu job resumes");
     assert_eq!(j3.kind, WorkKind::Analysis);
@@ -501,6 +502,8 @@ fn capacity_returns_to_zero_after_mixed_drain_and_cancel() {
     let _ = dag.cancel(&by_tok(b));
     let _ = dag.complete(&by_tok(c));
     let _ = dag.cancel(&by_tok(d));
+    // The dispatched jobs end (their pool closures return).
+    drop(dispatched);
 
     assert_eq!(
         dag.in_flight_cpu_permits(),
@@ -579,10 +582,13 @@ fn parked_cpu_worker_loans_over_saturated_cpu_lane_no_deadlock() {
         "the loan bumps the CPU counter past the cap for the inline execute",
     );
 
-    // Both reservations release exactly once.
+    // Both reservations release exactly once, when the node completes
+    // AND its dispatched job has ended.
     let _ = dag.complete(&dep_id);
+    drop(loaned);
     assert_eq!(dag.in_flight_cpu_permits(), 1);
     let _ = dag.complete(&parked_id);
+    drop(parked_job);
     assert_eq!(dag.in_flight_cpu_permits(), 0);
 }
 
@@ -870,4 +876,139 @@ fn run_lifecycle_model(seed: u64, ops: usize, budget: DagCapacityBudget) {
         // INVARIANT: lane membership == model readiness.
         dag.assert_lane_membership_matches_nodes();
     }
+}
+
+/// A dispatched job that is cancelled (superseded) while its work is still
+/// queued in a pool keeps its admission permit until that work is dropped.
+///
+/// The pool transport is sized to dominate the budget, which only holds if
+/// the work queued in a pool never exceeds the permits the ledger has
+/// admitted. Releasing the permit at `cancel` broke that: a superseded Load
+/// stayed queued in the IO channel (it cannot be pulled back out) while its
+/// freed permit admitted the next Load, so a burst of supersessions — a
+/// document closed and reopened in a loop — filled the channel, dispatch saw
+/// `Full`, and the dispatch-site assertion took the scheduler thread down.
+///
+/// Discriminating: with the permit released at `cancel`, the second IO job
+/// dispatches while the cancelled one is still held (in flight 1, not 0 → a
+/// second dispatch), and the ledger undercounts the queued work.
+#[test]
+fn a_cancelled_job_still_queued_keeps_its_permit_until_it_is_dropped() {
+    let budget = DagCapacityBudget { cpu: 1, io: 1 };
+    let mut dag = SchedulerDag::with_budget(budget);
+    let _first = submit_io(&mut dag, "/churn.vue", Priority::Background);
+    let queued = dag.next_ready().expect("the first load dispatches");
+    assert_eq!(dag.in_flight_io_permits(), 1);
+
+    // A newer generation supersedes it while its closure is still queued.
+    let _ = dag.cancel(&queued.identity);
+    let _second = submit_io(&mut dag, "/other.vue", Priority::Background);
+    assert_eq!(
+        dag.in_flight_io_permits(),
+        1,
+        "the superseded job's queued work still holds its permit"
+    );
+    assert!(
+        dag.next_ready().is_none(),
+        "no second load is admitted while the superseded one is still queued"
+    );
+
+    // The pool drops the superseded closure: the permit returns.
+    drop(queued);
+    assert_eq!(dag.in_flight_io_permits(), 0);
+    let second = dag
+        .next_ready()
+        .expect("the next load dispatches once the ghost drains");
+    assert_eq!(dag.in_flight_io_permits(), 1);
+    drop(second);
+}
+
+/// A reset zeroes the ledger; a job dispatched before it and dropped after it
+/// gives nothing back, so it can never drive a counter below the admissions
+/// made after the reset.
+#[test]
+fn a_job_dropped_after_a_reset_does_not_release_against_the_new_ledger() {
+    let budget = DagCapacityBudget { cpu: 2, io: 2 };
+    let mut dag = SchedulerDag::with_budget(budget);
+    let _old = submit_io(&mut dag, "/old.vue", Priority::Background);
+    let before_reset = dag.next_ready().expect("dispatches before the reset");
+    dag.clear();
+    assert_eq!(dag.in_flight_io_permits(), 0);
+
+    let _new = submit_io(&mut dag, "/new.vue", Priority::Background);
+    let after_reset = dag.next_ready().expect("dispatches after the reset");
+    assert_eq!(dag.in_flight_io_permits(), 1);
+
+    drop(before_reset);
+    assert_eq!(
+        dag.in_flight_io_permits(),
+        1,
+        "the pre-reset job's drop leaves the post-reset admission counted"
+    );
+    let identity = after_reset.identity.clone();
+    drop(after_reset);
+    let _ = dag.complete(&identity);
+    assert_eq!(dag.in_flight_io_permits(), 0);
+}
+
+/// A superseded job's node share was dropped at `cancel`; when its queued
+/// closure finally starts, the job's share is the last one, so the permit
+/// returns there — outside any pump — and the driver must be woken.
+///
+/// Discriminating: without the wake, the freed permit sits unused until the
+/// driver's idle re-pump (5 s). In the WSP6 churn lane (a document closed and
+/// reopened in a loop) that put a 5 s stall under roughly one request in
+/// five.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_started_superseded_job_returns_its_permit_and_wakes_the_driver() {
+    let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 1, io: 1 });
+    let _ = submit_io(&mut dag, "/churn.vue", Priority::Background);
+    let job = dag.next_ready().expect("the load dispatches");
+    let _ = dag.cancel(&job.identity);
+    assert_eq!(
+        dag.in_flight_io_permits(),
+        1,
+        "the superseded job still queued in the pool holds its permit"
+    );
+
+    let (inbox, wakes) = crossbeam_channel::unbounded();
+    let _job = job.started(&inbox);
+
+    assert_eq!(
+        dag.in_flight_io_permits(),
+        0,
+        "the permit returns when the closure starts"
+    );
+    assert!(
+        matches!(wakes.try_recv(), Ok(crate::driver::Submission::Wake)),
+        "returning the permit outside a pump wakes the driver"
+    );
+}
+
+/// A live job's node keeps its share until `complete`, so starting the
+/// closure neither returns the permit nor posts a wake: the completion path
+/// returns it and pumps, exactly as before the share existed.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_started_live_job_leaves_the_permit_with_its_node() {
+    let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 1, io: 1 });
+    let _ = submit_io(&mut dag, "/churn.vue", Priority::Background);
+    let job = dag.next_ready().expect("the load dispatches");
+
+    let (inbox, wakes) = crossbeam_channel::unbounded();
+    let job = job.started(&inbox);
+
+    assert_eq!(
+        dag.in_flight_io_permits(),
+        1,
+        "the running job's node holds the permit"
+    );
+    assert!(
+        wakes.try_recv().is_err(),
+        "no wake while the node holds the permit"
+    );
+    let identity = job.identity.clone();
+    let _ = dag.complete(&identity);
+    assert_eq!(dag.in_flight_io_permits(), 0);
 }

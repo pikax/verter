@@ -734,7 +734,7 @@ impl VerterLanguageServer {
                 continue;
             };
             // Framework carriers never sync as raw scripts.
-            if crate::provider_sync::provider_script_language(host, barrel_id).is_none() {
+            if crate::provider_sync::provider_script_language(&host, barrel_id).is_none() {
                 continue;
             }
             let Some(ingress) = host.get_script_ingress(barrel_id) else {

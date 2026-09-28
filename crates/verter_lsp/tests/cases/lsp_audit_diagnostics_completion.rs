@@ -73,7 +73,7 @@ async fn completion_audit_records_num_completion_items(worker_pools: &Arc<TestHo
     let host = fresh_audit_host(worker_pools);
 
     let result = audit_harness::run_with_audit::<usize, _, _>(
-        &host,
+        &verter_lsp::documents::SharedHost::new(std::sync::Arc::clone(&host)),
         LspMethodTag::Completion,
         verter_audit::RequestTargetIdentity::RegisteredCanonical("/comp.vue".to_string()),
         Some(tower_lsp_server::ls_types::Position {

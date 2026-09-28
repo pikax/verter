@@ -281,6 +281,16 @@ pub struct FrameworkAdapterRegistry {
 }
 
 impl FrameworkAdapterRegistry {
+    /// Cached framework-surface entries across every adapter's store
+    /// (retention observability).
+    #[must_use]
+    pub fn surface_entry_count(&self) -> usize {
+        self.registrations
+            .values()
+            .map(|registration| registration.surface_store.entry_count())
+            .sum()
+    }
+
     /// Build the registry with the production adapter rows.
     #[must_use]
     pub fn built_in() -> Self {
