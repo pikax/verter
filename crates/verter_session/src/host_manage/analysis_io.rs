@@ -575,7 +575,7 @@ impl VerterHost {
                 // the artifact-current authority for an artifact-only
                 // canonical; never a fenced serve).
                 let (snapshot, template_inputs) =
-                    self.build_snapshot_and_template_inputs_from_source(canonical, &source, true);
+                    self.build_snapshot_and_template_inputs_from_source(canonical, &source, true)?;
                 return Some(self.finalize_analysis_snapshot(
                     canonical,
                     snapshot,
@@ -817,6 +817,9 @@ impl VerterHost {
                     &self.provenance,
                     &parsed,
                 )?;
+                if parse.refused.is_some() {
+                    return None;
+                }
                 let template_inputs = crate::types::VueTemplateInputs {
                     source: Arc::clone(&source),
                     whole_hash: parse.whole_hash,
@@ -853,7 +856,7 @@ impl VerterHost {
                 canonical.as_str(),
                 &source,
                 false,
-            );
+            )?;
             return Some(self.finalize_analysis_snapshot(
                 canonical.as_str(),
                 snapshot,

@@ -418,16 +418,12 @@ fn dynamic_name_facts(expression: &str) -> DynamicNameFacts {
             open: true,
         };
     }
-    // Both walks recurse once per nested branch, parenthesis or
-    // assertion: they run on the stack the expression's nesting can need.
-    verter_parser::oxc_parse::with_source_stack(expression, || {
-        let mut candidates = Vec::new();
-        collect_event_literals(&parsed, &mut candidates);
-        DynamicNameFacts {
-            open: !event_name_branches_closed(&parsed),
-            candidates,
-        }
-    })
+    let mut candidates = Vec::new();
+    collect_event_literals(&parsed, &mut candidates);
+    DynamicNameFacts {
+        open: !event_name_branches_closed(&parsed),
+        candidates,
+    }
 }
 
 /// Source outside the parsed expression is trivia when it is whitespace,
@@ -468,34 +464,43 @@ fn is_trivia(mut bytes: &[u8]) -> bool {
     true
 }
 
-fn event_name_branches_closed(expression: &Expression<'_>) -> bool {
+/// The expression under an assertion, and the asserted type, when
+/// `expression` is `as` / `satisfies` / `<T>` assertion.
+fn asserted<'e, 'a>(
+    expression: &'e Expression<'a>,
+) -> Option<(&'e Expression<'a>, &'e TSType<'a>)> {
     match expression {
-        Expression::StringLiteral(_) => true,
-        Expression::ParenthesizedExpression(inner) => event_name_branches_closed(&inner.expression),
-        Expression::TSNonNullExpression(inner) => event_name_branches_closed(&inner.expression),
-        Expression::TSAsExpression(inner) => {
-            asserted_name_closed(&inner.expression, &inner.type_annotation)
-        }
+        Expression::TSAsExpression(inner) => Some((&inner.expression, &inner.type_annotation)),
         Expression::TSSatisfiesExpression(inner) => {
-            asserted_name_closed(&inner.expression, &inner.type_annotation)
+            Some((&inner.expression, &inner.type_annotation))
         }
-        Expression::TSTypeAssertion(inner) => {
-            asserted_name_closed(&inner.expression, &inner.type_annotation)
-        }
-        Expression::ConditionalExpression(inner) => {
-            event_name_branches_closed(&inner.consequent)
-                && event_name_branches_closed(&inner.alternate)
-        }
-        _ => false,
+        Expression::TSTypeAssertion(inner) => Some((&inner.expression, &inner.type_annotation)),
+        _ => None,
     }
 }
 
-fn asserted_name_closed(expression: &Expression<'_>, ty: &TSType<'_>) -> bool {
-    if ty.is_const_type_reference() {
-        event_name_branches_closed(expression)
-    } else {
-        finite_string_union(ty)
+/// Whether every branch of the dynamic event name ends in a string literal
+/// or a finite string-literal assertion. The branches are walked from an
+/// explicit stack, so a deeply nested name costs heap, not native stack.
+fn event_name_branches_closed(expression: &Expression<'_>) -> bool {
+    let mut branches = vec![expression];
+    while let Some(branch) = branches.pop() {
+        match branch {
+            Expression::StringLiteral(_) => {}
+            Expression::ParenthesizedExpression(inner) => branches.push(&inner.expression),
+            Expression::TSNonNullExpression(inner) => branches.push(&inner.expression),
+            Expression::ConditionalExpression(inner) => {
+                branches.push(&inner.alternate);
+                branches.push(&inner.consequent);
+            }
+            _ => match asserted(branch) {
+                Some((inner, ty)) if ty.is_const_type_reference() => branches.push(inner),
+                Some((_, ty)) if finite_string_union(ty) => {}
+                _ => return false,
+            },
+        }
     }
+    true
 }
 
 fn finite_string_union(ty: &TSType<'_>) -> bool {
@@ -523,46 +528,30 @@ fn push_event_name(values: &mut Vec<String>, value: &str) {
     }
 }
 
-/// String literals that are possible values of the dynamic event name.
-/// A non-literal branch contributes nothing here; `dynamic_name_facts`
-/// still marks that domain open.
+/// String literals that are possible values of the dynamic event name, in
+/// source order. A non-literal branch contributes nothing here;
+/// `dynamic_name_facts` still marks that domain open. The branches are
+/// walked from an explicit stack, so a deeply nested name costs heap, not
+/// native stack.
 fn collect_event_literals(expression: &Expression<'_>, values: &mut Vec<String>) {
-    match expression {
-        Expression::StringLiteral(literal) => push_event_name(values, literal.value.as_str()),
-        Expression::ParenthesizedExpression(inner) => {
-            collect_event_literals(&inner.expression, values);
+    let mut branches = vec![expression];
+    while let Some(branch) = branches.pop() {
+        match branch {
+            Expression::StringLiteral(literal) => push_event_name(values, literal.value.as_str()),
+            Expression::ParenthesizedExpression(inner) => branches.push(&inner.expression),
+            Expression::TSNonNullExpression(inner) => branches.push(&inner.expression),
+            Expression::ConditionalExpression(inner) => {
+                branches.push(&inner.alternate);
+                branches.push(&inner.consequent);
+            }
+            _ => match asserted(branch) {
+                Some((_, ty)) if !ty.is_const_type_reference() && finite_string_union(ty) => {
+                    collect_type_literals(ty, values);
+                }
+                Some((inner, _)) => branches.push(inner),
+                None => {}
+            },
         }
-        Expression::TSNonNullExpression(inner) => {
-            collect_event_literals(&inner.expression, values);
-        }
-        Expression::TSAsExpression(inner) => {
-            collect_asserted_literals(&inner.expression, &inner.type_annotation, values);
-        }
-        Expression::TSSatisfiesExpression(inner) => {
-            collect_asserted_literals(&inner.expression, &inner.type_annotation, values);
-        }
-        Expression::TSTypeAssertion(inner) => {
-            collect_asserted_literals(&inner.expression, &inner.type_annotation, values);
-        }
-        Expression::ConditionalExpression(inner) => {
-            collect_event_literals(&inner.consequent, values);
-            collect_event_literals(&inner.alternate, values);
-        }
-        _ => {}
-    }
-}
-
-fn collect_asserted_literals(
-    expression: &Expression<'_>,
-    ty: &TSType<'_>,
-    values: &mut Vec<String>,
-) {
-    if ty.is_const_type_reference() {
-        collect_event_literals(expression, values);
-    } else if finite_string_union(ty) {
-        collect_type_literals(ty, values);
-    } else {
-        collect_event_literals(expression, values);
     }
 }
 
@@ -609,8 +598,8 @@ mod spelling_tests {
     }
 
     /// A dynamic name nesting 10,000 conditionals or parentheses deep reads
-    /// its candidates on a 1 MiB thread: its branches are walked under the
-    /// parse's stack containment.
+    /// its candidates on a 1 MiB thread: its branches are walked from an
+    /// explicit stack, outside any stack containment.
     #[test]
     fn a_deeply_nested_dynamic_name_reads_on_a_small_stack() {
         let facts = std::thread::Builder::new()

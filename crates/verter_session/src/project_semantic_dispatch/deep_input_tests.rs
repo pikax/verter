@@ -14,7 +14,10 @@
 //! for its answer below it (3,000 levels, 1,000 for conditionals), and at 10,000 for returning on the
 //! production stacks at all.
 
-use super::checker_probe_lane_tests::{degradation_in, mismatches};
+use super::checker_probe_lane_tests::{degradation_in, flow_return_outcome_in, mismatches};
+use crate::host_flow_return_audit::FlowReturnError;
+use crate::semantic_query::FlowReturnFailure;
+use verter_type_expr::facts::InferenceUnavailableReason;
 
 /// The depth every form is checked at.
 const DEPTH: usize = 10_000;
@@ -40,16 +43,38 @@ fn mismatches_on_a_small_stack(
         .expect("the probe answers")
 }
 
-/// Whether `pf`'s body-derived return over `source` produced a value, read
-/// on a 1 MiB thread: it returns either way, never aborting the host.
-fn returns_on_a_small_stack(source: String) -> bool {
+/// The typed outcome of `pf`'s body-derived return over `source`, read on
+/// a 1 MiB thread: the degradation of the value it produced, or the typed
+/// error it answered instead, a missing `pf` (`Failure(Missing)`) told
+/// apart from a budget. It returns either way, never aborting the host.
+fn return_on_a_small_stack(
+    source: String,
+) -> Result<Option<crate::semantic_query::FlowReturnDegradation>, FlowReturnError> {
     std::thread::Builder::new()
         .stack_size(1 << 20)
-        .spawn(move || degradation_in(Default::default(), &source, "pf").is_ok())
+        .spawn(move || flow_return_outcome_in(Default::default(), &source, "pf"))
         .expect("spawn the probing thread")
         .join()
         .expect("the return evaluates")
 }
+
+/// The typed outcome of a return whose evaluation outgrew the demand's
+/// connected work: no value, and the work budget named.
+const WORK_BUDGET_EXCEEDED: Result<
+    Option<crate::semantic_query::FlowReturnDegradation>,
+    FlowReturnError,
+> = Err(FlowReturnError::Failure(FlowReturnFailure::Budget(
+    InferenceUnavailableReason::WorkBudgetExceeded,
+)));
+
+/// The typed outcome of a return whose inference outgrew the semantic
+/// inference depth budget: no value, and the depth budget named.
+const DEPTH_BUDGET_EXCEEDED: Result<
+    Option<crate::semantic_query::FlowReturnDegradation>,
+    FlowReturnError,
+> = Err(FlowReturnError::Failure(FlowReturnFailure::Budget(
+    InferenceUnavailableReason::DepthBudgetExceeded,
+)));
 
 fn wrap(depth: usize, open: &str, close: &str) -> String {
     format!("{}1{}", open.repeat(depth), close.repeat(depth))
@@ -146,7 +171,11 @@ fn conditionals_objects_and_blocks_nested_10000_deep_return_on_production_stacks
         ("objects", objects(DEPTH)),
         ("blocks", blocks(DEPTH)),
     ] {
-        assert!(!returns_on_a_small_stack(source), "{form}");
+        assert_eq!(
+            return_on_a_small_stack(source),
+            WORK_BUDGET_EXCEEDED,
+            "{form}"
+        );
     }
 }
 
@@ -234,7 +263,7 @@ fn calls_nested_500_deep_answer_on_production_stacks() {
 /// its typed budget failure).
 #[test]
 fn calls_nested_10000_deep_return_on_production_stacks() {
-    assert!(!returns_on_a_small_stack(calls(DEPTH)));
+    assert_eq!(return_on_a_small_stack(calls(DEPTH)), WORK_BUDGET_EXCEEDED);
 }
 
 #[test]
@@ -271,7 +300,10 @@ fn arrays_nested_64_deep_answer_on_production_stacks() {
 /// typed budget failure).
 #[test]
 fn arrays_nested_10000_deep_return_on_production_stacks() {
-    assert!(!returns_on_a_small_stack(arrays(DEPTH)));
+    assert_eq!(
+        return_on_a_small_stack(arrays(DEPTH)),
+        DEPTH_BUDGET_EXCEEDED
+    );
 }
 
 #[test]
@@ -310,7 +342,7 @@ fn keyof_chains_10000_deep_return_on_production_stacks() {
         "{}export function pf() {{ return null as unknown as ({KEYOF_PROBE}); }}\n",
         keyof_chain(DEPTH)
     );
-    assert!(!returns_on_a_small_stack(source));
+    assert_eq!(return_on_a_small_stack(source), WORK_BUDGET_EXCEEDED);
 }
 
 #[test]
@@ -383,7 +415,10 @@ fn module_calls_nested_1000_deep_answer_on_production_stacks() {
 /// failure).
 #[test]
 fn module_calls_nested_10000_deep_return_on_production_stacks() {
-    assert!(!returns_on_a_small_stack(module_calls(DEPTH, true)));
+    assert_eq!(
+        return_on_a_small_stack(module_calls(DEPTH, true)),
+        WORK_BUDGET_EXCEEDED
+    );
 }
 
 /// A receiver chain, `b.m().m()…`: its calls are walked from an explicit
@@ -476,7 +511,10 @@ fn generic_callbacks_nested_400_deep_answer_on_production_stacks() {
 /// of suspending the route overflows.
 #[test]
 fn generic_callbacks_nested_10000_deep_return_on_production_stacks() {
-    assert!(!returns_on_a_small_stack(generic_callbacks(DEPTH)));
+    assert_eq!(
+        return_on_a_small_stack(generic_callbacks(DEPTH)),
+        WORK_BUDGET_EXCEEDED
+    );
 }
 
 #[test]
@@ -616,7 +654,11 @@ fn branch_and_loop_statements_nested_10000_deep_return_on_production_stacks() {
         ("for", body("for (;;) { ", " }")),
         ("do", body("do { ", " } while (b);")),
     ] {
-        assert!(!returns_on_a_small_stack(source), "{form}");
+        assert_eq!(
+            return_on_a_small_stack(source),
+            WORK_BUDGET_EXCEEDED,
+            "{form}"
+        );
     }
 }
 
@@ -705,15 +747,47 @@ fn namespaces_nested_10000_deep_answer_on_production_stacks() {
     );
 }
 
+fn label_chain(depth: usize) -> String {
+    let labels: String = (0..depth).map(|label| format!("l{label}: ")).collect();
+    format!("export function pf() {{ {labels}return 1; }}\n")
+}
+
+fn else_if_chain(length: usize) -> String {
+    format!(
+        "export function pf(b: boolean) {{ {}return 2; }}\n",
+        "if (b) return 1; else ".repeat(length)
+    )
+}
+
 /// A statement wrapped in 10,000 labels. TypeScript 7.0.2: `number`, under
 /// every setting.
 #[test]
-#[ignore = "a label chain's parse snapshot is copied a native level per label beyond the parse containment"]
+#[ignore = "the flow-slice plan budget admits no demand slice of 10,000 nested labels"]
 fn label_chains_10000_deep_answer_on_production_stacks() {
-    let labels: String = (0..DEPTH).map(|label| format!("l{label}: ")).collect();
-    let source = format!("export function pf() {{ {labels}return 1; }}\n");
     assert_eq!(
-        mismatches_on_a_small_stack(source, RETURN, "number"),
+        mismatches_on_a_small_stack(label_chain(DEPTH), RETURN, "number"),
+        Vec::<String>::new()
+    );
+}
+
+/// A statement wrapped in 10,000 labels returns on the production stacks:
+/// the parse, and the copy of its program the binding index makes, run on
+/// the stack the scan bounds (a braceless label nests its statement a level
+/// under it), and the return is the plan's typed budget failure.
+#[test]
+fn label_chains_10000_deep_return_on_production_stacks() {
+    assert_eq!(
+        return_on_a_small_stack(label_chain(DEPTH)),
+        WORK_BUDGET_EXCEEDED
+    );
+}
+
+/// A statement wrapped in 4,000 labels, which the flow-slice plan budget
+/// admits. TypeScript 7.0.2: `number`, under every setting.
+#[test]
+fn label_chains_4000_deep_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(label_chain(4_000), RETURN, "number"),
         Vec::<String>::new()
     );
 }
@@ -721,14 +795,33 @@ fn label_chains_10000_deep_answer_on_production_stacks() {
 /// An `else if` chain 10,000 long. TypeScript 7.0.2: `1 | 2` (reporting
 /// TS2563, body too large for control-flow analysis), under every setting.
 #[test]
-#[ignore = "an else-if chain's parse snapshot is copied a native level per arm beyond the parse containment"]
+#[ignore = "the flow-slice plan's return-site budget admits no 10,001 return sites"]
 fn else_if_chains_10000_long_answer_on_production_stacks() {
-    let source = format!(
-        "export function pf(b: boolean) {{ {}return 2; }}\n",
-        "if (b) return 1; else ".repeat(DEPTH)
-    );
     assert_eq!(
-        mismatches_on_a_small_stack(source, RETURN, "1 | 2"),
+        mismatches_on_a_small_stack(else_if_chain(DEPTH), RETURN, "1 | 2"),
+        Vec::<String>::new()
+    );
+}
+
+/// An `else if` chain 10,000 long returns on the production stacks: the
+/// parse, and the copy of its program the binding index makes, run on the
+/// stack the scan bounds (an `else` continues its `if` past the `;` ending
+/// the `if`'s body), and the return is the plan's typed budget failure.
+#[test]
+fn else_if_chains_10000_long_return_on_production_stacks() {
+    assert_eq!(
+        return_on_a_small_stack(else_if_chain(DEPTH)),
+        WORK_BUDGET_EXCEEDED
+    );
+}
+
+/// An `else if` chain 250 long, whose return sites the flow-slice plan's
+/// return-site budget admits. TypeScript 7.0.2: `1 | 2`, under every
+/// setting.
+#[test]
+fn else_if_chains_250_long_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(else_if_chain(250), RETURN, "1 | 2"),
         Vec::<String>::new()
     );
 }
@@ -752,7 +845,7 @@ fn unreachable_code_nested_10000_deep_returns_on_production_stacks() {
             " }".repeat(depth)
         )
     };
-    assert!(!returns_on_a_small_stack(source(DEPTH)));
+    assert_eq!(return_on_a_small_stack(source(DEPTH)), WORK_BUDGET_EXCEEDED);
     assert_eq!(
         mismatches_on_a_small_stack(source(UNDER_THE_RETURN_SITE_BUDGET), RETURN, "number"),
         Vec::<String>::new()
@@ -773,7 +866,7 @@ fn code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks(
             " }".repeat(depth)
         )
     };
-    assert!(!returns_on_a_small_stack(source(DEPTH)));
+    assert_eq!(return_on_a_small_stack(source(DEPTH)), WORK_BUDGET_EXCEEDED);
     assert_eq!(
         mismatches_on_a_small_stack(source(UNDER_THE_RETURN_SITE_BUDGET), RETURN, "number"),
         Vec::<String>::new()

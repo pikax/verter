@@ -98,6 +98,10 @@ pub(crate) struct LoweringOutcome<R> {
 pub(crate) struct LeaseOutcome {
     pub lease: SnapshotLease,
     pub parsed_now: bool,
+    /// The retained parse was refused for want of stack: the program is
+    /// not retained, and the flight holding the lease publishes nothing
+    /// for the source.
+    pub refused: Option<verter_parser::oxc_parse::StackUnavailable>,
 }
 
 /// A live pin on the retained parse snapshot for one [`SnapshotKey`].
@@ -162,6 +166,9 @@ struct ShardEntry {
     /// so repeated demands against the same broken content do not
     /// re-parse it.
     parsed: Option<std::rc::Rc<crate::ParsedEvalProgram>>,
+    /// The stack refusal of a fatal parse that was refused for want of
+    /// stack rather than for its syntax.
+    refused: Option<verter_parser::oxc_parse::StackUnavailable>,
     /// Live lease count. The entry is removed (and its `Rc` dropped) when
     /// this reaches zero.
     refcount: usize,
@@ -184,20 +191,23 @@ impl SnapshotShard {
 
     /// Pin the snapshot for `key`: parse it if not already retained,
     /// otherwise bump the refcount on the existing entry. Returns
-    /// whether this acquisition had to parse.
+    /// whether this acquisition had to parse, and the parse's stack refusal.
     fn acquire(
         &mut self,
         account: &Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
         key: &SnapshotKey,
         source: &Arc<str>,
         source_type: oxc_span::SourceType,
-    ) -> bool {
+    ) -> (bool, Option<verter_parser::oxc_parse::StackUnavailable>) {
         if let Some(entry) = self.entries.get_mut(key) {
             entry.refcount += 1;
-            return false;
+            return (false, entry.refused);
         }
-        let parsed =
-            crate::ParsedEvalProgram::parse(Arc::clone(source), source_type).map(std::rc::Rc::new);
+        let (parsed, refused) =
+            match crate::ParsedEvalProgram::parse_outcome(Arc::clone(source), source_type) {
+                Ok(parsed) => (Some(std::rc::Rc::new(parsed)), None),
+                Err(refused) => (None, refused),
+            };
         // Charged from SOURCE bytes rather than by walking the arena:
         // the lease path is hot, and an arena walk per acquisition would
         // cost more than the accounting is worth. See
@@ -209,11 +219,12 @@ impl SnapshotShard {
             key.clone(),
             ShardEntry {
                 parsed,
+                refused,
                 refcount: 1,
                 _pin: pin,
             },
         );
-        true
+        (true, refused)
     }
 
     /// Release one pin on `key`. At refcount zero the entry — and its
@@ -655,7 +666,7 @@ impl DeclLoweringService {
     ) -> LeaseOutcome {
         verter_audit::attribute!(ArtifactPinAcquire);
         #[cfg(not(target_arch = "wasm32"))]
-        let parsed_now = {
+        let (parsed_now, refused) = {
             // First lowering demand spawns the worker threads if the
             // service was constructed lazily (`batch_typecheck`).
             let workers = self.workers();
@@ -695,7 +706,7 @@ impl DeclLoweringService {
                     workers[shard_index]
                         .send(job)
                         .expect("decl-lowering worker channel must outlive the service");
-                    let (parsed_now, started, finished) = result_rx
+                    let ((parsed_now, refused), started, finished) = result_rx
                         .recv()
                         .expect("decl-lowering worker must answer every acquire");
                     stats.record_acquire(
@@ -705,12 +716,12 @@ impl DeclLoweringService {
                         std::time::Instant::now(),
                         parsed_now,
                     );
-                    parsed_now
+                    (parsed_now, refused)
                 }
             }
         };
         #[cfg(target_arch = "wasm32")]
-        let parsed_now = WASM_DECL_LOWERING_SHARD.with(|cell| {
+        let (parsed_now, refused) = WASM_DECL_LOWERING_SHARD.with(|cell| {
             cell.borrow_mut()
                 .acquire(&self.account, key, source, source_type)
         });
@@ -721,6 +732,7 @@ impl DeclLoweringService {
                 service: Arc::clone(self),
             },
             parsed_now,
+            refused,
         }
     }
 

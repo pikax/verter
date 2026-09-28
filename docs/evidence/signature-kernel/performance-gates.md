@@ -535,11 +535,11 @@ Recorded plainly so no reader mistakes absence for a pass:
   default of 2 MiB). Each runs under `verter_parser::oxc_parse`'s
   containment, on a stack segment sized from the source when the worker's
   own stack is short (`oxc-deep-parse.md`), so the workers need no larger
-  stack of their own. The script analysis's own recursions over the
-  program (the module-reference collector, the binding extractors) run
-  under the same containment: a module constant of 10,000 nested calls
-  overflowed a 2 MiB I/O worker in the collector and now returns
-  (`deep_input_tests.rs` →
+  stack of their own. The script analysis's own passes over the program
+  (the module-reference collector, the await, string, macro and binding
+  walks) run from explicit stacks on the worker's own stack, outside any
+  region: a module constant of 10,000 nested calls overflowed a 2 MiB I/O
+  worker in the collector and now returns (`deep_input_tests.rs` →
   `module_calls_nested_10000_deep_return_on_production_stacks`).
   `type_syntax_depth_tests.rs` →
   `a_700_deep_nested_generic_application_parses_on_a_scheduler_worker`
@@ -580,11 +580,12 @@ Recorded plainly so no reader mistakes absence for a pass:
   `oxc_parser::Parser`. The scan costs about a third of the parse (1.8 ms
   against 5.8 ms for `lib.dom.d.ts`, optimized); a source short enough
   that every byte could be a level skips it. On wasm32 the engine's own
-  call stack, which nothing grows, bounds the parse: a source nesting past
-  `WASM_ENGINE_NESTING` (313 levels, from V8's 984 KiB default stack and
-  the measured 1,188 bytes of the costliest level) returns the same typed
-  diagnostic. oxc's walks over the tree run under the same containment
-  (below).
+  call stack, which nothing grows, bounds the parse under a measured
+  runtime safety profile of the engine, not a limit of the language: a
+  source nesting past `V8_DEFAULT_STACK_PROFILE` (V8's 984 KiB default
+  stack, oxc 0.151.0, the release build; 313 levels of the scan's bound)
+  returns the same typed diagnostic. oxc's walks over the tree run under
+  the same containment (below).
 
 * **A class expression raises one instance per level.** The lane's graph
   of `class { m() { return class { … } } }` nested `n` deep is linear
