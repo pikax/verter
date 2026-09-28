@@ -1301,6 +1301,7 @@ impl VerterHost {
     pub(super) fn build_runtime_intrinsic_surface_node(
         &self,
         members: &[crate::resolver_core::IntrinsicSurfaceMember],
+        cache_generation: u64,
     ) -> crate::resolver_core::fallthrough_resolver::FallthroughNodeResult {
         let mut attr_names = Vec::new();
         let mut event_names = Vec::new();
@@ -1322,6 +1323,7 @@ impl VerterHost {
                         members: members.to_vec(),
                         attr_names,
                         event_names,
+                        cache_generation,
                     },
                 ),
             facts: Vec::new(),
@@ -1409,14 +1411,20 @@ impl VerterHost {
         }
     }
 
+    /// The members a cached intrinsic-surface node carries, PAIRED with the
+    /// workspace content generation they were projected under.
+    ///
+    /// The caller compares that generation against the live one: the node
+    /// carries no validated fact signature, so this pairing is the only thing
+    /// standing between a warm read and a superseded surface.
     pub(super) fn runtime_intrinsic_node_to_members(
         &self,
         node: crate::resolver_core::fallthrough_resolver::FallthroughNodeResult,
-    ) -> Option<Vec<crate::resolver_core::IntrinsicSurfaceMember>> {
+    ) -> Option<(Vec<crate::resolver_core::IntrinsicSurfaceMember>, u64)> {
         match node.value {
             crate::resolver_core::fallthrough_resolver::FallthroughNodeValue::IntrinsicSurface(
                 intrinsic,
-            ) => Some(intrinsic.members),
+            ) => Some((intrinsic.members, intrinsic.cache_generation)),
             _ => None,
         }
     }

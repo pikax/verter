@@ -1352,3 +1352,212 @@ async fn a_failed_provider_close_leaves_the_surface_closing_not_finalized() {
         "a Closing path stays a KNOWN virtual surface until its close is confirmed"
     );
 }
+
+/// A stale close whose provider close LANDS after the same API path was reopened
+/// must leave BOTH the provider document and the store describing the reopen.
+///
+/// The provider close is path-only and un-fenced: an API publisher (which has no
+/// per-path serializer) can `open_dts` + `record` the SAME path while the close is
+/// awaited. The released close then closes the REOPENED document, and the
+/// epoch-scoped `finalize_close` correctly no-ops — so the store keeps vouching
+/// the reopened surface `Current` over a provider document the stale close just
+/// closed (the wrong-handle outcome the charter rejects).
+///
+/// This is the production shape, not a mock-only one: `TsgoCompositeProvider`'s
+/// close awaits its shared-overlay half (`shared_feed_close`) AFTER the managed
+/// half, unserialized against a concurrent reopen's synchronous `shared_record`.
+///
+/// Discriminating: the mock pauses INSIDE the provider close (an observed gate,
+/// never a sleep); in that window the test reopens the path with NEW content and
+/// records it, then releases the close. The mock logs every file-op at DISPATCH,
+/// so the parked close is logged before the reopen although it LANDS after it —
+/// the provider's final document state is therefore the log replayed with the
+/// parked close applied at its landing point (the release), not at its log slot.
+/// Against the OLD code nothing is dispatched after the release: the replay ends
+/// on the stale close and the provider holds NO document for a path the store
+/// vouches `Current` (the final assertion fails). Against the fixed code the
+/// refused finalize is re-verified and the reopened generation's exact bytes are
+/// re-delivered AFTER the close landed, so the replay ends open on the reopened
+/// content while the store stays `Current` on that same content.
+///
+/// The re-delivery itself is the CALLER's (`provider_sync` may not push carrier
+/// companion content — the `sealed_carrier_store_mutators_allowlist` guard): the
+/// close hands the reopened snapshot to a [`RedeliverReopenedSurface`], which the
+/// carrier-sync surface implements with its own content verb. This test's hook
+/// stands in for that publisher (a `_tests.rs` file is outside the guard's scan)
+/// and also records the generation it was handed, so the test proves the close
+/// re-delivers exactly the store's reopened generation, not bytes of its own.
+#[tokio::test]
+async fn a_close_landing_after_a_reopen_redelivers_the_reopened_api_surface() {
+    use crate::provider_surface_store::{ProviderSurfaceStore, RecordSurface};
+    use crate::type_provider::mock::{MockCall, MockTypeProvider};
+    use crate::type_provider::project_sync::ProjectSync;
+    use crate::ProjectSyncMode;
+    use std::sync::Arc as StdArc;
+
+    let mock = MockTypeProvider::new();
+    let sync = ProjectSync::new(StdArc::new(mock.clone()), ProjectSyncMode::FullProject);
+    let provider_surfaces = ProviderSurfaceStore::new();
+
+    let api_path = "/workspace/src/Child.vue.ts";
+    let source_path = "/workspace/src/Child.vue";
+    let stale_api = "declare const Child: { new(props?: { foo: string }): {} }";
+    let reopened_api = "declare const Child: { new(props?: { foo: string; bar: number }): {} }";
+    let record = |api_code: &str| {
+        RecordSurface::carrier_api_legacy(
+            api_path.to_string(),
+            source_path.to_string(),
+            StdArc::from(api_code),
+            None,
+            StdArc::from(
+                "<script setup lang=\"ts\">\ndefineProps<{ foo: string }>();\n</script>\n",
+            ),
+        )
+    };
+
+    // The stale surface is live in the provider and Current in the store.
+    sync.open_dts(api_path, stale_api)
+        .await
+        .expect("precondition: the stale API surface opens");
+    provider_surfaces.record(record(stale_api));
+    assert!(provider_surfaces.is_tracked(api_path));
+
+    // Pause the provider close of exactly this path; `arrived` fires once the
+    // closing task is parked inside `close_file`.
+    let (close_arrived, close_release) = mock.block_close_file(api_path);
+
+    // The carrier-sync surface's re-delivery, as a test-local hook: deliver the
+    // snapshot's exact bytes through the API lane's own content verb and record
+    // the generation handed over.
+    struct ApiPublisher<'a> {
+        sync: &'a ProjectSync,
+        handed_generations: std::sync::Mutex<Vec<u64>>,
+    }
+    impl RedeliverReopenedSurface for ApiPublisher<'_> {
+        fn redeliver<'a>(
+            &'a self,
+            kind: NonDeclProviderPathKind,
+            path: &'a str,
+            snapshot: StdArc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
+        ) -> RedeliveryFuture<'a> {
+            assert_eq!(kind, NonDeclProviderPathKind::Api);
+            self.handed_generations
+                .lock()
+                .unwrap()
+                .push(snapshot.stamp.generation);
+            Box::pin(async move {
+                self.sync
+                    .open_dts(path, &snapshot.payload.provider_content)
+                    .await
+            })
+        }
+    }
+    let publisher = ApiPublisher {
+        sync: &sync,
+        handed_generations: std::sync::Mutex::new(Vec::new()),
+    };
+
+    let close = close_stale_provider_path_with(
+        &sync,
+        &provider_surfaces,
+        NonDeclProviderPathKind::Api,
+        api_path,
+        "reopen_race_test",
+        Some(&publisher),
+    );
+    let reopen_during_close = async {
+        close_arrived.notified().await;
+        assert!(
+            provider_surfaces.is_tombstoned(api_path),
+            "the close retired the path (Closing) before dispatching the provider close"
+        );
+        // An API publisher reopens and records the SAME path while the close is
+        // still in flight (the publisher's own order: deliver, then record).
+        sync.open_dts(api_path, reopened_api)
+            .await
+            .expect("the reopen delivers");
+        provider_surfaces.record(record(reopened_api));
+        assert!(
+            provider_surfaces.is_tracked(api_path),
+            "the reopen makes the path Current under a newer generation"
+        );
+        // Now let the OLD close land — on the reopened document. Everything the
+        // mock logs from this index on was dispatched AFTER the close landed.
+        let released_at = mock.calls().len();
+        close_release.notify_one();
+        released_at
+    };
+    let ((), released_at) = tokio::join!(close, reopen_during_close);
+
+    // Store: the reopened generation is still the current one, and it is the
+    // generation the close handed to the publisher for re-delivery.
+    assert!(
+        provider_surfaces.is_tracked(api_path),
+        "the stale finalize must not erase the reopened surface"
+    );
+    let current = provider_surfaces
+        .current_snapshot(api_path)
+        .expect("the reopened surface is Current");
+    assert_eq!(
+        current.payload.provider_content.as_ref(),
+        reopened_api,
+        "the store's current surface is the reopened content"
+    );
+    assert_eq!(
+        *publisher.handed_generations.lock().unwrap(),
+        vec![current.stamp.generation],
+        "the close must hand the publisher exactly the store's reopened generation, once"
+    );
+
+    // Provider: replay the file-ops for the path into a document model, applying
+    // the parked close where it LANDED (at the release) rather than where the
+    // mock logged its dispatch. `Some(content)` = open with that content, `None`
+    // = closed.
+    let calls = mock.calls();
+    let (before_release, after_release) = calls.split_at(released_at);
+    let mut document: Option<String> = None;
+    let mut parked_close_seen = false;
+    let apply = |call: &MockCall, document: &mut Option<String>| match call {
+        MockCall::OpenFile { path, content }
+        | MockCall::OpenFileBackground { path, content }
+        | MockCall::LoadFile { path, content }
+        | MockCall::UpdateFile { path, content }
+            if path == api_path =>
+        {
+            *document = Some(content.clone());
+        }
+        MockCall::CloseFile { path } if path == api_path => *document = None,
+        _ => {}
+    };
+    for call in before_release {
+        // The ONE close dispatched before the release is the parked stale close:
+        // it lands at the release, so it is applied after the reopen, below.
+        if matches!(call, MockCall::CloseFile { path } if path == api_path) && !parked_close_seen {
+            parked_close_seen = true;
+            continue;
+        }
+        apply(call, &mut document);
+    }
+    assert!(
+        parked_close_seen,
+        "precondition: the stale close was dispatched (and parked) before the release"
+    );
+    assert_eq!(
+        document.as_deref(),
+        Some(reopened_api),
+        "precondition: the reopen was delivered while the stale close was parked"
+    );
+    // The stale close LANDS on the reopened document.
+    document = None;
+    for call in after_release {
+        apply(call, &mut document);
+    }
+    assert_eq!(
+        document.as_deref(),
+        Some(reopened_api),
+        "the stale close landed on the reopened document: the provider must hold the \
+         REOPENED content the store vouches as Current, so the close must be repaired by \
+         re-delivering the reopened bytes AFTER the close landed (nothing was dispatched \
+         after the release: {after_release:?})"
+    );
+}

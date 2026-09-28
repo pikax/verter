@@ -1,0 +1,313 @@
+/**
+ * Close-cost lane (WSP6, review item C): what a document close costs on a
+ * realistically large workspace.
+ *
+ * `release_canonical` walks the live semantic node set to find what the
+ * closing document rooted or bound (an O(live nodes) scan paid at the close,
+ * instead of a canonical→node reverse index charged to every hot intern).
+ * This lane collects the evidence for that choice where it matters: on the
+ * WSP equal-work synthetic SFC slice (2615 generated Vue files, the
+ * PrimeVue-equivalent workload of WSP1B) it opens, edits, hovers and closes
+ * corpus documents and records, per close, the server's own release receipt
+ * (`retention.lastRelease`: wall time, nodes scanned, nodes released, physical
+ * slots before/after, the wait behind in-flight computations) together with
+ * the exact heap, the process-tree resident set and the retained-object
+ * counters read just before the close and once the release landed. It judges
+ * nothing but its own completeness: the numbers are the deliverable, read
+ * against the same lane on the base build (a server without the retention
+ * fields still yields hover latency and resident set, the rest reads as
+ * unavailable).
+ *
+ * Opt in with `VERTER_ENDURANCE_CLOSE_COST=1`. `VERTER_ENDURANCE_CLOSE_COST_CORPUS_DIR`
+ * points at an existing workspace root instead of generating the slice;
+ * `VERTER_ENDURANCE_CLOSE_COST_FILES` bounds the documents driven (default 40);
+ * `VERTER_ENDURANCE_CLOSE_COST_COUNT` sets the slice size (default 2615 SFCs);
+ * `VERTER_ENDURANCE_CLOSE_COST_OUT` names a JSON receipt to write.
+ */
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { GET_STATISTICS_METHOD } from "../src/core/startupGate.js";
+import {
+  sampleProcessTreeRss,
+  type ProcessTreeRssSample,
+} from "../src/endurance/processTreeRss.js";
+import {
+  deriveCorpusProbes,
+  disposeWorkspace,
+  loadEnduranceConfig,
+  stageEnduranceFixtureDependencies,
+  type CorpusProbeDerivation,
+  type EnduranceProbe,
+} from "../src/endurance/index.js";
+import {
+  describeRetentionReading,
+  extractRetentionReading,
+  type LastReleaseReading,
+  type RetentionReading,
+} from "../src/endurance/scenarios/churn.js";
+import { disposeRig, spawnRig, type EnduranceRig } from "./endurance.helpers.js";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(HERE, "..", "..", "..");
+const config = loadEnduranceConfig();
+const ENABLED = process.env.VERTER_ENDURANCE_CLOSE_COST === "1";
+const FILE_BUDGET = Number(process.env.VERTER_ENDURANCE_CLOSE_COST_FILES ?? "40");
+/**
+ * WSP1B: the PrimeVue-equivalent slice of the synthetic-15k corpus (2615 SFCs,
+ * 80 modules, 8 composite). `VERTER_ENDURANCE_CLOSE_COST_COUNT` scales the
+ * slice down for a machine or build that cannot sync the full one in time;
+ * the receipt records the size actually driven.
+ */
+const SLICE = (() => {
+  const count = Number(process.env.VERTER_ENDURANCE_CLOSE_COST_COUNT ?? "2615");
+  const modules = Math.max(2, Math.round((count / 2615) * 80));
+  return { count, modules, composite: Math.max(1, Math.round(modules / 10)) } as const;
+})();
+
+interface CloseCostSample {
+  readonly relativePath: string;
+  readonly hoverMs: number;
+  /** Retention readings, or null on a server without the retention fields. */
+  readonly before: RetentionReading | null;
+  readonly after: RetentionReading | null;
+  readonly release: LastReleaseReading | null;
+  readonly rssBefore: ProcessTreeRssSample;
+  readonly rssAfter: ProcessTreeRssSample;
+  /** Wall time from the close notification to the release landing (or the fixed settle). */
+  readonly settleMs: number;
+}
+
+/** What a server without the retention fields settles on after a close. */
+const BLIND_SETTLE_MS = 500;
+
+function generateSlice(): string {
+  const root = mkdtempSync(path.join(tmpdir(), "verter-endurance-close-cost-"));
+  const corpus = path.join(root, "corpus");
+  const generator = path.join(REPO_ROOT, "test-corpora/perf/synthetic-15k/generator/generate.mjs");
+  execFileSync(
+    process.execPath,
+    [
+      generator,
+      "--out",
+      corpus,
+      "--count",
+      String(SLICE.count),
+      "--modules",
+      String(SLICE.modules),
+      "--composite",
+      String(SLICE.composite),
+      "--quiet",
+    ],
+    { cwd: REPO_ROOT, stdio: "inherit" },
+  );
+  writeFileSync(
+    path.join(root, "tsconfig.json"),
+    `${JSON.stringify(
+      {
+        compilerOptions: {
+          target: "ESNext",
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          strict: true,
+        },
+        include: ["corpus/**/*.vue", "corpus/**/*.ts"],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  mkdirSync(path.join(root, ".verter"), { recursive: true });
+  stageEnduranceFixtureDependencies(root, "vue");
+  return root;
+}
+
+async function readRetention(rig: EnduranceRig): Promise<RetentionReading | null> {
+  const snapshot: unknown = await rig.session.client.sendRequest(
+    GET_STATISTICS_METHOD,
+    {},
+    config.probeTimeoutMs,
+  );
+  return extractRetentionReading(snapshot);
+}
+
+/** Poll until one more release has been applied than `appliedBefore`, or give up. */
+async function settleRelease(
+  rig: EnduranceRig,
+  appliedBefore: number | null,
+  deadlineMs: number,
+): Promise<{ reading: RetentionReading | null; settleMs: number }> {
+  const started = performance.now();
+  if (appliedBefore === null) {
+    await new Promise((resolve) => setTimeout(resolve, BLIND_SETTLE_MS));
+    return { reading: await readRetention(rig), settleMs: performance.now() - started };
+  }
+  for (;;) {
+    const reading = await readRetention(rig);
+    if (reading !== null && reading.releasesApplied > appliedBefore) {
+      return { reading, settleMs: performance.now() - started };
+    }
+    if (performance.now() - started > deadlineMs) {
+      throw new Error(
+        `the close's release did not land within ${deadlineMs}ms: ` +
+          `${describeRetentionReading(reading)}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+const mib = (bytes: number) => (bytes / 1048576).toFixed(1);
+const ms = (micros: number) => (micros / 1000).toFixed(2);
+
+function summarize(samples: readonly CloseCostSample[]): string {
+  const hovers = samples.map((s) => s.hoverMs).sort((a, b) => a - b);
+  const pickOf = (sorted: readonly number[], q: number) =>
+    sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+  const releases = samples.map((s) => s.release).filter((r): r is LastReleaseReading => r !== null);
+  const micros = releases.map((r) => r.elapsedMicros).sort((a, b) => a - b);
+  const lines = [
+    `close cost over ${samples.length} closes: hover p50 ${pickOf(hovers, 0.5).toFixed(0)}ms ` +
+      `p95 ${pickOf(hovers, 0.95).toFixed(0)}ms max ${hovers[hovers.length - 1].toFixed(0)}ms; ` +
+      `settle max ${Math.max(...samples.map((s) => s.settleMs)).toFixed(0)}ms; ` +
+      `server RSS ${mib(samples[0].rssBefore.members[0]?.rssBytes ?? 0)}→${mib(
+        samples[samples.length - 1].rssAfter.members[0]?.rssBytes ?? 0,
+      )}MiB`,
+    releases.length === 0
+      ? "  release receipts: UNAVAILABLE (the server reports no retention fields)"
+      : `  release wall time p50 ${ms(pickOf(micros, 0.5))}ms p95 ${ms(pickOf(micros, 0.95))}ms ` +
+        `max ${ms(micros[micros.length - 1])}ms; wait behind computations max ` +
+        `${ms(Math.max(...releases.map((r) => r.waitMicros)))}ms; live nodes scanned ` +
+        `${Math.min(...releases.map((r) => r.nodesScanned))}..${Math.max(...releases.map((r) => r.nodesScanned))}, ` +
+        `released per close ${Math.min(...releases.map((r) => r.nodesReleased))}..${Math.max(...releases.map((r) => r.nodesReleased))}, ` +
+        `slots ${releases[0].storageSlotsBefore}→${releases[releases.length - 1].storageSlotsAfter}`,
+  ];
+  for (const s of samples) {
+    const heap =
+      s.before?.heapInUseBytes != null && s.after?.heapInUseBytes != null
+        ? `heap ${mib(s.before.heapInUseBytes)}→${mib(s.after.heapInUseBytes)}MiB`
+        : "heap n/a";
+    const rss = `rss ${mib(s.rssBefore.totalBytes ?? 0)}→${mib(s.rssAfter.totalBytes ?? 0)}MiB`;
+    const release = s.release
+      ? `release took ${ms(s.release.elapsedMicros)}ms (wait ${ms(s.release.waitMicros)}ms) scanned ${s.release.nodesScanned} ` +
+        `released ${s.release.nodesReleased} slots ${s.release.storageSlotsBefore}→${s.release.storageSlotsAfter} memo -${s.release.memoEntriesEvicted}`
+      : "release receipt n/a";
+    const counters =
+      s.before && s.after
+        ? `nodes ${s.before.semanticNodes}→${s.after.semanticNodes} memo ${s.before.semanticMemoEntries}→${s.after.semanticMemoEntries}`
+        : "counters n/a";
+    lines.push(
+      `  ${s.relativePath}: hover ${s.hoverMs.toFixed(0)}ms; ${release}; settle ${s.settleMs.toFixed(0)}ms; ${counters}; ${heap}; ${rss}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+describe.sequential(`endurance: close cost on the WSP equal-work slice [${config.route}]`, () => {
+  if (!ENABLED) {
+    it.skip("close-cost lane disabled (set VERTER_ENDURANCE_CLOSE_COST=1)", () => {});
+    return;
+  }
+  let root: string;
+  let generated = false;
+  let derivation: CorpusProbeDerivation;
+  let rig: EnduranceRig;
+
+  beforeAll(async () => {
+    const existing = process.env.VERTER_ENDURANCE_CLOSE_COST_CORPUS_DIR;
+    if (existing) {
+      root = path.resolve(existing);
+    } else {
+      root = generateSlice();
+      generated = true;
+    }
+    derivation = deriveCorpusProbes(root, { maxFiles: FILE_BUDGET });
+    // A 2615-file project takes the provider well past the default startup gate.
+    rig = await spawnRig(root, config, false, { readyTimeoutMs: 900_000 });
+  }, 1_800_000);
+
+  afterAll(async () => {
+    const stderrFile = process.env.VERTER_ENDURANCE_STDERR_FILE;
+    if (stderrFile) writeFileSync(stderrFile, rig.handle.client.stderr.text());
+    if (rig) await disposeRig(rig);
+    if (generated) disposeWorkspace(root);
+  });
+
+  it("records what a close costs: the release receipt, heap, resident set and counters around each close", async () => {
+    const probes: EnduranceProbe[] = derivation.lanes
+      .flatMap((section) => section.probes)
+      .filter((probe) => probe.kind === "hover");
+    const byFile = new Map<string, EnduranceProbe>();
+    for (const probe of probes)
+      if (!byFile.has(probe.relativePath)) byFile.set(probe.relativePath, probe);
+    const files = [...byFile.keys()].slice(0, FILE_BUDGET);
+    expect(files.length, "the slice must yield hoverable corpus documents").toBeGreaterThan(0);
+
+    const spawnedPid = rig.handle.client.process.pid;
+    expect(spawnedPid, "the spawned server must expose a pid").toBeDefined();
+    const serverPid = spawnedPid!;
+    const samples: CloseCostSample[] = [];
+    const failures: string[] = [];
+    let cycle = 0;
+    for (const relativePath of files) {
+      cycle += 1;
+      const probe = byFile.get(relativePath)!;
+      const text = rig.session.textOf(relativePath);
+      rig.session.openFile(relativePath, text);
+      rig.session.changeFile(
+        relativePath,
+        text.replace("</script>", `// close-cost ${cycle}\n</script>`),
+      );
+      const hoverStarted = performance.now();
+      const outcome = await rig.session.runProbe(
+        { ...probe, informational: true, label: `close-cost ${cycle} hover` },
+        config.probeTimeoutMs,
+      );
+      const hoverMs = performance.now() - hoverStarted;
+      if (outcome.classification !== "answered") {
+        failures.push(`${relativePath}: hover settled as ${outcome.classification}`);
+      }
+      const before = await readRetention(rig);
+      const rssBefore = await sampleProcessTreeRss(serverPid);
+      rig.session.closeFile(relativePath);
+      const { reading: after, settleMs } = await settleRelease(
+        rig,
+        before === null ? null : before.releasesApplied,
+        30_000,
+      );
+      const rssAfter = await sampleProcessTreeRss(serverPid);
+      if (before !== null && after !== null && !after.lastRelease) {
+        failures.push(`${relativePath}: no release receipt after the close`);
+        continue;
+      }
+      samples.push({
+        relativePath,
+        hoverMs,
+        before,
+        after,
+        release: after?.lastRelease ?? null,
+        rssBefore,
+        rssAfter,
+        settleMs,
+      });
+    }
+
+    const summary = summarize(samples);
+    console.log(`[endurance] close cost\n${summary}`);
+    const out = process.env.VERTER_ENDURANCE_CLOSE_COST_OUT;
+    if (out) {
+      writeFileSync(
+        out,
+        `${JSON.stringify({ root: generated ? "generated WSP1B slice" : root, slice: SLICE, samples }, null, 2)}\n`,
+      );
+    }
+    expect(failures, "every close must answer its hover and land its release").toEqual([]);
+    const last = samples[samples.length - 1]!.after;
+    if (last !== null) {
+      expect(last.deferredReleases, "no release may stay queued once the lane is idle").toBe(0);
+    }
+  }, 3_600_000);
+});
