@@ -1614,9 +1614,10 @@ jobs:
       # its offline oracle cache.
       - name: Provision the oracle npm cache (framework-conformance-harness)
         run: node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs
+      # --no-bail: every suite reports, so one failure never hides another.
       - name: Workspace package suites no other lane runs
         run: >-
-          pnpm
+          pnpm --no-bail
           --filter @verter/benchmark
           --filter @verter/component-meta
           --filter @verter/framework-conformance-harness
