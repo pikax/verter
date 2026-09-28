@@ -128,6 +128,7 @@ impl ParsedEvalProgram {
         owners: &verter_semantic::analysis::top_level_owners::TopLevelOwnerTable,
         canonical: Arc<str>,
         parse_env_hash: &crate::types::Hash16,
+        class_fields: &verter_semantic::analysis::class_field_value::ClassFieldValues,
     ) -> Arc<FunctionProgramIndex> {
         let cell = self.functions.get_or_init(|| {
             IndexedProgramFunctionsCell::new(Rc::clone(&self.cell), |owner| {
@@ -136,6 +137,7 @@ impl ParsedEvalProgram {
                     owner.borrow_owner().source.as_ref(),
                     owners,
                     canonical,
+                    class_fields,
                 );
                 IndexedProgramFunctions {
                     index: Arc::new(crate::decl_body_memo::fold_flow_body_env_identity(

@@ -395,6 +395,12 @@ pub struct DeclHeaderIndex {
     /// declares, with that block's scope, in source order. Empty in the
     /// `from_eval_env` mirror (same block-level-view limitation).
     pub augmentation_namespace_blocks: Vec<(AugmentationScopeKind, NamespaceBlockRecord)>,
+    /// The one classification of every field of every class this walk
+    /// indexes: which fields read through a synthetic value, and from what
+    /// source. The class lowering and the function-program discovery read
+    /// it instead of walking an initializer again. Empty in the
+    /// `from_eval_env` mirror.
+    pub class_field_values: std::sync::Arc<crate::analysis::class_field_value::ClassFieldValues>,
 }
 
 impl DeclHeaderIndex {
@@ -876,13 +882,7 @@ fn index_top_level_statement(
     // Mirror of `collect_hoisted_vars`: a `var` inside a nested block
     // belongs to the top level.
     crate::analysis::type_eval_build::for_each_hoisted_var(stmt, &mut |declarator, _| {
-        index_variable(
-            declarator,
-            VariableDeclarationKind::Var,
-            ctx,
-            &mut index.value_headers,
-            None,
-        );
+        index_variable_in(declarator, VariableDeclarationKind::Var, ctx, index, None);
     });
     match stmt {
         Statement::TSTypeAliasDeclaration(decl) => {
@@ -908,7 +908,7 @@ fn index_top_level_statement(
         }
         Statement::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                index_variable(decl, var_decl.kind, ctx, &mut index.value_headers, None);
+                index_variable_in(decl, var_decl.kind, ctx, index, None);
             }
         }
         Statement::TSEnumDeclaration(enum_decl) => {
@@ -998,7 +998,7 @@ fn index_declaration(
         }
         Declaration::VariableDeclaration(var_decl) => {
             for d in &var_decl.declarations {
-                index_variable(d, var_decl.kind, ctx, &mut index.value_headers, None);
+                index_variable_in(d, var_decl.kind, ctx, index, None);
             }
         }
         Declaration::TSEnumDeclaration(enum_decl) => {
@@ -1328,13 +1328,7 @@ fn index_namespaced_statement(
         }
         Statement::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                index_variable(
-                    decl,
-                    var_decl.kind,
-                    ctx,
-                    &mut index.value_headers,
-                    Some(namespace),
-                );
+                index_variable_in(decl, var_decl.kind, ctx, index, Some(namespace));
                 for name in decl.id.get_binding_identifiers() {
                     index_private_value(index, ctx, &format!("{namespace}.{}", name.name), body);
                 }
@@ -1384,13 +1378,7 @@ fn index_namespaced_declaration(
         }
         Declaration::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                index_variable(
-                    decl,
-                    var_decl.kind,
-                    ctx,
-                    &mut index.value_headers,
-                    Some(namespace),
-                );
+                index_variable_in(decl, var_decl.kind, ctx, index, Some(namespace));
             }
         }
         Declaration::FunctionDeclaration(func) => {
@@ -1528,6 +1516,42 @@ fn constructor_visibility(decl: &Class<'_>) -> Option<verter_type_expr::MemberVi
     })
 }
 
+/// Classify one field of the class `name` once for every consumer (see
+/// `class_field_value`) and index the synthetic value a field read through
+/// one declares, mirroring `collect_named_class`.
+fn index_class_field_value(
+    class: &Class<'_>,
+    name: &str,
+    prop: &oxc_ast::ast::PropertyDefinition<'_>,
+    ctx: HeaderStatementContext<'_>,
+    index: &mut DeclHeaderIndex,
+) {
+    let classified =
+        std::sync::Arc::make_mut(&mut index.class_field_values).classify(class, prop, ctx.source);
+    if let (Some(_), Some(field_name), Some(value)) = (
+        classified,
+        crate::analysis::type_eval_build::class_field_value_name(name, prop),
+        prop.value.as_ref(),
+    ) {
+        let span: Span = value.span().into();
+        let entry = index
+            .value_headers
+            .entry(ctx.key(&field_name))
+            .or_insert_with(|| ValueDeclHeader {
+                kind: if prop.readonly {
+                    ValueDeclKind::Const
+                } else {
+                    ValueDeclKind::Let
+                },
+                span,
+                name_span: span,
+                object_member_headers: Vec::new(),
+                contributors: Vec::new(),
+            });
+        push_contributor(&mut entry.contributors, ctx, span, span);
+    }
+}
+
 fn index_named_class(
     decl: &Class<'_>,
     name: &str,
@@ -1580,31 +1604,7 @@ fn index_named_class(
                 if matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
                     continue;
                 }
-                // A field initialized by a call's synthetic value (see
-                // `class_field_value_name`), mirroring `collect_named_class`.
-                if let (Some(field_name), Some(value)) = (
-                    crate::analysis::type_eval_build::class_field_value_name(
-                        name, prop, ctx.source,
-                    ),
-                    prop.value.as_ref(),
-                ) {
-                    let span: Span = value.span().into();
-                    let entry = index
-                        .value_headers
-                        .entry(ctx.key(&field_name))
-                        .or_insert_with(|| ValueDeclHeader {
-                            kind: if prop.readonly {
-                                ValueDeclKind::Const
-                            } else {
-                                ValueDeclKind::Let
-                            },
-                            span,
-                            name_span: span,
-                            object_member_headers: Vec::new(),
-                            contributors: Vec::new(),
-                        });
-                    push_contributor(&mut entry.contributors, ctx, span, span);
-                }
+                index_class_field_value(decl, name, prop, ctx, index);
                 let header = MemberHeader {
                     key: lower_property_key(&prop.key, ctx.source),
                     method_kind: None,
@@ -1737,6 +1737,28 @@ fn index_function_in(
         func.span.into(),
         id.span.into(),
     );
+}
+
+/// [`index_variable`] into `index`'s value headers, with the fields of a
+/// class expression the declarator holds classified as a class
+/// declaration's are (see `class_field_value`), so the class lowering and
+/// the function-program discovery read that one answer.
+fn index_variable_in(
+    decl: &VariableDeclarator<'_>,
+    kind: VariableDeclarationKind,
+    ctx: HeaderStatementContext<'_>,
+    index: &mut DeclHeaderIndex,
+    namespace: Option<&str>,
+) {
+    index_variable(decl, kind, ctx, &mut index.value_headers, namespace);
+    if let Some(class) = decl
+        .init
+        .as_ref()
+        .filter(|_| decl.type_annotation.is_none())
+        .and_then(crate::analysis::type_eval_build::initializer_class_expression)
+    {
+        std::sync::Arc::make_mut(&mut index.class_field_values).classify_class(class, ctx.source);
+    }
 }
 
 fn index_variable(

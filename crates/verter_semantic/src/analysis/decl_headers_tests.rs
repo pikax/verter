@@ -1051,6 +1051,7 @@ interface Merged { b: number }
             ),
             source,
             ret.program.source_type.is_typescript_definition(),
+            &index.class_field_values,
             &mut scratch,
         );
     }

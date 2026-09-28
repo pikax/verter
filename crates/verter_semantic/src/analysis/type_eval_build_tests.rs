@@ -38,7 +38,11 @@ fn svelte_runes_statement(source: &str) -> crate::analysis::type_eval_build::Low
             .parse();
     assert!(!parsed.fatal_error, "fixture must parse: {source}");
     let statement = parsed.program.body.first().expect("one statement fixture");
-    crate::analysis::type_eval_build::lower_svelte_runes_statement_parts(statement, source)
+    crate::analysis::type_eval_build::lower_svelte_runes_statement_parts(
+        statement,
+        source,
+        &Default::default(),
+    )
 }
 
 #[test]
@@ -70,6 +74,7 @@ namespace Ns { export class C { value!: string } }
         source,
         &context,
         &owners,
+        &Default::default(),
     );
 
     let module_group = env
@@ -130,6 +135,7 @@ const instanceMarker = 0;
         source,
         &context,
         &owners,
+        &Default::default(),
     );
     assert_eq!(
         env.type_symbols[&DeclBindingKey::new(module, "Shared")]

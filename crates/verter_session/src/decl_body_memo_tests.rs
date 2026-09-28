@@ -2329,9 +2329,12 @@ fn function_program_index_builds_once_and_covers_every_function_position() {
         .as_ref()
         .unwrap()
         .run_leased(&memo.key, move |parsed| {
-            parsed
-                .unwrap()
-                .function_program_index(&owners, canonical, &parse_env_hash)
+            parsed.unwrap().function_program_index(
+                &owners,
+                canonical,
+                &parse_env_hash,
+                &Default::default(),
+            )
         })
         .unwrap();
     assert!(

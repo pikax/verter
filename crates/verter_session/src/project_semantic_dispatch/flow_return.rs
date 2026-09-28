@@ -1635,6 +1635,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             | FunctionReturnNode::Absent => None,
                         })
                     }
+                    verter_semantic::analysis::function_program::ProgramExpressionSource::FieldInitializer {
+                        source: verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                        readonly,
+                    } => regular(self.field_initializer_value(identity, *readonly)),
+                    verter_semantic::analysis::function_program::ProgramExpressionSource::FieldInitializer { .. } => {
+                        crate::request_context::mark_request_result_partial();
+                        None
+                    }
                     verter_semantic::analysis::function_program::ProgramExpressionSource::UnsupportedCall => {
                         crate::request_context::mark_request_result_partial();
                         None
@@ -1649,6 +1657,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         )
                     }
                 }
+            }
+        }
+    }
+
+    /// The value of a class field whose initializer is served as its own
+    /// position: the position's body-derived return, its fresh literals
+    /// widened for a mutable field (the checker's widened literal type of a
+    /// property initializer) and kept for a `readonly` one. A read made
+    /// while the position is already being evaluated — the initializer
+    /// reads, through `this`, a field whose own initializer reads it back
+    /// — is the checker's circular initializer (TS7022): `any`.
+    fn field_initializer_value(
+        &self,
+        identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+        readonly: bool,
+    ) -> Option<crate::semantic_query::SemanticNodeId> {
+        match self.execute_flow_return(self.flow_return_key_for(identity)) {
+            FlowReturnStep::Complete(result) => {
+                let node = result.return_type();
+                if readonly || result.fresh_literal_arms().is_empty() {
+                    return Some(node);
+                }
+                Some(widen_values_within(
+                    self,
+                    node,
+                    result.fresh_literal_arms(),
+                    self.nullability_for(identity.anchor.canonical_id.as_ref()),
+                ))
+            }
+            FlowReturnStep::Hold(_) => Some(
+                self.graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
+            ),
+            FlowReturnStep::NoValue(_) => {
+                crate::request_context::mark_request_result_partial();
+                None
             }
         }
     }
@@ -7142,7 +7186,11 @@ fn collect_expression_write_spans(
 fn slice_expr_reads_frame(expr: &crate::flow_slice_content::SliceExpr) -> bool {
     use crate::flow_slice_content::{SliceArrayElement, SliceCall, SliceExpr, SliceObjectEntry};
     match expr {
-        SliceExpr::Param { .. } | SliceExpr::Local { .. } | SliceExpr::FrameShadowed { .. } => true,
+        // The frame's receiver is only the frame's to read.
+        SliceExpr::Param { .. }
+        | SliceExpr::Local { .. }
+        | SliceExpr::FrameShadowed { .. }
+        | SliceExpr::This(_) => true,
         SliceExpr::Call(call, _, arguments) => {
             arguments.iter().any(slice_expr_reads_frame)
                 || match call {
@@ -22779,8 +22827,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // `this` to the receiver.
                     let this_source = self.this_member_source(current, name);
                     let read_base = this_source.unwrap_or(current);
-                    let Some(member) =
-                        self.project_path_navigate(read_base, std::slice::from_ref(name))
+                    let Some(member) = this_source
+                        .and_then(|source| self.receiver_non_public_member(source, name))
+                        .or_else(|| {
+                            self.project_path_navigate(read_base, std::slice::from_ref(name))
+                        })
                     else {
                         self.record_degradation(FlowReturnDegradation::FlowGap(
                             crate::semantic_query::FlowGap::UnmodeledExpression,
@@ -23226,6 +23277,38 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// argument is applied by the statement's own evaluation order, never
     /// here, and a callee hold met inside it is not the argument's value,
     /// so neither form is read from the frame.
+    /// A `private`, `protected` or `#private` member `name` of the class
+    /// member source `source` a read off the class's own `this` reaches:
+    /// inside its class a non-public member reads as any other does, where
+    /// the public member walk would not find it. `None` for a public
+    /// member (the walk reads it) or one `source` does not declare.
+    fn receiver_non_public_member(
+        &self,
+        source: SemanticNodeId,
+        name: &str,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        let data = graph.node_data(source)?;
+        let SemanticNodeData::Object(surface) = &*data else {
+            return None;
+        };
+        let key = crate::semantic_query::PropertyKey::identifier(Arc::from(name));
+        if let Some(accessor) = surface.project_known_key_accessor(&key) {
+            return accessor
+                .property_member(graph)
+                .filter(|member| !member.visibility.is_public())
+                .and_then(|_| accessor.read_value(graph));
+        }
+        match surface.project_known_key(&key) {
+            crate::semantic_query::SurfaceKeyProjection::Exact(member)
+                if !member.visibility.is_public() =>
+            {
+                Some(member.value)
+            }
+            _ => None,
+        }
+    }
+
     fn eval_frame_call_argument(
         &mut self,
         expr: &crate::flow_slice_content::SliceExpr,
@@ -24225,10 +24308,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         break;
                     }
                     let this_source = self.this_member_source(callee_node, name);
-                    let Some(read) = self.project_path_navigate(
-                        this_source.unwrap_or(callee_node),
-                        std::slice::from_ref(name),
-                    ) else {
+                    let Some(read) = this_source
+                        .and_then(|source| self.receiver_non_public_member(source, name))
+                        .or_else(|| {
+                            self.project_path_navigate(
+                                this_source.unwrap_or(callee_node),
+                                std::slice::from_ref(name),
+                            )
+                        })
+                    else {
                         return self.degraded_unrepresentable_callee();
                     };
                     callee_node = match this_source {

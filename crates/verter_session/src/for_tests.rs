@@ -1027,7 +1027,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     let name = function.id.as_ref().expect("named function").name.as_str();
     let canonical_id: std::sync::Arc<str> = std::sync::Arc::from("/flow_solve_fixture.ts");
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
-    let (index, nodes) = build_function_program_index_with_nodes(&parsed.program, source, &owners, canonical_id.clone());
+    let (index, nodes) = build_function_program_index_with_nodes(&parsed.program, source, &owners, canonical_id.clone(), &Default::default());
     let entry = if let Some(nested_name) = nested {
         let mut matching = index.matches_named(name).filter(|candidate| {
             candidate.entry().lexical_parent.is_some() && nodes.get(&candidate.entry().key).is_some_and(|resolved| {
@@ -1045,6 +1045,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
         FunctionNode::Function(func) if func.r#type == oxc_ast::ast::FunctionType::FunctionExpression => FunctionBodySource::from_function_expression(func).expect("bodied expression"),
         FunctionNode::Function(func) => FunctionBodySource::from_function(func).expect("bodied declaration"),
         FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
+        FunctionNode::Initializer(expression) => FunctionBodySource::from_initializer(expression),
     };
     let prepared = build_indexed_function_body_skeleton(&body, source, entry).expect("indexed fixture structure");
     let function = entry.key.clone();
