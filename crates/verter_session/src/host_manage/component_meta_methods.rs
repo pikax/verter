@@ -2889,7 +2889,7 @@ impl VerterHost {
             }
         };
         self.resolver_runtime()
-            .admit_component_meta_view(cache_key, state, "component_meta.results", update_mirror)
+            .admit_component_meta_view(cache_key, state, update_mirror)
             .0
     }
 

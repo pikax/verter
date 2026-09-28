@@ -387,7 +387,6 @@ where
         &self,
         key: ResolutionNodeKey,
         state: Option<(Arc<MetaV>, Vec<FactVersionRef>)>,
-        cache_kind: &'static str,
         alongside: impl FnOnce(Option<u64>) -> R,
     ) -> (Option<ValidatedFactAdmission<MetaV>>, R) {
         let mut recent = self.recent_component_meta_views.lock();
@@ -416,7 +415,7 @@ where
         }
         let admission = state.and_then(|(value, facts)| {
             self.component_meta
-                .insert_arc_with_kind(key, value, facts, cache_kind)
+                .insert_arc_with_kind(key, value, facts, "component_meta.results")
         });
         let alongside = alongside(superseded);
         drop(recent);
@@ -558,12 +557,8 @@ mod tests {
             canonical_id: key.symbol_id.clone(),
             hash: [1u8; 16],
         }];
-        let (admission, ()) = runtime.admit_component_meta_view(
-            key,
-            Some((Arc::new(1), facts)),
-            "component_meta.results",
-            |_| (),
-        );
+        let (admission, ()) =
+            runtime.admit_component_meta_view(key, Some((Arc::new(1), facts)), |_| ());
         assert!(admission.is_some(), "fixture: the state is admitted");
     }
 
