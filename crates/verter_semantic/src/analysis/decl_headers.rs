@@ -40,7 +40,9 @@ use crate::analysis::top_level_owners::{DeclMap, TopLevelOwnerTable, TopLevelSta
 use crate::analysis::type_eval::{AugmentationScopeKind, TypeDeclKind, ValueDeclKind};
 use verter_parser::utils::oxc::script::route_inventory::statements_have_export_declarations;
 
-use crate::analysis::namespace_walk::{walk_namespaces, NamespaceVisitor, Nesting, QualifiedPath};
+use crate::analysis::namespace_walk::{
+    for_each_namespace, NamespaceVisitor, Nesting, QualifiedPath,
+};
 
 #[path = "decl_headers_augmentation.rs"]
 mod augmentation;
@@ -1084,7 +1086,7 @@ fn index_external_module_declaration(
 
 /// The identifier-named half of [`index_external_module_declaration`]: the
 /// namespace and every namespace nested in it, walked from an explicit
-/// stack ([`walk_namespaces`]).
+/// stack ([`for_each_namespace`]).
 fn index_module_declaration(
     decl: &TSNamespaceDeclaration<'_>,
     ctx: HeaderStatementContext<'_>,
@@ -1092,7 +1094,7 @@ fn index_module_declaration(
     prefix: Option<&str>,
     ambient: bool,
 ) {
-    walk_namespaces(
+    for_each_namespace(
         decl,
         &mut HeaderNamespaces {
             ctx,

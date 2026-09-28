@@ -31,7 +31,7 @@ use oxc_ast::ast::{
 };
 use oxc_ast_visit::Visit;
 
-use crate::analysis::namespace_walk::walk_namespaces;
+use crate::analysis::namespace_walk::for_each_namespace;
 use oxc_span::GetSpan;
 use verter_parser::utils::oxc::script::route_inventory::statements_have_export_declarations;
 use verter_type_expr::facts::{
@@ -1921,7 +1921,7 @@ fn collect_external_module_declaration(
 
 /// The identifier-named half of [`collect_external_module_declaration`]:
 /// the namespace and every namespace nested in it, walked from an explicit
-/// stack ([`walk_namespaces`]).
+/// stack ([`for_each_namespace`]).
 fn collect_module_declaration(
     decl: &TSNamespaceDeclaration<'_>,
     source: &str,
@@ -1929,7 +1929,7 @@ fn collect_module_declaration(
     prefix: Option<&str>,
     ambient: bool,
 ) {
-    walk_namespaces(
+    for_each_namespace(
         decl,
         &mut CollectedNamespaces {
             source,
@@ -2141,8 +2141,8 @@ fn collect_augmentation_module_declaration(
     // augmentation block is not a namespace-member contributor; only
     // identifier-named namespaces (`namespace JSX`) qualify members here.
     // The namespace and every namespace nested in it are walked from an
-    // explicit stack ([`walk_namespaces`]).
-    walk_namespaces(
+    // explicit stack ([`for_each_namespace`]).
+    for_each_namespace(
         decl,
         &mut CollectedNamespaces {
             source,

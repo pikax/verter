@@ -189,7 +189,7 @@ pub(super) fn index_augmentation_block(
 /// members under their qualified `Ns.Member` names in the augmentation
 /// inventory. A string-literal module name nested here contributes nothing.
 /// The namespace and every namespace nested in it are walked from an
-/// explicit stack ([`walk_namespaces`]).
+/// explicit stack ([`for_each_namespace`]).
 fn index_augmentation_module_declaration(
     decl: &TSNamespaceDeclaration<'_>,
     ctx: HeaderStatementContext<'_>,
@@ -197,7 +197,7 @@ fn index_augmentation_module_declaration(
     scope: &AugmentationScopeKind,
     prefix: Option<&str>,
 ) {
-    walk_namespaces(
+    for_each_namespace(
         decl,
         &mut AugmentationNamespaces {
             ctx,

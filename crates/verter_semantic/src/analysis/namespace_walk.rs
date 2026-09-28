@@ -124,7 +124,7 @@ fn open<'s, 'a, F>(decl: &'s TSNamespaceDeclaration<'a>, frame: F) -> Open<'s, '
 /// Walk `decl` and every namespace nested in it with `visitor`, in source
 /// order: a namespace is entered before its statements and left after the
 /// last of them.
-pub(crate) fn walk_namespaces<'s, 'a, V: NamespaceVisitor<'s, 'a>>(
+pub(crate) fn for_each_namespace<'s, 'a, V: NamespaceVisitor<'s, 'a>>(
     decl: &'s TSNamespaceDeclaration<'a>,
     visitor: &mut V,
 ) {

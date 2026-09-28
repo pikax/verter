@@ -253,13 +253,13 @@ pub fn collect_statement_dependency_names(
 /// A string-literal ambient module (augmentation scope) contributes
 /// nothing here. The namespace and every namespace nested in it are walked
 /// from an explicit stack
-/// ([`crate::analysis::namespace_walk::walk_namespaces`]).
+/// ([`crate::analysis::namespace_walk::for_each_namespace`]).
 fn collect_module_dependencies(
     module: &TSNamespaceDeclaration<'_>,
     owner: TopLevelOwnerId,
     out: &mut Vec<(DeclarationPath, DeclDependencyNames)>,
 ) {
-    crate::analysis::namespace_walk::walk_namespaces(
+    crate::analysis::namespace_walk::for_each_namespace(
         module,
         &mut ModuleDependencies {
             owner,
