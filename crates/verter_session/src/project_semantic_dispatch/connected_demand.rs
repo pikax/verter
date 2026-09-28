@@ -200,6 +200,18 @@ impl<'a> ConnectedDemandLedger<'a> {
         Ok(())
     }
 
+    /// Charge `units` work units at once — the work a planned stage costs,
+    /// paid before it runs. `Err` carries the sticky trip set when the
+    /// demand cannot pay for all of it.
+    pub(crate) fn charge_units(&self, units: usize) -> Result<(), PartialReasonSet> {
+        let available = self.work_available()?;
+        if units > available {
+            return Err(self.record_trip(PartialReasonSet::PROJECTION_WORK_LIMIT));
+        }
+        self.commit(units);
+        Ok(())
+    }
+
     /// Snapshot the remaining work available to a query-free terminal run. The
     /// caller commits exactly the units it consumes before any nested semantic
     /// dispatch.

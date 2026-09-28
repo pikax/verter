@@ -116,16 +116,151 @@ impl ComponentMetaQueryEngine<'_> {
         env: Option<&EvalEnv>,
         overrides: Option<&FallthroughPropOverrideSet>,
     ) -> Option<SemanticNodeId> {
-        let IndexedValueExpression::Value(lowered) = expression else {
-            return self.evaluate_indexed_semantic_call_node(
-                scope_canonical_id,
-                scope_owner,
-                expression,
-                env,
-                overrides,
-            );
-        };
+        // A call's callee, receiver and arguments, and a member read's
+        // object, evaluate from an explicit stack of the records waiting on
+        // them, in that order, a record ending at a child with no value: a
+        // record nested in a record costs no native level.
+        struct Waiting<'e> {
+            call: &'e verter_type_expr::IndexedValueCall,
+            callee: Option<SemanticNodeId>,
+            receiver: Option<Option<SemanticNodeId>>,
+            /// The object of the member read the call's callee is.
+            member_receiver: Option<SemanticNodeId>,
+            args: Vec<crate::semantic_query::CallArgKey>,
+        }
+        enum Pending<'e> {
+            Call(Waiting<'e>),
+            Member { name: &'e Arc<str>, callee: bool },
+        }
+        let mut waiting: Vec<Pending<'_>> = Vec::new();
+        let (mut current, mut as_callee) = (expression, false);
+        loop {
+            let mut value = match current {
+                IndexedValueExpression::Value(lowered) => self.evaluate_fallthrough_value_leaf(
+                    scope_canonical_id,
+                    scope_owner,
+                    lowered,
+                    env,
+                    overrides,
+                ),
+                IndexedValueExpression::Call(call) => {
+                    waiting.push(Pending::Call(Waiting {
+                        call,
+                        callee: None,
+                        receiver: None,
+                        member_receiver: None,
+                        args: Vec::with_capacity(call.args.len()),
+                    }));
+                    (current, as_callee) = (&call.callee, true);
+                    continue;
+                }
+                IndexedValueExpression::Member { object, name } => {
+                    waiting.push(Pending::Member {
+                        name,
+                        callee: as_callee,
+                    });
+                    (current, as_callee) = (object, false);
+                    continue;
+                }
+                IndexedValueExpression::UnsupportedCall { .. }
+                | IndexedValueExpression::TemplateStrings { .. } => {
+                    crate::request_context::mark_request_result_partial();
+                    None
+                }
+            };
+            loop {
+                let top = match waiting.last_mut() {
+                    None => return value,
+                    Some(Pending::Member { name, callee }) => {
+                        let (name, callee) = (*name, *callee);
+                        waiting.pop();
+                        let object = value;
+                        value = object.and_then(|object| {
+                            ProjectSemanticDispatch::new(self.ctx).indexed_member_value(
+                                scope_canonical_id,
+                                object,
+                                name,
+                            )
+                        });
+                        if callee {
+                            if let (Some(object), Some(Pending::Call(call))) =
+                                (object, waiting.last_mut())
+                            {
+                                call.member_receiver = Some(object);
+                            }
+                        }
+                        continue;
+                    }
+                    Some(Pending::Call(top)) => top,
+                };
+                let call = top.call;
+                if top.callee.is_none() {
+                    let Some(callee) = value else {
+                        waiting.pop();
+                        value = None;
+                        continue;
+                    };
+                    top.callee = Some(callee);
+                    if let Some(receiver) = top.member_receiver.take() {
+                        top.receiver = Some(Some(receiver));
+                    } else if let Some(receiver) = call.receiver.as_deref() {
+                        (current, as_callee) = (receiver, false);
+                        break;
+                    } else {
+                        top.receiver = Some(None);
+                    }
+                } else if top.receiver.is_none() {
+                    top.receiver = Some(value);
+                } else {
+                    let Some(ty) = value else {
+                        waiting.pop();
+                        value = None;
+                        continue;
+                    };
+                    let argument = &call.args[top.args.len()];
+                    top.args.push(crate::semantic_query::CallArgKey::Eager {
+                        ty,
+                        spread: argument.spread,
+                        context_sensitive: argument.context_sensitive,
+                        const_view: None,
+                        literal_mode: match argument.literal_mode {
+                            verter_type_expr::IndexedValueLiteralMode::Widened => {
+                                crate::semantic_query::ArgumentLiteralMode::Widened
+                            }
+                            verter_type_expr::IndexedValueLiteralMode::Literal => {
+                                crate::semantic_query::ArgumentLiteralMode::Literal
+                            }
+                        },
+                    });
+                }
+                if let Some(argument) = call.args.get(top.args.len()) {
+                    (current, as_callee) = (&argument.expression, false);
+                    break;
+                }
+                let Some(Pending::Call(finished)) = waiting.pop() else {
+                    unreachable!("the call on top")
+                };
+                value = self.resolve_fallthrough_call(
+                    scope_canonical_id,
+                    scope_owner,
+                    finished.call,
+                    finished.callee.expect("a resolved call has a callee"),
+                    finished.receiver.flatten(),
+                    finished.args,
+                );
+            }
+        }
+    }
 
+    /// One call-free value expression of [`Self::evaluate_fallthrough_value_node`].
+    fn evaluate_fallthrough_value_leaf(
+        &mut self,
+        scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
+        lowered: &TypeExpr,
+        env: Option<&EvalEnv>,
+        overrides: Option<&FallthroughPropOverrideSet>,
+    ) -> Option<SemanticNodeId> {
         // (1) Override forwarding: a bare single-segment `typeof <name>` whose
         // name is a propagated override resolves to the override value node.
         if let TypeExpr::TypeOf(value_ref) = lowered {
@@ -220,6 +355,7 @@ impl ComponentMetaQueryEngine<'_> {
                 collect_dynamic_root_candidates_from_type(lowered, imports)
             }
             IndexedValueExpression::Call(_)
+            | IndexedValueExpression::Member { .. }
             | IndexedValueExpression::UnsupportedCall { .. }
             | IndexedValueExpression::TemplateStrings { .. } => Vec::new(),
         };
@@ -310,58 +446,17 @@ impl ComponentMetaQueryEngine<'_> {
         )
     }
 
-    fn evaluate_indexed_semantic_call_node(
+    /// Resolve one indexed call over its evaluated callee, receiver and
+    /// arguments.
+    fn resolve_fallthrough_call(
         &mut self,
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
-        expression: &IndexedValueExpression,
-        env: Option<&EvalEnv>,
-        overrides: Option<&FallthroughPropOverrideSet>,
+        call: &verter_type_expr::IndexedValueCall,
+        callee: SemanticNodeId,
+        receiver: Option<SemanticNodeId>,
+        args: Vec<crate::semantic_query::CallArgKey>,
     ) -> Option<SemanticNodeId> {
-        let IndexedValueExpression::Call(call) = expression else {
-            crate::request_context::mark_request_result_partial();
-            return None;
-        };
-        let callee = self.evaluate_fallthrough_value_node(
-            scope_canonical_id,
-            scope_owner,
-            &call.callee,
-            env,
-            overrides,
-        )?;
-        let receiver = call.receiver.as_deref().and_then(|receiver| {
-            self.evaluate_fallthrough_value_node(
-                scope_canonical_id,
-                scope_owner,
-                receiver,
-                env,
-                overrides,
-            )
-        });
-        let mut args = Vec::with_capacity(call.args.len());
-        for argument in call.args.iter() {
-            let ty = self.evaluate_fallthrough_value_node(
-                scope_canonical_id,
-                scope_owner,
-                &argument.expression,
-                env,
-                overrides,
-            )?;
-            args.push(crate::semantic_query::CallArgKey::Eager {
-                ty,
-                spread: argument.spread,
-                context_sensitive: argument.context_sensitive,
-                const_view: None,
-                literal_mode: match argument.literal_mode {
-                    verter_type_expr::IndexedValueLiteralMode::Widened => {
-                        crate::semantic_query::ArgumentLiteralMode::Widened
-                    }
-                    verter_type_expr::IndexedValueLiteralMode::Literal => {
-                        crate::semantic_query::ArgumentLiteralMode::Literal
-                    }
-                },
-            });
-        }
         let dispatch = ProjectSemanticDispatch::new(self.ctx);
         let mut explicit_type_args = Vec::with_capacity(call.explicit_type_args.len());
         for argument in call.explicit_type_args.iter() {

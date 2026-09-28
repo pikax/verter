@@ -4928,6 +4928,46 @@ import Child from './Child.vue'
     );
 }
 
+/// A `v-bind` spread of a member read on a call's result — directly, and
+/// through a member call on the result of the call before it — consumes the
+/// member's attributes: the spread's value is the member of the call's value.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_spread_of_a_member_of_a_call_result_consumes_its_attributes() {
+    for spread in ["make().attrs", "make().next().attrs"] {
+        let project = make_project();
+        project
+            .upsert_base(
+                "/App.vue",
+                &format!(
+                    r#"<script setup lang="ts">
+interface Made {{ attrs: {{ id: string; title: string }}; next(): Made }}
+declare function make(): Made
+</script>
+<template><div v-bind="{spread}" /></template>"#
+                ),
+            )
+            .unwrap();
+        let surface = project
+            .host()
+            .resolve_fallthrough_surface("/App.vue")
+            .expect("the fallthrough surface resolves");
+        let names: Vec<&str> = surface
+            .accepted_props
+            .iter()
+            .map(|prop| prop.name.as_ref())
+            .collect();
+        assert!(
+            names.contains(&"placeholder"),
+            "{spread}: the remaining div attributes stay: {names:?}"
+        );
+        assert!(
+            !names.contains(&"id") && !names.contains(&"title"),
+            "{spread}: the spread consumes its attributes: {names:?}"
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_recomputes_and_reuses_runtime_subnode_after_top_level_node_clear() {

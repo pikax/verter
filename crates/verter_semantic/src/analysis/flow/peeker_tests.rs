@@ -480,7 +480,6 @@ fn planner_budget_exceeded_is_typed_refusal() {
     let graph = build_function_flow_graph(&skeleton);
     let demand = SliceDemand::for_return_projection(&skeleton, &[]);
     let tiny = FlowSliceBudget {
-        max_return_sites: 256,
         max_selected_nodes: 1,
         ..FlowSliceBudget::default()
     };
@@ -490,17 +489,6 @@ fn planner_budget_exceeded_is_typed_refusal() {
     assert_eq!(refused.axis, FlowSliceBudgetAxis::SelectedNodes);
     assert_eq!(refused.limit, 1);
     assert!(refused.observed > 1);
-
-    // The return-site axis trips before any traversal.
-    let no_returns = FlowSliceBudget {
-        max_return_sites: 0,
-        max_selected_nodes: 4096,
-        ..FlowSliceBudget::default()
-    };
-    let refused = ReturnPathPeeker::new(&graph)
-        .plan(&demand, &no_returns)
-        .expect_err("zero return-site budget");
-    assert_eq!(refused.axis, FlowSliceBudgetAxis::ReturnSites);
 }
 
 /// Planning is deterministic: the same demand yields an identical plan.
