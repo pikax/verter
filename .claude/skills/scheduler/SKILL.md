@@ -298,8 +298,12 @@ when the inbox is full, its existing items already cause another pump pass.
 The private teardown channel remains independent of inbox capacity.
 The pressure contract is `inbox_depth_max <= 1024`, with no dropped request
 or stage completion while the scheduler is live. A full inbox can delay a
-submitter but cannot park its own sole consumer. No parse or stage dispatch
-is duplicated on that path.
+submitter but cannot park its own sole consumer. Stage execution returns its
+terminal `StageComplete` to the caller instead of sending it: the inline pump
+(and a pool worker that inline-ran a dependency) delivers it through the same
+drain-capable submission path, while a pool task waits for capacity because
+it is never the inbox's consumer. No parse or stage dispatch is duplicated on
+that path.
 
 The native driver loop (`driver_loop_native`) parks between wakes on three
 things at once, reported as `DriverPark`: its own private teardown channel
