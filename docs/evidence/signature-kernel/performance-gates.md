@@ -443,17 +443,36 @@ Recorded plainly so no reader mistakes absence for a pass:
   recurses once per structural level, and is bounded as the checker bounds
   it (`CHECKER_RELATION_DEPTH_LIMIT`, `project_semantic_dispatch/relation.rs`).
   The relation frames stacked directly on one another are one checker
-  `checkTypeRelatedTo` call; a frame whose operands, unwrapped, are a
-  structured pair is one `recursiveTypeRelatedTo` entry. The 101st entry
+  `checkTypeRelatedTo` call. Every pair the checker enters
+  `recursiveTypeRelatedTo` for is one entry — a frame whose operands,
+  unwrapped, are such a pair, and a pair the frame's own worklist relates
+  inline (an element pair of two tuples or arrays, a union source's member
+  against a target that is no union, an intersection target's arm), which
+  counts as one more level on its frame while its items run; a small union
+  the checker relates without caching it (`skipCaching`) and, without
+  `strictNullChecks`, a union of one type and `null` / `undefined` (that
+  type, to the checker) are no entry of their own. The 101st entry
   overflows: the relation is false, every structured relation after it in
   the chain is false (the checker's `overflow` flag), and nothing computed
   under it is admitted. Measured on TypeScript 7.0.2 with each probe in its
   own file: `[B] extends [<B around number>] ? 1 : 2` is `1` over 97–99
   nested `Box` applications or `{ v: … }` literals and `2` with TS2321
-  over 100, 101, 102 and 500 (the tuple wrapper is the first entry); the
-  lane answers the same (`relation_depth_tests.rs` →
+  over 100, 101, 102 and 500 (the tuple wrapper is the first entry), written
+  inline or behind an alias; `[{ v: … }]` and `{ v: … }[]` count two a
+  level and overflow at 50, nested tuples at 100, `{ v: … } | null` two a
+  level under `strictNullChecks` and one without, and a small union source
+  one a level; the lane answers the same (`relation_depth_tests.rs` →
   `nested_object_types_overflow_at_the_checkers_depth`,
-  `nested_generic_applications_overflow_at_the_checkers_depth`). The
+  `inline_nested_object_types_overflow_at_the_checkers_depth`,
+  `inline_element_and_union_pairs_count_toward_the_checkers_depth`,
+  `a_union_erased_without_strict_null_checks_counts_as_its_object`,
+  `a_small_union_source_is_no_recursion_entry_of_its_own`,
+  `nested_generic_applications_overflow_at_the_checkers_depth`). An inline
+  entry is a counter on its frame, not a relation of its own: relating
+  tuples of 1,000, 2,000 and 5,000 object pairs takes 27, 52 and 131 ms
+  unoptimized with the count and 25, 50 and 126 ms without it (the best
+  of five cold relations in each of three alternating builds), one
+  relation check and one reduction per element (`relating_wide_tuples_of_object_pairs_costs_the_same_per_element`). The
   checker's `isDeeplyNestedType` stops a recursion earlier: three entries
   of one recursion identity on both stacks, each read from a newer
   instantiation, answer `Maybe`, which holds. The lane gives a type
@@ -461,19 +480,17 @@ Recorded plainly so no reader mistakes absence for a pass:
   type literal relates `1` to `string` from its third level, and an
   infinitely recursive one stops there
   (`a_recursive_alias_is_deeply_nested_from_its_third_instantiation`,
-  `an_infinitely_recursive_alias_stops_as_deeply_nested`). Two known
-  differences stay open, each a skipped test asserting the checker's
-  answer: an interface or class reference has no recursion identity,
-  because the checker relates two references to one generic interface by
-  its type arguments' variance and this engine does not
-  (`an_infinitely_recursive_interface_relates_by_its_variance`: the lane
-  overflows to `2` where the checker's variance measurement answers
-  `1`); and the checker's cache keeps the failures its overflow produced,
-  so in one file a 99-deep relation after a 100-deep one is `2`, where the
-  lane answers `1`, as the relation does alone — an answer computed under
-  an overflow depends on where its relation began, and the relation memo is
-  shared across requests
-  (`a_relation_after_an_overflowed_one_reads_its_failures`). The native
+  `an_infinitely_recursive_alias_stops_as_deeply_nested`). Two references
+  to one generic interface or class relate by their type arguments'
+  measured variance before any structural descent, so an infinitely
+  recursive interface never descends a level per nesting
+  (`an_infinitely_recursive_interface_relates_by_its_variance`); and a
+  memo entry is replayed only where its recorded height and recursion
+  identities prove the cold computation takes the same course, so a
+  relation answers its cold answer whatever was related before it
+  (`a_relation_answers_its_cold_answer_in_either_order_around_the_depth_limit`;
+  the checker's own cache answers the 99-deep relation `2` after the
+  100-deep one, see `determinism-matrix.md`). The native
   stack one relation uses, measured from the relating thread's start: 1.9
   MiB for 100 `Box` levels and 1.1 MiB for 100 object levels unoptimized
   (under the 2 MiB default test stack), 709 KiB and 586 KiB optimized
@@ -481,7 +498,24 @@ Recorded plainly so no reader mistakes absence for a pass:
   of `verter_wasm` (wasm32's linker default; no override is configured),
   the 2 MiB default of the tokio blocking and rayon CPU pools and the
   scheduler's I/O and CPU workers, and the 8 MiB of the LSP serve thread,
-  the host CPU pool and the declaration-lowering workers.
+  the host CPU pool and the declaration-lowering workers. A pair that is
+  no entry — a small union source against a target that is no union — takes
+  no relation frame either: the checker relates it without caching it
+  (`skipCaching`), member by member, and so does the lane
+  (`relate_uncached_union_source`), so a chain of such unions holds one
+  frame open per entry whatever its arms are written as. It took a frame
+  of its own beside its member's before: with each arm written as
+  `Box<S(i-1)>` over `type Box<X> = { v: X }`, 99 levels needed 1,152 to
+  1,280 KiB optimized, over the 1 MiB of `verter_wasm`. Measured optimized
+  on a thread of each size at 99 and 100 levels: literal, alias and
+  generic-alias arms fit 896 KiB and overflow 768
+  (`a_small_union_source_opens_no_frame_of_its_own`, which also holds the
+  frames open at once to the levels plus eight, and
+  `a_small_union_source_is_no_recursion_entry_of_its_own`), nested object
+  types fit 768 KiB, nested `Box` applications 640 KiB, and the doubling
+  unions of `a_pair_every_union_member_reaches_is_related_once` 1 MiB;
+  unoptimized, every shape fits 1.5 MiB (nested `Box` applications 1 MiB),
+  under the 2 MiB default test stack.
 
 * **A long logical chain applies a linear count of guards and evaluates
   without a native level per operand.** A chain of one operator over
@@ -1189,6 +1223,49 @@ Recorded plainly so no reader mistakes absence for a pass:
   difference over 8/12/16 equal to that over 12/16/20; it fails with the
   re-recording restored), and 256 nested calls lower in 0.5 s optimized.
 
+* **Relating two object types looks each property up once.** Each
+  target property found its source member by scanning the source's
+  members, so relating two object types of `n` members made `n²` key
+  comparisons: 1,000, 2,000 and 5,000 members took 115, 323 and 1,408 ms
+  to relate unoptimized (the best of five cold relations), 251,500 to
+  4,006,000 comparisons from 500 to 2,000 members. The relation indexes
+  the source's keys once (`SurfaceView::key_index`, dropped with the
+  relation) and looks each target property up there under the JS
+  property spelling (`{ 1: … }` and `{ "1": … }` are one property): 145,
+  305 and 609 ms, and no scanned comparison
+  (`relation_depth_tests.rs` →
+  `relating_wide_object_types_costs_the_same_per_member`,
+  `a_property_finds_the_member_of_either_spelling`).
+* **A pair every union member reaches is related once.** Over
+  `type Si = { v: S(i-1); a?: 1 } | { v: S(i-1); b?: 1 }`, every member of
+  every level reaches the same pair below it, along `2ⁿ` paths. A decided
+  pair was reused only once its batch published, so a relation inside one
+  transaction related it along every path (8, 32 and 128 reductions at 2,
+  4 and 6 levels), and the probe gave no answer at 8 levels. The relation now
+  reads a pair this transaction already decided from the transaction's
+  `settled` table (the checker's relation cache within one
+  `checkTypeRelatedTo`; request-scoped, cleared with the member batch it
+  mirrors, at most one entry per queued member), through the same recursion
+  footprint a memo entry is read through. The footprint counts
+  instantiations per recursion identity, as `isDeeplyNestedType` does, and
+  an alias named without type arguments is no identity: a sum over
+  different identities refused the replays the cold computation takes.
+  Relating the chain costs the same per level now (two reductions a level
+  at 10, 20 and 40 levels) and answers as the checker does at 10, 20, 50,
+  99 and 100 levels, for the two-member, three-member and reversed shapes
+  (`relation_depth_tests.rs` → `relating_doubling_unions_costs_the_same_per_level`,
+  `a_pair_every_union_member_reaches_is_related_once`).
+* **A union over aliases of unions relates as one union.** `type Ai =
+  A(i-1) | T` is, to the checker's `getUnionType`, one flat union of
+  `A0` and `T`. The relation related each alias as a union of its own, one
+  frame a level: 200 aliases answered `2` where the checker answers `1`,
+  and 2,000 overflowed the stack. It flattens a union member that names an
+  alias of a union from an explicit stack (`relation_union_members`), so
+  1,000 aliases relate one level deep
+  (`a_union_over_aliases_of_unions_relates_as_one_union`). From 1,995
+  aliases the request's projection-operation fuse (2,000 by default),
+  which counts the one `Instantiate` query each alias costs, ends the
+  probe with no answer (see *Known limits*).
 * **A pair of literal types relates without a query.** Two literal types
   relate, under every relation kind, exactly when they are one value, so
   the relation authority decides such a pair before its reentry intercept,
@@ -1217,3 +1294,14 @@ Recorded plainly so no reader mistakes absence for a pass:
   `else if` chains and `switch`es of 300 and 800 returns answer in under
   a second. A body of 10,000 returns selects more nodes than the flow-slice
   plan budget holds and returns `Budget(WorkBudgetExceeded)`.
+* **A request reads at most 2,000 aliases of one union chain.** Each
+  alias of `type Ai = A(i-1) | T` is read with one `Instantiate` query, and
+  the request's projection-operation fuse (`HostConfig::projection_op_budget`,
+  2,000 by default) counts every one: from 1,995 aliases
+  `[An] extends [{ v: 1 } | { w: 1 }] ? 1 : 2` ends in
+  `Budget(WorkBudgetExceeded)` where the checker answers `1` (measured at
+  200, 2,000 and 10,000). The work is linear (seven connected-work units an
+  alias from 250 to 1,900 aliases, far under the connected demand's
+  262,144), so the fuse, not super-linear work, stops it; the skipped
+  `relation_depth_tests.rs` →
+  `a_union_over_2000_aliases_of_unions_relates_as_one_union` holds it open.

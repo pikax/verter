@@ -4310,6 +4310,111 @@ impl<'a> ClosedSurfaceView<'a> {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// How many members this thread's key lookups compared by scanning a
+    /// surface; test-only.
+    static KEY_SCAN_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one member a key lookup compared by scanning a surface.
+fn note_key_scan_comparison() {
+    #[cfg(test)]
+    KEY_SCAN_COMPARISONS.with(|count| count.set(count.get() + 1));
+}
+
+/// How many members this thread's key lookups compared by scanning a
+/// surface; test-only.
+#[cfg(test)]
+pub(crate) fn key_scan_comparisons_for_tests() -> usize {
+    KEY_SCAN_COMPARISONS.with(std::cell::Cell::get)
+}
+
+/// The accessor the public members addressing one key form: `None` when
+/// one of them is no accessor, or none is present.
+fn known_key_accessor<'a>(
+    members: impl Iterator<Item = &'a SurfaceMember>,
+) -> Option<KnownKeyAccessor<'a>> {
+    let mut accessor = KnownKeyAccessor {
+        getter: None,
+        setter: None,
+    };
+    for member in members {
+        match member.method_kind {
+            Some(verter_type_expr::ObjectMethodKind::Get) => {
+                accessor.getter.get_or_insert(member);
+            }
+            Some(verter_type_expr::ObjectMethodKind::Set) => {
+                accessor.setter.get_or_insert(member);
+            }
+            _ => return None,
+        }
+    }
+    (accessor.getter.is_some() || accessor.setter.is_some()).then_some(accessor)
+}
+
+/// The one spelling of the JS property `key` addresses: a string that is
+/// the canonical spelling of an admissible integer is that number, so two
+/// keys collide under element access exactly when their spellings are
+/// equal.
+fn property_spelling(key: PropertyKey) -> PropertyKey {
+    match key.element_access_equivalent() {
+        Some(numeric @ verter_type_expr::PropertyKey::Number(_))
+            if matches!(key, verter_type_expr::PropertyKey::String(_)) =>
+        {
+            numeric
+        }
+        _ => key,
+    }
+}
+
+/// A surface's known-key members indexed by the property each addresses
+/// ([`SurfaceView::key_index`]): the lookups
+/// [`SurfaceView::project_known_key`] and
+/// [`SurfaceView::project_known_key_accessor`] make, each answered without
+/// scanning the surface. Built for one relation of two surfaces and dropped
+/// with it, so relating a surface of `n` members to one of `m` costs
+/// `n + m` lookups rather than `n × m` comparisons.
+pub(crate) struct SurfaceKeyIndex<'a> {
+    members: std::collections::HashMap<PropertyKey, smallvec::SmallVec<[&'a SurfaceMember; 1]>>,
+}
+
+impl<'a> SurfaceKeyIndex<'a> {
+    /// The members addressing `key`, in member order.
+    fn colliding(&self, key: &PropertyKey) -> &[&'a SurfaceMember] {
+        let spelled = match key {
+            verter_type_expr::PropertyKey::String(_) => key
+                .element_access_equivalent()
+                .filter(|numeric| matches!(numeric, verter_type_expr::PropertyKey::Number(_))),
+            _ => None,
+        };
+        self.members
+            .get(spelled.as_ref().unwrap_or(key))
+            .map_or(&[], |members| members.as_slice())
+    }
+
+    /// [`SurfaceView::project_known_key`] through the index.
+    pub(crate) fn project_known_key(&self, key: &PropertyKey) -> SurfaceKeyProjection<'a> {
+        match self.colliding(key).first() {
+            Some(member) => SurfaceKeyProjection::Exact(member),
+            None => SurfaceKeyProjection::AbsentProven,
+        }
+    }
+
+    /// [`SurfaceView::project_known_key_accessor`] through the index.
+    pub(crate) fn project_known_key_accessor(
+        &self,
+        key: &PropertyKey,
+    ) -> Option<KnownKeyAccessor<'a>> {
+        known_key_accessor(
+            self.colliding(key)
+                .iter()
+                .copied()
+                .filter(|member| member.visibility.is_public()),
+        )
+    }
+}
+
 /// Key evidence available from the sole positive-member state.
 pub enum SurfaceKeyProjection<'a> {
     Exact(&'a SurfaceMember),
@@ -4487,6 +4592,7 @@ impl SurfaceView {
         // property — a numeric member answers the string-spelling needle
         // (and vice versa), so element-access collision is the match rule.
         if let Some(known) = self.members.iter().find(|member| {
+            note_key_scan_comparison();
             member
                 .key
                 .as_known()
@@ -4560,28 +4666,33 @@ impl SurfaceView {
         &self,
         key: &PropertyKey,
     ) -> Option<KnownKeyAccessor<'_>> {
-        let mut accessor = KnownKeyAccessor {
-            getter: None,
-            setter: None,
-        };
-        for member in self.members.iter().filter(|member| {
+        known_key_accessor(self.members.iter().filter(|member| {
+            note_key_scan_comparison();
             member.visibility.is_public()
                 && member
                     .key
                     .as_known()
                     .is_some_and(|known| known.element_access_collides(&key.as_ref()))
-        }) {
-            match member.method_kind {
-                Some(verter_type_expr::ObjectMethodKind::Get) => {
-                    accessor.getter.get_or_insert(member);
-                }
-                Some(verter_type_expr::ObjectMethodKind::Set) => {
-                    accessor.setter.get_or_insert(member);
-                }
-                _ => return None,
+        }))
+    }
+
+    /// This surface's known-key members indexed by the property each
+    /// addresses, for a caller that looks up many keys
+    /// ([`SurfaceKeyIndex`]).
+    pub(crate) fn key_index(&self) -> SurfaceKeyIndex<'_> {
+        let mut members: std::collections::HashMap<
+            PropertyKey,
+            smallvec::SmallVec<[&SurfaceMember; 1]>,
+        > = std::collections::HashMap::default();
+        for member in self.members.iter() {
+            if let Some(known) = member.key.cloned_known() {
+                members
+                    .entry(property_spelling(known))
+                    .or_default()
+                    .push(member);
             }
         }
-        (accessor.getter.is_some() || accessor.setter.is_some()).then_some(accessor)
+        SurfaceKeyIndex { members }
     }
 
     /// Project an ordinary string key supplied by a string-only external
@@ -6513,14 +6624,55 @@ pub struct RelationPayload {
 /// it reaches no deeper than the depth left, and the recursion identities
 /// below the read cannot complete a deeply-nested stack with its own.
 /// Anywhere else the relation is computed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct RelationRecursionFootprint {
     /// The most structured relations the computation stacked, the
     /// relation itself included (`0` for a pair of simple types).
     pub height: u16,
-    /// Per side (source, target): the most distinct instantiations of one
-    /// recursion identity the computation stacked on one path.
-    pub repeats: [u16; 2],
+    /// Per side (source, target): a count every recursion identity's
+    /// instantiations on one path are within, the listed ones
+    /// ([`Self::side_identities`]) included: `0` when the list is exact,
+    /// the component's bound for a member of a cyclic component (whose own
+    /// computation stopped at an assumption a cold computation relates).
+    pub any: [u16; 2],
+    /// The computation met a variance marker the checker reports as
+    /// unreliable (`ReportsUnreliable`): a rest parameter holding it, or an
+    /// unreliable parameter's argument. A variance measurement whose
+    /// relations report it lets a failed argument check fall back to the
+    /// structural comparison.
+    pub unreliable: bool,
+    /// Per side, the recursion identities the computation stacked with the
+    /// most distinct instantiations of each on one path; `None` when
+    /// neither side stacked one (every memo entry carries a footprint, so
+    /// the rare list sits behind one pointer).
+    pub identities: Option<Arc<RecursionIdentities>>,
+}
+
+/// The per-side identity lists of a [`RelationRecursionFootprint`]:
+/// `(identity fingerprint, instantiations)` pairs, in fingerprint order.
+/// Only an identity with type arguments has more than one instantiation,
+/// so only a generic alias's appears.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct RecursionIdentities {
+    /// Source side, target side.
+    pub sides: [Box<[(u64, u16)]>; 2],
+}
+
+impl RelationRecursionFootprint {
+    /// The recursion identities side `side` stacked (`0` source, `1`
+    /// target).
+    #[must_use]
+    pub fn side_identities(&self, side: usize) -> &[(u64, u16)] {
+        self.identities
+            .as_deref()
+            .map_or(&[], |identities| &identities.sides[side])
+    }
+
+    /// Whether side `side` stacked no recursion identity.
+    #[must_use]
+    pub fn side_is_empty(&self, side: usize) -> bool {
+        self.any[side] == 0 && self.side_identities(side).is_empty()
+    }
 }
 
 /// Public value-domain outcome of a relation query (assignability / subtype /
