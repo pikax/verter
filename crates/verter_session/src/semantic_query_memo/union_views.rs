@@ -49,6 +49,13 @@ pub(super) struct UnionViews {
     admitted: VecDeque<SemanticUnionMembersKey>,
 }
 
+impl UnionViews {
+    /// Views kept (retention observability).
+    pub(super) fn len(&self) -> usize {
+        self.views.len()
+    }
+}
+
 impl std::fmt::Debug for UnionViews {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UnionViews")
@@ -186,6 +193,12 @@ mod tests {
             first.get_or_insert((union, view));
         }
         let kept = store.union_view_count_for_tests();
+        assert!(kept > 0, "premise: the revisions kept views");
+        assert_eq!(
+            store.union_view_count(),
+            kept,
+            "the public count reads the same table"
+        );
         assert!(
             kept <= BOUND,
             "{kept} union views kept after {} revisions, more than {BOUND}",

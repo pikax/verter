@@ -176,6 +176,17 @@ impl SemanticNodeData {
     ///
     /// Returns [`ChildWalk::Sealed`] for the sealed callable carrier, whose
     /// children are not enumerable here.
+    ///
+    /// This is the SEMANTIC descent topology, and three kinds of retained id
+    /// are deliberately leaves of it: an `Opaque(RecursiveRef { args })`
+    /// refusal is a typed back-edge whose arguments name the instantiation
+    /// it stands for, not structure beneath it; a class expression's
+    /// recorded `prototype` is a derived record beside its instance, not a
+    /// part of it; and a pending conditional frame's parameters are the
+    /// binders it substitutes, not operands. A reader that must see every
+    /// id a payload holds (release, the arena's acyclicity check) uses
+    /// [`Self::for_each_retained_child`] instead. The stable-key encoder uses
+    /// neither: it encodes each variant's fields itself.
     pub fn for_each_child(&self, mut visit: impl FnMut(SemanticNodeId)) -> ChildWalk {
         match self {
             Self::Primitive(_)
@@ -315,6 +326,43 @@ impl SemanticNodeData {
             Self::SyntheticBinding { value_node, .. } => visit(SemanticNodeId(*value_node)),
         }
         ChildWalk::Enumerated
+    }
+
+    /// Visit EVERY node id the payload retains: the semantic children
+    /// [`Self::for_each_child`] visits, a sealed deferred callable's parts,
+    /// a recursive back-edge's instantiation arguments, a class
+    /// expression's recorded `prototype`, and a pending conditional
+    /// frame's parameter binders. The retention topology: a holder that
+    /// releases nodes, or checks that a payload names only earlier ones,
+    /// walks this and needs no arm of its own per variant. An id can be
+    /// visited more than once; the order is stable.
+    pub fn for_each_retained_child(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        if let ChildWalk::Sealed = self.for_each_child(&mut visit) {
+            if let Self::DeferredCallable(callable) = self {
+                callable.for_each_child_node(&mut visit);
+            }
+        }
+        match self {
+            Self::Opaque(super::QueryError::RecursiveRef { args, .. }) => {
+                args.iter().copied().for_each(visit);
+            }
+            Self::ClassExpressionInstance { identity, .. } => {
+                identity.prototype.into_iter().for_each(visit);
+            }
+            Self::Conditional {
+                pending: Some(pending),
+                ..
+            } => {
+                for frame in [pending.true_branch(), pending.false_branch()] {
+                    frame
+                        .pairs()
+                        .iter()
+                        .map(|&(parameter, _)| parameter)
+                        .for_each(&mut visit);
+                }
+            }
+            _ => {}
+        }
     }
 }
 

@@ -86,11 +86,7 @@ fn names_forward_child(data: &SemanticNodeData, id: SemanticNodeId) -> bool {
     let mut check = |child: SemanticNodeId| {
         forward |= child.0 >= id.0 && child.0 < UNALLOCATABLE_ID_FLOOR;
     };
-    if let crate::semantic_query::ChildWalk::Sealed = data.for_each_child(&mut check) {
-        if let SemanticNodeData::DeferredCallable(callable) = data {
-            callable.for_each_child_node(&mut check);
-        }
-    }
+    data.for_each_retained_child(&mut check);
     forward
 }
 
