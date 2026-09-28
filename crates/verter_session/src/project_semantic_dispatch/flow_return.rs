@@ -5294,6 +5294,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
             };
+        // Each return site the slice plans is a contributor the evaluation
+        // joins: the connected demand pays for them before the evaluation
+        // runs, so a body answers exactly as far as the demand's work
+        // allows, however many returns it has.
+        let return_sites = planned
+            .selection()
+            .origins()
+            .iter()
+            .filter(|origin| {
+                matches!(
+                    origin,
+                    verter_semantic::analysis::flow::peeker::SliceOrigin::Return(_)
+                )
+            })
+            .count();
+        if self.connected_demand().charge_units(return_sites).is_err() {
+            return degraded(
+                FlowReturnFailure::Budget(
+                    verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                ),
+                self_roots,
+            );
+        }
         // The callee returns this body demands are evaluated first,
         // bottom-up, so the body reuses them instead of recursing.
         let _schedule = self.schedule_flow_return_callees(key, &index, entry, &lowered);

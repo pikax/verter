@@ -537,9 +537,9 @@ mod canary_flow_return_audit_emission_zero_alloc {
         let canonical: Arc<str> = Arc::from("/w/flow-canary.ts");
         let symbol: Arc<str> = Arc::from("makeThing");
         let exceeded = FlowSliceBudgetExceeded {
-            axis: FlowSliceBudgetAxis::ReturnSites,
-            limit: 256,
-            observed: 300,
+            axis: FlowSliceBudgetAxis::SelectedNodes,
+            limit: 4096,
+            observed: 4097,
         };
 
         // Warm the TLS probes (request-context slot, accumulator
