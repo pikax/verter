@@ -30,7 +30,7 @@ pub(super) struct ProbeProject<'a> {
 }
 
 const PROBE_ROOT: &str = "/wb";
-const PROBE_FILE: &str = "/wb/checker_probe.ts";
+pub(super) const PROBE_FILE: &str = "/wb/checker_probe.ts";
 
 /// Answer `probe` in TYPE position over a module of `source` and hand the
 /// reduced node to `read`.

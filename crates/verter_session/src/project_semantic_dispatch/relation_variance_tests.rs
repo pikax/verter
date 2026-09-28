@@ -455,3 +455,75 @@ fn variance_markers_belong_to_their_declarations_file_generation() {
         "no marker of the old generation is interned after the edit"
     );
 }
+
+/// Closing the declaring document ([`crate::VerterHost::evict`]) releases
+/// a measurement's markers and marker instantiations with the rest of its
+/// nodes (the close cascade's tombstone) — those of every generation an
+/// edit superseded as well as the current one's — and relating after the
+/// reload answers alike without reading a released node. An edit itself
+/// releases no payload (it drains the memo and the arena's dedup entries,
+/// so a superseded generation's markers are never read or interned
+/// again); the close does.
+///
+/// Oracle: over `interface Co<T> { v: T }` and, after the edit,
+/// `interface Co<T> { v: T; w: number }`, `[Co<1>] extends [Co<number>] ?
+/// 1 : 2` is `1`, before and after the close.
+#[test]
+fn closing_the_declaring_document_releases_its_variance_markers() {
+    use super::checker_probe_lane_tests::{default_probe_host, with_probe_on_host, PROBE_FILE};
+    let host = default_probe_host();
+    let probe = "[Co<1>] extends [Co<number>] ? 1 : 2";
+    let measure = |source: &str| {
+        with_probe_on_host(
+            &host,
+            Default::default(),
+            source,
+            probe,
+            |dispatch, node| {
+                let answer = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                    dispatch, node, 0,
+                );
+                assert_eq!(answer, "1", "over `{source}`");
+                variance_marker_nodes(dispatch)
+            },
+        )
+    };
+    let first = "interface Co<T> { v: T }\n";
+    let markers = measure(first);
+    let edited = measure("interface Co<T> { v: T; w: number }\n");
+    assert!(
+        edited.len() > markers.len(),
+        "the edit measured under a new generation: {markers:?} then {edited:?}"
+    );
+    let graph = std::sync::Arc::clone(host.project_type_store().semantic_graph());
+    assert!(edited.iter().all(|(node, _, _)| graph.node_is_live(*node)));
+    // The editor closes the document: the host evicts it, and WSP6 applies
+    // the close-time release as soon as no computation is in flight.
+    host.evict(PROBE_FILE);
+    let store = host.project_type_store();
+    store.try_apply_deferred_releases();
+    assert_eq!(
+        store.deferred_release_count(),
+        0,
+        "the close release applied"
+    );
+    let live: Vec<_> = edited
+        .iter()
+        .filter(|(node, _, _)| graph.node_is_live(*node))
+        .collect();
+    assert!(
+        live.is_empty(),
+        "closing {PROBE_FILE} releases every marker node of both generations; still live: {live:?}"
+    );
+    // The reload answers alike, and a released marker never reads live
+    // again: whatever the reload measures, it measures under fresh nodes.
+    let remeasured = measure(first);
+    assert!(
+        remeasured
+            .iter()
+            .filter(|(node, _, _)| graph.node_is_live(*node))
+            .all(|(node, _, _)| !edited.iter().any(|(old, _, _)| old == node)),
+        "the reloaded document reads no released marker: {remeasured:?}"
+    );
+    assert!(edited.iter().all(|(node, _, _)| !graph.node_is_live(*node)));
+}
