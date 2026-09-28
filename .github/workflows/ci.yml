@@ -55,6 +55,9 @@ jobs:
       native_artifact: ${{ steps.gates.outputs.gate_native_artifact }}
       wasm_artifact: ${{ steps.gates.outputs.gate_wasm_artifact }}
       impact_full: ${{ steps.gates.outputs.impact_full }}
+      # `project` or `ide` on a release pull request (every gate above is
+      # then off and the release rehearsal is the CI); empty otherwise.
+      release: ${{ steps.gates.outputs.release }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v4
@@ -375,6 +378,17 @@ jobs:
       # delimiter. `any_files`, the whole changed-file list, travels inside it.
       - name: Compose the lane gates from the path filters and the crate graph
         id: gates
+        env:
+          # A release pull request (`release: v…` or `release(ide): v…`, from
+          # this repository) carries only the version bump; what it must prove
+          # is that the release can be published, so its CI is the release
+          # rehearsal below rather than the ordinary lanes.
+          CI_IMPACT_RELEASE: >-
+            ${{ github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            (startsWith(github.event.pull_request.title, 'release(ide): ') && 'ide' ||
+            startsWith(github.event.pull_request.title, 'release: ') && 'project') ||
+            '' }}
         run: |
           outputs="$RUNNER_TEMP/ci-impact-filter-outputs.json"
           cat > "$outputs" <<'CI_IMPACT_FILTER_OUTPUTS_EOF'
@@ -2165,6 +2179,41 @@ jobs:
         run: node scripts/jetbrains-gate.mjs
 
   # ---------------------------------------------------------------------------
+  # Release pull requests. Their CI is the release rehearsal: the release
+  # workflow itself with `dry_run: true`, which builds and packages every
+  # artifact and skips every publishing job. `release: v…` rehearses the
+  # project release (release.yml); `release(ide): v…` rehearses the editors
+  # release, which ships the editors only (release-ide.yml). Only a pull
+  # request from this repository qualifies (`detect-changes` checks), so the
+  # write scopes the release graph declares never reach fork code, and no
+  # registry or Marketplace secret is passed.
+  # ---------------------------------------------------------------------------
+  release-check:
+    name: Release Check
+    needs: detect-changes
+    if: needs.detect-changes.outputs.release == 'project'
+    permissions:
+      contents: write
+      deployments: write
+      id-token: write
+      checks: write
+      issues: write
+      pull-requests: write
+    uses: ./.github/workflows/release.yml
+    with:
+      dry_run: true
+
+  release-ide-check:
+    name: Release IDE Check
+    needs: detect-changes
+    if: needs.detect-changes.outputs.release == 'ide'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-ide.yml
+    with:
+      dry_run: true
+
+  # ---------------------------------------------------------------------------
   # Aggregate gate. The ruleset must require the check named "CI Required"
   # (this job's `name:`) and nothing else. `scripts/check-ci-aggregate.mjs`
   # statically enforces that every job in this workflow is listed in its
@@ -2184,6 +2233,8 @@ jobs:
     timeout-minutes: 5
     needs:
       - detect-changes
+      - release-check
+      - release-ide-check
       - rust-fmt
       - proto-fmt
       - rust-clippy

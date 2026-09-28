@@ -376,10 +376,25 @@ export function ownedFilesFromFilterOutputs(filterOutputs) {
 }
 
 /** `$GITHUB_OUTPUT` lines: one `gate_<name>` per gate, then the fallback flag. */
-export function formatGithubOutput(gates, impact) {
+/** The release pull request kinds whose CI is the release rehearsal: `release: v…` and `release(ide): v…`. */
+export const RELEASE_KINDS = ["project", "ide"];
+
+/**
+ * A release pull request carries only the version bump, and what it must prove
+ * is that the release it lands can be published, so its CI is the release
+ * rehearsal (`release.yml` or `release-ide.yml` with `dry_run`), not the
+ * ordinary lanes: every gate is off. The kind is emitted as `release`.
+ */
+export function releaseGates(gates, release) {
+  if (!release) return gates;
+  return Object.fromEntries(Object.keys(gates).map((gate) => [gate, "false"]));
+}
+
+export function formatGithubOutput(gates, impact, release = "") {
   return [
     ...Object.entries(gates).map(([gate, value]) => `gate_${gate}=${value}`),
-    `impact_full=${impact.full ? "true" : "false"}`,
+    `impact_full=${impact.full && !release ? "true" : "false"}`,
+    `release=${release}`,
   ];
 }
 
@@ -432,6 +447,12 @@ export function main(argv = process.argv.slice(2), env = process.env, cwd = proc
   const summaryPath = argValue(argv, "--summary");
   const metadataPath = argValue(argv, "--metadata");
   const filterOutputsPath = argValue(argv, "--filter-outputs");
+  const release = argValue(argv, "--release") ?? env.CI_IMPACT_RELEASE ?? "";
+  if (release && !RELEASE_KINDS.includes(release)) {
+    process.stderr.write(`ci-impact: --release must be one of ${RELEASE_KINDS.join(", ")}, or empty
+`);
+    return 2;
+  }
 
   let filterOutputs = null;
   if (filterOutputsPath) {
@@ -508,10 +529,14 @@ export function main(argv = process.argv.slice(2), env = process.env, cwd = proc
     );
   }
 
-  const lines = formatGithubOutput(gates, impact);
+  gates = releaseGates(gates, release);
+  const lines = formatGithubOutput(gates, impact, release);
   if (githubOutput) appendFileSync(githubOutput, `${lines.join("\n")}\n`);
-  if (summaryPath) appendFileSync(summaryPath, `${summaryMarkdown(changedFiles, impact, gates)}\n`);
-  process.stdout.write(`${summaryMarkdown(changedFiles, impact, gates)}\n`);
+  const summary = release
+    ? `### CI lane selection\n\nRelease pull request (${release}): every lane is off; the release rehearsal is this pull request's CI.`
+    : summaryMarkdown(changedFiles, impact, gates);
+  if (summaryPath) appendFileSync(summaryPath, `${summary}\n`);
+  process.stdout.write(`${summary}\n`);
   return 0;
 }
 
