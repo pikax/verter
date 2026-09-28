@@ -1397,38 +1397,77 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expression: &verter_type_expr::IndexedValueExpression,
         hold_flow_result: bool,
     ) -> Option<IndexedValue> {
-        // A call's callee, receiver and arguments evaluate from an explicit
-        // stack of the calls waiting on them, in that order, a call ending
-        // at a callee or argument with no value: a call nested in an
-        // argument or a receiver (`f(f(f(1)))`, `b.m().m()`) costs no
-        // native level.
+        // A call's callee, receiver and arguments, and a member read's
+        // object, evaluate from an explicit stack of the records waiting on
+        // them, in that order, a record ending at a child with no value: a
+        // call nested in an argument or a receiver (`f(f(f(1)))`,
+        // `b.m().m()`) or a member read off a call's result (`f().a.b`)
+        // costs no native level.
         struct Waiting<'e> {
             call: &'e verter_type_expr::IndexedValueCall,
             hold_flow_result: bool,
             callee: Option<crate::semantic_query::SemanticNodeId>,
             receiver: Option<Option<crate::semantic_query::SemanticNodeId>>,
+            /// The object of the member read the call's callee is: its
+            /// receiver.
+            member_receiver: Option<crate::semantic_query::SemanticNodeId>,
             args: Vec<crate::semantic_query::CallArgKey>,
         }
-        let mut waiting: Vec<Waiting<'_>> = Vec::new();
-        let (mut current, mut hold) = (expression, hold_flow_result);
+        enum Pending<'e> {
+            Call(Waiting<'e>),
+            /// A member read waiting on its object; the callee of the call
+            /// below it when `callee`.
+            Member {
+                name: &'e Arc<str>,
+                callee: bool,
+            },
+        }
+        let mut waiting: Vec<Pending<'_>> = Vec::new();
+        let (mut current, mut hold, mut as_callee) = (expression, hold_flow_result, false);
         loop {
             let mut value = match self.indexed_value_leaf(canonical, owner, current) {
                 Ok(value) => value,
-                Err(call) => {
-                    waiting.push(Waiting {
+                Err(IndexedRecord::Call(call)) => {
+                    waiting.push(Pending::Call(Waiting {
                         call,
                         hold_flow_result: hold,
                         callee: None,
                         receiver: None,
+                        member_receiver: None,
                         args: Vec::with_capacity(call.args.len()),
+                    }));
+                    (current, hold, as_callee) = (&call.callee, false, true);
+                    continue;
+                }
+                Err(IndexedRecord::Member(object, name)) => {
+                    waiting.push(Pending::Member {
+                        name,
+                        callee: as_callee,
                     });
-                    (current, hold) = (&call.callee, false);
+                    (current, hold, as_callee) = (object, false, false);
                     continue;
                 }
             };
             loop {
-                let Some(top) = waiting.last_mut() else {
-                    return value;
+                let top = match waiting.last_mut() {
+                    None => return value,
+                    Some(Pending::Member { name, callee }) => {
+                        let (name, callee) = (*name, *callee);
+                        waiting.pop();
+                        let object = value.map(|object| object.node);
+                        value = object
+                            .and_then(|object| self.indexed_member_value(canonical, object, name))
+                            .map(|node| IndexedValue { node, fresh: false });
+                        if callee {
+                            if let (Some(object), Some(Pending::Call(call))) =
+                                (object, waiting.last_mut())
+                            {
+                                call.member_receiver = Some(object);
+                            }
+                        }
+                        continue;
+                    }
+                    Some(Pending::Call(top)) => top,
                 };
                 let call = top.call;
                 if top.callee.is_none() {
@@ -1438,11 +1477,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         continue;
                     };
                     top.callee = Some(callee.node);
-                    if let Some(receiver) = call.receiver.as_deref() {
-                        (current, hold) = (receiver, false);
+                    if let Some(receiver) = top.member_receiver.take() {
+                        top.receiver = Some(Some(receiver));
+                    } else if let Some(receiver) = call.receiver.as_deref() {
+                        (current, hold, as_callee) = (receiver, false, false);
                         break;
+                    } else {
+                        top.receiver = Some(None);
                     }
-                    top.receiver = Some(None);
                 } else if top.receiver.is_none() {
                     top.receiver = Some(value.map(|receiver| receiver.node));
                 } else {
@@ -1464,10 +1506,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     });
                 }
                 if let Some(argument) = call.args.get(top.args.len()) {
-                    (current, hold) = (&argument.expression, false);
+                    (current, hold, as_callee) = (&argument.expression, false, false);
                     break;
                 }
-                let finished = waiting.pop().expect("the call on top");
+                let Some(Pending::Call(finished)) = waiting.pop() else {
+                    unreachable!("the call on top")
+                };
                 value = self.resolve_indexed_call(
                     canonical,
                     owner,
@@ -1481,14 +1525,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// One indexed expression evaluated, unless it is a call, whose
-    /// children [`Self::evaluate_indexed_value`] evaluates first.
+    /// Member `name` of the value `object` an indexed expression evaluated
+    /// (`f().x`, the callee of `b.m().m()`): the shared `ProjectPath {
+    /// Navigate }` member walk, a declaration's self-reference read as the
+    /// declaration it names. None when the member does not project.
+    pub(crate) fn indexed_member_value(
+        &self,
+        canonical: &str,
+        object: crate::semantic_query::SemanticNodeId,
+        name: &Arc<str>,
+    ) -> Option<crate::semantic_query::SemanticNodeId> {
+        let object = self.self_reference_declaration(object).unwrap_or(object);
+        let _demand_scope =
+            super::LexicalDemandScopeGuard::push(&self.lexical_demand_scope, Arc::from(canonical));
+        let path: Arc<[crate::semantic_query::PathSegment]> =
+            Arc::from([crate::semantic_query::PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier(Arc::clone(name)),
+            )]);
+        match self.execute_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
+            base: object,
+            path,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        }) {
+            crate::semantic_query::QueryResult::Value(output)
+                if !matches!(
+                    self.graph().node_data(output.value).as_deref(),
+                    Some(SemanticNodeData::Opaque(_))
+                ) =>
+            {
+                Some(output.value)
+            }
+            _ => None,
+        }
+    }
+
+    /// One indexed expression evaluated, unless it is a call or a member
+    /// read, whose children [`Self::evaluate_indexed_value`] evaluates first.
     fn indexed_value_leaf<'e>(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         expression: &'e verter_type_expr::IndexedValueExpression,
-    ) -> Result<Option<IndexedValue>, &'e verter_type_expr::IndexedValueCall> {
+    ) -> Result<Option<IndexedValue>, IndexedRecord<'e>> {
         use verter_type_expr::IndexedValueExpression;
         let regular = |node: Option<crate::semantic_query::SemanticNodeId>| {
             node.map(|node| IndexedValue { node, fresh: false })
@@ -1509,7 +1589,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             IndexedValueExpression::TemplateStrings { .. } => {
                 regular(self.global_template_strings_array(canonical, owner))
             }
-            IndexedValueExpression::Call(call) => return Err(call),
+            IndexedValueExpression::Call(call) => return Err(IndexedRecord::Call(call)),
+            IndexedValueExpression::Member { object, name } => {
+                return Err(IndexedRecord::Member(object, name))
+            }
         })
     }
 
@@ -7797,6 +7880,13 @@ fn is_never_node(
 pub(crate) struct IndexedValue {
     node: SemanticNodeId,
     fresh: bool,
+}
+
+/// An indexed record [`ProjectSemanticDispatch::evaluate_indexed_value`]
+/// evaluates over its children: a call, or a member read off a value.
+enum IndexedRecord<'e> {
+    Call(&'e verter_type_expr::IndexedValueCall),
+    Member(&'e verter_type_expr::IndexedValueExpression, &'e Arc<str>),
 }
 
 /// The inference deposit mode of an indexed call argument: a bare literal,

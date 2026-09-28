@@ -714,12 +714,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // A member call's receiver rides the key: `.call` / `.apply`
         // rebase and `this`-typed methods read it — the same indexed
         // lowering the callee came from, evaluated in the same scope.
+        // A receiver this frame evaluated for the call (a call's result,
+        // which the indexed record reads as its callee's object) is its
+        // value.
+        let evaluated_receiver = self.call_receivers.get(&span).copied();
         let receiver = match call.receiver.as_deref() {
-            // A receiver this frame evaluated for the call (a call's
-            // result) is its value.
-            Some(_) if self.call_receivers.contains_key(&span) => {
-                self.call_receivers.get(&span).copied()
-            }
+            _ if evaluated_receiver.is_some() => evaluated_receiver,
             Some(receiver) => {
                 let root = indexed.receiver_root?;
                 let receiver_binding = self.indexed_argument_binding(root);

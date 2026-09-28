@@ -464,11 +464,12 @@ export const v = b{};
 }
 
 /// A module constant initialized by a receiver chain reads as the chain's
-/// last call. TypeScript 7.0.2: `B`, under every setting.
+/// last call: its indexed initializer reads each call's callee as a member
+/// of the value of the call before it, from an explicit stack. TypeScript
+/// 7.0.2: `B` for 2, 3 and 400 links, under every setting.
 #[test]
-#[ignore = "a module constant's indexed initializer has no member read of a call's value, so a member call on a call's result is a typed miss"]
 fn module_receiver_chains_answer() {
-    for links in [2, 3] {
+    for links in [2, 3, RECEIVER_CHAINS_UNDER_THE_WORK_BUDGET] {
         assert_eq!(
             mismatches_on_a_small_stack(module_receiver_chain(links), "typeof v", "B"),
             Vec::<String>::new(),
@@ -477,18 +478,18 @@ fn module_receiver_chains_answer() {
     }
 }
 
-/// A module constant initialized by a receiver chain 10,000 links long
-/// reads on the production stacks: the indexed initializer's calls
-/// evaluate from an explicit stack.
+/// A module constant initialized by a receiver chain 10,000 links long,
+/// read in a function, returns the connected-demand work budget's typed
+/// failure on the production stacks.
 #[test]
 fn module_receiver_chains_10000_deep_read_on_production_stacks() {
     assert_eq!(
-        mismatches_on_a_small_stack(module_receiver_chain(1), "typeof v", "B"),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        mismatches_on_a_small_stack(module_receiver_chain(DEPTH), "typeof v", "B"),
-        mismatches_on_a_small_stack(module_receiver_chain(3), "typeof v", "B")
+        return_on_a_small_stack(format!(
+            "{}export function pf() {{ return v; }}
+",
+            module_receiver_chain(DEPTH)
+        )),
+        WORK_BUDGET_EXCEEDED
     );
 }
 

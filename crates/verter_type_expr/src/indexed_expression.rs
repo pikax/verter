@@ -11,6 +11,14 @@ pub enum IndexedValueExpression {
     Value(TypeExpr),
     /// A direct semantic call/construct expression.
     Call(IndexedValueCall),
+    /// A member read off a value the indexed domain evaluates — a call's
+    /// result (`f().x`), or a member of one (`f().a.b`). As a call's
+    /// callee (`b.m().m`) its object is also the call's receiver, which the
+    /// call then does not repeat.
+    Member {
+        object: Box<IndexedValueExpression>,
+        name: Arc<str>,
+    },
     /// An expression outside the indexed expression domain: a
     /// call-bearing compound, or a class field initializer reading `this`.
     UnsupportedCall { point: u32 },
@@ -82,16 +90,24 @@ impl Drop for IndexedValueCall {
 }
 
 impl IndexedValueCall {
-    /// Move the nested call records this record solely owns onto `out`,
-    /// leaving a template-strings placeholder in their place.
+    /// Move the nested call records this record solely owns onto `out`
+    /// (through the objects of a member chain, `f().a.b`), leaving a
+    /// template-strings placeholder in their place.
     fn take_nested_calls(&mut self, out: &mut Vec<IndexedValueCall>) {
-        fn take(expression: &mut IndexedValueExpression, out: &mut Vec<IndexedValueCall>) {
-            if matches!(expression, IndexedValueExpression::Call(_)) {
-                let placeholder = IndexedValueExpression::TemplateStrings { point: 0 };
-                if let IndexedValueExpression::Call(call) =
-                    std::mem::replace(expression, placeholder)
-                {
-                    out.push(call);
+        fn take(mut expression: &mut IndexedValueExpression, out: &mut Vec<IndexedValueCall>) {
+            loop {
+                match expression {
+                    IndexedValueExpression::Member { object, .. } => expression = object,
+                    IndexedValueExpression::Call(_) => {
+                        let placeholder = IndexedValueExpression::TemplateStrings { point: 0 };
+                        if let IndexedValueExpression::Call(call) =
+                            std::mem::replace(expression, placeholder)
+                        {
+                            out.push(call);
+                        }
+                        return;
+                    }
+                    _ => return,
                 }
             }
         }
