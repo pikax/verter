@@ -4962,6 +4962,9 @@ pub struct HostRetentionSnapshot {
     /// Resident union member views (one per distinct union built, released
     /// with the union's document).
     pub union_views: usize,
+    /// Stable-key classes (distinct subtrees) the semantic store's key
+    /// table holds, forgotten with their released nodes.
+    pub stable_key_classes: usize,
     /// Live shape-cache entries.
     pub shape_cache_entries: usize,
     /// Flow-slice graph bundles.
