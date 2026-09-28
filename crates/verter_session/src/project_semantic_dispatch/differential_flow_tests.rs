@@ -571,6 +571,42 @@ fn a_nested_closure_keeps_its_outer_parameter_narrowing() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Writes to unannotated `let` / `var` bindings, whose declared type is
+/// their initializer's widened type.
+const INFERRED_DECLARED_WRITES: &str = r##"
+declare function cond(): boolean;
+export function adWrong() { let x = 0; x = "s" as any as string; return x; }
+export function adAny() { let x = 0; x = ("s" as string) as any; return x; }
+export function adUnion() { let x = cond() ? 1 : "s"; x = true as any as boolean; return x; }
+export function adUnionOk() { let x = cond() ? 1 : "s"; x = 2; return x; }
+export function adVar() { var x = "a"; x = 1 as any as number; return x; }
+"##;
+
+/// A write to an unannotated `let` / `var` takes the checker's assignment
+/// rule over the binding's declared type (its initializer's widened type):
+/// a non-union declared type is what the binding holds, and a union selects
+/// the constituents the value may be assigned to, else stays declared
+/// (tsc 7.0.2, all four settings).
+#[test]
+fn a_write_to_an_inferred_declared_local_reduces_by_its_declared_type() {
+    let matrix = Matrix::new(INFERRED_DECLARED_WRITES);
+    let failures = matrix.returns(&[
+        ("adWrong", "number"),
+        ("adAny", "number"),
+        ("adUnion", "string | number"),
+        ("adUnionOk", "number"),
+        ("adVar", "string"),
+    ]);
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+"
+        )
+    );
+}
+
 /// Writes in `try`, `catch` and `finally` blocks, and catch variables.
 const TRY_CATCH: &str = r##"
 declare function cond(): boolean;

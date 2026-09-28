@@ -10321,25 +10321,25 @@ fn flow_return_finally_identity_membership_scales_with_written_subjects() {
 
 #[test]
 fn flow_return_unused_catch_parameter_does_not_poison_selected_writes() {
-    // The existing catch policy retains its conditional-definition refusal.
-    // An unused binder must neither block the string write nor replace that
-    // established boundary with a product-selection failure.
+    // An unused binder must neither block the catch's write nor replace it
+    // with a product-selection failure. The write of `'s'` to `let x = 0`
+    // holds the declared `number` (the checker's assignment rule; tsc 7.0.2
+    // answers `number`), so the read is clean.
     for clause in ["catch(e)", "catch"] {
         let source =
             format!("function makeProps(){{let x=0;try{{throw 0;}}{clause}{{x='s';}}return x;}}");
         let result = flow_source_probe(&source);
         let FlowSourceProbe::Value {
             expr,
-            degradation:
-                Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
-            candidates: 0,
+            degradation: None,
+            candidates: 1,
         } = result
         else {
             panic!("{source}: {result:?}");
         };
         assert_eq!(
             expr,
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         );
     }
     assert_eq!(

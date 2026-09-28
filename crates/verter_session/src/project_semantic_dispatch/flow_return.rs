@@ -12511,7 +12511,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         target: &crate::flow_slice_content::SliceNarrowSubject,
         value: SemanticNodeId,
     ) -> SemanticNodeId {
-        let Some(declared) = self.target_declared_node(target) else {
+        // An unannotated `let` / `var` declared by its initializer's widened
+        // type (not an auto-typed or evolving one) takes the checker's
+        // assignment rule over that declared type exactly as an annotated
+        // one does.
+        let inferred_declared = match &target.root {
+            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. }
+                if target.path.is_empty() =>
+            {
+                let subject = self.canonical_runtime_subject(binding);
+                (!self.auto_typed_locals.contains(&subject) && !self.is_evolving_subject(binding))
+                    .then(|| {
+                        self.inferred_declared_locals
+                            .get(&subject)
+                            .map(|(_, node)| *node)
+                    })
+                    .flatten()
+            }
+            _ => None,
+        };
+        let Some(declared) = self.target_declared_node(target).or(inferred_declared) else {
             // Reuse an equivalent reaching-definition arm when one already
             // exists. Primitive nodes can originate in distinct lowered
             // arenas; joining two ids that both spell `number` would otherwise
@@ -14205,9 +14224,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// `let x: 1 | 2 = 1` is `1`.
     ///
     /// Comparability is judged by the crate's SOLE relation authority
-    /// (`execute_relate_pair`); an undecided constituent or an empty
-    /// survivor set fails closed onto the whole declared union with the
-    /// typed `UnreducedDeclaredUnion` degradation — never a guess. Generic
+    /// (`execute_relate_pair`); an undecided constituent fails closed onto
+    /// the whole declared union with the typed `UnreducedDeclaredUnion`
+    /// degradation — never a guess — and a decided empty survivor set is
+    /// the declared union, clean. Generic
     /// strict-subtype dominance is not a checker constituent-selection rule:
     /// required-property presence does not discard an overlapping optional
     /// constituent. Only the exact-own-key and discriminant evidence below
@@ -14232,6 +14252,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .flat_map(|source| self.boolean_literals_or_self(source))
             .collect();
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        let mut undecided = false;
         'arms: for arm in arms {
             let constituents = self.boolean_literals_or_self(*arm);
             let mut kept: Vec<SemanticNodeId> = Vec::with_capacity(constituents.len());
@@ -14247,6 +14268,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         | super::dispatch_txn::RelationStep::BudgetExceeded(_)
                         | super::dispatch_txn::RelationStep::Assumed(_) => {
                             survivors.clear();
+                            undecided = true;
                             break 'arms;
                         }
                     }
@@ -14258,10 +14280,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 survivors.extend(kept);
             }
         }
+        // A value no declared constituent may hold (an erroneous write)
+        // leaves the declared union, as the checker's rule answers
+        // (`isTypeAssignableTo(assigned, reduced) ? reduced : declared`);
+        // only an undecided relation fails closed.
         if survivors.is_empty() {
-            self.record_degradation(
-                crate::semantic_query::FlowReturnDegradation::UnreducedDeclaredUnion,
-            );
+            if undecided {
+                self.record_degradation(
+                    crate::semantic_query::FlowReturnDegradation::UnreducedDeclaredUnion,
+                );
+            }
             return declared;
         }
         // A fresh, non-spread object carries exact own-key evidence that

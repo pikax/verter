@@ -5369,11 +5369,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "root Other — a function value; deepening pins the signature (params + return)",
     ),
     (
-        "N29_switch_optional_chain_discriminant",
-        Owner::U6NarrowLattice,
-        "member Union carrying Opaque(Miss) — the recursive expectation vocabulary has no Miss variant, so the surface is unspellable as a deep pin; the member pin plus the KnownOwed note carry it",
-    ),
-    (
         "N33_computed_property_discriminant",
         Owner::U6NarrowLattice,
         "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
