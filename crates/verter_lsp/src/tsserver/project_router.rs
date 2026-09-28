@@ -11,7 +11,7 @@
 //!
 //! [`ProjectTsserverProvider`] resolves every production operation through the
 //! shared `ProjectBinding` → `BoundProject` contract, then lazily owns one
-//! resilient tsserver process per `(owning tsconfig, real tsserver.js)` identity.
+//! hub-managed tsserver engine per `(owning tsconfig, real tsserver.js)` identity.
 //! A project whose TypeScript cannot be resolved fails closed with the
 //! actionable install message from [`resolve_tsserver`] and NEVER borrows another
 //! project's engine.
@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tokio::sync::{Notify, OnceCell};
+use tokio::sync::OnceCell;
 use tower_lsp_server::Client;
 use verter_session::external_ts::{
     BoundProject, CarrierOwnershipResolution, EngineBackend, ProjectBinding,
@@ -38,8 +38,8 @@ use crate::type_provider::traits::{
     CarrierActivation, CarrierScriptKind, ProviderFuture, TypeProvider,
 };
 
-use super::ipc::TsserverTypeProvider;
-use super::resilient;
+use super::resilient::{self, TsserverEngineInputs};
+use crate::resilient_provider::ProviderHub;
 
 /// The identity of ONE owned tsserver process: the owning configured project
 /// plus the REAL `tsserver.js` that serves it. Two projects that resolve the
@@ -92,7 +92,7 @@ struct RegisteredRoute {
     project: String,
 }
 
-/// A project-bound pool of resilient tsserver processes.
+/// A project-bound pool of hub-managed tsserver engines.
 ///
 /// Cold at construction: no tsserver starts until a project-bound lifecycle
 /// operation or query resolves an owning configured project.
@@ -108,7 +108,7 @@ pub struct ProjectTsserverProvider {
     /// the witness that proves the operation is project-bound.
     witness_backend: TsserverEngineBackend,
     engine_specs: DashMap<String, CachedEngineSpec>,
-    providers: DashMap<ProjectEngineKey, Arc<OnceCell<Arc<dyn TypeProvider>>>>,
+    providers: DashMap<ProjectEngineKey, Arc<ProviderHub<dyn TypeProvider>>>,
     routes: DashMap<String, RegisteredRoute>,
 }
 
@@ -254,18 +254,40 @@ impl ProjectTsserverProvider {
         generation: u64,
     ) -> Result<Arc<dyn TypeProvider>, TypeProviderError> {
         let (_bound, spec) = self.engine_for_binding(binding, generation)?;
-        // One `OnceCell` per engine identity: concurrent cold demands for the
-        // same project collapse onto ONE spawn, and a failed spawn leaves the
-        // cell uninitialized so the next demand retries rather than latching.
-        let cell = self
+        // One hub per engine identity: concurrent cold demands for the same
+        // project join ONE establishment, a failed establishment is retried by
+        // the next demand, and a crashed engine is recovered by its hub.
+        let hub = self
             .providers
             .entry(spec.key.clone())
-            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .or_insert_with(|| {
+                Arc::new(resilient::hub(
+                    TsserverEngineInputs::production(
+                        self.node_path.clone(),
+                        spec.key.tsserver_path.clone(),
+                        spec.workspace_root.clone(),
+                        self.plugin_path.clone(),
+                    ),
+                    Arc::clone(&self.client),
+                    3,
+                ))
+            })
             .clone();
-        let provider = cell
-            .get_or_try_init(|| self.spawn_project_provider(spec))
-            .await?;
-        Ok(Arc::clone(provider))
+        match hub.establish().await {
+            Ok(_) => {}
+            // A recovering (or given-up) engine still owns this project: its
+            // hub holds lifecycle updates for the replacement and fails
+            // queries closed until one serves.
+            Err(_) if hub.has_served() => {}
+            Err(error) => {
+                return Err(TypeProviderError::new(format!(
+                    "resolved project {} to {} ({} default libraries), but tsserver failed to \
+                     start: {error}",
+                    spec.key.project, spec.key.tsserver_path, spec.default_lib_count
+                )))
+            }
+        }
+        Ok(hub as Arc<dyn TypeProvider>)
     }
 
     async fn provider_for_path(
@@ -274,80 +296,6 @@ impl ProjectTsserverProvider {
     ) -> Result<Arc<dyn TypeProvider>, TypeProviderError> {
         let (binding, generation) = self.binding_for_path(path)?;
         self.provider_for_binding(&binding, generation).await
-    }
-
-    async fn spawn_project_provider(
-        &self,
-        spec: ProjectEngineSpec,
-    ) -> Result<Arc<dyn TypeProvider>, TypeProviderError> {
-        let crash_notify = Arc::new(Notify::new());
-        let carrier_store_dir =
-            crate::external_ts::default_carrier_store_dir_string(&spec.workspace_root);
-        let provider = TsserverTypeProvider::spawn(
-            &self.node_path,
-            &spec.key.tsserver_path,
-            &spec.workspace_root,
-            self.plugin_path.as_deref(),
-            Some(&carrier_store_dir),
-            // verter_lsp-internal backend: the Rust merge layer is the sole
-            // companion→source response mapper, so the plugin returns RAW responses.
-            false,
-            Some(Arc::clone(&crash_notify)),
-        )
-        .await
-        .map_err(|error| {
-            TypeProviderError::new(format!(
-                "resolved project {} to {} ({} default libraries), but tsserver failed to start: \
-                 {error}",
-                spec.key.project, spec.key.tsserver_path, spec.default_lib_count
-            ))
-        })?;
-        let provider = resilient::new(
-            provider,
-            crash_notify,
-            self.node_path.clone(),
-            spec.key.tsserver_path.clone(),
-            spec.workspace_root.clone(),
-            self.plugin_path.clone(),
-            Arc::clone(&self.client),
-            3,
-        );
-        let provider: Arc<dyn TypeProvider> = Arc::new(provider);
-        tracing::info!(
-            project = %spec.key.project,
-            tsserver = %spec.key.tsserver_path,
-            default_lib_count = spec.default_lib_count,
-            "project-bound tsserver started"
-        );
-        // Announce THIS engine's child pid. The router is cold at construction,
-        // so `initialized()` has no pid to report; and with N engines a single
-        // startup announcement could only ever name one of them. Announcing each
-        // engine as it starts keeps the editor's orphan-cleanup set complete.
-        self.announce_started(&provider);
-        Ok(provider)
-    }
-
-    /// Send `$/verter/typeProviderStarted` for a freshly started engine.
-    fn announce_started(&self, provider: &Arc<dyn TypeProvider>) {
-        let Some(pid) = provider.child_pid() else {
-            // No pid, no notification: the contract carries a real child process
-            // id, and fabricating one would name a process that does not exist.
-            tracing::warn!("project-bound tsserver started without a reportable child pid");
-            return;
-        };
-        let client = Arc::clone(&self.client);
-        tokio::spawn(async move {
-            if let Some(client) = client.get() {
-                client
-                    .send_notification::<crate::server::protocol_types::TypeProviderStarted>(
-                        crate::server::protocol_types::TypeProviderStartedParams {
-                            pid,
-                            kind: "tsserver".to_string(),
-                        },
-                    )
-                    .await;
-            }
-        });
     }
 
     fn register_route(&self, source: &str, companion: &str, project: &str) {
@@ -374,7 +322,8 @@ impl ProjectTsserverProvider {
     fn providers_snapshot(&self) -> Vec<Arc<dyn TypeProvider>> {
         self.providers
             .iter()
-            .filter_map(|entry| entry.value().get().cloned())
+            .filter(|entry| entry.value().has_served())
+            .map(|entry| Arc::clone(entry.value()) as Arc<dyn TypeProvider>)
             .collect()
     }
 }

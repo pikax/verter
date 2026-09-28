@@ -36,7 +36,7 @@ use verter_lsp::documents::position_map::PositionMapper;
 use verter_lsp::documents::provider_projection::ProviderPositionMapper;
 use verter_lsp::tsgo::composite::{SharedRendezvous, SharedTsgoOverlay, TsgoCompositeProvider};
 use verter_lsp::tsgo::shared::{EstablishSharedParams, TsgoSharedProvider};
-use verter_lsp::type_provider::lazy_managed::LazyManagedTypeProvider;
+use verter_lsp::type_provider::lazy_managed::new_lazy_managed;
 use verter_lsp::type_provider::merge::tsx_range_to_carrier_range;
 use verter_lsp::type_provider::protocol::{
     CompletionResult, HoverInfo, InlayHint, ProviderDiagnosticContext, RenameLocation,
@@ -1643,7 +1643,7 @@ async fn composite_successful_shared_route_never_activates_managed_fallback() {
         return;
     };
     let activation_count = Arc::new(AtomicUsize::new(0));
-    let fallback = Arc::new(LazyManagedTypeProvider::new({
+    let fallback = Arc::new(new_lazy_managed({
         let activation_count = Arc::clone(&activation_count);
         move || {
             let activation_count = Arc::clone(&activation_count);
@@ -1749,7 +1749,7 @@ async fn composite_attach_failure_activates_managed_fallback_exactly_once() {
         },
     );
     let activation_count = Arc::new(AtomicUsize::new(0));
-    let fallback = Arc::new(LazyManagedTypeProvider::new({
+    let fallback = Arc::new(new_lazy_managed({
         let activation_count = Arc::clone(&activation_count);
         move || {
             let activation_count = Arc::clone(&activation_count);

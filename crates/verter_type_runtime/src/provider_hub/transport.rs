@@ -30,7 +30,8 @@
 //!   stamping the fresh generation failed — so a reconnect re-establishes in the SAME
 //!   demand rather than waiting for a FURTHER advance.
 //! - **Transport identity/epoch.** Every successful establishment mints a monotonic
-//!   [`TransportEpoch`] on the cell (advanced ONLY on the success commit). Callers
+//!   [`ProviderEpoch`] from the hub epoch mint (advanced ONLY on the success
+//!   commit) — the same serving-epoch authority [`super::ProviderHub`] uses. Callers
 //!   receive the transport together with its [`TransportIdentity`] as an
 //!   [`EstablishedTransport`], so a consumer can observe when the transport CHANGED
 //!   identity (a reconnect) — the signal the overlay uses to replay its open document
@@ -41,30 +42,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
+use verter_identity::identity::ProviderEpoch;
 
-/// A monotonic transport-identity epoch, minted ONLY when a transport is successfully
-/// committed to `Live`. A consumer observes it to detect a transport RE-establishment
-/// (a reconnect mints a new epoch) and react — e.g. replay an open document set into
-/// the fresh transport. `Ord` compares the inner counter, so a consumer can distinguish a
-/// strictly-newer epoch from a stale/older one (a late observe must not regress).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) struct TransportEpoch(u64);
+use super::epoch::EpochMint;
 
 /// The identity of a successfully-established transport: its monotonic epoch plus the
 /// generation discriminant it established at (the base a later dead-live eviction
 /// compares the CURRENT generation against — a fresh generation means a reconnect
 /// already exists, so the dead-live must not poison it).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TransportIdentity {
-    pub(crate) epoch: TransportEpoch,
-    pub(crate) establishment_generation: Option<String>,
+pub struct TransportIdentity {
+    pub epoch: ProviderEpoch,
+    pub establishment_generation: Option<String>,
 }
 
 /// A live transport handed out WITH its identity, so the caller can observe the epoch
 /// (and thereby detect a reconnect).
-pub(crate) struct EstablishedTransport<T> {
-    pub(crate) transport: Arc<T>,
-    pub(crate) identity: TransportIdentity,
+pub struct EstablishedTransport<T> {
+    pub transport: Arc<T>,
+    pub identity: TransportIdentity,
 }
 
 /// The lazily-established transport state.
@@ -89,13 +85,13 @@ enum CellState<T> {
     },
 }
 
-/// The cell's locked inner state: the state machine plus the monotonic epoch counter.
-/// `next_epoch` advances ONLY on a successful establishment commit — never on
+/// The cell's locked inner state: the state machine plus the monotonic epoch mint.
+/// The mint advances ONLY on a successful establishment commit — never on
 /// `Pending` / `Connecting` / `Unavailable` / a dead-live eviction / a failure / a
 /// timeout.
 struct CellInner<T> {
     state: CellState<T>,
-    next_epoch: u64,
+    epochs: EpochMint,
 }
 
 /// The state-machine branch a demand takes after inspecting the cell — computed while
@@ -135,7 +131,7 @@ impl<T> LazyTransport<T> {
         Self {
             inner: Mutex::new(CellInner {
                 state: CellState::Pending,
-                next_epoch: 1,
+                epochs: EpochMint::new(),
             }),
             establish_lock: Mutex::new(()),
         }
@@ -144,7 +140,7 @@ impl<T> LazyTransport<T> {
     /// The live transport (with its identity) if already established, else `None` —
     /// NEVER establishes. Used by the non-establishing lifecycle calls (retract /
     /// shutdown), which must not head-of-line-block on an establishment.
-    pub(crate) async fn current(&self) -> Option<EstablishedTransport<T>> {
+    pub async fn current(&self) -> Option<EstablishedTransport<T>> {
         match &self.inner.lock().await.state {
             CellState::Live {
                 transport,
@@ -170,7 +166,7 @@ impl<T> LazyTransport<T> {
     ///
     /// `probe_generation` returns the CURRENT generation discriminant (e.g. the shim
     /// advertisement nonce), or `None` when none is observable.
-    pub(crate) async fn get_or_establish<G, Lf, Ef, Fut>(
+    pub async fn get_or_establish<G, Lf, Ef, Fut>(
         &self,
         probe_generation: G,
         is_alive: Lf,
@@ -309,10 +305,9 @@ impl<T> LazyTransport<T> {
                 let mut inner = self.inner.lock().await;
                 // Mint the identity — the ONLY place the epoch advances.
                 let identity = TransportIdentity {
-                    epoch: TransportEpoch(inner.next_epoch),
+                    epoch: inner.epochs.mint(),
                     establishment_generation: established_generation,
                 };
-                inner.next_epoch += 1;
                 inner.state = CellState::Live {
                     transport: Arc::clone(&t),
                     identity: identity.clone(),
@@ -354,7 +349,7 @@ impl<T> LazyTransport<T> {
     /// attach re-arms on EITHER a fresh advertisement/editor generation OR a fresh
     /// published snapshot generation — never on every query within the same
     /// (nonce, generation).
-    pub(crate) async fn get_or_establish_bound<B, G, Lf, Ef, Fut>(
+    pub async fn get_or_establish_bound<B, G, Lf, Ef, Fut>(
         &self,
         bound: Option<(B, u64)>,
         probe_generation: G,
@@ -396,5 +391,5 @@ fn generation_advanced(failed: &Option<String>, current: &Option<String>) -> boo
 }
 
 #[cfg(test)]
-#[path = "transport_cell_tests.rs"]
-mod transport_cell_tests;
+#[path = "transport_tests.rs"]
+mod transport_tests;

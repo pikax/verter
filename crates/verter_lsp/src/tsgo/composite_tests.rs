@@ -91,7 +91,7 @@ async fn establish_invocation_transport(
     core: &LazyOverlayCore<InvocationTransport>,
     generation: u64,
     nonce: &str,
-) -> crate::tsgo::transport_cell::EstablishedTransport<InvocationTransport> {
+) -> verter_type_runtime::provider_hub::EstablishedTransport<InvocationTransport> {
     let nonce = nonce.to_string();
     core.ensure(
         Some(((), generation)),
@@ -105,7 +105,7 @@ async fn establish_invocation_transport(
 
 async fn replace_dead_invocation_transport(
     core: &LazyOverlayCore<InvocationTransport>,
-) -> crate::tsgo::transport_cell::EstablishedTransport<InvocationTransport> {
+) -> verter_type_runtime::provider_hub::EstablishedTransport<InvocationTransport> {
     for generation in 2..=6 {
         let nonce = format!("invoke-{generation}");
         if let Some(established) = core
@@ -489,7 +489,7 @@ impl OverlayTransport for RecordingTransport {
 
 async fn establish_recording_transport(
     core: &LazyOverlayCore<RecordingTransport>,
-) -> crate::tsgo::transport_cell::EstablishedTransport<RecordingTransport> {
+) -> verter_type_runtime::provider_hub::EstablishedTransport<RecordingTransport> {
     core.ensure(
         Some(((), 1)),
         |_| Some("recording".to_string()),

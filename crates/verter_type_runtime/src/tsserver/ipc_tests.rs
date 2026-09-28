@@ -3794,7 +3794,7 @@ struct RealReloadHarness {
 
 impl RealReloadHarness {
     async fn new() -> Self {
-        use crate::resilient::resilient_tests::RECOVERY_CARRIERS;
+        use crate::provider_hub::hub_tests::RECOVERY_CARRIERS;
 
         let project = tempfile::tempdir().expect("create real reload project");
         std::fs::write(
@@ -3852,7 +3852,7 @@ impl RealReloadHarness {
             .to_string_lossy()
             .replace('\\', "/");
         let carrier_store_dir = project.path().join("carrier-store");
-        crate::resilient::resilient_tests::publish_recovery_carrier_store(
+        crate::provider_hub::hub_tests::publish_recovery_carrier_store(
             &carrier_store_dir,
             &project_file_name,
             1,
@@ -3871,8 +3871,8 @@ impl RealReloadHarness {
             .expect("workspace root above crates/");
         let node_path = crate::discovery::find_node()
             .expect("real reload tests require the workspace Node.js runtime");
-        let tsserver_path = crate::resilient::resilient_tests::real_tsserver_path(repo_root);
-        let plugin_path = crate::resilient::resilient_tests::build_real_tsserver_plugin(
+        let tsserver_path = crate::provider_hub::hub_tests::real_tsserver_path(repo_root);
+        let plugin_path = crate::provider_hub::hub_tests::build_real_tsserver_plugin(
             repo_root,
             project.path(),
             &node_path,
@@ -3929,7 +3929,7 @@ impl RealReloadHarness {
     }
 
     fn publish_ready(&self, epoch: u64, version: u64, changed: bool) {
-        crate::resilient::resilient_tests::publish_recovery_carrier_store(
+        crate::provider_hub::hub_tests::publish_recovery_carrier_store(
             &self.carrier_store_dir,
             &self.project_file_name,
             epoch,
@@ -4037,7 +4037,7 @@ impl RealReloadHarness {
 /// out every request for the rest of the session.
 #[tokio::test]
 async fn consecutive_timeouts_fire_crash_notify() {
-    use crate::resilient::resilient_tests::RealRecoveryHarness;
+    use crate::provider_hub::hub_tests::RealRecoveryHarness;
 
     let recovery = RealRecoveryHarness::new(0).await;
     recovery.register_carriers().await;

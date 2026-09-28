@@ -163,13 +163,13 @@ impl TestSessionBuilder {
         }
     }
 
-    /// Wrap the spawned `TsserverTypeProvider` in the PRODUCTION
-    /// [`ResilientProvider`](crate::resilient_provider::ResilientProvider) via
-    /// `crate::tsserver::resilient::new` — the exact wrap `try_spawn_tsserver`
-    /// installs in `main.rs`. This exercises the carrier path THROUGH the wrapper
-    /// (the production seam), not the raw provider; only meaningful for the tsserver
-    /// kind. No production wiring changes — this only chooses to build the same wrap
-    /// the binary builds.
+    /// Establish the tsserver engine through the PRODUCTION
+    /// [`ProviderHub`](crate::resilient_provider::ProviderHub) via
+    /// `crate::tsserver::resilient::hub` — the same hub the project router owns
+    /// per project. This exercises the carrier path THROUGH the hub (the
+    /// production seam), not the raw provider; only meaningful for the tsserver
+    /// kind. No production wiring changes — this only chooses to build the same
+    /// hub the binary builds.
     pub(crate) fn resilient(mut self, enabled: bool) -> Self {
         self.resilient = enabled;
         self
@@ -318,57 +318,49 @@ impl TestSessionBuilder {
                 // harness-spawned tsserver session on Windows, reported as a
                 // skip-as-pass. Hand the value through; do not reshape it.
                 let tsserver_path_str = tsserver_path.to_string_lossy().into_owned();
-                // When `.resilient()` is set, spawn WITH a crash-notify and wrap in
-                // the production `ResilientProvider` (the carrier path then runs
-                // through the wrapper, the real production seam). Otherwise the raw
-                // provider, as before.
-                let crash_notify: Option<Arc<tokio::sync::Notify>> = if self.resilient {
-                    Some(Arc::new(tokio::sync::Notify::new()))
+                // When `.resilient()` is set, the engine is established by the
+                // production provider hub (the carrier path then runs through the
+                // hub, the real production seam). Otherwise the raw provider.
+                let spawned: Result<Arc<dyn TypeProvider>, _> = if self.resilient {
+                    // The notifier rides an empty client cell (logs only) — the
+                    // test never injects a real `Client`.
+                    let hub = crate::tsserver::resilient::hub(
+                        crate::tsserver::resilient::TsserverEngineInputs {
+                            node_path,
+                            tsserver_path: tsserver_path_str,
+                            workspace_root: workspace_id.clone(),
+                            plugin_path: Some(plugin_path),
+                            carrier_store_dir,
+                            plugin_response_remap: self.plugin_response_remap,
+                        },
+                        Arc::new(tokio::sync::OnceCell::new()),
+                        3,
+                    );
+                    match hub.establish().await {
+                        Ok(_) => Ok(Arc::new(hub) as Arc<dyn TypeProvider>),
+                        Err(error) => Err(error),
+                    }
                 } else {
-                    None
+                    crate::tsserver::ipc::TsserverTypeProvider::spawn(
+                        &node_path,
+                        &tsserver_path_str,
+                        &workspace_id,
+                        Some(&plugin_path),
+                        Some(&carrier_store_dir),
+                        self.plugin_response_remap,
+                        None,
+                    )
+                    .await
+                    .map(|p| Arc::new(p) as Arc<dyn TypeProvider>)
                 };
-                let spawned = crate::tsserver::ipc::TsserverTypeProvider::spawn(
-                    &node_path,
-                    &tsserver_path_str,
-                    &workspace_id,
-                    Some(&plugin_path),
-                    Some(&carrier_store_dir),
-                    self.plugin_response_remap,
-                    crash_notify.clone(),
-                )
-                .await;
-                let p = match spawned {
-                    Ok(p) => p,
+                match spawned {
+                    Ok(provider) => provider,
                     Err(e) => {
                         return handle_absent_provider(
                             self.kind,
                             ProviderUnavailable::SpawnFailed,
                             &format!("tsserver spawn failed: {e}"),
                         )
-                    }
-                };
-                match crash_notify {
-                    Some(crash_notify) => {
-                        // Byte-identical to the `main.rs` production wrap: the
-                        // notifier rides an empty client cell (logs only) — the test
-                        // never injects a real `Client`.
-                        let client_cell = Arc::new(tokio::sync::OnceCell::new());
-                        let resilient = crate::tsserver::resilient::new(
-                            p,
-                            crash_notify,
-                            node_path,
-                            tsserver_path_str,
-                            workspace_id.clone(),
-                            Some(plugin_path),
-                            client_cell,
-                            3,
-                        );
-                        let provider: Arc<dyn TypeProvider> = Arc::new(resilient);
-                        provider
-                    }
-                    None => {
-                        let provider: Arc<dyn TypeProvider> = Arc::new(p);
-                        provider
                     }
                 }
             }

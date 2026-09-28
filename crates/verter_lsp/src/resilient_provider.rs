@@ -1,15 +1,17 @@
-//! Resilient TypeProvider wrapper — delegates to `verter_type_runtime`.
+//! The provider lifecycle owner — delegates to `verter_type_runtime`.
 //!
-//! This module re-exports the `ResilientProvider` and `ResilientBackend` from
-//! `verter_type_runtime::resilient`, and provides the LSP-specific `LspNotifier`
-//! that bridges `tower_lsp_server::Client` → `ProviderNotifier`.
+//! This module re-exports the shared [`ProviderHub`] surface from
+//! `verter_type_runtime::provider_hub`, and provides the LSP-specific
+//! `LspNotifier` that bridges `tower_lsp_server::Client` → `ProviderNotifier`.
 
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tower_lsp_server::Client;
 
-// Re-export the shared resilient provider
-pub(crate) use verter_type_runtime::resilient::{ResilientBackend, ResilientProvider};
+// Re-export the shared lifecycle owner.
+pub(crate) use verter_type_runtime::provider_hub::{
+    EstablishFuture, HubPolicy, ProviderEstablisher, ProviderHub,
+};
 
 /// LSP-specific notifier that uses `client.show_message()` / `client.log_message()`.
 pub(crate) struct LspNotifier {
@@ -25,9 +27,9 @@ impl LspNotifier {
     }
 }
 
-impl verter_type_runtime::resilient::ProviderNotifier for LspNotifier {
-    fn notify(&self, severity: verter_type_runtime::resilient::NotifySeverity, message: String) {
-        use verter_type_runtime::resilient::NotifySeverity;
+impl verter_type_runtime::provider_hub::ProviderNotifier for LspNotifier {
+    fn notify(&self, severity: verter_type_runtime::provider_hub::NotifySeverity, message: String) {
+        use verter_type_runtime::provider_hub::NotifySeverity;
 
         let client = self.client.clone();
         // Spawn a task to send the notification (ProviderNotifier::notify is sync)

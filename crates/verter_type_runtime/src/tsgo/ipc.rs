@@ -491,7 +491,7 @@ impl LspTransport {
 
     /// Record a request-level failure (response timeout OR a stdin-enqueue stall)
     /// toward hang detection. At [`HANG_THRESHOLD`] consecutive failures fire
-    /// `crash_notify` so the [`crate::resilient::ResilientTypeProvider`] restart
+    /// `crash_notify` so the [`crate::provider_hub::ProviderHub`] restart
     /// machinery recovers the session — unless a deliberate teardown is in flight.
     ///
     /// Only the response-timeout arm used to count, so a request parked on a

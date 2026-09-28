@@ -23,9 +23,39 @@ struct BatchRouterFixture {
     members: Vec<CarrierActivation>,
 }
 
+/// An establisher that installs one pre-built engine.
+struct PrebuiltEngine(Arc<dyn TypeProvider>);
+
+impl crate::resilient_provider::ProviderEstablisher<dyn TypeProvider> for PrebuiltEngine {
+    fn log_name(&self) -> &'static str {
+        "prebuilt-tsserver"
+    }
+
+    fn user_label(&self) -> &'static str {
+        "tsserver"
+    }
+
+    fn restarting_error(&self) -> &'static str {
+        "prebuilt tsserver is restarting"
+    }
+
+    fn supports_completion_resolve(&self) -> bool {
+        true
+    }
+
+    fn establish<'a>(
+        &'a self,
+        _crash_signal: Arc<tokio::sync::Notify>,
+    ) -> crate::resilient_provider::EstablishFuture<'a, dyn TypeProvider> {
+        let engine = Arc::clone(&self.0);
+        Box::pin(async move { Ok(engine) })
+    }
+}
+
 /// Only engine discovery/spawning is substituted. Every operation still resolves
-/// its source against the live, published configured-project ownership graph.
-fn batch_router_fixture() -> BatchRouterFixture {
+/// its source against the live, published configured-project ownership graph,
+/// and every engine is established through its production provider hub.
+async fn batch_router_fixture() -> BatchRouterFixture {
     use verter_semantic::resolver_core::{
         ConfiguredMembership, ModuleResolverCore, StaticMembershipSpec,
     };
@@ -119,9 +149,13 @@ fn batch_router_fixture() -> BatchRouterFixture {
             },
         );
         let provider: Arc<dyn TypeProvider> = provider.clone();
-        router
-            .providers
-            .insert(key, Arc::new(OnceCell::new_with(Some(provider))));
+        let hub = ProviderHub::new(
+            PrebuiltEngine(provider),
+            Arc::new(verter_type_runtime::provider_hub::TracingNotifier),
+            crate::resilient_provider::HubPolicy::explicit(3),
+        );
+        hub.establish().await.unwrap();
+        router.providers.insert(key, Arc::new(hub));
     }
     workspace.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(WorkspaceSnapshot {
         owners_memo: Default::default(),
@@ -140,7 +174,7 @@ fn batch_router_fixture() -> BatchRouterFixture {
 
 #[tokio::test]
 async fn carrier_batches_preserve_each_provider_order_without_scalar_dispatch() {
-    let fixture = batch_router_fixture();
+    let fixture = batch_router_fixture().await;
     let members = &fixture.members;
     fixture
         .router
@@ -208,7 +242,7 @@ async fn carrier_batches_preserve_each_provider_order_without_scalar_dispatch() 
 
 #[tokio::test]
 async fn carrier_batches_revalidate_live_ownership_after_routes_are_registered() {
-    let fixture = batch_router_fixture();
+    let fixture = batch_router_fixture().await;
     fixture
         .router
         .activate_carrier_members(&fixture.members)

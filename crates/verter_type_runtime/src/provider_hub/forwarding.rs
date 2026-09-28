@@ -1,42 +1,40 @@
-//! TypeProvider forwarding for the resilient single-writer wrapper.
+//! `TypeProvider` surface of the hub: state mutations go through the actor,
+//! queries run against the serving incarnation under crash quarantine and
+//! epoch settlement.
 
+use super::quarantine::hash_extra;
 use super::*;
+use crate::protocol::*;
+use crate::traits::ProviderFuture;
 
-impl<P, B> TypeProvider for ResilientProvider<P, B>
+impl<P> TypeProvider for ProviderHub<P>
 where
-    P: TypeProvider + Send + Sync + 'static,
-    B: ResilientBackend<P>,
+    P: TypeProvider + ?Sized + Send + Sync + 'static,
 {
     fn provider_id(&self) -> &'static str {
-        // The wrapped provider's identity is stable across restarts (the backend
-        // always respawns the same provider type), so read it from the live
-        // inner when present, else fall back to the backend's user label.
+        // The engine identity is stable across establishments (the establisher
+        // always produces the same provider type), so read it from the serving
+        // incarnation when present, else from the establisher's user label.
         self.state
-            .inner
-            .try_read()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|provider| provider.provider_id()))
-            .unwrap_or_else(|| self.state.backend.user_label())
+            .shared
+            .serving()
+            .map(|serving| serving.provider.provider_id())
+            .unwrap_or_else(|| self.state.establisher.user_label())
     }
 
     fn supports_completion_resolve(&self) -> bool {
         self.state
-            .inner
-            .try_read()
-            .ok()
-            .and_then(|guard| {
-                guard
-                    .as_ref()
-                    .map(|provider| provider.supports_completion_resolve())
-            })
-            .unwrap_or(false)
+            .shared
+            .serving()
+            .map(|serving| serving.provider.supports_completion_resolve())
+            .unwrap_or_else(|| self.state.establisher.supports_completion_resolve())
     }
 
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.submit_mutation(DesiredMutation::Open { path, content }, Lane::Foreground)
+            self.mutate(DesiredMutation::Open { path, content }, Lane::Foreground)
                 .await
         })
     }
@@ -45,7 +43,7 @@ where
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.submit_mutation(DesiredMutation::Load { path, content }, Lane::Foreground)
+            self.mutate(DesiredMutation::Load { path, content }, Lane::Foreground)
                 .await
         })
     }
@@ -54,7 +52,7 @@ where
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.submit_mutation(DesiredMutation::Update { path, content }, Lane::Foreground)
+            self.mutate(DesiredMutation::Update { path, content }, Lane::Foreground)
                 .await
         })
     }
@@ -62,18 +60,21 @@ where
     fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
         let path = path.to_string();
         Box::pin(async move {
-            self.submit_mutation(DesiredMutation::Close { path }, Lane::Foreground)
+            self.mutate(DesiredMutation::Close { path }, Lane::Foreground)
                 .await
         })
     }
 
     fn notify_carrier_changed(&self, companion_path: &str) -> ProviderFuture<'_, ()> {
         // Pure engine-cache eviction signal; it changes no desired state, so it
-        // bypasses the actor and runs directly against the live provider.
+        // bypasses the actor. An engine that is not serving holds no cache to
+        // evict: the one that replaces it reads the carrier as it is.
         let path_owned = companion_path.to_string();
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider.notify_carrier_changed(&path_owned).await
+            match self.state.shared.serving() {
+                Some(serving) => serving.provider.notify_carrier_changed(&path_owned).await,
+                None => Ok(()),
+            }
         })
     }
 
@@ -83,8 +84,10 @@ where
     ) -> ProviderFuture<'a, ()> {
         let paths_owned = companion_paths.to_vec();
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider.notify_carriers_changed(&paths_owned).await
+            match self.state.shared.serving() {
+                Some(serving) => serving.provider.notify_carriers_changed(&paths_owned).await,
+                None => Ok(()),
+            }
         })
     }
 
@@ -100,7 +103,7 @@ where
         let content = content.to_string();
         let project_file_name = project_file_name.to_string();
         Box::pin(async move {
-            self.submit_mutation(
+            self.mutate(
                 DesiredMutation::RegisterCarrier {
                     source_path,
                     companion_path,
@@ -125,7 +128,7 @@ where
         let content = content.to_string();
         let project_file_name = project_file_name.to_string();
         Box::pin(async move {
-            self.submit_mutation(
+            self.mutate(
                 DesiredMutation::RegisterCarrierMetadata {
                     source_path,
                     companion_path,
@@ -149,7 +152,7 @@ where
         let companion_path = companion_path.to_string();
         let project_file_name = project_file_name.to_string();
         Box::pin(async move {
-            self.submit_mutation(
+            self.mutate(
                 DesiredMutation::ActivateCarrier {
                     source_path,
                     companion_path,
@@ -168,7 +171,7 @@ where
     ) -> ProviderFuture<'a, ()> {
         let members = members.to_vec();
         Box::pin(async move {
-            self.submit_mutation(
+            self.mutate(
                 DesiredMutation::ActivateCarriers { members },
                 Lane::Foreground,
             )
@@ -402,13 +405,7 @@ where
 
     fn shutdown(&self) -> ProviderFuture<'_, ()> {
         Box::pin(async {
-            // Declare teardown intent BEFORE tearing the inner provider down:
-            // the resulting crash-notify wake (child exit EOF) is the requested
-            // teardown, never a crash to report/restart from.
-            self.state.torn_down.store(true, Ordering::SeqCst);
-            if let Ok(provider) = self.get_inner().await {
-                let _ = provider.shutdown().await;
-            }
+            self.shutdown_hub().await;
             Ok(())
         })
     }
@@ -420,22 +417,23 @@ where
         // Not desired state: an engine that is down has nothing to be told, and
         // the one that replaces it reads the disk as it is.
         Box::pin(async move {
-            match self.get_inner().await {
-                Ok(provider) => provider.notify_watched_files_changed(changes).await,
-                Err(_) => Ok(()),
+            match self.state.shared.serving() {
+                Some(serving) => serving.provider.notify_watched_files_changed(changes).await,
+                None => Ok(()),
             }
         })
     }
 
     fn resync_open_files(&self) -> ProviderFuture<'_, ()> {
         // Resync does not change the desired-state set, so it bypasses the actor
-        // and runs directly against the live provider. Concurrency with an
-        // in-flight `update_file` is made stale-safe at the provider (ipc) layer
-        // by its per-file content generation gate.
+        // and runs directly against the serving engine (a fresh engine was just
+        // replayed and has nothing to resync). Concurrency with an in-flight
+        // `update_file` is made stale-safe at the provider (ipc) layer by its
+        // per-file content generation gate.
         Box::pin(async move {
-            match self.get_inner().await {
-                Ok(provider) => provider.resync_open_files().await,
-                Err(_) => Ok(()),
+            match self.state.shared.serving() {
+                Some(serving) => serving.provider.resync_open_files().await,
+                None => Ok(()),
             }
         })
     }
@@ -443,7 +441,7 @@ where
     fn configure_paths(&self, base_url: &str, paths: serde_json::Value) -> ProviderFuture<'_, ()> {
         let base_url = base_url.to_string();
         Box::pin(async move {
-            self.submit_mutation(
+            self.mutate(
                 DesiredMutation::ConfigurePaths { base_url, paths },
                 Lane::Foreground,
             )
@@ -457,7 +455,7 @@ where
         removed: Vec<serde_json::Value>,
     ) -> ProviderFuture<'_, ()> {
         Box::pin(async move {
-            self.submit_mutation(
+            self.mutate(
                 DesiredMutation::UpdateWorkspaceFolders { added, removed },
                 Lane::Foreground,
             )
@@ -467,10 +465,9 @@ where
 
     fn child_pid(&self) -> Option<u32> {
         self.state
-            .inner
-            .try_read()
-            .ok()
-            .and_then(|guard| guard.as_ref().and_then(|provider| provider.child_pid()))
+            .shared
+            .serving()
+            .and_then(|serving| serving.provider.child_pid())
     }
 
     // ── Background-priority forwarding ──────────────────────────────
@@ -479,7 +476,7 @@ where
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.submit_mutation(DesiredMutation::Open { path, content }, Lane::Background)
+            self.mutate(DesiredMutation::Open { path, content }, Lane::Background)
                 .await
         })
     }
@@ -488,7 +485,7 @@ where
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.submit_mutation(DesiredMutation::Load { path, content }, Lane::Background)
+            self.mutate(DesiredMutation::Load { path, content }, Lane::Background)
                 .await
         })
     }
@@ -497,7 +494,7 @@ where
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.submit_mutation(DesiredMutation::Update { path, content }, Lane::Background)
+            self.mutate(DesiredMutation::Update { path, content }, Lane::Background)
                 .await
         })
     }
@@ -505,7 +502,7 @@ where
     fn close_file_background(&self, path: &str) -> ProviderFuture<'_, ()> {
         let path = path.to_string();
         Box::pin(async move {
-            self.submit_mutation(DesiredMutation::Close { path }, Lane::Background)
+            self.mutate(DesiredMutation::Close { path }, Lane::Background)
                 .await
         })
     }
@@ -555,7 +552,7 @@ where
     ) -> ProviderFuture<'_, ()> {
         let base_url = base_url.to_string();
         Box::pin(async move {
-            self.submit_mutation(
+            self.mutate(
                 DesiredMutation::ConfigurePaths { base_url, paths },
                 Lane::Background,
             )
@@ -569,7 +566,7 @@ where
         removed: Vec<serde_json::Value>,
     ) -> ProviderFuture<'_, ()> {
         Box::pin(async move {
-            self.submit_mutation(
+            self.mutate(
                 DesiredMutation::UpdateWorkspaceFolders { added, removed },
                 Lane::Background,
             )
@@ -583,7 +580,7 @@ where
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.submit_mutation(DesiredMutation::Open { path, content }, Lane::Normal)
+            self.mutate(DesiredMutation::Open { path, content }, Lane::Normal)
                 .await
         })
     }
@@ -592,7 +589,7 @@ where
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.submit_mutation(DesiredMutation::Load { path, content }, Lane::Normal)
+            self.mutate(DesiredMutation::Load { path, content }, Lane::Normal)
                 .await
         })
     }
@@ -601,7 +598,7 @@ where
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.submit_mutation(DesiredMutation::Update { path, content }, Lane::Normal)
+            self.mutate(DesiredMutation::Update { path, content }, Lane::Normal)
                 .await
         })
     }
@@ -609,7 +606,7 @@ where
     fn close_file_normal(&self, path: &str) -> ProviderFuture<'_, ()> {
         let path = path.to_string();
         Box::pin(async move {
-            self.submit_mutation(DesiredMutation::Close { path }, Lane::Normal)
+            self.mutate(DesiredMutation::Close { path }, Lane::Normal)
                 .await
         })
     }

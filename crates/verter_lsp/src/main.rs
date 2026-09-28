@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
-use tokio::sync::{Notify, OnceCell};
+use tokio::sync::OnceCell;
 use tower_lsp_server::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 use verter_lsp::server::VerterLanguageServer;
 use verter_lsp::tsgo::composite::{SharedRendezvous, SharedTsgoOverlay, TsgoCompositeProvider};
-use verter_lsp::tsgo::ipc::{TsgoOwnedProvider, TsgoTypeProvider};
 use verter_lsp::tsgo::resilient as tsgo_resilient;
 use verter_lsp::tsserver::project_router::{self, ProjectTsserverProvider};
-use verter_lsp::type_provider::lazy_managed::LazyManagedTypeProvider;
+use verter_lsp::type_provider::lazy_managed;
 use verter_lsp::type_provider::traits::TypeProvider;
 use verter_lsp::{LspConfig, ProjectSyncMode, TypeProviderKind, TypeProviderTopology};
 use verter_session::{HostConfig, VerterHost};
@@ -1067,48 +1066,21 @@ async fn try_spawn_tsgo_with_request(
     // `root_uri` is the LSP transport's workspace-folder metadata only — NOT the
     // project-binding decision (that is resolved per query by the admission layer).
     let root_uri = path_to_file_uri(workspace_root);
-    let crash_notify = Arc::new(Notify::new());
 
-    let tp = TsgoTypeProvider::spawn_with_crash_signal(
-        &tsgo_bin,
-        &root_uri,
-        Some(Arc::clone(&crash_notify)),
-    )
-    .await
-    .map_err(|e| format!("found tsgo at {tsgo_bin}, but spawn/initialize failed: {e}"))?;
-
-    // OWNED one-instance dual-surface: attach a version-gated `--api` checker to
-    // THIS `tsgo --lsp` process. The checker stores NO configured project — each
-    // carrier's owning tsconfig is supplied per query (the binding the admission
-    // layer resolves), so ONE process serves every configured project. The `--lsp`
-    // surface serves features + the user-facing diagnostics (gated on the carrier's
-    // resolved `BoundProject` by the admission layer). A probe / wire-gate / attach
+    // OWNED one-instance dual-surface: ONE `tsgo --lsp` with a version-gated
+    // `--api` checker attached, established and recovered by its provider hub.
+    // The checker stores NO configured project — each carrier's owning tsconfig
+    // is supplied per query (the binding the admission layer resolves), so ONE
+    // process serves every configured project. The `--lsp` surface serves
+    // features + the user-facing diagnostics (gated on the carrier's resolved
+    // `BoundProject` by the admission layer). A probe / wire-gate / attach
     // failure fails closed rather than silently degrading the typecheck oracle.
-    let lsp = Arc::new(tp);
-    let owned = match TsgoOwnedProvider::attach(Arc::clone(&lsp), &tsgo_bin).await {
-        Ok(owned) => owned,
-        Err(error) => {
-            let teardown = lsp.shutdown().await;
-            return Err(format!(
-                "found tsgo at {tsgo_bin} and spawned --lsp, but the version-gated --api \
-                 attach failed: {error}; managed child teardown: {}",
-                teardown
-                    .err()
-                    .map_or_else(|| "reaped".to_string(), |error| error.to_string())
-            ));
-        }
-    };
-    tracing::info!("TSGO owned dual-surface provider started (--api attached, resilient)");
-
-    let resilient = tsgo_resilient::new_owned(
-        owned,
-        crash_notify,
-        tsgo_bin,
-        root_uri,
-        Arc::clone(client_cell),
-        3,
-    );
-    Ok(Arc::new(resilient))
+    let owned =
+        tsgo_resilient::establish_owned(tsgo_bin.clone(), root_uri, Arc::clone(client_cell), 3)
+            .await
+            .map_err(|error| format!("found tsgo at {tsgo_bin}, but {error}"))?;
+    tracing::info!("TSGO owned dual-surface provider started (--api attached, hub-managed)");
+    Ok(Arc::new(owned))
 }
 
 /// Wrap the OWNED tsgo provider in the ALWAYS-present host-aware admission /
@@ -1150,7 +1122,7 @@ fn wrap_shared_first_admission(
     let tsdk = args.tsdk.clone();
     let plugin_path = args.plugin_path.clone();
     let host_for_fallback = Arc::clone(host);
-    let fallback = Arc::new(LazyManagedTypeProvider::new(move || {
+    let fallback = Arc::new(lazy_managed::new_lazy_managed(move || {
         let workspace_root = workspace_root_owned.clone();
         let tsdk = tsdk.clone();
         let plugin_path = plugin_path.clone();
