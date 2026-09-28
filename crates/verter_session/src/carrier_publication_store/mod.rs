@@ -2,7 +2,7 @@
 
 pub mod persistence;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -599,9 +599,26 @@ pub struct PublicationAuditSnapshot {
     pub rejected_candidates: u64,
 }
 
+/// How many audit events the log keeps verbatim.
+///
+/// The counters in [`PublicationAuditSnapshot`] are the durable record and are
+/// kept exactly, for the life of the store. The events themselves — several per
+/// publication request, each carrying a cloned artifact identity — exist for
+/// inspection of a recent scenario (tests, a diagnostic dump), so the log keeps
+/// the newest window of them and lets the oldest go. Keeping every event was
+/// process-lifetime retention proportional to the number of REQUESTS ever made,
+/// growing on every hover and sync of a long session.
+const AUDIT_EVENT_RETENTION: usize = 1024;
+
+#[derive(Default)]
+struct PublicationAuditState {
+    counters: PublicationAuditSnapshot,
+    recent: VecDeque<PublicationAuditEvent>,
+}
+
 #[derive(Default)]
 struct PublicationAuditLog {
-    events: Mutex<Vec<PublicationAuditEvent>>,
+    state: Mutex<PublicationAuditState>,
 }
 
 impl PublicationAuditLog {
@@ -611,39 +628,46 @@ impl PublicationAuditLog {
         artifact_id: &FrameworkArtifactId,
         kind: PublicationAuditKind,
     ) {
-        if let Ok(mut events) = self.events.lock() {
-            events.push(PublicationAuditEvent {
+        if let Ok(mut state) = self.state.lock() {
+            match kind {
+                PublicationAuditKind::ParserStarted => state.counters.parser_started += 1,
+                PublicationAuditKind::CoordinationLaneEntered(PublicationLaneRole::Leader) => {
+                    state.counters.leaders += 1;
+                }
+                PublicationAuditKind::CoordinationLaneEntered(PublicationLaneRole::Waiter) => {
+                    state.counters.waiters += 1;
+                }
+                PublicationAuditKind::LiveHit => state.counters.live_hits += 1,
+                PublicationAuditKind::Adopted => state.counters.adopted += 1,
+                PublicationAuditKind::PersistentAdoptionRejected(_) => {
+                    state.counters.rejected_candidates += 1;
+                }
+                _ => {}
+            }
+            state.recent.push_back(PublicationAuditEvent {
                 request: request.audit_request_id,
                 artifact_id: artifact_id.clone(),
                 surface: request.surface,
                 kind,
             });
+            while state.recent.len() > AUDIT_EVENT_RETENTION {
+                state.recent.pop_front();
+            }
         }
     }
 
     fn snapshot(&self) -> PublicationAuditSnapshot {
-        let mut snapshot = PublicationAuditSnapshot::default();
-        let Ok(events) = self.events.lock() else {
-            return snapshot;
-        };
-        for event in events.iter() {
-            match event.kind {
-                PublicationAuditKind::ParserStarted => snapshot.parser_started += 1,
-                PublicationAuditKind::CoordinationLaneEntered(PublicationLaneRole::Leader) => {
-                    snapshot.leaders += 1;
-                }
-                PublicationAuditKind::CoordinationLaneEntered(PublicationLaneRole::Waiter) => {
-                    snapshot.waiters += 1;
-                }
-                PublicationAuditKind::LiveHit => snapshot.live_hits += 1,
-                PublicationAuditKind::Adopted => snapshot.adopted += 1,
-                PublicationAuditKind::PersistentAdoptionRejected(_) => {
-                    snapshot.rejected_candidates += 1;
-                }
-                _ => {}
-            }
-        }
-        snapshot
+        self.state
+            .lock()
+            .map(|state| state.counters)
+            .unwrap_or_default()
+    }
+
+    fn recent_events(&self) -> Vec<PublicationAuditEvent> {
+        self.state
+            .lock()
+            .map(|state| state.recent.iter().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -873,6 +897,30 @@ impl CarrierPublicationStore {
                 drop(state);
                 (lane, retired, retired)
             } else {
+                // A new version of this file is being published, so the lanes
+                // its superseded versions left behind — a terminal record whose
+                // artifact has already been dropped by everyone, or a failure —
+                // have nothing left to serve: a request for that exact older
+                // version would re-produce anyway. Dropping them here keeps the
+                // lane map proportional to the files in the session rather than
+                // to every version ever published. Lanes still producing, or
+                // still holding a live artifact, are kept for their waiters and
+                // readers.
+                let canonical = artifact_id.source.canonical_digest();
+                lanes.retain(|id, lane| {
+                    if *id == artifact_id || id.source.canonical_digest() != canonical {
+                        return true;
+                    }
+                    match lane.state.lock() {
+                        Ok(state) => !matches!(
+                            &*state,
+                            LaneState::Terminal(outcome)
+                                if outcome.artifact_expired()
+                                    || matches!(outcome, TerminalOutcome::Other(_))
+                        ),
+                        Err(_) => true,
+                    }
+                });
                 let lane = Arc::new(PublicationLane::vacant());
                 let mut state = lane
                     .state
@@ -1485,12 +1533,25 @@ impl CarrierPublicationStore {
         self.audit.snapshot()
     }
 
+    /// The newest retained audit events (see `AUDIT_EVENT_RETENTION`); the
+    /// counters in [`Self::audit_snapshot`] are exact for the store's whole
+    /// life.
     pub fn audit_events(&self) -> Vec<PublicationAuditEvent> {
-        self.audit
-            .events
-            .lock()
-            .map(|events| events.clone())
-            .unwrap_or_default()
+        self.audit.recent_events()
+    }
+
+    /// Number of publication lanes currently retained, live and terminal.
+    /// The object-count half of the store's retention bound: a lane whose
+    /// artifact has expired, or whose outcome was a failure, is dropped the
+    /// next time the same file publishes a different content.
+    pub fn retained_lane_count(&self) -> usize {
+        self.lanes.lock().map(|lanes| lanes.len()).unwrap_or(0)
+    }
+
+    /// Number of immutable carrier stable units the store retains (bounded by
+    /// its stable-unit retention).
+    pub fn retained_candidate_count(&self) -> usize {
+        self.units.retained_unit_count()
     }
 }
 

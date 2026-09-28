@@ -5315,11 +5315,12 @@ pub(crate) mod foundations_guards {
         "pub mod query_host_port",
         "pub(crate) mod semantic_query_memo",
         // The one process-local aggregate retained-byte account every
-        // host-owned semantic store charges. Crate-private: no consumer
-        // outside `verter_session` admits cache entries, and the
-        // account is an internal admission rail rather than an API.
-        // Its own unit tests live in-crate, so nothing needs `pub`.
-        "pub(crate) mod semantic_retention_account",
+        // host-owned semantic store charges. `pub` because the account is
+        // PROCESS-wide rather than crate-wide: the LSP server's
+        // `ProviderSurfaceStore` retains provider surfaces on the user's
+        // behalf and must charge THIS account, or the ratified ceiling
+        // would be enforced once per crate instead of once per process.
+        "pub mod semantic_retention_account",
         "pub(crate) mod session_runtime",
         // Stage 4a SessionView trait surface — `HostView` and
         // `OverlaidView` impls. `pub` because the integration smoke

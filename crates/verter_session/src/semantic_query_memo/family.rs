@@ -793,12 +793,258 @@ fn w_object_spread_projection_family_identity(identity: &ObjectSpreadProjectionF
 }
 
 impl FamilyKey {
+    /// Visit every [`SemanticNodeId`] this family identity embeds directly.
+    ///
+    /// Topology only, for the document-close release sweep: a family whose
+    /// key names a released node can never be looked up again (the id is
+    /// never re-minted), so its candidates are pure retention. Node ids
+    /// that live behind an opaque interned handle (an intersection recipe
+    /// id, a signature descriptor id) are NOT reached — those families are
+    /// reclaimed by the reverse index and the family budget instead. Every
+    /// id held inline is visited, however deep: a computed index in a path,
+    /// both sides of a substitution binding or a pending conditional pair,
+    /// and each node-set axis. The match carries no wildcard so a new
+    /// variant must be dispositioned here.
+    pub(super) fn for_each_node_id(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        use crate::semantic_query::{
+            authored_property_key_child, CallArgKey, CanonicalTypeSubstitution,
+            IntersectionInputRef, PathSegment,
+        };
+        fn path_nodes(path: &[PathSegment], visit: &mut impl FnMut(SemanticNodeId)) {
+            for segment in path {
+                match segment {
+                    PathSegment::Member(_) => {}
+                    PathSegment::Index(index) => {
+                        authored_property_key_child(index)
+                            .into_iter()
+                            .for_each(&mut *visit);
+                    }
+                }
+            }
+        }
+        fn substitution_nodes(
+            substitution: &CanonicalTypeSubstitution,
+            visit: &mut impl FnMut(SemanticNodeId),
+        ) {
+            for &(param, bound) in substitution.bindings() {
+                visit(param);
+                visit(bound);
+            }
+        }
+        match self {
+            FamilyKey::ResolveDecl(_)
+            | FamilyKey::TypeOf { .. }
+            | FamilyKey::ResolveEnum { .. }
+            | FamilyKey::ClassifyBroadRuntime { .. }
+            | FamilyKey::LowerLocator { .. }
+            | FamilyKey::ClassifyMaterializationCycleGate { .. }
+            | FamilyKey::ReadSignatureResult { .. } => {}
+            FamilyKey::FlowNarrowingAt { flow, .. } => flow.ids().iter().copied().for_each(visit),
+            FamilyKey::ContextualTypeAt { contextual, .. } => {
+                contextual.ids().iter().copied().for_each(visit);
+            }
+            FamilyKey::Instantiate { args, .. }
+            | FamilyKey::ResolveMacroPayload {
+                type_args: args, ..
+            }
+            | FamilyKey::ResolveClassSurface {
+                type_args: args, ..
+            }
+            | FamilyKey::ResolveAmbientNamespace {
+                type_args: args, ..
+            }
+            | FamilyKey::TemplateLiteralReduce { args, .. }
+            | FamilyKey::ReduceUnion { members: args, .. } => {
+                args.iter().copied().for_each(visit);
+            }
+            FamilyKey::InstantiateAuthored { identity } => {
+                identity.args.iter().copied().for_each(&mut visit);
+                if let Some(path) = identity.projection.residual_path() {
+                    path_nodes(path, &mut visit);
+                }
+            }
+            FamilyKey::ProjectPath { base, path, .. } => {
+                visit(*base);
+                path_nodes(path, &mut visit);
+            }
+            FamilyKey::ProjectMember { base, .. }
+            | FamilyKey::KeyOf { base, .. }
+            | FamilyKey::ApparentType { base, .. }
+            | FamilyKey::ClassifyTruthinessDomain { subject: base }
+            | FamilyKey::AwaitedNormalize { operand: base, .. }
+            | FamilyKey::AsyncReturnPayload { operand: base, .. }
+            | FamilyKey::SignaturesOfType { subject: base, .. } => visit(*base),
+            FamilyKey::IndexedAccess { base, index } => {
+                visit(*base);
+                authored_property_key_child(index)
+                    .into_iter()
+                    .for_each(visit);
+            }
+            FamilyKey::MappedType { source, mapper, .. } => {
+                visit(*source);
+                visit(mapper.parameter_node);
+                visit(mapper.key_space);
+                visit(mapper.value_expr);
+                mapper.name_remap.into_iter().for_each(visit);
+            }
+            FamilyKey::Conditional {
+                check,
+                extends,
+                true_branch,
+                false_branch,
+                pending,
+                ..
+            } => {
+                if let Some(pending) = pending {
+                    for &(param, argument) in pending
+                        .true_branch()
+                        .pairs()
+                        .iter()
+                        .chain(pending.false_branch().pairs())
+                    {
+                        visit(param);
+                        visit(argument);
+                    }
+                }
+                [*check, *extends, *true_branch, *false_branch]
+                    .into_iter()
+                    .for_each(visit);
+            }
+            FamilyKey::ReduceIntersection { input, .. } => match input {
+                IntersectionInputRef::Empty | IntersectionInputRef::Recipe(_) => {}
+                IntersectionInputRef::Unary(node) => visit(*node),
+                IntersectionInputRef::Binary(left, right) => {
+                    visit(*left);
+                    visit(*right);
+                }
+            },
+            FamilyKey::ProjectObjectSpread { identity } => visit(identity.program),
+            FamilyKey::ResolveOverloadSet {
+                callee, type_args, ..
+            } => {
+                visit(*callee);
+                type_args.iter().copied().for_each(visit);
+            }
+            FamilyKey::Relate { key } => {
+                visit(key.source);
+                visit(key.target);
+                if let Some(inference) = &key.inference_context {
+                    inference
+                        .inferable_params
+                        .ids()
+                        .iter()
+                        .copied()
+                        .for_each(visit);
+                }
+            }
+            FamilyKey::FlowReturn { key } => {
+                key.normalized_type_args
+                    .iter()
+                    .copied()
+                    .for_each(&mut visit);
+                substitution_nodes(&key.context.type_substitution, &mut visit);
+                path_nodes(key.demand.point.projection.path.as_slice(), &mut visit);
+                key.input
+                    .contextual_parameters
+                    .iter()
+                    .copied()
+                    .for_each(visit);
+            }
+            FamilyKey::ResolveCall { key } => {
+                substitution_nodes(&key.context.substitution, &mut visit);
+                key.flow.ids().iter().copied().for_each(&mut visit);
+                visit(key.callee);
+                key.receiver.into_iter().for_each(&mut visit);
+                for arg in key.args.iter() {
+                    // Every field is named so a new id-bearing one must be
+                    // dispositioned here.
+                    if let CallArgKey::Eager {
+                        ty,
+                        const_view,
+                        spread: _,
+                        literal_mode: _,
+                        context_sensitive: _,
+                    } = arg
+                    {
+                        visit(*ty);
+                        if let Some(const_view) = const_view {
+                            visit(*const_view);
+                        }
+                    }
+                }
+                key.explicit_type_args.iter().copied().for_each(visit);
+            }
+        }
+    }
+
+    /// Whether this family identity names `canonical_id` directly — through
+    /// a declaration slot (`defining_canonical`), a lookup scope, a `typeof`
+    /// value root, a program point, or a lowering locator's slot. Such a
+    /// family is bound to the document's CONTENT even though the key is
+    /// content-free: a close drops its candidates outright, since the
+    /// reload re-lowers the document and every candidate here validated
+    /// against the closed content. Families keyed only by node ids or by
+    /// an opaque interned handle report `false` (the id sweep and the
+    /// carrier sweep cover them). No wildcard: a new variant must be
+    /// dispositioned here.
+    pub(super) fn binds_canonical(&self, canonical_id: &str) -> bool {
+        let names = |canonical: &Arc<str>| canonical.as_ref() == canonical_id;
+        match self {
+            FamilyKey::ResolveDecl(key) => names(&key.scope.canonical_id),
+            FamilyKey::Instantiate { base, .. }
+            | FamilyKey::ResolveMacroPayload { owner: base, .. }
+            | FamilyKey::ResolveClassSurface {
+                decl_slot: base, ..
+            }
+            | FamilyKey::ResolveAmbientNamespace {
+                namespace_slot: base,
+                ..
+            }
+            | FamilyKey::ResolveEnum {
+                enum_slot: base, ..
+            } => names(&base.defining_canonical),
+            FamilyKey::InstantiateAuthored { identity } => names(&identity.base.defining_canonical),
+            FamilyKey::TypeOf { value_root, .. } => names(&value_root.root.scope.canonical_id),
+            FamilyKey::FlowNarrowingAt { point, .. }
+            | FamilyKey::ContextualTypeAt { point, .. } => names(&point.canonical_id),
+            FamilyKey::LowerLocator { key } => names(&key.slot().defining_canonical),
+            FamilyKey::ClassifyMaterializationCycleGate { key } => {
+                names(&key.root.defining_canonical)
+            }
+            FamilyKey::ClassifyBroadRuntime { subject, .. } => {
+                names(&subject.owner().defining_canonical)
+            }
+            FamilyKey::FlowReturn { key } => {
+                names(&key.function.declaration_slot.defining_canonical)
+            }
+            FamilyKey::ResolveCall { key } => names(&key.point.canonical_id),
+            FamilyKey::ProjectMember { .. }
+            | FamilyKey::IndexedAccess { .. }
+            | FamilyKey::KeyOf { .. }
+            | FamilyKey::MappedType { .. }
+            | FamilyKey::Conditional { .. }
+            | FamilyKey::ReduceUnion { .. }
+            | FamilyKey::ReduceIntersection { .. }
+            | FamilyKey::ProjectObjectSpread { .. }
+            | FamilyKey::ProjectPath { .. }
+            | FamilyKey::ResolveOverloadSet { .. }
+            | FamilyKey::Relate { .. }
+            | FamilyKey::ApparentType { .. }
+            | FamilyKey::TemplateLiteralReduce { .. }
+            | FamilyKey::ClassifyTruthinessDomain { .. }
+            | FamilyKey::AwaitedNormalize { .. }
+            | FamilyKey::AsyncReturnPayload { .. }
+            | FamilyKey::SignaturesOfType { .. }
+            | FamilyKey::ReadSignatureResult { .. } => false,
+        }
+    }
+
     /// The stable variant label of this family identity. Used by the family-
     /// mapping guards (via the `for_tests` probe) to assert the domain a
     /// [`SemanticQueryKey`] maps to — e.g. that `Relate` maps to the dedicated
     /// `Relate` family and never aliases `IndexedAccess` — without exposing the
-    /// `pub(super)` taxonomy outside the crate.
-    #[cfg(any(test, feature = "test-support"))]
+    /// `pub(super)` taxonomy outside the crate. Also the family name the
+    /// retention breakdown (`memo_entry_counts_by_family`) reports under.
     pub(super) fn variant_label(&self) -> &'static str {
         match self {
             FamilyKey::ResolveDecl(_) => "ResolveDecl",

@@ -995,7 +995,7 @@ async fn handle_completion_attempt(
             }
         };
         let ws_components = if workspace_component_scan {
-            build_workspace_components(&server.documents.host, canonical_id)
+            build_workspace_components(&server.documents.host(), canonical_id)
         } else {
             Vec::new()
         };
