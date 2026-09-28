@@ -90,6 +90,36 @@ fn names_forward_child(data: &SemanticNodeData, id: SemanticNodeId) -> bool {
     forward
 }
 
+/// Test builds: every node id `data`'s `Debug` form prints is one
+/// [`SemanticNodeData::for_each_retained_child`] visits (or an
+/// unallocatable one). Read off the printed payload, independently of the
+/// walk, so a variant or field the walk forgets fails the first test that
+/// interns it, rather than leaving a releasing holder to keep the node it
+/// names alive.
+#[cfg(test)]
+fn assert_retained_walk_is_complete(data: &SemanticNodeData) {
+    const MARK: &str = "SemanticNodeId(";
+    let printed = format!("{data:?}");
+    if !printed.contains(MARK) {
+        return;
+    }
+    let mut retained: SmallVec<[u64; 16]> = SmallVec::new();
+    data.for_each_retained_child(|child| retained.push(child.0));
+    let mut rest = printed.as_str();
+    while let Some(at) = rest.find(MARK) {
+        rest = &rest[at + MARK.len()..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let Ok(held) = rest[..digits].parse::<u64>() else {
+            continue;
+        };
+        assert!(
+            held >= UNALLOCATABLE_ID_FLOOR || retained.contains(&held),
+            "a {:?} payload holds node {held}, which for_each_retained_child never visits",
+            data.node_tag()
+        );
+    }
+}
+
 pub(super) const NUM_SHARDS: usize = 16;
 pub(super) const SHARD_MASK: u64 = (NUM_SHARDS as u64) - 1;
 
@@ -289,6 +319,8 @@ impl NodeArena {
                 (existing, false, 0u64)
             } else {
                 drop(shard);
+                #[cfg(test)]
+                assert_retained_walk_is_complete(&data);
                 // Miss: re-acquire the shard (to serialize concurrent
                 // misses for the same key on this shard) and then
                 // briefly acquire inner.write() to allocate.
