@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Embedded into verter-lsp.exe by build.rs (MSVC targets only).
+
+  SegmentHeap: a language server allocates and frees document-sized buffers
+  for as long as an editing session lasts. In the churn endurance lane (1000
+  open/edit/close cycles, live Rust heap flat at ~40 MiB) the legacy NT heap
+  kept committing more memory, ~30 MiB over 900 cycles and still rising at the
+  end. Under the segment heap the server started ~25 MiB lower and levelled
+  off after a few hundred cycles.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <heapType xmlns="http://schemas.microsoft.com/SMI/2020/WindowsSettings">SegmentHeap</heapType>
+    </windowsSettings>
+  </application>
+</assembly>
