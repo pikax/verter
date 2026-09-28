@@ -604,7 +604,12 @@ where
                 let teardown_generation = lifecycle.teardown_generation;
                 let flight_state = Arc::clone(state);
                 tokio::spawn(async move {
+                    let mut abandoned = AbandonedFlight {
+                        shared: &flight_state.shared,
+                        armed: true,
+                    };
                     let result = establish_once(&flight_state, teardown_generation).await;
+                    abandoned.armed = false;
                     {
                         let mut lifecycle = flight_state.shared.lifecycle();
                         lifecycle.phase = Phase::Idle;
@@ -648,6 +653,24 @@ where
         Some(Ok(epoch)) => Ok(epoch),
         Some(Err(message)) => Err(TypeProviderError::new(message)),
         None => Err(TypeProviderError::new(state.establisher.restarting_error())),
+    }
+}
+
+/// Returns the phase to idle if an establishment task ends without settling
+/// (it panicked), so the instance is never left joined to a dead flight.
+struct AbandonedFlight<'a, P: ?Sized> {
+    shared: &'a Shared<P>,
+    armed: bool,
+}
+
+impl<P: ?Sized> Drop for AbandonedFlight<'_, P> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut lifecycle = self.shared.lifecycle();
+            lifecycle.phase = Phase::Idle;
+            lifecycle.last_failure =
+                Some((Instant::now(), "establishment was abandoned".to_string()));
+        }
     }
 }
 
