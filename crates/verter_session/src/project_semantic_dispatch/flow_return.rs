@@ -8441,12 +8441,13 @@ pub(super) mod schedule;
 struct FlowEvaluator<'d, 'b> {
     dispatch: &'d ProjectSemanticDispatch<'d>,
     /// The receiver value of a member call on a value the indexed program
-    /// cannot evaluate (a call's result: `b.m().m()`), by the call's source
-    /// offset: the executor route reads it where it would evaluate the
-    /// authored receiver. Request-scoped: filled by the frame's evaluation
-    /// of the call (one entry per such call site of the frame) and dropped
-    /// with the frame, a cancel or a budget trip included.
-    call_receivers: rustc_hash::FxHashMap<u32, SemanticNodeId>,
+    /// cannot evaluate (a call's result: `b.m().m()`), by the call's whole
+    /// span — every call of a chain starts where the chain does, so only
+    /// the span tells them apart. The call's evaluation writes it before
+    /// its executor route reads it, in the same pass. Request-scoped: one
+    /// entry per such call site of the frame, dropped with the frame, a
+    /// cancel or a budget trip included.
+    call_receivers: rustc_hash::FxHashMap<verter_span::Span, SemanticNodeId>,
     /// The frame-lowered argument values of each call, by the call's span
     /// ([`crate::flow_slice_content::SliceContent::call_arguments`]).
     call_arguments: Arc<
@@ -24256,7 +24257,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
-                self.call_receivers.insert(site.span().start, object);
+                self.call_receivers.insert(site.span(), object);
                 let Some(callee) = self
                     .project_path_navigate(object, std::slice::from_ref(member))
                     .filter(|callee| {

@@ -106,6 +106,8 @@ pub(super) enum CallStep<'e> {
 /// its arguments: the arguments typed so far.
 pub(super) struct ResolveCallFrame<'e> {
     _serve: crate::host_manage::prepared_decl::IndexedReadyServe,
+    /// The call's whole span.
+    span: verter_span::Span,
     callee: SemanticNodeId,
     arguments: &'e SliceCallArguments,
     indexed: Arc<crate::decl_body_memo::IndexedFlowCallExpression>,
@@ -468,6 +470,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let count = indexed.call.args.len();
         let route = ResolveCallFrame {
             _serve: serve,
+            span: site.span(),
             callee,
             arguments,
             indexed,
@@ -690,6 +693,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn ask_resolve_call(&mut self, route: ResolveCallFrame<'_>) -> Option<Box<FinishRoute>> {
         let ResolveCallFrame {
             _serve,
+            span,
             callee,
             indexed,
             args,
@@ -713,8 +717,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let receiver = match call.receiver.as_deref() {
             // A receiver this frame evaluated for the call (a call's
             // result) is its value.
-            Some(_) if self.call_receivers.contains_key(&call.point) => {
-                self.call_receivers.get(&call.point).copied()
+            Some(_) if self.call_receivers.contains_key(&span) => {
+                self.call_receivers.get(&span).copied()
             }
             Some(receiver) => {
                 let root = indexed.receiver_root?;
