@@ -10911,7 +10911,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     (None, _) => self.graph().intern_node(SemanticNodeData::KeyOf { base }),
                 }
             }
-            Some(SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_)) => self
+            Some(SemanticNodeData::Intersection(members)) => {
+                match self.key_of_composite(&members.members_arc(), false) {
+                    Some(keys) => keys,
+                    None => self
+                        .member_names_for_published_projection(base)
+                        .map(|(names, is_partial)| {
+                            keyof_is_partial |= is_partial;
+                            names
+                        })
+                        .or_else(|| self.key_names_from_base_node(base))
+                        .and_then(|names| self.intern_keyspace_keys(base, names, &fence))
+                        .unwrap_or_else(|| {
+                            self.graph().intern_node(SemanticNodeData::KeyOf { base })
+                        }),
+                }
+            }
+            Some(SemanticNodeData::Union(members))
+                if self.key_of_composite(&members.members_arc(), true).is_some() =>
+            {
+                self.key_of_composite(&members.members_arc(), true)
+                    .expect("the keys settled")
+            }
+            Some(SemanticNodeData::Union(_)) => self
                 .member_names_for_published_projection(base)
                 .map(|(names, is_partial)| {
                     keyof_is_partial |= is_partial;
@@ -11026,6 +11048,68 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .with_observed_self_roots(observed_self_roots);
         keyof_output.result_is_partial = keyof_is_partial;
         keyof_output
+    }
+
+    /// Whether the intersection of `arms` is one the checker reduces to
+    /// `never` (`getReducedType`): the object types its arms name declare
+    /// one property whose literal types conflict (`{ c: 1 }` beside
+    /// `{ c: 2 }`), read through the declarations the arms name.
+    pub(super) fn intersection_arms_reduce_to_never(&self, arms: &[SemanticNodeId]) -> bool {
+        let published =
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
+        let surfaces: Vec<SemanticNodeId> = arms
+            .iter()
+            .map(|arm| self.resolve_signature_source_carrier(*arm, published))
+            .collect();
+        super::canonical_algebra::object_arms_conflict_on_a_literal_property(
+            self.graph(),
+            &surfaces,
+        )
+    }
+
+    /// `keyof` over a union or intersection as the checker's `getIndexType`
+    /// reads it: the keys every member of a union has (the intersection of
+    /// their key types) and the keys of any member of an intersection (their
+    /// union), each member's keys read whole — its index signatures'
+    /// key types beside its property names — and `keyof never` for an
+    /// intersection the checker reduces to `never` (a property whose
+    /// literal types conflict, `getReducedType`). `None` when a member's
+    /// keys do not settle, or when every member's keys are property names
+    /// alone (the name enumeration reads those).
+    fn key_of_composite(
+        &self,
+        members: &[SemanticNodeId],
+        is_union: bool,
+    ) -> Option<SemanticNodeId> {
+        if !is_union && self.intersection_arms_reduce_to_never(members) {
+            return Some(self.string_number_symbol());
+        }
+        let keys: Vec<SemanticNodeId> = members
+            .iter()
+            .map(|member| self.key_set_of(*member))
+            .collect::<Option<_>>()?;
+        let names_alone = keys.iter().all(|keys| {
+            let graph = self.graph();
+            let literal = |node: SemanticNodeId| {
+                matches!(
+                    graph.node_data(node).as_deref(),
+                    Some(
+                        SemanticNodeData::Literal(_)
+                            | SemanticNodeData::Primitive(PrimitiveKind::Never)
+                    )
+                )
+            };
+            match graph.node_data(*keys).as_deref() {
+                Some(SemanticNodeData::Union(members)) => {
+                    members.members_arc().iter().all(|m| literal(*m))
+                }
+                _ => literal(*keys),
+            }
+        });
+        if names_alone {
+            return None;
+        }
+        Some(self.intern_normalized_union_or_intersection(&keys, !is_union))
     }
 
     /// `keyof` over a carrier the checker resolves: a declaration, an
@@ -11964,7 +12048,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // §22 fast-reject on the mapped SOURCE: over `any` ⇒ `any`; over
         // `never` ⇒ `{}`; over `error` ⇒ `error`; a direct mapping over
         // `unknown` is illegal ⇒ error. Runs before key-space enumeration.
-        if let Some(absorbed) = self.absorb_mapped(source) {
+        // An intersection the checker reduces to `never` is `never` here.
+        let reduced_source = match self.graph().node_data(source).as_deref() {
+            Some(SemanticNodeData::Intersection(arms))
+                if self.intersection_arms_reduce_to_never(&arms.members_arc()) =>
+            {
+                self.primitive_node(PrimitiveKind::Never)
+            }
+            _ => source,
+        };
+        if let Some(absorbed) = self.absorb_mapped(reduced_source) {
             return absorbed;
         }
         let graph = self.graph();
@@ -13376,6 +13469,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // them: a union or intersection operand is the type its written
         // names reduce to (`1 & ReturnType<typeof anyf>` is `any`).
         let check = self.composite_over_resolved_arms(check).unwrap_or(check);
+        let check = self.union_as_constructed(check);
         let extends = self
             .composite_over_resolved_arms(extends)
             .unwrap_or(extends);
@@ -13399,7 +13493,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true_branch,
                     false_branch,
                     distributive: false,
-                    pending: pending.clone(),
+                    pending: pending.as_ref().map(|pending| {
+                        pending
+                            .distributed_over(member)
+                            .map_or_else(|| Arc::clone(pending), Arc::new)
+                    }),
                 })
             }) {
                 return output;
@@ -13472,6 +13570,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return self.cancelled_build_output();
         }
         let check = self.composite_over_resolved_arms(check).unwrap_or(check);
+        let check = self.union_as_constructed(check);
         let extends = self
             .composite_over_resolved_arms(extends)
             .unwrap_or(extends);
@@ -13827,6 +13926,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ) {
             return (ConditionalBranchSelection::Deferred, None);
         }
+        // The checker defers a conditional whose check or extends type is
+        // generic (`getConditionalType`'s `isDeferredType`) before relating
+        // anything: `T extends unknown ? [T] : never` stays a conditional
+        // until `T` is known, and distributes over the union it receives.
+        // (A bare `infer` pattern above binds the check whatever it is.)
+        if self.conditional_is_deferred(check, extends) {
+            return (ConditionalBranchSelection::Deferred, None);
+        }
         // The full relation authority — the SAME `execute(Relate)` path
         // every consumer rides. A binding-producing judgement's returned
         // bindings substitute into the selected (true) branch.
@@ -13845,6 +13952,137 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => (ConditionalBranchSelection::Deferred, None),
         }
+    }
+
+    /// A written union as the checker constructs it (`getUnionType`): an
+    /// `any` or `unknown` member is the whole union, a literal beside its
+    /// primitive and a duplicate go, and without `strictNullChecks` so do
+    /// `null` and `undefined` beside another member. A type argument keeps
+    /// the union as written (`D<string | unknown>`); the conditional it
+    /// reaches distributes over the union it constructs, and relates it.
+    fn union_as_constructed(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let members = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.members_arc(),
+            _ => return node,
+        };
+        let nullability = if self.relation_strict_config().strict_null_checks {
+            crate::semantic_query::NullabilityPolicy::Strict
+        } else {
+            crate::semantic_query::NullabilityPolicy::Erased
+        };
+        let constructed = self.intern_normalized_union(&members, nullability);
+        let same_members = match self.graph().node_data(constructed).as_deref() {
+            Some(SemanticNodeData::Union(kept)) => {
+                let kept = kept.members_arc();
+                kept.len() == members.len() && kept.iter().all(|member| members.contains(member))
+            }
+            _ => false,
+        };
+        if same_members {
+            return node;
+        }
+        // The written union's files are what the reduced one was read from.
+        self.deposit_operand_self_roots(&self.observed_self_roots_from_nodes([node]));
+        constructed
+    }
+
+    /// Whether the checker defers the conditional `check extends extends`
+    /// (`isDeferredType` in `getConditionalType`): either operand is
+    /// generic, or both are tuples of one arity whose elements are all
+    /// required (`checkTuples`) and an element of either is. An `infer`
+    /// declaration of the extends type is no type variable of the check: it
+    /// is inferred before the test.
+    fn conditional_is_deferred(&self, check: SemanticNodeId, extends: SemanticNodeId) -> bool {
+        if self.type_is_generic(check) || self.type_is_generic(extends) {
+            return true;
+        }
+        let graph = self.graph();
+        let simple_tuple = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Tuple { elements, .. })
+                if elements
+                    .iter()
+                    .all(|element| !element.optional && !element.rest) =>
+            {
+                Some(
+                    elements
+                        .iter()
+                        .map(|element| element.value)
+                        .collect::<Vec<_>>(),
+                )
+            }
+            _ => None,
+        };
+        match (simple_tuple(check), simple_tuple(extends)) {
+            (Some(check), Some(extends)) if check.len() == extends.len() => check
+                .into_iter()
+                .chain(extends)
+                .any(|element| self.type_is_generic(element)),
+            _ => false,
+        }
+    }
+
+    /// The checker's `isGenericType`: a type parameter or `infer`
+    /// reference, an indexed access, `keyof`, conditional or intrinsic
+    /// application over one, a mapped type over a generic source, a template
+    /// literal type with a generic hole, a tuple with a generic variadic
+    /// element, or a union or intersection holding one. Read from an
+    /// explicit stack.
+    pub(super) fn type_is_generic(&self, node: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        let mut pending = vec![node];
+        let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            match &*data {
+                SemanticNodeData::TypeParam { .. } | SemanticNodeData::InferRef { .. } => {
+                    return true;
+                }
+                // A shell the lane keeps where it is written (`Rec["a"]`,
+                // `keyof O`) is generic only over a generic operand; the
+                // checker resolved it.
+                SemanticNodeData::IndexedAccess { object, index } => {
+                    pending.push(*object);
+                    if let crate::semantic_query::IndexKey::Computed(index) = index {
+                        pending.push(*index);
+                    }
+                }
+                SemanticNodeData::KeyOf { base } => pending.push(*base),
+                SemanticNodeData::Conditional { check, extends, .. } => {
+                    pending.extend([*check, *extends]);
+                }
+                SemanticNodeData::IntrinsicApplication { args, .. } => {
+                    pending.extend(args.iter());
+                }
+                SemanticNodeData::Alias(inner) => pending.push(*inner),
+                SemanticNodeData::Mapped { source, .. } => pending.push(*source),
+                SemanticNodeData::Union(members) => pending.extend(members.members_arc().iter()),
+                SemanticNodeData::Intersection(members) => {
+                    pending.extend(members.members_arc().iter());
+                }
+                SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                    pending.extend(expressions.iter());
+                }
+                SemanticNodeData::Tuple { elements, .. } => pending.extend(
+                    elements
+                        .iter()
+                        .filter(|element| element.rest)
+                        .map(|element| element.value)
+                        .filter(|value| {
+                            matches!(
+                                graph.node_data(*value).as_deref(),
+                                Some(SemanticNodeData::TypeParam { .. })
+                            )
+                        }),
+                ),
+                _ => {}
+            }
+        }
+        false
     }
 
     /// The selection over an `extends` pattern whose `infer` declarations

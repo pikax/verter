@@ -9973,6 +9973,10 @@ enum ObjectEvalAwait<'e> {
 /// — its outcome.
 enum ObjectEvalStep<'e> {
     Descend(&'e crate::flow_slice_content::SliceExpr),
+    /// The child's outcome, already evaluated in place: a method typed by
+    /// its contextual signature, which only a literal evaluated under a
+    /// contextual type (`FlowEvaluator::eval_object_literal`) asks for.
+    Deliver(Positional<SemanticNodeId>),
     Done(Positional<SemanticNodeId>),
 }
 
@@ -10121,6 +10125,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             match self.object_eval_step(&mut frame, delivered.take()) {
                 ObjectEvalStep::Done(value) => return value,
                 ObjectEvalStep::Descend(child) => delivered = Some(self.eval_expr(child)),
+                ObjectEvalStep::Deliver(outcome) => delivered = Some(outcome),
             }
         }
     }
@@ -10439,6 +10444,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 holds_before: self.holds.len(),
                 again,
             };
+            // A method is typed by the contextual signature its property's
+            // contextual type gives it, as a function-valued property is.
+            let member_context = match (&member.key, frame.contextual) {
+                (crate::flow_slice_content::SliceObjectKey::Static(name), Some(contextual)) => {
+                    self.contextual_property_type(contextual, name)
+                }
+                _ => None,
+            };
+            if let Some(node) = member_context
+                .and_then(|context| self.eval_function_argument_in_context(&member.value, context))
+            {
+                return ObjectEvalStep::Deliver(Positional::Value(node));
+            }
             return ObjectEvalStep::Descend(&member.value);
         }
         ObjectEvalStep::Done(self.object_eval_finish(frame))
@@ -10859,6 +10877,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 elements,
                 const_asserted,
             } => self.eval_array_literal(elements, *const_asserted, Some(contextual)),
+            // A function expression is typed by the contextual signature
+            // its context gives it (`getContextualSignature`): its
+            // unannotated parameters take the context's parameter types.
+            crate::flow_slice_content::SliceExpr::NestedFunctionValue { .. } => {
+                match self.eval_function_argument_in_context(expr, contextual) {
+                    Some(node) => Positional::Value(node),
+                    None => self.eval_expr(expr),
+                }
+            }
             _ => {
                 if let Some(fresh_view) = fresh_view {
                     if let Positional::Value(fresh) = self.eval_expr(fresh_view) {
@@ -14871,6 +14898,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::semantic_query::SemanticQueryKey::ProjectPath {
                 base,
                 path,
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            },
+        ) {
+            crate::semantic_query::QueryResult::Value(output) => Some(output.value),
+            _ => None,
+        }
+    }
+
+    /// The member `key` reads off `base` (a projection of one member
+    /// segment), for a key no identifier spells.
+    pub(super) fn project_member_key(
+        &mut self,
+        base: SemanticNodeId,
+        key: crate::semantic_query::PropertyKey,
+    ) -> Option<SemanticNodeId> {
+        let _demand_scope = super::LexicalDemandScopeGuard::push(
+            &self.dispatch.lexical_demand_scope,
+            Arc::from(self.canonical),
+        );
+        match self.dispatch.execute_type_node(
+            crate::semantic_query::SemanticQueryKey::ProjectPath {
+                base,
+                path: Arc::from([crate::semantic_query::PathSegment::Member(key)]),
                 context: crate::semantic_query::ProjectionReductionContext::published(
                     crate::semantic_query::ProjectionMode::Navigate,
                 ),
@@ -22604,6 +22656,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let mut frame = self.object_eval_frame(entries, *offset, false, None);
                         match self.object_eval_step(&mut frame, None) {
                             ObjectEvalStep::Done(value) => value,
+                            // Only a literal under a contextual type types a
+                            // method in place; this one has none.
+                            ObjectEvalStep::Deliver(_) => {
+                                unreachable!("no contextual type here")
+                            }
                             ObjectEvalStep::Descend(child) => {
                                 run.waiting.push(Waiting::Object(Box::new(frame)));
                                 run.waiting.push(Waiting::Erase);
@@ -22735,6 +22792,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Some(Waiting::Object(mut frame)) => {
                         match self.object_eval_step(&mut frame, Some(value)) {
                             ObjectEvalStep::Done(done) => value = done,
+                            // Only a literal under a contextual type types a
+                            // method in place; this one has none.
+                            ObjectEvalStep::Deliver(_) => {
+                                unreachable!("no contextual type here")
+                            }
                             ObjectEvalStep::Descend(child) => {
                                 run.waiting.push(Waiting::Object(frame));
                                 run.waiting.push(Waiting::Erase);

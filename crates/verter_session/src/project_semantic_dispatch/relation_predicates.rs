@@ -211,6 +211,17 @@ pub(super) fn index_domains_overlap(
                 .iter()
                 .any(|&member| index_domains_overlap(graph, source_key, member))
         }
+        // A template literal key (`a${string}`) reads the source index of
+        // the same pattern and a `string` one, whose keys it is among
+        // (`isApplicableIndexType`).
+        SemanticNodeData::TemplateLiteral { .. } => {
+            source_key == target_key
+                || *source_data == *target_data
+                || matches!(
+                    &*source_data,
+                    SemanticNodeData::Primitive(PrimitiveKind::String | PrimitiveKind::Any)
+                )
+        }
         _ => false,
     }
 }

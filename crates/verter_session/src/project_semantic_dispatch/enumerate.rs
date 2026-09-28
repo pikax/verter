@@ -801,6 +801,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             // Never admits nothing.
             SemanticNodeData::Primitive(PrimitiveKind::Never) => Some(false),
+            // A template literal pattern admits the names it matches
+            // (`data-x` is among `data-${string}`).
+            SemanticNodeData::TemplateLiteral { .. } => {
+                drop(data);
+                let name = match needle {
+                    PropertyKey::String(name) => name.to_string(),
+                    PropertyKey::Number(number) => number.to_string(),
+                    PropertyKey::UniqueSymbol(_) => return Some(false),
+                };
+                let literal = self
+                    .graph()
+                    .intern_node(SemanticNodeData::Literal(LiteralValue::String(name)));
+                self.template_pattern_accepts(literal, node)
+            }
             // Union arms: admit iff ANY arm admits; refute iff ALL arms
             // refute. A single `None` arm makes the whole union
             // inconclusive.

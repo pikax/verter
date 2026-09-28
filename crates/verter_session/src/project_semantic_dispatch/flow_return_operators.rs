@@ -244,10 +244,17 @@ impl FlowEvaluator<'_, '_> {
             return self.positional_element(object, index);
         }
         // A key of string or numeric literal types reads the members it
-        // names; a key of any other type (an index-signature read) is not
-        // read here.
+        // names, a `unique symbol` key the member it keys; a key of any
+        // other type (an index-signature read) is not read here.
         let mut members = Vec::new();
         for key in self.operand_arms(index) {
+            if let Some(identity) = self.dispatch.relation_nominal_identity(key) {
+                members.push(self.project_member_key(
+                    object,
+                    crate::semantic_query::PropertyKey::UniqueSymbol(identity),
+                )?);
+                continue;
+            }
             let name: Arc<str> = match self.dispatch.graph().node_data(key).as_deref() {
                 Some(SemanticNodeData::Literal(LiteralValue::String(value))) => {
                     Arc::from(value.as_str())

@@ -1442,6 +1442,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     next_pending = next_pending.append_false(parameter_node, arg);
                 } else {
                     next_pending = next_pending.append_both(parameter_node, arg);
+                    // A distributive conditional's check IS this parameter:
+                    // its branches see each member it distributes over.
+                    if *distributive && *check == parameter_node {
+                        next_pending = next_pending.distributing(parameter_node);
+                    }
                 }
                 let next_pending = if next_pending.is_empty() {
                     None

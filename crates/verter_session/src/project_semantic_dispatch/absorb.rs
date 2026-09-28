@@ -81,7 +81,7 @@ impl ProjectSemanticDispatch<'_> {
     }
 
     /// `string | number | symbol` — the `keyof any` / `keyof never` keyspace.
-    fn string_number_symbol(&self) -> SemanticNodeId {
+    pub(super) fn string_number_symbol(&self) -> SemanticNodeId {
         let s = self.primitive_node(PrimitiveKind::String);
         let n = self.primitive_node(PrimitiveKind::Number);
         let sym = self.primitive_node(PrimitiveKind::Symbol);

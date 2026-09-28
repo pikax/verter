@@ -8103,6 +8103,18 @@ impl PendingSubstitutionFrame {
         &self.pairs
     }
 
+    /// The frame with the last pair binding `param` rebound to `arg`.
+    #[must_use]
+    pub fn rebind_last(&self, param: SemanticNodeId, arg: SemanticNodeId) -> Self {
+        let mut pairs = self.pairs.to_vec();
+        if let Some(pair) = pairs.iter_mut().rev().find(|(bound, _)| *bound == param) {
+            pair.1 = arg;
+        }
+        Self {
+            pairs: Arc::from(pairs.into_boxed_slice()),
+        }
+    }
+
     #[must_use]
     pub fn append(&self, param: SemanticNodeId, arg: SemanticNodeId) -> Self {
         if param == arg {
@@ -8124,6 +8136,12 @@ impl PendingSubstitutionFrame {
 pub struct ConditionalPendingSubstitution {
     true_branch: PendingSubstitutionFrame,
     false_branch: PendingSubstitutionFrame,
+    /// The type parameter a distributive conditional's check was written
+    /// as, once a substitution supplied it: distributing over the union it
+    /// was given binds it to each member in turn (the checker's
+    /// `getConditionalTypeInstantiation` maps the check parameter to each
+    /// member).
+    distribution: Option<SemanticNodeId>,
 }
 
 impl ConditionalPendingSubstitution {
@@ -8143,7 +8161,31 @@ impl ConditionalPendingSubstitution {
         Self {
             true_branch: PendingSubstitutionFrame::empty(),
             false_branch: PendingSubstitutionFrame::empty(),
+            distribution: None,
         }
+    }
+
+    /// This frame with `param` recorded as the distributive check's
+    /// parameter.
+    #[must_use]
+    pub fn distributing(&self, param: SemanticNodeId) -> Self {
+        Self {
+            distribution: Some(param),
+            ..self.clone()
+        }
+    }
+
+    /// The frame one member of the distribution relates under: the check's
+    /// parameter bound to `member` in both branches. `None` when no
+    /// substitution supplied the check's parameter.
+    #[must_use]
+    pub fn distributed_over(&self, member: SemanticNodeId) -> Option<Self> {
+        let param = self.distribution?;
+        Some(Self {
+            true_branch: self.true_branch.rebind_last(param, member),
+            false_branch: self.false_branch.rebind_last(param, member),
+            distribution: None,
+        })
     }
 
     #[must_use]
@@ -8166,6 +8208,7 @@ impl ConditionalPendingSubstitution {
         Self {
             true_branch: self.true_branch.append(param, arg),
             false_branch: self.false_branch.clone(),
+            distribution: self.distribution,
         }
     }
 
@@ -8174,6 +8217,7 @@ impl ConditionalPendingSubstitution {
         Self {
             true_branch: self.true_branch.clone(),
             false_branch: self.false_branch.append(param, arg),
+            distribution: self.distribution,
         }
     }
 
@@ -8182,6 +8226,7 @@ impl ConditionalPendingSubstitution {
         Self {
             true_branch: self.true_branch.append(param, arg),
             false_branch: self.false_branch.append(param, arg),
+            distribution: self.distribution,
         }
     }
 }
