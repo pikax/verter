@@ -103,6 +103,44 @@ pub(super) fn degradation_in(
         .ok_or(())
 }
 
+/// The typed outcome of the body-derived return of `function` in a module
+/// of `source`, checked in `project`: its degradation when it produced a
+/// value, or the typed [`FlowReturnError`](crate::host_flow_return_audit::FlowReturnError) it
+/// answered instead — a missing function (`Failure(Missing)`) told apart
+/// from a budget or any other incompleteness.
+pub(super) fn flow_return_outcome_in(
+    project: ProbeProject<'_>,
+    source: &str,
+    function: &str,
+) -> Result<
+    Option<crate::semantic_query::FlowReturnDegradation>,
+    crate::host_flow_return_audit::FlowReturnError,
+> {
+    let host = probe_host(project);
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        PROBE_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(source),
+        crate::FileLanguage::script_ts(),
+    );
+    let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(PROBE_FILE),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(function),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    host.get_flow_return_type_with_audit(
+        &identity,
+        crate::semantic_query::ReturnProjectionDemand::whole_return(),
+    )
+    .into_result()
+    .map(|result| result.degradation())
+}
+
 /// The audited body-derived return of the probe module's `function`.
 fn flow_return_of(
     host: &Arc<crate::VerterHost>,

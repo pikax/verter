@@ -8985,6 +8985,20 @@ pub(crate) fn guard_applications_for_tests() -> usize {
     GUARD_APPLICATIONS.with(std::cell::Cell::get)
 }
 
+/// What one loop pass produced on the evaluator's side outputs beyond its
+/// [`LoopPassMark`], set aside when the pass's head was taken so a later
+/// pass from the same state can put it back instead of running again.
+struct LoopPassTail {
+    yields: Vec<YieldContribution>,
+    holds: Vec<HeldCallee>,
+    fresh_calls: Vec<FreshCallReturn>,
+    call_evidence: Vec<FlowCallEvidence>,
+    heritage_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    break_exits: Vec<FlowBreakExit>,
+    return_edges: Vec<FlowLayerState>,
+    throw_points: Vec<FlowLayerState>,
+}
+
 /// One pass of a loop body ([`FlowEvaluator::begin_loop_pass`]).
 struct LoopPass {
     contributors: Vec<FlowContribution>,
@@ -9597,6 +9611,11 @@ struct RegionEvalFrame<'r> {
     /// to a `never`-returning function the lowering does not see): the
     /// checker aggregates every return there. It closes with the region.
     dead_tail: Option<Box<DeadPath>>,
+    /// The region's path died at a call to a `never`-returning function:
+    /// past it every reference reads its declared type (the checker reads a
+    /// reference past such a call as it reads one on an unreachable node),
+    /// where past an exhaustive `switch` it reads the no-matching-case edge.
+    dead_at_never_call: bool,
 }
 
 /// A statement suspended at a nested function value in its expression.
@@ -13089,22 +13108,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Evaluate statements no path reaches for the returns and yields the
-    /// checker still aggregates from them (a loop body behind a literal
-    /// `false` test): every reference reads its declared type there (the
-    /// checker answers an unreachable flow node with the declared type),
-    /// and nothing the region does — its writes, narrows, jumps and edges
-    /// — reaches the live state ([`DeadPath`]).
-    fn eval_unreachable_region(
-        &mut self,
-        region: &crate::flow_slice_content::SliceRegion,
-    ) -> Result<Vec<FlowContribution>, FlowReturnFailure> {
-        let dead = self.open_dead_path(true);
-        let (result, _) = self.eval_region(region);
-        self.close_dead_path(dead);
-        result
-    }
-
     /// The inferred bindings `lowered` declares that the checker cannot
     /// type without their own type. The checker types an inferred binding
     /// from its initializer; reading a binding there reads its flow type,
@@ -13366,16 +13369,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Discard what an unconverged pass produced beyond `mark`.
-    fn rewind_loop_pass(&mut self, mark: &LoopPassMark) {
-        self.yield_contributions.truncate(mark.yields);
-        self.holds.truncate(mark.holds);
-        self.call_fresh_literal_returns.truncate(mark.fresh_calls);
-        self.call_evidence.truncate(mark.call_evidence);
-        self.heritage_self_roots.truncate(mark.heritage_self_roots);
-        self.break_exits.truncate(mark.break_exits);
-        self.return_edges.truncate(mark.return_edges);
-        self.throw_points.truncate(mark.throw_points);
+    /// Set aside what a head-analysis pass produced beyond `mark`: the
+    /// side outputs rewind to the mark, and a later pass from the same state
+    /// puts the tail back ([`Self::replay_loop_pass`]).
+    fn set_aside_loop_pass(&mut self, mark: &LoopPassMark) -> LoopPassTail {
+        LoopPassTail {
+            yields: self.yield_contributions.split_off(mark.yields),
+            holds: self.holds.split_off(mark.holds),
+            fresh_calls: self.call_fresh_literal_returns.split_off(mark.fresh_calls),
+            call_evidence: self.call_evidence.split_off(mark.call_evidence),
+            heritage_self_roots: self.heritage_self_roots.split_off(mark.heritage_self_roots),
+            break_exits: self.break_exits.split_off(mark.break_exits),
+            return_edges: self.return_edges.split_off(mark.return_edges),
+            throw_points: self.throw_points.split_off(mark.throw_points),
+        }
+    }
+
+    /// Put back what a pass set aside ([`Self::set_aside_loop_pass`]).
+    fn replay_loop_pass(&mut self, tail: LoopPassTail) {
+        self.yield_contributions.extend(tail.yields);
+        self.holds.extend(tail.holds);
+        self.call_fresh_literal_returns.extend(tail.fresh_calls);
+        self.call_evidence.extend(tail.call_evidence);
+        self.heritage_self_roots.extend(tail.heritage_self_roots);
+        self.break_exits.extend(tail.break_exits);
+        self.return_edges.extend(tail.return_edges);
+        self.throw_points.extend(tail.throw_points);
     }
 
     /// Merge exactly the paths that continue past a conditional. A missing
@@ -19804,9 +19823,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                         Err(_) => self.executed_walk.aborted = true,
                     }
-                    run.frames.pop();
-                    if run.frames.is_empty() {
+                    let finished = run.frames.pop().expect("the region evaluated");
+                    let Some(enclosing) = run.frames.last_mut() else {
                         return RegionProgress::Done(outcome);
+                    };
+                    // A block statement whose path died at a `never`-returning
+                    // call ends the enclosing path there too.
+                    if !outcome.1
+                        && finished.dead_at_never_call
+                        && matches!(enclosing.entered, Some(Entered::Block(_)))
+                    {
+                        enclosing.dead_at_never_call = true;
                     }
                     delivered = Some(RegionDelivery::Block(outcome));
                 }
@@ -19829,6 +19856,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             entered: None,
             pending: None,
             dead_tail: None,
+            dead_at_never_call: false,
         }
     }
 
@@ -20155,7 +20183,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 )
                 && frame.dead_tail.is_none()
             {
-                frame.dead_tail = Some(Box::new(self.open_dead_path(false)));
+                let declared_reads = frame.dead_at_never_call;
+                frame.dead_tail = Some(Box::new(self.open_dead_path(declared_reads)));
             }
             self.executed_walk.statements_executed =
                 self.executed_walk.statements_executed.saturating_add(1);
@@ -21119,6 +21148,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 crate::flow_slice_content::SliceStatement::CallEffect { callee, site } => {
                     if !self.settle_call_effect(callee, *site) {
                         path_alive = false;
+                        frame.dead_at_never_call = true;
                     }
                 }
                 crate::flow_slice_content::SliceStatement::Assertion { subject, target } => {
@@ -21145,6 +21175,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         CalleeStatementEffect::Resolved(node) => {
                             if !self.settle_effects_signature(Some(node), *site) {
                                 path_alive = false;
+                                frame.dead_at_never_call = true;
                             }
                         }
                         CalleeStatementEffect::Assertion { parameter, target } => {

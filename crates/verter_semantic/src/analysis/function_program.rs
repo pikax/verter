@@ -5444,14 +5444,24 @@ pub fn build_indexed_program_expression_ir(
                 .as_ref()?
                 .expression
         }
-        // A class field's initializer.
+        // A class field's initializer. One reading `this` reads the
+        // instance (or class) under construction, which this lowering does
+        // not type: it is outside the indexed expression domain.
         FunctionDescentStep::ClassMember { member_ordinal } if steps.len() == 0 => {
             match class_declaration_of(statement)?
                 .body
                 .body
                 .get(*member_ordinal as usize)?
             {
-                oxc_ast::ast::ClassElement::PropertyDefinition(prop) => prop.value.as_ref()?,
+                oxc_ast::ast::ClassElement::PropertyDefinition(prop) => {
+                    let value = prop.value.as_ref()?;
+                    if crate::analysis::type_eval_build::value_reads_this(value, source) {
+                        return Some(verter_type_expr::IndexedValueExpression::UnsupportedCall {
+                            point: value.span().start,
+                        });
+                    }
+                    value
+                }
                 _ => return None,
             }
         }

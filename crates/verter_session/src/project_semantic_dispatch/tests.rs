@@ -13477,11 +13477,7 @@ fn a_resolved_workload_arena_is_a_dag() {
                 child.0
             );
         };
-        if let crate::semantic_query::ChildWalk::Sealed = data.for_each_child(&mut check) {
-            if let SemanticNodeData::DeferredCallable(callable) = data.as_ref() {
-                callable.for_each_child_node(&mut check);
-            }
-        }
+        data.for_each_retained_child(&mut check);
     }
 }
 

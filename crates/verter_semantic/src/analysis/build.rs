@@ -362,31 +362,7 @@ pub fn build_script_analysis_with_scope_from_program_with_providers_and_owners(
     (snapshot, candidates)
 }
 
-/// The analysis reads the program through recursions of its own (the
-/// module-reference collector, the binding and call extractors), each
-/// spending native stack once per level of the syntax it reads, so it runs
-/// under the program's stack containment, as oxc's own walks do.
 fn build_script_analysis_inner(
-    content: &str,
-    source_type: SourceType,
-    program: &Program<'_>,
-    scope: AnalysisScope,
-    owners: &TopLevelOwnerTable,
-    parse_errors: bool,
-) -> ScriptAnalysisSnapshot {
-    verter_parser::oxc_parse::with_program_stack(program, || {
-        build_script_analysis_on_its_stack(
-            content,
-            source_type,
-            program,
-            scope,
-            owners,
-            parse_errors,
-        )
-    })
-}
-
-fn build_script_analysis_on_its_stack(
     content: &str,
     source_type: SourceType,
     program: &Program<'_>,
@@ -1061,17 +1037,46 @@ fn build_dynamic_module_reference(
 
 /// Collects module reference sites (`import()`, `require()`) from expression trees.
 ///
-/// Encapsulates the recursive walk state (content, const values, output vec)
-/// so callers and recursive calls pass `&mut self` instead of 4 parameters.
+/// Encapsulates the walk state (content, const values, output vec) so the
+/// walk's steps pass `&mut self` instead of 4 parameters. The walk runs from
+/// an explicit stack of pending nodes, so a deeply nested expression costs
+/// heap, not native stack.
 struct ModuleReferenceCollector<'a, 'b> {
     content: &'a str,
     const_string_values: &'a FxHashMap<String, Vec<String>>,
     module_references: &'b mut Vec<AnalyzedModuleReference>,
 }
 
+/// A node the collector has yet to visit.
+enum PendingReference<'e, 'x> {
+    Expression(&'e Expression<'x>),
+    Chain(&'e ChainElement<'x>),
+}
+
 impl ModuleReferenceCollector<'_, '_> {
-    /// Walk an expression tree, collecting `import()` and `require()` sites.
+    /// Walk an expression tree, collecting `import()` and `require()` sites
+    /// in source order: each node's own site before its children's, the
+    /// children in order.
     fn collect(&mut self, expr: &Expression<'_>) {
+        let mut pending = vec![PendingReference::Expression(expr)];
+        while let Some(next) = pending.pop() {
+            // Children are pushed in reverse, so they pop in order.
+            let children_from = pending.len();
+            match next {
+                PendingReference::Expression(expr) => self.visit(expr, &mut pending),
+                PendingReference::Chain(chain) => Self::visit_chain(chain, &mut pending),
+            }
+            pending[children_from..].reverse();
+        }
+    }
+
+    /// Record `expr`'s own site and push its children, in order.
+    fn visit<'e, 'x>(
+        &mut self,
+        expr: &'e Expression<'x>,
+        pending: &mut Vec<PendingReference<'e, 'x>>,
+    ) {
+        let mut push = |expr: &'e Expression<'x>| pending.push(PendingReference::Expression(expr));
         match expr {
             Expression::ImportExpression(import) => {
                 self.module_references.push(build_dynamic_module_reference(
@@ -1083,7 +1088,7 @@ impl ModuleReferenceCollector<'_, '_> {
                     self.content,
                     self.const_string_values,
                 ));
-                self.collect(&import.source);
+                push(&import.source);
             }
             Expression::CallExpression(call) => {
                 if let Expression::Identifier(id) = &call.callee {
@@ -1103,84 +1108,91 @@ impl ModuleReferenceCollector<'_, '_> {
                         }
                     }
                 }
-                self.collect(&call.callee);
+                push(&call.callee);
                 for arg in &call.arguments {
                     if let Some(arg_expr) = arg.as_expression() {
-                        self.collect(arg_expr);
+                        push(arg_expr);
                     }
                 }
             }
-            Expression::AwaitExpression(aw) => self.collect(&aw.argument),
-            Expression::ParenthesizedExpression(paren) => self.collect(&paren.expression),
-            Expression::TSAsExpression(expr) => self.collect(&expr.expression),
-            Expression::TSSatisfiesExpression(expr) => self.collect(&expr.expression),
-            Expression::TSTypeAssertion(expr) => self.collect(&expr.expression),
+            Expression::AwaitExpression(aw) => push(&aw.argument),
+            Expression::ParenthesizedExpression(paren) => push(&paren.expression),
+            Expression::TSAsExpression(expr) => push(&expr.expression),
+            Expression::TSSatisfiesExpression(expr) => push(&expr.expression),
+            Expression::TSTypeAssertion(expr) => push(&expr.expression),
             Expression::BinaryExpression(bin) => {
-                self.collect(&bin.left);
-                self.collect(&bin.right);
+                push(&bin.left);
+                push(&bin.right);
             }
             Expression::LogicalExpression(log) => {
-                self.collect(&log.left);
-                self.collect(&log.right);
+                push(&log.left);
+                push(&log.right);
             }
             Expression::ConditionalExpression(cond) => {
-                self.collect(&cond.test);
-                self.collect(&cond.consequent);
-                self.collect(&cond.alternate);
+                push(&cond.test);
+                push(&cond.consequent);
+                push(&cond.alternate);
             }
             Expression::ArrayExpression(arr) => {
                 for elem in &arr.elements {
                     if let Some(elem_expr) = elem.as_expression() {
-                        self.collect(elem_expr);
+                        push(elem_expr);
                     }
                 }
             }
             Expression::ObjectExpression(obj) => {
                 for prop in &obj.properties {
                     match prop {
-                        ObjectPropertyKind::ObjectProperty(prop) => self.collect(&prop.value),
-                        ObjectPropertyKind::SpreadProperty(prop) => self.collect(&prop.argument),
+                        ObjectPropertyKind::ObjectProperty(prop) => push(&prop.value),
+                        ObjectPropertyKind::SpreadProperty(prop) => push(&prop.argument),
                     }
                 }
             }
             Expression::TemplateLiteral(tpl) => {
                 for expr in &tpl.expressions {
-                    self.collect(expr);
+                    push(expr);
                 }
             }
             Expression::TaggedTemplateExpression(tagged) => {
-                self.collect(&tagged.tag);
+                push(&tagged.tag);
                 for expr in &tagged.quasi.expressions {
-                    self.collect(expr);
+                    push(expr);
                 }
             }
-            Expression::StaticMemberExpression(member) => self.collect(&member.object),
+            Expression::StaticMemberExpression(member) => push(&member.object),
             Expression::ComputedMemberExpression(member) => {
-                self.collect(&member.object);
-                self.collect(&member.expression);
+                push(&member.object);
+                push(&member.expression);
             }
-            Expression::ChainExpression(chain) => self.collect_chain(&chain.expression),
+            Expression::ChainExpression(chain) => {
+                pending.push(PendingReference::Chain(&chain.expression));
+            }
             _ => {}
         }
     }
 
-    /// Handle `ChainElement` variants (optional chaining: `a?.b?.c()`).
-    fn collect_chain(&mut self, chain: &ChainElement<'_>) {
+    /// Push a `ChainElement`'s children (optional chaining: `a?.b?.c()`),
+    /// in order.
+    fn visit_chain<'e, 'x>(
+        chain: &'e ChainElement<'x>,
+        pending: &mut Vec<PendingReference<'e, 'x>>,
+    ) {
+        let mut push = |expr: &'e Expression<'x>| pending.push(PendingReference::Expression(expr));
         match chain {
             ChainElement::CallExpression(call) => {
-                self.collect(&call.callee);
+                push(&call.callee);
                 for arg in &call.arguments {
                     if let Some(arg_expr) = arg.as_expression() {
-                        self.collect(arg_expr);
+                        push(arg_expr);
                     }
                 }
             }
             ChainElement::ComputedMemberExpression(member) => {
-                self.collect(&member.object);
-                self.collect(&member.expression);
+                push(&member.object);
+                push(&member.expression);
             }
-            ChainElement::StaticMemberExpression(member) => self.collect(&member.object),
-            ChainElement::TSNonNullExpression(non_null) => self.collect(&non_null.expression),
+            ChainElement::StaticMemberExpression(member) => push(&member.object),
+            ChainElement::TSNonNullExpression(non_null) => push(&non_null.expression),
             _ => {}
         }
     }
@@ -1201,64 +1213,104 @@ fn collect_module_references_from_expression(
     .collect(expr);
 }
 
+/// The strings `expr` can evaluate to, when it is built from string
+/// literals, templates, `+`, conditionals and constants of known strings;
+/// `None` when any part of it is not. Evaluated from explicit stacks of
+/// steps and results, so a deeply nested expression costs heap, not native
+/// stack.
 fn evaluate_string_candidates(
     expr: &Expression<'_>,
     const_string_values: &FxHashMap<String, Vec<String>>,
 ) -> Option<Vec<String>> {
-    match expr {
-        Expression::StringLiteral(lit) => Some(vec![lit.value.to_string()]),
-        Expression::TemplateLiteral(tpl) => {
-            if tpl.quasis.is_empty() {
-                return Some(Vec::new());
-            }
-
-            let mut values = vec![String::new()];
-            for (idx, quasi) in tpl.quasis.iter().enumerate() {
-                for value in &mut values {
-                    value.push_str(quasi.value.raw.as_str());
-                }
-                if let Some(expr) = tpl.expressions.get(idx) {
-                    let expr_values = evaluate_string_candidates(expr, const_string_values)?;
-                    values = combine_string_candidates(&values, &expr_values)?;
-                }
-            }
-            dedupe_string_candidates(values)
-        }
-        Expression::BinaryExpression(bin) => {
-            if bin.operator.as_str() != "+" {
-                return None;
-            }
-            let left = evaluate_string_candidates(&bin.left, const_string_values)?;
-            let right = evaluate_string_candidates(&bin.right, const_string_values)?;
-            dedupe_string_candidates(combine_string_candidates(&left, &right)?)
-        }
-        Expression::ConditionalExpression(cond) => {
-            let mut values = evaluate_string_candidates(&cond.consequent, const_string_values)?;
-            values.extend(evaluate_string_candidates(
-                &cond.alternate,
-                const_string_values,
-            )?);
-            dedupe_string_candidates(values)
-        }
-        Expression::Identifier(id) => const_string_values.get(id.name.as_str()).cloned(),
-        Expression::ParenthesizedExpression(paren) => {
-            evaluate_string_candidates(&paren.expression, const_string_values)
-        }
-        Expression::TSAsExpression(expr) => {
-            evaluate_string_candidates(&expr.expression, const_string_values)
-        }
-        Expression::TSSatisfiesExpression(expr) => {
-            evaluate_string_candidates(&expr.expression, const_string_values)
-        }
-        Expression::TSTypeAssertion(expr) => {
-            evaluate_string_candidates(&expr.expression, const_string_values)
-        }
-        Expression::SequenceExpression(seq) => seq
-            .expressions
-            .last()
-            .and_then(|expr| evaluate_string_candidates(expr, const_string_values)),
-        _ => None,
+    /// What is left to do: evaluate an expression onto the results, or
+    /// fold the results its parts left there.
+    enum Step<'e, 'a> {
+        Evaluate(&'e Expression<'a>),
+        /// `left + right`: the top two results.
+        Concatenate,
+        /// `test ? consequent : alternate`: the top two results.
+        Either,
+        /// A template: the top results, one per expression, in order.
+        Template(&'e TemplateLiteral<'a>),
     }
+    let mut steps = vec![Step::Evaluate(expr)];
+    let mut results: Vec<Vec<String>> = Vec::new();
+    while let Some(step) = steps.pop() {
+        match step {
+            Step::Evaluate(expr) => match expr {
+                Expression::StringLiteral(lit) => results.push(vec![lit.value.to_string()]),
+                Expression::TemplateLiteral(tpl) => {
+                    if tpl.quasis.is_empty() {
+                        results.push(Vec::new());
+                        continue;
+                    }
+                    steps.push(Step::Template(tpl));
+                    // Evaluated in order: pushed last to first.
+                    for expr in tpl.expressions.iter().take(tpl.quasis.len()).rev() {
+                        steps.push(Step::Evaluate(expr));
+                    }
+                }
+                Expression::BinaryExpression(bin) => {
+                    if bin.operator.as_str() != "+" {
+                        return None;
+                    }
+                    steps.push(Step::Concatenate);
+                    steps.push(Step::Evaluate(&bin.right));
+                    steps.push(Step::Evaluate(&bin.left));
+                }
+                Expression::ConditionalExpression(cond) => {
+                    steps.push(Step::Either);
+                    steps.push(Step::Evaluate(&cond.alternate));
+                    steps.push(Step::Evaluate(&cond.consequent));
+                }
+                Expression::Identifier(id) => {
+                    results.push(const_string_values.get(id.name.as_str()).cloned()?);
+                }
+                Expression::ParenthesizedExpression(paren) => {
+                    steps.push(Step::Evaluate(&paren.expression));
+                }
+                Expression::TSAsExpression(expr) => steps.push(Step::Evaluate(&expr.expression)),
+                Expression::TSSatisfiesExpression(expr) => {
+                    steps.push(Step::Evaluate(&expr.expression));
+                }
+                Expression::TSTypeAssertion(expr) => {
+                    steps.push(Step::Evaluate(&expr.expression));
+                }
+                Expression::SequenceExpression(seq) => {
+                    steps.push(Step::Evaluate(seq.expressions.last()?));
+                }
+                _ => return None,
+            },
+            Step::Concatenate => {
+                let right = results.pop()?;
+                let left = results.pop()?;
+                results.push(dedupe_string_candidates(combine_string_candidates(
+                    &left, &right,
+                )?)?);
+            }
+            Step::Either => {
+                let alternate = results.pop()?;
+                let mut values = results.pop()?;
+                values.extend(alternate);
+                results.push(dedupe_string_candidates(values)?);
+            }
+            Step::Template(tpl) => {
+                let parts = tpl.expressions.len().min(tpl.quasis.len());
+                let expr_values = results.split_off(results.len().checked_sub(parts)?);
+                let mut values = vec![String::new()];
+                for (idx, quasi) in tpl.quasis.iter().enumerate() {
+                    for value in &mut values {
+                        value.push_str(quasi.value.raw.as_str());
+                    }
+                    if let Some(expr_values) = expr_values.get(idx) {
+                        values = combine_string_candidates(&values, expr_values)?;
+                    }
+                }
+                results.push(dedupe_string_candidates(values)?);
+            }
+        }
+    }
+    results.pop()
 }
 
 fn combine_string_candidates(left: &[String], right: &[String]) -> Option<Vec<String>> {
@@ -1405,9 +1457,10 @@ fn extract_destructured_bindings(
     );
 }
 
-/// The recursive leaf walk. Reached only through
-/// [`extract_destructured_bindings`], which has already normalized the shared
-/// initializer for member binding.
+/// The leaf walk, in source order, from an explicit stack of patterns, so a
+/// deeply nested pattern costs heap, not native stack. Reached only through
+/// [`extract_destructured_bindings`], which has already normalized the
+/// shared initializer for member binding.
 fn extract_destructured_binding_leaves(
     pattern: &BindingPattern<'_>,
     kind: AnalyzedBindingKind,
@@ -1416,75 +1469,36 @@ fn extract_destructured_binding_leaves(
     initializer: &Option<BindingInitializer>,
     bindings: &mut Vec<AnalyzedBinding>,
 ) {
-    match pattern {
-        BindingPattern::BindingIdentifier(id) => {
-            bindings.push(AnalyzedBinding {
-                name: id.name.to_string(),
-                kind,
-                is_reactive,
-                reactivity_kind,
-                type_annotation: None,
-                initializer: initializer.clone(),
-                span: id.span.into(),
-                used_in_script: false,
-                used_in_style: false,
-            });
-        }
-        BindingPattern::ObjectPattern(obj) => {
-            for prop in &obj.properties {
-                extract_destructured_binding_leaves(
-                    &prop.value,
+    let mut pending = vec![pattern];
+    while let Some(pattern) = pending.pop() {
+        // Patterns are pushed in order, then reversed, so they pop in order.
+        let from = pending.len();
+        match pattern {
+            BindingPattern::BindingIdentifier(id) => {
+                bindings.push(AnalyzedBinding {
+                    name: id.name.to_string(),
                     kind,
                     is_reactive,
                     reactivity_kind,
-                    initializer,
-                    bindings,
-                );
+                    type_annotation: None,
+                    initializer: initializer.clone(),
+                    span: id.span.into(),
+                    used_in_script: false,
+                    used_in_style: false,
+                });
             }
-            if let Some(rest) = &obj.rest {
-                extract_destructured_binding_leaves(
-                    &rest.argument,
-                    kind,
-                    is_reactive,
-                    reactivity_kind,
-                    initializer,
-                    bindings,
-                );
+            BindingPattern::ObjectPattern(obj) => {
+                pending.extend(obj.properties.iter().map(|prop| &prop.value));
+                pending.extend(obj.rest.as_ref().map(|rest| &rest.argument));
             }
-        }
-        BindingPattern::ArrayPattern(arr) => {
-            for elem in arr.elements.iter().flatten() {
-                extract_destructured_binding_leaves(
-                    elem,
-                    kind,
-                    is_reactive,
-                    reactivity_kind,
-                    initializer,
-                    bindings,
-                );
+            BindingPattern::ArrayPattern(arr) => {
+                pending.extend(arr.elements.iter().flatten());
+                pending.extend(arr.rest.as_ref().map(|rest| &rest.argument));
             }
-            if let Some(rest) = &arr.rest {
-                extract_destructured_binding_leaves(
-                    &rest.argument,
-                    kind,
-                    is_reactive,
-                    reactivity_kind,
-                    initializer,
-                    bindings,
-                );
-            }
-        }
-        BindingPattern::AssignmentPattern(assign) => {
             // `a = default` — extract the left-hand binding
-            extract_destructured_binding_leaves(
-                &assign.left,
-                kind,
-                is_reactive,
-                reactivity_kind,
-                initializer,
-                bindings,
-            );
+            BindingPattern::AssignmentPattern(assign) => pending.push(&assign.left),
         }
+        pending[from..].reverse();
     }
 }
 
@@ -2035,110 +2049,72 @@ fn try_extract_css_var_manipulation(
         span: call.span.into(),
     });
 }
-/// Stops at function boundaries (arrow/function expressions don't make setup async).
+/// The first `await` in source order, found depth-first from an explicit
+/// stack of pending expressions: a deeply nested initializer costs heap,
+/// not native stack. Stops at function boundaries (arrow/function
+/// expressions don't make setup async).
 fn find_await_offset(expr: &Expression<'_>) -> Option<u32> {
-    match expr {
-        Expression::AwaitExpression(aw) => Some(aw.span.start),
-        // Stop at function boundaries
-        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => None,
-        Expression::CallExpression(call) => {
-            if let Some(offset) = find_await_offset(&call.callee) {
-                return Some(offset);
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        // Children are pushed in order, then reversed, so they pop in order.
+        let children_from = pending.len();
+        match expr {
+            Expression::AwaitExpression(aw) => return Some(aw.span.start),
+            // Stop at function boundaries
+            Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {}
+            Expression::CallExpression(call) => {
+                pending.push(&call.callee);
+                pending.extend(call.arguments.iter().filter_map(|arg| arg.as_expression()));
             }
-            for arg in &call.arguments {
-                if let Some(e) = arg.as_expression() {
-                    if let Some(offset) = find_await_offset(e) {
-                        return Some(offset);
+            Expression::ArrayExpression(arr) => {
+                for elem in &arr.elements {
+                    match elem {
+                        oxc_ast::ast::ArrayExpressionElement::SpreadElement(s) => {
+                            pending.push(&s.argument);
+                        }
+                        oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
+                        _ => pending.extend(elem.as_expression()),
                     }
                 }
             }
-            None
-        }
-        Expression::ArrayExpression(arr) => {
-            for elem in &arr.elements {
-                match elem {
-                    oxc_ast::ast::ArrayExpressionElement::SpreadElement(s) => {
-                        if let Some(offset) = find_await_offset(&s.argument) {
-                            return Some(offset);
+            Expression::ObjectExpression(obj) => {
+                for prop in &obj.properties {
+                    match prop {
+                        oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) => {
+                            pending.push(&p.value);
                         }
-                    }
-                    oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
-                    _ => {
-                        if let Some(e) = elem.as_expression() {
-                            if let Some(offset) = find_await_offset(e) {
-                                return Some(offset);
-                            }
-                        }
-                    }
-                }
-            }
-            None
-        }
-        Expression::ObjectExpression(obj) => {
-            for prop in &obj.properties {
-                match prop {
-                    oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) => {
-                        if let Some(offset) = find_await_offset(&p.value) {
-                            return Some(offset);
-                        }
-                    }
-                    oxc_ast::ast::ObjectPropertyKind::SpreadProperty(s) => {
-                        if let Some(offset) = find_await_offset(&s.argument) {
-                            return Some(offset);
+                        oxc_ast::ast::ObjectPropertyKind::SpreadProperty(s) => {
+                            pending.push(&s.argument);
                         }
                     }
                 }
             }
-            None
-        }
-        Expression::AssignmentExpression(assign) => find_await_offset(&assign.right),
-        Expression::SequenceExpression(seq) => {
-            for expr in &seq.expressions {
-                if let Some(offset) = find_await_offset(expr) {
-                    return Some(offset);
-                }
+            Expression::AssignmentExpression(assign) => pending.push(&assign.right),
+            Expression::SequenceExpression(seq) => pending.extend(seq.expressions.iter()),
+            Expression::ConditionalExpression(cond) => {
+                pending.extend([&cond.test, &cond.consequent, &cond.alternate]);
             }
-            None
-        }
-        Expression::ConditionalExpression(cond) => find_await_offset(&cond.test)
-            .or_else(|| find_await_offset(&cond.consequent))
-            .or_else(|| find_await_offset(&cond.alternate)),
-        Expression::BinaryExpression(bin) => {
-            find_await_offset(&bin.left).or_else(|| find_await_offset(&bin.right))
-        }
-        Expression::LogicalExpression(log) => {
-            find_await_offset(&log.left).or_else(|| find_await_offset(&log.right))
-        }
-        Expression::UnaryExpression(un) => find_await_offset(&un.argument),
-        Expression::TemplateLiteral(tpl) => {
-            for expr in &tpl.expressions {
-                if let Some(offset) = find_await_offset(expr) {
-                    return Some(offset);
-                }
+            Expression::BinaryExpression(bin) => pending.extend([&bin.left, &bin.right]),
+            Expression::LogicalExpression(log) => pending.extend([&log.left, &log.right]),
+            Expression::UnaryExpression(un) => pending.push(&un.argument),
+            Expression::TemplateLiteral(tpl) => pending.extend(tpl.expressions.iter()),
+            Expression::TaggedTemplateExpression(tagged) => {
+                pending.push(&tagged.tag);
+                pending.extend(tagged.quasi.expressions.iter());
             }
-            None
+            Expression::ComputedMemberExpression(m) => pending.extend([&m.object, &m.expression]),
+            Expression::StaticMemberExpression(m) => pending.push(&m.object),
+            Expression::ParenthesizedExpression(p) => pending.push(&p.expression),
+            Expression::YieldExpression(y) => pending.extend(y.argument.as_ref()),
+            Expression::TSNonNullExpression(e) => pending.push(&e.expression),
+            Expression::TSAsExpression(e) => pending.push(&e.expression),
+            Expression::TSSatisfiesExpression(e) => pending.push(&e.expression),
+            Expression::TSTypeAssertion(e) => pending.push(&e.expression),
+            _ => {}
         }
-        Expression::TaggedTemplateExpression(tagged) => {
-            find_await_offset(&tagged.tag).or_else(|| {
-                tagged
-                    .quasi
-                    .expressions
-                    .iter()
-                    .find_map(|e| find_await_offset(e))
-            })
-        }
-        Expression::ComputedMemberExpression(m) => {
-            find_await_offset(&m.object).or_else(|| find_await_offset(&m.expression))
-        }
-        Expression::StaticMemberExpression(m) => find_await_offset(&m.object),
-        Expression::ParenthesizedExpression(p) => find_await_offset(&p.expression),
-        Expression::YieldExpression(y) => y.argument.as_ref().and_then(|a| find_await_offset(a)),
-        Expression::TSNonNullExpression(e) => find_await_offset(&e.expression),
-        Expression::TSAsExpression(e) => find_await_offset(&e.expression),
-        Expression::TSSatisfiesExpression(e) => find_await_offset(&e.expression),
-        Expression::TSTypeAssertion(e) => find_await_offset(&e.expression),
-        _ => None,
+        pending[children_from..].reverse();
     }
+    None
 }
 
 // =============================================================================
@@ -3234,60 +3210,103 @@ fn collect_nested_macro_calls(program: &Program<'_>, content_offset: u32) -> Vec
     result
 }
 
-/// Check a list of statements for macro calls — any macro found here is nested.
-fn scan_stmts_for_macros(stmts: &[Statement<'_>], offset: u32, out: &mut Vec<NestedMacroCall>) {
-    for stmt in stmts {
-        scan_stmt_for_macros(stmt, offset, out);
+/// A step of the nested-macro scan.
+enum MacroScan<'e, 'a: 'e> {
+    /// A statement: any macro in it is nested.
+    Statement(&'e Statement<'a>),
+    /// An expression that may itself be a macro call.
+    Check(&'e Expression<'a>),
+    /// An expression whose nested scopes are scanned.
+    Scopes(&'e Expression<'a>),
+}
+
+/// Run the nested-macro scan from `start`, recording macro calls in `out`
+/// in source order. The scan runs from an explicit stack of steps, so a
+/// deeply nested statement or expression costs heap, not native stack.
+fn scan_nested_macros<'e, 'a: 'e>(
+    start: impl DoubleEndedIterator<Item = MacroScan<'e, 'a>>,
+    offset: u32,
+    out: &mut Vec<NestedMacroCall>,
+) {
+    let mut pending: Vec<MacroScan<'e, 'a>> = start.rev().collect();
+    while let Some(step) = pending.pop() {
+        // Steps are pushed in order, then reversed, so they pop in order.
+        let from = pending.len();
+        match step {
+            MacroScan::Statement(stmt) => scan_statement_step(stmt, &mut pending),
+            MacroScan::Check(expr) => {
+                // Check if an expression is a compiler macro call and record it
+                // as nested.
+                if let Expression::CallExpression(call) = expr {
+                    if let Expression::Identifier(id) = &call.callee {
+                        if COMPILER_MACRO_NAMES.contains(&id.name.as_str()) {
+                            out.push(NestedMacroCall {
+                                name: id.name.to_string(),
+                                span: Span::new(call.span.start + offset, call.span.end + offset),
+                            });
+                        }
+                    }
+                    // Check inside call args: withDefaults(defineProps<...>(), {...})
+                    pending.extend(
+                        call.arguments
+                            .iter()
+                            .filter_map(|arg| arg.as_expression())
+                            .map(MacroScan::Check),
+                    );
+                }
+            }
+            MacroScan::Scopes(expr) => scan_scopes_step(expr, &mut pending),
+        }
+        pending[from..].reverse();
     }
 }
 
 /// Check a single statement for macro calls — any macro found here is nested.
-fn scan_stmt_for_macros(stmt: &Statement<'_>, offset: u32, out: &mut Vec<NestedMacroCall>) {
+fn scan_statement_step<'e, 'a: 'e>(stmt: &'e Statement<'a>, pending: &mut Vec<MacroScan<'e, 'a>>) {
+    let statements = |statements: &'e [Statement<'a>]| statements.iter().map(MacroScan::Statement);
     match stmt {
         Statement::ExpressionStatement(expr_stmt) => {
-            check_expr_for_macro_call(&expr_stmt.expression, offset, out);
-            scan_expr_for_nested_scopes(&expr_stmt.expression, offset, out);
+            pending.push(MacroScan::Check(&expr_stmt.expression));
+            pending.push(MacroScan::Scopes(&expr_stmt.expression));
         }
         Statement::VariableDeclaration(var_decl) => {
-            for decl in &var_decl.declarations {
-                if let Some(init) = &decl.init {
-                    check_expr_for_macro_call(init, offset, out);
-                    scan_expr_for_nested_scopes(init, offset, out);
-                }
+            for init in var_decl
+                .declarations
+                .iter()
+                .filter_map(|decl| decl.init.as_ref())
+            {
+                pending.push(MacroScan::Check(init));
+                pending.push(MacroScan::Scopes(init));
             }
         }
         Statement::ReturnStatement(ret) => {
             if let Some(arg) = &ret.argument {
-                check_expr_for_macro_call(arg, offset, out);
-                scan_expr_for_nested_scopes(arg, offset, out);
+                pending.push(MacroScan::Check(arg));
+                pending.push(MacroScan::Scopes(arg));
             }
         }
         Statement::IfStatement(if_stmt) => {
-            scan_stmt_for_macros(&if_stmt.consequent, offset, out);
-            if let Some(alt) = &if_stmt.alternate {
-                scan_stmt_for_macros(alt, offset, out);
-            }
+            pending.push(MacroScan::Statement(&if_stmt.consequent));
+            pending.extend(if_stmt.alternate.as_ref().map(MacroScan::Statement));
         }
-        Statement::BlockStatement(block) => {
-            scan_stmts_for_macros(&block.body, offset, out);
-        }
-        Statement::ForStatement(f) => scan_stmt_for_macros(&f.body, offset, out),
-        Statement::ForInStatement(f) => scan_stmt_for_macros(&f.body, offset, out),
-        Statement::ForOfStatement(f) => scan_stmt_for_macros(&f.body, offset, out),
-        Statement::WhileStatement(w) => scan_stmt_for_macros(&w.body, offset, out),
-        Statement::DoWhileStatement(dw) => scan_stmt_for_macros(&dw.body, offset, out),
+        Statement::BlockStatement(block) => pending.extend(statements(&block.body)),
+        Statement::ForStatement(f) => pending.push(MacroScan::Statement(&f.body)),
+        Statement::ForInStatement(f) => pending.push(MacroScan::Statement(&f.body)),
+        Statement::ForOfStatement(f) => pending.push(MacroScan::Statement(&f.body)),
+        Statement::WhileStatement(w) => pending.push(MacroScan::Statement(&w.body)),
+        Statement::DoWhileStatement(dw) => pending.push(MacroScan::Statement(&dw.body)),
         Statement::TryStatement(try_stmt) => {
-            scan_stmts_for_macros(&try_stmt.block.body, offset, out);
+            pending.extend(statements(&try_stmt.block.body));
             if let Some(handler) = &try_stmt.handler {
-                scan_stmts_for_macros(&handler.body.body, offset, out);
+                pending.extend(statements(&handler.body.body));
             }
             if let Some(finalizer) = &try_stmt.finalizer {
-                scan_stmts_for_macros(&finalizer.body, offset, out);
+                pending.extend(statements(&finalizer.body));
             }
         }
         Statement::FunctionDeclaration(func) => {
             if let Some(body) = &func.body {
-                scan_stmts_for_macros(&body.statements, offset, out);
+                pending.extend(statements(&body.statements));
             }
         }
         _ => {}
@@ -3296,62 +3315,59 @@ fn scan_stmt_for_macros(stmt: &Statement<'_>, offset: u32, out: &mut Vec<NestedM
 
 /// Recurse into expressions that introduce new scopes (arrow functions, function expressions).
 /// Once inside a nested scope, any macro call is invalid.
-fn scan_expr_for_nested_scopes(expr: &Expression<'_>, offset: u32, out: &mut Vec<NestedMacroCall>) {
+fn scan_scopes_step<'e, 'a: 'e>(expr: &'e Expression<'a>, pending: &mut Vec<MacroScan<'e, 'a>>) {
     match expr {
         Expression::ArrowFunctionExpression(arrow) => match &arrow.body {
             ArrowFunctionBody::FunctionBody(body) => {
-                scan_stmts_for_macros(&body.statements, offset, out);
+                pending.extend(body.statements.iter().map(MacroScan::Statement));
             }
             // An expression body is scanned as its one expression statement.
             body => {
                 if let Some(expression) = body.as_expression() {
-                    check_expr_for_macro_call(expression, offset, out);
-                    scan_expr_for_nested_scopes(expression, offset, out);
+                    pending.push(MacroScan::Check(expression));
+                    pending.push(MacroScan::Scopes(expression));
                 }
             }
         },
         Expression::FunctionExpression(func) => {
             if let Some(body) = &func.body {
-                scan_stmts_for_macros(&body.statements, offset, out);
+                pending.extend(body.statements.iter().map(MacroScan::Statement));
             }
         }
         Expression::CallExpression(call) => {
-            scan_expr_for_nested_scopes(&call.callee, offset, out);
-            for arg in &call.arguments {
-                if let Some(e) = arg.as_expression() {
-                    scan_expr_for_nested_scopes(e, offset, out);
-                }
-            }
+            pending.push(MacroScan::Scopes(&call.callee));
+            pending.extend(
+                call.arguments
+                    .iter()
+                    .filter_map(|arg| arg.as_expression())
+                    .map(MacroScan::Scopes),
+            );
         }
         Expression::ConditionalExpression(cond) => {
-            scan_expr_for_nested_scopes(&cond.consequent, offset, out);
-            scan_expr_for_nested_scopes(&cond.alternate, offset, out);
+            pending.push(MacroScan::Scopes(&cond.consequent));
+            pending.push(MacroScan::Scopes(&cond.alternate));
         }
         Expression::ParenthesizedExpression(paren) => {
-            scan_expr_for_nested_scopes(&paren.expression, offset, out);
+            pending.push(MacroScan::Scopes(&paren.expression));
         }
         _ => {}
     }
 }
 
-/// Check if an expression is a compiler macro call and record it as nested.
-fn check_expr_for_macro_call(expr: &Expression<'_>, offset: u32, out: &mut Vec<NestedMacroCall>) {
-    if let Expression::CallExpression(call) = expr {
-        if let Expression::Identifier(id) = &call.callee {
-            if COMPILER_MACRO_NAMES.contains(&id.name.as_str()) {
-                out.push(NestedMacroCall {
-                    name: id.name.to_string(),
-                    span: Span::new(call.span.start + offset, call.span.end + offset),
-                });
-            }
-        }
-        // Check inside call args: withDefaults(defineProps<...>(), {...})
-        for arg in &call.arguments {
-            if let Some(arg_expr) = arg.as_expression() {
-                check_expr_for_macro_call(arg_expr, offset, out);
-            }
-        }
-    }
+/// Check a list of statements for macro calls — any macro found here is nested.
+fn scan_stmts_for_macros(stmts: &[Statement<'_>], offset: u32, out: &mut Vec<NestedMacroCall>) {
+    scan_nested_macros(stmts.iter().map(MacroScan::Statement), offset, out);
+}
+
+/// Check a single statement for macro calls — any macro found here is nested.
+fn scan_stmt_for_macros(stmt: &Statement<'_>, offset: u32, out: &mut Vec<NestedMacroCall>) {
+    scan_nested_macros(std::iter::once(MacroScan::Statement(stmt)), offset, out);
+}
+
+/// Scan the nested scopes of an expression: any macro call inside one is
+/// nested.
+fn scan_expr_for_nested_scopes(expr: &Expression<'_>, offset: u32, out: &mut Vec<NestedMacroCall>) {
+    scan_nested_macros(std::iter::once(MacroScan::Scopes(expr)), offset, out);
 }
 
 // ── Script binding usage collector (second pass) ──

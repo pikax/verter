@@ -2755,9 +2755,16 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
     // is the property that test pins. It does NOT isolate visited-set-vs-depth-
     // fuse either: a depth-fuse-only impl (no visited set) would ALSO pass it (the
     // sub-fuse chain is never truncated). It pins the active-path removed-on-
-    // unwind semantics this one cannot.
+    // unwind semantics this one cannot. The names come in the evaluated
+    // union's member order, the canonical union order; the set is the claim.
     assert_eq!(
-        CallableNodeView::new(&dispatch, member("onack")).event_names(navigate()).resolved_for_tests(),
+        CallableNodeView::new(&dispatch, member("onack"))
+            .event_names(navigate())
+            .resolved_for_tests()
+            .map(|mut names| {
+                names.sort();
+                names
+            }),
         Some(vec![
             Arc::<str>::from("ack0"),
             Arc::<str>::from("ack1"),

@@ -6481,7 +6481,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ContributorOrigin::DeclareGlobal => {
                             entry.module_kind == FileModuleKind::Module
                         }
-                        ContributorOrigin::FileScopeInterface => true,
+                        ContributorOrigin::FileScopeInterface
+                        | ContributorOrigin::FileScopeType => true,
                         ContributorOrigin::FileScopeNamespace
                         | ContributorOrigin::FileScopeValue
                         | ContributorOrigin::ModuleAugmentation => false,
@@ -6580,6 +6581,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ContributorOrigin::FileScopeValue => true,
                     ContributorOrigin::FileScopeInterface
                     | ContributorOrigin::FileScopeNamespace
+                    | ContributorOrigin::FileScopeType
                     | ContributorOrigin::ModuleAugmentation => false,
                 };
             if !declares {
@@ -15876,6 +15878,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> TemplateReduceOutcome {
         let graph = self.graph();
+        let spliced = self.spliced_template(quasis, args);
+        let (quasis, args): (&[Arc<str>], &[SemanticNodeId]) = match &spliced {
+            Some((quasis, args)) => (quasis, args),
+            None => (quasis, args),
+        };
         let carrier_stop = |keyspace_budget_exceeded: bool| TemplateReduceOutcome {
             node: graph.intern_node(SemanticNodeData::TemplateLiteral {
                 quasis: Arc::from(quasis.to_vec().into_boxed_slice()),
@@ -15920,6 +15927,67 @@ impl<'a> ProjectSemanticDispatch<'a> {
             node,
             keyspace_budget_exceeded: false,
         }
+    }
+
+    /// The texts and holes of a template of `quasis` and `args` with every
+    /// hole that is itself a template literal type spliced in — the
+    /// checker's template construction adds such a hole's texts and types
+    /// to its own (`getTemplateLiteralType`), so `` `a${`b${T}`}` `` is
+    /// `` `ab${T}` ``. A nest of template literal types splices from an
+    /// explicit stack, never a reduction per level. None when no hole is a
+    /// template literal type.
+    fn spliced_template(
+        &self,
+        quasis: &[Arc<str>],
+        args: &[SemanticNodeId],
+    ) -> Option<(Vec<Arc<str>>, Vec<SemanticNodeId>)> {
+        let graph = self.graph();
+        let nested = |arg: SemanticNodeId| match graph.node_data(arg).as_deref() {
+            Some(SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            }) => Some((Arc::clone(quasis), Arc::clone(expressions))),
+            _ => None,
+        };
+        if !args.iter().any(|arg| nested(*arg).is_some()) {
+            return None;
+        }
+        let text = |quasis: &[Arc<str>], index: usize| {
+            quasis
+                .get(index)
+                .map(|q| q.as_ref())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let mut texts: Vec<String> = vec![text(quasis, 0)];
+        let mut holes: Vec<SemanticNodeId> = Vec::new();
+        // Each template being spliced: its texts, its holes and its next hole.
+        type Splicing = (Arc<[Arc<str>]>, Arc<[SemanticNodeId]>, usize);
+        let mut stack: Vec<Splicing> = vec![(Arc::from(quasis), Arc::from(args), 0)];
+        while let Some((quasis, args, next)) = stack.last_mut() {
+            let Some(&arg) = args.get(*next) else {
+                stack.pop();
+                // The enclosing template's text after the hole just spliced.
+                if let Some((quasis, _, next)) = stack.last() {
+                    let after = text(quasis, *next);
+                    texts.last_mut().expect("a text").push_str(&after);
+                }
+                continue;
+            };
+            *next += 1;
+            match nested(arg) {
+                Some((inner_quasis, inner_args)) => {
+                    let head = text(&inner_quasis, 0);
+                    texts.last_mut().expect("a text").push_str(&head);
+                    stack.push((inner_quasis, inner_args, 0));
+                }
+                None => {
+                    holes.push(arg);
+                    texts.push(text(quasis, *next));
+                }
+            }
+        }
+        Some((texts.into_iter().map(Arc::from).collect(), holes))
     }
 
     /// Every concatenation a template of `quasis` and `args` distributes

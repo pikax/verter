@@ -168,6 +168,7 @@ fn a_nodes_structural_bits_share_one_sidecar_entry() {
         readonly: false,
     });
     assert_eq!(store.node_structure_bits_for_tests(array), None);
+    assert_eq!(store.unresolved_reach_count(), 0);
     assert!(store.node_is_inert_structure(array));
     assert_eq!(
         store.node_structure_bits_for_tests(array),
@@ -191,6 +192,11 @@ fn a_nodes_structural_bits_share_one_sidecar_entry() {
             unresolved: Some(false),
             inert: Some(true),
         })
+    );
+    assert_eq!(
+        store.unresolved_reach_count(),
+        2,
+        "one sidecar entry per node, whatever bits it holds"
     );
 }
 

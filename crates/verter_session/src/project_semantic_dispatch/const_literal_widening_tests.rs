@@ -775,3 +775,57 @@ fn a_readonly_literal_member_widens_through_the_declaration_it_inherits() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+const READONLY_RECEIVERS: &str = "\
+class K { readonly r = 1; }
+class K2 extends K { }
+class KS { readonly r = 2; }
+export function gen<T extends K>(k: T) { return k.r; }
+export function uni(k: K | K2) { return k.r; }
+export function uni2(k: K | KS) { return k.r; }
+export function ctor() { return new K().r; }
+export function ctorLocal() { const k = new K(); return k.r; }
+";
+
+/// A local holding a constructed instance and a union receiver whose arms
+/// declare the member apart read as the checker reads them: `ctorLocal` is
+/// `number` (the binding's class declares the fresh literal) and `uni2`,
+/// over `K | KS` whose `r` members are two declarations, is `1 | 2` (a
+/// union property's type is its arms' declared types, regular literals).
+/// Measured on TypeScript 7.0.2, alike on the four settings.
+#[test]
+fn a_readonly_literal_member_read_widens_by_its_receiver() {
+    let failures = mismatches(
+        READONLY_RECEIVERS,
+        &[
+            ("ReturnType<typeof ctorLocal>", "number"),
+            ("ReturnType<typeof uni2>", "1 | 2"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A read through a generic receiver constrained to the class, through a
+/// union of the class and its subclass, and off a constructed value widens
+/// as a read through the class does: `gen`, `uni` and `ctor` are `number`
+/// on TypeScript 7.0.2 (all four settings).
+///
+/// What the lane gives:
+/// - `ReturnType<typeof gen>`: the lane measured `Opaque(Miss)` (a member
+///   read off a constrained binder).
+/// - `ReturnType<typeof uni>`: the lane measured `Opaque(Miss)`.
+/// - `ReturnType<typeof ctor>`: the lane measured `1`, clean: a member read
+///   off a constructed value carries no declaration freshness.
+#[test]
+#[ignore = "a readonly literal member read widens through a constrained, union or constructed receiver"]
+fn a_readonly_literal_member_read_widens_through_every_receiver() {
+    let failures = mismatches(
+        READONLY_RECEIVERS,
+        &[
+            ("ReturnType<typeof gen>", "number"),
+            ("ReturnType<typeof uni>", "number"),
+            ("ReturnType<typeof ctor>", "number"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

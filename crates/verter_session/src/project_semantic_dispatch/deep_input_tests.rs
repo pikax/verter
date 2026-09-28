@@ -14,7 +14,10 @@
 //! for its answer below it (3,000 levels, 1,000 for conditionals), and at 10,000 for returning on the
 //! production stacks at all.
 
-use super::checker_probe_lane_tests::{degradation_in, mismatches};
+use super::checker_probe_lane_tests::{degradation_in, flow_return_outcome_in, mismatches};
+use crate::host_flow_return_audit::FlowReturnError;
+use crate::semantic_query::FlowReturnFailure;
+use verter_type_expr::facts::InferenceUnavailableReason;
 
 /// The depth every form is checked at.
 const DEPTH: usize = 10_000;
@@ -40,16 +43,38 @@ fn mismatches_on_a_small_stack(
         .expect("the probe answers")
 }
 
-/// Whether `pf`'s body-derived return over `source` produced a value, read
-/// on a 1 MiB thread: it returns either way, never aborting the host.
-fn returns_on_a_small_stack(source: String) -> bool {
+/// The typed outcome of `pf`'s body-derived return over `source`, read on
+/// a 1 MiB thread: the degradation of the value it produced, or the typed
+/// error it answered instead, a missing `pf` (`Failure(Missing)`) told
+/// apart from a budget. It returns either way, never aborting the host.
+fn return_on_a_small_stack(
+    source: String,
+) -> Result<Option<crate::semantic_query::FlowReturnDegradation>, FlowReturnError> {
     std::thread::Builder::new()
         .stack_size(1 << 20)
-        .spawn(move || degradation_in(Default::default(), &source, "pf").is_ok())
+        .spawn(move || flow_return_outcome_in(Default::default(), &source, "pf"))
         .expect("spawn the probing thread")
         .join()
         .expect("the return evaluates")
 }
+
+/// The typed outcome of a return whose evaluation outgrew the demand's
+/// connected work: no value, and the work budget named.
+const WORK_BUDGET_EXCEEDED: Result<
+    Option<crate::semantic_query::FlowReturnDegradation>,
+    FlowReturnError,
+> = Err(FlowReturnError::Failure(FlowReturnFailure::Budget(
+    InferenceUnavailableReason::WorkBudgetExceeded,
+)));
+
+/// The typed outcome of a return whose inference outgrew the semantic
+/// inference depth budget: no value, and the depth budget named.
+const DEPTH_BUDGET_EXCEEDED: Result<
+    Option<crate::semantic_query::FlowReturnDegradation>,
+    FlowReturnError,
+> = Err(FlowReturnError::Failure(FlowReturnFailure::Budget(
+    InferenceUnavailableReason::DepthBudgetExceeded,
+)));
 
 fn wrap(depth: usize, open: &str, close: &str) -> String {
     format!("{}1{}", open.repeat(depth), close.repeat(depth))
@@ -146,7 +171,11 @@ fn conditionals_objects_and_blocks_nested_10000_deep_return_on_production_stacks
         ("objects", objects(DEPTH)),
         ("blocks", blocks(DEPTH)),
     ] {
-        assert!(!returns_on_a_small_stack(source), "{form}");
+        assert_eq!(
+            return_on_a_small_stack(source),
+            WORK_BUDGET_EXCEEDED,
+            "{form}"
+        );
     }
 }
 
@@ -234,7 +263,7 @@ fn calls_nested_500_deep_answer_on_production_stacks() {
 /// its typed budget failure).
 #[test]
 fn calls_nested_10000_deep_return_on_production_stacks() {
-    assert!(!returns_on_a_small_stack(calls(DEPTH)));
+    assert_eq!(return_on_a_small_stack(calls(DEPTH)), WORK_BUDGET_EXCEEDED);
 }
 
 #[test]
@@ -271,7 +300,10 @@ fn arrays_nested_64_deep_answer_on_production_stacks() {
 /// typed budget failure).
 #[test]
 fn arrays_nested_10000_deep_return_on_production_stacks() {
-    assert!(!returns_on_a_small_stack(arrays(DEPTH)));
+    assert_eq!(
+        return_on_a_small_stack(arrays(DEPTH)),
+        DEPTH_BUDGET_EXCEEDED
+    );
 }
 
 #[test]
@@ -310,7 +342,7 @@ fn keyof_chains_10000_deep_return_on_production_stacks() {
         "{}export function pf() {{ return null as unknown as ({KEYOF_PROBE}); }}\n",
         keyof_chain(DEPTH)
     );
-    assert!(!returns_on_a_small_stack(source));
+    assert_eq!(return_on_a_small_stack(source), WORK_BUDGET_EXCEEDED);
 }
 
 #[test]
@@ -383,7 +415,10 @@ fn module_calls_nested_1000_deep_answer_on_production_stacks() {
 /// failure).
 #[test]
 fn module_calls_nested_10000_deep_return_on_production_stacks() {
-    assert!(!returns_on_a_small_stack(module_calls(DEPTH, true)));
+    assert_eq!(
+        return_on_a_small_stack(module_calls(DEPTH, true)),
+        WORK_BUDGET_EXCEEDED
+    );
 }
 
 /// A receiver chain, `b.m().m()…`: its calls are walked from an explicit
@@ -476,7 +511,10 @@ fn generic_callbacks_nested_400_deep_answer_on_production_stacks() {
 /// of suspending the route overflows.
 #[test]
 fn generic_callbacks_nested_10000_deep_return_on_production_stacks() {
-    assert!(!returns_on_a_small_stack(generic_callbacks(DEPTH)));
+    assert_eq!(
+        return_on_a_small_stack(generic_callbacks(DEPTH)),
+        WORK_BUDGET_EXCEEDED
+    );
 }
 
 #[test]
@@ -616,7 +654,11 @@ fn branch_and_loop_statements_nested_10000_deep_return_on_production_stacks() {
         ("for", body("for (;;) { ", " }")),
         ("do", body("do { ", " } while (b);")),
     ] {
-        assert!(!returns_on_a_small_stack(source), "{form}");
+        assert_eq!(
+            return_on_a_small_stack(source),
+            WORK_BUDGET_EXCEEDED,
+            "{form}"
+        );
     }
 }
 
@@ -637,10 +679,10 @@ fn a_nest_derives_its_source_parse_identity_a_fixed_number_of_times() {
     assert_eq!(derivations(20), derivations(200));
 }
 
-/// Template literal types nested 10,000 deep. TypeScript 7.0.2: `"1"`,
+/// Template literal types nested 10,000 deep: a template in a template's
+/// hole splices into it from an explicit stack. TypeScript 7.0.2: `"1"`,
 /// under every setting.
 #[test]
-#[ignore = "a template literal type nested in a template literal type evaluates a query a native level per nesting"]
 fn template_literal_types_nested_10000_deep_answer_on_production_stacks() {
     let source = format!("type D = {};\n", wrap(DEPTH, "`${", "}`"));
     assert_eq!(
@@ -649,22 +691,52 @@ fn template_literal_types_nested_10000_deep_answer_on_production_stacks() {
     );
 }
 
+fn mapped_types(depth: usize) -> String {
+    format!("type D = {};\n", wrap(depth, "{ [K in \"a\"]: ", " }"))
+}
+
+/// A mapped-type nest the connected-demand work budget admits.
+const MAPPED_TYPES_UNDER_THE_WORK_BUDGET: usize = 1_000;
+
+/// Mapped types nested deep lower as frames of the locator lowering's
+/// stack (their binder frames a shared chain) and are judged open by a
+/// walk whose levels carry only the arm they take. 10,000 deep the probe
+/// returns the connected-demand work budget's typed failure; under it
+/// TypeScript 7.0.2 answers `"a"`, under every setting.
+#[test]
+fn mapped_types_nested_10000_deep_return_on_production_stacks() {
+    assert_eq!(
+        return_on_a_small_stack(format!(
+            "{}export function pf() {{ const p: keyof D = null as any; return p; }}\n",
+            mapped_types(DEPTH)
+        )),
+        WORK_BUDGET_EXCEEDED
+    );
+    assert_eq!(
+        mismatches_on_a_small_stack(
+            mapped_types(MAPPED_TYPES_UNDER_THE_WORK_BUDGET),
+            "keyof D",
+            "\"a\""
+        ),
+        Vec::<String>::new()
+    );
+}
+
 /// Mapped types nested 10,000 deep. TypeScript 7.0.2: `"a"`, under every
 /// setting.
 #[test]
-#[ignore = "a mapped type nested in a mapped type lowers its locator shape a native level per nesting"]
+#[ignore = "the connected-demand work budget admits no 10,000-deep mapped-type nest"]
 fn mapped_types_nested_10000_deep_answer_on_production_stacks() {
-    let source = format!("type D = {};\n", wrap(DEPTH, "{ [K in \"a\"]: ", " }"));
     assert_eq!(
-        mismatches_on_a_small_stack(source, "keyof D", "\"a\""),
+        mismatches_on_a_small_stack(mapped_types(DEPTH), "keyof D", "\"a\""),
         Vec::<String>::new()
     );
 }
 
 /// Namespaces nested 10,000 deep, read through a 10,000-segment qualified
-/// name. TypeScript 7.0.2: `1`, under every setting.
+/// name: every walk registering a namespace's members descends the nest
+/// from an explicit stack. TypeScript 7.0.2: `1`, under every setting.
 #[test]
-#[ignore = "a namespace nested in a namespace indexes its declaration headers a native level per nesting"]
 fn namespaces_nested_10000_deep_answer_on_production_stacks() {
     let source = format!(
         "namespace A {{ {}export type V = 1;{}\ntype D = {}V;\n",
@@ -678,15 +750,47 @@ fn namespaces_nested_10000_deep_answer_on_production_stacks() {
     );
 }
 
+fn label_chain(depth: usize) -> String {
+    let labels: String = (0..depth).map(|label| format!("l{label}: ")).collect();
+    format!("export function pf() {{ {labels}return 1; }}\n")
+}
+
+fn else_if_chain(length: usize) -> String {
+    format!(
+        "export function pf(b: boolean) {{ {}return 2; }}\n",
+        "if (b) return 1; else ".repeat(length)
+    )
+}
+
 /// A statement wrapped in 10,000 labels. TypeScript 7.0.2: `number`, under
 /// every setting.
 #[test]
-#[ignore = "a label chain's parse snapshot is copied a native level per label beyond the parse containment"]
+#[ignore = "the flow-slice plan budget admits no demand slice of 10,000 nested labels"]
 fn label_chains_10000_deep_answer_on_production_stacks() {
-    let labels: String = (0..DEPTH).map(|label| format!("l{label}: ")).collect();
-    let source = format!("export function pf() {{ {labels}return 1; }}\n");
     assert_eq!(
-        mismatches_on_a_small_stack(source, RETURN, "number"),
+        mismatches_on_a_small_stack(label_chain(DEPTH), RETURN, "number"),
+        Vec::<String>::new()
+    );
+}
+
+/// A statement wrapped in 10,000 labels returns on the production stacks:
+/// the parse, and the copy of its program the binding index makes, run on
+/// the stack the scan bounds (a braceless label nests its statement a level
+/// under it), and the return is the plan's typed budget failure.
+#[test]
+fn label_chains_10000_deep_return_on_production_stacks() {
+    assert_eq!(
+        return_on_a_small_stack(label_chain(DEPTH)),
+        WORK_BUDGET_EXCEEDED
+    );
+}
+
+/// A statement wrapped in 4,000 labels, which the flow-slice plan budget
+/// admits. TypeScript 7.0.2: `number`, under every setting.
+#[test]
+fn label_chains_4000_deep_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(label_chain(4_000), RETURN, "number"),
         Vec::<String>::new()
     );
 }
@@ -694,14 +798,33 @@ fn label_chains_10000_deep_answer_on_production_stacks() {
 /// An `else if` chain 10,000 long. TypeScript 7.0.2: `1 | 2` (reporting
 /// TS2563, body too large for control-flow analysis), under every setting.
 #[test]
-#[ignore = "an else-if chain's parse snapshot is copied a native level per arm beyond the parse containment"]
+#[ignore = "the flow-slice plan's return-site budget admits no 10,001 return sites"]
 fn else_if_chains_10000_long_answer_on_production_stacks() {
-    let source = format!(
-        "export function pf(b: boolean) {{ {}return 2; }}\n",
-        "if (b) return 1; else ".repeat(DEPTH)
-    );
     assert_eq!(
-        mismatches_on_a_small_stack(source, RETURN, "1 | 2"),
+        mismatches_on_a_small_stack(else_if_chain(DEPTH), RETURN, "1 | 2"),
+        Vec::<String>::new()
+    );
+}
+
+/// An `else if` chain 10,000 long returns on the production stacks: the
+/// parse, and the copy of its program the binding index makes, run on the
+/// stack the scan bounds (an `else` continues its `if` past the `;` ending
+/// the `if`'s body), and the return is the plan's typed budget failure.
+#[test]
+fn else_if_chains_10000_long_return_on_production_stacks() {
+    assert_eq!(
+        return_on_a_small_stack(else_if_chain(DEPTH)),
+        WORK_BUDGET_EXCEEDED
+    );
+}
+
+/// An `else if` chain 250 long, whose return sites the flow-slice plan's
+/// return-site budget admits. TypeScript 7.0.2: `1 | 2`, under every
+/// setting.
+#[test]
+fn else_if_chains_250_long_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(else_if_chain(250), RETURN, "1 | 2"),
         Vec::<String>::new()
     );
 }
@@ -725,7 +848,7 @@ fn unreachable_code_nested_10000_deep_returns_on_production_stacks() {
             " }".repeat(depth)
         )
     };
-    assert!(!returns_on_a_small_stack(source(DEPTH)));
+    assert_eq!(return_on_a_small_stack(source(DEPTH)), WORK_BUDGET_EXCEEDED);
     assert_eq!(
         mismatches_on_a_small_stack(source(UNDER_THE_RETURN_SITE_BUDGET), RETURN, "number"),
         Vec::<String>::new()
@@ -746,9 +869,213 @@ fn code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks(
             " }".repeat(depth)
         )
     };
-    assert!(!returns_on_a_small_stack(source(DEPTH)));
+    assert_eq!(return_on_a_small_stack(source(DEPTH)), WORK_BUDGET_EXCEEDED);
     assert_eq!(
         mismatches_on_a_small_stack(source(UNDER_THE_RETURN_SITE_BUDGET), RETURN, "number"),
         Vec::<String>::new()
     );
+}
+
+/// A nest of mapped types lowers in work that grows with the nest, not its
+/// square: each binder's identity reads the mapped types nested in it once
+/// (each hashed its whole value subtree), and each body's binder stack
+/// shares the frames around it (each copied them).
+#[test]
+fn a_mapped_type_nest_lowers_in_linear_work() {
+    let work = |depth: usize| {
+        let walked = crate::mapper_binder_registry::type_expr_visits_for_tests();
+        let copied = super::locator_shape::binder_frame_clones_for_tests();
+        assert_eq!(
+            mismatches(&mapped_types(depth), &[("keyof D", "\"a\"")]),
+            Vec::<String>::new()
+        );
+        (
+            crate::mapper_binder_registry::type_expr_visits_for_tests() - walked,
+            super::locator_shape::binder_frame_clones_for_tests() - copied,
+        )
+    };
+    let ((shallow_walked, shallow_copied), (deep_walked, deep_copied)) = (work(50), work(500));
+    assert!(
+        deep_walked <= 20 * shallow_walked,
+        "a ten-times-deeper nest walked {deep_walked} nodes against {shallow_walked}"
+    );
+    assert!(
+        deep_copied <= 20 * shallow_copied,
+        "a ten-times-deeper nest copied {deep_copied} binder frames against {shallow_copied}"
+    );
+}
+
+/// A dead loop nest the flow-slice plan budget admits.
+const DEAD_LOOPS_UNDER_THE_PLAN_BUDGET: usize = 1_000;
+
+/// Loops behind a literal `false` test nested deep: each dead body
+/// evaluates as a frame of the run, on a dead path its pass restores. 10,000
+/// deep the demand slice exceeds the plan budget (the return is its typed
+/// budget failure); under it TypeScript 7.0.2 answers `1 | 2`, under every
+/// setting.
+#[test]
+fn dead_loops_nested_10000_deep_return_on_production_stacks() {
+    for open in ["while (false) { ", "for (; false; ) { "] {
+        let source = |depth: usize| {
+            format!(
+                "export function pf() {{ {}return 1;{} return 2; }}\n",
+                open.repeat(depth),
+                " }".repeat(depth)
+            )
+        };
+        assert_eq!(
+            return_on_a_small_stack(source(DEPTH)),
+            WORK_BUDGET_EXCEEDED,
+            "{open}"
+        );
+        assert_eq!(
+            mismatches_on_a_small_stack(source(DEAD_LOOPS_UNDER_THE_PLAN_BUDGET), RETURN, "1 | 2"),
+            Vec::<String>::new(),
+            "{open}"
+        );
+    }
+}
+
+/// Loops nested `depth` deep, the innermost writing `body` over `let x: 0 |
+/// 1 = 0` (and `y`, alike).
+fn nested_loops(depth: usize, body: &str, result: &str) -> String {
+    format!(
+        "export function pf(b: boolean) {{ let x: 0 | 1 = 0; let y: 0 | 1 = 0; {}{body}{} return {result}; }}\n",
+        "while (b) { ".repeat(depth),
+        " }".repeat(depth)
+    )
+}
+
+/// Nested loops take work polynomial in their depth: a loop pass from a
+/// state an earlier pass of the loop started from is that pass, so the
+/// nested loops of a pass whose head did not change are not evaluated
+/// again (each loop's body ran once per pass of every loop around it, `2 ^
+/// depth` times). TypeScript 7.0.2, 20 deep, under every setting: `0` for
+/// `x = 0`, `readonly [0, 0]` for `x = 0; y = 0`, `0 | 1` for `x = 1`.
+#[test]
+fn nested_loops_take_passes_polynomial_in_their_depth() {
+    for (body, result, answer) in [
+        ("x = 0;", "x", "0"),
+        ("x = 0; y = 0;", "[x, y] as const", "readonly [0, 0]"),
+        ("x = 1;", "x", "0 | 1"),
+    ] {
+        let passes = |depth: usize| {
+            let before = super::flow_return::loop_passes_for_tests();
+            assert_eq!(
+                mismatches(&nested_loops(depth, body, result), &[(RETURN, answer)]),
+                Vec::<String>::new(),
+                "{body}"
+            );
+            super::flow_return::loop_passes_for_tests() - before
+        };
+        let (shallow, deep) = (passes(10), passes(20));
+        assert!(
+            deep <= 5 * shallow,
+            "`{body}` 20 deep took {deep} passes against {shallow} 10 deep"
+        );
+    }
+}
+
+/// Enums 10,000 long, each member reading the member of the enum before
+/// it: `enum E0 { A = 1 } enum E1 { A = E0.A } … enum E10000 { A =
+/// E9999.A }`.
+fn enum_chain(length: usize) -> String {
+    let mut source = String::from("enum E0 { A = 1 }\n");
+    for index in 1..=length {
+        source.push_str(&format!("enum E{index} {{ A = E{}.A }}\n", index - 1));
+    }
+    source
+}
+
+/// One enum whose members each read the member before them, seeded by
+/// another enum's member: `enum X { A = 1 } enum E { A0 = X.A, A1 = A0 +
+/// 1, … }`.
+fn enum_member_chain(length: usize) -> String {
+    let members: Vec<String> = (1..length)
+        .map(|index| format!("A{index} = A{} + 1", index - 1))
+        .collect();
+    format!(
+        "enum X {{ A = 1 }}\nenum E {{ A0 = X.A, {} }}\n",
+        members.join(", ")
+    )
+}
+
+/// An enum's member reading through a chain of 10,000 enums is evaluated
+/// from an explicit stack. TypeScript 7.0.2: `E10000.A extends 1 ? "y" :
+/// "n"` is `"y"`, under every `strictNullChecks` × `noImplicitAny` setting.
+#[test]
+fn enum_reference_chains_10000_long_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(
+            enum_chain(DEPTH),
+            "E10000.A extends 1 ? \"y\" : \"n\"",
+            "\"y\""
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// One enum of 10,000 members, each the member before it plus one, the
+/// first another enum's member. TypeScript 7.0.2: `E.A9999 extends 10000 ?
+/// "y" : "n"` is `"y"`, under every setting.
+#[test]
+fn enum_member_chains_10000_long_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(
+            enum_member_chain(DEPTH),
+            "E.A9999 extends 10000 ? \"y\" : \"n\"",
+            "\"y\""
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// Enum initializers 10,000 deep: an addition nested in parentheses to the
+/// right, a left-leaning chain of additions, and a chain of additions of
+/// another enum's member. TypeScript 7.0.2: each member extends `10001`
+/// (`"y"`), under every setting.
+#[test]
+fn enum_initializers_nested_10000_deep_answer_on_production_stacks() {
+    for (form, initializer) in [
+        ("parenthesized", wrap(DEPTH, "(1 + ", ")")),
+        ("left-leaning", format!("{}1", "1 + ".repeat(DEPTH))),
+        ("member reads", format!("{}1", "X.A + ".repeat(DEPTH))),
+    ] {
+        let source = format!("enum X {{ A = 1 }}\nenum D {{ A = {initializer} }}\n");
+        assert_eq!(
+            mismatches_on_a_small_stack(source, "D.A extends 10001 ? \"y\" : \"n\"", "\"y\""),
+            Vec::<String>::new(),
+            "{form}"
+        );
+    }
+}
+
+/// Evaluating an enum's pending members evaluates each initializer, and
+/// resolves each reference, once: the work of a chain of references grows
+/// with its length, whether the chain runs through enums or through the
+/// members of one enum.
+#[test]
+fn an_enum_reference_chain_evaluates_in_linear_work() {
+    let work = |source: String, probe: &'static str| {
+        let before = super::enum_type::enum_initializer_work_for_tests();
+        assert_eq!(
+            mismatches(&source, &[(probe, "\"y\"")]),
+            Vec::<String>::new()
+        );
+        super::enum_type::enum_initializer_work_for_tests() - before
+    };
+    let through_enums = |length: usize| {
+        let probe = Box::leak(format!("E{length}.A extends 1 ? \"y\" : \"n\"").into_boxed_str());
+        work(enum_chain(length), probe)
+    };
+    let through_members = |length: usize| {
+        let probe = Box::leak(
+            format!("E.A{} extends {length} ? \"y\" : \"n\"", length - 1).into_boxed_str(),
+        );
+        work(enum_member_chain(length), probe)
+    };
+    assert!(through_enums(200) > 0);
+    assert_eq!(through_enums(400), 2 * through_enums(200));
+    assert!(through_members(200) > 0);
+    assert_eq!(through_members(400), 2 * through_members(200));
 }

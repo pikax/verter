@@ -36,7 +36,7 @@
     "identity": "verter-signature-corpus-v0@typescript-7.0.2",
     "rows": 26,
     "seeds": "hand-authored fixed rows; no random generator (the reported 9,300-case generator was not recovered)",
-    "observation_digest": "882a81ea8a0a7a9b06eebba82547753eb0c51c0c2b734d32c1e331265ec4ca7a",
+    "observation_digest": "3335082cccaedfbd7303b09c83b652781b72a72cb4cbd09da90d8c7988b246b0",
     "digest_input": "for each row in table order: little-endian u64 byte length then bytes of id, checker, decl_emit, and the recorded diagnostic spelled `TS<code>: <message> => <recovery>` (empty when the row records none)",
     "homes": [
       "crates/verter_session/src/signature_corpus_rows_tests.rs",

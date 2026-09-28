@@ -180,15 +180,16 @@ fn a_1000_deep_union_alias_chain_reads_on_a_small_stack() {
 ///
 /// Measured on TypeScript 7.0.2 (all four settings): with `type U0 = 0 |
 /// 1; type U1 = U0 | 2`, `U1` and `0 | 1 | 2` are mutually assignable (as
-/// are `U3` and `0 | 1 | 2 | 3 | 4` over three links). The lane evaluates
-/// the named arm to a declaration placeholder: `U1` evaluates to
-/// `<placeholder> | 2`.
+/// are `U3` and `0 | 1 | 2 | 3 | 4` over three links).
 #[test]
-#[ignore = "a union alias's arm naming another union alias evaluates to a declaration placeholder"]
 fn a_union_alias_naming_a_union_alias_evaluates_to_both_members() {
-    let failures = super::checker_probe_lane_tests::evaluated_mismatches(
+    let mut failures = super::checker_probe_lane_tests::evaluated_mismatches(
         &union_alias_chain(1),
         &[("U1", "0 | 1 | 2")],
     );
+    failures.extend(super::checker_probe_lane_tests::evaluated_mismatches(
+        &union_alias_chain(3),
+        &[("U3", "0 | 1 | 2 | 3 | 4")],
+    ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

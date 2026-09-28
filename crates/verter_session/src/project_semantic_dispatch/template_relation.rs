@@ -379,14 +379,38 @@ fn valid_number_string(text: &str) -> bool {
         ("0B", 2),
     ] {
         if let Some(digits) = trimmed.strip_prefix(prefix) {
-            return !digits.is_empty() && digits.chars().all(|c| c.is_digit(radix));
+            return !digits.is_empty()
+                && digits.chars().all(|c| c.is_digit(radix))
+                && prefixed_integer_is_finite(digits, radix);
         }
     }
     let unsigned = trimmed
         .strip_prefix('+')
         .or_else(|| trimmed.strip_prefix('-'))
         .unwrap_or(trimmed);
-    decimal_literal(unsigned)
+    // A decimal literal's value is its correctly rounded double, which
+    // overflows to infinity past the largest finite one (`1e999`).
+    decimal_literal(unsigned) && unsigned.parse::<f64>().is_ok_and(f64::is_finite)
+}
+
+/// Whether a binary, octal or hexadecimal integer's value rounds to a finite
+/// double: under 1024 significant bits it does; at exactly 1024 it rounds
+/// to infinity when its top 54 bits are all set (at or past the midpoint
+/// between the largest finite double and 2^1024, a tie going to the even
+/// 2^1024); past 1024 it never does.
+fn prefixed_integer_is_finite(digits: &str, radix: u32) -> bool {
+    let width = radix.trailing_zeros();
+    let significant: Vec<bool> = digits
+        .chars()
+        .filter_map(|c| c.to_digit(radix))
+        .flat_map(|value| (0..width).rev().map(move |bit| value >> bit & 1 == 1))
+        .skip_while(|bit| !bit)
+        .collect();
+    match significant.len() {
+        length if length < 1024 => true,
+        1024 => !significant[..54].iter().all(|bit| *bit),
+        _ => false,
+    }
 }
 
 /// A JavaScript `StrUnsignedDecimalLiteral` other than `Infinity` (whose
@@ -469,6 +493,40 @@ mod tests {
         }
         for text in ["", "-0x1", "Infinity", "1_000", "NaN", "1e"] {
             assert!(!valid_number_string(text), "{text:?} is not a number");
+        }
+    }
+
+    /// Measured on TypeScript 7.0.2 through ``S extends `${number}` ``: a
+    /// numeric string whose value overflows the largest finite double is no
+    /// number. `"1e308"`, `"1.7976931348623157e308"`, 255 hexadecimal `F`s,
+    /// `0b1` followed by 1023 zeros and `0o1` by 341 zeros are numbers;
+    /// `"1e999"`, `"-1e999"`, `"2e308"`, `"1.7976931348623159e308"`, 256
+    /// hexadecimal `F`s, `0b1` followed by 1024 zeros and `0o1` by 342 zeros
+    /// are not.
+    #[test]
+    fn a_number_placeholder_refuses_a_value_past_the_largest_finite_double() {
+        let hex = |digits: usize| format!("0x{}", "F".repeat(digits));
+        let binary = |zeros: usize| format!("0b1{}", "0".repeat(zeros));
+        let octal = |zeros: usize| format!("0o1{}", "0".repeat(zeros));
+        for text in [
+            "1e308".to_owned(),
+            "1.7976931348623157e308".to_owned(),
+            hex(255),
+            binary(1023),
+            octal(341),
+        ] {
+            assert!(valid_number_string(&text), "{text:?} is a number");
+        }
+        for text in [
+            "1e999".to_owned(),
+            "-1e999".to_owned(),
+            "2e308".to_owned(),
+            "1.7976931348623159e308".to_owned(),
+            hex(256),
+            binary(1024),
+            octal(342),
+        ] {
+            assert!(!valid_number_string(&text), "{text:?} is not a number");
         }
     }
 

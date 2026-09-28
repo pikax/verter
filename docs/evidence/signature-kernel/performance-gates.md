@@ -22,7 +22,7 @@ the strength of a number nobody can recompute from this checkout.
 | Augmented type lookup | No whole-program scan; no unrelated contributor invalidation | `FileArtifactStore::ensure_augmentation_index_populated` is an inverse index, not a scan; `g_misc3/module_augmentation_stitching.rs` → `session_overlay_augmenter_isolated_from_base_index` holds the no-unrelated-invalidation half across the base/session overlay boundary. |
 | Composite construction | No eager overload Cartesian product; no quadratic prefix provenance copying | **Held.** `signature_kernel::discovery::union_signatures` is two phases: phase 1 takes signatures matched in every arm; phase 2 (restricted synthesis) fires only when phase 1 found nothing AND at most one arm has several signatures, so the product can never open. Held by `signature_kernel::discovery_tests::a_union_of_overloaded_arms_without_a_common_signature_synthesizes_nothing`: two overloaded arms with no common signature synthesize nothing (7.0.2: TS2349, not callable), while one overloaded arm still reaches the restricted synthesis; removing the phase-2 precondition fails it. No prefix of the fold copies provenance: `union_synthesis_interns_one_provenance_per_candidate_whatever_the_arm_count` counts one constituent sequence and one provenance per synthesized candidate for three arms and for six, and fails if the fold interns a sequence per prefix. |
 | Concurrent repeated demand | Coalesced computation without recursion deadlock or partial publication | `g_block/semantic_determinism_matrix.rs` → `signature_kernel_interned_identities_are_schedule_independent` (duplicate publishers and opposite intern orders at 1/2/4/8 workers converge on one logical identity) and `det_04_worker_counts_1_2_4_8`; `signature_kernel/lifetime_tests.rs` → `concurrent_replace_epoch_publishes_in_order`; `project_semantic_dispatch/signature_epoch_tests.rs` → `a_joiner_never_takes_a_retired_epoch_value_from_the_build_it_joined`. |
-| Editor edit/revert soak | Live memory plateaus after retired views are released and the retirement policy runs | **Partially held.** The retirement *mechanism* is guarded: `lifetime_tests.rs` → `live_readers_are_roots_until_drop`, `live_reader_count_includes_pinned_retired_epoch`, `retained_results_outlive_epoch_replacement_until_drained`; `file_artifact_store_tests.rs` → `unreachable_retired_version_is_reclaimed_once_no_root_sees_it`, `captured_root_still_reaches_a_retired_augmenter_set`; and the process-wide byte ceiling is held by `semantic_retention_account_tests.rs` (`many_individually_legal_entries_stop_at_the_aggregate_ceiling`, `a_charge_releases_exactly_once_across_every_ending`, `a_retained_parse_snapshot_charges_its_pin_once_per_snapshot`). The kernel tables' own retention is bounded under sustained unique edits: `project_semantic_dispatch/signature_epoch_tests.rs` → `sustained_unique_edits_keep_the_kernel_store_bounded_and_the_answers_fresh` (the edit path replaces the epoch past `EPOCH_RECORD_CAP`, and every replacement's answers equal a fresh host's), and a warm value of a retired epoch is a miss, never an incomplete answer: `a_warm_signature_set_of_a_retired_epoch_is_a_miss_that_recomputes_the_answer`, `a_replacement_between_the_memo_read_and_the_pin_is_a_miss_not_an_incomplete_answer`, `a_build_that_straddles_a_replacement_cannot_poison_later_reads`. The sustained edit/revert soak under the registered workload is the benchmark harness's `soak` (hundreds of edit/revert rounds on one host, live heap after each), whose plateau verdict the runner reports per arm in the locked session; the editor-process churn (open/edit/close through the language server) is the language-server retention work stacked on this branch. |
+| Editor edit/revert soak | Live memory plateaus after retired views are released and the retirement policy runs | **Partially held.** The retirement *mechanism* is guarded: `lifetime_tests.rs` → `live_readers_are_roots_until_drop`, `live_reader_count_includes_pinned_retired_epoch`, `retained_results_outlive_epoch_replacement_until_drained`; `file_artifact_store_tests.rs` → `unreachable_retired_version_is_reclaimed_once_no_root_sees_it`, `captured_root_still_reaches_a_retired_augmenter_set`; and the process-wide byte ceiling is held by `semantic_retention_account_tests.rs` (`many_individually_legal_entries_stop_at_the_aggregate_ceiling`, `a_charge_releases_exactly_once_across_every_ending`, `a_retained_parse_snapshot_charges_its_pin_once_per_snapshot`). The kernel tables' own retention is bounded under sustained unique edits: `project_semantic_dispatch/signature_epoch_tests.rs` → `sustained_unique_edits_keep_the_kernel_store_bounded_and_the_answers_fresh` (the edit path replaces the epoch past `EPOCH_RECORD_CAP`, and every replacement's answers equal a fresh host's); a holder that releases graph nodes hands them to `SemanticGraphStore::release_signature_records_naming`, which replaces the epoch once the tokens naming released nodes outnumber the live ones, so the tables track the live set rather than the cap: `semantic_query_memo/signature_epoch_tests.rs` → `releasing_most_tokenised_nodes_replaces_the_epoch` (a tie keeps the epoch; relaxing the majority to a tie fails it) and `project_semantic_dispatch/signature_epoch_tests.rs` → `releasing_the_named_nodes_evicts_the_warm_set_and_the_answer_recomputes` (dropping the candidate eviction fails it); and a warm value of a retired epoch is a miss, never an incomplete answer: `a_warm_signature_set_of_a_retired_epoch_is_a_miss_that_recomputes_the_answer`, `a_replacement_between_the_memo_read_and_the_pin_is_a_miss_not_an_incomplete_answer`, `a_build_that_straddles_a_replacement_cannot_poison_later_reads`. The sustained edit/revert soak under the registered workload is the benchmark harness's `soak` (hundreds of edit/revert rounds on one host, live heap after each), whose plateau verdict the runner reports per arm in the locked session; the editor-process churn (open/edit/close through the language server) is the language-server retention work stacked on this branch. |
 
 ## Additional §12 gates
 
@@ -556,11 +556,11 @@ Recorded plainly so no reader mistakes absence for a pass:
   default of 2 MiB). Each runs under `verter_parser::oxc_parse`'s
   containment, on a stack segment sized from the source when the worker's
   own stack is short (`oxc-deep-parse.md`), so the workers need no larger
-  stack of their own. The script analysis's own recursions over the
-  program (the module-reference collector, the binding extractors) run
-  under the same containment: a module constant of 10,000 nested calls
-  overflowed a 2 MiB I/O worker in the collector and now returns
-  (`deep_input_tests.rs` →
+  stack of their own. The script analysis's own passes over the program
+  (the module-reference collector, the await, string, macro and binding
+  walks) run from explicit stacks on the worker's own stack, outside any
+  region: a module constant of 10,000 nested calls overflowed a 2 MiB I/O
+  worker in the collector and now returns (`deep_input_tests.rs` →
   `module_calls_nested_10000_deep_return_on_production_stacks`).
   `type_syntax_depth_tests.rs` →
   `a_700_deep_nested_generic_application_parses_on_a_scheduler_worker`
@@ -601,11 +601,12 @@ Recorded plainly so no reader mistakes absence for a pass:
   `oxc_parser::Parser`. The scan costs about a third of the parse (1.8 ms
   against 5.8 ms for `lib.dom.d.ts`, optimized); a source short enough
   that every byte could be a level skips it. On wasm32 the engine's own
-  call stack, which nothing grows, bounds the parse: a source nesting past
-  `WASM_ENGINE_NESTING` (313 levels, from V8's 984 KiB default stack and
-  the measured 1,188 bytes of the costliest level) returns the same typed
-  diagnostic. oxc's walks over the tree run under the same containment
-  (below).
+  call stack, which nothing grows, bounds the parse under a measured
+  runtime safety profile of the engine, not a limit of the language: a
+  source nesting past `V8_DEFAULT_STACK_PROFILE` (V8's 984 KiB default
+  stack, oxc 0.151.0, the release build; 313 levels of the scan's bound)
+  returns the same typed diagnostic. oxc's walks over the tree run under
+  the same containment (below).
 
 * **A class expression raises one instance per level.** The lane's graph
   of `class { m() { return class { … } } }` nested `n` deep is linear
@@ -970,7 +971,58 @@ Recorded plainly so no reader mistakes absence for a pass:
   `code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks`
   return the plan's typed budget failure at 10,000 levels on a 1 MiB
   caller and answer `number` under the 256-return-site budget; evaluating
-  the unreachable region in place overflows the former.
+  the unreachable region in place overflows the former. A loop body
+  behind a literal `false` test is entered the same way, a frame of the
+  run on a dead path its pass restores:
+  `dead_loops_nested_10000_deep_return_on_production_stacks` returns the
+  plan's typed budget failure for `while (false)` and `for (; false; )`
+  nested 10,000 deep and answers `1 | 2` 1,000 deep; evaluating the body
+  through a nested drive overflowed at 100 levels. Past a call the
+  evaluator settles as `never`-returning (a method, a callee typed by a
+  parameter) the dead tail reads declared types, as tsc does
+  (`nStop`: `string | number`), while past an exhaustive `switch` it keeps
+  reading the no-matching-case edge.
+
+* **Type-level nests lower and evaluate from explicit stacks.**
+  - Every walk registering a namespace's members under qualified names —
+    the header index, the declaration-body collection and the dependency
+    collection, for the file scope and an augmentation block — shares one
+    explicit-stack walk (`verter_semantic` `namespace_walk.rs`) holding one
+    qualified path for the nest; a namespace block's instantiation settles
+    when its frame closes instead of re-searching its subtree at every
+    level. `namespaces_nested_10000_deep_answer_on_production_stacks`
+    answers `1`; the recursive walks overflow it.
+  - A template literal type in a template's hole splices into the
+    template (`getTemplateLiteralType`) from an explicit stack before the
+    reduction, instead of reducing each nested template by its own query:
+    `template_literal_types_nested_10000_deep_answer_on_production_stacks`
+    answers `"1"`; reducing nested templates by query overflows it.
+  - A mapped type's source, value and `as` clause lower as children on the
+    locator lowering's stack; each body's binder frames push onto a shared
+    chain; a binder's identity folds each nested mapped type by a digest
+    its drive computes once; and the openness walk's recursive arms are
+    functions of their own (the walk is bounded by its 256-node budget, and
+    a level now carries only the arm it takes).
+    `mapped_types_nested_10000_deep_return_on_production_stacks` returns
+    the connected-demand work budget's typed failure 10,000 deep (5.9 s,
+    against 256 s before the digest fix) and answers `"a"` 1,000 deep;
+    `a_mapped_type_nest_lowers_in_linear_work` holds the structural walk
+    (3,000 nodes at 500 levels against 300 at 50) and the binder-frame
+    copies (none) linear, which re-hashing each value subtree (501,000
+    against 5,100) and copying the frames (125,250 against 1,275) fail.
+
+* **Nested loops take polynomial passes.** A loop's head analysis runs a
+  pass per carried reference and then the converged pass, so each nested
+  loop's body ran once per pass of every loop around it. A pass is a
+  function of its start state: a reference whose pass would start from a
+  state an earlier pass of the loop started from takes its back edge, and
+  a converged head equal to such a start takes that pass, its side outputs
+  set aside and replayed (a loop head restores values without the analysis
+  passes' write receipts, so an unchanged head is that start).
+  `nested_loops_take_passes_polynomial_in_their_depth` counts 65 passes at
+  10 levels and 230 at 20 for `x = 0`, `x = 0; y = 0` and `x = 1` (tsc:
+  `0`, `readonly [0, 0]`, `0 | 1`); without the reuse the 20-level nest
+  exhausts the work budget.
 
 * **A nest's per-function work does not read the nest around it.** Four
   paths repeated work proportional to the nest for every nested function,
