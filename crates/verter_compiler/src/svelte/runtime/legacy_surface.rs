@@ -78,7 +78,11 @@ pub(super) fn refuse_unsupported_legacy_surfaces(
                 found: None,
                 store_exempt,
             };
-            verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
+            // A walk refused its stack scans nothing; the compile around it
+            // is refused with the refusal.
+            let _ = verter_parser::oxc_parse::leased_program_walk(&program, || {
+                scan.visit_program(&program)
+            });
             if let Some((rune, span)) = scan.found {
                 return Err(UnsupportedSvelteRuntimeSurface::LegacyRuneReference { rune, span });
             }

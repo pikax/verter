@@ -132,6 +132,9 @@ verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"]
 # test / example / bench targets ONLY (the integration binary `tests/cases/**`
 # among them) — same idiom as the `verter_css_syntax` edge above.
 verter_compiler = { path = ".", features = ["test-support"] }
+# Stack-reservation fault injection, for the tests of a compile whose parse
+# is refused its stack.
+verter_parser = { path = "../verter_parser", features = ["stack-fault-injection"] }
 
 [[bin]]
 name = "parse_corpus_probe"

@@ -200,6 +200,10 @@ impl SemanticGraphStore {
         report.relate_keys_released = relate_keys_released;
         report.relation_proofs_released = relation_proofs_released;
         report.union_views_released = self.release_union_views(&dead);
+        // The stable-key classes of released nodes can never be read again.
+        self.key_classes
+            .lock()
+            .release_nodes(|id| dead.contains(&id));
         // The edit-path drain already cleared these, but a publish that
         // raced the tombstone could have landed a mapping whose value names
         // a released node; clearing again after the tombstone closes it.

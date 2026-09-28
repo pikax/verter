@@ -274,8 +274,6 @@ impl SliceDemand {
 /// plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
 pub struct FlowSliceBudget {
-    /// Maximum demand-origin return sites.
-    pub max_return_sites: u32,
     /// Maximum selected nodes (value + effect + region) in one slice.
     pub max_selected_nodes: u32,
     /// Maximum combined value visits and interned projection tails. This
@@ -286,7 +284,6 @@ pub struct FlowSliceBudget {
 impl Default for FlowSliceBudget {
     fn default() -> Self {
         Self {
-            max_return_sites: 256,
             max_selected_nodes: 4096,
             max_value_states: 65_536,
         }
@@ -296,8 +293,6 @@ impl Default for FlowSliceBudget {
 /// Which budget axis tripped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
 pub enum FlowSliceBudgetAxis {
-    /// Too many demand-origin return sites.
-    ReturnSites,
     /// Too many selected nodes.
     SelectedNodes,
     /// Too many value visits or interned projection tails.
@@ -365,19 +360,6 @@ impl<'g> ReturnPathPeeker<'g> {
     ) -> Result<ReturnSlicePlan, FlowSliceBudgetExceeded> {
         #[cfg(feature = "test-support")]
         PLAN_INVOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
-        let return_origins = demand
-            .origins
-            .iter()
-            .filter(|origin| matches!(origin, SliceOrigin::Return(_)))
-            .count();
-        if return_origins > budget.max_return_sites as usize {
-            return Err(FlowSliceBudgetExceeded {
-                axis: FlowSliceBudgetAxis::ReturnSites,
-                limit: budget.max_return_sites,
-                observed: u32::try_from(return_origins).unwrap_or(u32::MAX),
-            });
-        }
-
         let mut state = PlanState {
             paths: PathArena::default(),
             value_nodes: FxHashSet::default(),

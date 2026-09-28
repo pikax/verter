@@ -2921,26 +2921,8 @@ fn demand_planner_rejects_a_selection_over_the_requests_slice_budget() {
         "the retained selection satisfying the request budget plans"
     );
 
-    // A stricter return-site budget with the same graph, query and demand:
-    // provenance passes; only the resource policy is stricter.
-    let mut strict_sites = request_named("rich");
-    strict_sites.resources.slice_budget = FlowSliceBudget {
-        max_return_sites: 1,
-        ..FlowSliceBudget::default()
-    };
-    assert_eq!(
-        fixture
-            .build_plan_with_retained(strict_sites, &loose)
-            .unwrap_err(),
-        FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
-            axis: FlowSliceBudgetAxis::ReturnSites,
-            limit: 1,
-            observed: 2,
-        }),
-        "a selection over the request's return-site budget is a typed planning error"
-    );
-
-    // The same rule on the selected-node axis.
+    // A stricter selected-node budget with the same graph, query and
+    // demand: provenance passes; only the resource policy is stricter.
     let mut strict_nodes = request_named("rich");
     strict_nodes.resources.slice_budget = FlowSliceBudget {
         max_selected_nodes: u32::try_from(selected).expect("in range") - 1,
@@ -2978,7 +2960,6 @@ fn demand_planner_rejects_a_selection_over_the_requests_slice_budget() {
     // selection's counts, never the budget VALUES.
     let mut tighter = request_named("rich");
     tighter.resources.slice_budget = FlowSliceBudget {
-        max_return_sites: 2,
         max_selected_nodes: u32::try_from(selected).expect("in range"),
         max_value_states: value_states,
     };

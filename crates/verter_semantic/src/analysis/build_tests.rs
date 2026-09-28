@@ -3106,6 +3106,41 @@ declare module 'outer' {
 }
 
 #[test]
+fn declares_interface_app_config_inside_a_dotted_namespace() {
+    let result = analyze("declare namespace A.B.C { interface AppConfig { theme: string } }");
+    assert!(
+        result
+            .flags
+            .contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG),
+        "`interface AppConfig` in the block of `namespace A.B.C` must set the flag"
+    );
+}
+
+/// An `interface AppConfig` at the bottom of namespaces nested 10,000
+/// deep is found on a 1 MiB thread: the nest is walked from an explicit
+/// stack, not a native frame per level; one nested next to it stays clear.
+#[test]
+fn declares_interface_app_config_inside_namespaces_nested_10000_deep() {
+    let nest = |name: &str| {
+        format!(
+            "namespace A {{ {}export interface {name} {{ theme: string }}{}\n",
+            "export namespace A { ".repeat(9_999),
+            " }".repeat(10_000)
+        )
+    };
+    let flags = |source: String| {
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || analyze(&source).flags)
+            .expect("spawn the analysing thread")
+            .join()
+            .expect("the analysis returns")
+    };
+    assert!(flags(nest("AppConfig")).contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG));
+    assert!(!flags(nest("AppConfiguration")).contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG));
+}
+
+#[test]
 fn declares_interface_app_config_type_alias_negative() {
     // `type AppConfig = ...` is NOT an interface; the merging surface
     // is interface-only, so the flag must stay clear.

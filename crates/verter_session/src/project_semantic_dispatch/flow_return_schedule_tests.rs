@@ -2123,3 +2123,62 @@ fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
     }
     assert!(cancelled > 0, "some cancellation landed inside a request");
 }
+
+/// `witness` as a `switch` whose `cases` cases each return their own
+/// literal, and whose `default` returns `-1`.
+fn switch_witness(cases: usize) -> String {
+    let arms: String = (0..cases)
+        .map(|case| format!("case {case}: return {case}; "))
+        .collect();
+    format!("export function witness(x: number) {{ switch (x) {{ {arms}default: return -1; }} }}\n")
+}
+
+/// Each return site the slice plans is one unit of connected work, paid
+/// before the body evaluates: the work grows linearly with the returns (one
+/// unit per site and one for the evaluation), a budget one unit short ends
+/// on the work rail, and no fixed ceiling on return sites refuses a body the
+/// budget can pay for.
+#[test]
+fn each_return_site_is_connected_work_the_demand_pays_for() {
+    for cases in [100, 200, 400, 800] {
+        let source = switch_witness(cases);
+        let (outcome, used) = witness_under_caps(
+            &source,
+            MAX_CONNECTED_PROJECTION_WORK,
+            MAX_CONNECTED_QUERY_DEPTH,
+        );
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Value {
+                    degradation: None,
+                    ..
+                }
+            ),
+            "{cases} cases answer: {outcome:?}"
+        );
+        assert_eq!(
+            used,
+            cases + 2,
+            "{cases} cases and the default, and the evaluation"
+        );
+
+        let host = host_with(&[(PATH, source.as_str())]);
+        let step = with_dispatch(&host, |dispatch| {
+            dispatch.set_connected_limits_for_tests(used - 1, MAX_CONNECTED_QUERY_DEPTH);
+            let key = key_of(dispatch, PATH, "witness");
+            dispatch.execute_flow_return(key)
+        });
+        assert!(
+            matches!(
+                step,
+                crate::semantic_query::FlowReturnStep::NoValue(
+                    crate::semantic_query::FlowReturnFailure::Budget(
+                        verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded
+                    )
+                )
+            ),
+            "{cases} cases one unit short end on the typed work budget: {step:?}"
+        );
+    }
+}

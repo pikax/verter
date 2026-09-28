@@ -42,15 +42,6 @@
       "disposition": "behavioral characterization and complexity measurement; no split is pre-declared by ARH0",
       "owner": { "id": "ARH2", "kind": "node" },
       "class": "complexity-measurement"
-    },
-    {
-      "id": "ARH0-DEBT-5",
-      "candidate": "god-module declaration discipline for future large files",
-      "candidatePath": "crates/verter_session/tests/cases/architecture_guards.rs",
-      "evidence": "33 production files over 4000 LOC while god_module_size_budget only walks the five retired Phase 11 targets",
-      "disposition": "extend the existing architecture_guards.rs pattern only after ARH2 measurement ratifies thresholds; no new status system",
-      "owner": { "id": "ARH12", "kind": "node" },
-      "class": "drift-prevention"
     }
   ]
 }

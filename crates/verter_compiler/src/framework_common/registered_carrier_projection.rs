@@ -364,6 +364,21 @@ pub fn parse_registered_source_for_tests(
     config: CarrierGrammarConfig,
     source: &str,
 ) -> Arc<FrameworkParseArtifact> {
+    Arc::new(
+        project_registered_source_for_tests(language, config, source)
+            .expect("fixture source parses")
+            .into_framework_parse_artifact(),
+    )
+}
+
+/// [`project_registered_accepted`] of `source`, registered and accepted under
+/// `language` and `config`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn project_registered_source_for_tests(
+    language: verter_language::FileLanguage,
+    config: CarrierGrammarConfig,
+    source: &str,
+) -> Result<RegisteredCarrierProjection, SyntaxReject> {
     use verter_language::carrier_grammar::{
         CarrierGrammarAuthority, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
     };
@@ -393,11 +408,7 @@ pub fn parse_registered_source_for_tests(
     let accepted = grammar_authority
         .accept_registered_source(&source_authority, &snapshot, &config)
         .expect("accept source");
-    Arc::new(
-        project_registered_accepted(&accepted)
-            .expect("fixture source parses")
-            .into_framework_parse_artifact(),
-    )
+    project_registered_accepted(&accepted)
 }
 
 impl std::fmt::Debug for FrameworkParseArtifact {
@@ -891,8 +902,10 @@ pub enum TemplateFactsBasis<'a> {
 
 /// One `built_in_semantic_catalog` lookup keyed adapter × artifact epoch
 /// × Semantic, then the selected row's template-fact payload. Catalog
-/// miss, parse-key mismatch, selected-template mismatch, and producer
-/// failure are `None` — no frontend hop, no Vue/Svelte match, no empty
+/// miss, parse-key mismatch, selected-template mismatch, producer failure,
+/// and a template expression's parse or a walk-stack lease refused its
+/// stack (facts read off the empty program in its place would be
+/// incomplete) are `None` — no frontend hop, no Vue/Svelte match, no empty
 /// success.
 #[must_use]
 pub fn template_facts_from_catalog(
@@ -908,8 +921,11 @@ pub fn template_facts_from_catalog(
     if !source_binds_to_artifact_parse_key(source, artifact) {
         return None;
     }
-    registered_semantic_for(artifact.adapter_id(), artifact.epoch())?
-        .template_facts(source, artifact)
+    let semantic = registered_semantic_for(artifact.adapter_id(), artifact.epoch())?;
+    match verter_parser::oxc_parse::refusals_within(|| semantic.template_facts(source, artifact)) {
+        (facts, None) => facts,
+        (_, Some(_)) => None,
+    }
 }
 
 fn selected_template_equals_admitted_host(artifact: &FrameworkParseArtifact, bytes: &str) -> bool {
@@ -1273,7 +1289,54 @@ pub fn project_registered_accepted(
             KnownRegisteredCompiler::Svelte(Arc::new(SvelteCarrierCompiler))
         }
     };
-    project_registered_carrier(Some(&known), accepted)
+    // A parse or lease refused its stack inside the frontend leaves the
+    // artifact built from an empty program in place of the source's, or
+    // reads the refusal as a syntax error: the projection is refused as
+    // typed incompleteness instead, and no artifact is produced to retain.
+    let (projected, refused) = verter_parser::oxc_parse::refusals_within(|| {
+        project_registered_carrier(Some(&known), accepted)
+    });
+    let Some(unavailable) = refused else {
+        return projected;
+    };
+    let (parse_key, syntax_profile) = match &projected {
+        Ok(projection) => (
+            Arc::clone(&projection.parse_key),
+            Arc::clone(&projection.syntax_profile),
+        ),
+        Err(
+            SyntaxReject::UnsupportedProfile {
+                parse_key,
+                syntax_profile,
+                ..
+            }
+            | SyntaxReject::RejectedSyntax {
+                parse_key,
+                syntax_profile,
+                ..
+            }
+            | SyntaxReject::UnmappedDiagnostic {
+                parse_key,
+                syntax_profile,
+                ..
+            }
+            | SyntaxReject::StackUnavailable {
+                parse_key,
+                syntax_profile,
+                ..
+            }
+            | SyntaxReject::InvalidCarrierGeometry {
+                parse_key,
+                syntax_profile,
+                ..
+            },
+        ) => (Arc::clone(parse_key), Arc::clone(syntax_profile)),
+    };
+    Err(SyntaxReject::StackUnavailable {
+        parse_key,
+        syntax_profile,
+        needed: unavailable.needed,
+    })
 }
 
 /// Parse through the catalog frontend for `(adapter, language)`. A catalog

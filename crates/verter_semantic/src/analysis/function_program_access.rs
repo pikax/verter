@@ -28,6 +28,15 @@ fn named(identifier: &IdentifierReference<'_>, kind: FunctionWriteKind) -> Funct
 pub(crate) fn static_member_reference(
     member: &oxc_ast::ast::StaticMemberExpression<'_>,
 ) -> Option<FunctionReferenceRecord> {
+    // The chain's root decides first, before any link is copied: a chain
+    // rooted at no identifier (`new C().a.b`) names no reference.
+    let mut root = &member.object;
+    while let Expression::StaticMemberExpression(parent) = root {
+        root = &parent.object;
+    }
+    if !matches!(root, Expression::Identifier(_)) {
+        return None;
+    }
     let mut path = Vec::new();
     let mut current = member;
     loop {

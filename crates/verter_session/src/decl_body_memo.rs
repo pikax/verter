@@ -1166,7 +1166,9 @@ impl DeclBodyMemo {
         let parse_env_hash = self.key.parse_env_hash;
         let class_fields = Arc::clone(&self.header_index.class_field_values);
         let Some(index) = service.run_leased(&self.key, move |program| {
-            program.map(|p| {
+            // A walk-stack lease refused the program's index reads as a missed
+            // snapshot below: an uncached empty index, never memoized.
+            program.and_then(|p| {
                 p.function_program_index(
                     owner_table.as_ref(),
                     Arc::clone(&canonical),

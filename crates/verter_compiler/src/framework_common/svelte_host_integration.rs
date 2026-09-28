@@ -346,6 +346,10 @@ pub enum SvelteHostCompileRefusal {
     },
     /// The shared orchestration refused the admitted request.
     Unsupported(CompileUnsupported),
+    /// A parse or walk-stack lease the execution needed was refused its
+    /// stack: typed operational incompleteness, not a verdict on the
+    /// source. Nothing the execution produced publishes.
+    StackUnavailable(verter_parser::oxc_parse::StackUnavailable),
     /// A requested runtime surface was refused; no sibling product
     /// publishes after this refusal.
     RuntimeSurfaceRefused {
@@ -670,7 +674,16 @@ impl SvelteHostIntegrationBackend {
         let opts = derive_admitted_runtime_options(&admission.request, inputs, continuations);
         let grants = execution_grants_for_request(&admission.request);
         drop(admission);
-        match svelte_carrier_bundle(source, artifact, &opts, alloc, grants) {
+        // A parse or lease refused its stack inside the bundle leaves the
+        // bundle built from an empty program in its place: the whole
+        // execution is refused, whatever the bundle says.
+        let (outcome, refused) = verter_parser::oxc_parse::refusals_within(|| {
+            svelte_carrier_bundle(source, artifact, &opts, alloc, grants)
+        });
+        if let Some(unavailable) = refused {
+            return Err(SvelteHostCompileRefusal::StackUnavailable(unavailable));
+        }
+        match outcome {
             Ok(CarrierCompileOutcome::Produced(bundle)) => Ok(bundle),
             // All-or-none: a refused runtime surface publishes nothing;
             // sibling projection/analysis products never warm or publish
@@ -1435,6 +1448,109 @@ mod tests {
             .admit_runtime_render(&foreign, SvelteHostRuntimeRenderDemand::default())
             .expect_err("the render demand composes the same parse admission");
         assert_eq!(refusal, SvelteHostAdmissionRefusal::NotASvelteParse);
+    }
+
+    /// A projection whose parse is refused its stack is refused as typed
+    /// incompleteness, not read as a syntax error nor projected from the
+    /// empty program the refused parse returned; the same projection
+    /// retried produces the artifact.
+    #[test]
+    fn a_projection_whose_parse_is_refused_its_stack_is_the_typed_refusal() {
+        // Deep enough that the markup expression's parse needs a region on
+        // a 1 MiB thread: it is the projection's first reservation.
+        let depth = 167;
+        let component = format!(
+            "<script>let n = 1;</script>\n<p>{{{}n{}}}</p>\n",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        );
+        let project = || {
+            super::super::registered_carrier_projection::project_registered_source_for_tests(
+                FileLanguage::svelte(),
+                CarrierGrammarConfig::Svelte,
+                &component,
+            )
+        };
+        let (refused, retried) = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(1 << 20)
+                .spawn_scoped(scope, || {
+                    verter_parser::oxc_parse::faults::fail_next_reservations(1);
+                    let refused = project().err();
+                    (refused, project().is_ok())
+                })
+                .expect("spawn the thread")
+                .join()
+                .expect("the projection returns")
+        });
+        assert!(
+            matches!(
+                refused,
+                Some(verter_language::SyntaxReject::StackUnavailable { .. })
+            ),
+            "expected the typed stack refusal, got {refused:?}"
+        );
+        assert!(retried, "the retry projects");
+    }
+
+    /// An execution whose parse is refused its stack is refused whole, as
+    /// typed incompleteness: no product publishes from the empty program
+    /// the refused parse returned. The same execution retried compiles.
+    #[test]
+    fn an_execution_whose_parse_is_refused_its_stack_publishes_nothing() {
+        use verter_parser::oxc_parse::faults::{self, Reservation};
+        // A depth no other test parses, so the fault finds this parse only,
+        // deep enough that the parse needs a region on a 1 MiB thread.
+        let depth = 163;
+        let script = format!(
+            "let v = {}1{};\nlet count = $state(0);",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        );
+        let component = format!("<script>{script}</script>\n<button>{{count}}</button>\n");
+        let artifact = svelte_artifact(&component);
+        let needed =
+            verter_parser::oxc_parse::parse_stack_bytes(&script, oxc_span::SourceType::ts());
+        let compile = || {
+            let alloc = oxc_allocator::Allocator::new();
+            let backend = SvelteHostIntegrationBackend::new();
+            let admission = backend
+                .admit_host_products(&artifact, multi_demand())
+                .expect("admits");
+            backend
+                .compile_host_products(
+                    admission,
+                    &artifact,
+                    &SvelteHostExecutionInputs::default(),
+                    &alloc,
+                )
+                .map(|products| products.runtime_client_bundle().is_some())
+        };
+        let on_a_small_thread = |work: &(dyn Fn() -> _ + Sync)| {
+            std::thread::scope(|scope| {
+                std::thread::Builder::new()
+                    .stack_size(1 << 20)
+                    .spawn_scoped(scope, work)
+                    .expect("spawn the thread")
+                    .join()
+                    .expect("the work returns")
+            })
+        };
+        let parses = faults::reservations_needing(Reservation::Parse, needed);
+        faults::fail_reservations_needing(Reservation::Parse, needed, 1);
+        let refused = on_a_small_thread(&compile);
+        faults::fail_reservations_needing(Reservation::Parse, needed, 0);
+        assert!(
+            faults::reservations_needing(Reservation::Parse, needed) > parses,
+            "the execution parses the script on a region of its own"
+        );
+        match refused {
+            Err(SvelteHostCompileRefusal::StackUnavailable(unavailable)) => {
+                assert_eq!(unavailable.needed, needed);
+            }
+            other => panic!("expected the typed stack refusal, got {other:?}"),
+        }
+        assert!(on_a_small_thread(&compile).expect("the retry compiles"));
     }
 
     #[test]

@@ -5044,8 +5044,7 @@ impl HostStoreView {
 mod resolution_currency_spec_tests;
 /// O(1) store-view build: the capture does no per-owner work, and the
 /// captured roots answer for the view's own world. Declared here rather
-/// than in `lib.rs` (which is line-ceiling guarded by
-/// `cases::g_misc1::no_lib_rs_growth`), following the same
+/// than in `lib.rs` (a thin crate root), following the same
 /// `#[cfg(test)] #[path]` pattern `host_resolve.rs` uses.
 #[cfg(test)]
 #[path = "store_view_o1_build_tests.rs"]

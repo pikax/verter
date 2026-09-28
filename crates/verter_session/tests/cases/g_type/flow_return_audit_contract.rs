@@ -187,10 +187,10 @@ fn warm_hit_emits_no_flow_return_started_event() {
 #[test]
 fn budget_refusal_surfaces_typed_error_counter_and_event() {
     let host = build_host(true);
-    // 300 demand-origin return sites trips the ReturnSites budget (256).
+    // 5,000 returning guards select more nodes than the slice budget holds.
     let canonical = "/w/flow-audit-budget.ts";
     let mut source = String::from("export function tooManyReturns(n: number) {\n");
-    for i in 0..300 {
+    for i in 0..5000 {
         source.push_str(&format!("  if (n === {i}) return {i};\n"));
     }
     source.push_str("  return -1;\n}\n");

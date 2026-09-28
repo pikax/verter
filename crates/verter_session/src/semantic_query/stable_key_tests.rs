@@ -1655,6 +1655,185 @@ fn classification_visits_each_node_once() {
     );
 }
 
+/// A chain of unions nested `depth` deep, each level `U(k) = U(k - 1)[] | k`,
+/// reduced level by level through the canonical union authority.
+fn nested_union_chain(graph: &SemanticGraphStore, depth: usize) -> Vec<SemanticNodeId> {
+    let mut node = prim(graph, PrimitiveKind::Number);
+    let mut levels = Vec::with_capacity(depth);
+    for index in 0..depth {
+        let wrapped = graph.intern_node(SemanticNodeData::Array {
+            element: node,
+            readonly: false,
+        });
+        let literal = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(
+            index as f64,
+        )));
+        node = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            graph,
+            &[wrapped, literal],
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
+        .node;
+        levels.push(node);
+    }
+    levels
+}
+
+/// Union reduction is linear in the depth of a nested union chain: each
+/// level classifies its array, literal and union once, and orders the two
+/// members by fingerprints folded from the class table without writing the
+/// deep member's key. The bytes hashed are bounded by 256 times the key
+/// bytes of the distinct subtrees (each memoizing class is folded from at
+/// most 256 start states) plus one direct run per level, and the bytes
+/// hashed per level stay flat as the depth quadruples. Reducing every
+/// level again classifies and hashes nothing.
+#[test]
+fn union_reduction_work_is_linear_in_the_chain_depth() {
+    use crate::semantic_query::stable_key::{CLASSIFICATION_FRAMES, FINGERPRINTED_BYTES};
+    let work = || {
+        (
+            CLASSIFICATION_FRAMES.with(std::cell::Cell::get),
+            FINGERPRINTED_BYTES.with(std::cell::Cell::get),
+        )
+    };
+    let mut hashed = Vec::new();
+    for depth in [1_000usize, 2_000, 4_000] {
+        let graph = SemanticGraphStore::new();
+        CLASSIFICATION_FRAMES.with(|frames| frames.set(0));
+        FINGERPRINTED_BYTES.with(|bytes| bytes.set(0));
+        let first = nested_union_chain(&graph, depth);
+        let (frames, bytes) = work();
+        assert_eq!(
+            frames,
+            3 * depth as u64,
+            "{depth} levels classify the array, the literal and the union once each"
+        );
+        let distinct = graph.with_key_classes(|classes| classes.distinct_key_bytes_for_tests());
+        let bound =
+            256 * distinct + depth as u64 * crate::semantic_query::stable_key::FOLD_MEMO_MIN_BYTES;
+        assert!(
+            bytes <= bound,
+            "{depth} levels hashed {bytes} bytes, more than 256 times the {distinct} key bytes of their distinct subtrees plus one direct run per level ({bound})"
+        );
+        assert!(
+            distinct <= 64 * depth as u64,
+            "the distinct subtrees hold {distinct} key bytes, more than a bounded amount per level"
+        );
+        hashed.push(bytes);
+        let cold = work();
+        let again = nested_union_chain(&graph, depth);
+        assert_eq!(again, first, "premise: the same chain");
+        assert_eq!(
+            work(),
+            cold,
+            "reducing every level again classifies and hashes nothing new"
+        );
+        assert!(
+            graph.stable_key_class_count() <= graph.stable_key_classified_count() + 1,
+            "one class at most per classified node"
+        );
+        assert!(
+            graph.stable_key_memo_count() <= 256 * graph.stable_key_class_count() + 16 * depth,
+            "the memoized orders and hash-map offsets stay proportional to the classes"
+        );
+    }
+    let per_level: Vec<u64> = hashed
+        .iter()
+        .zip([1_000u64, 2_000, 4_000])
+        .map(|(bytes, depth)| bytes / depth)
+        .collect();
+    assert!(
+        per_level[2] <= per_level[0] + per_level[0] / 2,
+        "the bytes hashed per level grew with the depth: {per_level:?}"
+    );
+}
+
+/// A folded fingerprint is exactly FNV-1a over the key's written bytes, at
+/// every level of a nested union chain, and for a structure whose shared
+/// subtree the key writes once and refers back to (which is hashed from
+/// its written bytes instead).
+#[test]
+fn a_folded_fingerprint_is_the_hash_of_the_written_key() {
+    use crate::semantic_query::stable_key::class_fingerprint_for_tests;
+    let graph = SemanticGraphStore::new();
+    let levels = nested_union_chain(&graph, 300);
+    for &level in levels.iter().rev().chain(levels.iter()) {
+        let key = stable_key_for_node(&graph, level);
+        assert_eq!(
+            class_fingerprint_for_tests(&graph, level),
+            key.fingerprint(),
+            "level {} ({} key bytes)",
+            level.0,
+            key.exact().len()
+        );
+        let wrapped = graph.intern_node(SemanticNodeData::Array {
+            element: level,
+            readonly: true,
+        });
+        let key = stable_key_for_node(&graph, wrapped);
+        assert_eq!(
+            class_fingerprint_for_tests(&graph, wrapped),
+            key.fingerprint()
+        );
+    }
+    let deep = *levels.last().expect("a chain");
+    let element = |value| crate::semantic_query::TupleElement {
+        label: None,
+        value,
+        optional: false,
+        rest: false,
+    };
+    let shared = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from([element(deep), element(deep)]),
+        readonly: false,
+    });
+    let key = stable_key_for_node(&graph, shared);
+    assert!(
+        key.exact().len() < 2 * stable_key_for_node(&graph, deep).exact().len(),
+        "premise: the repeated subtree is written once"
+    );
+    assert_eq!(
+        class_fingerprint_for_tests(&graph, shared),
+        key.fingerprint()
+    );
+}
+
+/// The key table forgets released nodes and empties once released entries
+/// outnumber live ones; a key computed after either is unchanged.
+#[test]
+fn the_key_table_releases_the_classes_of_released_nodes() {
+    let graph = SemanticGraphStore::new();
+    let levels = nested_union_chain(&graph, 64);
+    let deep = *levels.last().expect("a chain");
+    let key = stable_key_for_node(&graph, deep);
+    let classified = graph.stable_key_classified_count();
+    assert!(classified >= 3 * 64, "premise: the chain is classified");
+    let released =
+        graph.with_key_classes(|classes| classes.release_nodes(|id| levels[..8].contains(&id)));
+    assert_eq!(released, 8);
+    assert_eq!(graph.stable_key_classified_count(), classified - 8);
+    assert!(
+        graph.stable_key_class_count() > 0,
+        "a minority keeps the table"
+    );
+    let released = graph.with_key_classes(|classes| classes.release_nodes(|id| id.0 < deep.0));
+    assert!(released > 0);
+    assert_eq!(
+        (
+            graph.stable_key_class_count(),
+            graph.stable_key_classified_count(),
+            graph.stable_key_memo_count()
+        ),
+        (0, 0, 0),
+        "a majority released empties the table"
+    );
+    assert_eq!(
+        stable_key_for_node(&graph, deep),
+        key,
+        "the key rebuilds identically"
+    );
+}
+
 /// Every node id a payload retains is visited by the retention walk,
 /// including the ids the semantic descent treats as leaves — a recursive
 /// back-edge's instantiation arguments, a class expression's prototype and
@@ -1737,4 +1916,62 @@ fn the_retention_walk_visits_every_retained_id() {
         ),
         "a forward argument of a back-edge fails closed"
     );
+}
+
+/// A document close forgets the key classes of the nodes it released: a
+/// chain interned under the closed document's scope, keyed, then released
+/// with the document, leaves the key table holding at most the classes of
+/// the nodes that stay live.
+#[test]
+fn closing_a_document_releases_its_key_classes() {
+    let graph = SemanticGraphStore::new();
+    let scope = crate::semantic_query::NodeScopeId::File {
+        canonical_id: Arc::from("/w/closed.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: [0u8; 16],
+        local_scope: None,
+    };
+    let kept = prim(&graph, PrimitiveKind::String);
+    let mut node = kept;
+    for index in 0..64 {
+        let literal = graph.intern_node_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(f64::from(index))),
+            scope.clone(),
+        );
+        node = graph.intern_node_with_scope(
+            SemanticNodeData::Tuple {
+                elements: Arc::from([
+                    crate::semantic_query::TupleElement {
+                        label: None,
+                        value: node,
+                        optional: false,
+                        rest: false,
+                    },
+                    crate::semantic_query::TupleElement {
+                        label: None,
+                        value: literal,
+                        optional: false,
+                        rest: false,
+                    },
+                ]),
+                readonly: false,
+            },
+            scope.clone(),
+        );
+    }
+    let kept_key = stable_key_for_node(&graph, kept);
+    let _ = stable_key_for_node(&graph, node);
+    assert!(
+        graph.stable_key_classified_count() > 64,
+        "premise: the closed document's chain is classified"
+    );
+    let report = graph.release_canonical("/w/closed.ts");
+    assert!(report.nodes_released >= 128, "premise: {report:?}");
+    assert!(
+        graph.stable_key_classified_count() <= 1,
+        "only the live primitive may keep its class, not {}",
+        graph.stable_key_classified_count()
+    );
+    assert!(graph.stable_key_class_count() <= 1);
+    assert_eq!(stable_key_for_node(&graph, kept), kept_key);
 }
