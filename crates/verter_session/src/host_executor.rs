@@ -664,3 +664,7 @@ impl StageExecutor for HostStageExecutor {
 /// The underlying function lives in [`crate::parse::imported_eval_source_type`]
 /// so WASM-only fall-back paths can reach it without the scheduler feature.
 pub(crate) use crate::parse::imported_eval_source_type;
+
+#[cfg(test)]
+#[path = "stack_refusal_tests.rs"]
+mod stack_refusal_tests;

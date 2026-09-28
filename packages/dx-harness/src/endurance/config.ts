@@ -29,6 +29,20 @@
  *  - VERTER_ENDURANCE_SYNTHETIC_SCALE     "1" → generate a synthetic corpus for the scale lane
  *  - VERTER_ENDURANCE_SCALE_OPEN_FILES    files to open in the scale lane (default 40)
  *  - VERTER_ENDURANCE_SCALE_CORPUS_FILES  synthetic corpus size (default 300)
+ *  - VERTER_ENDURANCE_CHURN_CYCLES        open/edit/query/close cycles in the churn lane (default 1000)
+ *  - VERTER_ENDURANCE_CHURN_WARMUP_CYCLES cycles before the baseline memory reading (default 100)
+ *  - VERTER_ENDURANCE_CHURN_CARRIER_BLOCKS generated churn-carrier size in blocks (default 140)
+ *  - VERTER_ENDURANCE_CHURN_GROWTH_FACTOR  final/baseline tree-RSS bound (default 1.25)
+ *  - VERTER_ENDURANCE_CHURN_GROWTH_FLOOR_BYTES absolute churn growth slack (default 64 MiB)
+ *  - VERTER_ENDURANCE_CHURN_QUIESCE_MS    quiescence budget before each churn reading (default 60000)
+ *  - VERTER_ENDURANCE_CHURN_SLOPE_WINDOWS  quiesced readings after the baseline (default 18, min 2)
+ *  - VERTER_ENDURANCE_CHURN_HEAP_PLATEAU_BYTES   server exact-heap rise band over the late span (default 2 MiB)
+ *  - VERTER_ENDURANCE_CHURN_RSS_SETTLING_BYTES   server resident-set rise band over the late span (default 8 MiB)
+ *  - VERTER_ENDURANCE_CHURN_CHILD_PLATEAU_BYTES  child resident-set rise band per plateau segment (default 8 MiB)
+ *  - VERTER_ENDURANCE_CHURN_SHIFT_BYTES          smallest single-window increment read as a level shift (default 8 MiB)
+ *  - VERTER_ENDURANCE_CHURN_MIN_PLATEAU_READINGS readings a plateau segment needs (default 5)
+ *  - VERTER_ENDURANCE_CHURN_MAX_EXTENSION_CYCLES cycles the run may extend to prove a post-shift plateau (default 400)
+ *  - VERTER_ENDURANCE_CHURN_RETENTION_PLATEAU_OBJECTS objects a counter's late rise may reach before a trend counts (default 4)
  *  - VERTER_ENDURANCE_RECEIPT             receipt destination (a `.json` file, or a directory)
  */
 import {
@@ -118,6 +132,42 @@ export function loadEnduranceConfig(env: NodeJS.ProcessEnv = process.env): Endur
     syntheticScale: env.VERTER_ENDURANCE_SYNTHETIC_SCALE === "1",
     scaleOpenFiles: readInt(env, "VERTER_ENDURANCE_SCALE_OPEN_FILES", 40, { min: 1 }),
     scaleCorpusFiles: readInt(env, "VERTER_ENDURANCE_SCALE_CORPUS_FILES", 300, { min: 2 }),
+    churnCycles: readInt(env, "VERTER_ENDURANCE_CHURN_CYCLES", 1_000, { min: 2 }),
+    churnWarmupCycles: readInt(env, "VERTER_ENDURANCE_CHURN_WARMUP_CYCLES", 100, { min: 1 }),
+    churnCarrierBlocks: readInt(env, "VERTER_ENDURANCE_CHURN_CARRIER_BLOCKS", 140, { min: 1 }),
+    churnGrowthFactor: readNumber(env, "VERTER_ENDURANCE_CHURN_GROWTH_FACTOR", 1.25, { min: 1 }),
+    churnGrowthFloorBytes: readInt(
+      env,
+      "VERTER_ENDURANCE_CHURN_GROWTH_FLOOR_BYTES",
+      64 * 1024 ** 2,
+      { min: 1 },
+    ),
+    churnQuiesceMs: readInt(env, "VERTER_ENDURANCE_CHURN_QUIESCE_MS", 60_000, { min: 1000 }),
+    churnSlopeWindows: readInt(env, "VERTER_ENDURANCE_CHURN_SLOPE_WINDOWS", 18, { min: 2 }),
+    churnPlateauBands: {
+      heapPlateauBytes: readInt(env, "VERTER_ENDURANCE_CHURN_HEAP_PLATEAU_BYTES", 2 * 1024 ** 2, {
+        min: 1,
+      }),
+      rssSettlingBytes: readInt(env, "VERTER_ENDURANCE_CHURN_RSS_SETTLING_BYTES", 8 * 1024 ** 2, {
+        min: 1,
+      }),
+      childPlateauBytes: readInt(env, "VERTER_ENDURANCE_CHURN_CHILD_PLATEAU_BYTES", 8 * 1024 ** 2, {
+        min: 1,
+      }),
+      shiftBytes: readInt(env, "VERTER_ENDURANCE_CHURN_SHIFT_BYTES", 8 * 1024 ** 2, { min: 1 }),
+      minPlateauReadings: readInt(env, "VERTER_ENDURANCE_CHURN_MIN_PLATEAU_READINGS", 5, {
+        min: 2,
+      }),
+    },
+    churnMaxExtensionCycles: readInt(env, "VERTER_ENDURANCE_CHURN_MAX_EXTENSION_CYCLES", 400, {
+      min: 0,
+    }),
+    churnRetentionPlateauObjects: readInt(
+      env,
+      "VERTER_ENDURANCE_CHURN_RETENTION_PLATEAU_OBJECTS",
+      4,
+      { min: 0 },
+    ),
     receiptPath:
       env.VERTER_ENDURANCE_RECEIPT && env.VERTER_ENDURANCE_RECEIPT.length > 0
         ? env.VERTER_ENDURANCE_RECEIPT

@@ -567,6 +567,7 @@ async fn optional_semantic_analysis_is_isolated_and_published_asynchronously() {
         assert_eq!(
             semantic.semantic_host_revision(),
             semantic_host
+                .host()
                 .registered_source_revision_token(&uri_to_canonical_id(&uri))
                 .expect("semantic Source-stage revision token")
         );

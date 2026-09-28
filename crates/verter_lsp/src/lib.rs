@@ -90,6 +90,7 @@ pub mod extension_provider;
 pub mod external_ts;
 pub mod external_ts_sync;
 pub mod features;
+pub mod heap_in_use;
 pub mod interaction_trace;
 pub mod provider_surface_store;
 pub mod provider_sync;

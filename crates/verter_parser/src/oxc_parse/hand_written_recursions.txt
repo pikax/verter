@@ -134,7 +134,6 @@ verter_semantic/src/analysis/build.rs static_prefix_from_expression
 verter_semantic/src/analysis/decl_headers.rs collect_alias_member_headers
 verter_semantic/src/analysis/decl_headers.rs leaves
 verter_semantic/src/analysis/decl_headers.rs object_literal_member_headers
-verter_semantic/src/analysis/flow/mod.rs class_runs_unserved_code
 verter_semantic/src/analysis/flow/mod.rs collect_binding_pattern
 verter_semantic/src/analysis/flow/mod.rs open_object_site
 verter_semantic/src/analysis/flow/mod.rs open_site
@@ -142,7 +141,6 @@ verter_semantic/src/analysis/flow/mod.rs open_site_at
 verter_semantic/src/analysis/flow/mod.rs record_assignment_targets
 verter_semantic/src/analysis/flow/mod.rs record_maybe_default_target
 verter_semantic/src/analysis/flow/mod.rs reference_root_identifier
-verter_semantic/src/analysis/flow/mod.rs visit_class
 verter_semantic/src/analysis/flow/value_descent.rs chain_is_call_valued
 verter_semantic/src/analysis/flow/value_descent.rs expression_contains_call
 verter_semantic/src/analysis/flow/value_descent.rs sequence_value_takes_await_arm

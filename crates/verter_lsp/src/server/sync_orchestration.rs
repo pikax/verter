@@ -138,7 +138,7 @@ impl VerterLanguageServer {
             || snapshot.freshness != freshness
             || !snapshot
                 .publication_witness
-                .is_current(self.documents.host())
+                .is_current(&self.documents.host())
         {
             return None;
         }
@@ -148,7 +148,7 @@ impl VerterLanguageServer {
             && after_freshness == freshness
             && snapshot
                 .publication_witness
-                .is_current(self.documents.host()))
+                .is_current(&self.documents.host()))
         .then_some(snapshot.contract)
     }
 
@@ -208,7 +208,7 @@ impl VerterLanguageServer {
                 != Some(snapshot.terminal_host_revision)
             || !snapshot
                 .publication_witness
-                .is_current(self.documents.host())
+                .is_current(&self.documents.host())
         {
             return None;
         }
@@ -222,7 +222,7 @@ impl VerterLanguageServer {
                 == Some(snapshot.terminal_host_revision)
             && snapshot
                 .publication_witness
-                .is_current(self.documents.host()))
+                .is_current(&self.documents.host()))
         .then_some(snapshot.contract)
     }
 
@@ -255,7 +255,7 @@ impl VerterLanguageServer {
         };
         if child.host_revision != terminal_host_revision
             || child.freshness != freshness
-            || !child.publication_witness.is_current(self.documents.host())
+            || !child.publication_witness.is_current(&self.documents.host())
         {
             return ImportSyncOutcome::Retry;
         }
@@ -420,7 +420,7 @@ impl VerterLanguageServer {
         let Some(publication_witness) = projection.publication_witness else {
             return ImportSyncOutcome::Retry;
         };
-        if !publication_witness.is_current(self.documents.host()) {
+        if !publication_witness.is_current(&self.documents.host()) {
             return ImportSyncOutcome::Retry;
         }
         #[cfg(test)]
@@ -449,7 +449,7 @@ impl VerterLanguageServer {
                 .is_none_or(|snapshot| {
                     !snapshot
                         .publication_witness
-                        .is_current(self.documents.host())
+                        .is_current(&self.documents.host())
                 })
         {
             self.child_public_contracts.remove(canonical_id);
@@ -588,7 +588,7 @@ impl VerterLanguageServer {
     /// publish path with no observability cost.
     pub(super) async fn publish_full_diagnostics_with_audit(&self, uri: &Uri) {
         let host = self.documents.host_arc();
-        if !host.config().audit_enabled {
+        if !host.host().config().audit_enabled {
             self.publish_full_diagnostics(uri).await;
             return;
         }
@@ -825,7 +825,7 @@ impl VerterLanguageServer {
                 let mut committed_state = transition.next;
                 let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
                 if let Some(dts_path) = committed_state.api_path.clone() {
-                    let api = match self.documents.host.get_public_api(&canonical_id) {
+                    let api = match self.documents.host().get_public_api(&canonical_id) {
                         Ok(api) => api,
                         Err(error) => {
                             crate::report_public_api_projection_error(
@@ -923,11 +923,11 @@ impl VerterLanguageServer {
         let profile = self.documents.tsx_profile.read().clone();
         let _ = block_in_place_if_available(|| {
             self.documents
-                .host
+                .host()
                 .ensure_ide_compiled(canonical_id, &profile)
         });
         let ide =
-            block_in_place_if_available(|| self.documents.host.get_ide(canonical_id, &profile));
+            block_in_place_if_available(|| self.documents.host().get_ide(canonical_id, &profile));
         // The dialect comes from the compile, falling back to the parse-level
         // script language when the compile is unavailable — never a `.tsx` guess.
         let is_jsx = self.documents.is_jsx_for_canonical(canonical_id);
@@ -1050,7 +1050,7 @@ impl VerterLanguageServer {
             return;
         };
 
-        self.documents.host.set_import_dependencies(
+        self.documents.host().set_import_dependencies(
             canonical_id,
             resolved_dependencies
                 .iter()
@@ -1166,7 +1166,7 @@ impl VerterLanguageServer {
         }
 
         if !prepared.resolved_dependencies.is_empty() {
-            self.documents.host.set_import_dependencies(
+            self.documents.host().set_import_dependencies(
                 canonical_id,
                 prepared
                     .resolved_dependencies
@@ -1231,9 +1231,10 @@ impl VerterLanguageServer {
             // as raw scripts: `.vue` targets sync through the Vue
             // public-api path, and a carrier-less row (`.svelte`)
             // produces no provider sync state.
-            let Some(file_language) =
-                crate::provider_sync::provider_script_language(&self.documents.host, &canonical_id)
-            else {
+            let Some(file_language) = crate::provider_sync::provider_script_language(
+                &self.documents.host(),
+                &canonical_id,
+            ) else {
                 continue;
             };
 
@@ -1243,7 +1244,7 @@ impl VerterLanguageServer {
 
             let module_references = self
                 .documents
-                .host
+                .host()
                 .upsert(verter_session::UpsertRequest {
                     canonical_id: Some(canonical_id.clone()),
                     input_id: canonical_id.clone(),
@@ -1291,7 +1292,7 @@ impl VerterLanguageServer {
 
             let resolved_dependencies = prepared.resolved_dependencies;
             if !resolved_dependencies.is_empty() {
-                self.documents.host.set_import_dependencies(
+                self.documents.host().set_import_dependencies(
                     &canonical_id,
                     resolved_dependencies
                         .iter()
@@ -1903,7 +1904,7 @@ impl VerterLanguageServer {
                     // the source, or an owner-loss advanced the barrier) requeues and closes
                     // NOTHING — the prior IDE path may be that newer transaction's live buffer.
                     if self.carrier_transaction_coordinator.admit_owned(
-                        self.documents.host(),
+                        &self.documents.host(),
                         &self.provider_sync_states,
                         &canonical_id,
                         state,
@@ -2858,7 +2859,7 @@ impl VerterLanguageServer {
         }
 
         // Fast path: host already has the file — sync directly from cached artifacts.
-        let public_api = match self.documents.host.get_public_api(canonical_id) {
+        let public_api = match self.documents.host().get_public_api(canonical_id) {
             Ok(api) => api,
             Err(error) => {
                 crate::report_public_api_projection_error(
@@ -2882,7 +2883,7 @@ impl VerterLanguageServer {
                 _ => None,
             };
             let ide = if is_tsgo {
-                let cached = self.documents.host.get_ide(canonical_id, &profile);
+                let cached = self.documents.host().get_ide(canonical_id, &profile);
                 if cached.is_some() {
                     cached
                 } else {
@@ -2896,10 +2897,10 @@ impl VerterLanguageServer {
                     // use-site's synthetic JSX property.
                     let _ = block_in_place_if_available(|| {
                         self.documents
-                            .host
+                            .host()
                             .ensure_ide_compiled(canonical_id, &profile)
                     });
-                    self.documents.host.get_ide(canonical_id, &profile)
+                    self.documents.host().get_ide(canonical_id, &profile)
                 }
             } else {
                 None
@@ -3131,7 +3132,7 @@ impl VerterLanguageServer {
                 _ => None,
             };
             block_in_place_if_available(|| {
-                self.documents.host.remove(canonical_id);
+                self.documents.host().remove(canonical_id);
                 // `remove` clears the workspace overlay: if this canonical id
                 // is ALSO currently open, re-establish the overlay from its
                 // OWN live buffer before the reload below — never let the
@@ -3147,7 +3148,7 @@ impl VerterLanguageServer {
             drop(document_commit_guard);
 
             let compiled = block_in_place_if_available(|| {
-                if !self.documents.host.ensure_loaded(canonical_id) {
+                if !self.documents.host().ensure_loaded(canonical_id) {
                     return false;
                 }
 
@@ -3158,7 +3159,7 @@ impl VerterLanguageServer {
                 // IDE TSX still syncs to the provider below.
                 let profile = self.documents.tsx_profile.read().clone();
                 self.documents
-                    .host
+                    .host()
                     .ensure_ide_compiled(canonical_id, &profile)
                     .unwrap_or(false)
             });
@@ -3166,7 +3167,7 @@ impl VerterLanguageServer {
             let mut outcome = ImportSyncOutcome::Complete;
             if compiled {
                 if is_tsgo {
-                    if let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) {
+                    if let Some(ide) = self.documents.host().get_ide(canonical_id, &profile) {
                         let delivered = self
                             .sync_carrier_ide_unresolved(
                                 canonical_id,
@@ -3178,7 +3179,7 @@ impl VerterLanguageServer {
                         outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
                     }
                 }
-                let api = match self.documents.host.get_public_api(canonical_id) {
+                let api = match self.documents.host().get_public_api(canonical_id) {
                     Ok(api) => api,
                     Err(error) => {
                         crate::report_public_api_projection_error(
@@ -3281,7 +3282,7 @@ impl VerterLanguageServer {
             _ => None,
         };
         block_in_place_if_available(|| {
-            self.documents.host.remove(canonical_id);
+            self.documents.host().remove(canonical_id);
             // `remove` clears the workspace overlay: if this canonical id is
             // ALSO currently open, re-establish the overlay from its OWN live
             // buffer before the reload below — never let the subsequent
@@ -3300,7 +3301,7 @@ impl VerterLanguageServer {
         // to prevent tokio worker thread exhaustion during background sync.
         // Deliberately UNGUARDED by `did_change_mutex` (see comment above).
         let compile_result = block_in_place_if_available(|| {
-            if !self.documents.host.ensure_loaded(canonical_id) {
+            if !self.documents.host().ensure_loaded(canonical_id) {
                 tracing::debug!("resync_background: can't read {canonical_id}");
                 return None;
             }
@@ -3313,7 +3314,7 @@ impl VerterLanguageServer {
             let profile = self.documents.tsx_profile.read().clone();
             if !self
                 .documents
-                .host
+                .host()
                 .ensure_ide_compiled(canonical_id, &profile)
                 .unwrap_or(false)
             {
@@ -3329,7 +3330,7 @@ impl VerterLanguageServer {
 
         self.refresh_carrier_dependency_tracking(canonical_id);
 
-        let ide = self.documents.host.get_ide(canonical_id, &profile);
+        let ide = self.documents.host().get_ide(canonical_id, &profile);
         self.sync_compiled_carrier_to_provider(canonical_id, ide.as_ref(), open_pin)
             .await;
     }
@@ -3425,7 +3426,7 @@ impl VerterLanguageServer {
                 }
 
                 // Sync .vue.ts as secondary provider support output.
-                let api = match self.documents.host.get_public_api(canonical_id) {
+                let api = match self.documents.host().get_public_api(canonical_id) {
                     Ok(api) => api,
                     Err(error) => {
                         crate::report_public_api_projection_error(
