@@ -227,7 +227,9 @@ describe("release gating", () => {
   const releaseCheck = read(".github/workflows/release-check.yml");
   const graph = parseNeedsGraph(release);
 
-  const publishJobs = ["publish-crates", "publish-npm", "publish-vscode"];
+  const releaseIde = read(".github/workflows/release-ide.yml");
+  const ci = read(".github/workflows/ci.yml");
+  const publishJobs = ["publish-crates", "publish-npm", "publish-vscode", "github-release"];
 
   it("keeps PR release validation read-only and reserves the full rehearsal for dispatch", () => {
     expect(releaseCheck).toMatch(/permissions:\n  contents: read/);
@@ -244,6 +246,7 @@ describe("release gating", () => {
     expect(dispatched).toContain("uses: ./.github/workflows/release.yml");
     expect(dispatched).toContain("dry_run: true");
     for (const permission of [
+      "actions: read",
       "contents: write",
       "deployments: write",
       "id-token: write",
@@ -255,19 +258,74 @@ describe("release gating", () => {
     }
   });
 
-  it.each(publishJobs)("%s transitively depends on a job that runs tests", (job) => {
-    expect(graph.has(job), `release.yml must define a \`${job}:\` job`).toBe(true);
+  // A tag publishes what its release pull request's CI tested and built. The
+  // publish jobs wait on no test or build of their own: they wait on validate,
+  // which proves that run (scripts/release-proof.mjs), and they publish its
+  // artifacts. Nothing is tested or built twice.
+  it.each(publishJobs)(
+    "%s publishes only after validate proves the release pull request's CI",
+    (job) => {
+      expect(graph.has(job), `release.yml must define a \`${job}:\` job`).toBe(true);
+      expect(chainTo(graph, job, "validate"), `${job} must wait on validate`).not.toBeNull();
+      const body = workflowJobs(release).get(job) ?? "";
+      expect(body).toContain("if: needs.validate.outputs.dry-run != 'true'");
+      const downloads = body.split("uses: actions/download-artifact@").length - 1;
+      const fromRun = body.split("run-id: ${{ needs.validate.outputs.artifacts-run }}").length - 1;
+      expect(fromRun, `every download in ${job} must read the proven run`).toBe(downloads);
+    },
+  );
 
-    const needs = graph.get(job) ?? [];
-    expect(needs.length, `${job} must declare needs:`).toBeGreaterThan(0);
+  it.each([
+    ["release.yml", release, "release: ", "Release Check"],
+    ["release-ide.yml", releaseIde, "release(ide): ", "Release IDE Check"],
+  ])(
+    "%s proves the tag before any publish, and builds only in the rehearsal",
+    (_file, workflow, prefix, rehearsal) => {
+      const validate = workflowJobs(workflow).get("validate") ?? "";
+      expect(validate).toContain("node scripts/release-proof.mjs");
+      expect(validate).toContain(`--title-prefix "${prefix}"`);
+      expect(validate).toContain(`--rehearsal "${rehearsal}"`);
+      expect(validate).toContain("if: steps.check.outputs.dry-run != 'true'");
+      expect(validate).toContain("artifacts-run: ${{ steps.proof.outputs.artifacts-run }}");
+      for (const [job, body] of workflowJobs(workflow)) {
+        if (!/^build-/u.test(job)) continue;
+        expect(body, `${job} builds once, in the rehearsal`).toContain(
+          "if: needs.validate.outputs.dry-run == 'true'",
+        );
+      }
+    },
+  );
 
-    const chain = chainTo(graph, job, "test");
-    expect(
-      chain,
-      `${job} publishes to a public registry. Its direct needs are [${needs.join(", ")}], ` +
-        "and no chain from there reaches the `test` job. A tag push therefore publishes " +
-        "without tests, clippy or fmt ever running.",
-    ).not.toBeNull();
+  it.each([
+    ["release.yml", release],
+    ["release-ide.yml", releaseIde],
+  ])("%s runs no test lane of its own: the tests are CI's", (_file, workflow) => {
+    expect(workflow).not.toMatch(/^ {2}test:$/m);
+    for (const command of [
+      "node scripts/gate.mjs",
+      "cargo clippy",
+      "cargo fmt",
+      "pnpm test",
+      "verter-vscode test\n",
+    ])
+      expect(workflow, `${command} belongs to ci.yml`).not.toContain(command);
+  });
+
+  it("runs the rehearsal as the release pull request's CI, required through CI Required", () => {
+    const jobs = workflowJobs(ci);
+    for (const [job, file, kind] of [
+      ["release-check", "release.yml", "project"],
+      ["release-ide-check", "release-ide.yml", "ide"],
+    ]) {
+      const body = jobs.get(job) ?? "";
+      expect(body).toContain(`uses: ./.github/workflows/${file}`);
+      expect(body).toContain("dry_run: true");
+      expect(body).toContain(`if: needs.detect-changes.outputs.release == '${kind}'`);
+      expect(body).toContain("actions: read");
+    }
+    const aggregate = jobs.get("ci-success") ?? "";
+    expect(aggregate).toMatch(/- release-check\n/);
+    expect(aggregate).toMatch(/- release-ide-check\n/);
   });
 
   it("parses scalar, inline-sequence and block-form needs: alike", () => {
@@ -393,27 +451,6 @@ describe("release gating", () => {
     expect(parsed.get("final")).toContain("final-command");
   });
 
-  it("defines a test job that runs the canonical Rust gate and the JS suite", () => {
-    expect(release, "release.yml must define a `test:` job").toMatch(/^ {2}test:$/m);
-    const body = workflowJobs(release).get("test") ?? "";
-    expect(body, "the release test job must run the exhaustive canonical Rust gate").toContain(
-      "node scripts/gate.mjs --exhaustive",
-    );
-    expect(body, "the test job must run clippy with -D warnings").toMatch(
-      /clippy[\s\S]*-D warnings/,
-    );
-    expect(body, "the test job must check formatting").toContain("cargo fmt");
-    expect(body, "the test job must run the JS suite").toMatch(/pnpm (run )?test/);
-  });
-
-  // @ai-generated - Release shares the dedicated 16 GiB runner policy with CI.
-  it("gives the release Rust gate a dedicated-runner memory ceiling", () => {
-    const body = workflowJobs(release).get("test") ?? "";
-    expect(body, "the release gate must retain 4 GiB of runner headroom").toContain(
-      "node scripts/gate.mjs --exhaustive --memory-limit 12GiB",
-    );
-  });
-
   // @ai-generated - Every hermetic gate invocation needs an explicitly provisioned oracle cache.
   it("provisions the offline oracle cache before every release workflow gate invocation", () => {
     const provision =
@@ -436,10 +473,9 @@ describe("release gating", () => {
       }
     }
 
-    expect(
-      gateInvocations,
-      "release.yml must invoke the canonical gate at least once",
-    ).toBeGreaterThan(0);
+    // The gate is CI's; release.yml invokes it nowhere, and any future
+    // invocation must still provision the cache first (above).
+    expect(gateInvocations).toBe(0);
   });
 });
 
@@ -1092,13 +1128,16 @@ describe("editor distribution release lane", () => {
 
   it("packages every platform before it publishes any, and counts them", () => {
     const graph = parseNeedsGraph(lane);
-    expect(graph.get("publish-vscode"), "publishing consumes build-vsix's artifact").toContain(
-      "build-vsix",
+    // A tag publishes the VSIXes its release pull request's rehearsal packaged,
+    // from the run validate proved, rather than packaging them again.
+    expect(graph.get("publish-vscode"), "publishing waits on the proof").toContain("validate");
+    const publish = workflowJobs(lane).get("publish-vscode") ?? "";
+    expect(publish, "publishing reads the proven run's VSIXes").toContain(
+      "run-id: ${{ needs.validate.outputs.artifacts-run }}",
     );
     expect(graph.get("build-vsix"), "packaging needs all three binary matrices").toEqual(
       expect.arrayContaining(["build-lsp", "build-mcp", "build-native"]),
     );
-    const publish = workflowJobs(lane).get("publish-vscode") ?? "";
     expect(publish, "a short VSIX count is a partial release, not a quiet one").toContain(
       "EXPECTED=5",
     );

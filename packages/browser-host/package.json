@@ -5,6 +5,9 @@
   "description": "Shared browser language and semantic host over the existing WASM session, not a second authority: worker probes plus the async input-acquisition to committed-snapshot handoff",
   "license": "MIT",
   "type": "module",
+  "scripts": {
+    "test": "echo '@verter/browser-host is tested by its browser gate (node scripts/browser-host-gate.mjs, the browser-host CI lane): it needs the wasm build and real browsers'"
+  },
   "exports": {
     ".": "./src/index.js",
     "./worker": "./src/worker.js",

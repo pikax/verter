@@ -67,15 +67,45 @@ const publishNpmBody = readJobBody("publish-npm").join("\n");
 const buildVsixBody = readJobBody("build-vsix").join("\n");
 const publishVscodeBody = readJobBody("publish-vscode").join("\n");
 const githubReleaseBody = readJobBody("github-release").join("\n");
+const validateBody = readJobBody("validate").join("\n");
 
-/** A job's `needs:` list, as authored job names. */
+/** A job's `needs:` list, as authored job names (`needs: a` or `needs: [a, b]`). */
 function needsOf(jobBody: string): string[] {
-  const match = /needs:\s*\[([^\]]*)\]/s.exec(jobBody);
-  if (!match) return [];
-  return match[1]
-    .split(",")
-    .map((name) => name.trim())
-    .filter(Boolean);
+  const list = /needs:\s*\[([^\]]*)\]/s.exec(jobBody);
+  if (list)
+    return list[1]
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean);
+  const single = /^\s*needs:\s*([a-z0-9-]+)\s*$/m.exec(jobBody);
+  return single ? [single[1]] : [];
+}
+
+/**
+ * The artifact families `validate` proves the release pull request's CI run
+ * still holds (`release-proof.mjs --artifacts`). A tag builds nothing: its
+ * publish jobs download that run's artifacts, which its `Release Check`
+ * rehearsal built with these same build jobs.
+ */
+function provenArtifacts(): string[] {
+  const match = /--artifacts\s+"([^"]+)"/.exec(validateBody);
+  return match ? match[1].split(",").map((family) => family.trim()) : [];
+}
+
+/** Every artifact download in a job reads the run `validate` proved. */
+function downloadsFromProvenRun(jobBody: string): void {
+  const downloads = jobBody.split("actions/download-artifact@").slice(1);
+  expect(downloads.length, "the job downloads no artifact").toBeGreaterThan(0);
+  for (const download of downloads) {
+    expect(download).toMatch(/run-id:\s*\$\{\{\s*needs\.validate\.outputs\.artifacts-run\s*\}\}/);
+  }
+}
+
+/** A job's own `permissions:` map replaces the workflow's; a cross-run download needs `actions: read`. */
+function mayReadOtherRuns(jobBody: string): boolean {
+  const own = /\n\s{4}permissions:\n((?:\s{6}.*\n?)+)/.exec(jobBody);
+  if (!own) return true; // inherits the workflow map, asserted separately
+  return /actions:\s*read/.test(own[1]);
 }
 
 /** Normalise a repo-relative path to forward slashes for comparison. */
@@ -119,7 +149,13 @@ describe.each(FAMILIES.map((family) => [family.name, family] as const))(
     });
 
     it("is downloaded and staged into its platform packages before publishing", () => {
-      expect(needsOf(publishNpmBody)).toContain(family.job);
+      // The build job runs in the release pull request's rehearsal; the tag
+      // publishes that run's upload once validate proved it.
+      expect(jobBody).toMatch(/if:\s*needs\.validate\.outputs\.dry-run == 'true'/);
+      expect(provenArtifacts()).toContain(`${family.artifactPrefix}*`);
+      expect(needsOf(publishNpmBody)).toContain("validate");
+      downloadsFromProvenRun(publishNpmBody);
+      expect(mayReadOtherRuns(publishNpmBody), "publish-npm cannot read the proven run").toBe(true);
       // The single artifact download names every family's upload prefix …
       const pattern = /pattern:\s*"?\{([^}]*)\}"?/.exec(publishNpmBody);
       expect(pattern, "publish-npm downloads no artifact set").not.toBeNull();
@@ -224,7 +260,11 @@ describe("release.yml build-vsix job", () => {
 
 describe("release.yml publish-vscode job", () => {
   it("publishes the prebuilt VSIX rather than packaging its own", () => {
-    expect(needsOf(publishVscodeBody)).toContain("build-vsix");
+    // build-vsix packages it in the rehearsal; the tag downloads the proven run's.
+    expect(provenArtifacts()).toContain("vsix");
+    expect(needsOf(publishVscodeBody)).toContain("validate");
+    downloadsFromProvenRun(publishVscodeBody);
+    expect(mayReadOtherRuns(publishVscodeBody)).toBe(true);
     expect(publishVscodeBody).toContain("name: vsix");
     expect(publishVscodeBody).toContain("vsce publish");
     expect(publishVscodeBody).not.toContain("node package.mjs");
@@ -236,13 +276,17 @@ describe("release.yml publish-vscode job", () => {
 });
 
 describe("release.yml github-release job", () => {
-  it("is gated on the builds, not on publishing", () => {
+  it("is gated on the proof that the rehearsal built every asset, not on publishing", () => {
     const needs = needsOf(githubReleaseBody);
-    expect(needs, "github-release has no needs: [...] list").not.toEqual([]);
+    expect(needs, "github-release has no needs list").toContain("validate");
 
-    for (const buildJob of ["build-native", "build-lsp", "build-mcp", "build-wasm", "build-vsix"]) {
-      expect(needs).toContain(buildJob);
+    // Every asset family comes from the proven run, whose rehearsal ran the
+    // build jobs (build-native, build-lsp, build-mcp, build-wasm, build-vsix).
+    for (const family of ["native-*", "lsp-*", "mcp-*", "wasm", "vsix"]) {
+      expect(provenArtifacts()).toContain(family);
     }
+    downloadsFromProvenRun(githubReleaseBody);
+    expect(mayReadOtherRuns(githubReleaseBody)).toBe(true);
 
     // A failed npm or Marketplace publish must not withhold the release and its
     // binary assets — every asset comes from a build job.
@@ -286,10 +330,14 @@ describe("release.yml github-release job", () => {
     expect(githubReleaseBody).toContain("GITHUB_STEP_SUMMARY");
   });
 
-  it("is still gated on the test job, transitively", () => {
-    // Dropping the publish jobs from `needs` removed the path that used to
-    // carry the test gate. The release must not become the one job that ships
-    // past a red suite, so prove `test` is still upstream of it.
+  it("is still gated on the tests, through the release pull request's green CI", () => {
+    // The release must not become the one job that ships past a red suite. The
+    // tests are the release pull request's CI lanes: validate refuses unless
+    // that pull request's CI run succeeded (CI Required included) for the
+    // tagged tree and ran the Release Check rehearsal, and every publishing
+    // job is downstream of validate.
+    expect(validateBody).toContain("node scripts/release-proof.mjs");
+    expect(validateBody).toContain('--rehearsal "Release Check"');
     const seen = new Set<string>();
     const queue = needsOf(githubReleaseBody);
     while (queue.length > 0) {
@@ -298,7 +346,7 @@ describe("release.yml github-release job", () => {
       seen.add(job);
       queue.push(...needsOf(readJobBody(job).join("\n")));
     }
-    expect([...seen]).toContain("test");
+    expect([...seen]).toContain("validate");
   });
 });
 

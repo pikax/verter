@@ -23,6 +23,14 @@
 // and shape on every committed record (validateRecordProvenance), and
 // (b) relies on the content-address + manifest digest to catch any
 // mutation of the committed bytes.
+//
+// The recorded `environment` (the Node version, platform and arch that ran
+// the generator) is generation-time identity too: the expected results are
+// bound by the implementation and realized-closure digests and by the raw
+// and normalized outputs, so the same set regenerated on another machine or
+// Node release is the same set. It is recorded and shape-validated, and
+// normalized out of the comparison like the git fields; comparing it made
+// --check fail everywhere but on the one machine that last regenerated.
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -152,6 +160,13 @@ export function validateRecordProvenance(name, record) {
   need(HEX40.test(generator.commit ?? ""), "generator.commit", "not a git object id");
   need(HEX40.test(generator.tree ?? ""), "generator.tree", "not a git object id");
   need(typeof generator.worktreeDirty === "boolean", "generator.worktreeDirty", "missing");
+  for (const field of ["node", "platform", "arch"]) {
+    need(
+      typeof record.environment?.[field] === "string" && record.environment[field].length > 0,
+      `environment.${field}`,
+      "missing",
+    );
+  }
   need(
     HEX64.test(generator.implementationSha256 ?? ""),
     "generator.implementationSha256",
@@ -184,13 +199,15 @@ export function validateRecordProvenance(name, record) {
 
 /**
  * The projection compared byte-for-byte at --check: generation-TIME git
- * identity fields are normalized to null on BOTH sides (see the module
- * header for why); every other field — including the content-bound
- * implementation and realized-closure digests — compares strictly.
+ * identity fields and the generating environment are normalized to null on
+ * BOTH sides (see the module header for why); every other field — including
+ * the content-bound implementation and realized-closure digests — compares
+ * strictly.
  */
 export function checkComparableRecord(record) {
   return {
     ...record,
+    environment: null,
     generator: {
       ...record.generator,
       commit: null,

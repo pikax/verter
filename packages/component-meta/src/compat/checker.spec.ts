@@ -3039,12 +3039,19 @@ defineProps<AlertProps>()
     const meta = await checker.getComponentMeta("Alert.vue");
     const orientationProp = meta.props.find((prop) => prop.name === "orientation");
     expect(orientationProp).toBeDefined();
+    // The rewrite puts the `@defaultValue` literal first in the type. The
+    // schema's entries keep the union order the TypeScript checker reports,
+    // which follows literal-type creation, not declaration order (and so can
+    // differ between TypeScript builds); only their set, with `undefined`
+    // last, is the contract.
     expect(orientationProp!.type).toBe('"vertical" | "horizontal" | undefined');
-    expect(orientationProp!.schema).toEqual({
+    expect(orientationProp!.schema).toMatchObject({
       kind: "enum",
       type: '"vertical" | "horizontal" | undefined',
-      schema: ['"horizontal"', '"vertical"', "undefined"],
     });
+    const entries = (orientationProp!.schema as { schema: string[] }).schema;
+    expect(entries.at(-1)).toBe("undefined");
+    expect([...entries].sort()).toEqual(['"horizontal"', '"vertical"', "undefined"].sort());
 
     const avatarProp = meta.props.find((prop) => prop.name === "avatar");
     expect(avatarProp).toBeDefined();
