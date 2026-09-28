@@ -10265,11 +10265,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let resolved = self
             .evaluate_deferred_semantic_node_with_context(*index_node, context)
             .into_active_query_build_node(self);
-        if matches!(
-            self.graph().node_data(resolved).as_deref(),
-            Some(SemanticNodeData::Literal(_))
-        ) {
-            return None;
+        match self.graph().node_data(resolved).as_deref() {
+            Some(SemanticNodeData::Literal(_)) => return None,
+            // An access by `never` — the empty key set — reads nothing:
+            // `T[never]` IS `never` (the checker's `getIndexedAccessType`
+            // over an empty index union).
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
+                let never = self
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+                return Some(
+                    crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                        QueryResult::Value(never),
+                        self.project_generation_signature(),
+                    ))
+                    .with_observed_self_roots(self.observed_self_roots_from_nodes([base])),
+                );
+            }
+            _ => {}
         }
         let keys = self.finite_index_keys(resolved, 0)?;
         if keys.is_empty() {
@@ -10796,6 +10809,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // augmenter) misses the warm keyof entry. Nested-read partiality
             // (an incomplete heritage projection) folds through the
             // re-dispatched output verbatim.
+            // A class expression's instance has the keys of the surface it
+            // reads through: its public members (a `#private` or
+            // `private` member is no key). Two or more keep the class as
+            // their origin, the checker's `keyof (Anonymous class)` /
+            // `keyof Expr`; the key set a relation reads is
+            // [`Self::key_set_of`].
+            Some(SemanticNodeData::ClassExpressionInstance { .. }) => {
+                drop(data);
+                let Some(surface) = self.class_expression_read_surface(base) else {
+                    return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                        QueryResult::Value(self.opaque(QueryError::Miss)),
+                        fence,
+                    ));
+                };
+                let observed_self_roots = self.observed_self_roots_from_nodes([base, surface]);
+                let mut keys = self.build_key_of(surface, context);
+                let keeps_origin = matches!(
+                    &keys.result,
+                    QueryResult::Value(node) if matches!(
+                        self.graph().node_data(*node).as_deref(),
+                        Some(SemanticNodeData::Union(members)) if members.len() > 1
+                    )
+                );
+                if keeps_origin {
+                    keys.result =
+                        QueryResult::Value(self.graph().intern_node(SemanticNodeData::KeyOf { base }));
+                }
+                return keys.with_observed_self_roots(observed_self_roots);
+            }
             Some(SemanticNodeData::MergedDecl { contributors }) => {
                 let merged = self.reduce_merged_decl(contributors);
                 let observed_self_roots = self.observed_self_roots_from_nodes(
@@ -10952,7 +10994,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if settled == base {
             return None;
         }
-        let keys = settled_keys(read(settled)?)?;
+        let keys = read(settled)?;
+        // A class expression's instance is the class the checker names its
+        // keys by (`keyof (Anonymous class)`), whatever alias or application
+        // reaches it.
+        if let Some(SemanticNodeData::KeyOf { base: kept }) =
+            self.graph().node_data(keys).as_deref()
+        {
+            if matches!(
+                self.graph().node_data(*kept).as_deref(),
+                Some(SemanticNodeData::ClassExpressionInstance { .. })
+            ) {
+                return Some(keys);
+            }
+        }
+        let keys = settled_keys(keys)?;
         // A union's keys are those every member shares and an
         // intersection's those of any member (`getIndexType` over a union or
         // intersection), read off the members, so an alias naming one leaves
@@ -11019,21 +11075,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             QueryResult::Value(node) => Some(node),
             _ => None,
         };
-        let keys = read(base)?;
-        let kept = match self.graph().node_data(keys).as_deref() {
-            Some(SemanticNodeData::KeyOf { base: kept }) => *kept,
-            _ => return Some(keys),
-        };
-        let settled = self.resolve_signature_source_carrier(kept, published);
-        if settled == kept {
-            return None;
+        // Each step settles the carrier a `keyof` kept to the type it
+        // stands for — a declaration or application to its body, a class
+        // expression's instance (which keeps its `keyof` origin) to the
+        // surface it reads through — until the keys settle; a carrier that
+        // settles to itself keeps its keys open.
+        let mut keys = read(base)?;
+        let mut seen = FxHashSet::default();
+        loop {
+            let kept = match self.graph().node_data(keys).as_deref() {
+                Some(SemanticNodeData::KeyOf { base: kept }) => *kept,
+                _ => return Some(keys),
+            };
+            if !seen.insert(kept) {
+                return None;
+            }
+            let settled = match self.class_expression_read_surface(kept) {
+                Some(surface) => surface,
+                None => self.resolve_signature_source_carrier(kept, published),
+            };
+            if settled == kept {
+                return None;
+            }
+            keys = read(settled)?;
         }
-        let keys = read(settled)?;
-        (!matches!(
-            self.graph().node_data(keys).as_deref(),
-            Some(SemanticNodeData::KeyOf { .. })
-        ))
-        .then_some(keys)
     }
 
     pub(super) fn intern_keyspace_keys<I>(

@@ -522,34 +522,106 @@ fn a_class_expressions_private_names_brand_its_instance_type() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `keyof` a class expression's instance type is its public keys: `keyof
-/// IA` is `never` and `keyof IG` is `"y"` (a `#private` name is no key).
+/// Class expressions whose keys `keyof` reads: returned from functions (with
+/// a private name, several public members beside `private` and `protected`
+/// ones, and a base), and held by module constants.
+const KEYED_CLASS_EXPRESSIONS: &str = r##"
+function a() { return class { #x = 1 }; }
+function g() { return class { #x = 1; y = 2 }; }
+function h() { return class { y = 2; z = 3; private p = 1; protected q = 2 }; }
+class B { b = 1 }
+function k() { return class extends B { own = 1 }; }
+const A1 = class { #x = 1 };
+let C1 = class { #x = 1; y = 2 };
+const Expr = class { e = "e"; f = 1 };
+class K2 { a = 1; b = 2 }
+type IA = InstanceType<ReturnType<typeof a>>;
+type IG = InstanceType<ReturnType<typeof g>>;
+type IH = InstanceType<ReturnType<typeof h>>;
+type IK = InstanceType<ReturnType<typeof k>>;
+"##;
+
+/// `keyof` a class expression's instance type is its public keys (a
+/// `#private`, `private` or `protected` member is no key, a base's public
+/// member is one): none is `never`, one is that key, and two or more keep the
+/// class as their origin, `keyof (Anonymous class)` — a key set a relation
+/// reads as its keys.
 ///
-/// Measured on TypeScript 7.0.2, alike under every setting.
+/// Measured on TypeScript 7.0.2 (`--target es2022`), alike under every
+/// setting: `keyof IA` is `never`, `keyof IG` `"y"`, `keyof IH` and `keyof
+/// IK` `keyof (Anonymous class)`, `keyof InstanceType<typeof A1>` `never`,
+/// `keyof InstanceType<typeof C1>` `"y"`; the key-set equality checks each
+/// answer `1`.
 ///
-/// What the lane gives: `keyof IA` and `keyof IG` unreduced (`keyof IA`,
-/// `keyof InstanceType<ReturnType<…>>`) — `keyof` over a class
-/// expression's instance type stays deferred, with or without a private
-/// name.
+/// Mutation: reading `keyof` over a class expression's instance as a miss
+/// leaves `keyof IA`, `keyof IG`, `keyof IH` and `keyof IK` their
+/// declarations' `keyof` carriers and the key-set checks unreduced.
 #[test]
-#[ignore = "keyof over a class expression's instance type reduces to its public keys"]
 fn keyof_a_class_expressions_instance_type_is_its_public_keys() {
-    let matrix = Matrix::new(PRIVATE_BRANDS);
-    let failures = matrix.types(&[("keyof IA", "never"), ("keyof IG", "\"y\"")]);
+    let matrix = Matrix::new(KEYED_CLASS_EXPRESSIONS);
+    let failures = matrix.types(&[
+        ("keyof IA", "never"),
+        ("keyof IG", "\"y\""),
+        ("keyof IH", "keyof (Anonymous class)"),
+        ("keyof IK", "keyof (Anonymous class)"),
+        ("keyof InstanceType<typeof A1>", "never"),
+        ("keyof InstanceType<typeof C1>", "\"y\""),
+        (
+            "[keyof IH] extends [\"y\" | \"z\"] ? [\"y\" | \"z\"] extends [keyof IH] ? 1 : 2 : 3",
+            "1",
+        ),
+        (
+            "[keyof IK] extends [\"own\" | \"b\"] ? [\"own\" | \"b\"] extends [keyof IK] ? 1 : 2 : 3",
+            "1",
+        ),
+        (
+            "[keyof InstanceType<typeof Expr>] extends [\"e\" | \"f\"] ? [\"e\" | \"f\"] extends [keyof InstanceType<typeof Expr>] ? 1 : 2 : 3",
+            "1",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `[keyof K1] extends [never] ? 1 : 2` over `class K1 { #x = 1 }` is `1`:
-/// the class's only member is private, so its key set is empty.
+/// `keyof` a class's instance read through `InstanceType` keeps the class as
+/// its origin: `keyof InstanceType<typeof K2>` prints `keyof K2` and `keyof
+/// InstanceType<typeof Expr>` prints `keyof Expr` (the key sets agree, as
+/// [`keyof_a_class_expressions_instance_type_is_its_public_keys`] checks).
 ///
 /// Measured on TypeScript 7.0.2, alike under every setting.
 ///
-/// What the lane gives: `2` — `keyof K1` alone reads `never`, but inside
-/// the checked tuple the conditional does not relate it as `never`.
+/// What the lane gives: the key unions `"b" | "a"` and `"f" | "e"` — a
+/// `keyof` over a library application reads no origin through it.
 #[test]
-#[ignore = "a keyof of a class with only private members relates as never inside a conditional's checked tuple"]
+#[ignore = "keyof over InstanceType of a class keeps the class as the key union's origin"]
+fn keyof_an_instance_type_application_keeps_the_class_origin() {
+    let matrix = Matrix::new(KEYED_CLASS_EXPRESSIONS);
+    let failures = matrix.types(&[
+        ("keyof InstanceType<typeof K2>", "keyof K2"),
+        ("keyof InstanceType<typeof Expr>", "keyof Expr"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A class whose members are all private has no key: `[keyof K1] extends
+/// [never]` is `1` over `class K1 { #x = 1 }`, and so over `class K3 {}` and
+/// `class K4 { private p = 1 }`; `[keyof K5] extends ["y"]` over `class K5 {
+/// #x = 1; y = 2 }` is `1`.
+///
+/// Measured on TypeScript 7.0.2 (`--target es2022`), alike under every
+/// setting.
+///
+/// Mutation: reading the `keyof` below `never` with the bottom rule before
+/// its key set settles answers the three `never` rows `2`.
+#[test]
 fn a_keyof_of_only_private_members_relates_as_never() {
-    let matrix = Matrix::new("class K1 { #x = 1 }\n");
-    let failures = matrix.types(&[("[keyof K1] extends [never] ? 1 : 2", "1")]);
+    let matrix = Matrix::new(
+        "class K1 { #x = 1 }\nclass K3 {}\nclass K4 { private p = 1 }\nclass K5 { #x = 1; y = 2 }\n",
+    );
+    let failures = matrix.types(&[
+        ("[keyof K1] extends [never] ? 1 : 2", "1"),
+        ("[keyof K3] extends [never] ? 1 : 2", "1"),
+        ("[keyof K4] extends [never] ? 1 : 2", "1"),
+        ("[keyof K5] extends [\"y\"] ? 1 : 2", "1"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
