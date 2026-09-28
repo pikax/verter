@@ -407,14 +407,11 @@ impl RepeatsUse {
         }
     }
 
-    /// The published form, in fingerprint order.
-    pub(crate) fn published(&self) -> crate::semantic_query::RecursionRepeats {
+    /// The published identity list, in fingerprint order.
+    pub(crate) fn published_identities(&self) -> Box<[(u64, u16)]> {
         let mut identities = self.identities.to_vec();
         identities.sort_unstable();
-        crate::semantic_query::RecursionRepeats {
-            identities: Arc::from(identities.into_boxed_slice()),
-            any: self.any,
-        }
+        identities.into_boxed_slice()
     }
 }
 

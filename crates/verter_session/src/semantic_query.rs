@@ -6629,38 +6629,49 @@ pub struct RelationRecursionFootprint {
     /// The most structured relations the computation stacked, the
     /// relation itself included (`0` for a pair of simple types).
     pub height: u16,
-    /// Per side (source, target): the recursion identities the computation
-    /// stacked (see [`RecursionRepeats`]).
-    pub repeats: [RecursionRepeats; 2],
+    /// Per side (source, target): a count every recursion identity's
+    /// instantiations on one path are within, the listed ones
+    /// ([`Self::side_identities`]) included: `0` when the list is exact,
+    /// the component's bound for a member of a cyclic component (whose own
+    /// computation stopped at an assumption a cold computation relates).
+    pub any: [u16; 2],
     /// The computation met a variance marker the checker reports as
     /// unreliable (`ReportsUnreliable`): a rest parameter holding it, or an
     /// unreliable parameter's argument. A variance measurement whose
     /// relations report it lets a failed argument check fall back to the
     /// structural comparison.
     pub unreliable: bool,
+    /// Per side, the recursion identities the computation stacked with the
+    /// most distinct instantiations of each on one path; `None` when
+    /// neither side stacked one (every memo entry carries a footprint, so
+    /// the rare list sits behind one pointer).
+    pub identities: Option<Arc<RecursionIdentities>>,
 }
 
-/// One side of a [`RelationRecursionFootprint`]: for each recursion
-/// identity a computation stacked, the most distinct instantiations of it
-/// on one path, and a bound every identity's count is under.
+/// The per-side identity lists of a [`RelationRecursionFootprint`]:
+/// `(identity fingerprint, instantiations)` pairs, in fingerprint order.
+/// Only an identity with type arguments has more than one instantiation,
+/// so only a generic alias's appears.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct RecursionRepeats {
-    /// `(identity fingerprint, instantiations)` pairs, in fingerprint order.
-    /// Only an identity with type arguments has more than one
-    /// instantiation, so only a generic alias's appears.
-    pub identities: Arc<[(u64, u16)]>,
-    /// A count every identity's instantiations are within, the listed ones
-    /// included: `0` when the list is exact, the component's bound for a
-    /// member of a cyclic component (whose own computation stopped at an
-    /// assumption a cold computation relates).
-    pub any: u16,
+pub struct RecursionIdentities {
+    /// Source side, target side.
+    pub sides: [Box<[(u64, u16)]>; 2],
 }
 
-impl RecursionRepeats {
-    /// Whether the computation stacked no recursion identity.
+impl RelationRecursionFootprint {
+    /// The recursion identities side `side` stacked (`0` source, `1`
+    /// target).
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.identities.is_empty() && self.any == 0
+    pub fn side_identities(&self, side: usize) -> &[(u64, u16)] {
+        self.identities
+            .as_deref()
+            .map_or(&[], |identities| &identities.sides[side])
+    }
+
+    /// Whether side `side` stacked no recursion identity.
+    #[must_use]
+    pub fn side_is_empty(&self, side: usize) -> bool {
+        self.any[side] == 0 && self.side_identities(side).is_empty()
     }
 }
 
