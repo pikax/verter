@@ -169,6 +169,7 @@ pub(crate) enum Degr {
     FailedBindingInitializer,
     UnreducedDeclaredUnion,
     UnresolvedValue,
+    PartialInterior,
 }
 
 /// The flow-graph lane expectation for one row.
@@ -767,6 +768,7 @@ pub(crate) fn degr_of(reason: Option<FlowReturnDegradation>) -> Degr {
         Some(FlowReturnDegradation::FailedBindingInitializer) => Degr::FailedBindingInitializer,
         Some(FlowReturnDegradation::UnreducedDeclaredUnion) => Degr::UnreducedDeclaredUnion,
         Some(FlowReturnDegradation::UnresolvedValue) => Degr::UnresolvedValue,
+        Some(FlowReturnDegradation::PartialInterior) => Degr::PartialInterior,
     }
 }
 

@@ -220,7 +220,8 @@ fn degradation_reason_class(degradation: FlowReturnDegradation) -> PartialReason
         FlowReturnDegradation::NonCallableBinding
         | FlowReturnDegradation::UnappliedWriteEffect
         | FlowReturnDegradation::ConditionalVarDefinition
-        | FlowReturnDegradation::UnreducedDeclaredUnion => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        | FlowReturnDegradation::UnreducedDeclaredUnion
+        | FlowReturnDegradation::PartialInterior => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
     }
 }
 

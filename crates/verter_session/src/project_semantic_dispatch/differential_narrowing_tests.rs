@@ -854,3 +854,28 @@ fn a_call_of_a_degraded_member_return_is_never_read_clean() {
         .collect();
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
+
+/// A degraded member return read as a type (`ReturnType<typeof CS.is>`,
+/// `ReturnType<CM['m']>`) reaches the published answer as a typed
+/// degradation, never clean: the checker answers `Record<string, number>`
+/// (TypeScript 7.0.2, all four settings), the lane the unnarrowed union.
+#[test]
+fn a_degraded_member_return_read_as_a_type_is_never_published_clean() {
+    let matrix = Matrix::new(DEGRADED_MEMBER_RETURNS);
+    let rows: Vec<(Read<'_>, Vec<&str>)> = [
+        "ReturnType<typeof CS.is>",
+        "ReturnType<CM['m']>",
+        "ReturnType<typeof CG.is>",
+    ]
+    .iter()
+    .map(|text| (Read::Type(text), vec!["Record<string, number>"; 4]))
+    .collect();
+    let wrong: Vec<String> = matrix
+        .verdicts(&rows)
+        .into_iter()
+        .flatten()
+        .filter(|verdict| !verdict.matched && verdict.class != "GAP")
+        .map(|verdict| verdict.lane)
+        .collect();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
