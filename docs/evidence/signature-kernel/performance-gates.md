@@ -949,7 +949,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   `unreachable_code_nested_10000_deep_returns_on_production_stacks` and
   `code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks`
   return the plan's typed budget failure at 10,000 levels on a 1 MiB
-  caller and answer `number` under the 256-return-site budget; evaluating
+  caller and answer `number` 120 levels deep; evaluating
   the unreachable region in place overflows the former. A loop body
   behind a literal `false` test is entered the same way, a frame of the
   run on a dead path its pass restores:
@@ -1196,13 +1196,18 @@ Recorded plainly so no reader mistakes absence for a pass:
   structural reducer, 200 guards take 0.33 s, and 800 answer the checker's
   `"k799"` (`wide_union_relation_tests.rs` →
   `an_equality_guard_chain_over_a_literal_union_reduces_no_relation`).
-* **The demand slice plans at most 256 return sites.** A function with
-  more `return` statements on its demanded paths is refused before
-  evaluating, with `Budget(WorkBudgetExceeded)`
-  (`FlowSliceBudget::max_return_sites`): 255 `if (x === i) return …`
-  guards and the final return answer, 256 are refused. The work each such
-  guard costs is constant (relation checks `5N + 2`, guard applications
-  `2N` at 50, 100 and 200 guards), so the refusal is the planner's
-  return-site cap, not super-linear work; the skipped
-  `differential_depth_tests.rs` →
-  `an_800_return_if_chain_answers_within_the_work_budget` holds it open.
+* **Each return site is connected work.** The demand slice plans every
+  `return` on its demanded paths, and each one is a unit of connected work
+  the demand pays before the body evaluates: a `switch` of 100, 200, 400
+  and 800 returning cases costs its cases plus two units, and a budget one
+  unit short ends on the typed work budget
+  (`flow_return_schedule_tests.rs` →
+  `each_return_site_is_connected_work_the_demand_pays_for`, 0.7 s). The
+  work each guard costs is constant (relation checks `5N + 2`, guard
+  applications `2N` at 50, 100 and 200 guards), so 800
+  `if (x === i) return …` guards answer the checker's union
+  (`differential_depth_tests.rs` →
+  `an_800_return_if_chain_answers_within_the_work_budget`, 1.6 s), and
+  `else if` chains and `switch`es of 300 and 800 returns answer in under
+  a second. A body of 10,000 returns selects more nodes than the flow-slice
+  plan budget holds and returns `Budget(WorkBudgetExceeded)`.

@@ -939,3 +939,72 @@ fn a_local_overloaded_function_resolves_over_its_overloads() {
     let failures = local_overload_misses(false);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Member calls chained on call results, each receiver its own: every call
+/// of a chain starts where the chain does, and each reads the value its own
+/// callee's object evaluated to, on every loop pass.
+const RECEIVER_CHAINS: &str = r##"
+interface A { m(this: A): B }
+interface B { m(this: B): C }
+interface C { m(this: C): D }
+interface D { tag: string | number }
+declare const a: A;
+declare function cond(): boolean;
+export function looped() { let x: string | number = 0; while (cond()) { x = a.m().m().m().tag; } return x; }
+export function straight() { return a.m().m().m(); }
+"##;
+
+/// TypeScript 7.0.2, under every setting, with no diagnostics:
+/// `string | number` looped, `D` straight.
+#[test]
+fn each_call_of_a_receiver_chain_reads_its_own_receiver() {
+    let matrix = Matrix::new(RECEIVER_CHAINS);
+    let failures = matrix.returns(&[("looped", "string | number"), ("straight", "D")]);
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+"
+        )
+    );
+}
+
+/// Calls whose value depends on their receiver: a `this`-typed return, a
+/// type parameter inferred from a `this` parameter, and `Function`'s
+/// `call` / `apply` over the function they are read off.
+const RECEIVER_SENSITIVE_CALLS: &str = r##"
+interface S { self(): this; n: number }
+interface T extends S { t: string }
+declare const t: T;
+interface G { id<X>(this: X): X; next(): H }
+interface H { tag: "h" }
+declare const g: G;
+declare const f: (x: number) => string;
+declare function mk(): (x: number) => string;
+export function selfOnce() { return t.self(); }
+export function selfTwice() { return t.self().self(); }
+export function idOnce() { return g.id(); }
+export function idThenNext() { return g.id().next().tag; }
+export function called() { return f.call(null, 1); }
+export function calledOnResult() { return mk().call(null, 1); }
+export function appliedOnResult() { return mk().apply(null, [1]); }
+"##;
+
+/// TypeScript 7.0.2, under every setting: `T`, `T`, `G`, `"h"`, and
+/// `string` for each of the three `call` / `apply` forms.
+#[test]
+#[ignore = "a call reads its receiver for a this-typed return, a this-parameter inference and Function call/apply"]
+fn a_call_reads_its_receiver_where_its_value_depends_on_it() {
+    let matrix = Matrix::new(RECEIVER_SENSITIVE_CALLS);
+    let failures = matrix.returns(&[
+        ("selfOnce", "T"),
+        ("selfTwice", "T"),
+        ("idOnce", "G"),
+        ("idThenNext", "\"h\""),
+        ("called", "string"),
+        ("calledOnResult", "string"),
+        ("appliedOnResult", "string"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

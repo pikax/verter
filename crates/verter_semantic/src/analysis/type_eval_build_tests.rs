@@ -2811,6 +2811,76 @@ fn indexed_call_ir_preserves_nested_calls_and_rebases_program_points() {
     ));
 }
 
+/// A member call on a call's result lowers its callee as a member read off
+/// the call before it, which is also its receiver, so the call keeps no
+/// separate receiver record: `b.m().m()` is `Call { callee: Member {
+/// object: Call(b.m), name: "m" } }`.
+#[test]
+fn a_member_call_on_a_call_result_reads_its_callee_off_the_call() {
+    let source = "b.m().m()";
+    let allocator = oxc_allocator::Allocator::default();
+    let expression =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse_expression()
+            .expect("fixture expression");
+    let indexed =
+        crate::analysis::type_eval_build::lower_indexed_value_expression(&expression, source);
+    let crate::analysis::type_eval_build::IndexedValueExpression::Call(call) = indexed else {
+        panic!("the outer call is a call record");
+    };
+    assert!(
+        call.receiver.is_none(),
+        "the callee's object is the receiver"
+    );
+    let crate::analysis::type_eval_build::IndexedValueExpression::Member { object, name } =
+        call.callee.as_ref()
+    else {
+        panic!(
+            "the callee is a member read off the inner call: {:?}",
+            call.callee
+        );
+    };
+    assert_eq!(name.as_ref(), "m");
+    assert!(matches!(
+        object.as_ref(),
+        crate::analysis::type_eval_build::IndexedValueExpression::Call(inner) if inner.point == 0
+    ));
+}
+
+/// A receiver chain 10,000 links long lowers, rebases and drops on a 1 MiB
+/// thread: each is a walk of an explicit stack, never a native level per
+/// link.
+#[test]
+fn a_receiver_chain_10000_links_long_lowers_rebases_and_drops_on_a_small_stack() {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let source = format!("b{}", ".m()".repeat(10_000));
+            let allocator = oxc_allocator::Allocator::default();
+            let expression = verter_parser::oxc_parse::Parser::new(
+                &allocator,
+                &source,
+                oxc_span::SourceType::ts(),
+            )
+            .parse_expression()
+            .expect("fixture expression");
+            let mut indexed = crate::analysis::type_eval_build::lower_indexed_value_expression(
+                &expression,
+                &source,
+            );
+            crate::analysis::type_eval_build::offset_indexed_value_expression(&mut indexed, 7);
+            let crate::analysis::type_eval_build::IndexedValueExpression::Call(call) = &indexed
+            else {
+                panic!("the outer call is a call record");
+            };
+            assert_eq!(call.point, 7);
+            drop(indexed);
+        })
+        .expect("spawn the lowering thread")
+        .join()
+        .expect("the chain lowers, rebases and drops");
+}
+
 fn indexed_call_with_observed_roots(
     source: &str,
 ) -> (
