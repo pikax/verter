@@ -498,10 +498,23 @@ Recorded plainly so no reader mistakes absence for a pass:
   the 2 MiB default of the tokio blocking and rayon CPU pools and the
   scheduler's I/O and CPU workers, and the 8 MiB of the LSP serve thread,
   the host CPU pool and the declaration-lowering workers. A pair that is
-  no entry — a small union source — still takes a relation frame, at most
-  one beside the counted frame of its member's pair; 99 such levels relate
-  on the 2 MiB default test stack unoptimized
-  (`a_small_union_source_is_no_recursion_entry_of_its_own`).
+  no entry — a small union source against a target that is no union — takes
+  no relation frame either: the checker relates it without caching it
+  (`skipCaching`), member by member, and so does the lane
+  (`relate_uncached_union_source`), so a chain of such unions holds one
+  frame open per entry whatever its arms are written as. It took a frame
+  of its own beside its member's before: with each arm written as
+  `Box<S(i-1)>` over `type Box<X> = { v: X }`, 99 levels needed 1,152 to
+  1,280 KiB optimized, over the 1 MiB of `verter_wasm`. Measured optimized
+  on a thread of each size at 99 and 100 levels: literal, alias and
+  generic-alias arms fit 896 KiB and overflow 768
+  (`a_small_union_source_opens_no_frame_of_its_own`, which also holds the
+  frames open at once to the levels plus eight, and
+  `a_small_union_source_is_no_recursion_entry_of_its_own`), nested object
+  types fit 768 KiB, nested `Box` applications 640 KiB, and the doubling
+  unions of `a_pair_every_union_member_reaches_is_related_once` 1 MiB;
+  unoptimized, every shape fits 1.5 MiB (nested `Box` applications 1 MiB),
+  under the 2 MiB default test stack.
 
 * **A long logical chain applies a quadratic count of guards and
   evaluates without a native level per operand.** Each operand of `a && b
