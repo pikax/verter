@@ -1418,6 +1418,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "60b88e0dd8c216eb7c3a29684952ed99475202da6431d8dfe46d4e592b0f7a6b",
     ),
     (
+        "N32_optional_chain_property_discriminant",
+        "1a3ba50b8d6e1c0059f17e42b97c403bdc183398882b1dce5b3d4b49968d630d",
+    ),
+    (
         "N31_discriminated_union_switch_positive_control",
         "82864336129b447c34bf97d99dd936464a993c1c7a6112ab35892ffa151ca93c",
     ),
@@ -5370,11 +5374,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member Union carrying Opaque(Miss) — the recursive expectation vocabulary has no Miss variant, so the surface is unspellable as a deep pin; the member pin plus the KnownOwed note carry it",
     ),
     (
-        "N32_optional_chain_property_discriminant",
-        Owner::U6NarrowLattice,
-        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
-    ),
-    (
         "N33_computed_property_discriminant",
         Owner::U6NarrowLattice,
         "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
@@ -5471,7 +5470,6 @@ const OPEN_DEBTS: &[&str] = &[
     //    ReturnOnly (zero candidates, recomputed cold), never a
     //    silently narrowed answer.
     "N29_switch_optional_chain_discriminant",
-    "N32_optional_chain_property_discriminant",
     "N33_computed_property_discriminant",
     "N34_non_null_asserted_property_discriminant",
     "N39_instanceof_imported_class",
@@ -5614,7 +5612,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // dropping N25's dead contributor, and a correlated tuple's
     // destructured discriminant narrows its siblings (N47), and an enum
     // member discriminant narrows as the checker's does (N65): 31.
-    (Owner::U6NarrowLattice, 38, 31, 7),
+    (Owner::U6NarrowLattice, 38, 32, 6),
     // A call's predicate is read from its callee's resolved signature —
     // an arrow bound to a `const`, an object-literal method, a generic
     // instantiated at the call (N56, N57, N59) — and a statement call

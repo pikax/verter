@@ -10953,6 +10953,14 @@ impl<'a> Lowerer<'a> {
                             )));
                         }
                     }
+                    if let Some(disposition) = self.optional_chain_discriminant_guard(
+                        subject_side,
+                        literal_side,
+                        negated,
+                        false,
+                    ) {
+                        return disposition;
+                    }
                     let Some(subject) = self.narrow_subject_of(subject_side) else {
                         continue;
                     };
@@ -11008,6 +11016,14 @@ impl<'a> Lowerer<'a> {
                 for (subject_side, literal_side) in
                     [(&binary.left, &binary.right), (&binary.right, &binary.left)]
                 {
+                    if let Some(disposition) = self.optional_chain_discriminant_guard(
+                        subject_side,
+                        literal_side,
+                        negated,
+                        true,
+                    ) {
+                        return disposition;
+                    }
                     let Some(subject) = self.narrow_subject_of(subject_side) else {
                         continue;
                     };
@@ -12879,6 +12895,80 @@ impl<'a> Lowerer<'a> {
     /// not — a SUBSET of the checker's type, which drops a real
     /// contributor and is worse than the superset a missing narrow
     /// produces.
+    /// `root?.k === literal` (`==` with `loose`, `!==` / `!=` with
+    /// `negated`) against a literal that is neither `null` nor
+    /// `undefined`: a discriminant comparison of `root.k` (the checker's
+    /// `narrowTypeByDiscriminantProperty`) and, with `strictNullChecks`,
+    /// the optional chain's containment (`narrowTypeByOptionalChainContainment`):
+    /// on the edge where the chain equals the literal, `root` is not
+    /// nullish. `None` for any other chain, which keeps its rails.
+    fn optional_chain_discriminant_guard(
+        &self,
+        subject_side: &Expression<'_>,
+        literal_side: &Expression<'_>,
+        negated: bool,
+        loose: bool,
+    ) -> Option<GuardDisposition> {
+        let Expression::ChainExpression(chain) = unwrap_parenthesized(subject_side) else {
+            return None;
+        };
+        let (object, key) = match &chain.expression {
+            oxc_ast::ast::ChainElement::StaticMemberExpression(member) if member.optional => {
+                (&member.object, Arc::from(member.property.name.as_str()))
+            }
+            oxc_ast::ast::ChainElement::ComputedMemberExpression(member) if member.optional => {
+                (&member.object, literal_member_key(&member.expression)?)
+            }
+            _ => return None,
+        };
+        let root = self.narrow_subject_of(object)?;
+        if !root.path.is_empty() {
+            return None;
+        }
+        let literal = guard_literal_of(literal_side, self.source)?;
+        if matches!(
+            literal,
+            SliceGuardLiteral::Null | SliceGuardLiteral::Undefined
+        ) {
+            return None;
+        }
+        let member = SliceNarrowSubject {
+            root: root.root.clone(),
+            path: Arc::from([key]),
+        };
+        if self.subject_root_carries_an_unmentioned_narrowing(&member) {
+            return Some(GuardDisposition::Unexpressible);
+        }
+        let discriminant = SliceGuard::EqLiteral {
+            subject: member,
+            literal,
+            negated,
+            loose,
+        };
+        if !self.nullability.is_strict() {
+            return Some(GuardDisposition::modeled(discriminant));
+        }
+        // The edge where the chain holds the literal: `root` is neither
+        // `null` nor `undefined`. The other edge adds nothing.
+        let nullish: Arc<[SliceGuard]> = Arc::from(
+            [SliceGuardLiteral::Null, SliceGuardLiteral::Undefined]
+                .into_iter()
+                .map(|literal| SliceGuard::EqLiteral {
+                    subject: root.clone(),
+                    literal,
+                    negated: !negated,
+                    loose: false,
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        Some(GuardDisposition::modeled(if negated {
+            SliceGuard::Or(Arc::from([SliceGuard::Or(nullish), discriminant]))
+        } else {
+            SliceGuard::And(Arc::from([SliceGuard::And(nullish), discriminant]))
+        }))
+    }
+
     fn narrow_subject_of(&self, expression: &Expression<'_>) -> Option<SliceNarrowSubject> {
         let mut segments: Vec<Arc<str>> = Vec::new();
         let mut current = reference_candidate(expression);
