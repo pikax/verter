@@ -67,7 +67,10 @@ pub(super) fn prepare_state_bindings(
     let names: Vec<String> = decls.iter().map(|(n, _, _)| n.clone()).collect();
     let mut collector = ScriptUseCollector::tracking(&names);
     use oxc_ast_visit::Visit;
-    verter_parser::oxc_parse::with_program_stack(program, || collector.visit_program(program));
+    // A walk refused its stack scans nothing; the compile around it is
+    // refused with the refusal.
+    let _ =
+        verter_parser::oxc_parse::leased_program_walk(program, || collector.visit_program(program));
 
     let mut tracked = Vec::with_capacity(decls.len());
     for (name, declared, proxiable) in decls {
@@ -360,7 +363,10 @@ pub(super) fn prepare_legacy_let_tracking(
     // nested local of the same name never counts).
     let mut collector = super::expr::ScriptUseCollector::tracking_writes_only(&names);
     use oxc_ast_visit::Visit;
-    verter_parser::oxc_parse::with_program_stack(program, || collector.visit_program(program));
+    // A walk refused its stack collects nothing; the compile around it is
+    // refused with the refusal.
+    let _ =
+        verter_parser::oxc_parse::leased_program_walk(program, || collector.visit_program(program));
     rows.into_iter()
         .map(|(name, binding)| TrackedLegacyLet {
             script_uses: collector.use_set(&name),

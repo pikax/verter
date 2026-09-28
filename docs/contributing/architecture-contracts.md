@@ -42,7 +42,7 @@ linked above; nothing here duplicates it.
 ARH1 ratified five "hotspot" files — high-traffic modules whose surfaces,
 state and import directions are under active narrowing. Each subsection
 below names the surviving owners and the minimal public surface; the exact
-rows (snapshots, per-hook consumer inventories, narrowing dispositions) are
+rows (per-hook consumer inventories, narrowing dispositions) are
 in the dependency contracts file.
 
 ### Scheduler — `crates/verter_scheduler/src/scheduler.rs`
@@ -156,22 +156,20 @@ item (and to the hotspot path itself when the retained list is empty). A
 retained surface without a catalog id, or a mapped id absent from the
 catalog, fails `pnpm --filter docs check`.
 
-Population and snapshot counts (importers, retained surfaces, test-hook
-consumers) were ratified with the landing
-"docs(arch): ratify responsibility, visibility and dependency contracts (#636)"
-on 2026-09-19. Each hotspot's
-`importDirection.measurementBasis` records the measurement *method*
-(production import tree, `cfg(test)` stripped, use-statements and inline
-paths). The original host/profile of that measurement is unrecorded in ARH1 contract products;
-ARH2 records host/profile drift when it re-derives
-counts. Live re-derivation is the CI `architecture-health` job on
-`ubuntu-latest` with Node from `.nvmrc`, running
-`node tests/architecture-health/ARH1/verify.mjs`. A drifted count fails
-that command. Historical landing titles and dates are descriptive context only. Verification
-checks the current tree and does not depend on historical Git objects, commit
-ancestry or matching history text. Squash merging therefore cannot invalidate
-the proof. Any count claim that contradicts a live verifier result is a bug
-in the doc.
+The importer, retained-surface and test-hook consumer populations are
+joined as sets against the live tree: every file that references a hotspot
+across crates is a declared importer, and every declared importer references
+it. Each hotspot's `importDirection.measurementBasis` records the measurement
+*method* (production import tree, `cfg(test)` stripped, use-statements and
+inline paths). The original host/profile of that measurement is
+unrecorded in ARH1 contract products. File size, line counts and item counts
+are not architecture evidence; no verifier records or compares them, so
+growing or shrinking a hotspot never needs a product update. Live verification is the CI
+`architecture-health` job on `ubuntu-latest` with Node from `.nvmrc`,
+running `node tests/architecture-health/ARH1/verify.mjs`. Historical landing
+titles and dates are descriptive context only. Verification checks the current
+tree and does not depend on historical Git objects, commit ancestry or matching
+history text, so squash merging cannot invalidate the proof.
 
 ## Architecture-health PR checklist
 

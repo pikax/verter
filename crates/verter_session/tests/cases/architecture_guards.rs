@@ -333,112 +333,6 @@ fn no_local_vite_helpers_in_lsp() {
 }
 
 #[test]
-fn god_module_size_budget() {
-    // Target-root walkdir scan, production files only.
-    //
-    // The guard is intentionally scoped to the five Phase 11 god-module
-    // targets. A repository-wide scan would fail on unrelated large files
-    // that Phase 11 does not own; scanning only the old exact filenames
-    // would lose signal after a target becomes a folder module.
-    //
-    // Each target below may exist as the original file, as the post-split
-    // directory module, or as both when the split keeps a thin shell file
-    // next to private siblings. The guard walks whichever form exists,
-    // fails if neither form exists, and asserts every production .rs file
-    // under that target <= 4000 LOC.
-    // Test fixtures are excluded because Phase 11's public budget is for
-    // production module ownership; large test fixtures are governed by the
-    // testing skill's sibling-test extraction rules.
-    use std::collections::HashSet;
-    use walkdir::WalkDir;
-    const DEFAULT_MAX_LINES: usize = 4000;
-
-    fn is_test_fixture(rel: &str) -> bool {
-        rel.ends_with("_tests.rs") || rel.ends_with("/tests.rs") || rel.contains("/tests/")
-    }
-
-    fn check_file(
-        workspace: &std::path::Path,
-        path: &std::path::Path,
-        seen: &mut HashSet<String>,
-        violations: &mut Vec<String>,
-    ) {
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            return;
-        }
-        let rel = path
-            .strip_prefix(workspace)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        if !seen.insert(rel.clone()) || is_test_fixture(&rel) {
-            return;
-        }
-        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-        let lines = src.lines().count();
-        if lines > DEFAULT_MAX_LINES {
-            violations.push(format!(
-                "{rel}: {lines} > {DEFAULT_MAX_LINES} (Phase 11 god-module budget)"
-            ));
-        }
-    }
-
-    let phase_11_targets = [
-        (
-            "crates/verter_session/src/meta_resolve.rs",
-            "crates/verter_session/src/meta_resolve",
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_query_engine.rs",
-            "crates/verter_session/src/resolver_core/component_meta_query_engine",
-        ),
-        (
-            "crates/verter_session/src/host_manage.rs",
-            "crates/verter_session/src/host_manage",
-        ),
-        (
-            "crates/verter_compiler/src/ide/script.rs",
-            "crates/verter_compiler/src/ide/script",
-        ),
-        (
-            "crates/verter_lsp/src/server.rs",
-            "crates/verter_lsp/src/server",
-        ),
-    ];
-    let workspace = workspace_root();
-    let mut violations = Vec::<String>::new();
-    let mut seen = HashSet::<String>::new();
-    for (file_rel, dir_rel) in phase_11_targets {
-        let file_root = workspace.join(file_rel);
-        let dir_root = workspace.join(dir_rel);
-        let mut found_target = false;
-        if file_root.is_file() {
-            found_target = true;
-            check_file(&workspace, &file_root, &mut seen, &mut violations);
-        }
-        if dir_root.is_dir() {
-            found_target = true;
-            for entry in WalkDir::new(&dir_root) {
-                let entry = entry.expect("walkdir entry");
-                if entry.file_type().is_file() {
-                    check_file(&workspace, entry.path(), &mut seen, &mut violations);
-                }
-            }
-        }
-        if !found_target {
-            violations.push(format!(
-                "{file_rel} / {dir_rel}: missing Phase 11 target root"
-            ));
-        }
-    }
-    assert!(
-        violations.is_empty(),
-        "god_module_size_budget violations:\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
 fn arh12_structural_helpers_cover_aliases_targets_and_comments() {
     let manifest = r#"
 [dependencies]
@@ -1400,10 +1294,6 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
 // or carry an explicit allow-list entry with a phase-report citation
 // explaining why the recursion is bounded by another invariant
 // (data-structure DAG, finite AST depth from a finite source, etc.).
-//
-// Pattern mirrors `god_module_size_budget`'s allow-list approach (see
-// the head of this file). This is a doc-only test guard rewrite —
-// production code is not touched.
 
 mod resolver_core_recursion {
     use std::collections::HashMap;

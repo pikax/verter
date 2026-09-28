@@ -28,7 +28,7 @@
         "id": "ARH2",
         "kind": "node"
       },
-      "obligation": "characterize current surfaces before any narrowing lands and re-derive the ARH0 inventory populations and this node's importer/consumer populations on the then-current candidate (the recorded snapshot counts and populations are live invariants the verifier derives from the measured tree on every run, so a re-derivation that changes the tree must refresh them in the same change); record any drift in host/profile basis alongside the re-derived counts."
+      "obligation": "characterize current surfaces before any narrowing lands and re-derive the ARH0 inventory populations and this node's importer/consumer populations on the then-current candidate (the importer and consumer populations are live set joins the verifier derives from the measured tree on every run; file size and item counts are not recorded); record any drift in host/profile basis alongside the re-derived populations."
     },
     {
       "producer": {
@@ -145,15 +145,6 @@
           "declaration": "pub mod scheduler;"
         }
       ],
-      "snapshot": {
-        "pubFn": 56,
-        "pubFnTestHooks": 16,
-        "pubCrateFn": 12,
-        "pubType": 9,
-        "pubCrateMod": 0,
-        "inlinePubMod": 0,
-        "pubStructField": 20
-      },
       "authority": [
         {
           "responsibility": "pool submission and admission control",
@@ -695,15 +686,6 @@
           "declaration": "pub(crate) mod flow_return;"
         }
       ],
-      "snapshot": {
-        "pubFn": 0,
-        "pubFnTestHooks": 0,
-        "pubCrateFn": 20,
-        "pubType": 0,
-        "pubCrateMod": 1,
-        "inlinePubMod": 0,
-        "pubStructField": 0
-      },
       "authority": [
         {
           "responsibility": "flow-return semantic dispatch",
@@ -865,15 +847,6 @@
           "declaration": "pub(crate) mod build;"
         }
       ],
-      "snapshot": {
-        "pubFn": 0,
-        "pubFnTestHooks": 0,
-        "pubCrateFn": 9,
-        "pubType": 0,
-        "pubCrateMod": 0,
-        "inlinePubMod": 0,
-        "pubStructField": 0
-      },
       "authority": [
         {
           "responsibility": "dispatch build/admission",
@@ -1008,15 +981,6 @@
           "declaration": "pub mod semantic_query;"
         }
       ],
-      "snapshot": {
-        "pubFn": 179,
-        "pubFnTestHooks": 0,
-        "pubCrateFn": 48,
-        "pubType": 202,
-        "pubCrateMod": 2,
-        "inlinePubMod": 15,
-        "pubStructField": 309
-      },
       "authority": [
         {
           "responsibility": "semantic query envelope assembly",
@@ -1355,15 +1319,6 @@
           "declaration": "pub(crate) mod flow_slice_content;"
         }
       ],
-      "snapshot": {
-        "pubFn": 22,
-        "pubFnTestHooks": 0,
-        "pubCrateFn": 17,
-        "pubType": 64,
-        "pubCrateMod": 2,
-        "inlinePubMod": 0,
-        "pubStructField": 117
-      },
       "authority": [
         {
           "responsibility": "flow slice content projection",
@@ -1474,5 +1429,5 @@
       }
     }
   ],
-  "ac4Rationale": "AC4 surfaces a contract-only node cannot discharge with artifacts are specified for its producers instead: the VIM/DX capability mapping and the exact host/profile evidence are DOC2/ARH2 obligations above; migration notes are each narrowing row's exact consumersAffected inventory plus the cutover dispositions; permissions are not applicable (no capability, filesystem, network or editor-permission surface is created or widened at this node, so there is no permission note to publish); uncertainty is recorded as population and snapshot counts enforced by the verifier against the live tree on every run, with the source title and date retained as descriptive context only, and no partial or conditional runtime result is claimed anywhere in these bytes."
+  "ac4Rationale": "AC4 surfaces a contract-only node cannot discharge with artifacts are specified for its producers instead: the VIM/DX capability mapping and the exact host/profile evidence are DOC2/ARH2 obligations above; migration notes are each narrowing row's exact consumersAffected inventory plus the cutover dispositions; permissions are not applicable (no capability, filesystem, network or editor-permission surface is created or widened at this node, so there is no permission note to publish); uncertainty is recorded as importer and consumer populations joined by the verifier against the live tree on every run (no file size or item count is recorded), with the source title and date retained as descriptive context only, and no partial or conditional runtime result is claimed anywhere in these bytes."
 }

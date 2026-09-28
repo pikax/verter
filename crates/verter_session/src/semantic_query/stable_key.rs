@@ -341,15 +341,20 @@ fn encode_scope_id(enc: &mut Recipe, scope: &ScopeId) {
 /// reduces the reachable structure to a table of distinct subtrees
 /// (classes), classifying each node once, then writes the root's class.
 pub fn stable_key_for_node(graph: &SemanticGraphStore, id: SemanticNodeId) -> StableKey {
-    let mut table = ClassTable::new(graph);
-    let root = table.classify(id);
-    StableKey::from_exact(table.write(root))
+    graph.with_key_classes(|classes| {
+        let mut table = ClassTable::new(graph, classes);
+        let root = table.classify(id);
+        StableKey::from_exact(table.write(root))
+    })
 }
 
-// Test-only: classification frames opened on this thread.
+// Test-only: classification frames opened, and key bytes written to hash a
+// class's fingerprint, on this thread.
 #[cfg(test)]
 thread_local! {
     pub(crate) static CLASSIFICATION_FRAMES: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+    pub(crate) static FINGERPRINTED_BYTES: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
 }
 
@@ -375,7 +380,35 @@ struct Class {
     /// Length of the subtree written out in full, every occurrence inline
     /// (saturating).
     full_len: u64,
+    /// The fingerprint of the class's key (the class written as a key's
+    /// root), once computed.
+    fingerprint: Option<u64>,
+    /// Whether the class is written the same wherever it occurs: at most
+    /// one of its children (counted with repeats) is longer than
+    /// [`SHARED_SUBTREE_MIN_BYTES`], and that child is linear too. No
+    /// subtree long enough to be shared then occurs twice below it, so no
+    /// back-reference is ever written inside it and its bytes are its
+    /// full expansion, in every key that contains it.
+    linear: bool,
+    /// `FNV_PRIME` to the power of [`Self::full_len`]: how a linear
+    /// class's bytes scale the hash state they are folded into.
+    power: u64,
+    /// For a linear class, the bytes of its expansion a fold hashes
+    /// directly: all of them but those of its nearest memoizing
+    /// descendant on its long-child path.
+    direct_len: u64,
+    /// Whether folds of this linear class are memoized: its direct bytes
+    /// are at least [`FOLD_MEMO_MIN_BYTES`].
+    memoized: bool,
 }
+
+/// Shortest direct run of a linear class's bytes whose fold offsets are
+/// memoized. A class's offsets take at most 256 entries of eight bytes,
+/// so one is kept only for classes that would otherwise rehash at least as
+/// many bytes: the memoized offsets never outweigh the key bytes they
+/// stand for, and a fold hashes fewer than this many bytes before it
+/// reaches a memoizing class.
+pub const FOLD_MEMO_MIN_BYTES: u64 = 256 * 8;
 
 /// A child a frame has classified, per hole.
 enum Filled {
@@ -393,27 +426,124 @@ struct OpenFrame {
     set: Option<(usize, Vec<ClassId>)>,
 }
 
-/// Classification state for one key. It lives for one key computation and
-/// is dropped with it.
-struct ClassTable<'g> {
-    graph: &'g SemanticGraphStore,
+/// The stable-key classes of one store's nodes: every distinct subtree the
+/// store's keys have met, hash-consed by its parts, each node's class, the
+/// memoized order of compared class pairs, and each class's key
+/// fingerprint once computed.
+///
+/// **Owner, lifetime, release.** The table belongs to the
+/// [`SemanticGraphStore`] whose arena its node ids index, and dies with it:
+/// it is never shared between stores. A node's class is a pure function of
+/// its immutable payload and its children's classes over an acyclic arena
+/// whose ids are never reused, so an entry never goes stale and needs no
+/// invalidation on edit; dropping the whole table at any point only costs
+/// recomputation, and the next key rebuilds identical classes.
+///
+/// **Bound.** Every class is built for one classified node (plus the one
+/// class of an absent child), a class memoizes at most 256 fold offsets
+/// and only when it stands for at least [`FOLD_MEMO_MIN_BYTES`] key bytes
+/// of its own, and the memoized orders are the comparisons of the
+/// classified nodes' sets. When the store releases nodes (a document close), their
+/// entries are forgotten ([`Self::release_nodes`]) and the table is
+/// emptied once released entries outnumber live ones, so it stays
+/// proportional to the live nodes it classified.
+#[derive(Default)]
+pub(crate) struct KeyClasses {
     classes: Vec<Class>,
     interned: FxHashMap<Box<[u8]>, ClassId>,
     /// Each classified node's class: a node's subtree is the same at every
-    /// occurrence, so it is classified once.
+    /// occurrence, so it is classified once per store.
     classified: FxHashMap<SemanticNodeId, ClassId>,
     order: FxHashMap<(ClassId, ClassId), Ordering>,
+    /// Each memoizing linear class's hash map (`ClassTable::fold`): the
+    /// offset `T[l]` its bytes add to a state of low byte `l`, for the low
+    /// bytes it was folded at — at most 256 per class.
+    folds: FxHashMap<(ClassId, u8), u64>,
+    /// Classified nodes released since the table was last emptied.
+    released: usize,
+}
+
+impl KeyClasses {
+    /// Forget the classes of released nodes. A released id is never handed
+    /// out again, so its entry can never be read; the classes it reached
+    /// stay hash-consed for the live nodes that share them. Once the
+    /// released entries outnumber the live ones the whole table is emptied
+    /// (the next key rebuilds identical classes, since a class is a pure
+    /// function of its node's payload and its children's classes), so the
+    /// table stays proportional to the live nodes it classified: every
+    /// class was built for a classified node. Returns how many entries of
+    /// `dead` it held.
+    pub(crate) fn release_nodes(&mut self, dead: impl Fn(SemanticNodeId) -> bool) -> usize {
+        let before = self.classified.len();
+        self.classified.retain(|&id, _| !dead(id));
+        let released = before - self.classified.len();
+        self.released += released;
+        if self.released > self.classified.len() {
+            *self = Self::default();
+        }
+        released
+    }
+
+    /// Test-only: the key bytes of the held classes' own parts — each
+    /// class's literal bytes and one length prefix per child.
+    #[cfg(test)]
+    pub(crate) fn distinct_key_bytes_for_tests(&self) -> u64 {
+        self.classes
+            .iter()
+            .map(|class| {
+                class
+                    .parts
+                    .iter()
+                    .map(|part| match *part {
+                        Part::Lit(start, end) => u64::from(end - start),
+                        Part::Child(child) => {
+                            length_prefix(self.classes[child as usize].full_len).1 as u64
+                        }
+                    })
+                    .sum::<u64>()
+            })
+            .sum()
+    }
+
+    /// Distinct subtrees (classes) held.
+    #[must_use]
+    pub(crate) fn class_count(&self) -> usize {
+        self.classes.len()
+    }
+
+    /// Nodes whose class is held.
+    #[must_use]
+    pub(crate) fn classified_count(&self) -> usize {
+        self.classified.len()
+    }
+
+    /// Memoized class orders and hash-map offsets held.
+    #[must_use]
+    pub(crate) fn memo_count(&self) -> usize {
+        self.order.len() + self.folds.len()
+    }
+}
+
+impl std::fmt::Debug for KeyClasses {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyClasses")
+            .field("classes", &self.classes.len())
+            .finish()
+    }
+}
+
+/// Classification of one key's structure into its store's table.
+struct ClassTable<'t> {
+    graph: &'t SemanticGraphStore,
+    table: &'t mut KeyClasses,
     frames: Vec<OpenFrame>,
 }
 
-impl<'g> ClassTable<'g> {
-    fn new(graph: &'g SemanticGraphStore) -> Self {
+impl<'t> ClassTable<'t> {
+    fn new(graph: &'t SemanticGraphStore, table: &'t mut KeyClasses) -> Self {
         Self {
             graph,
-            classes: Vec::new(),
-            interned: FxHashMap::default(),
-            classified: FxHashMap::default(),
-            order: FxHashMap::default(),
+            table,
             frames: Vec::new(),
         }
     }
@@ -484,7 +614,7 @@ impl<'g> ClassTable<'g> {
     fn complete(&mut self) -> Option<ClassId> {
         let frame = self.frames.pop()?;
         let class = self.build(&frame.recipe, frame.filled);
-        self.classified.insert(frame.node, class);
+        self.table.classified.insert(frame.node, class);
         if self.frames.is_empty() {
             return Some(class);
         }
@@ -506,7 +636,7 @@ impl<'g> ClassTable<'g> {
     /// Begin classifying `id`: an absent node or an already classified one
     /// answers at once; anything else opens a frame.
     fn enter(&mut self, id: SemanticNodeId) -> Option<ClassId> {
-        if let Some(&class) = self.classified.get(&id) {
+        if let Some(&class) = self.table.classified.get(&id) {
             return Some(class);
         }
         let Some(data) = self.graph.node_data(id) else {
@@ -589,7 +719,7 @@ impl<'g> ClassTable<'g> {
                 }
             }
         }
-        if let Some(&class) = self.interned.get(repr.as_slice()) {
+        if let Some(&class) = self.table.interned.get(repr.as_slice()) {
             return class;
         }
         let mut full_len = 0u64;
@@ -599,20 +729,43 @@ impl<'g> ClassTable<'g> {
                     full_len = full_len.saturating_add(u64::from(end - start));
                 }
                 Part::Child(class) => {
-                    let child = &self.classes[class as usize];
+                    let child = &self.table.classes[class as usize];
                     full_len = full_len
                         .saturating_add(length_prefix(child.full_len).1 as u64)
                         .saturating_add(child.full_len);
                 }
             }
         }
-        let class = self.classes.len() as ClassId;
-        self.classes.push(Class {
+        let mut long_children = 0usize;
+        let mut children_linear = true;
+        let mut direct_len = full_len;
+        for part in &parts {
+            if let Part::Child(child) = *part {
+                let child = &self.table.classes[child as usize];
+                children_linear &= child.linear;
+                if child.full_len > SHARED_SUBTREE_MIN_BYTES {
+                    long_children += 1;
+                    if child.memoized {
+                        direct_len = direct_len.saturating_sub(child.full_len);
+                    } else {
+                        direct_len = direct_len.saturating_sub(child.full_len - child.direct_len);
+                    }
+                }
+            }
+        }
+        let linear = children_linear && long_children <= 1 && full_len < u64::from(u32::MAX);
+        let class = self.table.classes.len() as ClassId;
+        self.table.classes.push(Class {
             lit,
             parts,
             full_len,
+            fingerprint: None,
+            linear,
+            power: fnv_power(full_len),
+            direct_len,
+            memoized: linear && direct_len >= FOLD_MEMO_MIN_BYTES,
         });
-        self.interned.insert(repr.into_boxed_slice(), class);
+        self.table.interned.insert(repr.into_boxed_slice(), class);
         class
     }
 
@@ -623,13 +776,16 @@ impl<'g> ClassTable<'g> {
         if a == b {
             return Ordering::Equal;
         }
-        if let Some(&order) = self.order.get(&(a, b)) {
+        if let Some(&order) = self.table.order.get(&(a, b)) {
             return order;
         }
         let mut left = FullStream::new(a);
         let mut right = FullStream::new(b);
         let order = loop {
-            match (left.peek(&self.classes), right.peek(&self.classes)) {
+            match (
+                left.peek(&self.table.classes),
+                right.peek(&self.table.classes),
+            ) {
                 (Event::End, Event::End) => break Ordering::Equal,
                 (Event::End, _) => break Ordering::Less,
                 (_, Event::End) => break Ordering::Greater,
@@ -637,8 +793,8 @@ impl<'g> ClassTable<'g> {
                     left.skip();
                     right.skip();
                 }
-                (Event::Child(x), _) => left.descend(x, &self.classes),
-                (_, Event::Child(y)) => right.descend(y, &self.classes),
+                (Event::Child(x), _) => left.descend(x, &self.table.classes),
+                (_, Event::Child(y)) => right.descend(y, &self.table.classes),
                 (Event::Byte(x), Event::Byte(y)) => {
                     if x != y {
                         break x.cmp(&y);
@@ -648,9 +804,155 @@ impl<'g> ClassTable<'g> {
                 }
             }
         };
-        self.order.insert((a, b), order);
-        self.order.insert((b, a), order.reverse());
+        self.table.order.insert((a, b), order);
+        self.table.order.insert((b, a), order.reverse());
         order
+    }
+
+    /// The fingerprint of `class`'s key, computed once per class: FNV-1a
+    /// over the key's bytes. A linear class's key is its full expansion,
+    /// so its fingerprint folds from its parts, each child through that
+    /// child's memoized hash map ([`Self::fold`]), without writing the
+    /// key; any other class's key is written and hashed.
+    fn fingerprint(&mut self, class: ClassId) -> u64 {
+        if let Some(fingerprint) = self.table.classes[class as usize].fingerprint {
+            return fingerprint;
+        }
+        let fingerprint = if self.table.classes[class as usize].linear {
+            self.fold(class, FINGERPRINT_OFFSET)
+        } else {
+            let key = self.write(class);
+            #[cfg(test)]
+            FINGERPRINTED_BYTES.with(|bytes| bytes.set(bytes.get() + key.len() as u64));
+            fingerprint_v1(&key)
+        };
+        self.table.classes[class as usize].fingerprint = Some(fingerprint);
+        fingerprint
+    }
+
+    /// The FNV-1a state after folding linear class `class`'s bytes into
+    /// `state`.
+    ///
+    /// One FNV-1a step, `h' = (h ^ b) * P`, changes `h` by XOR only in its
+    /// low byte, so `h' = P * h + P * ((l ^ b) - l)` with `l = h & 0xFF`,
+    /// and the low byte of `h'` depends on `l` alone. By induction a run of
+    /// `n` bytes maps `h` to `P^n * h + T[l]`, where `T` depends only on the
+    /// bytes and the low byte of the state they start from. A memoizing
+    /// class's `T[l]` is computed the first time the class is folded at a
+    /// state with low byte `l` and kept in the store's table; the classes
+    /// between two memoizing ones are hashed through. So a fold hashes
+    /// fewer than [`FOLD_MEMO_MIN_BYTES`] before it meets a memoizing class,
+    /// and each (memoizing class, low byte) pair is computed once from the
+    /// class's direct bytes — at most 256 times the key bytes of the
+    /// distinct subtrees in all, whatever their depth. (The low-byte map of
+    /// a byte run is a bijection, so folds from different states never
+    /// merge: a class is folded at up to 256 states.) The walk is an
+    /// explicit stack of the classes being folded, never native recursion.
+    fn fold(&mut self, class: ClassId, state: u64) -> u64 {
+        struct Folding {
+            class: ClassId,
+            part: usize,
+            start: u64,
+            state: u64,
+        }
+        let hash = |mut state: u64, bytes: &[u8]| {
+            #[cfg(test)]
+            FINGERPRINTED_BYTES.with(|count| count.set(count.get() + bytes.len() as u64));
+            for &byte in bytes {
+                state ^= u64::from(byte);
+                state = state.wrapping_mul(FNV_PRIME);
+            }
+            state
+        };
+        if let Some(folded) = self.folded(class, state) {
+            return folded;
+        }
+        let mut stack = vec![Folding {
+            class,
+            part: 0,
+            start: state,
+            state,
+        }];
+        loop {
+            let top = stack.last_mut().expect("a class is being folded");
+            let current = &self.table.classes[top.class as usize];
+            match current.parts.get(top.part).copied() {
+                Some(Part::Lit(start, end)) => {
+                    top.part += 1;
+                    top.state = hash(top.state, &current.lit[start as usize..end as usize]);
+                }
+                Some(Part::Child(child)) => {
+                    top.part += 1;
+                    let (prefix, len) = length_prefix(self.table.classes[child as usize].full_len);
+                    top.state = hash(top.state, &prefix[..len]);
+                    let entry = top.state;
+                    match self.folded(child, entry) {
+                        Some(folded) => {
+                            stack.last_mut().expect("the parent").state = folded;
+                        }
+                        None => stack.push(Folding {
+                            class: child,
+                            part: 0,
+                            start: entry,
+                            state: entry,
+                        }),
+                    }
+                }
+                None => {
+                    let done = stack.pop().expect("the class just folded");
+                    let finished = &self.table.classes[done.class as usize];
+                    if finished.memoized {
+                        let offset = done
+                            .state
+                            .wrapping_sub(finished.power.wrapping_mul(done.start));
+                        self.table
+                            .folds
+                            .insert((done.class, done.start as u8), offset);
+                    }
+                    match stack.last_mut() {
+                        Some(parent) => parent.state = done.state,
+                        None => return done.state,
+                    }
+                }
+            }
+        }
+    }
+
+    /// `class`'s bytes folded into `state` from its memoized hash map, when
+    /// the class memoizes its folds and was folded before at a state with
+    /// the same low byte.
+    fn folded(&self, class: ClassId, state: u64) -> Option<u64> {
+        let folded = &self.table.classes[class as usize];
+        if !folded.memoized {
+            return None;
+        }
+        let offset = self.table.folds.get(&(class, state as u8))?;
+        Some(folded.power.wrapping_mul(state).wrapping_add(*offset))
+    }
+
+    /// `members` with their classes, in key order: the `(fingerprint,
+    /// exact)` order of their keys. Each class's fingerprint is hashed once;
+    /// exact bytes are written only for two classes whose fingerprints
+    /// collide, and equal classes (equal keys) keep their input order.
+    fn key_ordered(&mut self, members: &[SemanticNodeId]) -> Vec<(ClassId, SemanticNodeId)> {
+        let mut keyed: Vec<(u64, ClassId, SemanticNodeId)> = Vec::with_capacity(members.len());
+        for &id in members {
+            let class = self.classify(id);
+            keyed.push((self.fingerprint(class), class, id));
+        }
+        keyed.sort_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| {
+                if a.1 == b.1 {
+                    Ordering::Equal
+                } else {
+                    self.write(a.1).cmp(&self.write(b.1))
+                }
+            })
+        });
+        keyed
+            .into_iter()
+            .map(|(_, class, id)| (class, id))
+            .collect()
     }
 
     /// Write `root`'s class: every subtree in full the first time, and a
@@ -675,7 +977,7 @@ impl<'g> ClassTable<'g> {
             length_slot: None,
         }];
         while let Some(top) = stack.last_mut() {
-            let class = &self.classes[top.class as usize];
+            let class = &self.table.classes[top.class as usize];
             let part = class.parts.get(top.part).copied();
             if part.is_some() {
                 top.part += 1;
@@ -706,7 +1008,7 @@ impl<'g> ClassTable<'g> {
                     let Some(done) = stack.pop() else {
                         break;
                     };
-                    if self.classes[done.class as usize].full_len > SHARED_SUBTREE_MIN_BYTES {
+                    if self.table.classes[done.class as usize].full_len > SHARED_SUBTREE_MIN_BYTES {
                         let index = written.len() as u32;
                         written.insert(done.class, index);
                     }
@@ -718,6 +1020,20 @@ impl<'g> ClassTable<'g> {
         }
         out
     }
+}
+
+/// `FNV_PRIME` to the power `exponent`, wrapping.
+fn fnv_power(mut exponent: u64) -> u64 {
+    let mut base = FNV_PRIME;
+    let mut power: u64 = 1;
+    while exponent > 0 {
+        if exponent & 1 == 1 {
+            power = power.wrapping_mul(base);
+        }
+        base = base.wrapping_mul(base);
+        exponent >>= 1;
+    }
+    power
 }
 
 /// Append literal bytes, merging them into a trailing literal part.
@@ -1656,19 +1972,43 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
     }
 }
 
+/// `members` with their classes, in key order: the `(fingerprint, exact)`
+/// order of their keys, equal keys in input order.
+fn key_ordered(
+    graph: &SemanticGraphStore,
+    members: &[SemanticNodeId],
+) -> Vec<(ClassId, SemanticNodeId)> {
+    graph.with_key_classes(|classes| ClassTable::new(graph, classes).key_ordered(members))
+}
+
+/// Test-only: the fingerprint union ordering reads for `id`'s class.
+#[cfg(test)]
+pub(crate) fn class_fingerprint_for_tests(graph: &SemanticGraphStore, id: SemanticNodeId) -> u64 {
+    graph.with_key_classes(|classes| {
+        let mut table = ClassTable::new(graph, classes);
+        let class = table.classify(id);
+        table.fingerprint(class)
+    })
+}
+
 /// Sort `members` by `VerterStableV1`. Equal keys stay in input order
 /// only when they are indistinguishable; distinguishable members never
 /// compare equal.
 pub fn sort_by_stable_key(graph: &SemanticGraphStore, members: &mut [SemanticNodeId]) {
-    members.sort_by_cached_key(|id| stable_key_for_node(graph, *id));
+    let ordered = key_ordered(graph, members);
+    for (slot, (_, id)) in members.iter_mut().zip(ordered) {
+        *slot = id;
+    }
 }
 
 /// Stable-key equality, which may license a collapse: every key encodes
-/// its whole structure, so equal keys name one encoded structure.
+/// its whole structure, so equal keys name one encoded structure, one
+/// class of the store's table.
 pub fn provably_equal(graph: &SemanticGraphStore, a: SemanticNodeId, b: SemanticNodeId) -> bool {
-    let key_a = stable_key_for_node(graph, a);
-    let key_b = stable_key_for_node(graph, b);
-    key_a == key_b
+    graph.with_key_classes(|classes| {
+        let mut table = ClassTable::new(graph, classes);
+        table.classify(a) == table.classify(b)
+    })
 }
 
 /// Union-set canonicalization: sort by stable key and drop repeated node ids.
@@ -1676,11 +2016,7 @@ pub fn canonicalize_union_members(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],
 ) -> Arc<[SemanticNodeId]> {
-    let mut keyed: Vec<(StableKey, SemanticNodeId)> = members
-        .iter()
-        .map(|&id| (stable_key_for_node(graph, id), id))
-        .collect();
-    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut keyed = key_ordered(graph, members);
     if graph.union_order_reversed() {
         keyed.reverse();
     }
@@ -1706,16 +2042,12 @@ pub fn sort_union_members_by_stable_key(
 
 /// Order a union's members as [`sort_union_members_by_stable_key`] does and
 /// drop each member whose key equals its neighbour's (the key-equality
-/// collapse [`provably_equal`] licenses), keying every member once.
+/// collapse [`provably_equal`] licenses), classifying every member once.
 pub fn sort_and_collapse_union_members(
     graph: &SemanticGraphStore,
     members: &mut Vec<SemanticNodeId>,
 ) {
-    let mut keyed: Vec<(StableKey, SemanticNodeId)> = members
-        .iter()
-        .map(|&id| (stable_key_for_node(graph, id), id))
-        .collect();
-    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut keyed = key_ordered(graph, members);
     if graph.union_order_reversed() {
         keyed.reverse();
     }

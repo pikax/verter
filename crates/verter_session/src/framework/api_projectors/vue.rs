@@ -41,6 +41,17 @@ impl ComponentApiProjector for VueComponentApiProjector {
         // alias resolution (no classify-one / render-another split). The
         // batch-shared cold seed + session view ride on `render_seed` so the
         // macro-deps path takes ZERO per-call store-view reads.
-        host.render_vue_public_api_legacy(resolved_canonical, mode, profile, render_seed)
+        //
+        // The render is one operation: a parse or walk-stack lease refused its
+        // stack anywhere inside it (the script extract, the template facts
+        // the fallthrough surface reads) leaves some input read off an empty
+        // program, so the projection is absent until the stack can be had.
+        let (rendered, refused) = verter_parser::oxc_parse::refusals_within(|| {
+            host.render_vue_public_api_legacy(resolved_canonical, mode, profile, render_seed)
+        });
+        match refused {
+            Some(_) => Ok(None),
+            None => rendered,
+        }
     }
 }

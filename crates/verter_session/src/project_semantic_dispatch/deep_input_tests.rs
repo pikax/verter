@@ -111,6 +111,23 @@ fn parentheses_nested_10000_deep_answer_on_production_stacks() {
     );
 }
 
+/// A chain of 10,000 member reads off a constructed value
+/// (`new C().c.c…`): its lowering and its evaluation read the chain from
+/// explicit stacks, deciding once that it is rooted at a value, so the
+/// work grows with the chain's length. TypeScript 7.0.2: `C`, under every
+/// setting.
+#[test]
+fn value_rooted_member_chains_10000_long_answer_on_production_stacks() {
+    let source = format!(
+        "class C {{ c: C = this; }}\nexport function pf() {{ return new C(){}; }}\n",
+        ".c".repeat(DEPTH)
+    );
+    assert_eq!(
+        mismatches_on_a_small_stack(source, RETURN, "C"),
+        Vec::<String>::new()
+    );
+}
+
 #[test]
 fn logical_nots_nested_10000_deep_answer_on_production_stacks() {
     let source = returning(format!("{}1", "!".repeat(DEPTH)));

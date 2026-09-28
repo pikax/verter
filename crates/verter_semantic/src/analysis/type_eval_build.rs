@@ -8233,6 +8233,8 @@ fn value_type_derives_from_a_call(expr: &Expression<'_>, source: &str) -> bool {
         };
     }
     let mut probe = CallProbe::default();
-    verter_parser::oxc_parse::with_span_stack(source, expr.span(), || probe.visit_expression(expr));
-    probe.0
+    // A walk refused its stack is taken as a call, the conservative answer;
+    // the operation around it is refused with the refusal.
+    verter_parser::oxc_parse::leased_span_walk(source, expr.span(), || probe.visit_expression(expr))
+        .map_or(true, |()| probe.0)
 }

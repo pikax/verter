@@ -878,6 +878,10 @@ impl VerterHost {
                 .relation_proof_count(),
             relate_keys: self.project_type_store.semantic_graph().relate_key_count(),
             union_views: self.project_type_store.semantic_graph().union_view_count(),
+            stable_key_classes: self
+                .project_type_store
+                .semantic_graph()
+                .stable_key_class_count(),
             deferred_releases: self.project_type_store.deferred_release_count(),
             resolved_import_facts: self
                 .project_type_store

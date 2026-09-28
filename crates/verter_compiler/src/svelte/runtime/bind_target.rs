@@ -4,7 +4,7 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, Statement};
 use oxc_span::SourceType;
-use verter_parser::oxc_parse::{with_ast_stack, Parser};
+use verter_parser::oxc_parse::Parser;
 
 /// The STRUCTURAL classification of a two-way `bind:` directive's bound target
 /// expression, derived from the parsed OXC node — NOT a text scan.
@@ -287,7 +287,15 @@ fn expression_contains_non_plain_svelte_js(
 ) -> bool {
     use oxc_ast_visit::Visit;
     let mut scan = StrictOfficialDeltaScan { found: false };
-    with_ast_stack(source_text, source_type, || scan.visit_expression(expr));
+    // A walk refused its stack is taken as a delta, the fail-closed answer;
+    // the compile around it is refused with the refusal.
+    if verter_parser::oxc_parse::leased_ast_walk(source_text, source_type, || {
+        scan.visit_expression(expr)
+    })
+    .is_err()
+    {
+        return true;
+    }
     scan.found
 }
 
@@ -331,9 +339,12 @@ fn target_expr_keypath(expr: &Expression, source: &str) -> Option<String> {
     let mut collector = KeypathSegments {
         segments: Vec::new(),
     };
-    with_ast_stack(source, SourceType::tsx(), || {
+    // A walk refused its stack names no keypath; the compile around it is
+    // refused with the refusal.
+    verter_parser::oxc_parse::leased_ast_walk(source, SourceType::tsx(), || {
         collector.visit_expression(expr)
-    });
+    })
+    .ok()?;
     if collector.segments.is_empty() {
         None
     } else {

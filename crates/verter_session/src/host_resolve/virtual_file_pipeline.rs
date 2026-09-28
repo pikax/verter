@@ -3038,13 +3038,24 @@ impl VerterHost {
         // Try cached extract path: avoids re-parsing SFC + OXC on cache hit.
         let extract = if let Some(cached) = cached_extract {
             cached
-        } else if let Some(fresh) = verter_compiler::tsc::extract_tsc_state(
-            &source,
-            &component_name,
-            &verter_compiler::tsc::TscExtractOptions {
-                filename: Some(canonical.clone()),
-            },
-        ) {
+        } else if let Some(fresh) = {
+            // An extract whose parse was refused its stack is read off an
+            // empty program: it is neither served nor cached, and the
+            // projection is absent until the stack can be had.
+            let (extracted, refused) = verter_parser::oxc_parse::refusals_within(|| {
+                verter_compiler::tsc::extract_tsc_state(
+                    &source,
+                    &component_name,
+                    &verter_compiler::tsc::TscExtractOptions {
+                        filename: Some(canonical.clone()),
+                    },
+                )
+            });
+            if refused.is_some() {
+                return Ok(None);
+            }
+            extracted
+        } {
             let arc = Arc::new(fresh);
             if !has_content_override {
                 // cached_tsc_extract lives on DerivedRawState (D48 split).
@@ -3055,20 +3066,26 @@ impl VerterHost {
             arc
         } else {
             // No <script setup> â€” fall through to direct path for empty stub
-            let tsc_out = verter_compiler::tsc::generate_tsc_output_with_options(
-                &source,
-                &component_name,
-                &verter_compiler::tsc::TscGenOptions {
-                    conditional_root_narrowing: false,
-                    filename: Some(canonical.clone()),
-                    mode: tsc_mode,
-                },
-                macro_tsc.as_deref().map_or(
-                    verter_compiler::tsc::MacroTscInput::NotRequired,
-                    verter_compiler::tsc::MacroTscInput::Authoritative,
-                ),
-                &fallthrough_props,
-            )?;
+            let (tsc_out, refused) = verter_parser::oxc_parse::refusals_within(|| {
+                verter_compiler::tsc::generate_tsc_output_with_options(
+                    &source,
+                    &component_name,
+                    &verter_compiler::tsc::TscGenOptions {
+                        conditional_root_narrowing: false,
+                        filename: Some(canonical.clone()),
+                        mode: tsc_mode,
+                    },
+                    macro_tsc.as_deref().map_or(
+                        verter_compiler::tsc::MacroTscInput::NotRequired,
+                        verter_compiler::tsc::MacroTscInput::Authoritative,
+                    ),
+                    &fallthrough_props,
+                )
+            });
+            if refused.is_some() {
+                return Ok(None);
+            }
+            let tsc_out = tsc_out?;
             return Ok(Some(TscResponse::new(
                 Arc::from(tsc_out.code),
                 if tsc_out.source_map.is_empty() {
@@ -3081,16 +3098,22 @@ impl VerterHost {
             )));
         };
 
-        let tsc_out = verter_compiler::tsc::generate_tsc_from_state(
-            &extract,
-            &component_name,
-            tsc_mode,
-            macro_tsc.as_deref().map_or(
-                verter_compiler::tsc::MacroTscInput::NotRequired,
-                verter_compiler::tsc::MacroTscInput::Authoritative,
-            ),
-            &fallthrough_props,
-        )?;
+        let (tsc_out, refused) = verter_parser::oxc_parse::refusals_within(|| {
+            verter_compiler::tsc::generate_tsc_from_state(
+                &extract,
+                &component_name,
+                tsc_mode,
+                macro_tsc.as_deref().map_or(
+                    verter_compiler::tsc::MacroTscInput::NotRequired,
+                    verter_compiler::tsc::MacroTscInput::Authoritative,
+                ),
+                &fallthrough_props,
+            )
+        });
+        if refused.is_some() {
+            return Ok(None);
+        }
+        let tsc_out = tsc_out?;
         Ok(Some(TscResponse::new(
             Arc::from(tsc_out.code),
             if tsc_out.source_map.is_empty() {
@@ -3168,8 +3191,33 @@ impl VerterHost {
         true
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    /// Compile `snapshot` under `profile`. The compile is one operation: a
+    /// parse or walk-stack lease refused its stack anywhere inside it (the
+    /// backend's execution, or the preparation of its inputs) leaves some
+    /// product read off an empty program, so the compile fails with the
+    /// fatal `HOST_STACK_UNAVAILABLE` diagnostic and publishes nothing.
     pub(crate) fn compile_entry(
+        &self,
+        snapshot: &CompileInput,
+        profile: &CompileProfile,
+        binding: Option<BoundNativeHostRequest>,
+    ) -> Result<CompileEntryOutcome, DiagnosticsSnapshot> {
+        match verter_parser::oxc_parse::refusals_within(|| {
+            self.compile_entry_unrecorded(snapshot, profile, binding)
+        }) {
+            (compiled, None) => compiled,
+            (_, Some(unavailable)) => Err(snapshot.parse_diagnostics.clone().merge(
+                crate::host_resolve::compile_request_build::stack_unavailable_diagnostics(
+                    &snapshot.canonical_id,
+                    snapshot.source.len() as u32,
+                    unavailable,
+                ),
+            )),
+        }
+    }
+
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    fn compile_entry_unrecorded(
         &self,
         snapshot: &CompileInput,
         profile: &CompileProfile,
@@ -3478,8 +3526,44 @@ impl VerterHost {
     ///   request-local runtime macro bundle is produced from TypeInfo on
     ///   the Vue arm and never retained.
     /// - No cache admission and no last-known-good fallback.
+    ///
+    /// The render is one operation, as [`Self::compile_entry`]: a stack
+    /// refusal inside it fails it with the fatal `HOST_STACK_UNAVAILABLE`
+    /// diagnostic.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn compile_entry_runtime_render(
+        &self,
+        snapshot: &CompileInput,
+        profile: &CompileProfile,
+        binding: Option<BoundNativeHostRequest>,
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
+    ) -> Result<RenderOnlyMain, HostError> {
+        match verter_parser::oxc_parse::refusals_within(|| {
+            self.compile_entry_runtime_render_unrecorded(
+                snapshot,
+                profile,
+                binding,
+                style_processing,
+            )
+        }) {
+            (rendered, None) => rendered,
+            (_, Some(unavailable)) => Err(HostError::CompileError(CompileFailure {
+                diagnostics: snapshot.parse_diagnostics.clone().merge(
+                    crate::host_resolve::compile_request_build::stack_unavailable_diagnostics(
+                        &snapshot.canonical_id,
+                        snapshot.source.len() as u32,
+                        unavailable,
+                    ),
+                ),
+                requested_mode: profile.requested_mode,
+                actual_mode: profile.requested_mode,
+                downgrade_reason: None,
+            })),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn compile_entry_runtime_render_unrecorded(
         &self,
         snapshot: &CompileInput,
         profile: &CompileProfile,

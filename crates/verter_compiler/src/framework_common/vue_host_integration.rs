@@ -385,6 +385,10 @@ pub enum VueHostCompileRefusal {
     },
     /// The shared orchestration refused the admitted request.
     Unsupported(CompileUnsupported),
+    /// A parse or walk-stack lease the execution needed was refused its
+    /// stack: typed operational incompleteness, not a verdict on the
+    /// source. Nothing the execution produced publishes.
+    StackUnavailable(verter_parser::oxc_parse::StackUnavailable),
     /// A requested runtime surface was refused; no sibling product
     /// publishes after this refusal.
     RuntimeSurfaceRefused {
@@ -708,7 +712,16 @@ impl VueHostIntegrationBackend {
         attempt.stage_vue_macro_semantics(inputs.vue_macros.clone());
         let opts = derive_admitted_runtime_options(&request, inputs);
         let grants = execution_grants_for_request(&request);
-        match vue_carrier_bundle(source, artifact, &opts, &attempt, alloc, grants) {
+        // A parse or lease refused its stack inside the bundle leaves the
+        // bundle built from an empty program in its place: the whole
+        // execution is refused, whatever the bundle says.
+        let (outcome, refused) = verter_parser::oxc_parse::refusals_within(|| {
+            vue_carrier_bundle(source, artifact, &opts, &attempt, alloc, grants)
+        });
+        if let Some(unavailable) = refused {
+            return Err(VueHostCompileRefusal::StackUnavailable(unavailable));
+        }
+        match outcome {
             Ok(CarrierCompileOutcome::Produced(bundle)) => Ok(bundle),
             // All-or-none: a refused runtime surface publishes nothing;
             // sibling projection/analysis products never warm or publish
@@ -1969,6 +1982,75 @@ mod tests {
                 .any(|artifact| artifact.name() == "main"),
             "typed main artifact must survive host execution"
         );
+    }
+
+    /// An execution whose parse is refused its stack is refused whole, as
+    /// typed incompleteness: no product publishes from the empty program
+    /// the refused parse returned. The same execution retried compiles.
+    #[test]
+    fn an_execution_whose_parse_is_refused_its_stack_publishes_nothing() {
+        use verter_parser::oxc_parse::faults::{self, Reservation};
+        // A depth no other test parses, so the fault finds this parse only,
+        // deep enough that the parse needs a region on a 1 MiB thread.
+        let depth = 157;
+        let script = format!(
+            "const v = {}1{}\nconst w = 2",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        );
+        let sfc = format!(
+            "<script setup lang=\"ts\">{script}</script>\n<template><div>{{{{ w }}}}</div></template>"
+        );
+        let artifact = vue_artifact(&sfc);
+        let needed =
+            verter_parser::oxc_parse::parse_stack_bytes(&script, oxc_span::SourceType::ts());
+        let compile = || {
+            let alloc = oxc_allocator::Allocator::new();
+            let backend = VueHostIntegrationBackend::new();
+            let admission = backend
+                .admit_host_products(&artifact, multi_demand())
+                .expect("admits");
+            backend
+                .compile_host_products(
+                    admission,
+                    &artifact,
+                    &VueHostExecutionInputs {
+                        want_main: true,
+                        has_script: true,
+                        has_template: true,
+                        ..Default::default()
+                    },
+                    &alloc,
+                )
+                .map(|products| products.runtime_client_bundle().is_some())
+        };
+        let parses = faults::reservations_needing(Reservation::Parse, needed);
+        faults::fail_reservations_needing(Reservation::Parse, needed, 1);
+        let refused = on_a_small_thread(compile);
+        faults::fail_reservations_needing(Reservation::Parse, needed, 0);
+        assert!(
+            faults::reservations_needing(Reservation::Parse, needed) > parses,
+            "the execution parses the script on a region of its own"
+        );
+        match refused {
+            Err(VueHostCompileRefusal::StackUnavailable(unavailable)) => {
+                assert_eq!(unavailable.needed, needed);
+            }
+            other => panic!("expected the typed stack refusal, got {other:?}"),
+        }
+        assert!(on_a_small_thread(compile).expect("the retry compiles"));
+    }
+
+    /// Run `work` on a fresh 1 MiB thread.
+    fn on_a_small_thread<R: Send>(work: impl FnOnce() -> R + Send) -> R {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(1 << 20)
+                .spawn_scoped(scope, work)
+                .expect("spawn the thread")
+                .join()
+                .expect("the work returns")
+        })
     }
 
     #[test]
