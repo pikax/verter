@@ -231,6 +231,29 @@ test("ARH0-capability dirty twin: another dependency's version in the same file 
   );
 });
 
+test("ARH0-capability: a row that ships at the workspace release version pins no literal, but its property must resolve", () => {
+  const clean = cloneProducts();
+  const rows = clean["capability-matrix"].rows.filter((r) => r.version === "workspace");
+  assert.deepEqual(rows.map((r) => r.capability).sort(), [
+    "analysis-mcp",
+    "zed-lapce-helix-nvim-hosts",
+  ]);
+  assert.equal(validate(clean).ok, true);
+  // A stale literal on the same row is still a fabricated pin.
+  const stale = cloneProducts();
+  stale["capability-matrix"].rows.find((r) => r.capability === "analysis-mcp").version =
+    "0.0.0-stale";
+  assert.ok(
+    validate(stale).errors.some((e) => e.code === "version-not-pinned-in-source"),
+    "a literal must match the source",
+  );
+  // A workspace row bound to a property that does not exist is rejected.
+  const unbound = cloneProducts();
+  unbound["capability-matrix"].rows.find((r) => r.capability === "analysis-mcp").versionProperty =
+    "workspace.package.missing";
+  assert.equal(validate(unbound).ok, false);
+});
+
 test("ARH0-capability dirty twin: implemented row without a versionProperty binding is rejected", () => {
   const dirty = cloneProducts();
   const row = dirty["capability-matrix"].rows.find((r) => r.capability === "typescript-tsgo-plane");
