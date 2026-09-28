@@ -10488,10 +10488,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Union(members) => {
                 let members = members.members_arc();
                 drop(data);
+                // First occurrence order, deduplicated through a set: a
+                // scan of the keys kept so far made a long key union
+                // quadratic.
                 let mut keys = Vec::with_capacity(members.len());
+                let mut seen: FxHashSet<IndexKey> = FxHashSet::default();
                 for member in members.iter() {
                     for key in self.finite_index_keys(*member, depth + 1)? {
-                        if !keys.contains(&key) {
+                        if first_index_key(&mut seen, &key) {
                             keys.push(key);
                         }
                     }
@@ -10506,10 +10510,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let keys = self.finite_index_keys(*member, depth + 1)?;
                     common = Some(match common {
                         None => keys,
-                        Some(common) => common
-                            .into_iter()
-                            .filter(|key| keys.contains(key))
-                            .collect(),
+                        Some(common) => {
+                            let mut present: FxHashSet<IndexKey> = FxHashSet::default();
+                            for key in &keys {
+                                first_index_key(&mut present, key);
+                            }
+                            common
+                                .into_iter()
+                                .filter(|key| index_key_present(&present, key))
+                                .collect()
+                        }
                     });
                 }
                 common
@@ -17421,4 +17431,37 @@ mod awaited_path_tests {
         assert!(!path.contains(AwaitedRelation::Normalize, operand(2)));
         assert_eq!(path.len(), 0);
     }
+}
+
+/// Whether `key` is new to `seen`, recording it: the one membership test
+/// of [`ProjectSemanticDispatch::finite_index_keys`], a hash probe.
+fn first_index_key(
+    seen: &mut FxHashSet<crate::semantic_query::IndexKey>,
+    key: &crate::semantic_query::IndexKey,
+) -> bool {
+    #[cfg(test)]
+    INDEX_KEY_PROBES.with(|probes| probes.set(probes.get() + 1));
+    seen.insert(key.clone())
+}
+
+/// Whether `key` is in `present` (a hash probe).
+fn index_key_present(
+    present: &FxHashSet<crate::semantic_query::IndexKey>,
+    key: &crate::semantic_query::IndexKey,
+) -> bool {
+    #[cfg(test)]
+    INDEX_KEY_PROBES.with(|probes| probes.set(probes.get() + 1));
+    present.contains(key)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static INDEX_KEY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The key comparisons the finite index-key sets made on this thread, so
+/// far (test-only).
+#[cfg(test)]
+pub(super) fn index_key_probes_for_tests() -> usize {
+    INDEX_KEY_PROBES.with(std::cell::Cell::get)
 }
