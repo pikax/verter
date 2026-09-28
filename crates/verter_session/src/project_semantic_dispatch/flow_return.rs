@@ -1622,6 +1622,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             })
             .collect::<Option<Vec<_>>>()?;
+        // The callee's polymorphic `this` is the receiver it is read
+        // through.
+        let callee = receiver.map_or(callee, |receiver| {
+            self.bind_callee_receiver(callee, receiver)
+        });
         let (result, held) = self.execute_indexed_resolve_call_with_flow_hold(
             crate::semantic_query::ResolveCallKey {
                 point: crate::semantic_query::ProgramPointId {
@@ -14575,6 +14580,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         base: SemanticNodeId,
         segments: &[Arc<str>],
     ) -> Option<SemanticNodeId> {
+        self.project_path_navigate_with(base, segments, true)
+    }
+
+    /// [`Self::project_path_navigate`], binding each member's declared
+    /// polymorphic `this` to the reference it is read through only with
+    /// `bind_this`: a `super` member is read off the base's prototype, but
+    /// its `this` is the calling class's.
+    fn project_path_navigate_with(
+        &mut self,
+        base: SemanticNodeId,
+        segments: &[Arc<str>],
+        bind_this: bool,
+    ) -> Option<SemanticNodeId> {
         // A member of a class reference reads where the class declares it,
         // binding the member's polymorphic `this` to the reference: a body
         // reading its own class through a parameter (`h.v` over `h: H`)
@@ -14597,7 +14615,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 };
             }
         }
-        self.project_path_navigate_through(base, segments)
+        // A member read through a reference binds the member's declared
+        // polymorphic `this` to it (`t.self` over `self(): this` is
+        // `() => T`), one segment at a time: each segment's object is the
+        // reference its member is read through.
+        if !bind_this {
+            return self.project_path_navigate_through(base, segments);
+        }
+        let mut current = base;
+        for segment in segments {
+            let read =
+                self.project_path_navigate_through(current, std::slice::from_ref(segment))?;
+            current = if self.dispatch.receiver_this_types(read).is_empty() {
+                read
+            } else {
+                self.dispatch.bind_callee_receiver(read, current)
+            };
+        }
+        Some(current)
     }
 
     /// The surface that declares member `name` of `base` — the class's own
@@ -22265,6 +22300,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return self.degraded_unrepresentable_callee()
             }
         };
+        // This sink carries no receiver either: a signature whose value
+        // depends on the receiver it is called through is the executor's,
+        // and here the typed marker, never its unbound `this` or an
+        // uninferred parameter.
+        if self.signature_reads_receiver(function_node) {
+            return self.degraded_unrepresentable_callee();
+        }
         // A resolved callee VALUE TYPE was composed from a DECLARED
         // signature, lowered in file owner scope where the callee's own
         // clause is invisible — so every spelling of a clause parameter,
@@ -23524,6 +23566,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         {
             return true;
         }
+        // A signature whose value depends on its receiver reads it through
+        // the executor, the one route that carries the receiver.
+        if call_sigs
+            .iter()
+            .chain(construct_sigs.iter())
+            .any(|signature| self.signature_reads_receiver(*signature))
+        {
+            return true;
+        }
         let supplies_evidence =
             site.supplies_parameter_ordinal(0) || site.has_explicit_type_arguments();
         if !supplies_evidence {
@@ -23541,6 +23592,34 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }) if !type_parameters.is_empty()
                 )
             })
+    }
+
+    /// Whether `signature`'s value depends on the receiver it is called
+    /// through: a polymorphic `this` in its signature positions
+    /// (`self(): this`), or a `this` parameter its own type parameters are
+    /// inferred from (`id<X>(this: X): X`).
+    fn signature_reads_receiver(&self, signature: SemanticNodeId) -> bool {
+        let graph = self.dispatch.graph();
+        let Some(data) = graph.node_data(signature) else {
+            return false;
+        };
+        let SemanticNodeData::Signature {
+            params,
+            type_parameters,
+            ..
+        } = data.as_ref()
+        else {
+            return false;
+        };
+        if !self.dispatch.receiver_this_types(signature).is_empty() {
+            return true;
+        }
+        let (receiver, _) = crate::semantic_query::split_this_receiver(params);
+        receiver.is_some_and(|this| {
+            type_parameters
+                .iter()
+                .any(|decl| self.dispatch.mentions_node(this.ty, decl.param))
+        })
     }
 
     /// Resolve one authored call or `new` expression through the call
@@ -23871,10 +23950,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // literals, and a typed refusal when nothing applies,
                 // never a warm-admitted wrong answer and never the
                 // implementation's own signature.
-                if prepared
-                    .as_ref()
-                    .is_some_and(|prepared| prepared.signatures.len() > 1)
-                    || self.direct_callee_is_augmented(target)
+                // So is a callee whose type parameters a `this` parameter
+                // infers: the call's receiver (`void` for a bare call) is
+                // the executor's evidence.
+                if prepared.as_ref().is_some_and(|prepared| {
+                    prepared.signatures.len() > 1
+                        || prepared.signatures.get(ordinal).is_some_and(|signature| {
+                            !signature.type_parameters.is_empty()
+                                && signature
+                                    .parameters
+                                    .first()
+                                    .is_some_and(|param| param.name.as_deref() == Some("this"))
+                        })
+                }) || self.direct_callee_is_augmented(target)
                 {
                     let Some(callee) = self.direct_callee_value_node(target) else {
                         return self.degraded_unrepresentable_callee();
@@ -24152,6 +24240,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         return self.degraded_unrepresentable_callee();
                     }
                 }
+                // The signature read carries no receiver: a signature whose
+                // value depends on one is the typed marker here.
+                if matches!(
+                    self.dispatch.shared_signature_buckets(node),
+                    Ok((call_sigs, construct_sigs))
+                        if call_sigs
+                            .iter()
+                            .chain(construct_sigs.iter())
+                            .any(|signature| self.signature_reads_receiver(*signature))
+                ) {
+                    return self.degraded_unrepresentable_callee();
+                }
                 match CallValue::of_signature_node(
                     self.dispatch,
                     node,
@@ -24233,9 +24333,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     segments.push(Arc::from("prototype"));
                 }
                 segments.extend(member.iter().cloned());
-                let Some(callee) = self.project_path_navigate(base, &segments) else {
+                let Some(callee) = self.project_path_navigate_with(base, &segments, false) else {
                     return self.degraded_unrepresentable_callee();
                 };
+                // The base member's polymorphic `this` is this class's own
+                // `this`, which the heritage read does not carry: it stays
+                // unbound, and the call sink gives the typed marker.
                 self.call_return_of_callee_node(callee, site)
             }
             crate::flow_slice_content::SliceCall::Symbolic(ty, binding) => {
