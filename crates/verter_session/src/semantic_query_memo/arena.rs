@@ -114,48 +114,8 @@ fn names_forward_child(data: &SemanticNodeData, id: SemanticNodeId) -> bool {
     let mut check = |child: SemanticNodeId| {
         forward |= child.0 >= id.0 && child.0 < UNALLOCATABLE_ID_FLOOR;
     };
-    if let crate::semantic_query::ChildWalk::Sealed = data.for_each_child(&mut check) {
-        if let SemanticNodeData::DeferredCallable(callable) = data {
-            callable.for_each_child_node(&mut check);
-        }
-    }
+    data.for_each_retained_child(&mut check);
     forward
-}
-
-/// Visit every node id `data` embeds, for the release cascade: the topology
-/// child walk, plus the parts it does not reach. A sealed `DeferredCallable`
-/// answers `Sealed` to the walk, so its parts are read through the same
-/// topology-only visitor [`names_forward_child`] uses; a generic callable
-/// instantiated with another document's type is interned unscoped with its
-/// served position left in its declaring document, so neither the scope
-/// root rule nor the declaring-canonical check reaches it. A recursive
-/// reference carries its type arguments inside an `Opaque` payload the walk
-/// treats as a leaf, and a pending conditional frame binds parameters the
-/// walk does not visit (substitution appends a pair whether or not a branch
-/// mentions the binder). Each of these is interned unscoped, one per
-/// distinct payload, so an id of the closed document would otherwise keep
-/// one such node per content version.
-fn for_each_embedded_node(data: &SemanticNodeData, mut visit: impl FnMut(SemanticNodeId)) {
-    if let crate::semantic_query::ChildWalk::Sealed = data.for_each_child(&mut visit) {
-        if let SemanticNodeData::DeferredCallable(callable) = data {
-            callable.for_each_child_node(&mut visit);
-        }
-    }
-    match data {
-        SemanticNodeData::Opaque(crate::semantic_query::QueryError::RecursiveRef {
-            args, ..
-        }) => args.iter().copied().for_each(visit),
-        SemanticNodeData::Conditional {
-            pending: Some(pending),
-            ..
-        } => pending
-            .true_branch()
-            .pairs()
-            .iter()
-            .chain(pending.false_branch().pairs())
-            .for_each(|&(param, _)| visit(param)),
-        _ => {}
-    }
 }
 
 pub(super) const NUM_SHARDS: usize = 16;
@@ -721,7 +681,8 @@ impl NodeArena {
     /// whose origin scope is `File { canonical_id, .. }`, the sealed
     /// `DeferredCallable` carriers whose served position is declared in
     /// it, and — transitively — every node whose payload embeds a released
-    /// id, sealed and pending parts included ([`for_each_embedded_node`])
+    /// id, sealed and pending parts included
+    /// ([`SemanticNodeData::for_each_retained_child`])
     /// (a parent of a dead node can never be reached again: its dedup
     /// key names an id that is never re-minted, and the memo entries that
     /// held it are drained by the caller). Global-scope nodes are released
@@ -780,7 +741,14 @@ impl NodeArena {
                         continue;
                     }
                     let mut embeds_dead = false;
-                    for_each_embedded_node(payload, |child| {
+                    // Every id the payload retains, not only its semantic
+                    // children: a sealed callable's parts, a recursive
+                    // reference's arguments, a class expression's prototype
+                    // and a pending conditional's binders are each interned
+                    // unscoped, one per distinct payload, so an id of the
+                    // closed document would otherwise keep one such node per
+                    // content version.
+                    payload.for_each_retained_child(|child| {
                         embeds_dead |= dead.contains(&child.0);
                     });
                     if embeds_dead {
@@ -1156,6 +1124,53 @@ mod arena_intern_tests {
             "a conditional whose pending frame binds a released node goes with it"
         );
         assert!(arena.is_live(binds_kept));
+    }
+
+    /// A class expression instance declared in a kept document whose
+    /// recorded prototype is a closed document's node is released with it,
+    /// and one whose prototype is kept stays. Discriminating: the child walk
+    /// treats the prototype as a derived record beside the instance, not a
+    /// part of it, so only the retention walk reaches it.
+    #[test]
+    fn a_close_releases_the_class_expressions_whose_prototype_is_its_node() {
+        use crate::semantic_query::{ClassExpressionIdentity, LiteralValue};
+
+        let arena = NodeArena::default();
+        let closed = arena.push_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(1.0)),
+            file_scope("/closed.ts"),
+        );
+        let kept = arena.push_with_scope(
+            SemanticNodeData::Literal(LiteralValue::Number(2.0)),
+            file_scope("/kept.ts"),
+        );
+        let instance = |prototype: SemanticNodeId| {
+            arena.push(SemanticNodeData::ClassExpressionInstance {
+                identity: Arc::new(ClassExpressionIdentity {
+                    canonical_id: Arc::from("/kept.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    offset: 0,
+                    name: Arc::from("C"),
+                    outer_clauses: Arc::from([]),
+                    own_arity: 0,
+                    constructor_visibility: None,
+                    prototype: Some(prototype),
+                    object_literal: false,
+                }),
+                type_arguments: Arc::from([]),
+                surface: kept,
+            })
+        };
+        let over_closed = instance(closed);
+        let over_kept = instance(kept);
+
+        let released = arena.release_canonical("/closed.ts", u64::MAX);
+
+        assert!(
+            released.contains(&over_closed),
+            "an instance whose prototype is a released node goes with it"
+        );
+        assert!(arena.is_live(over_kept));
     }
 
     fn file_scope(canonical: &str) -> NodeScopeId {

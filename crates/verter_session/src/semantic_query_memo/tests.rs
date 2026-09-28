@@ -168,6 +168,7 @@ fn a_nodes_structural_bits_share_one_sidecar_entry() {
         readonly: false,
     });
     assert_eq!(store.node_structure_bits_for_tests(array), None);
+    assert_eq!(store.unresolved_reach_count(), 0);
     assert!(store.node_is_inert_structure(array));
     assert_eq!(
         store.node_structure_bits_for_tests(array),
@@ -191,6 +192,11 @@ fn a_nodes_structural_bits_share_one_sidecar_entry() {
             unresolved: Some(false),
             inert: Some(true),
         })
+    );
+    assert_eq!(
+        store.unresolved_reach_count(),
+        2,
+        "one sidecar entry per node, whatever bits it holds"
     );
 }
 
@@ -12568,4 +12574,47 @@ mod release_embedded_node_family_tests {
             );
         }
     }
+}
+
+/// A document close hands the nodes it released to the signature kernel:
+/// once the kernel's tokens name mostly released nodes the epoch is
+/// replaced at the close, long before the record cap, and a close whose
+/// released nodes the kernel holds few tokens for leaves the epoch alone.
+/// Discriminating: without the hand-off the close only checks the cap, so
+/// the stranded tokens stay until thousands of cycles later.
+#[test]
+fn release_canonical_retires_the_kernel_epoch_its_released_nodes_strand() {
+    let store = SemanticGraphStore::new();
+    let kernel = store.signature_store();
+    let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let (a_param, a_obj, _, _) = release_intern_document(&store, "/w/a.ts", 1, shared);
+    let (b_param, _, _, _) = release_intern_document(&store, "/w/b.ts", 2, shared);
+    for token in [a_param, a_obj, b_param] {
+        kernel.intern_type_token(token, None).unwrap();
+    }
+    let before = kernel.epoch();
+
+    let report = store.release_canonical("/w/b.ts");
+    assert!(
+        !report.signature_epoch_replaced,
+        "one of three tokens stranded is not a majority: {report:?}"
+    );
+    assert_eq!(kernel.epoch(), before);
+    assert_eq!(kernel.stranded_token_count(), 1);
+
+    let report = store.release_canonical("/w/a.ts");
+    assert!(
+        report.signature_epoch_replaced,
+        "every token now names a released node: {report:?}"
+    );
+    assert_ne!(kernel.epoch(), before);
+    assert_eq!(
+        kernel.interned_len(),
+        0,
+        "the replacement epoch starts empty"
+    );
+    assert!(
+        kernel.interned_len() < kernel.record_cap(),
+        "the replacement came from the release, not the cap"
+    );
 }

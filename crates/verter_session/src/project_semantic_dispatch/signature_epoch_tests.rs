@@ -294,6 +294,49 @@ fn compaction_evicts_retired_kernel_families_and_the_answers_recompute() {
     assert_eq!(return_node(&key), answered);
 }
 
+/// Releasing the graph nodes a warm signature set's tokens name replaces the
+/// epoch once they are the majority, and evicts the set's candidate with it;
+/// the next read answers the same in the new epoch.
+#[test]
+fn releasing_the_named_nodes_evicts_the_warm_set_and_the_answer_recomputes() {
+    let host = host();
+    let d = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = d.graph();
+    let store = graph.signature_store();
+    let [overloaded, _] = subjects(&d);
+    let before = shared(&d, overloaded);
+    let warm = d
+        .signature_set_value(overloaded, SignatureKind::Call)
+        .unwrap();
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&set_key(overloaded)),
+        1
+    );
+    let retired = store.epoch();
+
+    let released = (0..graph.node_count() as u64).map(SemanticNodeId);
+    let current = graph
+        .release_signature_records_naming(released)
+        .expect("every tokenised node released strands the whole epoch");
+    assert_ne!(current, retired);
+    assert_eq!(set_epoch(&warm), Some(retired));
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&set_key(overloaded)),
+        0,
+        "the retired set's candidate is evicted with its epoch"
+    );
+    assert_eq!(
+        graph.memo_family_count_for_test(),
+        graph.memo_budget_tracked_len_for_test(),
+        "every evicted family leaves the retention ledger with it"
+    );
+    assert_eq!(shared(&d, overloaded), before);
+    let reread = d
+        .signature_set_value(overloaded, SignatureKind::Call)
+        .unwrap();
+    assert_eq!(set_epoch(&reread), Some(current));
+}
+
 /// A `ReadSignatureResult` value of a retired epoch is never served warm,
 /// even without the compaction sweep: its key's handles are retired, so the
 /// read recomputes and reports the retired key as unanswerable instead of

@@ -206,11 +206,16 @@ impl SemanticGraphStore {
         self.clear_hash_cons_memos();
         // The signature kernel's tables are append-only within an epoch and
         // their type tokens name node ids, so this release strands the
-        // records that named the released nodes. Once the tables outgrow
-        // their cap the epoch is replaced (V8's `signature_epoch`), here at
-        // the zero-reader instant the activity gate provides; the memo
-        // families a retired epoch leaves unreachable go with it.
-        report.signature_epoch_replaced = self.compact_signature_store_if_over_cap().is_some();
+        // records that named the released nodes. The kernel is told which
+        // nodes went and replaces its epoch once they strand most of its
+        // tokens, or once the tables outgrow their cap (V8's
+        // `signature_epoch`), here at the zero-reader instant the activity
+        // gate provides; the memo families a retired epoch leaves
+        // unreachable go with it.
+        report.signature_epoch_replaced = self
+            .release_signature_records_naming(dead.iter().copied())
+            .is_some()
+            || self.compact_signature_store_if_over_cap().is_some();
         report.storage_slots_after = self.arena.storage_slots();
         report.elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         report

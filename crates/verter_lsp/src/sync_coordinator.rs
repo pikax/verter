@@ -143,6 +143,10 @@ pub(crate) struct CoordinatorReceipts {
     /// at the moment the sync receipt lands. A monotonic count makes "this
     /// tick's publish has finished" an exact predicate.
     pub(crate) diags_published_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Milliseconds each pull stays running after releasing its slot. Zero
+    /// unless a test widens the moment between a pull's release and its
+    /// handle reporting it finished.
+    pub(crate) hold_after_slot_release_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Clone, Debug)]
@@ -615,13 +619,20 @@ struct CoordinatorShared {
     scanning: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// One in-flight provider pull. Dropping it — on completion OR cancellation —
-/// tells the coordinator a slot is free.
-struct PullSlot(mpsc::Sender<()>);
+/// One in-flight provider pull, named by the task that runs it. Dropping it —
+/// on completion OR cancellation — tells the coordinator which pull freed its
+/// slot.
+///
+/// The release lands as the pull's body returns, a moment BEFORE its handle
+/// reports the task finished. The coordinator therefore settles the named pull
+/// by awaiting its handle, never by asking whether it has finished yet: a loop
+/// that woke inside that moment would find the slot still taken, arm no timer
+/// for the work queued behind it, and park with no release left to wake it.
+struct PullSlot(mpsc::UnboundedSender<tokio::task::Id>, tokio::task::Id);
 
 impl Drop for PullSlot {
     fn drop(&mut self) {
-        let _ = self.0.try_send(());
+        let _ = self.0.send(self.1);
     }
 }
 
@@ -649,50 +660,98 @@ fn reap_finished_pulls(
         let Some(task) = diagnostic_tasks.remove(&canonical_id) else {
             continue;
         };
-        let complete = task
-            .now_or_never()
-            .and_then(|joined| joined.ok())
-            .unwrap_or(true);
-        if complete {
-            incomplete_resyncs.remove(&canonical_id);
-            continue;
-        }
-        let Some(uri) = deps.documents.canonical_id_to_uri(&canonical_id) else {
-            incomplete_resyncs.remove(&canonical_id);
-            continue;
-        };
-        let attempts = incomplete_resyncs.entry(canonical_id.clone()).or_insert(0);
-        if *attempts >= 1 {
-            continue;
-        }
-        *attempts += 1;
-        tracing::debug!(
-            "sync_coordinator: pull for {canonical_id} landed incomplete; re-syncing once"
+        let joined = task.now_or_never().and_then(|joined| joined.ok());
+        settle_pull(
+            deps,
+            canonical_id,
+            joined,
+            pending_files,
+            incomplete_resyncs,
+            last_attention,
         );
-        deps.needs_provider_sync.insert(canonical_id.clone());
-        let received_at = Instant::now();
-        let attended = last_attention.get(&canonical_id).copied();
-        pending_files
-            .entry(canonical_id)
-            .and_modify(|(changed_at, pending)| {
-                *changed_at = (*changed_at).max(received_at);
-                pending.requires_sync = true;
-                pending.force_diagnostics = true;
-                pending.sync_retries_remaining = pending.sync_retries_remaining.max(1);
-            })
-            .or_insert((
-                received_at,
-                PendingSignal {
-                    uri: uri.to_string(),
-                    requires_sync: true,
-                    force_diagnostics: true,
-                    sync_retries_remaining: 1,
-                    received_at,
-                    user_received_at: attended,
-                    edited: false,
-                },
-            ));
     }
+}
+
+/// Settle the pull whose slot release named `task_id`: wait out the moment
+/// between its release and its handle reporting it finished, then reap it.
+/// A release from a pull no longer tracked — cancelled, or already reaped at
+/// the top of the loop — owes nothing.
+async fn settle_released_pull(
+    deps: &SyncCoordinatorDeps,
+    task_id: tokio::task::Id,
+    diagnostic_tasks: &mut HashMap<String, tokio::task::JoinHandle<bool>>,
+    pending_files: &mut HashMap<String, (Instant, PendingSignal)>,
+    incomplete_resyncs: &mut HashMap<String, u8>,
+    last_attention: &HashMap<String, Instant>,
+) {
+    let Some(canonical_id) = diagnostic_tasks
+        .iter()
+        .find(|(_, task)| task.id() == task_id)
+        .map(|(canonical_id, _)| canonical_id.clone())
+    else {
+        return;
+    };
+    let Some(task) = diagnostic_tasks.remove(&canonical_id) else {
+        return;
+    };
+    let joined = task.await.ok();
+    settle_pull(
+        deps,
+        canonical_id,
+        joined,
+        pending_files,
+        incomplete_resyncs,
+        last_attention,
+    );
+}
+
+/// Reap one finished pull given what it returned (`None` when it was
+/// cancelled or panicked).
+fn settle_pull(
+    deps: &SyncCoordinatorDeps,
+    canonical_id: String,
+    joined: Option<bool>,
+    pending_files: &mut HashMap<String, (Instant, PendingSignal)>,
+    incomplete_resyncs: &mut HashMap<String, u8>,
+    last_attention: &HashMap<String, Instant>,
+) {
+    if joined.unwrap_or(true) {
+        incomplete_resyncs.remove(&canonical_id);
+        return;
+    }
+    let Some(uri) = deps.documents.canonical_id_to_uri(&canonical_id) else {
+        incomplete_resyncs.remove(&canonical_id);
+        return;
+    };
+    let attempts = incomplete_resyncs.entry(canonical_id.clone()).or_insert(0);
+    if *attempts >= 1 {
+        return;
+    }
+    *attempts += 1;
+    tracing::debug!("sync_coordinator: pull for {canonical_id} landed incomplete; re-syncing once");
+    deps.needs_provider_sync.insert(canonical_id.clone());
+    let received_at = Instant::now();
+    let attended = last_attention.get(&canonical_id).copied();
+    pending_files
+        .entry(canonical_id)
+        .and_modify(|(changed_at, pending)| {
+            *changed_at = (*changed_at).max(received_at);
+            pending.requires_sync = true;
+            pending.force_diagnostics = true;
+            pending.sync_retries_remaining = pending.sync_retries_remaining.max(1);
+        })
+        .or_insert((
+            received_at,
+            PendingSignal {
+                uri: uri.to_string(),
+                requires_sync: true,
+                force_diagnostics: true,
+                sync_retries_remaining: 1,
+                received_at,
+                user_received_at: attended,
+                edited: false,
+            },
+        ));
 }
 
 fn absorb_inbox(
@@ -765,8 +824,9 @@ async fn coordinator_loop(
     // the file is re-examined the instant it becomes quiescent.
     let quiescent = |canonical_id: &str| !changes.lock().contains_key(canonical_id);
 
-    // A finished (or cancelled) pull frees its slot and wakes the loop. Capacity
-    // one: a full channel means a wake is already queued.
+    // A finished (or cancelled) pull frees its slot and wakes the loop with
+    // the task that ran it. One release per spawned pull, so the channel holds
+    // at most the pulls released since the loop last drained it.
     let max_inflight = max_inflight_diagnostics(&deps.type_provider_kind);
     let max_background = max_background_diagnostics(&deps.type_provider_kind);
     // When the user last turned to each document, kept PAST the service that
@@ -780,7 +840,7 @@ async fn coordinator_loop(
     // The in-flight pulls that are background work (see `max_background`).
     let mut background_inflight: std::collections::HashSet<String> =
         std::collections::HashSet::new();
-    let (pull_done_tx, mut pull_done_rx) = mpsc::channel::<()>(1);
+    let (pull_done_tx, mut pull_done_rx) = mpsc::unbounded_channel::<tokio::task::Id>();
 
     loop {
         // Calculate next deadline from pending files. With every pull slot
@@ -957,8 +1017,18 @@ async fn coordinator_loop(
                     }
                 }
             }
-            // A slot freed: fall through and recompute what is dispatchable.
-            Some(()) = pull_done_rx.recv() => {}
+            // A slot freed: settle its pull, then recompute what is dispatchable.
+            Some(task_id) = pull_done_rx.recv() => {
+                settle_released_pull(
+                    &deps,
+                    task_id,
+                    &mut diagnostic_tasks,
+                    &mut pending_files,
+                    &mut incomplete_resyncs,
+                    &last_attention,
+                )
+                .await;
+            }
             _ = async {
                 match next_deadline {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -1130,9 +1200,12 @@ async fn coordinator_loop(
                                 let diag_tasks_live = Arc::clone(&receipts.diag_tasks_live);
                                 #[cfg(test)]
                                 let diags_published_count = Arc::clone(&receipts.diags_published_count);
-                                let slot = PullSlot(pull_done_tx.clone());
+                                #[cfg(test)]
+                                let hold_after_slot_release_ms =
+                                    Arc::clone(&receipts.hold_after_slot_release_ms);
+                                let pull_done_tx = pull_done_tx.clone();
                                 async move {
-                                    let _slot = slot;
+                                    let slot = PullSlot(pull_done_tx, tokio::task::id());
                                     let complete = {
                                         #[cfg(test)]
                                         let _live = DiagTaskLiveGuard::new(diag_tasks_live);
@@ -1148,6 +1221,15 @@ async fn coordinator_loop(
                                         diags_published_count
                                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                         diags_published.notify_waiters();
+                                    }
+                                    drop(slot);
+                                    #[cfg(test)]
+                                    {
+                                        let hold = hold_after_slot_release_ms
+                                            .load(std::sync::atomic::Ordering::SeqCst);
+                                        if hold > 0 {
+                                            tokio::time::sleep(std::time::Duration::from_millis(hold)).await;
+                                        }
                                     }
                                     complete
                                 }

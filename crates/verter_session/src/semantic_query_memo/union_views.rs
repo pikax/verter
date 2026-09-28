@@ -226,6 +226,12 @@ mod tests {
             first.get_or_insert((union, view));
         }
         let kept = store.union_view_count_for_tests();
+        assert!(kept > 0, "premise: the revisions kept views");
+        assert_eq!(
+            store.union_view_count(),
+            kept,
+            "the public count reads the same table"
+        );
         assert!(
             kept <= BOUND,
             "{kept} union views kept after {} revisions, more than {BOUND}",
