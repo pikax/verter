@@ -390,6 +390,7 @@ impl SemanticGraphStore {
             outcome,
             bindings: Arc::from(Vec::new().into_boxed_slice()),
             relation_proof,
+            recursion: crate::semantic_query::RelationRecursionFootprint::default(),
         }
     }
 }

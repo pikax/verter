@@ -177,6 +177,7 @@ pub(crate) mod reactive_wrapper;
 pub(crate) mod relation;
 pub(crate) mod relation_excess;
 pub(crate) mod relation_predicates;
+pub(crate) mod relation_variance;
 mod return_equation;
 #[cfg(test)]
 mod return_equation_tests;
@@ -4284,6 +4285,8 @@ mod projection_stack_safety_tests;
 mod relation_depth_tests;
 #[cfg(test)]
 mod relation_operand_tests;
+#[cfg(test)]
+mod relation_variance_tests;
 #[cfg(test)]
 mod signature_relation_tests;
 #[cfg(test)]

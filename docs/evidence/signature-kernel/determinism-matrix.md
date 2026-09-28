@@ -103,6 +103,67 @@ fold recognised only an `Object` surface, and the mapped result reaches the
 read as a deferred shell. It now reduces such a node through the
 structural-fact demand before deciding, and the row passes on every axis.
 
+## Relation recursion bounds under the memo
+
+A relation answers its **cold** answer: the answer the checker gives when the
+relation is checked with fresh caches. This is a determinism rule, independent
+of the checker version, and not a semantic-difference class: the checker's own
+relation cache lets an earlier relation change a later one's answer through
+its two recursion bounds, and §5.9 (DET-02, DET-05) and §15 forbid that here.
+
+Measured on the pinned 7.0.2 checker (`tsc --noEmit --strict`, each answer
+read off TS2322; `strictNullChecks` × `noImplicitAny` all agree), with
+`interface Box<T> { v: T }`, `Bₙ(X)` for `Box<…<X>…>` of `n` applications and
+`type N<T, D extends unknown[]> = D['length'] extends 3 ? T : { v: N<T, [...D, 0]> }`:
+
+| Relation | Cold (a checker of its own) | After the other relation, in one file |
+|---|---|---|
+| `[B₉₉(1)] extends [B₉₉(number)] ? 1 : 2` | `1` | `2` after the 100-deep one (its overflow cached the failures) |
+| `[B₁₀₀(1)] extends [B₁₀₀(number)] ? 1 : 2` | `2`, TS2321 | `1` after the 99-deep one (the cached pair spares the depth) |
+| `[N<1, [0, 0]>] extends [N<string, [0, 0]>] ? 1 : 2` | `2` | `1` after the next one |
+| `[N<1, []>] extends [N<string, []>] ? 1 : 2` | `1` (deeply nested) | `2` after the previous one (the cached inner failure) |
+
+Verter answers the cold column in every order. A published relation carries
+its `RelationRecursionFootprint` — the most structured relations its
+computation stacked, and per side the most distinct instantiations of one
+recursion identity it stacked on one path — and a warm read inside another
+relation replays the entry only where the cold computation from that position
+takes the same course: the height fits the depth the chain has left, and on a
+side not yet expanding the chain's most instantiations of one identity plus
+the entry's own stay under the checker's three. Anywhere else the relation is
+computed. An overflowed or deeply-nested answer is never admitted (it depends
+on where its chain began); a member of a cyclic component publishes the
+component's counted frames and deepest replay as its bound, since its own
+computation stopped at an assumption its cold computation relates.
+`isDeeplyNestedType` counts distinct instantiations of a recursion identity
+rather than increasing type ids: ids follow allocation order, which the memo's
+history decides.
+
+Drivers: `relation_depth_tests::a_relation_answers_its_cold_answer_in_either_order_around_the_depth_limit`,
+`…_around_a_deeply_nested_stack`, and the same-snapshot replay
+`one_snapshot_answers_every_query_order_alike` (the probes forward, backward
+and interleaved from one host).
+
+Type-argument variance follows the same rule. Two references to one generic
+interface or class relate by their parameters' variances; a parameter's
+annotation is its variance, and any other is measured as the checker's
+`getVariances` measures it — marker instantiations related in a relation
+chain of their own, memoized in the relation memo like any other relation
+(the markers are type parameters of the measured declaration past every
+authored one, so no other relation names them). A measurement's own
+references to its declaration answer `Unknown` while it is open, and every
+relation reached from them carries its markers, so each is always related
+with the measurement open. A measurement nested inside another
+declaration's that reaches the OUTER declaration's references depends on
+the outer measurement, so nothing of that build is memoized: each root
+relation measures the variance it needs as if it were the first. Measured
+on 7.0.2 over `interface E<T> { d: D<T> }` and `interface D<T> { e: E<T>;
+f: (x: T) => void }`, `E` is contravariant whichever relation comes first
+(`[E<1>] extends [E<number>] ? 1 : 2` is `2` cold and after `[D<1>]
+extends [D<number>]`); measured inside `D`'s measurement it reads
+independent, which the memo must never keep. Driver:
+`relation_variance_tests::mutually_dependent_variances_answer_alike_in_either_order`.
+
 ## §5.4 stable-key table
 
 The same file carries the §5.4 stable-key registration. It is enumerated
