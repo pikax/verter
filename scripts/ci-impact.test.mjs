@@ -29,6 +29,7 @@ import {
   composeLaneGates,
   formatGithubOutput,
   isCiInert,
+  releaseGates,
   ownedFilesFromFilterOutputs,
 } from "./ci-impact.mjs";
 import { buildWorkspaceIndex } from "./lib/crate-graph.mjs";
@@ -355,7 +356,80 @@ test("ownedFilesFromFilterOutputs unions every filter's file list except the cat
 
 test("formatGithubOutput emits one gate line per gate plus the fallback flag", () => {
   const lines = formatGithubOutput({ rust: "true", wasm: "false" }, { full: true });
-  assert.deepEqual(lines, ["gate_rust=true", "gate_wasm=false", "impact_full=true"]);
+  assert.deepEqual(lines, ["gate_rust=true", "gate_wasm=false", "impact_full=true", "release="]);
+});
+
+// v0.0.1-beta.6's release PR (#705, 2026-09-28) ran the whole ordinary suite on a
+// version bump; its CI is the release rehearsal instead.
+test("a release pull request turns every lane off and names its kind, whatever changed", () => {
+  const gates = { rust: "true", wasm: "true", js: "false" };
+  assert.equal(releaseGates(gates, ""), gates);
+  assert.deepEqual(releaseGates(gates, "project"), { rust: "false", wasm: "false", js: "false" });
+  assert.deepEqual(formatGithubOutput(releaseGates(gates, "ide"), { full: true }, "ide"), [
+    "gate_rust=false",
+    "gate_wasm=false",
+    "gate_js=false",
+    "impact_full=false",
+    "release=ide",
+  ]);
+
+  const rootCrates = [...new Set(Object.values(LANE_ROOTS).flat())];
+  const metadata = fixtureMetadata(rootCrates.map((name) => ({ name, dir: `crates/${name}` })));
+  const dir = mkdtempSync(join(tmpdir(), "ci-impact-release-"));
+  try {
+    const outputsPath = join(dir, "filter-outputs.json");
+    const metadataPath = join(dir, "metadata.json");
+    const githubOutput = join(dir, "github-output");
+    // A workspace manifest forces the full fallback on an ordinary PR, and a
+    // filter that matched would turn its lane on; a release PR still runs none.
+    const filterOutputs = {
+      any: "true",
+      any_files: JSON.stringify(["Cargo.toml", "package.json"]),
+    };
+    for (const spec of Object.values(LANE_GATES)) {
+      for (const filter of spec.filters ?? []) {
+        filterOutputs[filter] = "true";
+        filterOutputs[`${filter}_files`] = "[]";
+      }
+    }
+    writeFileSync(outputsPath, JSON.stringify(filterOutputs));
+    writeFileSync(metadataPath, JSON.stringify(metadata));
+    const run = (release) =>
+      spawnSync(
+        process.execPath,
+        [
+          join(SCRIPT_DIR, "ci-impact.mjs"),
+          "--filter-outputs",
+          outputsPath,
+          "--metadata",
+          metadataPath,
+          "--github-output",
+          githubOutput,
+          "--release",
+          release,
+        ],
+        { encoding: "utf8", cwd: REPO_ROOT, env: { ...process.env, CI_IMPACT_RELEASE: "" } },
+      );
+    const released = run("project");
+    assert.equal(released.status, 0, released.stderr);
+    const lines = readFileSync(githubOutput, "utf8").trimEnd().split(/\r?\n/u);
+    assert.ok(
+      lines.some((line) => line.startsWith("gate_")),
+      lines.join(" "),
+    );
+    assert.ok(
+      lines.filter((line) => line.startsWith("gate_")).every((line) => line.endsWith("=false")),
+      lines.join(" "),
+    );
+    assert.ok(
+      lines.includes("impact_full=false") && lines.includes("release=project"),
+      lines.join(" "),
+    );
+    assert.match(released.stdout, /Release pull request \(project\)/u);
+    assert.equal(run("beta").status, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("every gate's impact lanes are declared roots, and every root lane is used by a gate", () => {
