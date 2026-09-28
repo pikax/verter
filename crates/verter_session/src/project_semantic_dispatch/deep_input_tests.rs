@@ -705,10 +705,13 @@ const MAPPED_TYPES_UNDER_THE_WORK_BUDGET: usize = 1_000;
 /// TypeScript 7.0.2 answers `"a"`, under every setting.
 #[test]
 fn mapped_types_nested_10000_deep_return_on_production_stacks() {
-    assert!(!returns_on_a_small_stack(format!(
-        "{}export function pf() {{ const p: keyof D = null as any; return p; }}\n",
-        mapped_types(DEPTH)
-    )));
+    assert_eq!(
+        return_on_a_small_stack(format!(
+            "{}export function pf() {{ const p: keyof D = null as any; return p; }}\n",
+            mapped_types(DEPTH)
+        )),
+        WORK_BUDGET_EXCEEDED
+    );
     assert_eq!(
         mismatches_on_a_small_stack(
             mapped_types(MAPPED_TYPES_UNDER_THE_WORK_BUDGET),
@@ -920,7 +923,11 @@ fn dead_loops_nested_10000_deep_return_on_production_stacks() {
                 " }".repeat(depth)
             )
         };
-        assert!(!returns_on_a_small_stack(source(DEPTH)), "{open}");
+        assert_eq!(
+            return_on_a_small_stack(source(DEPTH)),
+            WORK_BUDGET_EXCEEDED,
+            "{open}"
+        );
         assert_eq!(
             mismatches_on_a_small_stack(source(DEAD_LOOPS_UNDER_THE_PLAN_BUDGET), RETURN, "1 | 2"),
             Vec::<String>::new(),
