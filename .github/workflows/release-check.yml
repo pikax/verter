@@ -14,10 +14,12 @@ name: Release Check
 # confidence, which is worse than no rehearsal at all.
 #
 # A RELEASE pull request (`release: v…` or `release(ide): v…`, from this
-# repository, as the release tooling opens it) is the exception: its CI is the
-# full rehearsal, run by ci.yml's `release-check` / `release-ide-check` jobs
-# and required through `CI Required`. Such a PR is repository code, never a
-# fork's, and still receives no registry or Marketplace secret.
+# repository, as the release tooling opens it) is the exception: ci.yml's
+# `release-check` / `release-ide-check` jobs run the full rehearsal beside
+# the ordinary CI lanes (the tests), required through `CI Required`, and the
+# tag publishes that run's artifacts (scripts/release-proof.mjs). Such a PR is
+# repository code, never a fork's, and still receives no registry or
+# Marketplace secret.
 #
 # Defence in depth: the workflow default and PR job stay READ-ONLY. The manual
 # call receives the permission superset GitHub requires to validate the nested
@@ -92,6 +94,7 @@ jobs:
     # dispatch grants the union requested by release.yml and its nested
     # integration workflow; PRs never enter this job.
     permissions:
+      actions: read
       contents: write
       deployments: write
       id-token: write

@@ -72,6 +72,9 @@ describe("provenance validation mechanism", () => {
     ["fixture.sha256 missing", (r) => delete r.fixture.sha256],
     ["normalizer.implementationSha256 missing", (r) => delete r.normalizer.implementationSha256],
     ["generator object missing entirely", (r) => delete r.generator],
+    ["environment missing entirely", (r) => delete r.environment],
+    ["environment.node missing", (r) => delete r.environment.node],
+    ["environment.platform empty", (r) => (r.environment.platform = "")],
     ["schemaVersion downgraded", (r) => (r.schemaVersion = 2)],
   ];
 
@@ -136,13 +139,31 @@ describe("committed-set binding", () => {
     }
   });
 
-  it("the check projection normalizes ONLY generation-time git identity; content-bound digests stay strict", () => {
+  it("the check projection normalizes ONLY generation-time identity (git and environment); content-bound digests and outputs stay strict", () => {
     const set = readGoldenSet(GOLDENS_ROOT);
     const [, record] = [...set.entries()][0];
     const projected = checkComparableRecord(record);
     expect(projected.generator.commit).toBeNull();
     expect(projected.generator.tree).toBeNull();
     expect(projected.generator.worktreeDirty).toBeNull();
+    expect(projected.environment).toBeNull();
+    // The same set regenerated on another machine or Node release is the same set…
+    const elsewhere = JSON.parse(JSON.stringify(record));
+    elsewhere.environment = { node: "v0.0.0", platform: "elsewhere", arch: "other" };
+    expect(serializeGoldenRecord(checkComparableRecord(elsewhere))).toBe(
+      serializeGoldenRecord(projected),
+    );
+    // …and nothing else is normalized: every other field survives untouched.
+    for (const field of Object.keys(record)) {
+      if (field === "generator" || field === "environment") continue;
+      expect(projected[field], field).toEqual(record[field]);
+    }
+    // A different expected output is drift under the projection.
+    const drifted = JSON.parse(JSON.stringify(record));
+    drifted.code = `${drifted.code}\n// drift`;
+    expect(serializeGoldenRecord(checkComparableRecord(drifted))).not.toBe(
+      serializeGoldenRecord(projected),
+    );
     // Strictly-compared fields survive the projection untouched…
     expect(projected.generator.implementationSha256).toBe(record.generator.implementationSha256);
     expect(projected.realizedClosureSha256).toBe(record.realizedClosureSha256);
