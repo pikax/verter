@@ -5217,6 +5217,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Whether `signature` declares type parameters of its own.
+    fn signature_is_generic(&self, signature: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(signature).as_deref(),
+            Some(SemanticNodeData::Signature { type_parameters, .. }) if !type_parameters.is_empty()
+        )
+    }
+
     /// Whether relating an overloaded source to `target` infers the
     /// target's `infer` sites or a call's type parameters: the checker's
     /// `inferFromSignatures` reads the source's LAST signature, so `(() =>
@@ -7387,11 +7395,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         // `getUnmatchedProperty`); a source whose key set is
                         // open may still carry the key with any value.
                         let indexed = source.indices.iter().any(|index| {
-                            index_signature_applies_to_property(
-                                self.graph(),
-                                index.key_type,
-                                &target_member.key,
-                            )
+                            self.index_key_applies_to_property(index.key_type, &target_member.key)
                         });
                         if source.open && !indexed {
                             RelationResult::Unknown
@@ -7440,11 +7444,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             for source_member in source.members.iter().filter(|member| {
-                index_signature_applies_to_property(
-                    self.graph(),
-                    target_index.key_type,
-                    &member.key,
-                )
+                self.index_key_applies_to_property(target_index.key_type, &member.key)
             }) {
                 acc = result_and(
                     acc,
@@ -9376,6 +9376,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return;
         }
 
+        // ── An intersection the checker reduces to `never`
+        //    (`getReducedType`: its arms declare one property whose literal
+        //    types conflict) relates as `never`. ──────────────────────────
+        if let SemanticNodeData::Intersection(arms) = &*source_data {
+            let arms = arms.members_arc();
+            if self.intersection_arms_reduce_to_never(&arms) {
+                drop(source_data);
+                drop(target_data);
+                let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+                work.push(same_pair(never, target));
+                return;
+            }
+        }
+
         // ── Top / bottom + error-type wildcard ─────────────────────────
         match (&*source_data, &*target_data) {
             (SemanticNodeData::Opaque(err), _) if err.is_error_type() => {
@@ -9466,6 +9480,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     None => {}
                 }
+            }
+            // `void` fits that unknown union as `unknown` does
+            // (`isUnknownLikeUnionType`) — and only it: not `{}`, not
+            // `{} | undefined`, and nothing without `strictNullChecks`.
+            if strict.strict_null_checks
+                && matches!(
+                    &*source_data,
+                    SemanticNodeData::Primitive(PrimitiveKind::Void)
+                )
+                && !self.subtype_mode()
+                && matches!(
+                    self.relate_unknown_source(target, &target_data, true),
+                    Some(PairStep::Assignable)
+                )
+            {
+                results.push(assignable(bindings));
+                return;
             }
         }
 
@@ -10109,9 +10140,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // A generic source relates as it is instantiated in the
             // target's context (`compareSignaturesRelated`); a relation
             // under an inference session, or of comparability (which
-            // erases generics), keeps the source as it is.
+            // erases generics), keeps the source as it is — unless the
+            // target is generic itself: its own type parameters are no
+            // inference site of the session, so the pair relates as it
+            // does outside one (`callWith(id, 3)` over `callWith<T>(f: <U>(x:
+            // U) => U, x: T)`).
             if self.current_relation_kind() != RelationKind::Comparable
-                && !self.relation_session_active()
+                && (!self.relation_session_active() || self.signature_is_generic(target))
             {
                 if let Some(instantiated) =
                     self.instantiate_signature_in_context_of(source, target, kind)
@@ -10738,11 +10773,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// mapper's modifiers (a `?` modifier makes a property optional and an
     /// index signature's value `undefined`-able under `strictNullChecks`).
     ///
+    /// A template literal pattern (`data-${string}`) is an index key as
+    /// `string` is (`isValidIndexKeyType`).
+    ///
     /// `None` (the operand stays the carrier it is, undecided) for a key
     /// remap, a key domain that does not settle to such constituents (a
-    /// numeric literal or a template key among them), one without an
-    /// index key (an enumerable key domain is the mapped build's own), and
-    /// a template the binder substitution cannot read.
+    /// numeric literal or a template with a hole that is no placeholder
+    /// among them), one without an index key (an enumerable key domain is
+    /// the mapped build's own), and a template the binder substitution
+    /// cannot read.
     /// The object is interned for the relation only.
     fn index_key_mapped_object_for_relation(
         &self,
@@ -10815,8 +10854,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 SemanticNodeData::Primitive(
                     PrimitiveKind::String | PrimitiveKind::Number | PrimitiveKind::Symbol,
-                ) => {
+                )
+                | SemanticNodeData::TemplateLiteral { .. } => {
+                    let pattern = matches!(&*data, SemanticNodeData::TemplateLiteral { .. });
                     drop(data);
+                    if pattern && !self.template_is_settled(key) {
+                        return None;
+                    }
                     let mut value = value_for(key)?;
                     if optional_undefined {
                         let undefined = graph
@@ -11842,6 +11886,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Whether an index signature keyed by `key_type` applies to the
+    /// property `key` (`isApplicableIndexType`): the key kinds
+    /// [`index_signature_applies_to_property`] reads, and a template
+    /// literal pattern the property's name matches (the name `data-x`
+    /// matches the pattern `data-${string}`), alone or in a union.
+    pub(super) fn index_key_applies_to_property(
+        &self,
+        key_type: SemanticNodeId,
+        key: &crate::semantic_query::PropertyKey,
+    ) -> bool {
+        let graph = self.graph();
+        if index_signature_applies_to_property(graph, key_type, key) {
+            return true;
+        }
+        let name = match key {
+            crate::semantic_query::PropertyKey::String(name) => name.to_string(),
+            crate::semantic_query::PropertyKey::Number(number) => number.to_string(),
+            crate::semantic_query::PropertyKey::UniqueSymbol(_) => return false,
+        };
+        let is_template = |node: &SemanticNodeId| {
+            matches!(
+                graph.node_data(*node).as_deref(),
+                Some(SemanticNodeData::TemplateLiteral { .. })
+            )
+        };
+        let patterns: Vec<SemanticNodeId> = match graph.node_data(key_type).as_deref() {
+            Some(SemanticNodeData::TemplateLiteral { .. }) => vec![key_type],
+            Some(SemanticNodeData::Union(members)) => members
+                .members_arc()
+                .iter()
+                .copied()
+                .filter(is_template)
+                .collect(),
+            _ => Vec::new(),
+        };
+        if patterns.is_empty() {
+            return false;
+        }
+        let literal = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(name)));
+        patterns
+            .into_iter()
+            .any(|pattern| self.template_pattern_accepts(literal, pattern) == Some(true))
+    }
+
     pub(super) fn relate_target_index_signature(
         &self,
         source: &SurfaceView,
@@ -11883,7 +11971,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let Some(property_key) = prop.key.cloned_known() else {
                 return RelationResult::Unknown;
             };
-            if !index_signature_applies_to_property(graph, target_index.key_type, &property_key) {
+            if !self.index_key_applies_to_property(target_index.key_type, &property_key) {
                 continue;
             }
             let r = self.relate_member(
@@ -12311,6 +12399,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .iter()
             .map(|source_signature| (*source_signature, target_sig))
             .collect();
+        // An overloaded source infers from its last signature, as an
+        // intersection of callables does ([`Self::infers_from_last_source_signature`]).
+        if self.infers_from_last_source_signature(target_sig) {
+            return self.relate_overloads_inferring_from_last(
+                &alternatives,
+                bindings,
+                InferPosition::Covariant,
+            );
+        }
         self.relate_pair_alternatives(&alternatives, bindings, InferPosition::Covariant)
     }
 }
