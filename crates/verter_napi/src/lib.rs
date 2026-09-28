@@ -1457,12 +1457,23 @@ pub struct NapiTscScriptSetupAttrsFailureSubject {
     pub sourceRange: NapiSourceRange,
 }
 
+/// The whole source as a failure's subject: a failure not attributable to
+/// one syntax slot (a parse of the source refused its stack).
+#[napi(object)]
+pub struct NapiTscSourceFailureSubject {
+    pub kind: String,
+}
+
 /// Stable structured identity for a failed public-API projection.
 #[napi(object, use_nullable = true)]
 pub struct NapiPublicApiProjectionError {
     pub code: String,
     pub detailCode: String,
-    pub subject: Either<NapiTscMacroFailureSubject, NapiTscScriptSetupAttrsFailureSubject>,
+    pub subject: Either3<
+        NapiTscMacroFailureSubject,
+        NapiTscScriptSetupAttrsFailureSubject,
+        NapiTscSourceFailureSubject,
+    >,
     pub declarationShapeReason: Option<String>,
     pub memberOrdinal: Option<u32>,
     pub outcomeKind: Option<String>,
@@ -1490,13 +1501,13 @@ impl From<FfiPublicApiProjectionError> for NapiPublicApiProjectionError {
     fn from(value: FfiPublicApiProjectionError) -> Self {
         let subject = match value.subject {
             PublicApiProjectionSubject::Macro { syntax_index } => {
-                Either::A(NapiTscMacroFailureSubject {
+                Either3::A(NapiTscMacroFailureSubject {
                     kind: "macro".to_string(),
                     syntaxIndex: syntax_index,
                 })
             }
             PublicApiProjectionSubject::ScriptSetupAttrs { source_range } => {
-                Either::B(NapiTscScriptSetupAttrsFailureSubject {
+                Either3::B(NapiTscScriptSetupAttrsFailureSubject {
                     kind: "scriptSetupAttrs".to_string(),
                     sourceRange: NapiSourceRange {
                         start: source_range.start,
@@ -1504,6 +1515,9 @@ impl From<FfiPublicApiProjectionError> for NapiPublicApiProjectionError {
                     },
                 })
             }
+            PublicApiProjectionSubject::Source => Either3::C(NapiTscSourceFailureSubject {
+                kind: "source".to_string(),
+            }),
         };
         Self {
             code: value.code,
@@ -5171,7 +5185,7 @@ defineProps<{ value: Unsafe }>()
         assert_eq!(error.detailCode, "unsupported-declaration-shape");
         assert!(matches!(
             error.subject,
-            Either::A(NapiTscMacroFailureSubject { syntaxIndex: 0, .. })
+            Either3::A(NapiTscMacroFailureSubject { syntaxIndex: 0, .. })
         ));
         assert_eq!(
             error.declarationShapeReason.as_deref(),
@@ -5219,7 +5233,7 @@ defineProps<{ value: Unsafe }>()
             assert_eq!(error.detailCode, "unavailable-outcome");
             assert!(matches!(
                 error.subject,
-                Either::A(NapiTscMacroFailureSubject {
+                Either3::A(NapiTscMacroFailureSubject {
                     syntaxIndex,
                     ..
                 }) if syntaxIndex == syntax_index as u32
@@ -5246,10 +5260,27 @@ defineProps<{ value: Unsafe }>()
         .into();
         assert!(matches!(
             attrs_error.subject,
-            Either::B(NapiTscScriptSetupAttrsFailureSubject {
+            Either3::B(NapiTscScriptSetupAttrsFailureSubject {
                 sourceRange: NapiSourceRange { start: 31, end: 37 },
                 ..
             })
+        ));
+
+        let source_error: NapiPublicApiProjectionError = FfiPublicApiProjectionError {
+            code: "tsc-generation".to_string(),
+            detail_code: "stack-unavailable".to_string(),
+            subject: PublicApiProjectionSubject::Source,
+            declaration_shape_reason: None,
+            member_ordinal: None,
+            outcome_kind: None,
+            outcome_reason: None,
+            outcome_diagnostic: None,
+        }
+        .into();
+        assert_eq!(source_error.detailCode, "stack-unavailable");
+        assert!(matches!(
+            source_error.subject,
+            Either3::C(NapiTscSourceFailureSubject { ref kind }) if kind == "source"
         ));
     }
 

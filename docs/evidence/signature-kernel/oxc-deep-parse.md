@@ -281,16 +281,25 @@ the operation's product typed incompleteness, never an empty file's.
   and publishes no product: the host reports the fatal diagnostic
   `HOST_STACK_UNAVAILABLE`, a failure blocked on an input outside the
   bytes.
-- A public-API projection with a refused parse is absent, and caches no
-  extract of the script read off the refused parse.
+- A public-API projection with a refused parse fails with
+  `TscGenerationError::StackUnavailable` (detail code `stack-unavailable`),
+  whose subject is the whole source (`TscFailureSubject::Source`, on the
+  wire `{ "kind": "source" }` through napi and wasm), and caches no extract
+  of the script read off the refused parse.
 
 Through the shipped module a script past the profile throws the typed
 refusal on upsert, serves no analysis, and raises no `no-undef-properties`
 warning for the binding it declares.
 
-The compiler's entries called outside the host (the `tsc` generation of
-the standalone checker, the standalone compile) have no typed channel for
-the refusal: a refused parse there reads as an empty script.
+The compiler's entries outside a host record their own refusals: the
+standalone compile (`StandaloneCompiler::compile`, `compile_prepared`,
+`compile_batch`) fails with `DirectCompileError::StackUnavailable`, a
+prepared carrier keeps its preparation's refusal and refuses every compile
+from it; the `tsc` generation (`generate_tsc_output*`,
+`extract_tsc_state`, `generate_tsc_from_state`) fails with
+`TscGenerationError::StackUnavailable`; the specifier inventory
+(`collect_module_specifier_spans`) answers the refusal, and the
+standalone checker reports it as the file's typed failure.
 
 A walk's stack is taken by a walk-stack lease, the one fallible step, at
 an operation's boundary: the operation holds a lease sized for the
@@ -309,9 +318,10 @@ report each such walk by its call site, and each leased walk that could
 reserve while no operation records its refusals.
 `every_walk_of_the_host_operations_runs_under_a_lease` runs the host's
 operations (upsert, analysis, a flow return, the runtime compile, a
-compile request, the public-API projection) over TypeScript, Vue and
-Svelte sources nesting 201 levels, in a child process, and fails on any
-reported walk.
+compile request, the public-API projection) and the compiler's standalone
+entries (the direct, prepared and batched compile, the `tsc` generation,
+the specifier inventory) over TypeScript, Vue and Svelte sources nesting
+201 levels, in a child process, and fails on any reported walk.
 
 ### Hand-written recursions over oxc syntax
 

@@ -8,6 +8,7 @@ use verter_parser::oxc_parse::Parser;
 
 fn texts(source: &str) -> Vec<String> {
     collect_module_specifier_spans(source)
+        .expect("the stack is had")
         .expect("source must parse")
         .into_iter()
         .map(|span| span.text)
@@ -72,7 +73,9 @@ fn separates_a_real_specifier_from_a_lookalike_in_the_same_source() {
     let source = "import Child from '@/Child.vue'\n\
          const marker = 'import(\"@/Child.vue\")' as const\n\
          export default { components: { Child }, marker }\n";
-    let spans = collect_module_specifier_spans(source).expect("source must parse");
+    let spans = collect_module_specifier_spans(source)
+        .expect("the stack is had")
+        .expect("source must parse");
     assert_eq!(
         spans.len(),
         1,
@@ -103,7 +106,9 @@ fn a_source_that_does_not_parse_cleanly_reports_no_answer() {
     let panicking = "import Child from './Child.vue'\n\
          const swallowed = (\n";
     assert!(
-        collect_module_specifier_spans(panicking).is_none(),
+        collect_module_specifier_spans(panicking)
+            .expect("the stack is had")
+            .is_none(),
         "a carrier the parser cannot handle must be distinguishable from one \
          that genuinely contains no specifier"
     );
@@ -129,7 +134,9 @@ fn a_source_that_does_not_parse_cleanly_reports_no_answer() {
         );
     }
     assert!(
-        collect_module_specifier_spans(recoverable).is_none(),
+        collect_module_specifier_spans(recoverable)
+            .expect("the stack is had")
+            .is_none(),
         "a RECOVERED parse with diagnostics must also report no answer — \
          checking only `panicked` lets a malformed carrier be rewritten on \
          spans a recovering parser invented"
@@ -137,7 +144,7 @@ fn a_source_that_does_not_parse_cleanly_reports_no_answer() {
 
     let empty_but_valid = "export const x = 1\n";
     assert_eq!(
-        collect_module_specifier_spans(empty_but_valid),
+        collect_module_specifier_spans(empty_but_valid).expect("the stack is had"),
         Some(Vec::new()),
         "a VALID source with no specifiers is an answer, and it is the empty one"
     );
@@ -155,6 +162,7 @@ fn reports_a_no_substitution_template_specifier_and_skips_an_interpolated_one() 
     );
 
     let spans = collect_module_specifier_spans("const lazy = () => import(`./Child.vue`)\n")
+        .expect("the stack is had")
         .expect("source must parse");
     // The recorded range covers the WHOLE template literal, backticks
     // included, and the replacement is emitted as a plain string literal.
@@ -240,4 +248,36 @@ fn quoting_round_trips_through_the_decoded_value() {
             "re-quoting {specifier:?} with {quote:?} must denote the same specifier"
         );
     }
+}
+
+/// An inventory whose parse is refused its stack is the typed refusal: not
+/// `None` (a source that did not parse cleanly) and not an empty inventory;
+/// retried, it answers the specifiers.
+#[test]
+fn an_inventory_whose_parse_is_refused_is_the_typed_refusal() {
+    let source = format!(
+        "import Child from './Child.vue'\nconst v = {}1{};\n",
+        "(".repeat(157),
+        ")".repeat(157)
+    );
+    let (refused, retried) = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn_scoped(scope, || {
+                verter_parser::oxc_parse::faults::fail_next_reservations(1);
+                let refused = collect_module_specifier_spans(&source);
+                (refused.is_err(), collect_module_specifier_spans(&source))
+            })
+            .expect("spawn the thread")
+            .join()
+            .expect("the inventories return")
+    });
+    assert!(refused, "the refused inventory is the typed refusal");
+    let texts: Vec<String> = retried
+        .expect("the stack is had")
+        .expect("source must parse")
+        .into_iter()
+        .map(|span| span.text)
+        .collect();
+    assert_eq!(texts, ["./Child.vue"]);
 }

@@ -29,6 +29,8 @@ verter_debug_assert = { workspace = true }
 verter_compiler = { path = "../verter_compiler" }
 verter_session = { path = "../verter_session" }
 verter_semantic = { path = "../verter_semantic" }
+# The typed stack refusal a specifier inventory can answer.
+verter_parser = { path = "../verter_parser" }
 verter_workspace = { path = "../verter_workspace" }
 # In-memory tsgo `--api` typecheck backend (the `--noEmit` path).
 verter_tsgo_api = { path = "../verter_tsgo_api" }
@@ -48,6 +50,8 @@ tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "io-util", "pro
 
 [dev-dependencies]
 verter_test_support = { path = "../verter_test_support" }
+# Stack-reservation fault injection, for the checker's stack-refusal tests.
+verter_parser = { path = "../verter_parser", features = ["stack-fault-injection"] }
 verter_macro_dto = { path = "../verter_macro_dto" }
 # Self dev-dependency: enables `test-fake-engine` for THIS crate's test builds
 # only, so the fake-engine shim bin exists for `cargo test` (CARGO_BIN_EXE_)

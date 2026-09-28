@@ -3963,6 +3963,7 @@ dependencies = [
  "verter_compiler",
  "verter_debug_assert",
  "verter_macro_dto",
+ "verter_parser",
  "verter_semantic",
  "verter_session",
  "verter_span",
