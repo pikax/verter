@@ -1687,6 +1687,91 @@ fn a_walk_stack_lease_that_cannot_be_reserved_starts_no_walk() {
     assert_eq!(retried, Ok(1));
 }
 
+/// An operation recording its refusals learns of a parse refused its stack
+/// inside it, of an expression parse's, and of a walk-stack lease's, however
+/// the operation went on to use the refusal; an operation enclosing it
+/// learns of it too, one recording nothing learns of none made outside it,
+/// and a refusal made where no operation records is recorded nowhere.
+#[test]
+fn an_operation_learns_of_every_stack_refusal_made_inside_it() {
+    let outcomes = on_a_small_thread(|| {
+        let source = deep_source();
+        let parenthesized = format!("{}1{}", "(".repeat(10_000), ")".repeat(10_000));
+        let allocator = Allocator::default();
+        let parse = || {
+            super::faults::fail_next_reservations(1);
+            // The operation reads the refused parse as an empty program.
+            Parser::new(&allocator, &source, SourceType::ts())
+                .parse()
+                .program
+                .body
+                .len()
+        };
+        let parsed = super::refusals_within(parse);
+        let expression = super::refusals_within(|| {
+            super::faults::fail_next_reservations(1);
+            Parser::new(&allocator, &parenthesized, SourceType::ts())
+                .parse_expression()
+                .is_err()
+        });
+        let program = Parser::new(&allocator, &source, SourceType::ts())
+            .parse()
+            .program;
+        let leased = super::refusals_within(|| {
+            super::faults::fail_next_reservations(1);
+            super::with_program_walk_stack_lease(&program, || ()).is_err()
+        });
+        let enclosing = super::refusals_within(|| super::refusals_within(parse).1);
+        let complete = super::refusals_within(|| {
+            Parser::new(&allocator, &source, SourceType::ts())
+                .parse()
+                .program
+                .body
+                .len()
+        });
+        let unrecorded = parse();
+        let after = super::refusals_within(|| ()).1;
+        (
+            parsed, expression, leased, enclosing, complete, unrecorded, after,
+        )
+    });
+    let (parsed, expression, leased, enclosing, complete, unrecorded, after) = outcomes;
+    assert_eq!(parsed.0, 0);
+    assert!(parsed.1.is_some(), "the parse's refusal");
+    assert!(expression.0);
+    assert!(expression.1.is_some(), "the expression parse's refusal");
+    assert!(leased.0);
+    assert!(leased.1.is_some(), "the lease's refusal");
+    assert_eq!(enclosing.0, parsed.1, "the inner operation's");
+    assert_eq!(enclosing.1, parsed.1, "carried to the outer");
+    assert_eq!(complete, (1, None));
+    assert_eq!(unrecorded, 0);
+    assert_eq!(after, None, "no operation recorded the unrecorded refusal");
+}
+
+/// An operation that unwinds restores the record of the one enclosing it,
+/// which keeps the refusal it learned of before.
+#[test]
+fn an_unwinding_operation_restores_the_enclosing_record() {
+    let (inner_unwound, outer) = on_a_small_thread(|| {
+        let source = deep_source();
+        super::refusals_within(|| {
+            let allocator = Allocator::default();
+            super::faults::fail_next_reservations(1);
+            Parser::new(&allocator, &source, SourceType::ts()).parse();
+            std::panic::catch_unwind(|| {
+                super::refusals_within(|| -> () { std::panic::resume_unwind(Box::new("unwinds")) })
+            })
+            .is_err()
+        })
+    });
+    assert!(inner_unwound);
+    assert!(
+        outer.is_some(),
+        "the refusal made before the inner operation"
+    );
+}
+
 /// Every walk inside a walk-stack lease, of the whole program, of its
 /// statement, by its text, and nested under another, runs on the lease's
 /// region: the operation reserves once. Without the lease each reserves a

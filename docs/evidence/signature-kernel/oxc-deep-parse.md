@@ -249,47 +249,48 @@ refusal removed the module throws `RangeError: Maximum call stack size
 exceeded` at 31,300 levels, and the same instance then fails the shallow
 script too.
 
-### Operations without a typed incompleteness
+### Typed incompleteness of a refused parse
 
-The parse and the lease return `StackUnavailable`, but the host's
-products have no state that carries it. A refused parse's program is
-empty and marked fatal, and the snapshot builders publish the empty
-file's analysis for it: through the shipped module, a script past the
-profile yields `bindings: []` and the template's `no-undef-properties`
-warning for the binding it declares, semantic facts read off a program
-the source is not.
+A parse or a walk-stack lease refused its stack returns `StackUnavailable`,
+and the refused parse's program is empty and marked fatal. Nothing is
+read off that program as the file's: every operation that parses or
+leases records its refusals (`oxc_parse::refusals_within`, scoped to the
+operation on its thread, restored on return and on unwind, an inner
+operation's refusal carried to the one enclosing it), and a refusal makes
+the operation's product typed incompleteness, never an empty file's.
 
-The smallest missing authority is an operational-incompleteness state on
-the parse product (`ParseSnapshot`, and `ScriptAnalysisSnapshot` through
-it) that every consumer honours, set where a parse or a lease is
-refused. Its producers, each parsing a script and publishing what it
-reads:
+- The scheduler's source stage (`host_executor::execute_source`) fails
+  with `StageErrorKind::StackUnavailable`, which the upsert reports as
+  `SchedulerError::StackUnavailable { file_id, needed }`; it publishes no
+  snapshot, and the same upsert once the stack can be had publishes the
+  file. A refused script parse sets `ParseSnapshot::refused`; a refused
+  carrier projection is `SyntaxReject::StackUnavailable`, which the
+  publication store never retains, and a stage sharing another stage's
+  projection maps that reject to the same typed failure.
+- The analysis lanes that parse on their own serve no analysis and
+  publish no artifact from a refused parse or lease: the rebuild of a
+  snapshot from source (`host_manage/analysis_io.rs`,
+  `host_manage/eval_env.rs`), the overlay materializer and the
+  evaluation program (`parsed_eval_program`), whose flights publish
+  nothing from it.
+- Template facts whose expression parse was refused are absent, not
+  empty, and the result that would have read them is partial, so a cache
+  keyed on the source never retains it.
+- A compile whose parse or lease was refused is refused whole
+  (`VueHostCompileRefusal` / `SvelteHostCompileRefusal::StackUnavailable`)
+  and publishes no product: the host reports the fatal diagnostic
+  `HOST_STACK_UNAVAILABLE`, a failure blocked on an input outside the
+  bytes.
+- A public-API projection with a refused parse is absent, and caches no
+  extract of the script read off the refused parse.
 
-- the scheduler's source stage (`host_executor::execute_source`): the
-  non-SFC lane (`parse::parse_non_sfc_snapshot`) and the carrier lane
-  (`parse::carrier_snapshot_from_eval_source` → `build_vue_script_outputs`
-  / `build_svelte_snapshot_from_eval_source`), whose `StageError` could
-  carry it as a new `StageErrorKind`;
-- the analysis read's scheduler-missed lane
-  (`host_manage/analysis_io.rs` →
-  `build_snapshot_and_template_inputs_from_source`), which rebuilds a
-  snapshot from source when the source stage published none;
-- the evaluation environment (`host_manage/eval_env.rs`), the overlay
-  materializer (`host_manage/overlay_materialize.rs`) and the evaluation
-  program's own parse (`parsed_eval_program`, read by type evaluation);
-- the compiler's compile and projection entries, which parse and walk the
-  script on their own: Vue script setup, options API, public constructor,
-  binding views and template data; the Svelte runtime, IDE and semantic
-  comment scans; `tsc` script and module specifiers.
+Through the shipped module a script past the profile throws the typed
+refusal on upsert, serves no analysis, and raises no `no-undef-properties`
+warning for the binding it declares.
 
-Its consumers are every reader of the published analysis: 100 reads of
-`script_analysis` across 28 production files (the analysis FFI, lint,
-component meta, IDE projection, codegen, type evaluation), besides each
-compiler entry's own use of its program. The walk roots under the
-producers are the 117 containment calls across `verter_compiler`,
-`verter_semantic`, `verter_session` and `verter_parser`. Until the
-producers carry the state and the consumers honour it, the leases have no
-boundary to report to, and a walk's failed reservation ends the process.
+The compiler's entries called outside the host (the `tsc` generation of
+the standalone checker, the standalone compile) have no typed channel for
+the refusal: a refused parse there reads as an empty script.
 
 ### Hand-written recursions over oxc syntax
 

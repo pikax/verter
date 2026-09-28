@@ -49,7 +49,7 @@ mod stack;
 pub use nesting::Nesting;
 #[cfg(any(test, feature = "stack-fault-injection"))]
 pub use stack::faults;
-pub use stack::StackUnavailable;
+pub use stack::{refusals_within, StackUnavailable};
 
 /// The most native stack oxc 0.151's parser, or a walk of oxc's over what
 /// it parsed, spends per level of [`nesting`]'s bound, with twice the
@@ -212,11 +212,12 @@ fn parse_with_stack_under<R>(
     }
     let depth = syntax_nesting(source_text, source_type).depth as usize;
     if let Some(profile) = profile.filter(|profile| !profile.admits(depth)) {
-        return Err(StackUnavailable {
+        return Err(stack::record_refusal(StackUnavailable {
             needed: depth.saturating_mul(profile.bytes_per_level),
-        });
+        }));
     }
     stack::with_stack(stack_bytes(depth), stack::Reservation::Parse, parse)
+        .map_err(stack::record_refusal)
 }
 
 /// Run `walk`, a walk of oxc's over parsed syntax, with at least `needed`

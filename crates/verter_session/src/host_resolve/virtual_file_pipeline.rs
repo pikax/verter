@@ -3038,13 +3038,24 @@ impl VerterHost {
         // Try cached extract path: avoids re-parsing SFC + OXC on cache hit.
         let extract = if let Some(cached) = cached_extract {
             cached
-        } else if let Some(fresh) = verter_compiler::tsc::extract_tsc_state(
-            &source,
-            &component_name,
-            &verter_compiler::tsc::TscExtractOptions {
-                filename: Some(canonical.clone()),
-            },
-        ) {
+        } else if let Some(fresh) = {
+            // An extract whose parse was refused its stack is read off an
+            // empty program: it is neither served nor cached, and the
+            // projection is absent until the stack can be had.
+            let (extracted, refused) = verter_parser::oxc_parse::refusals_within(|| {
+                verter_compiler::tsc::extract_tsc_state(
+                    &source,
+                    &component_name,
+                    &verter_compiler::tsc::TscExtractOptions {
+                        filename: Some(canonical.clone()),
+                    },
+                )
+            });
+            if refused.is_some() {
+                return Ok(None);
+            }
+            extracted
+        } {
             let arc = Arc::new(fresh);
             if !has_content_override {
                 // cached_tsc_extract lives on DerivedRawState (D48 split).
@@ -3055,20 +3066,26 @@ impl VerterHost {
             arc
         } else {
             // No <script setup> â€” fall through to direct path for empty stub
-            let tsc_out = verter_compiler::tsc::generate_tsc_output_with_options(
-                &source,
-                &component_name,
-                &verter_compiler::tsc::TscGenOptions {
-                    conditional_root_narrowing: false,
-                    filename: Some(canonical.clone()),
-                    mode: tsc_mode,
-                },
-                macro_tsc.as_deref().map_or(
-                    verter_compiler::tsc::MacroTscInput::NotRequired,
-                    verter_compiler::tsc::MacroTscInput::Authoritative,
-                ),
-                &fallthrough_props,
-            )?;
+            let (tsc_out, refused) = verter_parser::oxc_parse::refusals_within(|| {
+                verter_compiler::tsc::generate_tsc_output_with_options(
+                    &source,
+                    &component_name,
+                    &verter_compiler::tsc::TscGenOptions {
+                        conditional_root_narrowing: false,
+                        filename: Some(canonical.clone()),
+                        mode: tsc_mode,
+                    },
+                    macro_tsc.as_deref().map_or(
+                        verter_compiler::tsc::MacroTscInput::NotRequired,
+                        verter_compiler::tsc::MacroTscInput::Authoritative,
+                    ),
+                    &fallthrough_props,
+                )
+            });
+            if refused.is_some() {
+                return Ok(None);
+            }
+            let tsc_out = tsc_out?;
             return Ok(Some(TscResponse::new(
                 Arc::from(tsc_out.code),
                 if tsc_out.source_map.is_empty() {
@@ -3081,16 +3098,22 @@ impl VerterHost {
             )));
         };
 
-        let tsc_out = verter_compiler::tsc::generate_tsc_from_state(
-            &extract,
-            &component_name,
-            tsc_mode,
-            macro_tsc.as_deref().map_or(
-                verter_compiler::tsc::MacroTscInput::NotRequired,
-                verter_compiler::tsc::MacroTscInput::Authoritative,
-            ),
-            &fallthrough_props,
-        )?;
+        let (tsc_out, refused) = verter_parser::oxc_parse::refusals_within(|| {
+            verter_compiler::tsc::generate_tsc_from_state(
+                &extract,
+                &component_name,
+                tsc_mode,
+                macro_tsc.as_deref().map_or(
+                    verter_compiler::tsc::MacroTscInput::NotRequired,
+                    verter_compiler::tsc::MacroTscInput::Authoritative,
+                ),
+                &fallthrough_props,
+            )
+        });
+        if refused.is_some() {
+            return Ok(None);
+        }
+        let tsc_out = tsc_out?;
         Ok(Some(TscResponse::new(
             Arc::from(tsc_out.code),
             if tsc_out.source_map.is_empty() {

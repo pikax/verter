@@ -1094,7 +1094,8 @@ impl CarrierPublicationStore {
                         verter_language::SyntaxReject::UnsupportedProfile { .. }
                         | verter_language::SyntaxReject::RejectedSyntax { .. }
                         | verter_language::SyntaxReject::UnmappedDiagnostic { .. }
-                        | verter_language::SyntaxReject::InvalidCarrierGeometry { .. },
+                        | verter_language::SyntaxReject::InvalidCarrierGeometry { .. }
+                        | verter_language::SyntaxReject::StackUnavailable { .. },
                     ) => {
                         self.audit.push(
                             request,
@@ -1463,7 +1464,8 @@ impl CarrierPublicationStore {
                     verter_language::SyntaxReject::UnsupportedProfile { .. }
                     | verter_language::SyntaxReject::RejectedSyntax { .. }
                     | verter_language::SyntaxReject::UnmappedDiagnostic { .. }
-                    | verter_language::SyntaxReject::InvalidCarrierGeometry { .. },
+                    | verter_language::SyntaxReject::InvalidCarrierGeometry { .. }
+                    | verter_language::SyntaxReject::StackUnavailable { .. },
                 ) => {
                     return PublicationOutcome::RegistryMismatch(
                         RegistryMismatch::ProducerVersionMismatch,

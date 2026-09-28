@@ -1036,6 +1036,23 @@ pub(crate) fn admission_refused_diagnostics(
     }])
 }
 
+/// `HOST_STACK_UNAVAILABLE`: a parse or walk-stack lease the execution
+/// needed was refused its stack, so its bundle was built from an empty
+/// program in place of the source's and nothing it produced publishes.
+pub(crate) fn stack_unavailable_diagnostics(
+    canonical_id: &str,
+    source_len: u32,
+    unavailable: verter_parser::oxc_parse::StackUnavailable,
+) -> DiagnosticsSnapshot {
+    DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+        severity: HostSeverity::Error,
+        code: crate::types::HOST_STACK_UNAVAILABLE.to_string(),
+        message: format!("compile of '{canonical_id}' is incomplete: {unavailable}"),
+        arguments: Vec::new(),
+        span: verter_span::Span::new(0, source_len),
+    }])
+}
+
 /// `HOST_NO_CARRIER_ARTIFACT`: the input has no framework parse artifact,
 /// so no registered identity exists — no binding, no registry dispatch,
 /// and no runtime compile route.
@@ -1129,6 +1146,9 @@ pub(crate) fn vue_render_execution_refusal(
                 &unsupported,
             ))
         }
+        VueHostCompileRefusal::StackUnavailable(unavailable) => RenderExecutionRefusal::Fatal(
+            stack_unavailable_diagnostics(canonical_id, source_len, unavailable),
+        ),
         refusal @ (VueHostCompileRefusal::AdmissionParseMismatch
         | VueHostCompileRefusal::WrongDemand { .. }) => RenderExecutionRefusal::Fatal(
             admission_refused_diagnostics(canonical_id, source_len, &format!("{refusal:?}")),
@@ -1217,6 +1237,9 @@ pub(crate) fn svelte_render_execution_refusal(
                 &unsupported,
             ))
         }
+        SvelteHostCompileRefusal::StackUnavailable(unavailable) => RenderExecutionRefusal::Fatal(
+            stack_unavailable_diagnostics(canonical_id, source_len, unavailable),
+        ),
         refusal @ (SvelteHostCompileRefusal::AdmissionParseMismatch
         | SvelteHostCompileRefusal::WrongDemand { .. }) => RenderExecutionRefusal::Fatal(
             admission_refused_diagnostics(canonical_id, source_len, &format!("{refusal:?}")),
@@ -1340,6 +1363,9 @@ fn vue_products_execution_failure(
                 &unsupported,
             ))
         }
+        VueHostCompileRefusal::StackUnavailable(unavailable) => HostProductsFailure::Fatal(
+            stack_unavailable_diagnostics(canonical_id, source_len, unavailable),
+        ),
         refusal @ (VueHostCompileRefusal::AdmissionParseMismatch
         | VueHostCompileRefusal::WrongDemand { .. }) => HostProductsFailure::Fatal(
             admission_refused_diagnostics(canonical_id, source_len, &format!("{refusal:?}")),
@@ -1376,6 +1402,9 @@ fn svelte_products_execution_failure(
                 &unsupported,
             ))
         }
+        SvelteHostCompileRefusal::StackUnavailable(unavailable) => HostProductsFailure::Fatal(
+            stack_unavailable_diagnostics(canonical_id, source_len, unavailable),
+        ),
         refusal @ (SvelteHostCompileRefusal::AdmissionParseMismatch
         | SvelteHostCompileRefusal::WrongDemand { .. }) => HostProductsFailure::Fatal(
             admission_refused_diagnostics(canonical_id, source_len, &format!("{refusal:?}")),

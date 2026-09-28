@@ -236,12 +236,10 @@ impl HostStageExecutor {
     }
 }
 
-impl StageExecutor for HostStageExecutor {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+impl HostStageExecutor {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn execute_source(
+    /// The source stage's snapshot of `content`: see [`StageExecutor::execute_source`].
+    fn source_snapshot(
         &self,
         canonical_id: &str,
         file_language: FileLanguage,
@@ -363,9 +361,20 @@ impl StageExecutor for HostStageExecutor {
                         .unwrap_or_default(),
                     registered.snapshot_id().clone(),
                 );
-                let envelope = self
-                    .publication_store
-                    .publish_or_get(&accepted, request)
+                let published = self.publication_store.publish_or_get(&accepted, request);
+                // A projection refused its stack, on this stage or on the one
+                // whose parse this stage shared, is the typed refusal.
+                if let crate::carrier_publication_store::PublicationOutcome::Failed(
+                    crate::carrier_publication_store::CarrierParseFailure::ParserRejected(reject),
+                ) = &published
+                {
+                    if let verter_language::SyntaxReject::StackUnavailable { needed, .. } =
+                        &**reject
+                    {
+                        return Err(StageError::stack_unavailable(*needed));
+                    }
+                }
+                let envelope = published
                     .into_envelope()
                     .ok_or_else(|| StageError::new("carrier publication did not admit"))?;
                 (
@@ -502,6 +511,33 @@ impl StageExecutor for HostStageExecutor {
         });
 
         Ok(snapshot)
+    }
+}
+
+impl StageExecutor for HostStageExecutor {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    /// The source stage is one operation: a parse or walk-stack lease
+    /// refused its stack anywhere inside it (the carrier projection, the
+    /// script parse, the template facts, the evaluation source) leaves a
+    /// product built from an empty program in place of the source's, so
+    /// the stage publishes nothing and fails with the typed refusal.
+    fn execute_source(
+        &self,
+        canonical_id: &str,
+        file_language: FileLanguage,
+        content: Arc<str>,
+        generation: u64,
+    ) -> Result<SourceSnapshot, StageError> {
+        let (snapshot, refused) = verter_parser::oxc_parse::refusals_within(|| {
+            self.source_snapshot(canonical_id, file_language, content, generation)
+        });
+        match refused {
+            Some(refused) => Err(StageError::stack_unavailable(refused.needed)),
+            None => snapshot,
+        }
     }
 
     fn extract_deps(&self, canonical_id: &str, source: &SourceSnapshot) -> ExtractedDeps {
