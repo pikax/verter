@@ -1328,7 +1328,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         carriers: [SemanticNodeId; 2],
         concrete: [SemanticNodeId; 2],
     ) -> Option<RelationResult> {
-        if !self.relation_pair_is_structured(concrete[0], concrete[1]) {
+        if !self.checker_recursion_entry(concrete[0], concrete[1]) {
             return None;
         }
         let identities = carriers.map(|carrier| {
@@ -1400,6 +1400,235 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return Some(assignable(&[]));
         }
         None
+    }
+
+    /// Whether the checker's `isRelatedTo(source, target)` enters
+    /// `recursiveTypeRelatedTo` — one entry of its recursion depth: the
+    /// operands differ, `isSimpleTypeRelatedTo` does not already hold (a
+    /// pair of simple types, an `any` / `unknown` target, a `never` or
+    /// `any` source), and the pair is not a small union the checker relates
+    /// without caching it — a union source of fewer than four members
+    /// against a target that is no union, or a union target of fewer than
+    /// four against a simple source (`skipCaching`).
+    fn checker_recursion_entry(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool {
+        if source == target || !self.relation_pair_is_structured(source, target) {
+            return false;
+        }
+        let graph = self.graph();
+        let (Some(source_data), Some(target_data)) =
+            (graph.node_data(source), graph.node_data(target))
+        else {
+            return true;
+        };
+        let simple = |data: &SemanticNodeData| {
+            matches!(
+                data,
+                SemanticNodeData::Primitive(_)
+                    | SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_)
+            )
+        };
+        // Without `strictNullChecks` the checker's union of one type and
+        // `null` / `undefined` is that type: the pair of its member is the
+        // entry, relating it no union.
+        if self.relation_union_erased_member(source).is_some()
+            || self.relation_union_erased_member(target).is_some()
+        {
+            return false;
+        }
+        let small_union = |data: &SemanticNodeData| matches!(data, SemanticNodeData::Union(members) if members.members_arc().len() < 4);
+        let is_union = |data: &SemanticNodeData| matches!(data, SemanticNodeData::Union(_));
+        match (&*source_data, &*target_data) {
+            (_, SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown))
+            | (SemanticNodeData::Primitive(PrimitiveKind::Never), _) => false,
+            (SemanticNodeData::Primitive(PrimitiveKind::Any), target)
+                if !matches!(target, SemanticNodeData::Primitive(PrimitiveKind::Never)) =>
+            {
+                false
+            }
+            (source, target) if small_union(source) && !is_union(target) => false,
+            (source, target) if small_union(target) && simple(source) => false,
+            _ => true,
+        }
+    }
+
+    /// The one member a union of it and `null` / `undefined` is to the
+    /// checker without `strictNullChecks` (`getUnionType` drops them beside
+    /// any other member); `None` for any other node, under
+    /// `strictNullChecks`, and while an inference session collects (its
+    /// candidates are the ones the union's members deposit).
+    fn relation_union_erased_member(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        if self.relation_session_active() {
+            return None;
+        }
+        let strict_null_checks = self
+            .dispatch_txn
+            .borrow()
+            .relation
+            .strict
+            .unwrap_or(StrictFamilyConfig::TS_STRICT)
+            .strict_null_checks;
+        if strict_null_checks {
+            return None;
+        }
+        let graph = self.graph();
+        let data = graph.node_data(node)?;
+        let SemanticNodeData::Union(members) = &*data else {
+            return None;
+        };
+        let members = members.members_arc();
+        let mut kept = members.iter().copied().filter(|member| {
+            !matches!(
+                graph.node_data(*member).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        });
+        let member = kept.next()?;
+        kept.next().is_none().then_some(member)
+    }
+
+    /// Relate a [`RelateWork::Descend`] pair: one the checker relates with
+    /// an `isRelatedTo` of its own. A pair that takes a relation frame of
+    /// its own counts toward the recursion depth as that frame; any other
+    /// pair the checker enters `recursiveTypeRelatedTo` for is one more
+    /// entry of the depth inline, left once everything it pushed is done —
+    /// so a pair written inline counts as the same pair behind an alias
+    /// does.
+    fn relate_nested_pair(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        kind: DescendKind,
+        bindings: &mut Vec<InferBinding>,
+        work: &mut Vec<RelateWork>,
+        results: &mut Vec<RelationResult>,
+    ) {
+        let framed = match kind {
+            DescendKind::Eval => self.relation_eval_requires_canonical_frame(source, target),
+            DescendKind::Arm | DescendKind::TargetArm => {
+                self.relation_eval_requires_canonical_frame(source, target)
+                    || self.arm_pair_names_a_declaration_carrier(source, target)
+            }
+        };
+        if framed {
+            results.push(match kind {
+                DescendKind::Eval => {
+                    self.relate_member(source, target, bindings, InferPosition::Covariant)
+                }
+                DescendKind::Arm => self.relate_arm_member(source, target, false, bindings),
+                DescendKind::TargetArm => self.relate_arm_member(source, target, true, bindings),
+            });
+            return;
+        }
+        if self.checker_recursion_entry(source, target) {
+            if !self.enter_inline_recursion() {
+                results.push(RelationResult::NotAssignable);
+                return;
+            }
+            work.push(RelateWork::Ascend);
+        }
+        self.expand_pair(
+            source,
+            target,
+            kind == DescendKind::TargetArm,
+            bindings,
+            work,
+            results,
+        );
+    }
+
+    /// Open one inline entry of the checker's recursion depth on the frame
+    /// on top of the stack: `false` (and the chain overflowed) when the
+    /// chain already overflowed or holds [`CHECKER_RELATION_DEPTH_LIMIT`]
+    /// entries, as a frame of its own would.
+    fn enter_inline_recursion(&self) -> bool {
+        let chain = {
+            let txn = self.dispatch_txn.borrow();
+            let reentry = txn.reentry();
+            let Some(top) = reentry.depth().checked_sub(1) else {
+                return true;
+            };
+            let Some(chain) = reentry
+                .frame(top)
+                .and_then(|frame| frame.relation())
+                .map(|state| state.chain.clone())
+            else {
+                return true;
+            };
+            let overflowed = reentry
+                .frame(chain.base)
+                .and_then(|frame| frame.relation())
+                .is_some_and(|state| state.chain.overflowed);
+            if !overflowed && chain.depth < CHECKER_RELATION_DEPTH_LIMIT {
+                drop(txn);
+                self.adjust_inline_recursion(true);
+                return true;
+            }
+            chain
+        };
+        self.overflow_relation_chain(&chain);
+        false
+    }
+
+    /// Leave the inline recursion entry [`Self::enter_inline_recursion`]
+    /// opened.
+    fn leave_inline_recursion(&self) {
+        self.adjust_inline_recursion(false);
+    }
+
+    fn adjust_inline_recursion(&self, enter: bool) {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        let reentry = txn.reentry_mut();
+        let Some(top) = reentry.depth().checked_sub(1) else {
+            return;
+        };
+        if let Some(state) = reentry
+            .frame_mut_for_update(top)
+            .and_then(super::dispatch_txn::ObligationFrame::relation_mut)
+        {
+            let chain = &mut state.chain;
+            if enter {
+                chain.depth += 1;
+                chain.recursion.reached = chain.recursion.reached.max(chain.depth);
+                chain.recursion.frames = chain.recursion.frames.saturating_add(1);
+            } else {
+                chain.depth -= 1;
+            }
+        }
+    }
+
+    /// The chain depth of the frame on top of the stack, when it is a
+    /// relation frame.
+    fn top_relation_chain_depth(&self) -> Option<u16> {
+        let txn = self.dispatch_txn.borrow();
+        let reentry = txn.reentry();
+        let top = reentry.depth().checked_sub(1)?;
+        reentry
+            .frame(top)
+            .and_then(|frame| frame.relation())
+            .map(|state| state.chain.depth)
+    }
+
+    /// Restore the chain depth of the frame on top of the stack to `depth`,
+    /// closing the inline recursion entries a worklist left open when it
+    /// stopped early.
+    fn restore_relation_chain_depth(&self, depth: Option<u16>) {
+        let Some(depth) = depth else {
+            return;
+        };
+        let mut txn = self.dispatch_txn.borrow_mut();
+        let reentry = txn.reentry_mut();
+        let Some(top) = reentry.depth().checked_sub(1) else {
+            return;
+        };
+        if let Some(state) = reentry
+            .frame_mut_for_update(top)
+            .and_then(super::dispatch_txn::ObligationFrame::relation_mut)
+        {
+            state.chain.depth = depth;
+        }
     }
 
     /// The checker's `isDeeplyNestedType` count for the entry of
@@ -7203,6 +7432,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 IdentityCarrierUnwrap::Unresolvable => operand,
             }
         });
+        // Without `strictNullChecks` a union of one type and `null` /
+        // `undefined` is that type to the checker: the pair relates as the
+        // pair of its member, one recursion entry, not a union and then its
+        // member.
+        let erased = concrete.map(|operand| self.relation_union_erased_member(operand));
+        if erased[0].is_some() || erased[1].is_some() {
+            return self.decide_relation_with_dispatch(
+                erased[0].unwrap_or(source),
+                erased[1].unwrap_or(target),
+                bindings,
+                intersection_target_arm,
+            );
+        }
         if let Some(result) = self.enter_checker_recursion([source, target], concrete) {
             return result;
         }
@@ -7327,6 +7569,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         bindings: &mut Vec<InferBinding>,
         intersection_target_arm: bool,
     ) -> RelationResult {
+        // A worklist that stops early leaves its inline recursion entries
+        // open; the frame's depth is its own again once it returns.
+        let depth = self.top_relation_chain_depth();
+        let result =
+            self.decide_relation_worklist(source, target, bindings, intersection_target_arm);
+        self.restore_relation_chain_depth(depth);
+        result
+    }
+
+    fn decide_relation_worklist(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+        intersection_target_arm: bool,
+    ) -> RelationResult {
         // Program recognition precedes the identity shortcut here exactly as
         // at the root and in `expand_pair`: an open program is never accepted
         // on node identity.
@@ -7389,6 +7647,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let combined = reduce_and_from_results(&mut results, n);
                     results.push(combined);
                 }
+                RelateWork::Descend(s, t, kind) => {
+                    self.relate_nested_pair(s, t, kind, bindings, &mut work, &mut results);
+                }
+                RelateWork::Ascend => self.leave_inline_recursion(),
             }
         }
         results.pop().unwrap_or(RelationResult::Unknown)
@@ -7531,7 +7793,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `Array<T>` and `ReadonlyArray<T>` is covariant
                 // (`string[]` is assignable to `(string | number)[]`, the
                 // reverse is not).
-                work.push(RelateWork::Eval(s_el, t_el));
+                work.push(RelateWork::Descend(s_el, t_el, DescendKind::Eval));
                 return true;
             }
             (
@@ -7676,7 +7938,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // ([`tuple_position_pairs`]).
                 let mut forward: Vec<RelateWork> = Vec::with_capacity(pairs.len() + 1);
                 for (source_element, target_element) in pairs.iter().copied() {
-                    forward.push(RelateWork::Eval(source_element, target_element));
+                    forward.push(RelateWork::Descend(
+                        source_element,
+                        target_element,
+                        DescendKind::Eval,
+                    ));
                 }
                 if pairs.len() > 1 {
                     forward.push(RelateWork::ReduceAnd(pairs.len() as u32));
@@ -7718,14 +7984,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 for slot in self.tuple_slots(&s_els) {
                     match slot.kind {
                         TupleSlotKind::Variadic => {
-                            forward.push(RelateWork::Eval(slot.value, target))
+                            forward.push(RelateWork::Descend(slot.value, target, DescendKind::Eval))
                         }
                         _ => positions.push(slot.type_argument),
                     }
                 }
                 if !positions.is_empty() {
                     let index = self.intern_normalized_union_or_intersection(&positions, true);
-                    forward.push(RelateWork::Eval(index, t_el));
+                    forward.push(RelateWork::Descend(index, t_el, DescendKind::Eval));
                 }
                 if forward.len() > 1 {
                     forward.push(RelateWork::ReduceAnd(forward.len() as u32));
@@ -7768,7 +8034,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 let mut forward: Vec<RelateWork> = Vec::with_capacity(pairs.len() + 1);
                 for (source_element, target_element) in pairs.iter().copied() {
-                    forward.push(RelateWork::Eval(source_element, target_element));
+                    forward.push(RelateWork::Descend(
+                        source_element,
+                        target_element,
+                        DescendKind::Eval,
+                    ));
                 }
                 if pairs.len() > 1 {
                     forward.push(RelateWork::ReduceAnd(pairs.len() as u32));
@@ -9166,6 +9436,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // ── Union/Intersection distribution ────────────────────────────
         if let SemanticNodeData::Union(members) = &*source_data {
+            let target_is_union = matches!(&*target_data, SemanticNodeData::Union(_));
             let members = members.members_arc();
             drop(source_data);
             drop(target_data);
@@ -9180,7 +9451,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 None => {}
             }
-            distribute_and(work, results, &members, RelateWork::Arm, |m| (*m, target));
+            // Against a union target each member relates to SOME target
+            // member (`eachTypeRelatedToSomeType`), which is no recursion
+            // entry of its own; against any other target each member is
+            // an `isRelatedTo` of its own (`eachTypeRelatedToType`).
+            let arm = if target_is_union {
+                RelateWork::Arm
+            } else {
+                |source, target| RelateWork::Descend(source, target, DescendKind::Arm)
+            };
+            distribute_and(work, results, &members, arm, |m| (*m, target));
             return;
         }
         // `boolean` IS the union `true | false` to the checker: against a
@@ -9239,9 +9519,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let members = members.members_arc();
             drop(source_data);
             drop(target_data);
-            distribute_and(work, results, &members, RelateWork::TargetArm, |m| {
-                (source, *m)
-            });
+            distribute_and(
+                work,
+                results,
+                &members,
+                |source, target| RelateWork::Descend(source, target, DescendKind::TargetArm),
+                |m| (source, *m),
+            );
             return;
         }
         if let SemanticNodeData::Intersection(members) = &*source_data {
@@ -11841,6 +12125,26 @@ enum RelateWork {
     TargetArm(SemanticNodeId, SemanticNodeId),
     /// Pop `n` prior results, AND them, push one combined result.
     ReduceAnd(u32),
+    /// Relate a pair the checker relates with an `isRelatedTo` of its own
+    /// — an element pair, a union source's member against a target that is
+    /// no union, an intersection target's arm — as the item `kind` would:
+    /// a structured pair is one more entry of the checker's recursion
+    /// depth, inline as in a frame of its own
+    /// ([`ProjectSemanticDispatch::relate_nested_pair`]).
+    Descend(SemanticNodeId, SemanticNodeId, DescendKind),
+    /// Leave the inline recursion entry a [`Self::Descend`] opened, once
+    /// every item it pushed is done.
+    Ascend,
+}
+
+/// How a [`RelateWork::Descend`] pair relates once its recursion entry
+/// is open: as a [`RelateWork::Eval`], a [`RelateWork::Arm`] or a
+/// [`RelateWork::TargetArm`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DescendKind {
+    Eval,
+    Arm,
+    TargetArm,
 }
 
 fn reduce_and_from_results(results: &mut Vec<RelationResult>, n: u32) -> RelationResult {

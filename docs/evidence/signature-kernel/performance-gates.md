@@ -442,17 +442,36 @@ Recorded plainly so no reader mistakes absence for a pass:
   recurses once per structural level, and is bounded as the checker bounds
   it (`CHECKER_RELATION_DEPTH_LIMIT`, `project_semantic_dispatch/relation.rs`).
   The relation frames stacked directly on one another are one checker
-  `checkTypeRelatedTo` call; a frame whose operands, unwrapped, are a
-  structured pair is one `recursiveTypeRelatedTo` entry. The 101st entry
+  `checkTypeRelatedTo` call. Every pair the checker enters
+  `recursiveTypeRelatedTo` for is one entry — a frame whose operands,
+  unwrapped, are such a pair, and a pair the frame's own worklist relates
+  inline (an element pair of two tuples or arrays, a union source's member
+  against a target that is no union, an intersection target's arm), which
+  counts as one more level on its frame while its items run; a small union
+  the checker relates without caching it (`skipCaching`) and, without
+  `strictNullChecks`, a union of one type and `null` / `undefined` (that
+  type, to the checker) are no entry of their own. The 101st entry
   overflows: the relation is false, every structured relation after it in
   the chain is false (the checker's `overflow` flag), and nothing computed
   under it is admitted. Measured on TypeScript 7.0.2 with each probe in its
   own file: `[B] extends [<B around number>] ? 1 : 2` is `1` over 97–99
   nested `Box` applications or `{ v: … }` literals and `2` with TS2321
-  over 100, 101, 102 and 500 (the tuple wrapper is the first entry); the
-  lane answers the same (`relation_depth_tests.rs` →
+  over 100, 101, 102 and 500 (the tuple wrapper is the first entry), written
+  inline or behind an alias; `[{ v: … }]` and `{ v: … }[]` count two a
+  level and overflow at 50, nested tuples at 100, `{ v: … } | null` two a
+  level under `strictNullChecks` and one without, and a small union source
+  one a level; the lane answers the same (`relation_depth_tests.rs` →
   `nested_object_types_overflow_at_the_checkers_depth`,
-  `nested_generic_applications_overflow_at_the_checkers_depth`). The
+  `inline_nested_object_types_overflow_at_the_checkers_depth`,
+  `inline_element_and_union_pairs_count_toward_the_checkers_depth`,
+  `a_union_erased_without_strict_null_checks_counts_as_its_object`,
+  `a_small_union_source_is_no_recursion_entry_of_its_own`,
+  `nested_generic_applications_overflow_at_the_checkers_depth`). An inline
+  entry is a counter on its frame, not a relation of its own: relating
+  tuples of 1,000, 2,000 and 5,000 object pairs takes 27, 52 and 131 ms
+  unoptimized with the count and 25, 50 and 126 ms without it (the best
+  of five cold relations in each of three alternating builds), one
+  relation check and one reduction per element (`relating_wide_tuples_of_object_pairs_costs_the_same_per_element`). The
   checker's `isDeeplyNestedType` stops a recursion earlier: three entries
   of one recursion identity on both stacks, each read from a newer
   instantiation, answer `Maybe`, which holds. The lane gives a type
@@ -460,19 +479,17 @@ Recorded plainly so no reader mistakes absence for a pass:
   type literal relates `1` to `string` from its third level, and an
   infinitely recursive one stops there
   (`a_recursive_alias_is_deeply_nested_from_its_third_instantiation`,
-  `an_infinitely_recursive_alias_stops_as_deeply_nested`). Two known
-  differences stay open, each a skipped test asserting the checker's
-  answer: an interface or class reference has no recursion identity,
-  because the checker relates two references to one generic interface by
-  its type arguments' variance and this engine does not
-  (`an_infinitely_recursive_interface_relates_by_its_variance`: the lane
-  overflows to `2` where the checker's variance measurement answers
-  `1`); and the checker's cache keeps the failures its overflow produced,
-  so in one file a 99-deep relation after a 100-deep one is `2`, where the
-  lane answers `1`, as the relation does alone — an answer computed under
-  an overflow depends on where its relation began, and the relation memo is
-  shared across requests
-  (`a_relation_after_an_overflowed_one_reads_its_failures`). The native
+  `an_infinitely_recursive_alias_stops_as_deeply_nested`). Two references
+  to one generic interface or class relate by their type arguments'
+  measured variance before any structural descent, so an infinitely
+  recursive interface never descends a level per nesting
+  (`an_infinitely_recursive_interface_relates_by_its_variance`); and a
+  memo entry is replayed only where its recorded height and recursion
+  identities prove the cold computation takes the same course, so a
+  relation answers its cold answer whatever was related before it
+  (`a_relation_answers_its_cold_answer_in_either_order_around_the_depth_limit`;
+  the checker's own cache answers the 99-deep relation `2` after the
+  100-deep one, see `determinism-matrix.md`). The native
   stack one relation uses, measured from the relating thread's start: 1.9
   MiB for 100 `Box` levels and 1.1 MiB for 100 object levels unoptimized
   (under the 2 MiB default test stack), 709 KiB and 586 KiB optimized
@@ -480,7 +497,11 @@ Recorded plainly so no reader mistakes absence for a pass:
   of `verter_wasm` (wasm32's linker default; no override is configured),
   the 2 MiB default of the tokio blocking and rayon CPU pools and the
   scheduler's I/O and CPU workers, and the 8 MiB of the LSP serve thread,
-  the host CPU pool and the declaration-lowering workers.
+  the host CPU pool and the declaration-lowering workers. A pair that is
+  no entry — a small union source — still takes a relation frame, at most
+  one beside the counted frame of its member's pair; 99 such levels relate
+  on the 2 MiB default test stack unoptimized
+  (`a_small_union_source_is_no_recursion_entry_of_its_own`).
 
 * **A long logical chain applies a quadratic count of guards and
   evaluates without a native level per operand.** Each operand of `a && b

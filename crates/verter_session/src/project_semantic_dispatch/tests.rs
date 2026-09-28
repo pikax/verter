@@ -13608,24 +13608,16 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
     );
 }
 
-/// The iterative relation engine handles structurally-novel deeply
-/// nested distribution without a per-frame stack-safety cap. A
-/// fixed per-frame recursion cap would have returned `Unknown` on
-/// anything deeper; the iterative form runs the work on a
-/// heap-backed worklist and only fires the work budget on genuine
-/// runaway (budget = `10 × graph.node_count()`, 4096 floor), not on
-/// reasonably-deep nesting.
-///
-/// Discriminator: build a 500-deep **readonly** nested array chain
-/// `readonly Number[]…[]` on the source and `readonly String[]…[]`
-/// on the target. Readonly Array-Array relation is covariant (forward
-/// only) so descent is linear in depth — one sub-pair per level,
-/// not the exponential 2ⁿ growth of mutable-array bidirectional
-/// comparison. The iterative worklist driver bounds itself on a
-/// graph-size work budget rather than a fixed recursion-frame cap, so
-/// it walks to the innermost `Number` vs `String` mismatch and returns
-/// `NotAssignable` instead of short-circuiting to `Unknown` once a
-/// recursion-depth limit is reached.
+/// Deeply nested arrays relate on the heap-backed worklist, one element
+/// pair per level, and never answer `Unknown` for their depth: within the
+/// checker's recursion depth the relation reaches the innermost `Number`
+/// vs `String` mismatch, and past it the relation overflows, false, as the
+/// checker's does (every element pair is one `recursiveTypeRelatedTo`
+/// entry; measured on TypeScript 7.0.2, `{ v: … }[]` nested 50 times
+/// overflows with TS2321). Either way a 90-deep and a 500-deep
+/// **readonly** chain `readonly Number[]…[]` against `readonly
+/// String[]…[]` are `NotAssignable`. Readonly Array-Array relation is
+/// covariant (forward only), so descent is linear in depth.
 #[test]
 fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
     use crate::semantic_query::RelationResult;
@@ -13652,24 +13644,28 @@ fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
         }
         id
     }
-    const DEPTH: u32 = 500;
-    let source = nest_readonly_array(&graph, PrimitiveKind::Number, DEPTH);
-    let target = nest_readonly_array(&graph, PrimitiveKind::String, DEPTH);
-    assert_ne!(
-        source, target,
-        "distinct base primitives must not alias under structural interning"
-    );
+    for depth in [90, 500] {
+        let source = nest_readonly_array(&graph, PrimitiveKind::Number, depth);
+        let target = nest_readonly_array(&graph, PrimitiveKind::String, depth);
+        assert_ne!(
+            source, target,
+            "distinct base primitives must not alias under structural interning"
+        );
 
-    let result = dispatch.execute_relate_pair_as_result_for_tests(source, target);
-    assert!(
-        matches!(result, RelationResult::NotAssignable),
-        "iterative relate must walk a 500-deep readonly Array \
-         chain to the leaf primitive mismatch and return NotAssignable \
-         rather than short-circuiting to Unknown at a recursion-depth \
-         cap; got {result:?}",
-    );
+        let result = dispatch.execute_relate_pair_as_result_for_tests(source, target);
+        assert!(
+            matches!(result, RelationResult::NotAssignable),
+            "relating a {depth}-deep readonly Array chain must answer NotAssignable \
+             (the leaf mismatch, or the checker's depth overflow), never Unknown; \
+             got {result:?}",
+        );
+    }
 }
 
+/// Within the checker's recursion depth the array descent reaches its leaf
+/// on the worklist and reduces it through the canonical conditional
+/// oracle: 90 nested readonly arrays are 90 recursion entries, the leaf
+/// pair one more.
 #[test]
 fn iterative_deep_array_relation_reaches_the_nested_conditional_oracle() {
     use crate::semantic_query::{LiteralValue, RelationResult};
@@ -13691,7 +13687,7 @@ fn iterative_deep_array_relation_reaches_the_nested_conditional_oracle() {
         pending: None,
     });
     let nest = |mut node| {
-        for _ in 0..500 {
+        for _ in 0..90 {
             node = graph.intern_node(SemanticNodeData::Array {
                 element: node,
                 readonly: true,

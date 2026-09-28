@@ -297,7 +297,6 @@ fn one_snapshot_answers_every_query_order_alike() {
 /// the enclosing relation's frame, so that pair never counts toward the
 /// depth: the 100-deep relation answers `1`.
 #[test]
-#[ignore = "an element pair of two inline object literal types counts toward the relation depth"]
 fn inline_nested_object_types_overflow_at_the_checkers_depth() {
     let failures: Vec<String> = [(99, "1"), (100, "2")]
         .into_iter()
@@ -308,6 +307,174 @@ fn inline_nested_object_types_overflow_at_the_checkers_depth() {
                 nested(depth, "number")
             );
             mismatches("", &[(probe.as_str(), expected)])
+                .into_iter()
+                .map(move |failure| format!("depth {depth}: {failure}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `[S] extends [<S's shape around number>] ? 1 : 2` for a shape around `1`
+/// nested `depth` times, written inline on both sides.
+fn inline_row(open: &str, close: &str, depth: usize) -> (String, String) {
+    let wrap = |inner: &str| format!("{}{inner}{}", open.repeat(depth), close.repeat(depth));
+    (
+        format!("[{}] extends [{}] ? 1 : 2", wrap("1"), wrap("number")),
+        format!("{open}…{close} × {depth}"),
+    )
+}
+
+#[track_caller]
+fn assert_inline_rows(
+    project: super::checker_probe_lane_tests::ProbeProject<'_>,
+    rows: &[(&str, &str, usize, &str)],
+) {
+    let failures: Vec<String> = rows
+        .iter()
+        .flat_map(|&(open, close, depth, expected)| {
+            let (probe, label) = inline_row(open, close, depth);
+            super::checker_probe_lane_tests::mismatches_in(
+                project,
+                "",
+                &[(probe.as_str(), expected)],
+            )
+            .into_iter()
+            .map(move |failure| format!("{label}: {failure}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Every pair the checker relates with an `isRelatedTo` of its own is one
+/// entry of its recursion depth, whether a relation frame of this engine
+/// or its inline worklist relates it: an element pair of two tuples or two
+/// arrays, and a union pair the checker caches.
+///
+/// Measured (all four settings agree unless noted): with the tuple wrapper
+/// as the first entry, `[[{ v: …n…1… }]]`-style `[{ v: … }]` nested 48 and
+/// 49 times relates (`1`) and 50 times overflows (`2`, TS2321) — two
+/// entries a level; `{ v: … }[]` nested 49 times relates and 50 and 51
+/// overflow; tuples `[…]` nested 98 and 99 times relate and 100
+/// overflow; `{ v: … } | null` nested 49 times relates and 50 overflows
+/// under `strictNullChecks` (the union pair and the object pair each
+/// count; the member-to-union step, `typeRelatedToSomeType`, does not);
+/// `{ v: … } | null | undefined | 0` nested 33 and 49 times relates and 50
+/// overflows.
+#[test]
+fn inline_element_and_union_pairs_count_toward_the_checkers_depth() {
+    assert_inline_rows(
+        Default::default(),
+        &[
+            ("[{ v: ", " }]", 48, "1"),
+            ("[{ v: ", " }]", 49, "1"),
+            ("[{ v: ", " }]", 50, "2"),
+            ("{ v: ", " }[]", 49, "1"),
+            ("{ v: ", " }[]", 50, "2"),
+            ("{ v: ", " }[]", 51, "2"),
+            ("[", "]", 99, "1"),
+            ("[", "]", 100, "2"),
+            ("{ v: ", " } | null", 49, "1"),
+            ("{ v: ", " } | null", 50, "2"),
+            ("{ v: ", " } | null | undefined | 0", 33, "1"),
+            ("{ v: ", " } | null | undefined | 0", 49, "1"),
+            ("{ v: ", " } | null | undefined | 0", 50, "2"),
+        ],
+    );
+}
+
+/// Without `strictNullChecks` the checker's union of an object type and
+/// `null` is the object type alone, one entry a level.
+///
+/// Measured with `strictNullChecks` off (`noImplicitAny` on and off):
+/// `{ v: … } | null` nested 50 and 99 times relates (`1`) and 100 times
+/// overflows (`2`).
+#[test]
+fn a_union_erased_without_strict_null_checks_counts_as_its_object() {
+    assert_inline_rows(
+        super::checker_probe_lane_tests::ProbeProject {
+            compiler_options: Some(r#"{ "strict": true, "strictNullChecks": false }"#),
+            ..Default::default()
+        },
+        &[
+            ("{ v: ", " } | null", 50, "1"),
+            ("{ v: ", " } | null", 99, "1"),
+            ("{ v: ", " } | null", 100, "2"),
+        ],
+    );
+}
+
+/// Relating two wide tuples of object pairs costs the same relation checks
+/// and structural reductions per element at 500, 1,000 and 2,000
+/// elements: an element pair's inline recursion entry is a counter on its
+/// frame, not a relation of its own.
+///
+/// Oracle: the relation holds, `1`, at every width.
+#[test]
+fn relating_wide_tuples_of_object_pairs_costs_the_same_per_element() {
+    let elements = |width: usize, value: &str| {
+        (0..width)
+            .map(|index| format!("{{ a{index}: {value} }}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let work = |width: usize| {
+        let probe = format!(
+            "[{}] extends [{}] ? 1 : 2",
+            elements(width, "1"),
+            elements(width, "number")
+        );
+        let reductions = super::ProjectSemanticDispatch::relation_reductions_for_tests();
+        let (checks, answer) =
+            super::checker_probe_lane_tests::with_probe("", &probe, |dispatch, node| {
+                (
+                    dispatch.graph().stats_snapshot().relation_check_count,
+                    crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                        dispatch, node, 0,
+                    ),
+                )
+            });
+        assert_eq!(answer, "1", "the {width}-element relation holds");
+        (
+            checks,
+            super::ProjectSemanticDispatch::relation_reductions_for_tests() - reductions,
+        )
+    };
+    let (at_500, at_1000, at_2000) = (work(500), work(1000), work(2000));
+    assert_eq!(
+        (at_1000.0 - at_500.0) * 2,
+        at_2000.0 - at_1000.0,
+        "relation checks at 500 / 1,000 / 2,000 elements: {at_500:?} / {at_1000:?} / {at_2000:?}"
+    );
+    assert_eq!(
+        (at_1000.1 - at_500.1) * 2,
+        at_2000.1 - at_1000.1,
+        "reductions at 500 / 1,000 / 2,000 elements: {at_500:?} / {at_1000:?} / {at_2000:?}"
+    );
+}
+
+/// A union source of fewer than four members against a target that is no
+/// union is no recursion entry of its own (`skipCaching`): only each
+/// member's relation to the target is.
+///
+/// Measured over `type S0 = 1; type T0 = number;` and for `i` from 1 to
+/// `n`, `type Si = { v: S(i-1) } | Ti;` and `type Ti = { v: T(i-1) };`:
+/// `[Sn] extends [Tn] ? 1 : 2` is `1` at `n` 49, 50, 98 and 99 and `2`
+/// with TS2321 at 100 — one entry a level after the tuple's.
+#[test]
+fn a_small_union_source_is_no_recursion_entry_of_its_own() {
+    let failures: Vec<String> = [(50, "1"), (99, "1"), (100, "2")]
+        .into_iter()
+        .flat_map(|(depth, expected)| {
+            let mut source = String::from("type S0 = 1;\ntype T0 = number;\n");
+            for level in 1..=depth {
+                source.push_str(&format!(
+                    "type S{level} = {{ v: S{} }} | T{level};\ntype T{level} = {{ v: T{} }};\n",
+                    level - 1,
+                    level - 1
+                ));
+            }
+            let probe = format!("[S{depth}] extends [T{depth}] ? 1 : 2");
+            mismatches(&source, &[(probe.as_str(), expected)])
                 .into_iter()
                 .map(move |failure| format!("depth {depth}: {failure}"))
         })
