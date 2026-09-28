@@ -875,3 +875,107 @@ fn nested_loops_take_passes_polynomial_in_their_depth() {
         );
     }
 }
+
+/// Enums 10,000 long, each member reading the member of the enum before
+/// it: `enum E0 { A = 1 } enum E1 { A = E0.A } … enum E10000 { A =
+/// E9999.A }`.
+fn enum_chain(length: usize) -> String {
+    let mut source = String::from("enum E0 { A = 1 }\n");
+    for index in 1..=length {
+        source.push_str(&format!("enum E{index} {{ A = E{}.A }}\n", index - 1));
+    }
+    source
+}
+
+/// One enum whose members each read the member before them, seeded by
+/// another enum's member: `enum X { A = 1 } enum E { A0 = X.A, A1 = A0 +
+/// 1, … }`.
+fn enum_member_chain(length: usize) -> String {
+    let members: Vec<String> = (1..length)
+        .map(|index| format!("A{index} = A{} + 1", index - 1))
+        .collect();
+    format!(
+        "enum X {{ A = 1 }}\nenum E {{ A0 = X.A, {} }}\n",
+        members.join(", ")
+    )
+}
+
+/// An enum's member reading through a chain of 10,000 enums is evaluated
+/// from an explicit stack. TypeScript 7.0.2: `E10000.A extends 1 ? "y" :
+/// "n"` is `"y"`, under every `strictNullChecks` × `noImplicitAny` setting.
+#[test]
+fn enum_reference_chains_10000_long_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(
+            enum_chain(DEPTH),
+            "E10000.A extends 1 ? \"y\" : \"n\"",
+            "\"y\""
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// One enum of 10,000 members, each the member before it plus one, the
+/// first another enum's member. TypeScript 7.0.2: `E.A9999 extends 10000 ?
+/// "y" : "n"` is `"y"`, under every setting.
+#[test]
+fn enum_member_chains_10000_long_answer_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(
+            enum_member_chain(DEPTH),
+            "E.A9999 extends 10000 ? \"y\" : \"n\"",
+            "\"y\""
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// Enum initializers 10,000 deep: an addition nested in parentheses to the
+/// right, a left-leaning chain of additions, and a chain of additions of
+/// another enum's member. TypeScript 7.0.2: each member extends `10001`
+/// (`"y"`), under every setting.
+#[test]
+fn enum_initializers_nested_10000_deep_answer_on_production_stacks() {
+    for (form, initializer) in [
+        ("parenthesized", wrap(DEPTH, "(1 + ", ")")),
+        ("left-leaning", format!("{}1", "1 + ".repeat(DEPTH))),
+        ("member reads", format!("{}1", "X.A + ".repeat(DEPTH))),
+    ] {
+        let source = format!("enum X {{ A = 1 }}\nenum D {{ A = {initializer} }}\n");
+        assert_eq!(
+            mismatches_on_a_small_stack(source, "D.A extends 10001 ? \"y\" : \"n\"", "\"y\""),
+            Vec::<String>::new(),
+            "{form}"
+        );
+    }
+}
+
+/// Evaluating an enum's pending members evaluates each initializer, and
+/// resolves each reference, once: the work of a chain of references grows
+/// with its length, whether the chain runs through enums or through the
+/// members of one enum.
+#[test]
+fn an_enum_reference_chain_evaluates_in_linear_work() {
+    let work = |source: String, probe: &'static str| {
+        let before = super::enum_type::enum_initializer_work_for_tests();
+        assert_eq!(
+            mismatches(&source, &[(probe, "\"y\"")]),
+            Vec::<String>::new()
+        );
+        super::enum_type::enum_initializer_work_for_tests() - before
+    };
+    let through_enums = |length: usize| {
+        let probe = Box::leak(format!("E{length}.A extends 1 ? \"y\" : \"n\"").into_boxed_str());
+        work(enum_chain(length), probe)
+    };
+    let through_members = |length: usize| {
+        let probe = Box::leak(
+            format!("E.A{} extends {length} ? \"y\" : \"n\"", length - 1).into_boxed_str(),
+        );
+        work(enum_member_chain(length), probe)
+    };
+    assert!(through_enums(200) > 0);
+    assert_eq!(through_enums(400), 2 * through_enums(200));
+    assert!(through_members(200) > 0);
+    assert_eq!(through_members(400), 2 * through_members(200));
+}
