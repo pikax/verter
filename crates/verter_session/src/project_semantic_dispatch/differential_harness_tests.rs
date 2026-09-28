@@ -66,8 +66,9 @@ pub(super) const LOOSE_IMPLICIT: Setting = Setting {
 /// The four settings, in the order a four-answer row lists them.
 pub(super) const ALL: [Setting; 4] = [STRICT, LOOSE, STRICT_IMPLICIT, LOOSE_IMPLICIT];
 
-/// How long one row may take before it is reported overdue.
-const ROW_DEADLINE: Duration = Duration::from_secs(60);
+/// How long one row may take before it is reported overdue: no test may
+/// run longer, so neither may one of its rows.
+const ROW_DEADLINE: Duration = Duration::from_secs(10);
 
 /// What a row reads.
 #[derive(Clone, Copy)]
@@ -112,6 +113,12 @@ impl<'a> Matrix<'a> {
     /// each project.
     pub(super) fn files(mut self, files: &'a [(&'a str, &'a str)]) -> Self {
         self.files = files;
+        self
+    }
+
+    /// Checked in `settings` only, in place of all four.
+    pub(super) fn settings(mut self, settings: &'a [Setting]) -> Self {
+        self.settings = settings;
         self
     }
 
