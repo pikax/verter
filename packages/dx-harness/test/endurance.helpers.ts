@@ -57,8 +57,9 @@ export async function spawnRig(
   workspaceRoot: string,
   config: EnduranceConfig,
   ownsWorkspace: boolean,
+  options: { readonly readyTimeoutMs?: number } = {},
 ): Promise<EnduranceRig> {
-  const handle = await spawnEnduranceLsp(config.route, workspaceRoot);
+  const handle = await spawnEnduranceLsp(config.route, workspaceRoot, options);
   try {
     const tracker = new RequestTracker();
     const recorder = new LatencyRecorder(config.windowMs);

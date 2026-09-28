@@ -2239,11 +2239,11 @@ impl VerterHost {
         // for a deleted file.
         self.resolver.runtime.hard_evict_canonical(&canonical);
         self.project_type_store.evict_canonical(&canonical);
-        // Also evict component_meta results keyed by this canonical.
+        // Also evict component_meta results keyed by this canonical, with
+        // their view bookkeeping.
         self.resolver
             .runtime
-            .component_meta
-            .retain(|key| key.symbol_id != canonical);
+            .release_component_meta_states(&canonical);
 
         self.bump_store_view_epoch();
         Some(HostRemoveResult {

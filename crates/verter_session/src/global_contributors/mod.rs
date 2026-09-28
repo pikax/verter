@@ -519,6 +519,22 @@ impl GlobalContributorIndex {
             .collect()
     }
 
+    /// Number of per-file contribution records held: one per canonical
+    /// and slot (base, or the overlay of one parse environment). A later
+    /// version of the same slot replaces its record, and a retired
+    /// artifact's record leaves with it ([`Self::note_gone`]).
+    #[must_use]
+    pub fn record_count(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Number of contributor entries the grouped index holds across every
+    /// symbol: exactly the contributions of the held records.
+    #[must_use]
+    pub fn contribution_count(&self) -> usize {
+        self.grouped.lock().by_symbol.values().map(Vec::len).sum()
+    }
+
     /// Record (or replace) the contributions of a live artifact version.
     /// Same-canonical overlay/base slots replace in place so retained
     /// old versions are not program membership.

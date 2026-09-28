@@ -2945,3 +2945,210 @@ fn one_pinned_root_does_not_retain_the_versions_born_after_it() {
         "once the last root drops, the retained set drains completely"
     );
 }
+
+/// The per-key half of the self-triggered sweep: ONE key's retired chain
+/// never outgrows `RECLAIM_TRIGGER_CHAIN_LENGTH` while no root can read
+/// it, and a root that CAN read one version pins exactly that version
+/// through every sweep — never its neighbours.
+///
+/// Every publish of an already-live key retires the displaced payload
+/// into the key's chain AND closes the key's canonical→keys index
+/// version, so one dead version costs two retained entries; the
+/// retained count for the key therefore saws between `2` and
+/// `2 * RECLAIM_TRIGGER_CHAIN_LENGTH` (= 4) and the sweep fires on the
+/// publish that would push the chain to three.
+///
+/// On the code before the per-key trigger only the aggregate
+/// `RECLAIM_TRIGGER_RETIREMENTS` (= 64) sweep existed: six publishes of
+/// one key retained a chain of five (retained count 10) with no sweep in
+/// sight. There the first bound assertion fails on the fourth publish
+/// (chain 3, retained 6 > 4).
+#[test]
+fn a_single_keys_retired_chain_is_swept_before_it_outgrows_the_per_key_trigger() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/one-key.ts");
+    let key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [0xAA; 16]);
+    // One dead version = its artifact version + its index version.
+    let bound = 2 * super::RECLAIM_TRIGGER_CHAIN_LENGTH;
+
+    // Phase 1: no root alive. Six successive versions of the SAME key,
+    // each superseding the previous one.
+    let mut peak = 0usize;
+    for marker in 1u8..=6 {
+        store.insert_artifacts(key.clone(), synth_artifacts(marker));
+        let retained = store.retained_retired_version_count();
+        peak = peak.max(retained);
+        assert!(
+            retained <= bound,
+            "publish {marker}: the per-key sweep must keep one key's chain within \
+             RECLAIM_TRIGGER_CHAIN_LENGTH (retained = {retained}, bound = {bound})"
+        );
+    }
+    assert_eq!(
+        peak, bound,
+        "the chain reaches exactly the trigger length before it is swept — the \
+         sweep is neither late (old cadence) nor early (a sweep per publish)"
+    );
+    assert_eq!(
+        store.live_artifact_count(),
+        1,
+        "one live version of the key"
+    );
+    assert_eq!(
+        store.live_root_count(),
+        0,
+        "no lease was taken during the loop"
+    );
+
+    // Phase 2: a root that sees version 6 lives across three more
+    // publishes. The sweeps fire (the chain overflows on publish 7 and
+    // again on publish 9) but reclamation is root-gated: version 6 is
+    // kept every time, versions 7 and 8 are not.
+    let root = store.capture_root();
+    let pinned_hash = [6u8; 16];
+    for marker in 7u8..=9 {
+        store.insert_artifacts(key.clone(), synth_artifacts(marker));
+        let retained = store.retained_retired_version_count();
+        assert!(
+            retained <= bound,
+            "publish {marker}: a single pinned version must not stop the sweep from \
+             bounding the chain (retained = {retained}, bound = {bound})"
+        );
+        let through_root = store
+            .indexed_at_root(&root, &key)
+            .expect("the captured root must still reach the version it addresses");
+        assert_eq!(
+            through_root.whole_hash, pinned_hash,
+            "the root resolves the version IT captured, never a later one"
+        );
+    }
+    assert_eq!(
+        store.retained_retired_version_count(),
+        2,
+        "after the publish-9 sweep only the root-pinned version (its artifact \
+         version + its index version) remains: versions 7 and 8 were reclaimed"
+    );
+    assert_eq!(
+        store.reclaim_retired_versions(),
+        0,
+        "what remains is root-gated, not merely unswept"
+    );
+    let current = store
+        .get_artifacts(&key)
+        .expect("the current version is untouched by the sweeps");
+    assert_eq!(current.indexed.whole_hash, [9u8; 16]);
+
+    // Phase 3: the root drops, so its version loses its pin. The next
+    // publish takes the chain to exactly the trigger length (no sweep
+    // yet, but the bound holds); the one after that overflows it with no
+    // root alive, and the whole chain — the formerly pinned version
+    // included — drains.
+    drop(root);
+    assert_eq!(store.live_root_count(), 0, "the lease is released on drop");
+    store.insert_artifacts(key.clone(), synth_artifacts(10));
+    let retained = store.retained_retired_version_count();
+    assert!(
+        retained <= bound,
+        "publish 10: the bound holds while the chain sits AT the trigger length \
+         (retained = {retained}, bound = {bound})"
+    );
+    store.insert_artifacts(key.clone(), synth_artifacts(11));
+    assert_eq!(
+        store.retained_retired_version_count(),
+        0,
+        "publish 11 overflows the chain with no root alive: every retired version \
+         of the key, the formerly pinned one included, is reclaimed"
+    );
+    assert_eq!(
+        store.live_artifact_count(),
+        1,
+        "the key's live version is untouched"
+    );
+}
+
+/// The per-canonical half of the self-triggered sweep on the shape that
+/// matters most: a distinct-content edit loop through the legacy
+/// `insert(canonical, indexed)` path, where every publish lands under a
+/// FRESH key (the content hash is part of the key) and retires the
+/// previous content's key.
+///
+/// Each such publish costs two retained entries (the displaced key's
+/// artifact version on its own one-entry chain + its closed index
+/// version) and raises the canonical's retired total by one, so the
+/// retained count saws between `2` and `2 * RECLAIM_TRIGGER_CHAIN_LENGTH`
+/// (= 4) and the sweep fires on the publish that would take the
+/// canonical's total to three. A second canonical's single supersession
+/// is its own account: it adds exactly its two entries and triggers
+/// nothing.
+///
+/// On the earlier PER-KEY trigger every chain here has length 1, so
+/// nothing fires until the aggregate `RECLAIM_TRIGGER_RETIREMENTS`
+/// (= 64) and eight publishes retain 7 dead versions (retained count
+/// 14); the bound assertion fails on the fourth publish (3 dead versions,
+/// retained 6 > 4).
+#[test]
+fn a_distinct_content_edit_loop_on_one_canonical_is_swept_per_canonical() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/typing.ts");
+    // One dead version = its artifact version + its index version.
+    let bound = 2 * super::RECLAIM_TRIGGER_CHAIN_LENGTH;
+
+    let mut peak = 0usize;
+    for marker in 1u8..=8 {
+        store.insert(Arc::clone(&canonical), synth_indexed(marker));
+        let retained = store.retained_retired_version_count();
+        peak = peak.max(retained);
+        assert!(
+            retained <= bound,
+            "publish {marker}: the per-canonical sweep must bound a distinct-content \
+             edit loop (retained = {retained}, bound = {bound})"
+        );
+        assert!(
+            retained < 8,
+            "publish {marker}: the retained count must never approach one entry per \
+             publish (retained = {retained})"
+        );
+    }
+    assert_eq!(
+        peak, bound,
+        "the canonical's retired total reaches exactly the trigger length before it \
+         is swept — the sweep is neither late (per-key trigger) nor per publish"
+    );
+    assert_eq!(store.len(), 1, "one live version per canonical");
+    assert_eq!(
+        store.live_root_count(),
+        0,
+        "no lease was taken during the loop"
+    );
+    let after_loop = store.retained_retired_version_count();
+    assert_eq!(
+        after_loop, 2,
+        "publish 8 leaves exactly the one dead version publish 7 became"
+    );
+
+    // A second canonical superseded once keeps its own dead version: its
+    // total is 1, under the trigger, and the first canonical's leftover
+    // neither counts against it nor is disturbed by it.
+    let other: Arc<str> = Arc::from("/other.ts");
+    store.insert(Arc::clone(&other), synth_indexed(0x21));
+    assert_eq!(
+        store.retained_retired_version_count(),
+        after_loop,
+        "a fresh canonical's first publish retires nothing"
+    );
+    store.insert(Arc::clone(&other), synth_indexed(0x22));
+    assert_eq!(
+        store.retained_retired_version_count(),
+        after_loop + 2,
+        "one supersession of another canonical adds exactly its artifact version + \
+         its index version and triggers no sweep"
+    );
+    assert_eq!(store.len(), 2, "one live version per canonical");
+    // Nothing is root-pinned, so an explicit request drains both.
+    assert_eq!(
+        store.reclaim_retired_versions(),
+        after_loop + 2,
+        "an explicit sweep with no root alive frees every retained version"
+    );
+    assert_eq!(store.retained_retired_version_count(), 0);
+}

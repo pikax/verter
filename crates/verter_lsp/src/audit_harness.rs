@@ -21,13 +21,12 @@
 //! audit-config consumer filter and audit-disabled fast-path stay
 //! centralised.
 
-use std::sync::Arc;
-
 use tower_lsp_server::ls_types::{Position, Uri};
 use verter_audit::payloads::tags::LspMethodTag;
 use verter_audit::{LspRequestPayload, RequestAuditRecord, RequestTargetIdentity};
 use verter_session::host_lsp_audit::LspAuditSession;
-use verter_session::VerterHost;
+
+use crate::documents::SharedHost;
 
 /// Resolve the audit target identity for `uri`.
 ///
@@ -48,11 +47,11 @@ pub fn target_identity_for_uri(
 /// [`LspAuditSession::Noop`] when audit is disabled or the consumer
 /// filter rejects the kind.
 pub fn begin(
-    host: &Arc<VerterHost>,
+    host: &SharedHost,
     method: LspMethodTag,
     target_identity: RequestTargetIdentity,
 ) -> LspAuditSession {
-    host.lsp_audit_begin(method, target_identity)
+    host.with_arc(|host| host.lsp_audit_begin(method, target_identity))
 }
 
 /// Build a `Position`-bound payload base for a hover / goto-def /
@@ -151,7 +150,7 @@ where
 /// Audit never changes request semantics. In particular, enabling audit cannot
 /// introduce a provider or feature timeout that is absent in normal operation.
 pub async fn run_with_audit<T, F, P>(
-    host: &Arc<VerterHost>,
+    host: &SharedHost,
     method: LspMethodTag,
     target_identity: RequestTargetIdentity,
     position: Option<Position>,
@@ -162,11 +161,17 @@ where
     F: std::future::Future<Output = tower_lsp_server::jsonrpc::Result<T>>,
     P: FnOnce(&mut LspRequestPayload, &T),
 {
-    let timeouts = &host.config().lsp_method_timeouts;
-    let deadline = timeouts.request_deadlines.for_method(&method);
-    let budget = timeouts.audit_supersede.for_method(&method);
+    let (deadline, budget, audit_enabled) = {
+        let host = host.host();
+        let timeouts = &host.config().lsp_method_timeouts;
+        (
+            timeouts.request_deadlines.for_method(&method),
+            timeouts.audit_supersede.for_method(&method),
+            host.config().audit_enabled,
+        )
+    };
 
-    if !host.config().audit_enabled {
+    if !audit_enabled {
         // Production defaults this table to zero. Explicit diagnostic/test
         // configurations may still install a bound here.
         return run_with_deadline(deadline, body).await;
@@ -219,9 +224,11 @@ where
 mod tests {
     use super::*;
     use crate::documents::DocumentRegistry;
+    use std::sync::Arc;
     use tower_lsp_server::ls_types::TextDocumentItem;
     use verter_audit::RequestTargetIdentity;
     use verter_session::HostConfig;
+    use verter_session::VerterHost;
 
     #[test]
     fn target_identity_for_file_uri_matches_production_document_identity() {
@@ -318,20 +325,28 @@ mod tests {
             line: 4,
             character: 7,
         };
-        let record_a = begin(&host, LspMethodTag::Completion, identity_a.clone())
-            .finalize_ok(payload_with_position(
-                LspMethodTag::Completion,
-                &identity_a,
-                &position,
-            ))
-            .expect("first audit session must publish");
-        let record_b = begin(&host, LspMethodTag::Completion, identity_b.clone())
-            .finalize_ok(payload_with_position(
-                LspMethodTag::Completion,
-                &identity_b,
-                &position,
-            ))
-            .expect("second audit session must publish");
+        let record_a = begin(
+            &crate::documents::SharedHost::new(std::sync::Arc::clone(&host)),
+            LspMethodTag::Completion,
+            identity_a.clone(),
+        )
+        .finalize_ok(payload_with_position(
+            LspMethodTag::Completion,
+            &identity_a,
+            &position,
+        ))
+        .expect("first audit session must publish");
+        let record_b = begin(
+            &crate::documents::SharedHost::new(std::sync::Arc::clone(&host)),
+            LspMethodTag::Completion,
+            identity_b.clone(),
+        )
+        .finalize_ok(payload_with_position(
+            LspMethodTag::Completion,
+            &identity_b,
+            &position,
+        ))
+        .expect("second audit session must publish");
 
         assert_eq!(record_a.target_identity.as_ref(), Some(&identity_a));
         assert_eq!(record_b.target_identity.as_ref(), Some(&identity_b));
