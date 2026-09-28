@@ -6624,20 +6624,44 @@ pub struct RelationPayload {
 /// it reaches no deeper than the depth left, and the recursion identities
 /// below the read cannot complete a deeply-nested stack with its own.
 /// Anywhere else the relation is computed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct RelationRecursionFootprint {
     /// The most structured relations the computation stacked, the
     /// relation itself included (`0` for a pair of simple types).
     pub height: u16,
-    /// Per side (source, target): the most distinct instantiations of one
-    /// recursion identity the computation stacked on one path.
-    pub repeats: [u16; 2],
+    /// Per side (source, target): the recursion identities the computation
+    /// stacked (see [`RecursionRepeats`]).
+    pub repeats: [RecursionRepeats; 2],
     /// The computation met a variance marker the checker reports as
     /// unreliable (`ReportsUnreliable`): a rest parameter holding it, or an
     /// unreliable parameter's argument. A variance measurement whose
     /// relations report it lets a failed argument check fall back to the
     /// structural comparison.
     pub unreliable: bool,
+}
+
+/// One side of a [`RelationRecursionFootprint`]: for each recursion
+/// identity a computation stacked, the most distinct instantiations of it
+/// on one path, and a bound every identity's count is under.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct RecursionRepeats {
+    /// `(identity fingerprint, instantiations)` pairs, in fingerprint order.
+    /// Only an identity with type arguments has more than one
+    /// instantiation, so only a generic alias's appears.
+    pub identities: Arc<[(u64, u16)]>,
+    /// A count every identity's instantiations are within, the listed ones
+    /// included: `0` when the list is exact, the component's bound for a
+    /// member of a cyclic component (whose own computation stopped at an
+    /// assumption a cold computation relates).
+    pub any: u16,
+}
+
+impl RecursionRepeats {
+    /// Whether the computation stacked no recursion identity.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.identities.is_empty() && self.any == 0
+    }
 }
 
 /// Public value-domain outcome of a relation query (assignability / subtype /

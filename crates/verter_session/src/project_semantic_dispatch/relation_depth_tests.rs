@@ -554,3 +554,195 @@ fn a_property_finds_the_member_of_either_spelling() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// `type Si = { v: S(i-1); a?: 1 } | { v: S(i-1); b?: 1 };` for `i` from 1
+/// to `depth`, over `S0 = 1`, beside `Ti = { v: T(i-1) }` over `T0 =
+/// number` and the three-member `Ui` like `Si`.
+fn doubling_unions(depth: usize) -> String {
+    let mut source = String::from("type S0 = 1;\ntype T0 = number;\ntype U0 = 1;\n");
+    for level in 1..=depth {
+        let below = level - 1;
+        source.push_str(&format!(
+            "type S{level} = {{ v: S{below}; a?: 1 }} | {{ v: S{below}; b?: 1 }};\n\
+             type T{level} = {{ v: T{below} }};\n\
+             type U{level} = {{ v: U{below}; a?: 1 }} | {{ v: U{below}; b?: 1 }} | {{ v: U{below}; c?: 1 }};\n"
+        ));
+    }
+    source
+}
+
+/// A union whose every member reaches the same pair relates that pair once:
+/// a pair already decided in the relation answers from the relation's own
+/// settled results, as the checker's relation cache serves it, so `2ⁿ`
+/// paths to one pair cost one relation of it.
+///
+/// Measured over [`doubling_unions`] (all four settings agree):
+/// `[Sn] extends [Tn] ? 1 : 2` and `[Un] extends [Tn] ? 1 : 2` are `1` at
+/// `n` 10, 20, 50 and 99 and `2` with TS2321 at 100 (one entry a level
+/// after the tuple's); `[Tn] extends [Sn] ? 1 : 2` is `2` at every `n`.
+#[test]
+fn a_pair_every_union_member_reaches_is_related_once() {
+    let mut failures = Vec::new();
+    for (depth, holds) in [(10, "1"), (20, "1"), (50, "1"), (99, "1"), (100, "2")] {
+        let rows = [
+            (format!("[S{depth}] extends [T{depth}] ? 1 : 2"), holds),
+            (format!("[U{depth}] extends [T{depth}] ? 1 : 2"), holds),
+            (format!("[T{depth}] extends [S{depth}] ? 1 : 2"), "2"),
+        ];
+        let rows: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|(probe, answer)| (probe.as_str(), *answer))
+            .collect();
+        failures.extend(
+            mismatches(&doubling_unions(depth), &rows)
+                .into_iter()
+                .map(|failure| format!("depth {depth}: {failure}")),
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The structural reductions relating [`doubling_unions`] makes grow by the
+/// same count per level at 10, 20 and 40 levels (two a level for `Sn`
+/// against `Tn`), not doubling per level.
+///
+/// Oracle: the relation holds, `1`, at every depth.
+#[test]
+fn relating_doubling_unions_costs_the_same_per_level() {
+    let work = |depth: usize| {
+        let reductions = super::ProjectSemanticDispatch::relation_reductions_for_tests();
+        let answer = super::checker_probe_lane_tests::with_probe(
+            &doubling_unions(depth),
+            &format!("[S{depth}] extends [T{depth}] ? 1 : 2"),
+            |dispatch, node| {
+                crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                    dispatch, node, 0,
+                )
+            },
+        );
+        assert_eq!(answer, "1", "the {depth}-level relation holds");
+        super::ProjectSemanticDispatch::relation_reductions_for_tests() - reductions
+    };
+    let (at_10, at_20, at_40) = (work(10), work(20), work(40));
+    assert_eq!(
+        (at_20 - at_10) * 2,
+        at_40 - at_20,
+        "reductions at 10 / 20 / 40 levels: {at_10} / {at_20} / {at_40}"
+    );
+}
+
+/// `type A0 = { v: 1 }; type T = { w: 1 };` and `type Ai = A(i-1) | T;` for
+/// `i` from 1 to `depth`.
+fn alias_union_chain(depth: usize) -> String {
+    let mut source = String::from("type T = { w: 1 };\ntype A0 = { v: 1 };\n");
+    for level in 1..=depth {
+        source.push_str(&format!("type A{level} = A{} | T;\n", level - 1));
+    }
+    source
+}
+
+/// A union written over an alias of a union is the one union the checker's
+/// `getUnionType` flattens it to: related one level deep, whatever the
+/// aliases' nesting, and read from an explicit stack.
+///
+/// Measured over [`alias_union_chain`] at 200, 2,000 and 10,000 aliases
+/// (all four settings agree): `[An] extends [{ v: 1 } | { w: 1 }] ? 1 : 2`
+/// and `[An] extends [{ v?: 1; w?: 1 }] ? 1 : 2` are `1`, `[An] extends [{
+/// v: 1 }] ? 1 : 2` is `2`.
+#[test]
+fn a_union_over_aliases_of_unions_relates_as_one_union() {
+    let depth = 1000;
+    let rows = [
+        (
+            format!("[A{depth}] extends [{{ v: 1 }} | {{ w: 1 }}] ? 1 : 2"),
+            "1",
+        ),
+        (
+            format!("[A{depth}] extends [{{ v?: 1; w?: 1 }}] ? 1 : 2"),
+            "1",
+        ),
+        (format!("[A{depth}] extends [{{ v: 1 }}] ? 1 : 2"), "2"),
+    ];
+    let rows: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|(probe, answer)| (probe.as_str(), *answer))
+        .collect();
+    let failures =
+        super::checker_probe_lane_tests::mismatches_in_one_host(&alias_union_chain(depth), &rows);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The same union over 2,000 aliases: the checker answers `1` (see
+/// [`a_union_over_aliases_of_unions_relates_as_one_union`]). The lane
+/// reads each alias of the chain with one `Instantiate` query, and the
+/// request's projection-operation fuse (`HostConfig::projection_op_budget`,
+/// 2,000 by default, `crate::request_budget::RequestBudget`) counts every
+/// one: from 1,995 aliases the probe ends in `Budget(WorkBudgetExceeded)`
+/// and gives no answer. The work is linear (seven connected-work units
+/// an alias at 250 to 1,900 aliases); the fuse, not the relation, stops it.
+#[test]
+#[ignore = "known limit: the request's projection-operation fuse counts one query per alias"]
+fn a_union_over_2000_aliases_of_unions_relates_as_one_union() {
+    let depth = 2000;
+    let probe = format!("[A{depth}] extends [{{ v: 1 }} | {{ w: 1 }}] ? 1 : 2");
+    let failures = mismatches(&alias_union_chain(depth), &[(probe.as_str(), "1")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `type S0 = 1; type T0 = number;` and for `i` from 1 to `depth`,
+/// `type Si = Ai | Ti; type Ti = { v: T(i-1) };`, the arm `Ai` written as
+/// `{ v: S(i-1) }`, as an alias `Oi` of it, or as `Box<S(i-1)>` over
+/// `type Box<X> = { v: X }`.
+fn small_union_chain(depth: usize, arm: &str) -> String {
+    let mut source = String::from("type S0 = 1;\ntype T0 = number;\ntype Box<X> = { v: X };\n");
+    for level in 1..=depth {
+        let below = level - 1;
+        let written = match arm {
+            "literal" => format!("{{ v: S{below} }}"),
+            "alias" => {
+                source.push_str(&format!("type O{level} = {{ v: S{below} }};\n"));
+                format!("O{level}")
+            }
+            _ => format!("Box<S{below}>"),
+        };
+        source.push_str(&format!(
+            "type S{level} = {written} | T{level};\ntype T{level} = {{ v: T{below} }};\n"
+        ));
+    }
+    source
+}
+
+/// A small union source against a target that is no union opens no
+/// relation frame of its own: the checker relates it without caching it
+/// (`skipCaching`), so each member relates on its own and a chain of such
+/// unions holds one obligation frame open per recursion entry, whatever
+/// its arms are written as.
+///
+/// Measured over [`small_union_chain`] (all four settings agree):
+/// `[Sn] extends [Tn] ? 1 : 2` is `1` at 49, 50, 98 and 99 and `2` with
+/// TS2321 at 100 for the literal and the alias arms; `1` at 10, 50 and 99
+/// and `2` with TS2321 at 100 for the generic one.
+#[test]
+fn a_small_union_source_opens_no_frame_of_its_own() {
+    let mut failures = Vec::new();
+    for arm in ["literal", "alias", "generic"] {
+        for (depth, expected) in [(99, "1"), (100, "2")] {
+            let probe = format!("[S{depth}] extends [T{depth}] ? 1 : 2");
+            super::ProjectSemanticDispatch::take_most_open_frames_for_tests();
+            failures.extend(
+                mismatches(
+                    &small_union_chain(depth, arm),
+                    &[(probe.as_str(), expected)],
+                )
+                .into_iter()
+                .map(|failure| format!("{arm} arms, depth {depth}: {failure}")),
+            );
+            let frames = super::ProjectSemanticDispatch::take_most_open_frames_for_tests();
+            assert!(
+                frames <= depth + 8,
+                "relating {depth} levels of {arm} arms held {frames} obligation frames open at once"
+            );
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

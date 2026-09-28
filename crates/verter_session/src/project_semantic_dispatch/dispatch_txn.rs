@@ -341,9 +341,11 @@ pub(crate) struct RelationChainPosition {
     /// frame or one below it in the chain.
     pub(crate) expanding: u8,
     /// The recursion identities of this counted frame's source and target
-    /// with the node each was read from (see
+    /// with the instantiation each was read from — its type arguments, none
+    /// for the alias named without any (see
     /// `ProjectSemanticDispatch::relation_recursion_identity`).
-    pub(crate) identities: [Option<(crate::semantic_query::DeclIdentity, SemanticNodeId)>; 2],
+    pub(crate) identities:
+        [Option<(crate::semantic_query::DeclIdentity, Arc<[SemanticNodeId]>)>; 2],
     /// The chain's depth when this frame opened — the depth its parent
     /// had reached.
     pub(crate) opened_at: u16,
@@ -359,15 +361,17 @@ pub(crate) struct RelationChainPosition {
 /// where the cold computation takes the same course
 /// (`ProjectSemanticDispatch::relation_replays_cold`). Transient: it lives
 /// on the frame and on the pending member, and is released at publish.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct RelationRecursionUse {
     /// The deepest chain depth a counted frame of the computation reached,
     /// or a replayed memo entry would have reached.
     pub(crate) reached: u16,
-    /// Per side (source, target): the most distinct instantiations of one
-    /// recursion identity the computation stacked on one path from this
-    /// frame, a replayed entry's own count added to the chain's below it.
-    pub(crate) repeats: [u16; 2],
+    /// Per side (source, target): for each recursion identity, the most
+    /// distinct instantiations of it the computation stacked on one path
+    /// from this frame, a replayed entry's own counts added to the chain's
+    /// below it; and the bound a replayed cyclic member carries for every
+    /// identity.
+    pub(crate) repeats: [RepeatsUse; 2],
     /// The counted frames the computation opened, itself included.
     pub(crate) frames: u32,
     /// The deepest a replayed memo entry reaches below its read.
@@ -375,12 +379,49 @@ pub(crate) struct RelationRecursionUse {
     /// The computation met a marker the checker reports as unreliable
     /// (see `RelationRecursionFootprint::unreliable`).
     pub(crate) unreliable: bool,
+    /// The computation answered from where its chain began: a relation of
+    /// it overflowed the checker's depth, or was deeply nested. Its answer
+    /// is no cold answer, and is never reused.
+    pub(crate) context_dependent: bool,
+}
+
+/// One side of [`RelationRecursionUse::repeats`].
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RepeatsUse {
+    /// `(identity fingerprint, instantiations)` pairs.
+    pub(crate) identities: smallvec::SmallVec<[(u64, u16); 2]>,
+    /// A count every identity's instantiations are within.
+    pub(crate) any: u16,
+}
+
+impl RepeatsUse {
+    /// Raise the count of the identity `fingerprint` to `count`.
+    pub(crate) fn raise(&mut self, fingerprint: u64, count: u16) {
+        match self
+            .identities
+            .iter_mut()
+            .find(|(seen, _)| *seen == fingerprint)
+        {
+            Some((_, seen)) => *seen = (*seen).max(count),
+            None => self.identities.push((fingerprint, count)),
+        }
+    }
+
+    /// The published form, in fingerprint order.
+    pub(crate) fn published(&self) -> crate::semantic_query::RecursionRepeats {
+        let mut identities = self.identities.to_vec();
+        identities.sort_unstable();
+        crate::semantic_query::RecursionRepeats {
+            identities: Arc::from(identities.into_boxed_slice()),
+            any: self.any,
+        }
+    }
 }
 
 /// A closed relation frame's [`RelationRecursionUse`], measured from the
 /// frame itself: the footprint its own publication carries, and what a
 /// cyclic component's members are bounded by.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ClosedRelationRecursion {
     /// The frame's own footprint.
     pub(crate) footprint: crate::semantic_query::RelationRecursionFootprint,
@@ -388,6 +429,9 @@ pub(crate) struct ClosedRelationRecursion {
     pub(crate) frames: u32,
     /// The deepest a replayed memo entry reached below its read.
     pub(crate) replayed_height: u16,
+    /// The computation answered from where its chain began (see
+    /// `RelationRecursionUse::context_dependent`).
+    pub(crate) context_dependent: bool,
 }
 
 /// The flow-return-domain payload of one in-flight frame. The ordered
@@ -2899,6 +2943,18 @@ pub(crate) struct RelationDomainRuntime {
     /// variance marker — read by the variance measurement that asked for
     /// it, right after asking. Transient: overwritten at every close.
     pub(crate) last_relation_unreliable: bool,
+    /// The relations this transaction decided and queued for publication
+    /// (completed SCC members and inline SCC roots), by key: a relation
+    /// met again before the batch publishes reads its answer here, as the
+    /// checker's relation cache serves a pair it already related, instead
+    /// of relating it again — without it, a pair reached along every one
+    /// of `2ⁿ` paths was related `2ⁿ` times. Only cold answers enter (no
+    /// overflow or deeply-nested answer, no session-local delta, no binding
+    /// key), each read through its recursion footprint like a memo entry.
+    /// Request-scoped: it lives on the transaction, and is cleared with the
+    /// member batch it mirrors — at its publish or its abort — so one entry
+    /// per queued member at most.
+    pub(crate) settled: FxHashMap<RelateMemoKey, RelationPayload>,
     next_session_id: u64,
 }
 
