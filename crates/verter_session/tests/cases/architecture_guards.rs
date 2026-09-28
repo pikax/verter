@@ -32,6 +32,11 @@ fn workspace_path(rel: &str) -> std::path::PathBuf {
     workspace_root().join(rel)
 }
 
+#[allow(clippy::duplicate_mod)]
+#[path = "support/map_in_parallel.rs"]
+mod map_in_parallel;
+use map_in_parallel::map_in_parallel;
+
 #[test]
 fn creo_is_the_only_emit_occurrence_identity_path() {
     // Static defense-in-depth behind the behavioral cross-kind heritage and
@@ -653,29 +658,32 @@ fn arh12_dependency_and_visibility_contracts_are_enforced() {
             .map(|name| name.as_str().expect("forbidden dependency name"))
             .collect();
         let src_root = workspace.join(crate_rel).join("src");
-        for entry in WalkDir::new(&src_root) {
-            let entry = entry.unwrap_or_else(|e| panic!("walk {}: {e}", src_root.display()));
-            if !entry.file_type().is_file()
-                || entry.path().extension().and_then(|ext| ext.to_str()) != Some("rs")
-            {
-                continue;
-            }
-            let source = fs::read_to_string(entry.path())
-                .unwrap_or_else(|e| panic!("read {}: {e}", entry.path().display()));
+        let sources: Vec<PathBuf> = WalkDir::new(&src_root)
+            .into_iter()
+            .map(|entry| entry.unwrap_or_else(|e| panic!("walk {}: {e}", src_root.display())))
+            .filter(|entry| {
+                entry.file_type().is_file()
+                    && entry.path().extension().and_then(|ext| ext.to_str()) == Some("rs")
+            })
+            .map(|entry| entry.into_path())
+            .collect();
+        map_in_parallel(&sources, |path| {
+            let source =
+                fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
             let syntax = syn::parse_file(&source).unwrap_or_else(|e| {
                 panic!(
                     "{} contains unsupported Rust syntax; refusing to skip dependency enforcement: {e}",
-                    entry.path().display()
+                    path.display()
                 )
             });
             let found = forbidden_imports(&syntax, &forbidden);
             assert!(
                 found.is_empty(),
                 "{} imports forbidden crates: {:?}",
-                entry.path().display(),
+                path.display(),
                 found
             );
-        }
+        });
     }
 
     let hotspots = contracts["hotspots"]
@@ -3646,35 +3654,40 @@ mod cosmetic_reprinter_guard {
             Ok(it) => it,
             Err(_) => return violations,
         };
+        let mut sources: Vec<(String, PathBuf)> = Vec::new();
         for entry in entries.flatten() {
             let crate_dir = entry.path();
             if !crate_dir.is_dir() {
                 continue;
             }
-            // (b) Production `.rs` sources under `<crate>/src`.
+            // (b) Production `.rs` sources under `<crate>/src`, scanned below.
             let src_dir = crate_dir.join("src");
             if src_dir.exists() {
                 for file in walk_production_rs(&src_dir) {
                     let rel = relative_to_root(&file);
-                    if super::is_generated_data_source(&rel) {
-                        continue;
-                    }
-                    let src = match fs::read_to_string(&file) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-                    let in_codegen = path_is_codegen_emit(&rel);
-                    let stripped = strip_comments(&src);
-                    for (idx, line) in stripped.lines().enumerate() {
-                        if let Some(token) = line_flags_cosmetic_reprinter(line, in_codegen) {
-                            violations.push((rel.clone(), idx + 1, token.to_string()));
-                        }
+                    if !super::is_generated_data_source(&rel) {
+                        sources.push((rel, file));
                     }
                 }
             }
             // (c) The crate manifest — a forbidden JS-printer/codegen dependency (structural parse).
             scan_manifest(crate_dir.join("Cargo.toml"), &mut violations);
         }
+        let scanned = super::map_in_parallel(&sources, |(rel, file)| {
+            let mut found = Vec::new();
+            let Ok(src) = fs::read_to_string(file) else {
+                return found;
+            };
+            let in_codegen = path_is_codegen_emit(rel);
+            let stripped = strip_comments(&src);
+            for (idx, line) in stripped.lines().enumerate() {
+                if let Some(token) = line_flags_cosmetic_reprinter(line, in_codegen) {
+                    found.push((rel.clone(), idx + 1, token.to_string()));
+                }
+            }
+            found
+        });
+        violations.extend(scanned.into_iter().flatten());
         violations.sort();
         violations
     }

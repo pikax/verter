@@ -123,7 +123,9 @@ fn names_forward_child(data: &SemanticNodeData, id: SemanticNodeId) -> bool {
 /// unallocatable one). Read off the printed payload, independently of the
 /// walk, so a variant or field the walk forgets fails the first test that
 /// interns it, rather than leaving a releasing holder to keep the node it
-/// names alive.
+/// names alive. The visited ids are sorted once and each printed id found
+/// by a binary search, so a wide payload (a union of hundreds of members)
+/// costs its size, not its size squared.
 #[cfg(test)]
 fn assert_retained_walk_is_complete(data: &SemanticNodeData) {
     const MARK: &str = "SemanticNodeId(";
@@ -133,6 +135,7 @@ fn assert_retained_walk_is_complete(data: &SemanticNodeData) {
     }
     let mut retained: SmallVec<[u64; 16]> = SmallVec::new();
     data.for_each_retained_child(|child| retained.push(child.0));
+    retained.sort_unstable();
     let mut rest = printed.as_str();
     while let Some(at) = rest.find(MARK) {
         rest = &rest[at + MARK.len()..];
@@ -141,7 +144,7 @@ fn assert_retained_walk_is_complete(data: &SemanticNodeData) {
             continue;
         };
         assert!(
-            held >= UNALLOCATABLE_ID_FLOOR || retained.contains(&held),
+            held >= UNALLOCATABLE_ID_FLOOR || retained.binary_search(&held).is_ok(),
             "a {:?} payload holds node {held}, which for_each_retained_child never visits",
             data.node_tag()
         );

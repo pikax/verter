@@ -17,7 +17,9 @@
 //! overdue row fails after the harness's row deadline, so a hanging ignored
 //! test takes that deadline for each setting.
 
-use super::differential_harness_tests::{Matrix, Read};
+use super::differential_harness_tests::{
+    Matrix, Read, Setting, LOOSE, LOOSE_IMPLICIT, STRICT, STRICT_IMPLICIT,
+};
 
 /// A 40-deep generic application, a 100-member literal union, a recursive tuple
 /// builder, a 40-branch conditional and 200 interfaces in a cycle.
@@ -1326,12 +1328,34 @@ export function last(x: K) {
 "##;
 
 /// 799 `if (x === "k<i>") throw 0;` guards narrow the 800-member union to
-/// `"k799"`.
-#[test]
-fn an_800_guard_narrowing_chain_answers() {
-    let matrix = Matrix::new(NARROW_CHAIN_800);
-    let failures = matrix.returns(&[("last", "\"k799\"")]);
+/// `"k799"` in `setting`. Every guard filters the arms left, as the
+/// checker's `filterType` does, so the chain's work is its length times
+/// the union's width; each setting is a test of its own.
+fn an_800_guard_narrowing_chain_answers_in(setting: Setting) {
+    let failures = Matrix::new(NARROW_CHAIN_800)
+        .settings(&[setting])
+        .returns(&[("last", "\"k799\"")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_800_guard_narrowing_chain_answers_strict() {
+    an_800_guard_narrowing_chain_answers_in(STRICT);
+}
+
+#[test]
+fn an_800_guard_narrowing_chain_answers_without_strict_null_checks() {
+    an_800_guard_narrowing_chain_answers_in(LOOSE);
+}
+
+#[test]
+fn an_800_guard_narrowing_chain_answers_without_no_implicit_any() {
+    an_800_guard_narrowing_chain_answers_in(STRICT_IMPLICIT);
+}
+
+#[test]
+fn an_800_guard_narrowing_chain_answers_with_both_off() {
+    an_800_guard_narrowing_chain_answers_in(LOOSE_IMPLICIT);
 }
 
 /// 800 returning guards.

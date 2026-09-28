@@ -1503,6 +1503,76 @@ fn owner_import_route_witness_is_side_effect_free() {
     );
 }
 
+/// Within one request an owner's import-route witness resolves the owner's
+/// specifiers once: every later consumer rooting on it in the request
+/// shares that build, its observations replayed into any witness scope
+/// open around the consumer, and an edit in the request builds it again.
+/// Building it for every consumer resolved each specifier of a real-world
+/// component about a thousand times per request.
+#[test]
+fn a_request_builds_an_owners_import_route_witness_once() {
+    use crate::host_manage::import_route_witness::{
+        witness_builds_for_tests, ResolutionWitnessScope,
+    };
+    let host = make_host();
+    let importer = "/workspace/src/importer.ts";
+    upsert_non_sfc(
+        &host,
+        importer,
+        "import { Theme } from './theme'\nimport { Size } from './size'\nexport type Re = [Theme, Size]\n",
+    );
+    let _request = crate::request_context::install_test_request_for(importer);
+    let before = witness_builds_for_tests();
+    let first = host
+        .owner_import_route_witness_for_tests(importer)
+        .expect("the builder produces a witness");
+    assert!(!first.is_empty(), "the unresolved specifiers observe facts");
+    for _ in 0..3 {
+        assert_eq!(
+            host.owner_import_route_witness_for_tests(importer),
+            Some(first.clone())
+        );
+    }
+    assert_eq!(
+        witness_builds_for_tests() - before,
+        1,
+        "one build per request"
+    );
+
+    let replayed = {
+        let scope = ResolutionWitnessScope::enter();
+        let _ = host.owner_import_route_witness_for_tests(importer);
+        scope.collected()
+    };
+    let as_set = |facts: &[crate::resolver_core::FactVersionRef]| {
+        facts.iter().cloned().collect::<rustc_hash::FxHashSet<_>>()
+    };
+    assert_eq!(
+        as_set(&replayed),
+        as_set(&first),
+        "a shared build records its observations into the scope around its consumer"
+    );
+    assert_eq!(witness_builds_for_tests() - before, 1);
+
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/theme.ts",
+        "export interface Theme { item: string }\n",
+    );
+    let after_edit = host
+        .owner_import_route_witness_for_tests(importer)
+        .expect("the builder produces a witness after the edit");
+    assert_eq!(
+        witness_builds_for_tests() - before,
+        2,
+        "an edit builds it again"
+    );
+    assert_ne!(
+        after_edit, first,
+        "the rebuilt witness observes the new file"
+    );
+}
+
 /// The CALLER-DECLARED specifier is covered by the owner's import-route
 /// witness.
 ///

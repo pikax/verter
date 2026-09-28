@@ -108,6 +108,71 @@ impl Drop for ResolutionWitnessScope {
     }
 }
 
+/// Replay observations a memoized witness build recorded into every open
+/// [`ResolutionWitnessScope`], as the resolutions that produced them
+/// recorded them when the build ran.
+fn replay_resolution_witness(observed: &[FactVersionRef]) {
+    if WITNESS_DEPTH.with(Cell::get) == 0 || observed.is_empty() {
+        return;
+    }
+    WITNESS_FRAMES.with(|frames| {
+        for frame in frames.borrow_mut().iter_mut() {
+            frame.extend_from_slice(observed);
+        }
+    });
+}
+
+/// What resolving one owner's specifier set observed: whether a resolution
+/// was refused, and every observation the admitted ones recorded, in order.
+#[derive(Debug)]
+pub(crate) struct ImportRouteObservation {
+    refused: bool,
+    observed: Vec<FactVersionRef>,
+}
+
+/// The identity of one witness build within a request: the host, the
+/// owner, the specifier lanes resolved, and the generations a load or an
+/// edit advances, so a build after either resolves again.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ImportRouteObservationKey {
+    host: usize,
+    canonical: std::sync::Arc<str>,
+    specifiers: Vec<(
+        String,
+        Option<verter_semantic::resolver_core::ResolveRequestKind>,
+    )>,
+    load_generation: u64,
+    store_view_epoch: u64,
+}
+
+/// A request's witness builds, so every consumer that roots on an owner's
+/// import-route witness within the request shares one resolution of the
+/// owner's specifiers instead of resolving all of them again (the witness
+/// is rooting evidence: a build that a later change in the request makes
+/// stale fails validation, never answers wrongly). Owned by the
+/// [`crate::request_context::RequestContext`] and dropped with it; bounded
+/// by the owners the request roots on.
+#[derive(Debug, Default)]
+pub(crate) struct ImportRouteObservationMemo(
+    parking_lot::Mutex<
+        rustc_hash::FxHashMap<ImportRouteObservationKey, std::sync::Arc<ImportRouteObservation>>,
+    >,
+);
+
+#[cfg(test)]
+thread_local! {
+    /// How many witness builds resolved their specifiers on this thread;
+    /// test-only.
+    static WITNESS_BUILDS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// How many witness builds resolved their specifiers on this thread so
+/// far (test-only).
+#[cfg(test)]
+pub(crate) fn witness_builds_for_tests() -> usize {
+    WITNESS_BUILDS.with(Cell::get)
+}
+
 /// Record an admitted resolution's sealed Decision signature into every open
 /// [`ResolutionWitnessScope`].
 ///
@@ -235,7 +300,56 @@ impl VerterHost {
             Option<verter_semantic::resolver_core::ResolveRequestKind>,
         )],
     ) -> Option<Vec<FactVersionRef>> {
-        let (refused, observed) = {
+        let observation = self.import_route_observation(canonical_id, specifiers);
+        if observation.refused {
+            return self.decline_import_route_witness();
+        }
+
+        // Dedup while preserving first-observation order. The consuming
+        // producer folds these into its own `FactReadSet`, which sorts
+        // and dedups canonically on finalise.
+        let observed = &observation.observed;
+        let mut seen: rustc_hash::FxHashSet<FactVersionRef> =
+            rustc_hash::FxHashSet::with_capacity_and_hasher(observed.len(), Default::default());
+        let mut witness: Vec<FactVersionRef> = Vec::with_capacity(observed.len());
+        for fact in observed.iter().cloned() {
+            if seen.insert(fact.clone()) {
+                witness.push(fact);
+            }
+        }
+        Some(witness)
+    }
+
+    /// The resolution of `specifiers` a witness is built from: the one the
+    /// active request already made for the same owner, specifiers and
+    /// generations, its observations replayed into the open witness scopes,
+    /// or a fresh one the request keeps.
+    fn import_route_observation(
+        &self,
+        canonical_id: &str,
+        specifiers: &[(
+            String,
+            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+        )],
+    ) -> std::sync::Arc<ImportRouteObservation> {
+        let request = crate::request_context::current_request_context();
+        let key = request.as_ref().map(|_| ImportRouteObservationKey {
+            host: self as *const Self as usize,
+            canonical: std::sync::Arc::from(canonical_id),
+            specifiers: specifiers.to_vec(),
+            load_generation: self.current_load_generation(),
+            store_view_epoch: self.store_view_epoch(),
+        });
+        if let (Some(request), Some(key)) = (request.as_ref(), key.as_ref()) {
+            let hit = request.import_route_observations.0.lock().get(key).cloned();
+            if let Some(hit) = hit {
+                replay_resolution_witness(&hit.observed);
+                return hit;
+            }
+        }
+        #[cfg(test)]
+        WITNESS_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        let observation = {
             let scope = ResolutionWitnessScope::enter();
             let mut refused = false;
             for (specifier, lane) in specifiers {
@@ -250,24 +364,19 @@ impl VerterHost {
                     }
                 }
             }
-            (refused, scope.collected())
+            std::sync::Arc::new(ImportRouteObservation {
+                refused,
+                observed: scope.collected(),
+            })
         };
-        if refused {
-            return self.decline_import_route_witness();
+        if let (Some(request), Some(key)) = (request, key) {
+            request
+                .import_route_observations
+                .0
+                .lock()
+                .insert(key, std::sync::Arc::clone(&observation));
         }
-
-        // Dedup while preserving first-observation order. The consuming
-        // producer folds these into its own `FactReadSet`, which sorts
-        // and dedups canonically on finalise.
-        let mut seen: rustc_hash::FxHashSet<FactVersionRef> =
-            rustc_hash::FxHashSet::with_capacity_and_hasher(observed.len(), Default::default());
-        let mut witness: Vec<FactVersionRef> = Vec::with_capacity(observed.len());
-        for fact in observed {
-            if seen.insert(fact.clone()) {
-                witness.push(fact);
-            }
-        }
-        Some(witness)
+        observation
     }
 
     /// Mark the enclosing compute non-cacheable and report an

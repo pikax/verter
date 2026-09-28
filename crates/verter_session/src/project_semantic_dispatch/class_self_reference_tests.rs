@@ -442,3 +442,37 @@ export function m() { return this.x; }
         );
     }
 }
+
+/// Object literals whose method returns the next: whether a literal's
+/// members name its own `this` is read by one walk of each node however
+/// deep the nest, so the walks grow by the same count for every level a
+/// nest adds. A nested literal's members were walked again for every
+/// literal around it, the square of the nesting.
+///
+/// Measured on TypeScript 7.0.2 (all four settings): `ReturnType<typeof pf>
+/// extends object ? 1 : 2` is `1` over the 8-, 16- and 32-deep nests.
+#[test]
+fn an_object_method_nest_walks_each_member_once_for_its_own_this() {
+    let walked = |depth: usize| {
+        let source = format!(
+            "export function pf(b: boolean) {{ return {}1{}; }}\n",
+            "{ m() { return ".repeat(depth),
+            "; } }".repeat(depth)
+        );
+        let before = super::flow_return::receiver_walk_visits_for_tests();
+        assert_eq!(
+            mismatches(
+                &source,
+                &[("ReturnType<typeof pf> extends object ? 1 : 2", "1")]
+            ),
+            Vec::<String>::new()
+        );
+        super::flow_return::receiver_walk_visits_for_tests() - before
+    };
+    let [eight, sixteen, thirty_two] = [8, 16, 32].map(walked);
+    assert_eq!(
+        thirty_two - sixteen,
+        2 * (sixteen - eight),
+        "the walks grow linearly with the nest: {eight}, {sixteen}, {thirty_two}"
+    );
+}

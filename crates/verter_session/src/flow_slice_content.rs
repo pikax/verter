@@ -6039,8 +6039,9 @@ pub(crate) mod capture_lookup_probe {
 
 /// Counts one slice lowering's work into the counters its scope installs
 /// on the lowering thread: the tests it classifies as guards
-/// ([`Lowerer::classify_guard`]) and the expressions it lowers
-/// ([`Lowerer::lower_expr`]); test-only.
+/// ([`Lowerer::classify_guard`]), the expressions it lowers
+/// ([`Lowerer::lower_expr`]) and the classes its same-frame effect scans
+/// enter ([`LeafCallScanner`]); test-only.
 #[cfg(test)]
 pub(crate) mod lowering_probe {
     use std::cell::RefCell;
@@ -6052,6 +6053,7 @@ pub(crate) mod lowering_probe {
     pub(crate) struct LoweringWork {
         pub(crate) guard_classifications: AtomicUsize,
         pub(crate) expressions: AtomicUsize,
+        pub(crate) scanned_classes: AtomicUsize,
     }
     thread_local! {
         static ACTIVE: RefCell<Option<Arc<LoweringWork>>> = const { RefCell::new(None) };
@@ -6077,6 +6079,9 @@ pub(crate) mod lowering_probe {
     }
     pub(crate) fn expression() {
         record(|work| &work.expressions);
+    }
+    pub(super) fn scanned_class() {
+        record(|work| &work.scanned_classes);
     }
 }
 
@@ -19310,20 +19315,19 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         }
         walk::walk_sequence_expression(self, it);
     }
-    // Nested function / arrow / class bodies are their own frames.
+    // Nested function and arrow bodies are their own frames: nothing in
+    // them runs at this frame's statement, and the flow skeleton records
+    // none of their calls as this frame's (each is its own frame's
+    // footprint, which that frame's own lowering answers for). The walk
+    // stops at them, so a nest of functions is scanned once per frame,
+    // never once per enclosing frame.
     fn visit_function(
         &mut self,
-        it: &oxc_ast::ast::Function<'a>,
-        flags: oxc_syntax::scope::ScopeFlags,
+        _it: &oxc_ast::ast::Function<'a>,
+        _flags: oxc_syntax::scope::ScopeFlags,
     ) {
-        self.nested_frame_nesting += 1;
-        walk::walk_function(self, it, flags);
-        self.nested_frame_nesting -= 1;
     }
-    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
-        self.nested_frame_nesting += 1;
-        walk::walk_arrow_function_expression(self, it);
-        self.nested_frame_nesting -= 1;
+    fn visit_arrow_function_expression(&mut self, _it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
     }
     fn visit_static_block(&mut self, it: &oxc_ast::ast::StaticBlock<'a>) {
         // A static block runs at CLASS EVALUATION — one frame out from
@@ -19424,6 +19428,8 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         //
         // The skeleton records no write of the class subtree, so every
         // write under this visit — heritage included — is skeleton-hidden.
+        #[cfg(test)]
+        lowering_probe::scanned_class();
         self.class_nesting += 1;
         self.visit_decorators(&it.decorators);
         if let Some(super_class) = it.heritage.as_ref().map(|heritage| &heritage.expression) {

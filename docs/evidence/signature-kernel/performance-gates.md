@@ -332,10 +332,10 @@ Recorded plainly so no reader mistakes absence for a pass:
     chains answer. Only a return holding a function TYPE written in the
     body with a same-name clause (`const id: <T>(z: T) => T`), whose
     binder is the outer one's node, is evaluated under the instantiation
-    instead: over a 256-level chain through local arrow functions its
+    instead: over a 128-level chain through local arrow functions its
     `witness` answers and so does a new instantiation `second(v:
     boolean)` (tsc: `{ v: boolean; tag: "c"; id: <T>(z: T) => T; }`;
-    held by `schedule::a_256_level_chain_returning_a_same_name_function_type_answers`);
+    held by `schedule::a_128_level_chain_returning_a_same_name_function_type_answers`);
   * a cycle among callee returns is evaluated from its first-discovered
     member through the ordinary path, where the re-entry intercept holds
     each back-edge; its members nest natively beneath that root;
@@ -364,9 +364,10 @@ Recorded plainly so no reader mistakes absence for a pass:
   (`ReturnType<typeof f>`, `Parameters<…>`, …) resolves where the body
   builds it, as the checker resolves a conditional type whose check type
   is not generic, so a chain through type positions is linear in work
-  too: 12 units per level at 16, 64 and 200 levels, 11,990 in all at
-  1,000 (`schedule::a_type_position_chain_costs_the_same_work_per_level`,
-  `schedule::a_1000_level_type_position_chain_answers`). An application
+  too: 12 units per level at 16, 64 and 200 levels, 5,990 in all at 500
+  (`schedule::a_type_position_chain_costs_the_same_work_per_level`,
+  `schedule::a_500_level_type_position_chain_answers`, which overflows the
+  default test stack with the schedule off). An application
   over a type parameter stays the deferred carrier, as the checker defers
   it (`schedule::a_return_type_in_a_body_resolves_unless_its_check_type_is_generic`).
 
@@ -482,21 +483,23 @@ Recorded plainly so no reader mistakes absence for a pass:
   scheduler's I/O and CPU workers, and the 8 MiB of the LSP serve thread,
   the host CPU pool and the declaration-lowering workers.
 
-* **A long logical chain applies a quadratic count of guards and
-  evaluates without a native level per operand.** Each operand of `a && b
-  && c …` is evaluated under every earlier operand's guard and each
-  short-circuit edge under their negations, as the checker's flow walk
-  reads every earlier condition for each operand — a count that grows with
-  the square of the chain. The short-circuit edge's union
+* **A long logical chain applies a linear count of guards and evaluates
+  without a native level per operand.** A chain of one operator over
+  references (`a && b && c …`) reads each operand under the chain of the
+  earlier operands' conditions, as the checker's flow graph gives it with
+  no join between them, so each operand's guard is applied once on top of
+  the ones before it, and the chain's short-circuit edges are joined once
+  past it (`eval_reference_chain`). Applying every earlier operand's guard
+  again for each operand grew the count with the square of the chain (635
+  guard applications per five operands at 40 operands against 335 at 20;
+  the same at both now). The short-circuit edge's union
   (`apply_guard_union`) reads the earlier parts' negations as one growing
   prefix whose standing facts are kept one per subject; re-reading the
-  whole prefix for every alternative made the count grow with the cube
-  (the second difference of the count per five operands was 650 at 20 and
-  1,150 at 40 operands; it is now the same at both). The evaluator walks a
-  chain's nested left operands from the innermost one outward
-  (`eval_logical`), so a 300-operand chain answers on a 1 MiB thread
-  (`flow_return_null_policy_tests.rs` →
-  `an_and_chain_applies_a_quadratic_count_of_guards` and
+  whole prefix for every alternative made the count grow with the cube.
+  The evaluator walks a chain's nested left operands from the innermost
+  one outward (`eval_logical`), so a 300-operand chain answers on a 1 MiB
+  thread (`flow_return_null_policy_tests.rs` →
+  `an_and_chain_applies_a_linear_count_of_guards` and
   `a_300_operand_and_chain_evaluates_on_a_small_stack`, the checker's
   `"" | 0 | 1 | false | null | undefined`). The slice lowering of the chain
   (`Lowerer::lower_logical_value`, on the declaration-lowering workers)
@@ -515,17 +518,16 @@ Recorded plainly so no reader mistakes absence for a pass:
   and the evaluation stops at the first operand after the connected
   demand's work budget trips, instead of evaluating the rest of the chain
   under a result already refused. A 2,000-operand chain lowers and
-  evaluates on a 1 MiB thread in 8 s unoptimized
+  evaluates on a 1 MiB thread and answers the checker's
+  `"" | 0 | 1 | false | null | undefined` in about 1 s unoptimized, its
+  guard applications growing linearly with the chain
   (`flow_return_null_policy_tests.rs` →
-  `a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack`: the
-  typed `Budget(WorkBudgetExceeded)` refusal, with the guard applications of
-  a 1,000-operand chain; without the early stop, 6.0 million against 1.5
-  million and 90 s). Recursive slice lowering overflows the worker, and a
-  recursive fresh-literal collection or effect walk the 1 MiB thread. The
-  checker answers the chain in about a second
-  (`"" | 0 | 1 | false | null | undefined`); the lane's connected work
-  outgrows the budget from about 420 operands
-  (`a_2000_operand_and_chain_answers_the_checkers_type`, skipped).
+  `a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack`;
+  applying every earlier guard per operand, the lane's connected work
+  outgrew the budget from about 420 operands and answered the typed
+  `Budget(WorkBudgetExceeded)` refusal). Recursive slice lowering
+  overflows the worker, and a recursive fresh-literal collection or effect
+  walk the 1 MiB thread.
 
 * **The scheduler's workers parse on the platform's default stack.** The
   oxc parser, the syntax-tree clone the semantic builder reads
@@ -885,16 +887,15 @@ Recorded plainly so no reader mistakes absence for a pass:
   expression's members (`flow_return_class.rs`: its `extends` value,
   initializers and member functions are children of the class's step).
   `await` and a comma sequence's value operand evaluate from the
-  expression stack too. `deep_input_tests.rs` answers TypeScript 7.0.2 at
-  10,000 levels on a 1 MiB caller for callbacks (`number`; through a
-  generic callee they answer at 400 levels and return their typed
-  work-budget failure at 10,000),
-  immediately invoked arrows and function expressions (`number`), object
-  methods and class methods (`1` for `extends object` / `extends
-  Function`), arrows initializing a declarator (`1`) and 10,000
-  `await`s (`Promise<number>`). Evaluating in place instead — a
-  declarator's initializer, a generic call's callback, a class's member
-  function, an object's method — overflows each.
+  expression stack too. `deep_input_tests.rs` answers TypeScript 7.0.2 on
+  a 1 MiB caller for callbacks 10,000 deep (`number`; through a generic
+  callee they answer at 400 levels and return their typed work-budget
+  failure at 2,000), and 2,000 deep for immediately invoked arrows and
+  function expressions (`number`), object methods and class methods (`1`
+  for `extends object` / `extends Function`) and arrows initializing a
+  declarator (`1`), and 10,000 `await`s (`Promise<number>`).
+  Evaluating each nested function in place instead (a native level per
+  function) overflows every one of the 2,000-deep nests within 200 levels.
 
 * **Branch statements evaluate as frames of their region's run.** An
   `if`'s arms, a `switch`'s clauses, a labeled statement's body, a
@@ -904,12 +905,13 @@ Recorded plainly so no reader mistakes absence for a pass:
   head analysis runs from an explicit stack of the references under
   analysis. A function returned from inside any of them is therefore
   evaluated from the stack of evaluators too:
-  `arrows_returned_from_branches_nested_10000_deep_answer_on_production_stacks`
-  answers `1` for arrows returned from a block, an `if` arm, a `switch`
-  clause and a labeled statement, 10,000 deep (TypeScript 7.0.2 answers
-  `1` too, reporting TS2563 — body too large for control-flow analysis —
-  on the `if` and `switch` nests), and evaluating the `if` in place
-  overflows it.
+  the `arrows_returned_from_*_nested_2000_deep_answer_on_production_stacks`
+  tests answer `1` for arrows returned from a block, an `if` arm, a
+  `switch` clause and a labeled statement, 2,000 deep (TypeScript 7.0.2
+  answers `1` too; 10,000 deep it reports TS2563 — body too large for
+  control-flow analysis — on the `if` and `switch` nests), and
+  evaluating each nested function in place overflows every one of them
+  within 200 levels.
 
 * **Compound statements lower as frames of their region's lowering.**
   The demand-slice lowering takes an `if`'s arms, a labeled statement's
@@ -920,8 +922,9 @@ Recorded plainly so no reader mistakes absence for a pass:
   run from explicit stacks, and the evaluator binds a pattern, registers
   its correlated elements and walks a loop's carried references from
   explicit stacks. A pattern element and a capture scope chain drop from a
-  loop. `branch_and_loop_statements_nested_10000_deep_return_on_production_stacks`
-  returns on a 1 MiB caller for `if`, `switch`, `try`, `while`,
+  loop. `branch_statements_nested_10000_deep_return_on_production_stacks`
+  and `loop_statements_nested_10000_deep_return_on_production_stacks`
+  return on a 1 MiB caller for `if`, `switch`, `try`, `while`,
   `for` and `do` statements nested 10,000 deep (their demand slices
   exceed the plan budget), and
   `destructuring_patterns_nested_10000_deep_answer_on_production_stacks`
@@ -984,7 +987,9 @@ Recorded plainly so no reader mistakes absence for a pass:
     a level now carries only the arm it takes).
     `mapped_types_nested_10000_deep_return_on_production_stacks` returns
     the connected-demand work budget's typed failure 10,000 deep (5.9 s,
-    against 256 s before the digest fix) and answers `"a"` 1,000 deep;
+    against 256 s before the digest fix) and
+    `mapped_types_nested_1000_deep_answer_on_production_stacks` answers
+    `"a"` 1,000 deep;
     `a_mapped_type_nest_lowers_in_linear_work` holds the structural walk
     (3,000 nodes at 500 levels against 300 at 50) and the binder-frame
     copies (none) linear, which re-hashing each value subtree (501,000
@@ -1089,12 +1094,13 @@ Recorded plainly so no reader mistakes absence for a pass:
   Each now runs from an explicit stack, children queued last first so every
   edge comes out in the order the recursive walk emitted it (only childless
   nodes emit). `route_facts_tests.rs` →
-  `bodies_nested_10000_deep_produce_route_facts_on_a_small_stack` produces
-  the facts of a 10,000-deep `keyof` chain, object nest and parenthesized
+  `bodies_nested_3000_deep_produce_route_facts_on_a_small_stack` produces
+  the facts of a 3,000-deep `keyof` chain, object nest and parenthesized
   intersection chain on a 1 MiB thread; walking the children in place
-  overflows it. The object nest's seed edges are one per member path, each
-  with its full path, so their count is linear and their size quadratic in
-  the nest's depth (8 s unoptimized at 10,000).
+  overflows it within 500 levels. The object nest's seed edges are one per
+  member path, each with its full path, so their count is linear and their
+  size quadratic in the nest's depth (under 1 s unoptimized at 3,000, 10 s
+  at 10,000).
 
 * **Type dependency facts collect from an explicit stack.** The collector
   of an authored type's dependency paths (`verter_type_expr_oxc`'s
