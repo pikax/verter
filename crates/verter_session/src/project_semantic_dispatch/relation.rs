@@ -12284,6 +12284,25 @@ fn tag_level_disjoint(
     super::canonical_algebra::tag_level_disjoint(graph, a, b)
 }
 
+/// Whether a relation operand is a carrier the checker resolves where it is
+/// written — a declaration reference or instantiation, `keyof`, an indexed
+/// access, a mapped or conditional type — so the type it stands for, which
+/// may be `never`, is read before the top and bottom rules.
+fn is_settling_carrier(data: &SemanticNodeData) -> bool {
+    matches!(
+        data,
+        SemanticNodeData::DeclRef { .. }
+            | SemanticNodeData::InstantiationRef { .. }
+            | SemanticNodeData::KeyOf { .. }
+            | SemanticNodeData::IndexedAccess { .. }
+            | SemanticNodeData::Mapped { .. }
+            | SemanticNodeData::Conditional { .. }
+            | SemanticNodeData::Opaque(
+                QueryError::DeclPlaceholder { .. } | QueryError::RecursiveRef { .. }
+            )
+    )
+}
+
 #[cfg(test)]
 pub(crate) mod reverse_ownership_tests {
     use super::super::dispatch_txn::SessionId;
@@ -12383,23 +12402,4 @@ pub(crate) mod reverse_ownership_tests {
             "the accepted aggregate reaches bindings only through session fixation"
         );
     }
-}
-
-/// Whether a relation operand is a carrier the checker resolves where it is
-/// written — a declaration reference or instantiation, `keyof`, an indexed
-/// access, a mapped or conditional type — so the type it stands for, which
-/// may be `never`, is read before the top and bottom rules.
-fn is_settling_carrier(data: &SemanticNodeData) -> bool {
-    matches!(
-        data,
-        SemanticNodeData::DeclRef { .. }
-            | SemanticNodeData::InstantiationRef { .. }
-            | SemanticNodeData::KeyOf { .. }
-            | SemanticNodeData::IndexedAccess { .. }
-            | SemanticNodeData::Mapped { .. }
-            | SemanticNodeData::Conditional { .. }
-            | SemanticNodeData::Opaque(
-                QueryError::DeclPlaceholder { .. } | QueryError::RecursiveRef { .. }
-            )
-    )
 }

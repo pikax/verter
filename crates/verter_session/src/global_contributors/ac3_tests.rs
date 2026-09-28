@@ -578,14 +578,15 @@ fn script_file_scope_types_are_released_on_supersession_and_removal() {
         )),
     );
     let upsert = |source: &str| {
-        host.upsert(UpsertRequest {
-            canonical_id: Some("/script.ts".to_owned()),
-            input_id: "/script.ts".to_owned(),
-            source: Arc::from(source),
-            file_language: FileLanguage::script_ts(),
-            aliases: Vec::new(),
-        })
-        .expect("upsert");
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some("/script.ts".to_owned()),
+                input_id: "/script.ts".to_owned(),
+                source: Arc::from(source),
+                file_language: FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert");
         host.ingest_program_ambient_roots();
     };
     let index = host
