@@ -2193,6 +2193,9 @@ pub enum SliceExpr {
     MemberOf {
         object: Box<SliceExpr>,
         member: Arc<str>,
+        /// The authored member expression's span: the identity a consuming
+        /// position matches the read's freshness by.
+        span: verter_span::Span,
     },
     /// A non-null assertion over a flow expression (`a!`): the checker's
     /// non-nullable type of the operand's value.
@@ -15300,6 +15303,7 @@ impl<'a> Lowerer<'a> {
                 SliceExpr::MemberOf {
                     object: Box::new(object),
                     member: Arc::from(member.property.name.as_str()),
+                    span: member.span.into(),
                 }
             }
             // An element access whose every key is a literal (`a["k"]`,

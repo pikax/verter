@@ -14465,6 +14465,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .dispatch
                 .self_reference_declaration(base)
                 .unwrap_or(base);
+            // A member of a type parameter reads through its constraint.
+            let receiver = self.dispatch.type_parameter_apparent_receiver(base);
+            if receiver != base {
+                return self.project_path_navigate(receiver, segments);
+            }
+            // A member of a union of class references is each arm's member,
+            // and the read is their union.
+            if let Some(arms) = self.class_reference_union_arms(base, first) {
+                let mut reads = Vec::with_capacity(arms.len());
+                for arm in arms {
+                    reads.push(self.project_path_navigate(arm, segments)?);
+                }
+                return Some(
+                    self.dispatch
+                        .intern_normalized_union_or_intersection(&reads, true),
+                );
+            }
             if let Some(source) = self.class_reference_member_source(base, first) {
                 let read =
                     self.project_path_navigate_through(source, std::slice::from_ref(first))?;
@@ -14496,6 +14513,29 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// declares reads through the numeric index, and every other path is
     /// the shared `ProjectPath { mode: Navigate }` walk
     /// ([`Self::project_member_path`]).
+    /// The arms of the union `base` when every arm reads `first` as a
+    /// member of a class reference (through a constrained type parameter
+    /// arm's constraint); `None` otherwise.
+    fn class_reference_union_arms(
+        &self,
+        base: SemanticNodeId,
+        first: &str,
+    ) -> Option<Vec<SemanticNodeId>> {
+        let arms: Vec<SemanticNodeId> = match self.dispatch.graph().node_data(base).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            _ => return None,
+        };
+        arms.iter()
+            .all(|arm| {
+                self.class_reference_member_source(
+                    self.dispatch.type_parameter_apparent_receiver(*arm),
+                    first,
+                )
+                .is_some()
+            })
+            .then_some(arms)
+    }
+
     fn project_path_navigate_through(
         &mut self,
         base: SemanticNodeId,
@@ -19679,6 +19719,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::flow_slice_content::SliceExpr::FrameShadowed { inner, .. } => {
                 self.fresh_call_return_for(inner, node)
             }
+            crate::flow_slice_content::SliceExpr::MemberOf { span, .. } => self
+                .call_fresh_literal_returns
+                .iter()
+                .rev()
+                .find(|read| read.span == *span && read.node == node),
             _ => None,
         }
     }
@@ -22999,7 +23044,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::flow_slice_content::SliceExpr::NonNull { operand } => {
                 self.eval_non_null(operand)
             }
-            crate::flow_slice_content::SliceExpr::MemberOf { object, member } => {
+            crate::flow_slice_content::SliceExpr::MemberOf {
+                object,
+                member,
+                span,
+            } => {
                 let object = match self.eval_expr(object) {
                     Positional::Value(node) => node,
                     other => return other,
@@ -23011,6 +23060,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             Some(SemanticNodeData::Opaque(_))
                         ) =>
                     {
+                        // A class instance's `readonly` member declared by
+                        // its literal initializer holds that fresh literal:
+                        // the read is fresh at the position that consumes
+                        // it (`new K().r` widens at a return).
+                        if matches!(
+                            self.dispatch.graph().node_data(node).as_deref(),
+                            Some(SemanticNodeData::Literal(_))
+                        ) && self.dispatch.instance_member_read_widens(object, member)
+                        {
+                            self.call_fresh_literal_returns.push(FreshCallReturn {
+                                span: *span,
+                                node,
+                                values: Arc::from([node]),
+                            });
+                        }
                         Positional::Value(node)
                     }
                     _ => {

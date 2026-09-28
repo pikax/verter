@@ -3582,8 +3582,8 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
     );
 }
 
-/// CANARY — a member read off a CONSTRAINED clause parameter resolves
-/// through the constraint.
+/// A member read off a CONSTRAINED clause parameter resolves through the
+/// constraint, the checker's apparent type of a type parameter.
 ///
 /// Oracle (bidirectional signature identity): tsc resolves
 /// `<T extends HasQ>(x: T) => x.q` as returning `string`, NOT `T["q"]`.
@@ -3592,39 +3592,23 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
 /// `const bad: <U extends HasQ>(x: U) => number = tlConstrainedMember;`
 /// fails with `TS2322: Type '<T extends HasQ>(x: T) => string' is not
 /// assignable to type '<U extends HasQ>(x: U) => number'.`
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: tlConstrainedMember
-///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnresolvedValue), candidates: 0 }
-///  right: Value { ty: Primitive(String), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: the same member arm as the unconstrained row — the
-/// constraint is never reached, so this row does not yet discriminate
-/// constraint resolution specifically. The miss is `ReturnOnly`, so
-/// nothing warms on it.
 #[test]
-#[ignore = "blocked behind the member-read arm: `x.q` over a constrained binder evaluates to Opaque(Miss) before the constraint is consulted"]
 fn constrained_clause_parameter_member_read_resolves_through_the_constraint() {
     let host = ts_host();
     assert_clean_warm(&host, TL, "tlConstrainedMember", string());
 }
 
-/// A COMPUTED member read off a constrained clause parameter (`x["q"]`)
-/// fails CLOSED — a distinct outcome from the static member read's warm
-/// opaque, and the architecturally correct one.
+/// A literal-keyed element read off a constrained clause parameter
+/// (`x["q"]`) resolves through the constraint exactly as the dotted read.
 ///
-/// Oracle (for the record — the answer the fail-closed arm declines to
-/// produce): tsc resolves `<T extends HasQ>(x: T) => x["q"]` as `string`
+/// Oracle: tsc resolves `<T extends HasQ>(x: T) => x["q"]` as `string`
 /// (`const bad: <U extends HasQ>(x: U) => number = tlConstrainedIndexed;`
 /// fails with `TS2322: Type '<T extends HasQ>(x: T) => string' is not
 /// assignable to type '<U extends HasQ>(x: U) => number'.`).
 #[test]
-fn computed_member_read_over_a_constrained_binder_fails_closed() {
+fn computed_member_read_over_a_constrained_binder_resolves_through_the_constraint() {
     let host = ts_host();
-    assert_fails_closed(&host, TL, "tlConstrainedIndexed");
+    assert_clean_warm(&host, TL, "tlConstrainedIndexed", string());
 }
 
 // ──────────────────────────────────────────────────────────────────────
