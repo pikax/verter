@@ -573,32 +573,60 @@ fn infinity_and_nan_naming_the_library_globals_are_the_global_numbers() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Enum members referencing declarations of the same file written after
+/// them: another enum, another declaration of a merged enum, another
+/// namespace block, a `const`; and the same in ambient contexts.
+const LATER_DECLARATIONS: &str = "\
+enum F { A = G.A, B = 1 }
+enum G { A = F.A }
+enum M { A = B }
+enum M { B = 1 }
+enum Q { A = c }
+const c = 5;
+namespace P { export enum P1 { A = P.P2.A } }
+namespace P { export enum P2 { A = 4 } }
+enum R { A = S.B + 1 }
+enum S { B = 7 }
+declare enum D1 { A = D2.A }
+declare enum D2 { A = 1 }
+declare const enum C1 { A = C2.A }
+declare const enum C2 { A = 2 }
+declare namespace NS { enum N1 { A = N2.A } enum N2 { A = 3 } }
+";
+
 /// A member referencing a member of ANOTHER enum declaration (another enum,
-/// or another declaration of a merged enum) declared after it in the same
-/// file reads `0` (TS2651), and one referencing a `const` declared after it
-/// is computed (TS2448) — the checker's declared-before-use rule across
-/// declarations.
+/// another declaration of a merged enum, one in a later namespace block)
+/// declared after it in the same file reads `0` (TS2651), and one
+/// referencing a `const` declared after it is computed (TS2448) — the
+/// checker's declared-before-use rule across declarations. A use in an
+/// ambient context reads every declaration as declared before it.
 ///
 /// Measured on TypeScript 7.0.2, alike under every setting: `F.A extends
-/// 0`, `G.A extends 0`, `M.A extends 0`, `1 extends Q.A` and `5 extends
-/// Q.A` are each `"y"`.
+/// 0`, `G.A extends 0`, `M.A extends 0`, `1 extends Q.A`, `5 extends Q.A`,
+/// `P.P1.A extends 0`, `R.A extends 1`, `D1.A extends 1`, `1 extends D1.A`,
+/// `C1.A extends 2`, `NS.N1.A extends 3` are each `"y"`; `1 extends NS.N1.A`
+/// is `"n"`.
 ///
-/// What the lane gives: `"n"` for each but `5 extends Q.A` (it reads the
-/// later declaration's own value: `F.A`, `G.A` and `M.A` are computed or
-/// `1`, `Q.A` is `5`).
+/// Mutation: reading every declaration of the file as declared before its
+/// use answers `F.A`, `G.A`, `M.A`, `1 extends Q.A`, `P.P1.A` and `R.A`
+/// `"n"`; ignoring the ambient context answers `D1.A`, `C1.A` and `NS.N1.A`
+/// `"n"`.
 #[test]
-#[ignore = "a reference to a member or const declared after it in another declaration of the same file reads the checker's declared-before-use value"]
 fn a_reference_to_a_later_declaration_reads_as_the_checker_reads_it() {
     let yes = |probe: &'static str| (probe, "\"y\"");
-    let failures = Matrix::new(
-        "enum F { A = G.A, B = 1 }\nenum G { A = F.A }\nenum M { A = B }\nenum M { B = 1 }\nenum Q { A = c }\nconst c = 5;\n",
-    )
-    .types(&[
+    let failures = Matrix::new(LATER_DECLARATIONS).types(&[
         yes("F.A extends 0 ? \"y\" : \"n\""),
         yes("G.A extends 0 ? \"y\" : \"n\""),
         yes("M.A extends 0 ? \"y\" : \"n\""),
         yes("1 extends Q.A ? \"y\" : \"n\""),
         yes("5 extends Q.A ? \"y\" : \"n\""),
+        yes("P.P1.A extends 0 ? \"y\" : \"n\""),
+        yes("R.A extends 1 ? \"y\" : \"n\""),
+        yes("D1.A extends 1 ? \"y\" : \"n\""),
+        yes("1 extends D1.A ? \"y\" : \"n\""),
+        yes("C1.A extends 2 ? \"y\" : \"n\""),
+        yes("NS.N1.A extends 3 ? \"y\" : \"n\""),
+        ("1 extends NS.N1.A ? \"y\" : \"n\"", "\"n\""),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

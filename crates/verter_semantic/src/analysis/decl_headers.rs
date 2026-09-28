@@ -326,7 +326,22 @@ pub struct EnumDeclHeader {
     pub span: Span,
     pub name_span: Span,
     pub member_names: Vec<String>,
+    /// Where each member of [`Self::member_names`] is declared, in the same
+    /// order: the position the checker's declared-before-use rule compares
+    /// an initializer's reference by. Empty in the `from_eval_env` mirror.
+    pub member_positions: Vec<EnumMemberPosition>,
     pub contributors: Vec<DeclHeaderContributor>,
+}
+
+/// Where one enum member is declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnumMemberPosition {
+    /// The member's source start offset.
+    pub start: u32,
+    /// The member is in an ambient context (a `declare enum`, an enum of a
+    /// declaration file or of an ambient namespace), where the checker
+    /// reads a reference to a later declaration as declared before its use.
+    pub ambient: bool,
 }
 
 /// The shallow declaration-header index for one parsed program.
@@ -707,6 +722,7 @@ impl DeclHeaderIndex {
                         span: Span::default(),
                         name_span: Span::default(),
                         member_names: names_fact.names.iter().cloned().collect(),
+                        member_positions: Vec::new(),
                         contributors: Vec::new(),
                     },
                 );
@@ -890,7 +906,13 @@ fn index_top_level_statement(
             }
         }
         Statement::TSEnumDeclaration(enum_decl) => {
-            index_enum(enum_decl, enum_decl.id.name.as_str(), ctx, index);
+            index_enum(
+                enum_decl,
+                enum_decl.id.name.as_str(),
+                ctx,
+                ctx.declaration_file,
+                index,
+            );
         }
         Statement::ExportDeclaration(export) => {
             let decl = &export.declaration;
@@ -974,7 +996,13 @@ fn index_declaration(
             }
         }
         Declaration::TSEnumDeclaration(enum_decl) => {
-            index_enum(enum_decl, enum_decl.id.name.as_str(), ctx, index);
+            index_enum(
+                enum_decl,
+                enum_decl.id.name.as_str(),
+                ctx,
+                ctx.declaration_file,
+                index,
+            );
         }
         _ => {}
     }
@@ -1000,6 +1028,7 @@ fn index_enum(
     enum_decl: &TSEnumDeclaration<'_>,
     name: &str,
     ctx: HeaderStatementContext<'_>,
+    ambient: bool,
     index: &mut DeclHeaderIndex,
 ) {
     let entry = index
@@ -1009,16 +1038,19 @@ fn index_enum(
             span: enum_decl.span.into(),
             name_span: enum_decl.id.span.into(),
             member_names: Vec::new(),
+            member_positions: Vec::new(),
             contributors: Vec::new(),
         });
+    let ambient = ambient || enum_decl.declare;
+    let mut seen: FxHashSet<String> = entry.member_names.iter().cloned().collect();
     for member in &enum_decl.body.members {
         let member_name = member.id.static_name().to_string();
-        if !entry
-            .member_names
-            .iter()
-            .any(|existing| existing == &member_name)
-        {
+        if seen.insert(member_name.clone()) {
             entry.member_names.push(member_name);
+            entry.member_positions.push(EnumMemberPosition {
+                start: member.span.start,
+                ambient,
+            });
         }
     }
     push_contributor(
@@ -1182,6 +1214,7 @@ impl<'s, 'a> NamespaceVisitor<'s, 'a> for HeaderNamespaces<'_, '_> {
             self.index,
             self.path.name(),
             frame.implicit_export,
+            frame.ambient,
         );
     }
 
@@ -1209,6 +1242,7 @@ fn index_namespaced_statement(
     index: &mut DeclHeaderIndex,
     namespace: &str,
     implicit_export: bool,
+    ambient: bool,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
@@ -1236,7 +1270,7 @@ fn index_namespaced_statement(
         }
         Statement::TSEnumDeclaration(enum_decl) => {
             let name = format!("{namespace}.{}", enum_decl.id.name);
-            index_enum(enum_decl, &name, ctx, index);
+            index_enum(enum_decl, &name, ctx, ambient, index);
             if !implicit_export {
                 index.namespace_private_members.insert(ctx.key(&name));
             }
@@ -1253,7 +1287,7 @@ fn index_namespaced_statement(
         // registers a qualified value member.
         Statement::ExportDeclaration(export) => {
             let decl = &export.declaration;
-            index_namespaced_declaration(decl, ctx, index, namespace);
+            index_namespaced_declaration(decl, ctx, index, namespace, ambient);
         }
         Statement::VariableDeclaration(var_decl) if implicit_export => {
             for decl in &var_decl.declarations {
@@ -1278,6 +1312,7 @@ fn index_namespaced_declaration(
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
+    ambient: bool,
 ) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
@@ -1302,7 +1337,7 @@ fn index_namespaced_declaration(
         }
         Declaration::TSEnumDeclaration(enum_decl) => {
             let name = format!("{namespace}.{}", enum_decl.id.name);
-            index_enum(enum_decl, &name, ctx, index);
+            index_enum(enum_decl, &name, ctx, ambient, index);
         }
         Declaration::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
