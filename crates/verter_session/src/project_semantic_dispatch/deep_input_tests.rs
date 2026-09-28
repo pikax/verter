@@ -14,7 +14,7 @@
 //! for its answer below it (3,000 levels, 1,000 for conditionals), and at 10,000 for returning on the
 //! production stacks at all.
 
-use super::checker_probe_lane_tests::{degradation_in, flow_return_outcome_in, mismatches};
+use super::checker_probe_lane_tests::{flow_return_outcome_in, mismatches};
 use crate::host_flow_return_audit::FlowReturnError;
 use crate::semantic_query::FlowReturnFailure;
 use verter_type_expr::facts::InferenceUnavailableReason;
@@ -421,44 +421,75 @@ fn module_calls_nested_10000_deep_return_on_production_stacks() {
     );
 }
 
-/// A receiver chain, `b.m().m()…`: its calls are walked from an explicit
-/// stack. 10,000 links return what three links return, on the production
-/// stacks (a member call on a member call's result is an unmodeled
-/// position either way).
-#[test]
-fn receiver_chains_10000_deep_return_on_production_stacks() {
-    let chain = |depth: usize| {
-        let source = format!(
-            "interface B {{ m(): B; }}
+fn receiver_chain(links: usize) -> String {
+    format!(
+        "interface B {{ m(): B; }}
 export function pf(b: B) {{ return b{}; }}
 ",
-            ".m()".repeat(depth)
-        );
-        std::thread::Builder::new()
-            .stack_size(1 << 20)
-            .spawn(move || degradation_in(Default::default(), &source, "pf"))
-            .expect("spawn the probing thread")
-            .join()
-            .expect("the return evaluates")
-    };
-    assert_eq!(chain(DEPTH), chain(3));
+        ".m()".repeat(links)
+    )
 }
 
-/// A module constant initialized by a receiver chain 10,000 links long
-/// reads as one three links long does, on the production stacks.
+/// A receiver chain the connected-demand work budget admits.
+const RECEIVER_CHAINS_UNDER_THE_WORK_BUDGET: usize = 400;
+
+/// A receiver chain, `b.m().m()…`: each call is a member call on the
+/// value of the call before it, lowered and evaluated from explicit
+/// stacks, the value its receiver. TypeScript 7.0.2: `B` for 2, 3 and 400
+/// links, under every setting; 10,000 links return the connected-demand
+/// work budget's typed failure on the production stacks.
 #[test]
-fn module_receiver_chains_10000_deep_read_on_production_stacks() {
-    let chain = |depth: usize| {
-        let source = format!(
-            "interface B {{ m(): B; }}
+fn receiver_chains_10000_deep_return_on_production_stacks() {
+    for links in [2, 3, RECEIVER_CHAINS_UNDER_THE_WORK_BUDGET] {
+        assert_eq!(
+            mismatches_on_a_small_stack(receiver_chain(links), RETURN, "B"),
+            Vec::<String>::new(),
+            "{links} links"
+        );
+    }
+    assert_eq!(
+        return_on_a_small_stack(receiver_chain(DEPTH)),
+        WORK_BUDGET_EXCEEDED
+    );
+}
+
+fn module_receiver_chain(links: usize) -> String {
+    format!(
+        "interface B {{ m(): B; }}
 declare const b: B;
 export const v = b{};
 ",
-            ".m()".repeat(depth)
+        ".m()".repeat(links)
+    )
+}
+
+/// A module constant initialized by a receiver chain reads as the chain's
+/// last call. TypeScript 7.0.2: `B`, under every setting.
+#[test]
+#[ignore = "a module constant's indexed initializer has no member read of a call's value, so a member call on a call's result is a typed miss"]
+fn module_receiver_chains_answer() {
+    for links in [2, 3] {
+        assert_eq!(
+            mismatches_on_a_small_stack(module_receiver_chain(links), "typeof v", "B"),
+            Vec::<String>::new(),
+            "{links} links"
         );
-        mismatches_on_a_small_stack(source, "typeof v", "B")
-    };
-    assert_eq!(chain(DEPTH), chain(3));
+    }
+}
+
+/// A module constant initialized by a receiver chain 10,000 links long
+/// reads on the production stacks: the indexed initializer's calls
+/// evaluate from an explicit stack.
+#[test]
+fn module_receiver_chains_10000_deep_read_on_production_stacks() {
+    assert_eq!(
+        mismatches_on_a_small_stack(module_receiver_chain(1), "typeof v", "B"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        mismatches_on_a_small_stack(module_receiver_chain(DEPTH), "typeof v", "B"),
+        mismatches_on_a_small_stack(module_receiver_chain(3), "typeof v", "B")
+    );
 }
 
 /// Callbacks nested 10,000 deep, each an arrow passed to a callee that

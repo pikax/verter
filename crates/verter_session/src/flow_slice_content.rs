@@ -4633,8 +4633,8 @@ fn member_target_chain<'a>(
 
 /// Whether a member access's object is a flow VALUE with no reference
 /// behind it: a `new` expression, an object literal, a primitive literal
-/// (read through its apparent type), or a static member chain rooted at
-/// one.
+/// (read through its apparent type), a call's result, or a static member
+/// chain rooted at one.
 fn value_rooted_member_object(object: &Expression<'_>) -> bool {
     match unwrap_parenthesized(object) {
         Expression::NewExpression(_)
@@ -4643,6 +4643,7 @@ fn value_rooted_member_object(object: &Expression<'_>) -> bool {
         | Expression::NumericLiteral(_)
         | Expression::BooleanLiteral(_)
         | Expression::BigIntLiteral(_) => true,
+        Expression::CallExpression(call) => !call.optional,
         Expression::StaticMemberExpression(member) => value_rooted_member_object(&member.object),
         _ => false,
     }
