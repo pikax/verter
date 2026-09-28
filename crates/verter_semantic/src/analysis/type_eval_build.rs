@@ -7851,26 +7851,100 @@ pub fn indexed_literal_mode(expr: Option<&Expression<'_>>) -> IndexedValueLitera
 /// so the eager arguments fix the call's type arguments first. The
 /// classification is purely structural over the authored parameter list — the
 /// lowered parameter type cannot express it, because an explicit `: any`
-/// lowers exactly like a missing annotation. Only a parenthesised wrapper is
-/// transparent.
+/// lowers exactly like a missing annotation. A function expression or an
+/// object literal method without an explicit `this` parameter is context
+/// sensitive whatever its parameters (its `this` is contextually typed),
+/// and a generic function never is.
+///
+/// The checker's `isContextSensitive` reaches through the expressions that
+/// hand their context on: an object literal is context sensitive when a
+/// property's value or a method is, an array literal when an element is,
+/// a conditional when a branch is, and `a || b` / `a ?? b` when an
+/// operand is. A parenthesised wrapper is transparent. Read from an
+/// explicit stack.
 pub fn indexed_context_sensitive(expr: Option<&Expression<'_>>) -> bool {
-    let mut expr = expr;
-    while let Some(Expression::ParenthesizedExpression(parenthesized)) = expr {
-        expr = Some(&parenthesized.expression);
+    let mut pending: Vec<&Expression<'_>> = expr.into_iter().collect();
+    while let Some(expr) = pending.pop() {
+        let params = match expr {
+            Expression::ParenthesizedExpression(parenthesized) => {
+                pending.push(&parenthesized.expression);
+                continue;
+            }
+            // A generic function is not context sensitive
+            // (`hasContextSensitiveParameters`).
+            Expression::ArrowFunctionExpression(arrow) if arrow.type_parameters.is_some() => {
+                continue;
+            }
+            Expression::FunctionExpression(function) if function.type_parameters.is_some() => {
+                continue;
+            }
+            // An arrow function whose expression body is context sensitive
+            // is (`hasContextSensitiveReturnExpression`).
+            Expression::ArrowFunctionExpression(arrow) => {
+                if arrow.return_type.is_none() {
+                    if let Some(body) = arrow.get_expression() {
+                        pending.push(body);
+                    }
+                }
+                &arrow.params
+            }
+            // A function expression or method with no explicit `this`
+            // parameter has an implicit one its context types.
+            Expression::FunctionExpression(function) if function.this_param.is_none() => {
+                return true;
+            }
+            Expression::FunctionExpression(function) => &function.params,
+            Expression::ObjectExpression(object) => {
+                for property in &object.properties {
+                    if let ObjectPropertyKind::ObjectProperty(property) = property {
+                        // An accessor is no context-sensitive member.
+                        if matches!(property.kind, PropertyKind::Init) {
+                            pending.push(&property.value);
+                        }
+                    }
+                }
+                continue;
+            }
+            Expression::ArrayExpression(array) => {
+                pending.extend(
+                    array
+                        .elements
+                        .iter()
+                        .filter_map(|element| element.as_expression()),
+                );
+                continue;
+            }
+            Expression::ConditionalExpression(conditional) => {
+                pending.push(&conditional.consequent);
+                pending.push(&conditional.alternate);
+                continue;
+            }
+            Expression::LogicalExpression(logical)
+                if matches!(
+                    logical.operator,
+                    oxc_syntax::operator::LogicalOperator::Or
+                        | oxc_syntax::operator::LogicalOperator::Coalesce
+                ) =>
+            {
+                pending.push(&logical.left);
+                pending.push(&logical.right);
+                continue;
+            }
+            _ => continue,
+        };
+        if params
+            .items
+            .iter()
+            .any(|param| param.type_annotation.is_none())
+            || params
+                .rest
+                .as_ref()
+                .is_some_and(|rest| rest.type_annotation.is_none())
+        {
+            return true;
+        }
     }
-    let params = match expr {
-        Some(Expression::ArrowFunctionExpression(arrow)) => &arrow.params,
-        Some(Expression::FunctionExpression(function)) => &function.params,
-        _ => return false,
-    };
-    params
-        .items
-        .iter()
-        .any(|param| param.type_annotation.is_none())
-        || params
-            .rest
-            .as_ref()
-            .is_some_and(|rest| rest.type_annotation.is_none())
+    false
 }
 
 fn indexed_callee_and_receiver(
