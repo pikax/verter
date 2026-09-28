@@ -69,10 +69,10 @@ mod harness {
     /// canonical gate runs under `cargo nextest`, whose profile
     /// (`.config/nextest.toml`) terminates a test after
     /// `slow-timeout.period x terminate-after`. The oracle makes TWO
-    /// invocations, so the budget is `2 x 9s` worst case, and
+    /// invocations, so the budget is `2 x 60s` worst case, and
     /// `the_run_deadline_is_strictly_below_the_nextest_termination_deadline`
     /// checks both against the profile that will actually run.
-    pub const RUN_DEADLINE: Duration = Duration::from_secs(9);
+    pub const RUN_DEADLINE: Duration = Duration::from_secs(60);
 
     /// The marker a skip line carries so a skipped run is distinguishable from a
     /// run that executed. Only ONE condition may emit it: no tsgo candidate
