@@ -611,9 +611,17 @@ function ghJson(args) {
  * The run whose artifacts the tag ships: its release pull request's CI run,
  * whose rehearsal built them for the tagged tree (scripts/release-proof.mjs).
  * The tag's own release.yml run builds nothing; it publishes that run's
- * artifacts, and so does this.
+ * artifacts, and so does this. A run named with --run passes the same proof
+ * (successful CI of the release pull request for the tagged tree, the Release
+ * Check rehearsal, every artifact family); naming it only picks among proven
+ * runs.
  */
-async function findReleaseRun(tag, tagSha) {
+async function findReleaseRun(tag, tagSha, named) {
+  if (named !== undefined && !/^[1-9][0-9]*$/u.test(String(named)))
+    fail(
+      `--run ${named === true ? "needs a workflow run id" : `${named} is not a workflow run id`}`,
+    );
+  const runId = named === undefined ? undefined : Number(named);
   const repo = ghJson(["repo", "view", "--json", "nameWithOwner"]).nameWithOwner;
   try {
     return await releaseProof({
@@ -622,12 +630,11 @@ async function findReleaseRun(tag, tagSha) {
       titlePrefix: "release: ",
       rehearsal: "Release Check",
       artifacts: ["native-*", "native-loader", "tsc-*", "lsp-*", "mcp-*", "wasm"],
+      runId,
       api: async (path) => ghJson(["api", path]),
     });
   } catch (error) {
-    return fail(
-      `${tag}: ${error instanceof Error ? error.message : String(error)} — pass --run <id> to name the run`,
-    );
+    return fail(`${tag}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -677,8 +684,9 @@ async function local(flags) {
 
   // --- Download the tag's release-run artifacts (the exact binaries CI built
   // for this tag), unless a previous invocation already did.
-  const proven = flags.get("run") ? null : await findReleaseRun(tag, tagSha);
-  const runId = flags.get("run") ?? proven.runId;
+  const named = flags.get("run");
+  const proven = await findReleaseRun(tag, tagSha, named);
+  const runId = proven.runId;
   const runInfo = ghJson([
     "run",
     "view",
@@ -686,16 +694,10 @@ async function local(flags) {
     "--json",
     "headSha,status,conclusion,workflowName",
   ]);
-  // The proven run ran for the release pull request's head and recorded testing
-  // exactly the tagged tree; a run named with --run must be for the tag, that
-  // head, or a commit with the tagged tree.
-  const treeOf = (sha) => ghJson(["api", `/repos/{owner}/{repo}/git/commits/${sha}`]).tree?.sha;
-  if (
-    runInfo.headSha !== tagSha &&
-    runInfo.headSha !== proven?.head &&
-    treeOf(runInfo.headSha) !== treeOf(tagSha)
-  ) {
-    fail(`run ${runId} built ${runInfo.headSha}, whose tree is not the tagged commit ${tagSha}'s`);
+  // The proof chose a run of the release pull request's head that recorded
+  // testing exactly the tagged tree.
+  if (runInfo.headSha !== proven.head) {
+    fail(`run ${runId} ran for ${runInfo.headSha}, not the proven head ${proven.head}`);
   }
   log(`Release run: ${runId} (${runInfo.workflowName}, ${runInfo.status}/${runInfo.conclusion})`);
 

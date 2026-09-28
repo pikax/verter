@@ -343,7 +343,14 @@ Releases start from a local version bump and end with an automatic tag:
    on a dirty tree, and refuses a version that is not greater than the current
    one. On success it creates exactly one commit, `release: v<version>`. It
    never creates a tag and never pushes.
-4. Review the commit and push it to `main`.
+4. Review the commit, push it on a branch and open a pull request titled
+   `release: v<version>`. Its CI runs every lane and the `Release Check`
+   rehearsal (every build, the packaging and the clean-room smoke test);
+   squash-merge it once `CI Required` is green, with the commit subject exactly
+   `release: v<version>` (remove the ` (#N)` GitHub appends: `release-tag.yml`
+   tags only an exact release subject). Do not push the version commit
+   to `main` directly: the tag publishes only the artifacts of a merged release
+   pull request's green CI, so a direct push can never publish.
 5. The `release-tag.yml` workflow detects the version commit on `main` — the
    commit message must match `release: v<version>` and agree with the
    workspace version in the tree, and the tag must not exist yet. It re-verifies
@@ -373,13 +380,17 @@ them:
    `extensions/lapce/volt.toml` — verifies them, refuses a dirty tree and a
    version that is not greater than the current one, and creates exactly one
    commit: `release(ide): v<version>`. No tag, no push.
-3. Review the commit and push it to `main`.
+3. Review the commit, push it on a branch and open a pull request titled
+   `release(ide): v<version>`. Its CI runs the lanes and the `Release IDE
+   Check` rehearsal: seven LSP and MCP targets and five napi targets are
+   cross-compiled and five VSIXes are packaged. Squash-merge it once `CI
+   Required` is green, with the subject exactly `release(ide): v<version>`; as for the monorepo release, a version commit pushed
+   straight to `main` can never publish.
 4. `release-tag.yml` tags `ide/v<version>`.
-5. The tag triggers `release-ide.yml`: the extension suite runs, seven LSP and
-   MCP targets and five napi targets are cross-compiled, five VSIXes are
-   packaged and published to the Marketplace, and the GitHub Release for the tag
-   carries the VSIXes plus the per-platform engine binaries every other editor
-   launches.
+5. The tag triggers `release-ide.yml`, which proves the release pull request's
+   CI and publishes that run's artifacts: the five VSIXes to the Marketplace,
+   and a GitHub Release for the tag carrying the VSIXes plus the per-platform
+   engine binaries every other editor launches.
 
 The manifests were versioned separately before the lane existed (the extension
 at 0.0.2, the Zed extension and the Lapce volt at 0.1.0). `pnpm bump:ide` takes
@@ -411,7 +422,7 @@ npm login                                        # a user with publish rights + 
 cargo login                                      # a crates.io token (no 2FA involved)
 
 node scripts/release-publish.mjs local           # the whole thing, interactive
-node scripts/release-publish.mjs local --run 35334967938   # pick the run explicitly
+node scripts/release-publish.mjs local --run 35334967938   # pick among the proven runs (it must pass the same proof)
 node scripts/release-publish.mjs local --dry-run --skip-crates   # rehearse: pack + `npm publish --dry-run`
 ```
 

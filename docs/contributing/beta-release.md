@@ -69,22 +69,26 @@ git cliff --tag v0.0.1-beta.1 -o CHANGELOG.md
 git cliff --tag v0.0.1-beta.1 --unreleased
 ```
 
-## 4. Commit and Tag
+## 4. Commit and open the release pull request
 
 ```bash
+git switch -c release/v0.0.1-beta.1
 git add -A
-git commit -m "release(all): v0.0.1-beta.1"
-git tag v0.0.1-beta.1
+git commit -m "release: v0.0.1-beta.1"
+git push -u origin release/v0.0.1-beta.1
+gh pr create --title "release: v0.0.1-beta.1" --fill
 ```
 
-## 5. Push (triggers release workflow)
+The pull request's CI runs every lane plus the `Release Check` rehearsal (every
+build, the packaging and the clean-room smoke test). Do not push the release
+commit to `main` or tag it by hand: the tag publishes only the artifacts of a
+merged release pull request's green CI.
 
-```bash
-git push origin main
-git push origin v0.0.1-beta.1
-```
+## 5. Merge (tags and triggers the release workflow)
 
-The `release.yml` workflow runs automatically on tag push:
+Squash-merge the pull request once `CI Required` is green, with the commit
+subject exactly `release: v0.0.1-beta.1`: remove the ` (#N)` GitHub appends,
+since `release-tag.yml` tags only an exact release subject. It then tags the squash commit `v0.0.1-beta.1`, and the tag push runs `release.yml`:
 
 1. **validate** — proves the tag is the squash of the release pull request
    whose CI passed for this tree (`scripts/release-proof.mjs`); the tests and
@@ -93,7 +97,7 @@ The `release.yml` workflow runs automatically on tag push:
 3. **publish-npm** — npm with `--tag beta`, from the release pull request's
    CI artifacts
 4. **github-release** — GitHub Release with the same binaries
-7. **deploy-playground** — Netlify deployment
+5. **deploy-playground** — Netlify deployment
 
 ## 6. Post-Release Verification
 

@@ -83,10 +83,12 @@ export async function testedByRun({ repo, runId, api }) {
  * selected from that pull request's own diff, the selection its green check
  * already vouched for. A run that recorded nothing (a fork's, or one from
  * before the record existed) proves nothing, so its merge runs CI as usual.
- * @param {{ repo: string; sha: string; api: (path: string) => Promise<any> }} input
+ * `runId`, when given, is the only run considered: naming a run chooses among
+ * the runs that prove the commit, it never bypasses the proof.
+ * @param {{ repo: string; sha: string; runId?: number; api: (path: string) => Promise<any> }} input
  * @returns {Promise<{ pullRequest: number; title: string; head: string; runId: number }>}
  */
-export async function landedPullProof({ repo, sha, api }) {
+export async function landedPullProof({ repo, sha, runId, api }) {
   if (!/^[0-9a-f]{40}$/u.test(sha))
     throw new Error(`release-proof: ${sha} is not a full commit sha`);
   const pulls = await api(`/repos/${repo}/commits/${sha}/pulls`);
@@ -105,7 +107,12 @@ export async function landedPullProof({ repo, sha, api }) {
       "workflow_runs",
     )
   )
-    .filter((row) => row?.conclusion === "success" && row.head_sha === head)
+    .filter(
+      (row) =>
+        row?.conclusion === "success" &&
+        row.head_sha === head &&
+        (runId === undefined || row.id === runId),
+    )
     .sort((a, b) => b.run_number - a.run_number);
   for (const run of runs) {
     const tested = await testedByRun({ repo, runId: run.id, api });
@@ -113,7 +120,7 @@ export async function landedPullProof({ repo, sha, api }) {
       return { pullRequest: pull.number, title: String(pull.title ?? ""), head, runId: run.id };
   }
   throw new Error(
-    `release-proof: no successful ${CI_WORKFLOW} run of pull request #${pull.number} (head ${String(head).slice(0, 12)}) recorded testing ${sha.slice(0, 12)}'s tree ${tree.slice(0, 12)}`,
+    `release-proof: no successful ${CI_WORKFLOW} run${runId === undefined ? "" : ` ${runId}`} of pull request #${pull.number} (head ${String(head).slice(0, 12)}) recorded testing ${sha.slice(0, 12)}'s tree ${tree.slice(0, 12)}`,
   );
 }
 
@@ -121,11 +128,11 @@ export async function landedPullProof({ repo, sha, api }) {
  * A tag's release: the landed proof, for a pull request titled like the
  * release, whose run ran `rehearsal` and still holds every artifact family.
  * @param {{ repo: string; sha: string; titlePrefix: string; rehearsal: string; artifacts: string[];
- *   api: (path: string) => Promise<any> }} input
+ *   runId?: number; api: (path: string) => Promise<any> }} input
  * @returns {Promise<{ pullRequest: number; head: string; runId: number }>}
  */
-export async function releaseProof({ repo, sha, titlePrefix, rehearsal, artifacts, api }) {
-  const proof = await landedPullProof({ repo, sha, api }).catch((error) => {
+export async function releaseProof({ repo, sha, titlePrefix, rehearsal, artifacts, runId, api }) {
+  const proof = await landedPullProof({ repo, sha, runId, api }).catch((error) => {
     throw new Error(`${error.message}; a release lands through its release pull request`);
   });
   if (!proof.title.startsWith(titlePrefix))

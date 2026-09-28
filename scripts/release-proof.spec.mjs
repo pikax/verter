@@ -234,3 +234,23 @@ test("reuses only a run that recorded testing this pull request's landed tree", 
   // A run that recorded nothing: a fork's, or one from before the record existed.
   await assert.rejects(land({ runs: [ran(12, null)] }), /recorded testing/u);
 });
+
+// Naming a run (release-publish.mjs --run) picks among the proving runs; it
+// never exempts a run from the proof.
+test("a named run is the only one considered, and it must prove the commit itself", async () => {
+  assert.equal((await prove({}, { runId: 12 })).runId, 12);
+  // The older run of the same pull request proves the tree, but did not run the rehearsal.
+  await assert.rejects(prove({}, { runId: 11 }), /did not run the "Release Check" rehearsal/u);
+  // Another pull request's run, a run for another tree, a failed or unknown run.
+  const runs = [ran(12), ran(13, { pull: 900, tree: TREE }), ran(14, { pull: 705, tree: OTHER })];
+  await assert.rejects(
+    prove({ runs }, { runId: 13 }),
+    /no successful ci\.yml run 13 of pull request #705/u,
+  );
+  await assert.rejects(prove({ runs }, { runId: 14 }), /no successful ci\.yml run 14/u);
+  await assert.rejects(
+    prove({ runs: [{ ...ran(12), conclusion: "failure" }] }, { runId: 12 }),
+    /no successful ci\.yml run 12/u,
+  );
+  await assert.rejects(prove({}, { runId: 99 }), /no successful ci\.yml run 99/u);
+});
