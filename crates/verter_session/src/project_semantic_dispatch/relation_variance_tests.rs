@@ -363,3 +363,95 @@ fn rest_template_and_mapped_parameters_keep_their_variance() {
         ],
     );
 }
+
+/// The variance markers and marker instantiations a measurement interns in
+/// the semantic graph, with the scope each was interned under.
+fn variance_marker_nodes(
+    dispatch: &super::ProjectSemanticDispatch<'_>,
+) -> Vec<(
+    crate::semantic_query::SemanticNodeId,
+    crate::semantic_query::DeclIdentity,
+    Option<crate::semantic_query::NodeScopeId>,
+)> {
+    use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
+    let graph = dispatch.graph();
+    (0..graph.node_count() as u64)
+        .map(SemanticNodeId)
+        .filter_map(|node| {
+            let declaration = match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::InstantiationRef { base, args })
+                    if args
+                        .iter()
+                        .any(|arg| dispatch.variance_marker_of(*arg).is_some()) =>
+                {
+                    base.clone()
+                }
+                _ => dispatch.variance_marker_of(node)?.0,
+            };
+            Some((node, declaration, graph.node_scope(node)))
+        })
+        .collect()
+}
+
+/// A measurement's markers and marker instantiations are nodes of the
+/// measured declaration's own file generation — at most six per type
+/// parameter — so they are released with that generation, and measuring
+/// again on the same generation interns none. An edit of the declaring
+/// file measures under the new generation, never beside the old one.
+///
+/// Oracle: over `interface Co<T> { v: T }` and, after the edit, `interface
+/// Co<T> { v: T; w: number }`, `[Co<1>] extends [Co<number>] ? 1 : 2` is
+/// `1`.
+#[test]
+fn variance_markers_belong_to_their_declarations_file_generation() {
+    use super::checker_probe_lane_tests::{default_probe_host, with_probe_on_host};
+    let host = default_probe_host();
+    let probe = "[Co<1>] extends [Co<number>] ? 1 : 2";
+    let measure = |source: &str| {
+        with_probe_on_host(
+            &host,
+            Default::default(),
+            source,
+            probe,
+            |dispatch, node| {
+                let answer = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                    dispatch, node, 0,
+                );
+                assert_eq!(answer, "1", "over `{source}`");
+                variance_marker_nodes(dispatch)
+            },
+        )
+    };
+    let first = measure("interface Co<T> { v: T }\n");
+    assert!(
+        (1..=6).contains(&first.len()),
+        "one parameter's measurement interns at most six marker nodes: {first:?}"
+    );
+    for (node, declaration, scope) in &first {
+        assert_eq!(
+            scope.as_ref(),
+            Some(&super::relation_variance::declaration_scope(declaration)),
+            "marker node {node:?} is scoped to its declaration's file generation"
+        );
+    }
+    assert_eq!(
+        measure("interface Co<T> { v: T }\n"),
+        first,
+        "measuring again on the same generation interns no marker"
+    );
+    let edited = measure("interface Co<T> { v: T; w: number }\n");
+    let first_hash = first[0].1.whole_hash;
+    let fresh: Vec<_> = edited
+        .iter()
+        .filter(|(_, declaration, _)| declaration.whole_hash != first_hash)
+        .collect();
+    assert!(
+        !fresh.is_empty() && fresh.len() <= 6,
+        "the edited declaration is measured under its new generation: {edited:?}"
+    );
+    assert_eq!(
+        edited.len() - fresh.len(),
+        first.len(),
+        "no marker of the old generation is interned after the edit"
+    );
+}

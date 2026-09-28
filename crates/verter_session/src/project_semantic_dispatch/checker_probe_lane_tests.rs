@@ -49,7 +49,25 @@ pub(super) fn with_probe_in<R>(
     probe: &str,
     read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
 ) -> R {
-    let host = probe_host(project);
+    with_probe_on_host(&probe_host(project), project, source, probe, read)
+}
+
+/// A host for a default probe project, for probes that read one host
+/// across edits ([`with_probe_on_host`]).
+pub(super) fn default_probe_host() -> Arc<crate::VerterHost> {
+    probe_host(ProbeProject::default())
+}
+
+/// [`with_probe_in`] on `host`, a host of `project`: the probe module
+/// is (re)written on it, so a probe after another reads what the earlier
+/// one left in the host.
+pub(super) fn with_probe_on_host<R>(
+    host: &Arc<crate::VerterHost>,
+    project: ProbeProject<'_>,
+    source: &str,
+    probe: &str,
+    read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+) -> R {
     let module = format!(
         "{source}\nexport function __checker_probe() {{ \
             const __probe: {probe} = null as any; \
@@ -57,16 +75,16 @@ pub(super) fn with_probe_in<R>(
         }}\n"
     );
     crate::u6_flow_shape_corpus_tests::upsert(
-        &host,
+        host,
         PROBE_FILE,
         &crate::u6_flow_shape_corpus_tests::module_script(&module),
         crate::FileLanguage::script_ts(),
     );
-    let result = flow_return_of(&host, "__checker_probe")
+    let result = flow_return_of(host, "__checker_probe")
         .unwrap_or_else(|| panic!("the probe `{probe}` produced no flow-return result"));
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     // A read of a global the ambient library declares is scoped by the
     // probe module's project, as the member access in its body would be.

@@ -468,20 +468,26 @@ impl ProjectSemanticDispatch<'_> {
                 if position == index {
                     self.variance_marker(declaration, name, index, role)
                 } else {
-                    graph.intern_node(SemanticNodeData::TypeParam {
-                        decl: declaration.clone(),
-                        param_index: position as u16,
-                        constraint: None,
-                        default: None,
-                        display_name: Arc::clone(name),
-                    })
+                    graph.intern_node_with_scope(
+                        SemanticNodeData::TypeParam {
+                            decl: declaration.clone(),
+                            param_index: position as u16,
+                            constraint: None,
+                            default: None,
+                            display_name: Arc::clone(name),
+                        },
+                        declaration_scope(declaration),
+                    )
                 }
             })
             .collect();
-        graph.intern_node(SemanticNodeData::InstantiationRef {
-            base: declaration.clone(),
-            args: Arc::from(args.into_boxed_slice()),
-        })
+        graph.intern_node_with_scope(
+            SemanticNodeData::InstantiationRef {
+                base: declaration.clone(),
+                args: Arc::from(args.into_boxed_slice()),
+            },
+            declaration_scope(declaration),
+        )
     }
 
     /// The marker of `role` for parameter `index` (named `name`) of
@@ -500,13 +506,16 @@ impl ProjectSemanticDispatch<'_> {
             MarkerRole::Super => "super-",
             MarkerRole::Other => "other-",
         };
-        self.graph().intern_node(SemanticNodeData::TypeParam {
-            decl: declaration.clone(),
-            param_index: MARKER_PARAM_INDEX + 3 * index as u16 + role as u16,
-            constraint,
-            default: None,
-            display_name: Arc::from(format!("{prefix}{name}")),
-        })
+        self.graph().intern_node_with_scope(
+            SemanticNodeData::TypeParam {
+                decl: declaration.clone(),
+                param_index: MARKER_PARAM_INDEX + 3 * index as u16 + role as u16,
+                constraint,
+                default: None,
+                display_name: Arc::from(format!("{prefix}{name}")),
+            },
+            declaration_scope(declaration),
+        )
     }
 
     /// The variance marker `node` is: its declaration, parameter and role.
@@ -654,6 +663,21 @@ impl ProjectSemanticDispatch<'_> {
             }
             _ => None,
         }
+    }
+}
+
+/// The origin scope of the nodes a measurement of `declaration` interns —
+/// its markers and marker instantiations: the declaration's own file at
+/// the content generation its identity pins. They are the declaration's
+/// derived nodes, released with that generation (a measurement after an
+/// edit interns under the new generation, never beside a stale one), and
+/// at most six per type parameter: three markers and three instantiations.
+pub(super) fn declaration_scope(declaration: &DeclIdentity) -> NodeScopeId {
+    NodeScopeId::File {
+        canonical_id: Arc::clone(&declaration.canonical_id),
+        owner: declaration.owner,
+        whole_hash: declaration.whole_hash,
+        local_scope: None,
     }
 }
 
