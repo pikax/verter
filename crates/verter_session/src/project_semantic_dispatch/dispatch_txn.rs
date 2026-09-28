@@ -372,6 +372,9 @@ pub(crate) struct RelationRecursionUse {
     pub(crate) frames: u32,
     /// The deepest a replayed memo entry reaches below its read.
     pub(crate) replayed_height: u16,
+    /// The computation met a marker the checker reports as unreliable
+    /// (see `RelationRecursionFootprint::unreliable`).
+    pub(crate) unreliable: bool,
 }
 
 /// A closed relation frame's [`RelationRecursionUse`], measured from the
@@ -2892,6 +2895,10 @@ pub(crate) struct RelationDomainRuntime {
     /// this counter, so the fuse's unit is the accepted deposit itself —
     /// never one unit per top-level argument.
     pub(crate) accepted_inference_deposits: u64,
+    /// Whether the relation last closed or replayed reported an unreliable
+    /// variance marker — read by the variance measurement that asked for
+    /// it, right after asking. Transient: overwritten at every close.
+    pub(crate) last_relation_unreliable: bool,
     next_session_id: u64,
 }
 

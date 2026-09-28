@@ -1216,6 +1216,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if self.dispatch_txn.borrow().active_session().is_none() {
             if let Some(payload) = graph.get_relation_payload(self.ctx, &key) {
                 if measurement {
+                    self.dispatch_txn
+                        .borrow_mut()
+                        .relation
+                        .last_relation_unreliable = payload.recursion.unreliable;
                     return relation_step_from_payload(&payload);
                 }
                 if self.relation_replays_cold(payload.recursion) {
@@ -1514,6 +1518,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the most any frame below stacks up to the read.
     fn note_relation_replay(&self, footprint: crate::semantic_query::RelationRecursionFootprint) {
         let mut txn = self.dispatch_txn.borrow_mut();
+        txn.relation.last_relation_unreliable = footprint.unreliable;
         let reentry = txn.reentry_mut();
         let Some(top) = reentry.depth().checked_sub(1) else {
             return;
@@ -1534,6 +1539,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .reached
                 .max(state.chain.depth.saturating_add(footprint.height));
             recursion.replayed_height = recursion.replayed_height.max(footprint.height);
+            recursion.unreliable |= footprint.unreliable;
         }
         if footprint.repeats == [0, 0] {
             return;
@@ -1586,6 +1592,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             footprint: crate::semantic_query::RelationRecursionFootprint {
                 height: recursion.reached.saturating_sub(chain.opened_at),
                 repeats: recursion.repeats,
+                unreliable: recursion.unreliable,
             },
             frames: recursion.frames,
             replayed_height: recursion.replayed_height,
@@ -1628,6 +1635,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     crate::semantic_query::RelationRecursionFootprint {
                         height: bound,
                         repeats: [bound, bound],
+                        unreliable: closed.footprint.unreliable,
                     }
                 }
             })
@@ -2097,6 +2105,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         };
         let recursion = self.close_relation_recursion(idx, &chain);
+        self.close_relation_unreliable(idx, &frame_key, recursion.footprint.unreliable);
         let mut session_bindings: Option<Arc<[InferBinding]>> = None;
         let mut session_abandoned = false;
         if let Some(sid) = opened_session {
@@ -11293,6 +11302,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         else {
             return RelationResult::Unknown;
         };
+        // The checker instantiates a rest parameter's type with its
+        // unreliable-marker reporter (`compareSignaturesRelated`).
+        if [source, target]
+            .into_iter()
+            .any(|signature| self.signature_rest_holds_variance_marker(signature))
+        {
+            self.note_relation_unreliable();
+        }
         if let (Some(src_this), Some(tgt_this)) = (plan.source_receiver, plan.target_receiver) {
             let this_rel = self.relate_member(
                 tgt_this,

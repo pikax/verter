@@ -6521,6 +6521,12 @@ pub struct RelationRecursionFootprint {
     /// Per side (source, target): the most distinct instantiations of one
     /// recursion identity the computation stacked on one path.
     pub repeats: [u16; 2],
+    /// The computation met a variance marker the checker reports as
+    /// unreliable (`ReportsUnreliable`): a rest parameter holding it, or an
+    /// unreliable parameter's argument. A variance measurement whose
+    /// relations report it lets a failed argument check fall back to the
+    /// structural comparison.
+    pub unreliable: bool,
 }
 
 /// Public value-domain outcome of a relation query (assignability / subtype /

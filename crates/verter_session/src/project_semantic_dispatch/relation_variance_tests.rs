@@ -288,3 +288,78 @@ fn an_annotated_parameter_keeps_its_variance_beside_a_measured_one() {
         ],
     );
 }
+
+/// A parameter whose measurement reaches a rest parameter, a template
+/// literal or a mapped type's constraint is unreliable (`VarianceFlags`
+/// `Unreliable`): when its arguments do not relate by the variance, the
+/// references fall back to the structural comparison.
+///
+/// Measured: over `interface H<T extends unknown[]> { f: (...args: T) =>
+/// void }`, `[H<[]>] extends [H<[number]>] ? 1 : 2` is `1` (`() => void`
+/// takes the place of `(x: number) => void`, though `[number]` is not
+/// assignable to `[]`) and `[H<[number]>] extends [H<[]>]` and
+/// `[H<[1]>] extends [H<[number]>]` are `2`; the method form `interface
+/// HM<T extends unknown[]> { f(...args: T): void }` answers `[HM<[]>]
+/// extends [HM<[number]>]` `1`; over `interface TN<T extends string |
+/// number> { v: `${T}` }`, `[TN<'1'>] extends [TN<1>]` and `[TN<1>]
+/// extends [TN<'1'>]` are `1` (both read `"1"`) and `[TN<'x'>] extends
+/// [TN<string>]` is `1`; over `interface MO<T> { v: { [K in keyof T]?:
+/// T[K] } }`, `[MO<{ a: 1; b: 2 }>] extends [MO<{ a: number }>]` and
+/// `[MO<{ a: number }>] extends [MO<{ a: number; b: 2 }>]` are `1`.
+#[test]
+fn an_unreliable_parameter_falls_back_to_structure() {
+    let source = "interface H<T extends unknown[]> { f: (...args: T) => void }\n\
+         interface HM<T extends unknown[]> { f(...args: T): void }\n\
+         interface TN<T extends string | number> { v: `${T}` }\n\
+         interface MO<T> { v: { [K in keyof T]?: T[K] } }\n";
+    let rows = [
+        ("[H<[]>] extends [H<[number]>] ? 1 : 2", "1"),
+        ("[H<[number]>] extends [H<[]>] ? 1 : 2", "2"),
+        ("[H<[1]>] extends [H<[number]>] ? 1 : 2", "2"),
+        ("[HM<[]>] extends [HM<[number]>] ? 1 : 2", "1"),
+        ("[TN<'1'>] extends [TN<1>] ? 1 : 2", "1"),
+        ("[TN<1>] extends [TN<'1'>] ? 1 : 2", "1"),
+        ("[TN<'x'>] extends [TN<string>] ? 1 : 2", "1"),
+        (
+            "[MO<{ a: 1; b: 2 }>] extends [MO<{ a: number }>] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[MO<{ a: number }>] extends [MO<{ a: number; b: 2 }>] ? 1 : 2",
+            "1",
+        ),
+    ];
+    let mut failures = mismatches(source, &rows);
+    // A measurement read back from the memo keeps its report.
+    let reversed: Vec<(&str, &str)> = rows.iter().rev().copied().collect();
+    for rows in [&rows[..], &reversed[..]] {
+        failures.extend(mismatches_in_one_host(source, rows));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A reliable variance decides on its own, with no structural fallback.
+///
+/// Measured: over `interface HR<T> { f: (...args: T[]) => void }`,
+/// `[HR<number>] extends [HR<1>] ? 1 : 2` is `1` and `[HR<1>] extends
+/// [HR<number>]` is `2`; over `interface TA<T extends string> { v:
+/// `a${T}` }`, `[TA<'x'>] extends [TA<string>]` is `1` and `[TA<string>]
+/// extends [TA<'x'>]` is `2`; over `interface MP<T> { v: { [K in keyof
+/// T]: T[K] } }`, `[MP<{ a: 1 }>] extends [MP<{ a: number }>]` is `1` and
+/// the reverse `2`.
+#[test]
+fn rest_template_and_mapped_parameters_keep_their_variance() {
+    assert_answers(
+        "interface HR<T> { f: (...args: T[]) => void }\n\
+         interface TA<T extends string> { v: `a${T}` }\n\
+         interface MP<T> { v: { [K in keyof T]: T[K] } }\n",
+        &[
+            ("[HR<number>] extends [HR<1>] ? 1 : 2", "1"),
+            ("[HR<1>] extends [HR<number>] ? 1 : 2", "2"),
+            ("[TA<'x'>] extends [TA<string>] ? 1 : 2", "1"),
+            ("[TA<string>] extends [TA<'x'>] ? 1 : 2", "2"),
+            ("[MP<{ a: 1 }>] extends [MP<{ a: number }>] ? 1 : 2", "1"),
+            ("[MP<{ a: number }>] extends [MP<{ a: 1 }>] ? 1 : 2", "2"),
+        ],
+    );
+}

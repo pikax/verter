@@ -71,6 +71,10 @@ pub(super) struct Variance {
     /// relations, so arguments relate by identity and a failure falls
     /// back to the structural comparison.
     unmeasurable: bool,
+    /// `Unreliable`: the measurement's relations met the marker where the
+    /// checker reports it unreliable (a rest parameter holding it), so a
+    /// failure falls back to the structural comparison.
+    unreliable: bool,
 }
 
 impl Variance {
@@ -84,6 +88,7 @@ impl Variance {
         Self {
             mask,
             unmeasurable: false,
+            unreliable: false,
         }
     }
 }
@@ -151,6 +156,11 @@ impl ProjectSemanticDispatch<'_> {
         use super::relation::InferPosition;
         let mut acc = assignable(bindings);
         for ((&source, &target), variance) in source_args.iter().zip(target_args).zip(variances) {
+            if variance.unreliable {
+                // `typeArgumentsRelatedTo` reports an unreliable
+                // parameter's argument to an enclosing measurement.
+                self.note_relation_unreliable();
+            }
             let related = if variance.mask == Variance::INDEPENDENT {
                 continue;
             } else if variance.unmeasurable {
@@ -183,7 +193,9 @@ impl ProjectSemanticDispatch<'_> {
         if !matches!(acc, RelationResult::NotAssignable) {
             return Some(acc);
         }
-        let structural_fallback = variances.iter().any(|variance| variance.unmeasurable)
+        let structural_fallback = variances
+            .iter()
+            .any(|variance| variance.unmeasurable || variance.unreliable)
             || variances
                 .iter()
                 .zip(target_args)
@@ -294,44 +306,149 @@ impl ProjectSemanticDispatch<'_> {
         let with =
             |role: MarkerRole| self.variance_marker_instantiation(declaration, names, index, role);
         let (sub, sup) = (with(MarkerRole::Sub), with(MarkerRole::Super));
-        let (Some(covariant), Some(contravariant)) = (
-            self.variance_marker_relation(sub, sup),
-            self.variance_marker_relation(sup, sub),
-        ) else {
+        let mut unreliable = false;
+        let mut relate = |source, target| {
+            let (related, reported) = self.variance_marker_relation(source, target);
+            unreliable |= reported;
+            related
+        };
+        let (Some(covariant), Some(contravariant)) = (relate(sub, sup), relate(sup, sub)) else {
             return Variance {
                 mask: Variance::INVARIANT,
                 unmeasurable: true,
+                unreliable,
             };
         };
         let mut mask = u8::from(covariant) * Variance::COVARIANT
             + u8::from(contravariant) * Variance::CONTRAVARIANT;
         if mask == Variance::BIVARIANT {
-            match self.variance_marker_relation(with(MarkerRole::Other), sup) {
+            match relate(with(MarkerRole::Other), sup) {
                 Some(true) => mask = Variance::INDEPENDENT,
                 Some(false) => {}
                 None => {
                     return Variance {
                         mask,
                         unmeasurable: true,
+                        unreliable,
                     }
                 }
             }
         }
-        Variance::exact(mask)
+        Variance {
+            mask,
+            unmeasurable: false,
+            unreliable,
+        }
     }
 
     /// One marker relation of a measurement, assignability as the
-    /// checker's `isTypeAssignableTo` asks it; `None` when undecided.
+    /// checker's `isTypeAssignableTo` asks it (`None` when undecided),
+    /// and whether it reported an unreliable marker — computed, or replayed
+    /// from the memo, where its footprint carries the report.
     fn variance_marker_relation(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-    ) -> Option<bool> {
-        match self.execute_relate(self.relate_key_for(source, target)) {
+    ) -> (Option<bool>, bool) {
+        self.dispatch_txn
+            .borrow_mut()
+            .relation
+            .last_relation_unreliable = false;
+        let related = match self.execute_relate(self.relate_key_for(source, target)) {
             super::dispatch_txn::RelationStep::Assignable { .. } => Some(true),
             super::dispatch_txn::RelationStep::NotAssignable => Some(false),
             _ => None,
+        };
+        (
+            related,
+            self.dispatch_txn.borrow().relation.last_relation_unreliable,
+        )
+    }
+
+    /// Record, on the relation frame on top of the stack, that its
+    /// computation met a marker the checker reports as unreliable.
+    pub(super) fn note_relation_unreliable(&self) {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        let reentry = txn.reentry_mut();
+        let Some(top) = reentry.depth().checked_sub(1) else {
+            return;
+        };
+        if let Some(state) = reentry
+            .frame_mut_for_update(top)
+            .and_then(super::dispatch_txn::ObligationFrame::relation_mut)
+        {
+            state.chain.recursion.unreliable = true;
         }
+    }
+
+    /// Close the unreliable report of the relation frame at `idx`, keyed
+    /// `key`: the report is the transaction's last, for a measurement
+    /// reading it, and part of the frame below's computation — unless the
+    /// frame is a measurement of its own, whose reports stay its own (the
+    /// checker restores the enclosing handler after `getVariances`).
+    pub(super) fn close_relation_unreliable(
+        &self,
+        idx: usize,
+        key: &RelateMemoKey,
+        unreliable: bool,
+    ) {
+        let measurement = self.relation_key_is_variance_measurement(key);
+        let mut txn = self.dispatch_txn.borrow_mut();
+        txn.relation.last_relation_unreliable = unreliable;
+        if !unreliable || measurement {
+            return;
+        }
+        let Some(parent) = idx.checked_sub(1) else {
+            return;
+        };
+        if let Some(state) = txn
+            .reentry_mut()
+            .frame_mut_for_update(parent)
+            .and_then(super::dispatch_txn::ObligationFrame::relation_mut)
+        {
+            state.chain.recursion.unreliable = true;
+        }
+    }
+
+    /// Whether `signature` has a rest parameter whose type holds a
+    /// variance marker — one the checker's `compareSignaturesRelated`
+    /// reports unreliable.
+    pub(super) fn signature_rest_holds_variance_marker(&self, signature: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        let Some(data) = graph.node_data(signature) else {
+            return false;
+        };
+        let SemanticNodeData::Signature { params, .. } = &*data else {
+            return false;
+        };
+        let Some(rest) = params.iter().find(|param| param.rest).map(|param| param.ty) else {
+            return false;
+        };
+        drop(data);
+        let mut stack = vec![rest];
+        let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            if self.variance_marker_of(node).is_some() {
+                return true;
+            }
+            match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::Array { element, .. }) => stack.push(*element),
+                Some(SemanticNodeData::Tuple { elements, .. }) => {
+                    stack.extend(elements.iter().map(|element| element.value));
+                }
+                Some(SemanticNodeData::Union(members)) => {
+                    stack.extend(members.members_arc().iter().copied());
+                }
+                Some(SemanticNodeData::Intersection(members)) => {
+                    stack.extend(members.members_arc().iter().copied());
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// `declaration` applied to its own type parameters, the one at `index`
