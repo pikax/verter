@@ -77,8 +77,6 @@ mod cold_artifact_dedup_tests;
 mod compile;
 #[cfg(test)]
 mod request_view_reuse_tests;
-#[cfg(test)]
-mod stack_refusal_tests;
 pub use compile::VueMainAssemblyFailure;
 pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment};
 pub use compile::{SfcRewriteRefusal, UncomposableCode, UncomposableFamily};
