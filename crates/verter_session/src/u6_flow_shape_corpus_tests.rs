@@ -1562,6 +1562,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "c76dfe56935d20c486ad3695ee27b779e464d342d25d67178c8c7b892636f6be",
     ),
     (
+        "X24_try_write_catch_read",
+        "534a8807d4563419025d29a3b9c6692b211bd303ce66001bce7236f1ddbb4f1f",
+    ),
+    (
         "X25_try_assertion_catch_scope",
         "095993c48c8f8979211c6c00984ccb8b4a8516d601f2e1fea448eafaaffb6ad8",
     ),
@@ -1632,6 +1636,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "X51_finally_write_not_on_abrupt_edge",
         "7788f7e8640c12051a56378d1636e025ab5d0a52341929e9fcb8e6901128ce17",
+    ),
+    (
+        "X52_finally_entry_joins_pending_break",
+        "0c318879b4d25bc404804372e74611b313043cb84b3c89973c2314025fbf6ea6",
     ),
     (
         "X53_terminated_if_arm_contributes_nothing",
@@ -5561,7 +5569,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // undefined` members take: 84 matching, 4 parked. A const context
     // copies a spread's members `readonly`, so B03, B04 and B10 match the
     // checker: 87 matching, 1 parked.
-    (Owner::U6ValueInference, 93, 87, 1),
+    (Owner::U6ValueInference, 93, 89, 1),
     // Loops iterate to the checker's fixed point: D05's return-bearing loop
     // is the substrate's, and the N52–N54 downstream narrows and X82's
     // loop break crossing an abrupt finally match the checker. A capture

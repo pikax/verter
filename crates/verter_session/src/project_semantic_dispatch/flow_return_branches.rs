@@ -780,6 +780,7 @@ pub(super) struct TryEval<'r> {
     pre_finally: Option<FlowLayerState>,
     finally_break_base: usize,
     finally_return_base: usize,
+    finally_throw_base: usize,
     clause: Option<TryClause>,
     phase: TryPhase,
 }
@@ -808,7 +809,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return_base: self.return_edges.len(),
             saved_collect: self.collect_throw_points,
         };
-        self.collect_throw_points = collect_throws;
+        // The catch variable binds before the clause collects: binding it
+        // writes nothing the clause's exception flow can observe.
+        self.collect_throw_points = false;
         if let Some((param, declared)) = catch_param.filter(|(param, _)| {
             self.products
                 .contains_subject(&FlowProductSubject::Local(*param))
@@ -856,6 +859,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 false,
             );
         }
+        self.collect_throw_points = collect_throws;
         clause
     }
 
@@ -959,6 +963,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 pre_finally: None,
                 finally_break_base: 0,
                 finally_return_base: 0,
+                finally_throw_base: 0,
                 clause: Some(clause),
                 phase: TryPhase::Block,
             })),
@@ -998,14 +1003,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     self.throw_points[eval.throw_base..].to_vec()
                 };
                 if let Some(catch) = eval.catch {
-                    let mut catch_start = {
+                    let catch_start = {
                         let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> =
                             std::iter::once(&eval.entry)
                                 .chain(eval.block_throws.iter())
                                 .collect();
                         self.join_states(&incoming, &eval.entry.write_observation)
                     };
-                    self.flag_clause_type_changes(&mut catch_start, &writes.type_changes);
                     eval.try_writes = Some(writes);
                     let clause = self.begin_try_clause(
                         &catch_start,
@@ -1056,10 +1060,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             None => eval.entry.clone(),
         };
-        self.flag_clause_type_changes(&mut pre_finally, &try_writes.type_changes);
-        if let Some(catch_writes) = &eval.catch_writes {
-            self.flag_clause_type_changes(&mut pre_finally, &catch_writes.type_changes);
-        }
         if !eval.exit_states.is_empty() {
             self.flag_conditionally_defined_bindings(&mut pre_finally, &eval.exit_states);
         }
@@ -1102,10 +1102,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         normal_inputs.push(eval.entry.clone());
         for state in &mut normal_inputs {
             self.restore_clause_entry_narrowings(&eval.entry, &mut state.products);
-            self.flag_clause_type_changes(state, &try_writes.type_changes);
-            if let Some(written) = &eval.catch_writes {
-                self.flag_clause_type_changes(state, &written.type_changes);
-            }
         }
         let clause_throws = self.throw_points[eval.throw_base..].to_vec();
         let pending_exits: Vec<FlowLayerState> = self.break_exits[eval.break_base..]
@@ -1127,9 +1123,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         eval.finally_break_base = self.break_exits.len();
         eval.finally_return_base = self.return_edges.len();
+        eval.finally_throw_base = self.throw_points.len();
         eval.try_writes = Some(try_writes);
         eval.pre_finally = Some(pre_finally);
-        let clause = self.begin_try_clause(&finally_start, None, false);
+        // The finally clause's own writes are points an OUTER try's catch
+        // is entered from (the checker binds the finally block under the
+        // enclosing exception target).
+        let collect = self.collect_throw_points;
+        let clause = self.begin_try_clause(&finally_start, None, collect);
         eval.clause = Some(clause);
         eval.phase = TryPhase::Finally;
         BranchStep::Enter(Entered::Try(eval), finally)
@@ -1230,6 +1231,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.products.set_assignment(subject, cleared);
             }
         }
+        // A throw of the try / catch clauses continues to an OUTER try
+        // through the finally: it reaches the outer catch as the state the
+        // finally ends in (the checker's reduce label over the exception
+        // antecedents), or not at all when the finally cannot complete.
+        let finally_throws = self.throw_points.split_off(eval.finally_throw_base);
+        let clause_threw = self.throw_points.len() > eval.throw_base;
+        self.throw_points.truncate(eval.throw_base);
+        if clause_threw
+            && finally
+                .can_fall_through
+                .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
+        {
+            self.throw_points.push(finally_end.clone());
+        }
+        self.throw_points.extend(finally_throws);
         if !finally
             .can_fall_through
             .reaches_end(CompletionDischarge::EvaluatorRegionWalk)

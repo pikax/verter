@@ -12427,6 +12427,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.narrowing_writes.push(NarrowingLedgerEntry::Cleared {
             root: self.canonical_runtime_subject(binding),
         });
+        // A write is a mutation, and every mutation inside a `try` is a
+        // point its `catch` / `finally` may be entered from, with the
+        // written value (the checker's `createFlowMutation` adds each to
+        // the current exception target).
+        self.capture_throw_point();
     }
 
     /// Whether this frame's body assigns `binding` anywhere.
@@ -13899,20 +13904,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         FlowExecutedClauseWrites(after.products.writes_since(observation))
     }
 
-    /// Flag a set of try-internal writes on a clause-entry state: a read
-    /// of any of them in the clause fails closed (the throw can precede
-    /// the write, so the value is one path's, not the join's).
-    fn flag_clause_type_changes(
-        &self,
-        state: &mut FlowLayerState,
-        changes: &FlowClauseTypeChanges,
-    ) {
-        for subject in &changes.0 {
-            let flagged = state.products.assignment(subject).with_single_path(true);
-            state.products.set_assignment(subject, flagged);
-        }
-    }
-
     /// A dispatch path with no reaching definition retains the existing
     /// conditional-definition boundary, including an evolving lexical local.
     fn flag_fallthrough_only_bindings(&self, start: &mut FlowLayerState, entry: &FlowLayerState) {
@@ -14079,6 +14070,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// lexical layer on its first read. A projection miss binds the typed
     /// unmodelled-position marker with failed-initializer membership.
     fn seed_destructured_param_element(&mut self, binding: &FlowProductSubject) {
+        // Seeding binds a parameter element on its first read; it is not a
+        // write of the body, so it is no exception-flow point.
+        let collect = std::mem::replace(&mut self.collect_throw_points, false);
+        self.seed_destructured_param_element_value(binding);
+        self.collect_throw_points = collect;
+    }
+
+    fn seed_destructured_param_element_value(&mut self, binding: &FlowProductSubject) {
         let Some((ordinal, key, has_default)) =
             self.param_names
                 .iter()

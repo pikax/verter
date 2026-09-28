@@ -622,6 +622,11 @@ export function tryCatchVarTyped() { try { risky(); } catch (e: unknown) { retur
 export function tryCatchNarrow() { try { risky(); } catch (e) { if (typeof e === "string") return e; } throw 0; }
 export function tryThrowOnly() { try { throw 1; } catch { return "c"; } }
 export function tryNested() { let x: 1 | 2 | 3 = 1; try { try { x = 2; risky(); } finally { x = 3; } } catch { } return x; }
+export function tryCatchOnly() { let x: 1 | 2 | 3 = 1; try { try { x = 2; } catch { } } catch { return x; } return 3 as const; }
+export function tryInCatch() { let x: 1 | 2 | 3 = 1; try { risky(); } catch { x = 2; } finally { return x; } }
+export function tryFinallyOuter() { let x: 1 | 2 | 3 = 1; try { try { x = 2; } finally { risky(); } } catch { return x; } return 3 as const; }
+export function tryFinallyWrites() { let x: 1 | 2 | 3 = 1; try { try { risky(); } finally { x = 2; risky(); x = 3; } } catch { return x; } return "z" as const; }
+export function tryTwoWrites() { let x: 1 | 2 | 3 = 1; try { x = 2; x = 3; } catch { return x; } return 1 as const; }
 "##;
 
 /// A `finally` block sees and overrides its `try`'s writes, returns in `try`
@@ -645,23 +650,23 @@ fn try_statements_join_as_the_checker_joins_them() {
 
 /// After `try { x = 1; … } catch { … }` the read joins the value before the
 /// `try` (the throw may come first), each write in the `try` block, and the
-/// `catch` block's writes; a `finally` block's write replaces them all.
-///
-/// What the lane gives:
-/// - `tryTry`: the checker answers `string | number`; the lane measured `number
-///   | string` degraded by ConditionalVarDefinition.
-/// - `tryCatch`: the checker answers `number | true`; the lane measured `true |
-///   number` degraded by ConditionalVarDefinition.
-/// - `tryNested`: the checker answers `1 | 3`; the lane measured `3 | 2 | 1`
-///   degraded by ConditionalVarDefinition.
+/// `catch` block's writes; a `finally` block's write replaces them all. A
+/// catch is entered from the try's entry and from every write of its own
+/// block (not of a nested try's); a throw leaving a nested `try` through its
+/// `finally` reaches the outer catch as the state the finally ends in
+/// (tsc 7.0.2, all four settings).
 #[test]
-#[ignore = "the read after a try statement joins the values every point of the try block may have left"]
 fn a_try_catch_join_holds_every_write_that_may_have_run() {
     let matrix = Matrix::new(TRY_CATCH);
     let failures = matrix.returns(&[
         ("tryTry", "string | number"),
         ("tryCatch", "number | true"),
         ("tryNested", "1 | 3"),
+        ("tryCatchOnly", "1 | 3"),
+        ("tryInCatch", "1 | 2"),
+        ("tryFinallyOuter", "1 | 2 | 3"),
+        ("tryTwoWrites", "1 | 2 | 3"),
+        ("tryFinallyWrites", "\"z\" | 1 | 2 | 3"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

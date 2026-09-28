@@ -4561,16 +4561,21 @@ fn flow_return_switch_fallthrough_only_var_is_flagged_conditional() {
 }
 
 /// A binding WRITTEN in the try and read in the catch: the throw can
-/// precede the write, so the read must degrade rather than publish the
-/// entry value clean. tsgo: `{ v: "before" | "inside" }`.
+/// precede the write, so the catch reads the entry value and the written
+/// one — the catch is entered from the try's entry and from every mutation
+/// in it. tsc 7.0.2: `{ v: "before" | "inside" }`.
 #[test]
-fn flow_return_try_written_binding_degrades_at_catch_read() {
-    let (_, degradation) = flow_expr_for_script(
+fn flow_return_try_written_binding_joins_at_catch_read() {
+    let (expr, degradation) = flow_expr_for_script(
         "function makeProps() { let x: \"before\" | \"inside\" = \"before\"; try { x = \"inside\"; throw 0 } catch { return { v: x } } return { v: x } }",
     );
+    assert_eq!(degradation, None);
     assert_eq!(
-        degradation,
-        Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition)
+        member_types(&expr, "v"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            string_literal("before"),
+            string_literal("inside"),
+        ])]
     );
 }
 
@@ -5161,10 +5166,15 @@ fn flow_return_switch_merges_actual_predecessors_in_one_canonical_batch() {
 
 #[test]
 fn flow_return_labeled_catch_and_finally_merge_original_predecessors() {
+    // A catch merges the try's entry with the state after each write and at
+    // each throw point of its block: `0`, `x = 1`, `x = 'b'`, `x = true`
+    // and the three throws are its seven predecessors. A finally merges the
+    // normal completion and the entry with each write and throw of the try
+    // and each pending return: seven again.
     for (source, predecessors) in [
         ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0; L:{if(a){x=1;break L;}if(b){x='b';break L;}x=true;}return x;}", 3),
-        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x=1;throw 0;}if(b){x='b';throw 0;}x=true;throw 0;}catch{return x;}}", 4),
-        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x='a';return 0;}if(b){x=true;throw 0;}x=1;}finally{x=2;}return x;}", 4),
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x=1;throw 0;}if(b){x='b';throw 0;}x=true;throw 0;}catch{return x;}}", 7),
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x='a';return 0;}if(b){x=true;throw 0;}x=1;}finally{x=2;}return x;}", 7),
     ] {
         let (result, joins) = flow_source_probe_observed(source, true);
         assert!(matches!(result, FlowSourceProbe::Value { .. }), "{source}: {result:?}");
@@ -10689,15 +10699,22 @@ fn flow_return_clause_entry_restore_excludes_every_executed_write() {
         assert_eq!(member_types(&expr, "v"), expected, "{case}");
     }
     // The CHANGING write read inside the finally: the entering fact does
-    // not describe the written try end, so it cannot stand at the join,
-    // and the read of the clause-flagged value fails closed rather than
-    // publishing the pre-try `string` clean.
-    let (_, degradation) = flow_expr_cold_warm(
+    // not describe the written try end, so it cannot stand at the join;
+    // the finally reads the pre-try `string` and the written `number`
+    // (tsc 7.0.2: `{ v: string | number; } | { v: boolean; }`).
+    let (expr, degradation) = flow_expr_cold_warm(
         "function makeProps(p: string | number) { if (typeof p === \"string\") { try { p = 1 } finally { return { v: p } } } return { v: true } }",
     );
+    assert_eq!(degradation, None, "changing write read inside the finally");
     assert_eq!(
-        degradation,
-        Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
+        member_types(&expr, "v"),
+        vec![
+            boolean,
+            verter_type_expr::TypeExpr::union(vec![
+                number,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ]),
+        ],
         "changing write read inside the finally"
     );
 }
