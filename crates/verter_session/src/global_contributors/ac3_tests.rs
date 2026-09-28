@@ -563,3 +563,65 @@ fn snapshot_replacement_discovers_new_globals_without_membership_change() {
         .entries
         .is_empty());
 }
+
+/// A script's class, type alias and enum enter the type-space population as
+/// file-scope type contributors, and leave it with their artifact: an edit
+/// that supersedes the script's version drops the old version's records,
+/// and removing the script drops every record it held.
+#[test]
+fn script_file_scope_types_are_released_on_supersession_and_removal() {
+    use super::ContributorOrigin;
+    let host = VerterHost::new(
+        HostConfig::default(),
+        Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        )),
+    );
+    let upsert = |source: &str| {
+        host.upsert(UpsertRequest {
+            canonical_id: Some("/script.ts".to_owned()),
+            input_id: "/script.ts".to_owned(),
+            source: Arc::from(source),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert");
+        host.ingest_program_ambient_roots();
+    };
+    let index = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index();
+    let types = |name: &str| {
+        index
+            .snapshot()
+            .lookup(
+                &AugmentationTargetKind::GlobalAugmentation,
+                name,
+                None,
+                true,
+            )
+            .entries
+            .iter()
+            .map(|entry| entry.origin)
+            .collect::<Vec<_>>()
+    };
+    upsert("class Pc { x = 1 }\ntype TT = { q: 1 };\nenum GE { A }\n");
+    for name in ["Pc", "TT", "GE"] {
+        assert_eq!(types(name), [ContributorOrigin::FileScopeType], "{name}");
+    }
+    upsert("class Other {}\n");
+    for name in ["Pc", "TT", "GE"] {
+        assert!(types(name).is_empty(), "a superseded {name} is released");
+    }
+    assert_eq!(types("Other"), [ContributorOrigin::FileScopeType]);
+    host.remove("/script.ts");
+    assert!(
+        types("Other").is_empty(),
+        "a removed script's type is released"
+    );
+    assert!(
+        !index.record_canonicals().contains("/script.ts"),
+        "a removed script keeps no contribution record"
+    );
+}
