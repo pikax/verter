@@ -2008,7 +2008,6 @@ impl<'s, 'a> crate::analysis::namespace_walk::NamespaceVisitor<'s, 'a>
                 self.out,
                 self.path.name(),
                 frame.ambient,
-                frame.implicit_export,
             ),
             Some(scope) => collect_namespaced_statement_into_augmentation(
                 statement,
@@ -2343,7 +2342,6 @@ fn collect_namespaced_statement(
     out: &mut LoweredStatementParts,
     namespace: &str,
     ambient: bool,
-    implicit_export: bool,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
@@ -2387,19 +2385,18 @@ fn collect_namespaced_statement(
                 out,
             );
         }
-        // Namespace value indexing is EXPORT-ONLY: a non-exported
-        // `namespace N { const hidden = … }` is private to the namespace body
-        // (TS: `N.hidden` does not exist on `typeof N`), so a DIRECT
-        // `Statement::VariableDeclaration` is NOT indexed under its qualified
-        // name. The exported path below (`export const VERSION = …` →
-        // `collect_namespaced_declaration`) registers a qualified value member
-        // such as `N.VERSION` — and a namespace body that is an export
-        // context exports every member, written `export` or not.
+        // A namespace's values register under their qualified names: the
+        // exported path below (`export const VERSION = …` →
+        // `collect_namespaced_declaration`) and a direct declaration alike.
+        // A non-exported `namespace N { const hidden = … }` is private to
+        // its block (TS: `N.hidden` does not exist on `typeof N`); the
+        // header index records it private, so only a reference inside the
+        // block names it.
         Statement::ExportDeclaration(export) => {
             let decl = &export.declaration;
             collect_namespaced_declaration(decl, source, out, namespace, ambient);
         }
-        Statement::VariableDeclaration(var_decl) if implicit_export => {
+        Statement::VariableDeclaration(var_decl) => {
             for declarator in &var_decl.declarations {
                 for parts in
                     lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
@@ -2408,7 +2405,7 @@ fn collect_namespaced_statement(
                 }
             }
         }
-        Statement::FunctionDeclaration(func) if implicit_export => {
+        Statement::FunctionDeclaration(func) => {
             if let Some(parts) = lower_function_parts_in(func, source, Some(namespace)) {
                 out.value_decls.push(parts);
             }

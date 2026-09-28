@@ -301,11 +301,19 @@ impl ProjectSemanticDispatch<'_> {
                 },
                 name: Arc::clone(root),
             };
-            let Some((identity, remaining)) = self.value_path_declaration(
-                &value_root,
-                rest,
-                &mut rustc_hash::FxHashSet::default(),
-            ) else {
+            let resolved = if depth > 0 {
+                self.namespace_private_value(evaluation, user, &candidate[..=depth])
+                    .map(|identity| (identity, candidate[depth + 1..].to_vec()))
+            } else {
+                None
+            };
+            let Some((identity, remaining)) = resolved.or_else(|| {
+                self.value_path_declaration(
+                    &value_root,
+                    rest,
+                    &mut rustc_hash::FxHashSet::default(),
+                )
+            }) else {
                 continue;
             };
             match remaining.as_slice() {
@@ -369,6 +377,42 @@ impl ProjectSemanticDispatch<'_> {
         } else {
             ReferenceTarget::Member(key)
         }
+    }
+
+    /// The private value member `qualified` (`N.k`) of the namespace
+    /// `user`'s enum is declared in, as a reference in the member's
+    /// initializer names it: a class, enum, variable or function the
+    /// namespace does not export is visible inside the block that declares
+    /// it, and only there (another block of a merged namespace does not see
+    /// it). `None` for any other name.
+    fn namespace_private_value(
+        &self,
+        evaluation: &mut EnumEvaluation,
+        user: &EnumMemberKey,
+        qualified: &[Arc<str>],
+    ) -> Option<ResolvedRootIdentity> {
+        let used = self.enum_member_position(evaluation, user)?;
+        let name = qualified.join(".");
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(user.0.canonical_id.as_ref())?
+            .indexed;
+        let block = *indexed
+            .shallow_state
+            .decl_bodies()
+            .header_index()
+            .namespace_private_value_blocks
+            .get(&verter_type_expr::facts::DeclBindingKey::new(
+                user.0.owner,
+                name.as_str(),
+            ))?;
+        (block.start <= used.start && used.start < block.end).then(|| {
+            ResolvedRootIdentity::new_in_owner(
+                Arc::clone(&user.0.canonical_id),
+                user.0.owner,
+                name.as_str(),
+            )
+        })
     }
 
     /// Whether a declaration of `canonical`'s `owner` starting at
@@ -508,9 +552,9 @@ impl ProjectSemanticDispatch<'_> {
         {
             return None;
         }
-        let mut segments = symbol.split('.');
-        let root = segments.next()?;
-        let path: Arc<[Arc<str>]> = segments.map(Arc::from).collect();
+        // The declaration itself, under its qualified name (`N.k`): a
+        // namespace's private member is no member a qualified read names.
+        let path: Arc<[Arc<str>]> = Arc::from(Vec::new().into_boxed_slice());
         let value_root = ValueRootKey {
             scope: crate::semantic_query::ScopeId {
                 canonical_id: canonical,
@@ -518,7 +562,7 @@ impl ProjectSemanticDispatch<'_> {
                 local_scope: None,
                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
             },
-            name: Arc::from(root),
+            name: symbol,
         };
         let QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) = self
             .execute_type_node(self.typeof_key_with_path(

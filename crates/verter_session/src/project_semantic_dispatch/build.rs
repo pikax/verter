@@ -798,9 +798,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // A namespace member path: a namespace block has no value surface
         // the path could walk, and its members register under their
-        // QUALIFIED names, so `typeof N.M.f` reads the value `N.M.f` names.
-        // A function-local root is never a namespace (a namespace declares
-        // only at file or namespace scope).
+        // QUALIFIED names, so `typeof N.M.f` reads the value `N.M.f` names
+        // — a member the namespace exports: read from outside its body, a
+        // private one is no member of it. A function-local root is never a
+        // namespace (a namespace declares only at file or namespace scope).
         if value_root.scope.local_scope.is_none() {
             let mut joined = value_root.name.to_string();
             for (split, segment) in path.iter().enumerate() {
@@ -809,7 +810,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if matches!(
                     shallow.visible_value_binding(value_root.scope.owner, &joined),
                     Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(_))
-                ) {
+                ) && shallow
+                    .decl_bodies()
+                    .header_index()
+                    .namespace_member_is_exported(value_root.scope.owner, &joined)
+                {
                     let member_root = ValueRootKey {
                         scope: value_root.scope.clone(),
                         name: Arc::from(joined),
@@ -2257,7 +2262,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         (1..=path.len()).rev().find_map(|length| {
             let name = qualified(value_root.name.as_ref(), &path[..length]);
             let visible = shallow.visible_value_binding(owner, &name);
-            let declared = matches!(visible, Some(LexicalValueBinding::Local(_)))
+            // A qualified read names a namespace's member from outside its
+            // body: one the namespace does not export is no member of it
+            // (TS2339).
+            let declared = (matches!(visible, Some(LexicalValueBinding::Local(_)))
+                && shallow
+                    .decl_bodies()
+                    .header_index()
+                    .namespace_member_is_exported(owner, &name))
                 || (visible.is_none()
                     && matches!(
                         shallow.value_fallback_augmentation_scope(owner, &name),

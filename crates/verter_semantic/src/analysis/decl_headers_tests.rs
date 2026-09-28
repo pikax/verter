@@ -1124,13 +1124,27 @@ export namespace EX { function f(): 4; export function h(): 5; export {}; }
 declare global { namespace GN { function gf(): 6; } namespace GX { function gx(): 7; export {}; } }
 "#;
     let index = assert_name_parity_as(source, oxc_span::SourceType::d_ts());
+    // A namespace member a body with an export declaration does not write
+    // `export` on is a private member: indexed, but no member of the
+    // namespace read from outside it.
+    let exported = |index: &DeclHeaderIndex| {
+        let mut names: Vec<String> = index
+            .value_headers
+            .keys()
+            .filter(|key| index.namespace_member_is_exported(key.owner, &key.name))
+            .map(|key| key.name.to_string())
+            .collect();
+        names.sort_unstable();
+        names
+    };
+    assert_eq!(exported(&index), ["EN.Inner.g", "EN.c", "EN.f", "EX.h"]);
     let mut names: Vec<&str> = index
         .value_headers
         .keys()
         .map(|key| key.name.as_ref())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, ["EN.Inner.g", "EN.c", "EN.f", "EX.h"]);
+    assert_eq!(names, ["EN.Inner.g", "EN.c", "EN.f", "EX.f", "EX.h"]);
     let mut global: Vec<&str> = index
         .augmentation_value_headers
         .values()
@@ -1144,10 +1158,9 @@ declare global { namespace GN { function gf(): 6; } namespace GX { function gx()
         "namespace EN { function f(): 1; export function h(): 2; }\n",
         oxc_span::SourceType::ts(),
     );
-    let names: Vec<&str> = script
-        .value_headers
+    assert_eq!(exported(&script), ["EN.h"]);
+    assert!(script
+        .namespace_private_value_blocks
         .keys()
-        .map(|key| key.name.as_ref())
-        .collect();
-    assert_eq!(names, ["EN.h"]);
+        .any(|key| key.name.as_ref() == "EN.f"));
 }

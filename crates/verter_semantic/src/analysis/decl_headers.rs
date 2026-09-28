@@ -385,6 +385,12 @@ pub struct DeclHeaderIndex {
     /// outside it cannot name the member (the checker's TS2694). Empty in
     /// the `from_eval_env` mirror (same block-level-view limitation).
     pub namespace_private_members: FxHashSet<DeclBindingKey>,
+    /// The block each private namespace VALUE member (a class, an enum, a
+    /// variable or a function declared without `export`) is declared in:
+    /// only a reference inside that block names it — another block of a
+    /// merged namespace does not see it. Empty in the `from_eval_env`
+    /// mirror (same block-level-view limitation).
+    pub namespace_private_value_blocks: FxHashMap<DeclBindingKey, Span>,
     /// Every `namespace N { … }` block a `declare module "…"` block
     /// declares, with that block's scope, in source order. Empty in the
     /// `from_eval_env` mirror (same block-level-view limitation).
@@ -1208,13 +1214,17 @@ impl<'s, 'a> NamespaceVisitor<'s, 'a> for HeaderNamespaces<'_, '_> {
 
     fn statement(&mut self, frame: &mut HeaderNamespace, statement: &'s Statement<'a>) {
         frame.instantiated |= statement_instantiates_here(statement);
+        let block = self.index.namespace_blocks[frame.record].span;
         index_namespaced_statement(
             statement,
             self.ctx,
             self.index,
             self.path.name(),
-            frame.implicit_export,
-            frame.ambient,
+            NamespaceBody {
+                implicit_export: frame.implicit_export,
+                ambient: frame.ambient,
+                block,
+            },
         );
     }
 
@@ -1227,23 +1237,54 @@ impl<'s, 'a> NamespaceVisitor<'s, 'a> for HeaderNamespaces<'_, '_> {
     }
 }
 
+/// The namespace body a statement is indexed in.
+#[derive(Clone, Copy)]
+struct NamespaceBody {
+    /// The body exports every member, written `export` or not (an ambient
+    /// namespace body without an export declaration).
+    implicit_export: bool,
+    /// The body is in an ambient context.
+    ambient: bool,
+    /// The block's span.
+    block: Span,
+}
+
+/// Record the private namespace value member `name` declared in `body`.
+fn index_private_value(
+    index: &mut DeclHeaderIndex,
+    ctx: HeaderStatementContext<'_>,
+    name: &str,
+    body: NamespaceBody,
+) {
+    if body.implicit_export {
+        return;
+    }
+    index.namespace_private_members.insert(ctx.key(name));
+    index
+        .namespace_private_value_blocks
+        .insert(ctx.key(name), body.block);
+}
+
 /// Mirror of `collect_namespaced_statement`: type aliases, interfaces and
-/// nested modules register under their qualified `Ns.Name`. Namespace VALUE
-/// indexing is EXPORT-ONLY — only an exported `const`/`let`/`var`/`function`
-/// (routed via the `ExportNamedDeclaration` path to
-/// `index_namespaced_declaration`) registers a qualified value member such as
-/// `N.VERSION`; a non-exported `const hidden = …` is private to the namespace
-/// body and is NOT indexed — except in an export context (an ambient
-/// namespace body without an export declaration), which exports every
-/// member.
+/// nested modules register under their qualified `Ns.Name`, and so do
+/// values: an exported `const`/`let`/`var`/`function` (routed via the
+/// `ExportNamedDeclaration` path to `index_namespaced_declaration`) is a
+/// member such as `N.VERSION`; a non-exported `const hidden = …` is a
+/// private member, named only by a reference inside its block — except in
+/// an export context (an ambient namespace body without an export
+/// declaration), which exports every member.
 fn index_namespaced_statement(
     stmt: &Statement<'_>,
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
-    implicit_export: bool,
-    ambient: bool,
+    body: NamespaceBody,
 ) {
+    let NamespaceBody {
+        implicit_export,
+        ambient,
+        ..
+    } = body;
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
             let name = format!("{namespace}.{}", alias.id.name);
@@ -1263,17 +1304,13 @@ fn index_namespaced_statement(
             if let Some(identifier) = &class.id {
                 let name = format!("{namespace}.{}", identifier.name);
                 index_named_class(class, &name, ctx, index);
-                if !implicit_export {
-                    index.namespace_private_members.insert(ctx.key(&name));
-                }
+                index_private_value(index, ctx, &name, body);
             }
         }
         Statement::TSEnumDeclaration(enum_decl) => {
             let name = format!("{namespace}.{}", enum_decl.id.name);
             index_enum(enum_decl, &name, ctx, ambient, index);
-            if !implicit_export {
-                index.namespace_private_members.insert(ctx.key(&name));
-            }
+            index_private_value(index, ctx, &name, body);
         }
         // A nested namespace is a frame of [`index_module_declaration`]'s
         // walk.
@@ -1289,7 +1326,7 @@ fn index_namespaced_statement(
             let decl = &export.declaration;
             index_namespaced_declaration(decl, ctx, index, namespace, ambient);
         }
-        Statement::VariableDeclaration(var_decl) if implicit_export => {
+        Statement::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
                 index_variable(
                     decl,
@@ -1298,10 +1335,16 @@ fn index_namespaced_statement(
                     &mut index.value_headers,
                     Some(namespace),
                 );
+                for name in decl.id.get_binding_identifiers() {
+                    index_private_value(index, ctx, &format!("{namespace}.{}", name.name), body);
+                }
             }
         }
-        Statement::FunctionDeclaration(func) if implicit_export => {
+        Statement::FunctionDeclaration(func) => {
             index_function_in(func, ctx, &mut index.value_headers, Some(namespace));
+            if let Some(id) = &func.id {
+                index_private_value(index, ctx, &format!("{namespace}.{}", id.name), body);
+            }
         }
         _ => {}
     }
