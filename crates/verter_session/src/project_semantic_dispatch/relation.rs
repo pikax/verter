@@ -498,6 +498,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> RelationStep {
+        if let Some(step) = self.literal_pair_relation_of(source, target) {
+            self.graph().record_relation_check();
+            return step;
+        }
         self.execute_relate(self.relate_key_for(source, target))
     }
 
@@ -509,6 +513,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: SemanticNodeId,
         relation: RelationKind,
     ) -> RelationStep {
+        if let Some(step) = self.literal_pair_relation_of(source, target) {
+            self.graph().record_relation_check();
+            return step;
+        }
         self.execute_relate(self.relate_key_for_kind(source, target, relation))
     }
 
@@ -1676,22 +1684,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// an inference session collects (its candidate bookkeeping runs the
     /// ordinary path).
     fn literal_pair_relation(&self, key: &RelateMemoKey) -> Option<RelationStep> {
+        self.literal_pair_relation_of(key.source, key.target)
+    }
+
+    /// [`Self::literal_pair_relation`] over a node pair, decided before a
+    /// relation key is built for it: a literal pair needs neither the
+    /// relation environment nor the pair's carrier unwrapping the key
+    /// derives, both paid per remaining arm of a guard over a wide
+    /// literal union.
+    fn literal_pair_relation_of(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<RelationStep> {
         if self.dispatch_txn.borrow().active_session().is_some() {
             return None;
         }
         let graph = self.graph();
         let related = match (
-            graph.node_data(key.source).as_deref(),
-            graph.node_data(key.target).as_deref(),
+            graph.node_data(source).as_deref(),
+            graph.node_data(target).as_deref(),
         ) {
             (Some(SemanticNodeData::Literal(source)), Some(SemanticNodeData::Literal(target))) => {
                 source == target
             }
             _ => return None,
         };
-        self.deposit_operand_self_roots(
-            &self.observed_self_roots_from_nodes([key.source, key.target]),
-        );
+        self.deposit_operand_self_roots(&self.observed_self_roots_from_nodes([source, target]));
         Some(if related {
             RelationStep::Assignable {
                 bindings: Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
