@@ -503,13 +503,14 @@ impl ValueDeclGroup {
     pub fn merged_enum_unified(&self) -> Option<EnumMemberFact> {
         let mut is_enum = false;
         let mut merged: Vec<EnumMemberEntry> = Vec::new();
+        let mut seen: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
         for decl in &self.contributors {
             let Some(members) = decl.enum_members.as_ref() else {
                 continue;
             };
             is_enum = true;
             for entry in members.members.iter() {
-                if !merged.iter().any(|existing| existing.name == entry.name) {
+                if seen.insert(entry.name.as_str()) {
                     merged.push(entry.clone());
                 }
             }
@@ -532,13 +533,14 @@ impl ValueDeclGroup {
     pub fn merged_enum_member_names_fact(&self) -> Option<EnumMemberNamesFact> {
         let mut is_enum = false;
         let mut names: Vec<String> = Vec::new();
+        let mut seen: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
         for decl in &self.contributors {
             let Some(fact) = decl.enum_member_names.as_ref() else {
                 continue;
             };
             is_enum = true;
             for name in fact.names.iter() {
-                if !names.iter().any(|existing| existing == name) {
+                if seen.insert(name.as_str()) {
                     names.push(name.clone());
                 }
             }
@@ -597,9 +599,10 @@ impl ValueDeclGroup {
     pub fn enum_type_union(&self) -> Option<Vec<EnumScalar>> {
         let members = self.merged_enum_unified()?;
         let mut arms: Vec<EnumScalar> = Vec::new();
+        let mut seen: rustc_hash::FxHashSet<EnumScalar> = rustc_hash::FxHashSet::default();
         for entry in members.members.iter() {
             let arm = EnumMemberValue::from_scalar(&entry.value).projected_scalar();
-            if !arms.contains(&arm) {
+            if seen.insert(arm.clone()) {
                 arms.push(arm);
             }
         }

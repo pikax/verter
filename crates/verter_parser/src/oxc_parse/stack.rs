@@ -64,8 +64,17 @@ thread_local! {
     static LEASE: Cell<Option<Lease>> = const { Cell::new(None) };
 }
 
+#[cfg(not(miri))]
 fn stack_pointer() -> usize {
     psm::stack_pointer() as usize
+}
+
+/// Under Miri, which runs no assembly: the address of a local, as near the
+/// stack pointer as the interpreter can say.
+#[cfg(miri)]
+fn stack_pointer() -> usize {
+    let marker = 0u8;
+    std::ptr::addr_of!(marker) as usize
 }
 
 /// The bytes left on the stack this thread runs on, when they are known.
@@ -183,6 +192,7 @@ pub fn refusals_within<R>(operation: impl FnOnce() -> R) -> (R, Option<StackUnav
 
 /// Whether an operation records its refusals on this thread
 /// ([`refusals_within`]).
+#[cfg(any(test, feature = "stack-fault-injection"))]
 pub(super) fn recording() -> bool {
     REFUSALS.with(Cell::get).is_some()
 }
@@ -540,38 +550,135 @@ impl Region {
     }
 }
 
+/// The slot a Windows region's owner and its fiber hand work through: the
+/// job the fiber runs next, and the fiber it switches back to.
+///
+/// Safety argument. The slot is heap memory the handoff owns as a raw
+/// pointer (`Box::into_raw`, freed by `Drop`), never as a `Box` or a
+/// reference, so moving the handoff does not re-assert unique ownership over
+/// memory the fiber still points into. The slot sits in an `UnsafeCell`, and
+/// both sides reach it only through `UnsafeCell::raw_get` and raw-pointer
+/// reads and writes: no `&Slot` or `&mut Slot` is ever created, so no
+/// reference's aliasing guarantee covers memory the other side writes. The
+/// two sides never run at once: the owner writes the slot, then switches to
+/// the fiber and runs nothing until the fiber switches back; the fiber reads
+/// and clears the job, runs it, reads the parent, and switches back. Every
+/// access is therefore ordered by a switch on one thread. The owner holds
+/// only `&self` of the region while it writes: the writes go through the
+/// cell, which permits mutation behind a shared reference.
+#[cfg(any(windows, test))]
+mod handoff {
+    use std::cell::UnsafeCell;
+    use std::ffi::c_void;
+    use std::ptr::NonNull;
+
+    struct Slot {
+        job: Option<*mut dyn FnMut(usize)>,
+        parent: *mut c_void,
+    }
+
+    /// The slot, owned as a raw pointer for as long as the handoff lives.
+    pub(super) struct Handoff {
+        cell: NonNull<UnsafeCell<Slot>>,
+    }
+
+    impl Handoff {
+        pub(super) fn new() -> Handoff {
+            let slot = Box::new(UnsafeCell::new(Slot {
+                job: None,
+                parent: std::ptr::null_mut(),
+            }));
+            Handoff {
+                // SAFETY: `Box::into_raw` never returns null.
+                cell: unsafe { NonNull::new_unchecked(Box::into_raw(slot)) },
+            }
+        }
+
+        /// The pointer the fiber is created with, valid until the handoff
+        /// drops.
+        pub(super) fn fiber_data(&self) -> *mut c_void {
+            self.cell.as_ptr().cast()
+        }
+
+        /// Post `job` for the fiber to run and `parent` for it to switch
+        /// back to.
+        ///
+        /// # Safety
+        ///
+        /// The fiber is suspended, and stays suspended until the caller
+        /// switches to it; `job` stays valid until the fiber switches back.
+        pub(super) unsafe fn post(&self, job: *mut dyn FnMut(usize), parent: *mut c_void) {
+            let slot = UnsafeCell::raw_get(self.cell.as_ptr());
+            // SAFETY: the slot is alive (owned by `self`), and the fiber,
+            // the only other side, is suspended.
+            unsafe {
+                std::ptr::write(&raw mut (*slot).job, Some(job));
+                std::ptr::write(&raw mut (*slot).parent, parent);
+            }
+        }
+
+        /// On the fiber: take the job posted for it, clearing the slot.
+        ///
+        /// # Safety
+        ///
+        /// `data` is a live handoff's [`Self::fiber_data`], and its owner is
+        /// suspended in a switch to this fiber.
+        pub(super) unsafe fn take_job(data: *mut c_void) -> Option<*mut dyn FnMut(usize)> {
+            let slot = UnsafeCell::raw_get(data.cast::<UnsafeCell<Slot>>());
+            // SAFETY: as the caller guarantees; the owner reads nothing
+            // until this fiber switches back.
+            unsafe { std::ptr::replace(&raw mut (*slot).job, None) }
+        }
+
+        /// On the fiber: the fiber to switch back to.
+        ///
+        /// # Safety
+        ///
+        /// As [`Self::take_job`].
+        pub(super) unsafe fn parent(data: *mut c_void) -> *mut c_void {
+            let slot = UnsafeCell::raw_get(data.cast::<UnsafeCell<Slot>>());
+            // SAFETY: as the caller guarantees.
+            unsafe { std::ptr::read(&raw const (*slot).parent) }
+        }
+    }
+
+    impl Drop for Handoff {
+        fn drop(&mut self) {
+            // SAFETY: the pointer came from `Box::into_raw` in `new` and is
+            // freed once, here; the fiber that read it is deleted first.
+            drop(unsafe { Box::from_raw(self.cell.as_ptr()) });
+        }
+    }
+}
+
 #[cfg(windows)]
 mod platform {
+    use super::handoff::Handoff;
     use std::ffi::c_void;
     use windows_sys::Win32::System::Threading::{
         ConvertFiberToThread, ConvertThreadToFiber, CreateFiberEx, DeleteFiber, IsThreadAFiber,
         SwitchToFiber,
     };
 
-    /// What the region's fiber runs next, and the fiber to switch back to.
-    struct Slot {
-        job: Option<*mut dyn FnMut(usize)>,
-        parent: *mut c_void,
-    }
-
     /// A fiber that runs each job it is switched to, then switches back.
+    /// The region's `Drop` deletes the fiber before its `handoff` field
+    /// drops and frees the slot the fiber points into.
     pub(super) struct Region {
         fiber: *mut c_void,
-        slot: Box<Slot>,
+        handoff: Handoff,
     }
 
     unsafe extern "system" fn serve(data: *mut c_void) {
-        let slot = data.cast::<Slot>();
         let limit = fiber_stack_limit();
         loop {
-            // SAFETY: `slot` is the region's, alive while the fiber is;
-            // `run` sets the job and parent before switching here and reads
-            // nothing until this fiber switches back.
+            // SAFETY: `data` is the region's handoff, alive while the fiber
+            // is; `run` posts the job and parent before switching here and
+            // touches nothing until this fiber switches back.
             unsafe {
-                if let Some(job) = (*slot).job.take() {
+                if let Some(job) = Handoff::take_job(data) {
                     (*job)(limit);
                 }
-                SwitchToFiber((*slot).parent);
+                SwitchToFiber(Handoff::parent(data));
             }
         }
     }
@@ -581,22 +688,19 @@ mod platform {
             // The system's guard pages and stack-overflow guarantee come out
             // of the reservation.
             let reserve = needed.checked_add(fiber_overhead())?;
-            let mut slot = Box::new(Slot {
-                job: None,
-                parent: std::ptr::null_mut(),
-            });
-            // SAFETY: the fiber runs `serve` over `slot`, which the region
-            // owns for as long as the fiber exists.
+            let handoff = Handoff::new();
+            // SAFETY: the fiber runs `serve` over the handoff's slot, which
+            // the region owns for as long as the fiber exists.
             let fiber = unsafe {
                 CreateFiberEx(
                     super::INITIAL_COMMIT_BYTES,
                     reserve,
                     0,
                     Some(serve),
-                    (&raw mut *slot).cast(),
+                    handoff.fiber_data(),
                 )
             };
-            (!fiber.is_null()).then(|| Region { fiber, slot })
+            (!fiber.is_null()).then(|| Region { fiber, handoff })
         }
 
         pub(super) fn run(&self, job: &mut dyn FnMut(usize)) {
@@ -617,15 +721,17 @@ mod platform {
                     job(super::stack_pointer());
                     return;
                 }
-                let slot = (&raw const *self.slot).cast_mut();
                 // Erase the job's lifetime: the fiber runs it before this
                 // call returns.
                 let job: *mut (dyn FnMut(usize) + '_) = job;
-                (*slot).job = Some(std::mem::transmute::<
+                let job = std::mem::transmute::<
                     *mut (dyn FnMut(usize) + '_),
                     *mut (dyn FnMut(usize) + 'static),
-                >(job));
-                (*slot).parent = parent;
+                >(job);
+                // The fiber is suspended in `serve` (it runs only while this
+                // thread switches to it, and has switched back), and `job`
+                // outlives the switch.
+                self.handoff.post(job, parent);
                 SwitchToFiber(self.fiber);
                 if converted {
                     ConvertFiberToThread();
@@ -801,5 +907,81 @@ mod platform {
             // SAFETY: the allocation is the region's, and no work runs on it.
             unsafe { std::alloc::dealloc(self.base, self.layout) };
         }
+    }
+}
+
+/// The handoff between a Windows region's owner and its fiber, the switch
+/// between them played by a direct call: run under Miri, which checks the
+/// owner's writes through a shared reference and the fiber's reads through
+/// its raw pointer against the aliasing model (`cargo +nightly miri test -p
+/// verter_parser --lib -- handoff`).
+#[cfg(test)]
+mod handoff_tests {
+    use super::handoff::Handoff;
+    use std::ffi::c_void;
+
+    /// The fiber's side of one switch: take the job, run it, answer the
+    /// parent it switches back to.
+    fn serve_once(data: *mut c_void, limit: usize) -> *mut c_void {
+        // SAFETY: `data` is a live handoff's, and its owner posted before
+        // this call and touches nothing during it.
+        unsafe {
+            if let Some(job) = Handoff::take_job(data) {
+                (*job)(limit);
+            }
+            Handoff::parent(data)
+        }
+    }
+
+    #[test]
+    fn a_posted_job_runs_once_and_answers_its_parent() {
+        let handoff = Handoff::new();
+        let data = handoff.fiber_data();
+        let mut ran = Vec::new();
+        let parent = std::ptr::without_provenance_mut::<c_void>(0x10);
+        for round in 0..3 {
+            let mut job = |limit: usize| ran.push((round, limit));
+            let job: *mut (dyn FnMut(usize) + '_) = &mut job;
+            // SAFETY: the job outlives the "switch" below, and nothing
+            // serves the handoff while it is posted to.
+            unsafe {
+                handoff.post(
+                    std::mem::transmute::<
+                        *mut (dyn FnMut(usize) + '_),
+                        *mut (dyn FnMut(usize) + 'static),
+                    >(job),
+                    parent,
+                )
+            };
+            assert_eq!(serve_once(data, 7 + round), parent);
+            // A switch with no job posted runs nothing.
+            assert_eq!(serve_once(data, 0), parent);
+        }
+        assert_eq!(ran, [(0, 7), (1, 8), (2, 9)]);
+    }
+
+    /// The fiber keeps the pointer it was created with while its owner
+    /// moves: the slot is not the handoff's to re-borrow on a move.
+    #[test]
+    fn the_fiber_pointer_survives_the_owner_moving() {
+        let handoff = Handoff::new();
+        let data = handoff.fiber_data();
+        let moved = vec![handoff];
+        let mut count = 0;
+        let mut job = |_: usize| count += 1;
+        let job: *mut (dyn FnMut(usize) + '_) = &mut job;
+        // SAFETY: as above.
+        unsafe {
+            moved[0].post(
+                std::mem::transmute::<
+                    *mut (dyn FnMut(usize) + '_),
+                    *mut (dyn FnMut(usize) + 'static),
+                >(job),
+                std::ptr::null_mut(),
+            )
+        };
+        serve_once(data, 0);
+        drop(moved);
+        assert_eq!(count, 1);
     }
 }

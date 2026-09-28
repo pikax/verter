@@ -192,7 +192,8 @@ fn map_parsed_runtime(err: DirectCompileError) -> SvelteRuntimeError {
         | DirectCompileError::Vue(_)
         | DirectCompileError::VueComposition(_)
         | DirectCompileError::StalePreparedInput { .. }
-        | DirectCompileError::Cancelled => SvelteRuntimeError::Direct(err),
+        | DirectCompileError::Cancelled
+        | DirectCompileError::StackUnavailable(_) => SvelteRuntimeError::Direct(err),
     }
 }
 

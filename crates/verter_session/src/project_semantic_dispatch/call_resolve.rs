@@ -930,7 +930,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let (relation_members, flow_members, call_members) = {
             let mut txn = self.dispatch_txn.borrow_mut();
             (
-                std::mem::take(&mut txn.relation.completed_members),
+                {
+                    txn.relation.settled.clear();
+                    std::mem::take(&mut txn.relation.completed_members)
+                },
                 std::mem::take(&mut txn.flow.completed_members),
                 std::mem::take(&mut txn.call.completed_members),
             )
@@ -1959,6 +1962,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
+        // The generic function arguments the first pass skips, each with the
+        // one generic signature it holds and its parameter type.
+        let mut generic_function_arguments: Vec<(&CallArgument, SemanticNodeId, SemanticNodeId)> =
+            Vec::new();
         for (index, argument) in arguments.iter().enumerate() {
             if generic_rest.is_some_and(|(_, rest_start)| index >= rest_start) {
                 continue;
@@ -1979,6 +1986,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
+            // A generic function argument against a parameter of one
+            // non-generic call signature is skipped by the first inference
+            // pass (`SkipGenericFunctions`): it is instantiated in that
+            // signature's context once the other arguments inferred what
+            // they infer, below.
+            if !argument.context_sensitive
+                && !raw_type_params.is_empty()
+                && key.explicit_type_args.is_empty()
+            {
+                if let Some(signature) = self.generic_function_against(argument.node, target) {
+                    generic_function_arguments.push((argument, signature, target));
+                    continue;
+                }
+            }
             // A CONTEXT-SENSITIVE argument is withheld from the first
             // inference pass: an un-annotated lambda parameter lowers to
             // `any`, and depositing that `any` would beat every candidate
@@ -2011,6 +2032,67 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
                     );
                 }
+                RelationStep::NotAssignable => {
+                    return self.reject_call_candidate(session_id, &checkpoint)
+                }
+                RelationStep::Assumed(evidence)
+                    if assumption_is_relation_only(&evidence, own_return_function.as_ref()) =>
+                {
+                    deferred_for_relation_scc = true;
+                }
+                RelationStep::BudgetExceeded(_) => {
+                    self.abandon_session(session_id);
+                    return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
+                }
+                RelationStep::Unknown | RelationStep::Assumed(_) => {
+                    self.abandon_session(session_id);
+                    return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
+                }
+            }
+        }
+
+        // The second pass over the skipped generic function arguments
+        // (`instantiateTypeWithSingleGenericCallSignature`): each is
+        // instantiated in the context of its parameter's signature, the
+        // callee's type parameters read with what the arguments inferred
+        // so far (the checker's fixing mapper), and related as that
+        // instantiation.
+        for (argument, signature, target) in generic_function_arguments {
+            let return_structure = match &candidate.return_carrier {
+                SignatureReturnCarrier::Declared(declared) => Some(*declared),
+                _ => None,
+            };
+            let source = match self.generic_function_in_context(
+                session_id,
+                &raw_type_params,
+                (signature, target),
+                return_structure,
+                budget,
+                own_return_function.as_ref(),
+            ) {
+                Ok(Some(instantiated)) => instantiated,
+                Ok(None) => argument.node,
+                Err(failure) => {
+                    self.abandon_session(session_id);
+                    return CandidateVerdict::Degraded(failure);
+                }
+            };
+            let deposits_before = self.accepted_inference_deposits();
+            let step = self.call_argument_relation(
+                source,
+                target,
+                argument.freshness_origin,
+                budget,
+                argument.literal_mode,
+            );
+            if !budget
+                .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
+            {
+                self.abandon_session(session_id);
+                return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
+            }
+            match step {
+                RelationStep::Assignable { .. } => {}
                 RelationStep::NotAssignable => {
                     return self.reject_call_candidate(session_id, &checkpoint)
                 }
@@ -2813,6 +2895,115 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .borrow()
             .relation
             .accepted_inference_deposits
+    }
+
+    /// The one generic call signature of `argument` when `target` has one
+    /// call signature and it is not generic — the argument the checker's
+    /// first inference pass skips (`SkipGenericFunctions`).
+    fn generic_function_against(
+        &self,
+        argument: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let single =
+            |node: SemanticNodeId| match self.shared_signature_nodes(node, SignatureKind::Call) {
+                super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                    match nodes.as_slice() {
+                        [one] => Some(*one),
+                        _ => None,
+                    }
+                }
+                super::signature_discovery::SharedSignatureNodes::Incomplete(_) => None,
+            };
+        // Only a function type holds a call signature to read: every other
+        // argument is no generic function, and its signatures are not read.
+        let function_like = |node: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Signature { .. })
+            ) || matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Object(view)) if !view.call_signatures.is_empty()
+            )
+        };
+        if !function_like(argument) || !function_like(target) {
+            return None;
+        }
+        let generic = |signature: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(signature).as_deref(),
+                Some(SemanticNodeData::Signature { type_parameters, .. })
+                    if !type_parameters.is_empty()
+            )
+        };
+        let contextual = single(target)?;
+        if generic(contextual) {
+            return None;
+        }
+        let signature = single(argument)?;
+        generic(signature).then_some(signature)
+    }
+
+    /// `signature`, a generic function argument's, instantiated in the
+    /// context of `target`'s one call signature with the callee's type
+    /// parameters read as the session has inferred them so far (the
+    /// checker's `instantiateSignatureInContextOf` under the fixing mapper,
+    /// whose inferences widen a fresh literal outside the top level of
+    /// `return_structure`, as the call's own do). `None` when the
+    /// instantiation does not settle.
+    fn generic_function_in_context(
+        &self,
+        session_id: super::dispatch_txn::SessionId,
+        type_params: &[crate::semantic_query::TypeParamDecl],
+        (signature, target): (SemanticNodeId, SemanticNodeId),
+        return_structure: Option<SemanticNodeId>,
+        budget: &mut CallResolutionBudget,
+        own_return_function: Option<&crate::semantic_query::FlowFunctionSlotIdentity>,
+    ) -> Result<Option<SemanticNodeId>, ResolveCallFailure> {
+        let inputs = {
+            let txn = self.dispatch_txn.borrow();
+            txn.relation
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .and_then(|session| session.fixation_inputs())
+        };
+        let Some(inputs) = inputs else {
+            return Ok(None);
+        };
+        let (fixed, uninferred) =
+            self.fix_inference_inputs(inputs, type_params, |this, from, to| {
+                decided_call_relation(
+                    this.call_relation(from, to, from, budget, false, false),
+                    own_return_function,
+                )
+            })?;
+        let inferred: Vec<crate::semantic_query::InferBinding> = fixed
+            .into_iter()
+            .enumerate()
+            .filter(|(position, _)| !uninferred.contains(position))
+            .map(|(_, binding)| binding)
+            .collect();
+        let inferred = CanonicalTypeSubstitution::new(
+            inferred
+                .iter()
+                .map(|binding| (binding.param, binding.bound))
+                .collect(),
+        );
+        let inferred = self
+            .fresh_widened_substitution_outside_top_level(session_id, &inferred, return_structure)
+            .unwrap_or(inferred);
+        let contextual = self.substitute_canonical(target, &inferred);
+        let contextual = match self.shared_signature_nodes(contextual, SignatureKind::Call) {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                match nodes.as_slice() {
+                    [one] => *one,
+                    _ => return Ok(None),
+                }
+            }
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => return Ok(None),
+        };
+        Ok(self.instantiate_signature_in_context_of(signature, contextual, SignatureKind::Call))
     }
 
     fn call_argument_relation(

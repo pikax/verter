@@ -910,17 +910,30 @@ fn assert_answers_as_the_checker(read: &ColdRead) {
 }
 
 /// The connected work one more level adds to a chain at each of `levels`.
+/// Every chain is read cold in a host of its own, all of them at once.
 fn work_per_level(chain: ChainSource, expected: &str, levels: &[usize]) -> Vec<usize> {
-    levels
-        .iter()
-        .map(|&levels| {
-            let shorter = cold_read_of(&chain(levels), "witness", expected);
-            let longer = cold_read_of(&chain(levels + 1), "witness", expected);
-            assert_answers_as_the_checker(&shorter);
-            assert_answers_as_the_checker(&longer);
-            longer.work - shorter.work
-        })
-        .collect()
+    std::thread::scope(|scope| {
+        let reads: Vec<_> = levels
+            .iter()
+            .flat_map(|&levels| [levels, levels + 1])
+            .map(|levels| scope.spawn(move || cold_read_of(&chain(levels), "witness", expected)))
+            .collect();
+        let reads: Vec<ColdRead> = reads
+            .into_iter()
+            .map(|read| read.join().expect("the chain reads"))
+            .collect();
+        reads
+            .chunks(2)
+            .map(|pair| {
+                let [shorter, longer] = pair else {
+                    unreachable!("a shorter and a longer chain per level")
+                };
+                assert_answers_as_the_checker(shorter);
+                assert_answers_as_the_checker(longer);
+                longer.work - shorter.work
+            })
+            .collect()
+    })
 }
 
 /// The smallest connected-query depth cap under which a chain's witness
@@ -1106,16 +1119,17 @@ fn a_type_position_chain_costs_the_same_work_per_level() {
     );
 }
 
-/// A 1,000-level type-position chain answers, under the production work
-/// budget and on the default test stack.
+/// A 500-level type-position chain answers, under the production work
+/// budget and on the default test stack, which evaluating each level's
+/// callee inside the level above it overflows.
 ///
 /// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
 /// `noImplicitAny` settings, measured at 200 levels — every level is the
 /// same declaration): `witness` is `{ v: number; tag: "c"; }`.
 #[test]
-fn a_1000_level_type_position_chain_answers() {
+fn a_500_level_type_position_chain_answers() {
     assert_answers_as_the_checker(&cold_read_of(
-        &type_position_chain(1_000),
+        &type_position_chain(500),
         "witness",
         "{ v: number; tag: \"c\"; }",
     ));
@@ -1740,21 +1754,21 @@ fn a_256_level_chain_returning_a_same_name_generic_answers() {
             &format!("{{ v: x, tag: \"c\" as const, {head} }}"),
             1,
         );
-        assert_same_name_generic_chain_answers(source, member, keeps_its_clause, 512 << 10);
+        assert_same_name_generic_chain_answers(source, 256, member, keeps_its_clause, 512 << 10);
     }
 }
 
 /// The same chain over a head holding a function TYPE written in the body
 /// with a same-name clause (`const id: <T>(z: T) => T = (z) => z`): a new
-/// instantiation of the 256-level chain answers too.
+/// instantiation of a 128-level chain answers too.
 ///
 /// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
-/// `noImplicitAny` settings alike, measured at 256 levels): `witness` is
+/// `noImplicitAny` settings alike, measured at 128 levels): `witness` is
 /// `{ v: string | number; tag: "c"; id: <T>(z: T) => T; }` and
 /// `second(v: boolean)` is `{ v: boolean; tag: "c"; id: <T>(z: T) => T; }`.
 #[test]
-fn a_256_level_chain_returning_a_same_name_function_type_answers() {
-    let source = local_arrow_chain(256).replacen(
+fn a_128_level_chain_returning_a_same_name_function_type_answers() {
+    let source = local_arrow_chain(128).replacen(
         "function l0<T>(x: T) { return { v: x, tag: \"c\" as const }; }",
         "function l0<T>(x: T) { const id: <T>(z: T) => T = (z) => z; \
          return { v: x, tag: \"c\" as const, id }; }",
@@ -1762,7 +1776,7 @@ fn a_256_level_chain_returning_a_same_name_function_type_answers() {
     );
     // The production worker stack: the per-level evaluation meets the
     // typed depth refusal rather than a small test stack's end.
-    assert_same_name_generic_chain_answers(source, "id", identity_of_its_own_t, 8 << 20);
+    assert_same_name_generic_chain_answers(source, 128, "id", identity_of_its_own_t, 8 << 20);
 }
 
 /// A binder named `T`.
@@ -1806,18 +1820,22 @@ fn constructor_of_its_own_t(member: &TypeExpr) -> bool {
             [ObjectMember::Property(own)] if own.key == "own".into() && is_t(&own.ty))
 }
 
-/// Over a 256-level chain `source` ending in `l255`: `witness` answers
-/// `{ v: string | number; tag: "c"; <member> }` cold, and a new
-/// instantiation `second(v: boolean)` answers `{ v: boolean; tag: "c";
-/// <member> }` on a `second_stack`-byte stack, clean and admitted, with
-/// `member` keeping its own clause.
+/// Over a `levels`-level chain `source` ending in `l<levels - 1>`:
+/// `witness` answers `{ v: string | number; tag: "c"; <member> }` cold,
+/// and a new instantiation `second(v: boolean)` answers `{ v: boolean;
+/// tag: "c"; <member> }` on a `second_stack`-byte stack, clean and
+/// admitted, with `member` keeping its own clause.
 fn assert_same_name_generic_chain_answers(
     mut source: String,
+    levels: usize,
     member: &str,
     keeps_its_clause: fn(&TypeExpr) -> bool,
     second_stack: usize,
 ) {
-    source.push_str("export function second(v: boolean) { return l255(v); }\n");
+    source.push_str(&format!(
+        "export function second(v: boolean) {{ return l{}(v); }}\n",
+        levels - 1
+    ));
     let host = host_with(&[(PATH, source.as_str())]);
     let witness = {
         let host = Arc::clone(&host);

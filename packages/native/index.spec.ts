@@ -128,6 +128,49 @@ describe("TSC public-API error wire contract", () => {
       "malformed-or-recovered-type-syntax",
     ]);
   });
+
+  it("types a stack refusal by the whole source, and only a stack refusal", () => {
+    const refused: HostPublicApiProjectionError = {
+      code: "tsc-generation",
+      detailCode: "stack-unavailable",
+      subject: { kind: "source" },
+      declarationShapeReason: null,
+      memberOrdinal: null,
+      outcomeKind: null,
+      outcomeReason: null,
+      outcomeDiagnostic: null,
+    };
+    const refusedAtAMacro: HostPublicApiProjectionError = {
+      code: "tsc-generation",
+      detailCode: "stack-unavailable",
+      subject: {
+        kind: "macro",
+        // @ts-expect-error — a stack refusal is the whole source's, no slot's.
+        syntaxIndex: 0,
+      },
+      declarationShapeReason: null,
+      memberOrdinal: null,
+      outcomeKind: null,
+      outcomeReason: null,
+      outcomeDiagnostic: null,
+    };
+    // @ts-expect-error — every other failure names its syntax slot.
+    const sourceMissingEntry: HostPublicApiProjectionError = {
+      code: "tsc-generation",
+      detailCode: "missing-entry",
+      subject: { kind: "source" },
+      declarationShapeReason: null,
+      memberOrdinal: null,
+      outcomeKind: null,
+      outcomeReason: null,
+      outcomeDiagnostic: null,
+    };
+    expect([refused.subject, refusedAtAMacro.detailCode, sourceMissingEntry.detailCode]).toEqual([
+      { kind: "source" },
+      "stack-unavailable",
+      "missing-entry",
+    ]);
+  });
 });
 
 describe("VerterHost", () => {

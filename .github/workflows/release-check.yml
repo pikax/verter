@@ -13,6 +13,12 @@ name: Release Check
 # A duplicated matrix would drift from the real pipeline and give false
 # confidence, which is worse than no rehearsal at all.
 #
+# A RELEASE pull request (`release: v…` or `release(ide): v…`, from this
+# repository, as the release tooling opens it) is the exception: its CI is the
+# full rehearsal, run by ci.yml's `release-check` / `release-ide-check` jobs
+# and required through `CI Required`. Such a PR is repository code, never a
+# fork's, and still receives no registry or Marketplace secret.
+#
 # Defence in depth: the workflow default and PR job stay READ-ONLY. The manual
 # call receives the permission superset GitHub requires to validate the nested
 # graph, but passes NO registry or Marketplace secrets and `dry_run: true`

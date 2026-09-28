@@ -5530,6 +5530,7 @@ fn direct_compiler_public_api_for(
             filename: Some(canonical_id.to_string()),
         },
     )
+    .expect("the stack is had")
     .expect("direct compiler extraction");
     // The direct control must be handed the SAME resolver-owned inputs the
     // production path threads, or this equivalence assertion would silently

@@ -186,6 +186,7 @@ oxc_sourcemap = "7.0.0"
 thiserror = "2.0"
 arc-swap = "1.9"
 parking_lot = "0.12.5"
+crossbeam-channel = "0.5.15"
 indexmap = "2.14"
 similar = "3"
 # ts-rs is a REGULAR dependency (not dev) so derives compile into production

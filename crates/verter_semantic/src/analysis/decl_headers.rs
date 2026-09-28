@@ -326,7 +326,22 @@ pub struct EnumDeclHeader {
     pub span: Span,
     pub name_span: Span,
     pub member_names: Vec<String>,
+    /// Where each member of [`Self::member_names`] is declared, in the same
+    /// order: the position the checker's declared-before-use rule compares
+    /// an initializer's reference by. Empty in the `from_eval_env` mirror.
+    pub member_positions: Vec<EnumMemberPosition>,
     pub contributors: Vec<DeclHeaderContributor>,
+}
+
+/// Where one enum member is declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnumMemberPosition {
+    /// The member's source start offset.
+    pub start: u32,
+    /// The member is in an ambient context (a `declare enum`, an enum of a
+    /// declaration file or of an ambient namespace), where the checker
+    /// reads a reference to a later declaration as declared before its use.
+    pub ambient: bool,
 }
 
 /// The shallow declaration-header index for one parsed program.
@@ -370,10 +385,22 @@ pub struct DeclHeaderIndex {
     /// outside it cannot name the member (the checker's TS2694). Empty in
     /// the `from_eval_env` mirror (same block-level-view limitation).
     pub namespace_private_members: FxHashSet<DeclBindingKey>,
+    /// The block each private namespace VALUE member (a class, an enum, a
+    /// variable or a function declared without `export`) is declared in:
+    /// only a reference inside that block names it — another block of a
+    /// merged namespace does not see it. Empty in the `from_eval_env`
+    /// mirror (same block-level-view limitation).
+    pub namespace_private_value_blocks: FxHashMap<DeclBindingKey, Span>,
     /// Every `namespace N { … }` block a `declare module "…"` block
     /// declares, with that block's scope, in source order. Empty in the
     /// `from_eval_env` mirror (same block-level-view limitation).
     pub augmentation_namespace_blocks: Vec<(AugmentationScopeKind, NamespaceBlockRecord)>,
+    /// The one classification of every field of every class this walk
+    /// indexes: which fields read through a synthetic value, and from what
+    /// source. The class lowering and the function-program discovery read
+    /// it instead of walking an initializer again. Empty in the
+    /// `from_eval_env` mirror.
+    pub class_field_values: std::sync::Arc<crate::analysis::class_field_value::ClassFieldValues>,
 }
 
 impl DeclHeaderIndex {
@@ -707,6 +734,7 @@ impl DeclHeaderIndex {
                         span: Span::default(),
                         name_span: Span::default(),
                         member_names: names_fact.names.iter().cloned().collect(),
+                        member_positions: Vec::new(),
                         contributors: Vec::new(),
                     },
                 );
@@ -854,13 +882,7 @@ fn index_top_level_statement(
     // Mirror of `collect_hoisted_vars`: a `var` inside a nested block
     // belongs to the top level.
     crate::analysis::type_eval_build::for_each_hoisted_var(stmt, &mut |declarator, _| {
-        index_variable(
-            declarator,
-            VariableDeclarationKind::Var,
-            ctx,
-            &mut index.value_headers,
-            None,
-        );
+        index_variable_in(declarator, VariableDeclarationKind::Var, ctx, index, None);
     });
     match stmt {
         Statement::TSTypeAliasDeclaration(decl) => {
@@ -886,11 +908,17 @@ fn index_top_level_statement(
         }
         Statement::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                index_variable(decl, var_decl.kind, ctx, &mut index.value_headers, None);
+                index_variable_in(decl, var_decl.kind, ctx, index, None);
             }
         }
         Statement::TSEnumDeclaration(enum_decl) => {
-            index_enum(enum_decl, enum_decl.id.name.as_str(), ctx, index);
+            index_enum(
+                enum_decl,
+                enum_decl.id.name.as_str(),
+                ctx,
+                ctx.declaration_file,
+                index,
+            );
         }
         Statement::ExportDeclaration(export) => {
             let decl = &export.declaration;
@@ -970,11 +998,17 @@ fn index_declaration(
         }
         Declaration::VariableDeclaration(var_decl) => {
             for d in &var_decl.declarations {
-                index_variable(d, var_decl.kind, ctx, &mut index.value_headers, None);
+                index_variable_in(d, var_decl.kind, ctx, index, None);
             }
         }
         Declaration::TSEnumDeclaration(enum_decl) => {
-            index_enum(enum_decl, enum_decl.id.name.as_str(), ctx, index);
+            index_enum(
+                enum_decl,
+                enum_decl.id.name.as_str(),
+                ctx,
+                ctx.declaration_file,
+                index,
+            );
         }
         _ => {}
     }
@@ -1000,6 +1034,7 @@ fn index_enum(
     enum_decl: &TSEnumDeclaration<'_>,
     name: &str,
     ctx: HeaderStatementContext<'_>,
+    ambient: bool,
     index: &mut DeclHeaderIndex,
 ) {
     let entry = index
@@ -1009,16 +1044,19 @@ fn index_enum(
             span: enum_decl.span.into(),
             name_span: enum_decl.id.span.into(),
             member_names: Vec::new(),
+            member_positions: Vec::new(),
             contributors: Vec::new(),
         });
+    let ambient = ambient || enum_decl.declare;
+    let mut seen: FxHashSet<String> = entry.member_names.iter().cloned().collect();
     for member in &enum_decl.body.members {
         let member_name = member.id.static_name().to_string();
-        if !entry
-            .member_names
-            .iter()
-            .any(|existing| existing == &member_name)
-        {
+        if seen.insert(member_name.clone()) {
             entry.member_names.push(member_name);
+            entry.member_positions.push(EnumMemberPosition {
+                start: member.span.start,
+                ambient,
+            });
         }
     }
     push_contributor(
@@ -1176,12 +1214,17 @@ impl<'s, 'a> NamespaceVisitor<'s, 'a> for HeaderNamespaces<'_, '_> {
 
     fn statement(&mut self, frame: &mut HeaderNamespace, statement: &'s Statement<'a>) {
         frame.instantiated |= statement_instantiates_here(statement);
+        let block = self.index.namespace_blocks[frame.record].span;
         index_namespaced_statement(
             statement,
             self.ctx,
             self.index,
             self.path.name(),
-            frame.implicit_export,
+            NamespaceBody {
+                implicit_export: frame.implicit_export,
+                ambient: frame.ambient,
+                block,
+            },
         );
     }
 
@@ -1194,22 +1237,54 @@ impl<'s, 'a> NamespaceVisitor<'s, 'a> for HeaderNamespaces<'_, '_> {
     }
 }
 
+/// The namespace body a statement is indexed in.
+#[derive(Clone, Copy)]
+struct NamespaceBody {
+    /// The body exports every member, written `export` or not (an ambient
+    /// namespace body without an export declaration).
+    implicit_export: bool,
+    /// The body is in an ambient context.
+    ambient: bool,
+    /// The block's span.
+    block: Span,
+}
+
+/// Record the private namespace value member `name` declared in `body`.
+fn index_private_value(
+    index: &mut DeclHeaderIndex,
+    ctx: HeaderStatementContext<'_>,
+    name: &str,
+    body: NamespaceBody,
+) {
+    if body.implicit_export {
+        return;
+    }
+    index.namespace_private_members.insert(ctx.key(name));
+    index
+        .namespace_private_value_blocks
+        .insert(ctx.key(name), body.block);
+}
+
 /// Mirror of `collect_namespaced_statement`: type aliases, interfaces and
-/// nested modules register under their qualified `Ns.Name`. Namespace VALUE
-/// indexing is EXPORT-ONLY — only an exported `const`/`let`/`var`/`function`
-/// (routed via the `ExportNamedDeclaration` path to
-/// `index_namespaced_declaration`) registers a qualified value member such as
-/// `N.VERSION`; a non-exported `const hidden = …` is private to the namespace
-/// body and is NOT indexed — except in an export context (an ambient
-/// namespace body without an export declaration), which exports every
-/// member.
+/// nested modules register under their qualified `Ns.Name`, and so do
+/// values: an exported `const`/`let`/`var`/`function` (routed via the
+/// `ExportNamedDeclaration` path to `index_namespaced_declaration`) is a
+/// member such as `N.VERSION`; a non-exported `const hidden = …` is a
+/// private member, named only by a reference inside its block — except in
+/// an export context (an ambient namespace body without an export
+/// declaration), which exports every member.
 fn index_namespaced_statement(
     stmt: &Statement<'_>,
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
-    implicit_export: bool,
+    body: NamespaceBody,
 ) {
+    let NamespaceBody {
+        implicit_export,
+        ambient,
+        ..
+    } = body;
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
             let name = format!("{namespace}.{}", alias.id.name);
@@ -1229,17 +1304,13 @@ fn index_namespaced_statement(
             if let Some(identifier) = &class.id {
                 let name = format!("{namespace}.{}", identifier.name);
                 index_named_class(class, &name, ctx, index);
-                if !implicit_export {
-                    index.namespace_private_members.insert(ctx.key(&name));
-                }
+                index_private_value(index, ctx, &name, body);
             }
         }
         Statement::TSEnumDeclaration(enum_decl) => {
             let name = format!("{namespace}.{}", enum_decl.id.name);
-            index_enum(enum_decl, &name, ctx, index);
-            if !implicit_export {
-                index.namespace_private_members.insert(ctx.key(&name));
-            }
+            index_enum(enum_decl, &name, ctx, ambient, index);
+            index_private_value(index, ctx, &name, body);
         }
         // A nested namespace is a frame of [`index_module_declaration`]'s
         // walk.
@@ -1253,21 +1324,21 @@ fn index_namespaced_statement(
         // registers a qualified value member.
         Statement::ExportDeclaration(export) => {
             let decl = &export.declaration;
-            index_namespaced_declaration(decl, ctx, index, namespace);
+            index_namespaced_declaration(decl, ctx, index, namespace, ambient);
         }
-        Statement::VariableDeclaration(var_decl) if implicit_export => {
+        Statement::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                index_variable(
-                    decl,
-                    var_decl.kind,
-                    ctx,
-                    &mut index.value_headers,
-                    Some(namespace),
-                );
+                index_variable_in(decl, var_decl.kind, ctx, index, Some(namespace));
+                for name in decl.id.get_binding_identifiers() {
+                    index_private_value(index, ctx, &format!("{namespace}.{}", name.name), body);
+                }
             }
         }
-        Statement::FunctionDeclaration(func) if implicit_export => {
+        Statement::FunctionDeclaration(func) => {
             index_function_in(func, ctx, &mut index.value_headers, Some(namespace));
+            if let Some(id) = &func.id {
+                index_private_value(index, ctx, &format!("{namespace}.{}", id.name), body);
+            }
         }
         _ => {}
     }
@@ -1278,6 +1349,7 @@ fn index_namespaced_declaration(
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
+    ambient: bool,
 ) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
@@ -1302,17 +1374,11 @@ fn index_namespaced_declaration(
         }
         Declaration::TSEnumDeclaration(enum_decl) => {
             let name = format!("{namespace}.{}", enum_decl.id.name);
-            index_enum(enum_decl, &name, ctx, index);
+            index_enum(enum_decl, &name, ctx, ambient, index);
         }
         Declaration::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                index_variable(
-                    decl,
-                    var_decl.kind,
-                    ctx,
-                    &mut index.value_headers,
-                    Some(namespace),
-                );
+                index_variable_in(decl, var_decl.kind, ctx, index, Some(namespace));
             }
         }
         Declaration::FunctionDeclaration(func) => {
@@ -1450,6 +1516,42 @@ fn constructor_visibility(decl: &Class<'_>) -> Option<verter_type_expr::MemberVi
     })
 }
 
+/// Classify one field of the class `name` once for every consumer (see
+/// `class_field_value`) and index the synthetic value a field read through
+/// one declares, mirroring `collect_named_class`.
+fn index_class_field_value(
+    class: &Class<'_>,
+    name: &str,
+    prop: &oxc_ast::ast::PropertyDefinition<'_>,
+    ctx: HeaderStatementContext<'_>,
+    index: &mut DeclHeaderIndex,
+) {
+    let classified =
+        std::sync::Arc::make_mut(&mut index.class_field_values).classify(class, prop, ctx.source);
+    if let (Some(_), Some(field_name), Some(value)) = (
+        classified,
+        crate::analysis::type_eval_build::class_field_value_name(name, prop),
+        prop.value.as_ref(),
+    ) {
+        let span: Span = value.span().into();
+        let entry = index
+            .value_headers
+            .entry(ctx.key(&field_name))
+            .or_insert_with(|| ValueDeclHeader {
+                kind: if prop.readonly {
+                    ValueDeclKind::Const
+                } else {
+                    ValueDeclKind::Let
+                },
+                span,
+                name_span: span,
+                object_member_headers: Vec::new(),
+                contributors: Vec::new(),
+            });
+        push_contributor(&mut entry.contributors, ctx, span, span);
+    }
+}
+
 fn index_named_class(
     decl: &Class<'_>,
     name: &str,
@@ -1502,31 +1604,7 @@ fn index_named_class(
                 if matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
                     continue;
                 }
-                // A field initialized by a call's synthetic value (see
-                // `class_field_value_name`), mirroring `collect_named_class`.
-                if let (Some(field_name), Some(value)) = (
-                    crate::analysis::type_eval_build::class_field_value_name(
-                        name, prop, ctx.source,
-                    ),
-                    prop.value.as_ref(),
-                ) {
-                    let span: Span = value.span().into();
-                    let entry = index
-                        .value_headers
-                        .entry(ctx.key(&field_name))
-                        .or_insert_with(|| ValueDeclHeader {
-                            kind: if prop.readonly {
-                                ValueDeclKind::Const
-                            } else {
-                                ValueDeclKind::Let
-                            },
-                            span,
-                            name_span: span,
-                            object_member_headers: Vec::new(),
-                            contributors: Vec::new(),
-                        });
-                    push_contributor(&mut entry.contributors, ctx, span, span);
-                }
+                index_class_field_value(decl, name, prop, ctx, index);
                 let header = MemberHeader {
                     key: lower_property_key(&prop.key, ctx.source),
                     method_kind: None,
@@ -1659,6 +1737,28 @@ fn index_function_in(
         func.span.into(),
         id.span.into(),
     );
+}
+
+/// [`index_variable`] into `index`'s value headers, with the fields of a
+/// class expression the declarator holds classified as a class
+/// declaration's are (see `class_field_value`), so the class lowering and
+/// the function-program discovery read that one answer.
+fn index_variable_in(
+    decl: &VariableDeclarator<'_>,
+    kind: VariableDeclarationKind,
+    ctx: HeaderStatementContext<'_>,
+    index: &mut DeclHeaderIndex,
+    namespace: Option<&str>,
+) {
+    index_variable(decl, kind, ctx, &mut index.value_headers, namespace);
+    if let Some(class) = decl
+        .init
+        .as_ref()
+        .filter(|_| decl.type_annotation.is_none())
+        .and_then(crate::analysis::type_eval_build::initializer_class_expression)
+    {
+        std::sync::Arc::make_mut(&mut index.class_field_values).classify_class(class, ctx.source);
+    }
 }
 
 fn index_variable(

@@ -25,7 +25,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::Visit;
 use oxc_span::SourceType;
-use verter_parser::oxc_parse::{with_program_stack, Parser};
+use verter_parser::oxc_parse::{leased_program_walk, refusals_within, Parser, StackUnavailable};
 
 /// One module specifier: the byte range of its whole string literal, the
 /// DECODED specifier it denotes, and the quote character it was written with.
@@ -111,8 +111,20 @@ pub fn quote_module_specifier(specifier: &str, quote: char) -> String {
 /// we could not fully parse risks corrupting the carrier; declining to splice
 /// at worst leaves a specifier un-absolutized, which surfaces as a
 /// module-resolution diagnostic beside the syntax error that caused it.
-#[must_use]
-pub fn collect_module_specifier_spans(source: &str) -> Option<Vec<ModuleSpecifierSpan>> {
+///
+/// A parse or walk-stack lease refused its stack is the typed
+/// [`StackUnavailable`]: the inventory is not known, and neither is the
+/// parse's cleanliness.
+pub fn collect_module_specifier_spans(
+    source: &str,
+) -> Result<Option<Vec<ModuleSpecifierSpan>>, StackUnavailable> {
+    match refusals_within(|| collect_unrecorded(source)) {
+        (spans, None) => Ok(spans),
+        (_, Some(unavailable)) => Err(unavailable),
+    }
+}
+
+fn collect_unrecorded(source: &str) -> Option<Vec<ModuleSpecifierSpan>> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
     if parsed.fatal_error || !parsed.diagnostics.is_empty() {
@@ -122,7 +134,7 @@ pub fn collect_module_specifier_spans(source: &str) -> Option<Vec<ModuleSpecifie
         source,
         spans: Vec::new(),
     };
-    with_program_stack(&parsed.program, || collector.visit_program(&parsed.program));
+    leased_program_walk(&parsed.program, || collector.visit_program(&parsed.program)).ok()?;
     collector.spans.sort_by_key(|span| span.start);
     collector.spans.dedup_by_key(|span| span.start);
     Some(collector.spans)

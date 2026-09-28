@@ -1360,10 +1360,7 @@ namespace N {
     let resolved_start = |entry: &FunctionProgramEntry| {
         let resolved = resolve_function_node(&ret.program, &entry.locator)
             .unwrap_or_else(|| panic!("{} must resolve", entry.key.declaration.name));
-        match resolved.node {
-            FunctionNode::Function(func) => func.span.start,
-            FunctionNode::Arrow(arrow) => arrow.span.start,
-        }
+        resolved.node.span().start
     };
 
     let inner = entry_of(&index, "N.M.make");
@@ -1483,6 +1480,7 @@ fn retained_function_addresses_preserve_exact_locator_metadata() {
         source,
         &owners,
         Arc::from("/retained.ts"),
+        &Default::default(),
     );
     for entry in index.entries.iter() {
         let expected = resolve_function_node(&parsed.program, &entry.locator).unwrap();

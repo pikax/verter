@@ -3471,11 +3471,12 @@ const DEEP_SCRIPT_CHILD: &str = "VERTER_DEEP_SCRIPT_CHILD";
 /// Every form of [`deeply_nested_scripts`], 10,000 deep, is analyzed on a
 /// 1 MiB thread: the analysis's own passes walk from explicit stacks, and
 /// only oxc's walks run on a stack region. Each form runs in a child
-/// process, so a recursion that overflows names its form rather than
-/// aborting this process. The forms reach each pass that walks from an
-/// explicit stack: the await scan (`find_await_offset`: calls, arrays,
-/// objects, conditionals, logical chains, members, `!`, assignments, `ref`,
-/// `defineProps` and `defineEmits` arguments), the string evaluator
+/// process, all of them at once, so a recursion that overflows names its
+/// form rather than aborting this process. The forms reach each pass that
+/// walks from an explicit stack: the await scan (`find_await_offset`:
+/// calls, arrays, objects, conditionals, logical chains, members, `!`,
+/// assignments, `ref`, `defineProps` and `defineEmits` arguments), the
+/// string evaluator
 /// (`evaluate_string_candidates`: parentheses, sums, sequences, templates),
 /// the nested-macro scan (`scan_nested_macros`: arrows, `computed`, blocks,
 /// `if`s), the macro type references (`collect_type_references`: a props
@@ -3502,10 +3503,10 @@ fn every_deeply_nested_script_is_analyzed_on_a_small_stack() {
         println!("{DEEP_SCRIPT_CHILD}: analyzed");
         return;
     }
-    let failures: Vec<String> = deeply_nested_scripts(10_000)
+    let children: Vec<(&str, std::process::Child)> = deeply_nested_scripts(10_000)
         .into_iter()
-        .filter_map(|(form, _)| {
-            let output =
+        .map(|(form, _)| {
+            let child =
                 std::process::Command::new(std::env::current_exe().expect("this test binary"))
                     .args([
                         "--exact",
@@ -3514,8 +3515,19 @@ fn every_deeply_nested_script_is_analyzed_on_a_small_stack() {
                         "--test-threads=1",
                     ])
                     .env(DEEP_SCRIPT_CHILD, form)
-                    .output()
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
                     .expect("run the form in a child process");
+            (form, child)
+        })
+        .collect();
+    let failures: Vec<String> = children
+        .into_iter()
+        .filter_map(|(form, child)| {
+            let output = child
+                .wait_with_output()
+                .expect("the form's child process exits");
             let analyzed = String::from_utf8_lossy(&output.stdout)
                 .contains(&format!("{DEEP_SCRIPT_CHILD}: analyzed"));
             (!output.status.success() || !analyzed).then(|| {

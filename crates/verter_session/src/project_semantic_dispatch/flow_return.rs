@@ -1723,6 +1723,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             | FunctionReturnNode::Absent => None,
                         })
                     }
+                    verter_semantic::analysis::function_program::ProgramExpressionSource::FieldInitializer {
+                        source: verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                        readonly,
+                    } => regular(self.field_initializer_value(identity, *readonly)),
+                    verter_semantic::analysis::function_program::ProgramExpressionSource::FieldInitializer { .. } => {
+                        crate::request_context::mark_request_result_partial();
+                        None
+                    }
                     verter_semantic::analysis::function_program::ProgramExpressionSource::UnsupportedCall => {
                         crate::request_context::mark_request_result_partial();
                         None
@@ -1737,6 +1745,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         )
                     }
                 }
+            }
+        }
+    }
+
+    /// The value of a class field whose initializer is served as its own
+    /// position: the position's body-derived return, its fresh literals
+    /// widened for a mutable field (the checker's widened literal type of a
+    /// property initializer) and kept for a `readonly` one. A read made
+    /// while the position is already being evaluated — the initializer
+    /// reads, through `this`, a field whose own initializer reads it back
+    /// — is the checker's circular initializer (TS7022): `any`.
+    fn field_initializer_value(
+        &self,
+        identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+        readonly: bool,
+    ) -> Option<crate::semantic_query::SemanticNodeId> {
+        match self.execute_flow_return(self.flow_return_key_for(identity)) {
+            FlowReturnStep::Complete(result) => {
+                let node = result.return_type();
+                if readonly || result.fresh_literal_arms().is_empty() {
+                    return Some(node);
+                }
+                Some(widen_values_within(
+                    self,
+                    node,
+                    result.fresh_literal_arms(),
+                    self.nullability_for(identity.anchor.canonical_id.as_ref()),
+                ))
+            }
+            FlowReturnStep::Hold(_) => Some(
+                self.graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
+            ),
+            FlowReturnStep::NoValue(_) => {
+                crate::request_context::mark_request_result_partial();
+                None
             }
         }
     }
@@ -2407,7 +2451,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // transaction-local value channel's work is done.
             txn.flow.closed_values.clear();
             (
-                std::mem::take(&mut txn.relation.completed_members),
+                {
+                    txn.relation.settled.clear();
+                    std::mem::take(&mut txn.relation.completed_members)
+                },
                 std::mem::take(&mut txn.flow.completed_members),
                 std::mem::take(&mut txn.call.completed_members),
             )
@@ -5717,6 +5764,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             call_arguments: Arc::clone(&ir.call_arguments),
             self_slot: Some(key),
             resolving_functions: std::rc::Rc::default(),
+            this_free_values: std::rc::Rc::default(),
             canonical,
             owner,
             nullability: key.context.policy.nullability,
@@ -7253,7 +7301,11 @@ fn collect_expression_write_spans(
 fn slice_expr_reads_frame(expr: &crate::flow_slice_content::SliceExpr) -> bool {
     use crate::flow_slice_content::{SliceArrayElement, SliceCall, SliceExpr, SliceObjectEntry};
     match expr {
-        SliceExpr::Param { .. } | SliceExpr::Local { .. } | SliceExpr::FrameShadowed { .. } => true,
+        // The frame's receiver is only the frame's to read.
+        SliceExpr::Param { .. }
+        | SliceExpr::Local { .. }
+        | SliceExpr::FrameShadowed { .. }
+        | SliceExpr::This(_) => true,
         SliceExpr::Call(call, _, arguments) => {
             arguments.iter().any(slice_expr_reads_frame)
                 || match call {
@@ -8595,6 +8647,13 @@ struct FlowEvaluator<'d, 'b> {
     /// (`pushTypeResolution`), shared by every nested evaluator of one
     /// root evaluation.
     resolving_functions: std::rc::Rc<std::cell::RefCell<nested::ResolvingFunctions>>,
+    /// The values an object literal's recursion check has walked and found
+    /// to hold no polymorphic `this` binder at all
+    /// ([`FlowEvaluator::value_mentions_receiver`]), shared by every nested
+    /// evaluator of one root evaluation and dropped with it. Request-scoped:
+    /// it holds only nodes this evaluation walked, so it is bounded by the
+    /// evaluation's own work.
+    this_free_values: std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashSet<SemanticNodeId>>>,
     canonical: &'d str,
     owner: verter_type_expr::TopLevelOwnerId,
     /// The `null` / `undefined` algebra of the function's own project
@@ -9117,6 +9176,20 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn guard_applications_for_tests() -> usize {
     GUARD_APPLICATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many nodes this thread's object-literal recursion checks
+    /// ([`FlowEvaluator::value_mentions_receiver`]) walked; test-only.
+    static RECEIVER_WALK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many nodes this thread's object-literal recursion checks walked so
+/// far (test-only).
+#[cfg(test)]
+pub(super) fn receiver_walk_visits_for_tests() -> usize {
+    RECEIVER_WALK_VISITS.with(std::cell::Cell::get)
 }
 
 /// What one loop pass produced on the evaluator's side outputs beyond its
@@ -9907,6 +9980,10 @@ enum ObjectEvalAwait<'e> {
 /// — its outcome.
 enum ObjectEvalStep<'e> {
     Descend(&'e crate::flow_slice_content::SliceExpr),
+    /// The child's outcome, already evaluated in place: a method typed by
+    /// its contextual signature, which only a literal evaluated under a
+    /// contextual type (`FlowEvaluator::eval_object_literal`) asks for.
+    Deliver(Positional<SemanticNodeId>),
     Done(Positional<SemanticNodeId>),
 }
 
@@ -10055,6 +10132,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             match self.object_eval_step(&mut frame, delivered.take()) {
                 ObjectEvalStep::Done(value) => return value,
                 ObjectEvalStep::Descend(child) => delivered = Some(self.eval_expr(child)),
+                ObjectEvalStep::Deliver(outcome) => delivered = Some(outcome),
             }
         }
     }
@@ -10373,6 +10451,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 holds_before: self.holds.len(),
                 again,
             };
+            // A method is typed by the contextual signature its property's
+            // contextual type gives it, as a function-valued property is.
+            let member_context = match (&member.key, frame.contextual) {
+                (crate::flow_slice_content::SliceObjectKey::Static(name), Some(contextual)) => {
+                    self.contextual_property_type(contextual, name)
+                }
+                _ => None,
+            };
+            if let Some(node) = member_context
+                .and_then(|context| self.eval_function_argument_in_context(&member.value, context))
+            {
+                return ObjectEvalStep::Deliver(Positional::Value(node));
+            }
             return ObjectEvalStep::Descend(&member.value);
         }
         ObjectEvalStep::Done(self.object_eval_finish(frame))
@@ -10538,6 +10629,50 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         ObjectEvalStep::Done(Positional::Unmodeled)
     }
 
+    /// Whether `value` mentions the receiver `binder` anywhere below it
+    /// ([`ProjectSemanticDispatch::mentions_node`]), skipping every node an
+    /// earlier walk of this evaluation found to hold no polymorphic `this`
+    /// binder at all. A walk that meets none records every node it visited
+    /// so: a literal nested in a method of another is walked once, not
+    /// again for every literal around it.
+    fn value_mentions_receiver(&self, value: SemanticNodeId, binder: SemanticNodeId) -> bool {
+        let graph = self.dispatch.graph();
+        let mut free = self.this_free_values.borrow_mut();
+        let mut visited: Vec<SemanticNodeId> = Vec::new();
+        let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut holds_a_binder = false;
+        let mut stack = vec![value];
+        while let Some(current) = stack.pop() {
+            if current == binder {
+                return true;
+            }
+            if free.contains(&current) || !seen.insert(current) {
+                continue;
+            }
+            #[cfg(test)]
+            RECEIVER_WALK_VISITS.with(|visits| visits.set(visits.get() + 1));
+            visited.push(current);
+            let Some(data) = graph.node_data(current) else {
+                holds_a_binder = true;
+                continue;
+            };
+            if matches!(
+                data.as_ref(),
+                SemanticNodeData::TypeParam {
+                    param_index: super::substitute::THIS_BINDER_INDEX,
+                    ..
+                }
+            ) {
+                holds_a_binder = true;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        if !holds_a_binder {
+            free.extend(visited);
+        }
+        false
+    }
+
     /// An object literal whose members, methods and accessors all
     /// evaluated: its surface built.
     fn object_eval_finish(
@@ -10564,7 +10699,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let recursive = receiver.as_ref().is_some_and(|receiver| {
             surface_members
                 .iter()
-                .any(|member| self.dispatch.mentions_node(member.value, receiver.binder))
+                .any(|member| self.value_mentions_receiver(member.value, receiver.binder))
         });
         self.receiver = enclosing_receiver;
         if spread_seen {
@@ -10749,6 +10884,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 elements,
                 const_asserted,
             } => self.eval_array_literal(elements, *const_asserted, Some(contextual)),
+            // A function expression is typed by the contextual signature
+            // its context gives it (`getContextualSignature`): its
+            // unannotated parameters take the context's parameter types.
+            crate::flow_slice_content::SliceExpr::NestedFunctionValue { .. } => {
+                match self.eval_function_argument_in_context(expr, contextual) {
+                    Some(node) => Positional::Value(node),
+                    None => self.eval_expr(expr),
+                }
+            }
             _ => {
                 if let Some(fresh_view) = fresh_view {
                     if let Positional::Value(fresh) = self.eval_expr(fresh_view) {
@@ -14761,6 +14905,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::semantic_query::SemanticQueryKey::ProjectPath {
                 base,
                 path,
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            },
+        ) {
+            crate::semantic_query::QueryResult::Value(output) => Some(output.value),
+            _ => None,
+        }
+    }
+
+    /// The member `key` reads off `base` (a projection of one member
+    /// segment), for a key no identifier spells.
+    pub(super) fn project_member_key(
+        &mut self,
+        base: SemanticNodeId,
+        key: crate::semantic_query::PropertyKey,
+    ) -> Option<SemanticNodeId> {
+        let _demand_scope = super::LexicalDemandScopeGuard::push(
+            &self.dispatch.lexical_demand_scope,
+            Arc::from(self.canonical),
+        );
+        match self.dispatch.execute_type_node(
+            crate::semantic_query::SemanticQueryKey::ProjectPath {
+                base,
+                path: Arc::from([crate::semantic_query::PathSegment::Member(key)]),
                 context: crate::semantic_query::ProjectionReductionContext::published(
                     crate::semantic_query::ProjectionMode::Navigate,
                 ),
@@ -22522,6 +22691,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let mut frame = self.object_eval_frame(entries, *offset, false, None);
                         match self.object_eval_step(&mut frame, None) {
                             ObjectEvalStep::Done(value) => value,
+                            // Only a literal under a contextual type types a
+                            // method in place; this one has none.
+                            ObjectEvalStep::Deliver(_) => {
+                                unreachable!("no contextual type here")
+                            }
                             ObjectEvalStep::Descend(child) => {
                                 run.waiting.push(Waiting::Object(Box::new(frame)));
                                 run.waiting.push(Waiting::Erase);
@@ -22653,6 +22827,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Some(Waiting::Object(mut frame)) => {
                         match self.object_eval_step(&mut frame, Some(value)) {
                             ObjectEvalStep::Done(done) => value = done,
+                            // Only a literal under a contextual type types a
+                            // method in place; this one has none.
+                            ObjectEvalStep::Deliver(_) => {
+                                unreachable!("no contextual type here")
+                            }
                             ObjectEvalStep::Descend(child) => {
                                 run.waiting.push(Waiting::Object(frame));
                                 run.waiting.push(Waiting::Erase);
@@ -23011,8 +23190,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // `this` to the receiver.
                     let this_source = self.this_member_source(current, name);
                     let read_base = this_source.unwrap_or(current);
-                    let Some(member) =
-                        self.project_path_navigate(read_base, std::slice::from_ref(name))
+                    let Some(member) = this_source
+                        .and_then(|source| self.receiver_non_public_member(source, name))
+                        .or_else(|| {
+                            self.project_path_navigate(read_base, std::slice::from_ref(name))
+                        })
                     else {
                         self.record_degradation(FlowReturnDegradation::FlowGap(
                             crate::semantic_query::FlowGap::UnmodeledExpression,
@@ -23442,6 +23624,38 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// argument is applied by the statement's own evaluation order, never
     /// here, and a callee hold met inside it is not the argument's value,
     /// so neither form is read from the frame.
+    /// A `private`, `protected` or `#private` member `name` of the class
+    /// member source `source` a read off the class's own `this` reaches:
+    /// inside its class a non-public member reads as any other does, where
+    /// the public member walk would not find it. `None` for a public
+    /// member (the walk reads it) or one `source` does not declare.
+    fn receiver_non_public_member(
+        &self,
+        source: SemanticNodeId,
+        name: &str,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        let data = graph.node_data(source)?;
+        let SemanticNodeData::Object(surface) = &*data else {
+            return None;
+        };
+        let key = crate::semantic_query::PropertyKey::identifier(Arc::from(name));
+        if let Some(accessor) = surface.project_known_key_accessor(&key) {
+            return accessor
+                .property_member(graph)
+                .filter(|member| !member.visibility.is_public())
+                .and_then(|_| accessor.read_value(graph));
+        }
+        match surface.project_known_key(&key) {
+            crate::semantic_query::SurfaceKeyProjection::Exact(member)
+                if !member.visibility.is_public() =>
+            {
+                Some(member.value)
+            }
+            _ => None,
+        }
+    }
+
     fn eval_frame_call_argument(
         &mut self,
         expr: &crate::flow_slice_content::SliceExpr,
@@ -24523,10 +24737,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         break;
                     }
                     let this_source = self.this_member_source(callee_node, name);
-                    let Some(read) = self.project_path_navigate(
-                        this_source.unwrap_or(callee_node),
-                        std::slice::from_ref(name),
-                    ) else {
+                    let Some(read) = this_source
+                        .and_then(|source| self.receiver_non_public_member(source, name))
+                        .or_else(|| {
+                            self.project_path_navigate(
+                                this_source.unwrap_or(callee_node),
+                                std::slice::from_ref(name),
+                            )
+                        })
+                    else {
                         return self.degraded_unrepresentable_callee();
                     };
                     callee_node = match this_source {

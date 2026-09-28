@@ -432,10 +432,11 @@ fn a_refused_vue_template_analysis_serves_no_template() {
 }
 
 /// A public-API projection whose parses of the script are each refused
-/// their stack in turn serves either no projection or the projection the
-/// script has, never declarations read off the empty program in a refused
-/// parse's place; the read whose own extract of the script was refused
-/// serves none, and caches no extract of it.
+/// their stack in turn fails with the typed stack refusal, its subject the
+/// whole source, or serves the projection the script has (a refused parse
+/// of a prefetch leaves the projection to parse again): never declarations
+/// read off the empty program in a refused parse's place. The read whose
+/// own extract was refused fails, and caches no extract of it.
 #[test]
 fn a_refused_public_api_projection_serves_no_wrong_projection() {
     use verter_parser::oxc_parse::faults::{fail_reservations_here_after, reservations_here};
@@ -463,7 +464,7 @@ fn a_refused_public_api_projection_serves_no_wrong_projection() {
         parses >= 1,
         "the projection parses the script on this thread"
     );
-    let mut absent = 0;
+    let mut refusals = 0;
     for skip in 0..parses {
         let host = VerterHost::new_standalone(HostConfig::default());
         upsert_component(&host, "/src/Clean.vue", &component);
@@ -473,7 +474,13 @@ fn a_refused_public_api_projection_serves_no_wrong_projection() {
         let refused = projection(&host, "/src/Clean.vue");
         fail_reservations_here(Reservation::Parse, needed, 0);
         match refused {
-            Ok(None) => absent += 1,
+            Err(crate::PublicApiProjectionError::TscGeneration(
+                verter_compiler::tsc::TscGenerationError::StackUnavailable { needed: refused },
+            )) => {
+                assert_eq!(refused, needed);
+                refusals += 1;
+            }
+            Ok(None) => panic!("parse {skip} of {parses}: an absent projection"),
             Ok(Some(code)) => assert_eq!(code, clean, "parse {skip} of {parses}"),
             Err(error) => panic!("parse {skip} of {parses}: {error:?}"),
         }
@@ -485,8 +492,8 @@ fn a_refused_public_api_projection_serves_no_wrong_projection() {
         );
     }
     assert!(
-        absent >= 1,
-        "the read whose own extract was refused serves none"
+        refusals >= 1,
+        "the read whose own extract was refused fails with the typed refusal"
     );
 }
 
@@ -494,12 +501,15 @@ fn a_refused_public_api_projection_serves_no_wrong_projection() {
 /// runs its operations in.
 const UNLEASED_WALK_CHILD: &str = "VERTER_UNLEASED_WALK_GUARD_CHILD";
 
-/// Every walk of oxc's that the host's operations make over syntax nesting
-/// past what the thread's stack holds by its length runs under a
-/// walk-stack lease its operation holds, the operation's one fallible step:
-/// none reserves a region of its own, a failure no operation could report.
-/// The operations (upsert, analysis, a flow return, the runtime compile, a
-/// compile request, the public-API projection) run over TypeScript, Vue
+/// Every walk of oxc's that the host's operations, and the compiler's
+/// entries outside a host, make over syntax nesting past what the
+/// thread's stack holds by its length runs under a walk-stack lease its
+/// operation holds, the operation's one fallible step: none reserves a
+/// region of its own, a failure no operation could report. The host
+/// operations (upsert, analysis, a flow return, the runtime compile, a
+/// compile request, the public-API projection) and the standalone entries
+/// (the direct, prepared and batched compile, the `tsc` generation, the
+/// specifier inventory) run over TypeScript, Vue
 /// (script setup and options API) and Svelte (runes and legacy) sources
 /// whose constructs nest 201 levels deep, in a child process of their own
 /// so that no other test's walks are counted.
@@ -641,6 +651,7 @@ fn host_operations_over_deep_sources() {
         let _ = host.get_analysis(id);
         compile(id);
     }
+    standalone_entries_over_deep_sources(&setup, &options);
     let unleased = take_unleased_walks();
     assert!(
         unleased.is_empty(),
@@ -787,4 +798,87 @@ fn every_refused_lease_of_an_indexed_materialisation_publishes_nothing() {
         .expect("spawn the thread")
         .join()
         .expect("the materialisations return");
+}
+
+/// The compiler's entries outside a host, over the guard's deep sources:
+/// the standalone compile (direct, prepared and batched; Vue runtime and
+/// IDE products, Svelte runtime), the standalone checker's `tsc`
+/// generation (one-shot, and extracted then generated), and the specifier
+/// inventory. Their outcomes are the entries' own tests' concern; the guard
+/// reads only which walks they make.
+fn standalone_entries_over_deep_sources(setup: &str, options: &str) {
+    use verter_compiler::compile::types::VueExecutionInputs;
+    use verter_compiler::compile::VueMacroSemanticInput;
+    use verter_compiler::compile_request::{
+        CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest,
+        RuntimeProductRequest, SvelteCompileRequest, VueCompileRequest,
+    };
+    use verter_compiler::standalone::{
+        DirectExecutionInputs, StandaloneCompiler, SvelteExecutionInputs,
+    };
+    let request = |products: Vec<CompileProduct>, framework: FrameworkCompileRequest| {
+        CompileRequest::new(products, framework, None, None, None, false, false)
+            .expect("the demand constructs")
+    };
+    let vue = |products| {
+        request(
+            products,
+            FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+        )
+    };
+    let vue_inputs = VueExecutionInputs::default();
+    let macros = VueMacroSemanticInput::Unavailable;
+    for source in [setup, options] {
+        for products in [
+            vec![CompileProduct::RuntimeClient(
+                RuntimeProductRequest::default(),
+            )],
+            vec![CompileProduct::IdeCompanion(IdeProductRequest {
+                want_source_map: true,
+                ..IdeProductRequest::default()
+            })],
+        ] {
+            let request = vue(products);
+            let inputs = || DirectExecutionInputs::Vue {
+                execution: &vue_inputs,
+                macros: &macros,
+            };
+            let _ = StandaloneCompiler.compile(source, &request, inputs());
+            let prepared = StandaloneCompiler.prepare(source, &request);
+            let _ = StandaloneCompiler.compile_prepared(source, &prepared, &request, inputs());
+        }
+        let _ = verter_compiler::tsc::generate_tsc_output(source, "Deep");
+        if let Ok(Some(state)) = verter_compiler::tsc::extract_tsc_state(
+            source,
+            "Deep",
+            &verter_compiler::tsc::TscExtractOptions::default(),
+        ) {
+            let _ = verter_compiler::tsc::generate_tsc_from_state(
+                &state,
+                "Deep",
+                verter_compiler::tsc::TscMode::Public,
+                verter_compiler::tsc::MacroTscInput::NotRequired,
+                &verter_compiler::tsc::FallthroughPropsProjection::none(),
+            );
+        }
+        if let Ok(Ok(output)) = verter_compiler::tsc::generate_tsc_output(source, "Deep")
+            .map(|output| Ok::<_, ()>(output.code))
+        {
+            let _ = verter_compiler::tsc::collect_module_specifier_spans(&output);
+        }
+    }
+    let svelte = deep_runes_component(201);
+    let request = request(
+        vec![CompileProduct::RuntimeClient(
+            RuntimeProductRequest::default(),
+        )],
+        FrameworkCompileRequest::Svelte(SvelteCompileRequest::default()),
+    );
+    let svelte_inputs = SvelteExecutionInputs::default();
+    let inputs = || DirectExecutionInputs::Svelte {
+        execution: &svelte_inputs,
+    };
+    let _ = StandaloneCompiler.compile(&svelte, &request, inputs());
+    let prepared = StandaloneCompiler.prepare(&svelte, &request);
+    let _ = StandaloneCompiler.compile_prepared(&svelte, &prepared, &request, inputs());
 }

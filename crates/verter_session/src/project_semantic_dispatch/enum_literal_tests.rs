@@ -12,7 +12,7 @@
 //! The four settings agree on every row except where a row says otherwise.
 
 use super::checker_probe_lane_tests::{mismatches_in, ProbeProject};
-use super::differential_harness_tests::Matrix;
+use super::differential_harness_tests::{Matrix, Read};
 
 const ENUMS: &str = "\
 export enum E { A, B }
@@ -573,57 +573,134 @@ fn infinity_and_nan_naming_the_library_globals_are_the_global_numbers() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Enum members referencing declarations of the same file written after
+/// them: another enum, another declaration of a merged enum, another
+/// namespace block, a `const`; and the same in ambient contexts.
+const LATER_DECLARATIONS: &str = "\
+enum F { A = G.A, B = 1 }
+enum G { A = F.A }
+enum M { A = B }
+enum M { B = 1 }
+enum Q { A = c }
+const c = 5;
+namespace P { export enum P1 { A = P.P2.A } }
+namespace P { export enum P2 { A = 4 } }
+enum R { A = S.B + 1 }
+enum S { B = 7 }
+declare enum D1 { A = D2.A }
+declare enum D2 { A = 1 }
+declare const enum C1 { A = C2.A }
+declare const enum C2 { A = 2 }
+declare namespace NS { enum N1 { A = N2.A } enum N2 { A = 3 } }
+";
+
 /// A member referencing a member of ANOTHER enum declaration (another enum,
-/// or another declaration of a merged enum) declared after it in the same
-/// file reads `0` (TS2651), and one referencing a `const` declared after it
-/// is computed (TS2448) — the checker's declared-before-use rule across
-/// declarations.
+/// another declaration of a merged enum, one in a later namespace block)
+/// declared after it in the same file reads `0` (TS2651), and one
+/// referencing a `const` declared after it is computed (TS2448) — the
+/// checker's declared-before-use rule across declarations. A use in an
+/// ambient context reads every declaration as declared before it.
 ///
 /// Measured on TypeScript 7.0.2, alike under every setting: `F.A extends
-/// 0`, `G.A extends 0`, `M.A extends 0`, `1 extends Q.A` and `5 extends
-/// Q.A` are each `"y"`.
+/// 0`, `G.A extends 0`, `M.A extends 0`, `1 extends Q.A`, `5 extends Q.A`,
+/// `P.P1.A extends 0`, `R.A extends 1`, `D1.A extends 1`, `1 extends D1.A`,
+/// `C1.A extends 2`, `NS.N1.A extends 3` are each `"y"`; `1 extends NS.N1.A`
+/// is `"n"`.
 ///
-/// What the lane gives: `"n"` for each but `5 extends Q.A` (it reads the
-/// later declaration's own value: `F.A`, `G.A` and `M.A` are computed or
-/// `1`, `Q.A` is `5`).
+/// Mutation: reading every declaration of the file as declared before its
+/// use answers `F.A`, `G.A`, `M.A`, `1 extends Q.A`, `P.P1.A` and `R.A`
+/// `"n"`; ignoring the ambient context answers `D1.A`, `C1.A` and `NS.N1.A`
+/// `"n"`.
 #[test]
-#[ignore = "a reference to a member or const declared after it in another declaration of the same file reads the checker's declared-before-use value"]
 fn a_reference_to_a_later_declaration_reads_as_the_checker_reads_it() {
     let yes = |probe: &'static str| (probe, "\"y\"");
-    let failures = Matrix::new(
-        "enum F { A = G.A, B = 1 }\nenum G { A = F.A }\nenum M { A = B }\nenum M { B = 1 }\nenum Q { A = c }\nconst c = 5;\n",
-    )
-    .types(&[
+    let failures = Matrix::new(LATER_DECLARATIONS).types(&[
         yes("F.A extends 0 ? \"y\" : \"n\""),
         yes("G.A extends 0 ? \"y\" : \"n\""),
         yes("M.A extends 0 ? \"y\" : \"n\""),
         yes("1 extends Q.A ? \"y\" : \"n\""),
         yes("5 extends Q.A ? \"y\" : \"n\""),
+        yes("P.P1.A extends 0 ? \"y\" : \"n\""),
+        yes("R.A extends 1 ? \"y\" : \"n\""),
+        yes("D1.A extends 1 ? \"y\" : \"n\""),
+        yes("1 extends D1.A ? \"y\" : \"n\""),
+        yes("C1.A extends 2 ? \"y\" : \"n\""),
+        yes("NS.N1.A extends 3 ? \"y\" : \"n\""),
+        ("1 extends NS.N1.A ? \"y\" : \"n\"", "\"n\""),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// An enum in a namespace naming the namespace's own non-exported `const`
-/// — `k`, or `Infinity` / `NaN` shadowing the global numbers — reads its
-/// value.
+/// Enums in namespaces naming the namespaces' own members, exported or not:
+/// a `const` (one spelled `Infinity` / `NaN`), an enum, a `const` of an
+/// enclosing namespace, and a `const` of another block of a merged
+/// namespace.
+const NAMESPACE_MEMBERS: &str = "\
+namespace N { const Infinity = 2; const NaN = 3; export enum E { A = Infinity, B = NaN } }
+namespace N2 { const k = 4; export enum E { A = k } }
+namespace N2 { export enum F { A = k } }
+namespace N4 { const k = 1; enum H { X = 1 } export const e = 2; export enum E { A = k, B = H.X, C = e } }
+namespace Outer { const o = 6; export namespace Inner { export enum E { A = o } } }
+";
+
+/// An enum in a namespace names the namespace's own non-exported members —
+/// a `const` (one spelled `Infinity` or `NaN` shadows the global number),
+/// an enum — and exported ones, in its own block or an enclosing one; a
+/// non-exported member of another block of a merged namespace is not in
+/// scope (TS2304), so the member naming it is computed.
 ///
 /// Measured on TypeScript 7.0.2, alike under every setting: `N.E.A extends
-/// 2`, `N.E.B extends 3`, `N2.E.A extends 4` are each `"y"`.
+/// 2`, `N.E.B extends 3`, `N2.E.A extends 4`, `1 extends N2.F.A`, `N4.E.A
+/// extends 1`, `N4.E.B extends 1`, `N4.E.C extends 2` and
+/// `Outer.Inner.E.A extends 6` are each `"y"`.
 ///
-/// What the lane gives: `"n"` for each (a namespace's non-exported value
-/// declaration is not indexed, so `Infinity` / `NaN` read the global
-/// numbers and `k` names nothing).
+/// Mutation: resolving no private member of an enclosing namespace answers
+/// `N.E.A`, `N.E.B`, `N2.E.A`, `N4.E.A`, `N4.E.B` and `Outer.Inner.E.A`
+/// `"n"`; reading a private member outside its block answers `1 extends
+/// N2.F.A` `"n"`.
 #[test]
-#[ignore = "an enum initializer reads its namespace's non-exported const declarations"]
 fn an_enum_reads_its_namespaces_non_exported_constants() {
     let yes = |probe: &'static str| (probe, "\"y\"");
-    let failures = Matrix::new(
-        "namespace N { const Infinity = 2; const NaN = 3; export enum E { A = Infinity, B = NaN } }\nnamespace N2 { const k = 4; export enum E { A = k } }\n",
-    )
-    .types(&[
+    let failures = Matrix::new(NAMESPACE_MEMBERS).types(&[
         yes("N.E.A extends 2 ? \"y\" : \"n\""),
         yes("N.E.B extends 3 ? \"y\" : \"n\""),
         yes("N2.E.A extends 4 ? \"y\" : \"n\""),
+        yes("1 extends N2.F.A ? \"y\" : \"n\""),
+        yes("N4.E.A extends 1 ? \"y\" : \"n\""),
+        yes("N4.E.B extends 1 ? \"y\" : \"n\""),
+        yes("N4.E.C extends 2 ? \"y\" : \"n\""),
+        yes("Outer.Inner.E.A extends 6 ? \"y\" : \"n\""),
     ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A namespace's non-exported member is no member of the namespace read
+/// from outside it: `typeof N4.k` and `typeof N4.H` name nothing (TS2339),
+/// while the exported `typeof N4.e` is `2`.
+///
+/// Measured on TypeScript 7.0.2, alike under every setting: `typeof N4.e`
+/// is `2`, `typeof N4.k` and `typeof N4.H` are the error type (`any`).
+///
+/// Mutation: reading a qualified member without the export check answers
+/// `typeof N4.k` a clean `1` — a member the checker says does not exist.
+#[test]
+fn a_namespaces_non_exported_member_is_not_read_from_outside() {
+    let matrix = Matrix::new(NAMESPACE_MEMBERS);
+    let mut failures = matrix.types(&[("typeof N4.e", "2")]);
+    let rows: Vec<(Read<'_>, Vec<&str>)> = ["typeof N4.k", "typeof N4.H"]
+        .into_iter()
+        .map(|probe| (Read::Type(probe), vec!["any"; 4]))
+        .collect();
+    for ((read, _), verdicts) in rows.iter().zip(matrix.verdicts(&rows)) {
+        let Read::Type(probe) = read else {
+            unreachable!("type rows")
+        };
+        failures.extend(
+            verdicts
+                .into_iter()
+                .filter(|verdict| !verdict.matched && verdict.class == "WRONG-CLEAN")
+                .map(|verdict| format!("{probe}: {}", verdict.lane)),
+        );
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
