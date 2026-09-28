@@ -48,7 +48,7 @@ export function aForEachResult(xs: number[]) { return xs.forEach(() => {}); }
 
 /// The library every project registers and the checker reads as its only lib
 /// file.
-const GLOBALS_LIB: &str = r##"interface Object { toString(): string; hasOwnProperty(v: PropertyKey): boolean; }
+pub(super) const GLOBALS_LIB: &str = r##"interface Object { toString(): string; hasOwnProperty(v: PropertyKey): boolean; }
 interface Function { apply(this: Function, thisArg: any, argArray?: any): any; readonly length: number; }
 interface CallableFunction extends Function {
   apply<T, R>(this: (this: T) => R, thisArg: T): R;

@@ -1250,6 +1250,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "094addee6d5b49b37da84c00789b93f9bf2199ae708427f46814ba089fa2a407",
     ),
     (
+        "E04_spread_optional_chain",
+        "3096817da7d969842611fdb3faca184737f1c1fe0dc290e7d6a769935cb7c5b1",
+    ),
+    (
         "E05_empty_literal",
         "954bd988d8bcf4862f58c7d2cf598d8debda29850d2e60ac6d1b031d09dc4d08",
     ),
@@ -3894,7 +3898,7 @@ mod corpus_suite {
             ),
             (
                 "E04_spread_optional_chain",
-                "checker prints `{ label?: string | undefined; }`; the renderer spells the unmodelled-position marker `Opaque(UnmodeledPosition)` — print syntax AND semantics differ; the FailsClosed divergence is held by the semantic test",
+                "checker prints `{ label?: string | undefined; }`; the renderer prints `ObjectSpreadProgram` — the semantic comparison composes the program through the public spread-projection consumer",
             ),
             (
                 "H02_union_spread_source",
@@ -5583,7 +5587,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // through the constructed instance matches too. Loops iterate to the
     // checker's fixed point: D05 and the X58–X60 loop transfers match the
     // checker.
-    (Owner::U6FlowReturnSubstrate, 67, 60, 1),
+    (Owner::U6FlowReturnSubstrate, 67, 61, 1),
     // A `typeof` test over an `unknown` / `any` arm substitutes the kind's
     // implied type (N44, N46), and a comparison value is `boolean`, so the
     // `let`-aliased condition control (N84) publishes complete. A `const`

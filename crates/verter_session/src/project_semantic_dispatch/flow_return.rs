@@ -7262,6 +7262,7 @@ fn slice_expr_reads_frame(expr: &crate::flow_slice_content::SliceExpr) -> bool {
                     | SliceCall::TaggedTemplate(inner) => slice_expr_reads_frame(inner),
                     SliceCall::Member { receiver, .. } => slice_expr_reads_frame(receiver),
                     SliceCall::OnValue { object, .. } => slice_expr_reads_frame(object),
+                    SliceCall::OptionalChain { root, .. } => slice_expr_reads_frame(root),
                     SliceCall::LocalFunctionShadow | SliceCall::OnHeritage { .. } => false,
                 }
         }
@@ -7396,6 +7397,7 @@ fn expression_effect_tree(
                         children.push(callee)
                     }
                     SliceCall::OnValue { object, .. } => children.push(object),
+                    SliceCall::OptionalChain { root, .. } => children.push(root),
                     _ => {}
                 }
                 children.extend(arguments.iter());
@@ -9897,6 +9899,22 @@ enum ObjectEvalAwait<'e> {
 enum ObjectEvalStep<'e> {
     Descend(&'e crate::flow_slice_content::SliceExpr),
     Done(Positional<SemanticNodeId>),
+}
+
+/// One link of an optional chain read by [`FlowEvaluator::optional_chain_link`].
+enum OptionalLink {
+    /// The link's read, off `base` — the value the link was read from,
+    /// after its own nullish strip.
+    Read {
+        base: SemanticNodeId,
+        read: SemanticNodeId,
+    },
+    /// The link's base was nullish through and through: the chain
+    /// short-circuits to `undefined`.
+    ShortCircuit,
+    /// The link is a position this lane does not model; the degradation
+    /// is recorded.
+    Unmodeled,
 }
 
 enum NullishStrip {
@@ -22966,82 +22984,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 };
                 let mut current = node;
                 let mut adds_undefined = false;
-                for (index, (name, optional)) in links.iter().enumerate() {
-                    if *optional {
-                        match self.strip_nullish_arms_for_optional_read(current) {
-                            NullishStrip::Unchanged => {}
-                            NullishStrip::Stripped(stripped) => {
-                                adds_undefined = true;
-                                current = stripped;
-                            }
-                            // A base that is nullish ENTIRELY short-circuits
-                            // the chain: the read is `undefined`, full stop.
-                            NullishStrip::AllNullish => {
-                                return Positional::Value(graph.intern_node(
-                                    SemanticNodeData::Primitive(PrimitiveKind::Undefined),
-                                ));
-                            }
+                for index in 0..links.len() {
+                    match self.optional_chain_link(
+                        current,
+                        links,
+                        index,
+                        narrow_root.as_ref(),
+                        &mut adds_undefined,
+                    ) {
+                        OptionalLink::Read { read, .. } => current = read,
+                        // A base that is nullish ENTIRELY short-circuits
+                        // the chain: the read is `undefined`, full stop.
+                        OptionalLink::ShortCircuit => {
+                            return Positional::Value(graph.intern_node(
+                                SemanticNodeData::Primitive(PrimitiveKind::Undefined),
+                            ));
                         }
+                        OptionalLink::Unmodeled => return Positional::Unmodeled,
                     }
-                    if let Some(narrowed) = narrow_root.as_ref().and_then(|root| {
-                        self.narrowed_read(&crate::flow_slice_content::SliceNarrowSubject {
-                            root: root.clone(),
-                            path: links[..=index]
-                                .iter()
-                                .map(|(name, _)| Arc::clone(name))
-                                .collect(),
-                        })
-                    }) {
-                        current = narrowed;
-                        continue;
-                    }
-                    // A class's polymorphic `this` reads its class's member
-                    // where the member is declared, binding the member's own
-                    // `this` to the receiver.
-                    let this_source = self.this_member_source(current, name);
-                    let read_base = this_source.unwrap_or(current);
-                    let Some(member) =
-                        self.project_path_navigate(read_base, std::slice::from_ref(name))
-                    else {
-                        self.record_degradation(FlowReturnDegradation::FlowGap(
-                            crate::semantic_query::FlowGap::UnmodeledExpression,
-                        ));
-                        return Positional::Unmodeled;
-                    };
-                    // An element read (`a[0]`) the walk misses is a position
-                    // this lane does not model, never a published miss.
-                    let element_read = name.parse::<u64>().is_ok();
-                    if element_read
-                        && matches!(
-                            graph.node_data(member).as_deref(),
-                            Some(SemanticNodeData::Opaque(
-                                crate::semantic_query::QueryError::Miss
-                            ))
-                        )
-                    {
-                        self.record_degradation(FlowReturnDegradation::FlowGap(
-                            crate::semantic_query::FlowGap::UnmodeledExpression,
-                        ));
-                        return Positional::Unmodeled;
-                    }
-                    let member = match this_source {
-                        Some(_) => self.dispatch.bind_this_receiver(member, current),
-                        None => member,
-                    };
-                    // A declared-optional member (`b?: string`) folds its
-                    // absent-key `undefined` into THIS link's read — the
-                    // same authority `project_segments_navigate` uses for
-                    // a plain member path — regardless of whether the hop
-                    // itself used `?.` or `.`.
-                    let declared_optional = self.member_read_optionality(
-                        self.member_declaring_surface(read_base, name.as_ref()),
-                        name.as_ref(),
-                    ) == Some(true);
-                    current = if declared_optional {
-                        self.fold_optional_read_undefined(member)
-                    } else {
-                        member
-                    };
                 }
                 // The short-circuit's `undefined` is a strict-null fact: with
                 // `strictNullChecks` off the chain reads the member type.
@@ -23361,6 +23321,98 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // at THIS position — the marker, never a fabricated `any` and
             // never the enclosing structure.
             crate::flow_slice_content::SliceExpr::Elided => Positional::Unmodeled,
+        }
+    }
+
+    /// Read link `index` of an optional chain's `links` off `current` —
+    /// the one link rule every optional chain shares (a member-valued
+    /// chain's links, and an optional call chain's links before and after
+    /// its call). An optional link strips its base's nullish arms first,
+    /// setting `stripped` when that removed an arm; a narrowing standing
+    /// on the link's reference is what it reads; a class's polymorphic
+    /// `this` reads its class's member where declared; a declared-optional
+    /// member folds its absent-key `undefined` into the read.
+    fn optional_chain_link(
+        &mut self,
+        mut current: SemanticNodeId,
+        links: &[(Arc<str>, bool)],
+        index: usize,
+        narrow_root: Option<&crate::flow_slice_content::SliceNarrowRoot>,
+        stripped: &mut bool,
+    ) -> OptionalLink {
+        let (name, optional) = &links[index];
+        if *optional {
+            match self.strip_nullish_arms_for_optional_read(current) {
+                NullishStrip::Unchanged => {}
+                NullishStrip::Stripped(base) => {
+                    *stripped = true;
+                    current = base;
+                }
+                NullishStrip::AllNullish => return OptionalLink::ShortCircuit,
+            }
+        }
+        if let Some(narrowed) = narrow_root.and_then(|root| {
+            self.narrowed_read(&crate::flow_slice_content::SliceNarrowSubject {
+                root: root.clone(),
+                path: links[..=index]
+                    .iter()
+                    .map(|(name, _)| Arc::clone(name))
+                    .collect(),
+            })
+        }) {
+            return OptionalLink::Read {
+                base: current,
+                read: narrowed,
+            };
+        }
+        // A class's polymorphic `this` reads its class's member
+        // where the member is declared, binding the member's own
+        // `this` to the receiver.
+        let this_source = self.this_member_source(current, name);
+        let read_base = this_source.unwrap_or(current);
+        let Some(member) = self.project_path_navigate(read_base, std::slice::from_ref(name)) else {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::UnmodeledExpression,
+            ));
+            return OptionalLink::Unmodeled;
+        };
+        // An element read (`a[0]`) the walk misses is a position
+        // this lane does not model, never a published miss.
+        let element_read = name.parse::<u64>().is_ok();
+        if element_read
+            && matches!(
+                self.dispatch.graph().node_data(member).as_deref(),
+                Some(SemanticNodeData::Opaque(
+                    crate::semantic_query::QueryError::Miss
+                ))
+            )
+        {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::UnmodeledExpression,
+            ));
+            return OptionalLink::Unmodeled;
+        }
+        let member = match this_source {
+            Some(_) => self.dispatch.bind_this_receiver(member, current),
+            None => member,
+        };
+        // A declared-optional member (`b?: string`) folds its
+        // absent-key `undefined` into THIS link's read — the
+        // same authority `project_segments_navigate` uses for
+        // a plain member path — regardless of whether the hop
+        // itself used `?.` or `.`.
+        let declared_optional = self.member_read_optionality(
+            self.member_declaring_surface(read_base, name.as_ref()),
+            name.as_ref(),
+        ) == Some(true);
+        let read = if declared_optional {
+            self.fold_optional_read_undefined(member)
+        } else {
+            member
+        };
+        OptionalLink::Read {
+            base: current,
+            read,
         }
     }
 
@@ -24452,6 +24504,135 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     return value;
                 }
                 self.call_return_of_callee_node(callee_node, site)
+            }
+            crate::flow_slice_content::SliceCall::OptionalChain {
+                root,
+                links,
+                optional_call,
+                after,
+            } => {
+                // The checker's optional chain: each `?.` edge strips its
+                // base's nullish arms (short-circuiting to `undefined`
+                // when nothing else is left), the callee is read and called
+                // exactly as a member callee is, the links after the call
+                // read off its value, and the chain's value carries
+                // `undefined` beside the read when a strip removed arms.
+                let node = match self.call_operand_value(root, site) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
+                };
+                // A member of an `any` receiver, its call, and every read
+                // off that are `any`.
+                if self.node_is_semantic_any(node) {
+                    return Positional::Value(CallValue::modeled_any(self.dispatch));
+                }
+                let undefined = self
+                    .dispatch
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                let narrow_root = match root.as_ref() {
+                    crate::flow_slice_content::SliceExpr::Param { ordinal, binding } => {
+                        Some(crate::flow_slice_content::SliceNarrowRoot::Param {
+                            ordinal: *ordinal,
+                            binding: *binding,
+                        })
+                    }
+                    crate::flow_slice_content::SliceExpr::Local {
+                        binding,
+                        name,
+                        captured: false,
+                        ..
+                    } => Some(crate::flow_slice_content::SliceNarrowRoot::Local {
+                        name: Arc::clone(name),
+                        binding: binding.clone(),
+                    }),
+                    _ => None,
+                };
+                let mut stripped = false;
+                let mut callee = node;
+                let mut receiver = None;
+                for index in 0..links.len() {
+                    if self.node_is_semantic_any(callee) {
+                        return Positional::Value(CallValue::modeled_any(self.dispatch));
+                    }
+                    match self.optional_chain_link(
+                        callee,
+                        links,
+                        index,
+                        narrow_root.as_ref(),
+                        &mut stripped,
+                    ) {
+                        OptionalLink::Read { base, read } => {
+                            receiver = Some(base);
+                            callee = read;
+                        }
+                        OptionalLink::ShortCircuit => {
+                            return Positional::Value(CallValue::of_resolved_call(
+                                self.dispatch,
+                                undefined,
+                            ));
+                        }
+                        OptionalLink::Unmodeled => return Positional::Unmodeled,
+                    }
+                }
+                if self.node_is_semantic_any(callee) {
+                    return Positional::Value(CallValue::modeled_any(self.dispatch));
+                }
+                if *optional_call {
+                    match self.strip_nullish_arms_for_optional_read(callee) {
+                        NullishStrip::Unchanged => {}
+                        NullishStrip::Stripped(base) => {
+                            stripped = true;
+                            callee = base;
+                        }
+                        NullishStrip::AllNullish => {
+                            return Positional::Value(CallValue::of_resolved_call(
+                                self.dispatch,
+                                undefined,
+                            ));
+                        }
+                    }
+                }
+                // The receiver the chain read the callee off is the call's
+                // receiver: the executor reads it where it would evaluate
+                // the authored (unstripped) one.
+                if let Some(receiver) = receiver {
+                    self.call_receivers.insert(site.span(), receiver);
+                }
+                let value = match self.eval_call_via_resolve_call(callee, site, arguments) {
+                    Some(value) => value,
+                    None => self.call_return_of_callee_node(callee, site),
+                };
+                let value = match value {
+                    Positional::Value(value) => value,
+                    other => return other,
+                };
+                if after.is_empty() && !(stripped && self.nullability.is_strict()) {
+                    return Positional::Value(value);
+                }
+                let mut current = value.into_node();
+                for index in 0..after.len() {
+                    if self.node_is_semantic_any(current) {
+                        break;
+                    }
+                    match self.optional_chain_link(current, after, index, None, &mut stripped) {
+                        OptionalLink::Read { read, .. } => current = read,
+                        OptionalLink::ShortCircuit => {
+                            return Positional::Value(CallValue::of_resolved_call(
+                                self.dispatch,
+                                undefined,
+                            ));
+                        }
+                        OptionalLink::Unmodeled => return Positional::Unmodeled,
+                    }
+                }
+                // The short-circuit's `undefined` is a strict-null fact,
+                // exactly as for a member-valued chain.
+                if stripped && self.nullability.is_strict() {
+                    current = self.union(&[current, undefined]);
+                }
+                Positional::Value(CallValue::of_resolved_call(self.dispatch, current))
             }
             crate::flow_slice_content::SliceCall::OnValue { object, member } => {
                 // `new C().m()`, `b.m().m()`: the member of the value is

@@ -382,14 +382,7 @@ fn a_comma_expression_is_its_last_operand_after_its_writes() {
 
 /// `f?.()` over `f?: () => string` is `string | undefined` (`string` without
 /// `strictNullChecks`).
-///
-/// What the lane gives:
-/// - `lgOptionalCall`: the checker answers `string | undefined` (strict),
-///   `string` (strictNullChecks off), `string | undefined` (noImplicitAny off),
-///   `string` (both off); the lane measured `<opaque UnmodeledPosition>`
-///   degraded by FlowGap(UnmodeledExpression).
 #[test]
-#[ignore = "an optional call is the callee's result or undefined"]
 fn an_optional_call_adds_undefined_to_the_callee_result() {
     let matrix = Matrix::new(LOGICAL);
     let failures = matrix.nullness(&[(
@@ -397,6 +390,113 @@ fn an_optional_call_adds_undefined_to_the_callee_result() {
         "string | undefined",
         "string",
     )]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Optional chains that hold a call, measured with tsc 7.0.2 under the four
+/// settings (`noImplicitAny` never changes the answer).
+const OPTIONAL_CALLS: &str = r##"
+export interface S { self(): this; v: number }
+export function ocCallee(g?: () => string) { return g?.(); }
+export function ocMember(o: { m?: () => string }) { return o.m?.(); }
+export function ocReceiver(o?: { m(): string }) { return o?.m(); }
+export function ocBoth(o?: { m?: () => string }) { return o?.m?.(); }
+export function ocThen(g?: () => string) { return g?.().length; }
+export function ocDefinite(g: () => string) { return g?.(); }
+export function ocNullReceiverThen(o: { m(): string } | null) { return o?.m().length; }
+export function ocNullCallee(g: (() => string) | null) { return g?.(); }
+export function ocDeep(o?: { a: { m(): string } }) { return o?.a.m(); }
+export function ocObjThen(o?: { m(): { v: number } }) { return o?.m().v; }
+export function ocCallMethod(f?: (a: number) => string) { return f?.call(undefined, 1); }
+export function ocBind(f?: (a: number) => string) { return f?.bind(undefined, 1); }
+export function ocThisParam(o?: { v: number; m<T>(this: T): T }) { return o?.m(); }
+export function pThisParam(o: { v: number; m<T>(this: T): T }) { return o.m(); }
+export function ocThisThen(o?: S) { return o?.self().v; }
+export function ocThis(o: S | undefined) { return o?.self(); }
+export function pThis(o: S) { return o.self(); }
+export function ocNarrowed(o: { m?: () => string }) { if (o.m) { return o.m?.(); } throw 0; }
+"##;
+
+/// An optional chain holding a call short-circuits to `undefined` on every
+/// `?.` edge whose base has nullish arms: the chain is the call's value (and
+/// the links read off it) with `undefined` beside it exactly when a strip
+/// removed arms, and `undefined` is a strict-null fact. A callee that is
+/// never nullish (`ocDefinite`) adds nothing, and a member called off the
+/// stripped receiver reads that receiver (`f?.call(…)`). The library
+/// supplies `String` for the `.length` reads and `CallableFunction` for
+/// `call`.
+#[test]
+fn an_optional_chain_call_adds_undefined_on_its_short_circuit_edge() {
+    let matrix =
+        Matrix::new(OPTIONAL_CALLS).lib(super::differential_global_library_tests::GLOBALS_LIB);
+    let failures = matrix.nullness(&[
+        (Read::Return("ocCallee"), "string | undefined", "string"),
+        (Read::Return("ocMember"), "string | undefined", "string"),
+        (Read::Return("ocReceiver"), "string | undefined", "string"),
+        (Read::Return("ocBoth"), "string | undefined", "string"),
+        (Read::Return("ocThen"), "number | undefined", "number"),
+        (Read::Return("ocDefinite"), "string", "string"),
+        (
+            Read::Return("ocNullReceiverThen"),
+            "number | undefined",
+            "number",
+        ),
+        (Read::Return("ocNullCallee"), "string | undefined", "string"),
+        (Read::Return("ocDeep"), "string | undefined", "string"),
+        (Read::Return("ocObjThen"), "number | undefined", "number"),
+        (Read::Return("ocCallMethod"), "string | undefined", "string"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An interface method returning `this` returns its receiver's type, and a
+/// guarded root's optional call reads the narrowed member.
+///
+/// What the lane gives:
+/// - `pThis` (no optional chain): the checker answers `S`; the lane
+///   measured `<unrendered BareRef(BareRefCarrier { name: "this", .. })>`
+///   (the interface's polymorphic `this` is not bound to the receiver on
+///   any call rail).
+/// - `ocThis`, `ocThisThen`: the same unbound `this` under the chain
+///   (`undefined | <unrendered BareRef this>`, and `<opaque Miss> |
+///   undefined` for `.v` read off it).
+/// - `ocNarrowed`: the checker answers `string`; the lane measured
+///   `<opaque UnmodeledPosition>` degraded by FlowGap(UnmodeledExpression)
+///   (the write-effect rail every optional chain root takes refuses a root
+///   an in-frame guard changes).
+/// - `pThisParam` (no optional chain) and `ocThisParam`: the checker infers
+///   `T` from the receiver (`{ v: number; m<T>(this: T): T; }`, with
+///   `| undefined` under the chain); wrong-but-clean: the lane measured
+///   `unknown` (the call executor infers nothing from a `this` parameter).
+/// - `ocBind`: the checker answers `(() => string) | undefined`; the lane
+///   measured `<opaque UnmodeledPosition> | undefined` degraded by
+///   UnrepresentableCallee (`bind` has no modeled call, chain or not).
+#[test]
+#[ignore = "an interface's this return binds the receiver; a guarded optional-chain root reads its narrowing"]
+fn an_optional_chain_call_binds_interface_this_and_reads_a_guarded_root() {
+    let matrix =
+        Matrix::new(OPTIONAL_CALLS).lib(super::differential_global_library_tests::GLOBALS_LIB);
+    let failures = matrix.nullness(&[
+        (Read::Return("pThis"), "S", "S"),
+        (Read::Return("ocThis"), "S | undefined", "S"),
+        (Read::Return("ocThisThen"), "number | undefined", "number"),
+        (Read::Return("ocNarrowed"), "string", "string"),
+        (
+            Read::Return("pThisParam"),
+            "{ v: number; m<T>(this: T): T; }",
+            "{ v: number; m<T>(this: T): T; }",
+        ),
+        (
+            Read::Return("ocThisParam"),
+            "{ v: number; m<T>(this: T): T; } | undefined",
+            "{ v: number; m<T>(this: T): T; }",
+        ),
+        (
+            Read::Return("ocBind"),
+            "(() => string) | undefined",
+            "() => string",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

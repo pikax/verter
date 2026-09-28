@@ -296,6 +296,11 @@ export function callOptional() {
   return maybeFn?.();
 }
 
+export declare const maybeRec: { m(): number } | undefined;
+export function callOptionalComputed() {
+  return maybeRec?.["m"]();
+}
+
 export declare function tag(strings: TemplateStringsArray, ...v: number[]): boolean;
 export function callTagged() {
   return tag`a${1}b`;
@@ -2561,30 +2566,18 @@ fn construct_signature_call_return_is_the_signature_instance_type() {
     assert_eq!(projected_member(&value, "q"), &string());
 }
 
-/// CANARY — an OPTIONAL-CHAINED call (`maybeFn?.()`) returns the callee's
-/// return unioned with `undefined`.
+/// An OPTIONAL-CHAINED call (`maybeFn?.()`) returns the callee's return
+/// unioned with `undefined`.
 ///
 /// Oracle: `ReturnType<typeof callOptional>` is `number | undefined`.
 ///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed
-///   left: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection })
-///  right: Union([Primitive(Number), Primitive(Undefined)])
-/// ```///
-/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
-/// result is a degraded success and nothing warms — so the row observes a
-/// VALUE rather than `Miss`. The capability gap named below is unchanged.
-///
-/// Owning layer: the OPTIONAL-CALL capability — no arm routes `f?.()`
-/// through the call carrier, so the `| undefined` arm is never
-/// synthesised. The admission half is settled: the chain is a
-/// `ValueDescent::UnmodeledCall` and fails closed instead of publishing
-/// `any` warm.
+/// The chain's call lowers through the shared call carrier
+/// (`SliceCall::OptionalChain`): the `?.()` edge strips the callee's
+/// nullish arms, the stripped callee is called like any other, and the
+/// short-circuit edge adds `undefined`. Before it the chain was a
+/// `ValueDescent::UnmodeledCall` and failed closed with the typed
+/// unresolved marker.
 #[test]
-#[ignore = "ChainExpression has no optional-call arm: `f?.()` fails closed as an unmodeled call position"]
 fn optional_chained_call_return_unions_undefined() {
     let host = ts_host();
     assert_eq!(
@@ -4158,7 +4151,7 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// produce, different from `any`:
 ///
 /// ```text
-/// callOptional    maybeFn?.()                     number | undefined
+/// callOptionalComputed    maybeRec?.["m"]()     number | undefined
 /// ```
 ///
 /// `await asyncSrc()` is NOT in this set: an awaited
@@ -4175,11 +4168,14 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// (both `value_descent`'s guarded arm and the content half's residual
 /// type-carrier check delegate to it), so flipping one of its arms flips
 /// exactly the matching rows — `ChainElement::CallExpression` to `false`
-/// flips `callOptional` back to a warm `any`.
+/// flips `callOptionalComputed` back to a warm `any`. An optional chain
+/// whose call is off a static member path (`callOptional`, `maybeFn?.()`)
+/// is modelled (see `optional_chained_call_return_unions_undefined`); a
+/// computed link keeps this rail.
 #[test]
 fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() {
     let host = ts_host();
-    assert_fails_closed(&host, CALLS, "callOptional");
+    assert_fails_closed(&host, CALLS, "callOptionalComputed");
 }
 
 /// D7 — the SEQUENCE wrapping of a call does not change the call's
