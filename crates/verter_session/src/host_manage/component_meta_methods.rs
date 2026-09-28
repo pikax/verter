@@ -2637,19 +2637,24 @@ impl VerterHost {
         // populated at cold-compute publish time; re-hydration here
         // passes them through unchanged. Empty signatures skip
         // admission rather than caching a phantom-fact entry — the
-        // cached state is still returned.
-        let admission = if !cached.fact_versions.is_empty() {
-            self.resolver_runtime().component_meta.insert_arc_with_kind(
-                cache_key,
-                cached.state.clone(),
-                cached.fact_versions.to_vec(),
-                "component_meta.results",
+        // cached state is still returned. The mirror's read guard is
+        // released first: the admission updates the mirror itself.
+        let state = Arc::clone(&cached.state);
+        let fact_versions = cached.fact_versions.to_vec();
+        drop(entry);
+        let admission = if !fact_versions.is_empty() {
+            self.admit_resolved_meta_view(
+                canonical,
+                mode,
+                view_fingerprint,
+                Some((Arc::clone(&state), fact_versions)),
+                None,
             )
         } else {
             None
         };
         Some(crate::resolver_core::ComponentMetaCacheLookup {
-            value: cached.state.as_ref().clone(),
+            value: state.as_ref().clone(),
             admission: admission.map(|candidate| {
                 crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof {
                     cache_key: crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
@@ -2729,23 +2734,20 @@ impl VerterHost {
             mode,
             view_fingerprint,
         );
-        let admission = if !admitted.is_empty() {
-            self.resolver_runtime().component_meta.insert_arc_with_kind(
-                cache_key.clone(),
-                state.clone(),
-                admitted.to_vec(),
-                "component_meta.results",
-            )
-        } else {
-            None
-        };
         // View-aware mirror: the legacy `cached_resolved_meta` slot is
         // keyed by `(ProjectionMode, view_fingerprint)` so overlay-
         // bearing publishers (`view_fingerprint != 0`) cannot
         // overwrite the base slot. A later base `resolve_component_meta`
         // (view_fingerprint == 0) does NOT fall through to an overlay-
-        // derived entry.
-        self.mirror_cached_resolved_meta_arc(canonical, mode, view_fingerprint, state);
+        // derived entry. The state and its mirror are admitted together.
+        let mirror = self.resolved_meta_mirror_entry(canonical, Arc::clone(&state));
+        let admission = self.admit_resolved_meta_view(
+            canonical,
+            mode,
+            view_fingerprint,
+            (!admitted.is_empty()).then(|| (state, admitted.to_vec())),
+            mirror,
+        );
         admission.map(|candidate| {
             crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof {
                 cache_key,
@@ -2831,6 +2833,7 @@ impl VerterHost {
         }
     }
 
+    /// Re-mirror a state served warm from the validated cache.
     pub(crate) fn mirror_cached_resolved_meta_arc(
         &self,
         canonical: &str,
@@ -2838,8 +2841,67 @@ impl VerterHost {
         view_fingerprint: u64,
         state: Arc<ResolvedComponentMetaState>,
     ) {
+        if let Some(mirror) = self.resolved_meta_mirror_entry(canonical, state) {
+            self.admit_resolved_meta_view(canonical, mode, view_fingerprint, None, Some(mirror));
+        }
+    }
+
+    /// The ONE admission point for resolved component-meta views: admits
+    /// `state` into the validated cache (when given) and `mirror` into the
+    /// derived `cached_resolved_meta` slot (when given) as a single
+    /// [`admit_component_meta_view`](crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::admit_component_meta_view)
+    /// operation, so both keep only the two most recent view fingerprints per
+    /// document and mode. Every publisher — cold publication, warm
+    /// re-mirror, legacy rehydration — comes through here; a direct insert
+    /// into either would keep a key per overlay view for the life of the owner.
+    fn admit_resolved_meta_view(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        view_fingerprint: u64,
+        state: Option<(
+            Arc<ResolvedComponentMetaState>,
+            Vec<crate::resolver_core::FactVersionRef>,
+        )>,
+        mirror: Option<crate::types::ResolvedComponentMetaCacheEntry>,
+    ) -> Option<crate::resolver_core::ValidatedFactAdmission<ResolvedComponentMetaState>> {
+        let cache_key = crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
+            canonical,
+            mode,
+            view_fingerprint,
+        );
+        // cached_resolved_meta lives on DerivedRawState (D48 split).
+        let update_mirror = |superseded: Option<u64>| match mirror {
+            Some(mirror) => {
+                let mut derived_ref = self.derived_raw_entry_or_default(canonical.to_string());
+                let cached = &mut derived_ref.value_mut().cached_resolved_meta;
+                if let Some(superseded) = superseded {
+                    cached.remove(&(mode, superseded));
+                }
+                cached.insert((mode, view_fingerprint), mirror);
+            }
+            None => {
+                if let Some(superseded) = superseded {
+                    if let Some(mut derived) = self.derived_raw_cache().get_mut(canonical) {
+                        derived.cached_resolved_meta.remove(&(mode, superseded));
+                    }
+                }
+            }
+        };
+        self.resolver_runtime()
+            .admit_component_meta_view(cache_key, state, update_mirror)
+            .0
+    }
+
+    /// The mirror entry for `state`, fanning its cross-file facts out to any
+    /// active outer fact tracer; `None` for a partial state.
+    fn resolved_meta_mirror_entry(
+        &self,
+        canonical: &str,
+        state: Arc<ResolvedComponentMetaState>,
+    ) -> Option<crate::types::ResolvedComponentMetaCacheEntry> {
         if state.completeness.is_partial() {
-            return;
+            return None;
         }
         // R3/R26/R28: capture the resolved state's observed fact set
         // as an `Arc<[FactVersionRef]>` so the wrapper's warm-hit
@@ -2880,23 +2942,14 @@ impl VerterHost {
             canonical,
             &full_fact_versions,
         );
-        let cached = crate::types::ResolvedComponentMetaCacheEntry {
-            fact_versions,
-            state,
-        };
-
-        // cached_resolved_meta lives on DerivedRawState (D48 split).
         // View-aware key: `(mode, view_fingerprint)` prevents an
         // overlay-bearing publisher (view_fingerprint != 0) from
         // overwriting the base slot (view_fingerprint == 0) and
         // contaminating a later base read.
-        {
-            let mut derived_ref = self.derived_raw_entry_or_default(canonical.to_string());
-            derived_ref
-                .value_mut()
-                .cached_resolved_meta
-                .insert((mode, view_fingerprint), cached);
-        }
+        Some(crate::types::ResolvedComponentMetaCacheEntry {
+            fact_versions,
+            state,
+        })
     }
 
     // ───────────────────────────────────────────────────────────────────────

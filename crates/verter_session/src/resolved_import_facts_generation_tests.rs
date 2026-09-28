@@ -272,3 +272,56 @@ fn eviction_rides_the_insertion_that_causes_it_rather_than_advancing_separately(
          does not exist, because the drain happens inside the same insertion transaction."
     );
 }
+
+/// The store follows the document's content: it keeps the entries of the two
+/// most recent contents (a projection in flight may still hold the previous
+/// one) and an admission under a third content hash retracts the oldest
+/// instead of sitting beside it; a close releases the owner's entries.
+/// Discriminating: before this, the store gained one key per edit for the
+/// life of the host (the WSP6 churn lane's heap profile showed it).
+#[test]
+fn an_admission_under_new_content_supersedes_the_oldest_and_a_close_releases_it() {
+    let host = seeded_host();
+    let db = host.project_type_store().resolved_import_facts();
+    let before = db.entry_count();
+    assert!(before >= 1, "fixture: the producer admitted the owner");
+    let admit_edit = |edit: usize| {
+        upsert_ts(
+            &host,
+            "/owner.ts",
+            &format!(
+                "import {{ dep }} from './dep';
+// edit {edit}
+export const owner = dep;
+"
+            ),
+        );
+        let key = producer_key(&host, "/owner.ts");
+        let witness: Vec<FactVersionRef> = host
+            .resolved_import_facts_witness_for(key.canonical.as_ref(), key.content_hash)
+            .expect("the production witness must be rootable for the owner");
+        let _ = db.admit(key, Arc::new(ResolvedImportFacts::new()), witness);
+    };
+    admit_edit(1);
+    let with_window = db.entry_count();
+    assert!(
+        with_window <= before + 1,
+        "the first edit adds at most one entry"
+    );
+    for edit in 2..=4 {
+        admit_edit(edit);
+        assert_eq!(
+            db.entry_count(),
+            with_window,
+            "edit {edit}: the owner's new content hash supersedes the oldest instead of adding one"
+        );
+    }
+    let released = db.release_canonical("/owner.ts");
+    assert!(released >= 1, "the close releases the owner's entries");
+    assert_eq!(db.entry_count(), with_window - released);
+    assert_eq!(
+        db.release_canonical("/owner.ts"),
+        0,
+        "a second close finds nothing"
+    );
+}

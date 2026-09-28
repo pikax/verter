@@ -1604,3 +1604,284 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
          snapshot is current, promoting a result computed from a stale seed.",
     );
 }
+
+// ──────────────────────────────────────────────────────────────────
+// Document-close release of the shape cache + the host `evict` hook
+// ──────────────────────────────────────────────────────────────────
+
+/// `ShapeCacheDb::release_canonical` (reached through
+/// `ProjectTypeStore::release_canonical`) drops the entries a closed
+/// document retained in the shape cache: the ones ROOTED in it, the ones
+/// whose member-value subject node the semantic graph released, and the
+/// ones whose fact signature DEPENDS on it — while an entry rooted in the
+/// neighbour, keyed by a live node, depending only on the neighbour, stays
+/// peekable.
+///
+/// On the old code the close path never reached the shape cache at all
+/// (`live_count` stayed 4); and even `ShapeCacheDb::invalidate_canonical`
+/// matched only the rooted entry, leaving the released-node and dependent
+/// entries (`live_count` 3, both peeks `Some`).
+#[test]
+fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entries() {
+    use crate::component_meta_caches::ShapeCacheKey;
+    use crate::semantic_query::{NodeScopeId, PrimitiveKind, SemanticNodeData};
+    use crate::types::ProjectionMode;
+
+    let project = make_project();
+    project
+        .upsert_base("/rel_a.ts", "export type A = { x: string };")
+        .unwrap();
+    project
+        .upsert_base("/rel_b.ts", "export type B = { y: number };")
+        .unwrap();
+    let host = project.host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let store = host.project_type_store();
+    let db = store.shape_cache_db();
+    let graph = store.semantic_graph();
+
+    let file_scope = |canonical: &str, hash: u8| NodeScopeId::File {
+        canonical_id: Arc::from(canonical),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: [hash; 16],
+        local_scope: None,
+    };
+    let node_a = graph.intern_node_with_scope(
+        SemanticNodeData::Primitive(PrimitiveKind::Boolean),
+        file_scope("/rel_a.ts", 1),
+    );
+    let node_b = graph.intern_node_with_scope(
+        SemanticNodeData::Primitive(PrimitiveKind::Number),
+        file_scope("/rel_b.ts", 2),
+    );
+    let node_shared = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    let (value_a, sig_a) = shape_value_and_fact_sig_for_scope(ctx, "/rel_a.ts", false);
+    let (value_b, sig_b) = shape_value_and_fact_sig_for_scope(ctx, "/rel_b.ts", false);
+    let sig_b_and_a: Arc<[crate::resolver_core::FactVersionRef]> = Arc::from(
+        sig_b
+            .iter()
+            .chain(sig_a.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+
+    let key_rooted_a = ShapeCacheKey::member_value_node_whole_for_test(
+        Arc::from("/rel_a.ts"),
+        node_shared,
+        ProjectionMode::Expanded,
+    );
+    let key_b_by_released_node = ShapeCacheKey::member_value_node_whole_for_test(
+        Arc::from("/rel_b.ts"),
+        node_a,
+        ProjectionMode::Expanded,
+    );
+    let key_b_depends_on_a = ShapeCacheKey::member_value_node_whole_for_test(
+        Arc::from("/rel_b.ts"),
+        node_shared,
+        ProjectionMode::Shallow,
+    );
+    let key_b = ShapeCacheKey::member_value_node_whole_for_test(
+        Arc::from("/rel_b.ts"),
+        node_b,
+        ProjectionMode::Expanded,
+    );
+    let _ = db.admit_computed_traced_for_test(&key_rooted_a, ctx, value_a, sig_a);
+    let _ = db.admit_computed_traced_for_test(
+        &key_b_by_released_node,
+        ctx,
+        value_b.clone(),
+        Arc::clone(&sig_b),
+    );
+    let _ =
+        db.admit_computed_traced_for_test(&key_b_depends_on_a, ctx, value_b.clone(), sig_b_and_a);
+    let _ = db.admit_computed_traced_for_test(&key_b, ctx, value_b, sig_b);
+    assert_eq!(db.live_count(), 4, "fixture: all four entries admitted");
+    for key in [
+        &key_rooted_a,
+        &key_b_by_released_node,
+        &key_b_depends_on_a,
+        &key_b,
+    ] {
+        assert!(
+            db.peek(key, ctx).is_some(),
+            "fixture: every entry peeks warm"
+        );
+    }
+
+    let report = store.release_canonical("/rel_a.ts");
+
+    assert!(
+        !graph.node_is_live(node_a),
+        "the graph released /rel_a.ts's node"
+    );
+    assert!(graph.node_is_live(node_b));
+    assert_eq!(
+        report.shape_entries_released, 3,
+        "rooted + released-node + dependent entries: {report:?}"
+    );
+    assert_eq!(db.live_count(), 1);
+    assert!(
+        db.peek(&key_rooted_a, ctx).is_none(),
+        "rooted in the closed document"
+    );
+    assert!(
+        db.peek(&key_b_by_released_node, ctx).is_none(),
+        "keyed by a released node"
+    );
+    assert!(
+        db.peek(&key_b_depends_on_a, ctx).is_none(),
+        "its shape was lowered through the closed document's facts"
+    );
+    assert!(
+        db.peek(&key_b, ctx).is_some(),
+        "the neighbour's own entry stays warm"
+    );
+}
+
+/// `VerterHost::evict` (the `did_close` path) releases the closed
+/// document's semantic nodes and the reopen path stays intact: after the
+/// close no live node is scoped to the closed file and the live node
+/// count dropped; once the document is brought back (this fixture's host
+/// has no disk-backed workspace, so the reopen is a re-upsert of the same
+/// content) a consumer edit that forces re-resolution re-lowers it —
+/// re-interning its nodes under fresh ids and producing the same component
+/// meta as before the close. The disk-reload variant of the reopen lives
+/// in `host_manage_tests`.
+///
+/// On the old code `evict` never reached the semantic graph: every node
+/// scoped to `/types/buttons.ts` stayed live after the close, so the
+/// `== 0` assertion failed (and `node_count` did not drop).
+#[test]
+fn host_evict_releases_the_closed_documents_semantic_nodes_and_the_reopen_recomputes() {
+    use crate::semantic_query::SemanticNodeId;
+
+    let project = make_project();
+    upsert_editor_toolbar_fixture(&project);
+    let session = project.open_session_batch().unwrap();
+    let host = session.host();
+    let _ = session.evaluate_types("/EditorToolbar.vue").unwrap();
+    let meta_before = host
+        .get_component_meta("/EditorToolbar.vue")
+        .expect("component meta before the close");
+
+    let graph = host.project_type_store().semantic_graph();
+    let live_scoped_to = |canonical: &str| {
+        (0..graph.node_slot_count() as u64)
+            .filter(|ordinal| {
+                graph
+                    .node_scope(SemanticNodeId(*ordinal))
+                    .and_then(|scope| scope.canonical_file())
+                    .is_some_and(|file| file.as_ref() == canonical)
+            })
+            .count()
+    };
+    let buttons_before = live_scoped_to("/types/buttons.ts");
+    assert!(
+        buttons_before > 0,
+        "fixture: resolving the consumer lowers declaration nodes scoped to /types/buttons.ts"
+    );
+    let live_before = graph.node_count();
+
+    host.evict("/types/buttons.ts");
+
+    assert_eq!(
+        live_scoped_to("/types/buttons.ts"),
+        0,
+        "the close releases every node scoped to the closed document"
+    );
+    assert!(
+        graph.node_count() < live_before,
+        "the live node count drops on close ({} -> {})",
+        live_before,
+        graph.node_count()
+    );
+
+    // The reopen: the document comes back (a re-upsert of the same
+    // content here — this host has no workspace to reload from), and a
+    // consumer that must re-resolve re-lowers it under fresh ids.
+    let buttons_source = r#"export interface ButtonGroupProps {
+  size: 'sm' | 'md' | 'lg';
+  variant: 'primary' | 'secondary' | 'ghost';
+  disabled: boolean;
+  loading: boolean;
+}
+
+export interface InputMenuProps {
+  options: string[];
+  selected: string | null;
+  placeholder: string;
+}
+
+export interface ToolbarItem {
+  id: string;
+  label: string;
+  group?: string;
+}
+
+export type ToolbarItems = ToolbarItem[];
+
+export type PickedButtonProps = Pick<ButtonGroupProps, 'size' | 'variant'>;
+"#;
+    project
+        .upsert_base("/types/buttons.ts", buttons_source)
+        .unwrap();
+    project
+        .upsert_base(
+            "/EditorToolbar.vue",
+            r#"<script setup lang="ts">
+import type {
+  ButtonGroupProps,
+  InputMenuProps,
+  ToolbarItems,
+  PickedButtonProps,
+} from './types'
+
+// edited after the dependency was closed
+defineProps<{
+  buttonGroup: ButtonGroupProps;
+  picked: PickedButtonProps;
+  inputMenu: InputMenuProps;
+  items: ToolbarItems;
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let _ = session.evaluate_types("/EditorToolbar.vue").unwrap();
+    let meta_after = host
+        .get_component_meta("/EditorToolbar.vue")
+        .expect("component meta after the close + reopen");
+    // The stable semantic projection: prop identity plus the RESOLVED type
+    // source. Provenance metadata (the consumer's content hash / artifact
+    // token, and the exactness stamp, which an evict + re-upsert + consumer
+    // edit already shifts from `ExactConcrete` to `ExactSymbolic` WITHOUT
+    // any semantic release — verified by running this sequence with the
+    // release hook disabled) is deliberately outside the comparison.
+    let published_sources =
+        |meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis| {
+            meta.props
+                .iter()
+                .map(|prop| {
+                    (
+                        prop.name.clone(),
+                        prop.required,
+                        format!("{:?}", prop.callable_role),
+                        format!("{:?}", prop.publication.authority().source()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+    let before = published_sources(&meta_before);
+    assert!(!before.is_empty(), "fixture: the consumer publishes props");
+    assert_eq!(
+        published_sources(&meta_after),
+        before,
+        "the re-lowered dependency yields the same resolved prop sources"
+    );
+    assert!(
+        live_scoped_to("/types/buttons.ts") > 0,
+        "the reopen re-interned the closed document's declarations"
+    );
+}

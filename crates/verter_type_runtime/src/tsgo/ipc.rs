@@ -968,14 +968,15 @@ async fn deliver_document_sync(
     let uri = TsgoTypeProvider::path_to_uri(path);
     let mut versions_guard = versions.lock().await;
     let mut contents_guard = contents.lock().await;
-    let contents_key = contents_key(path);
+    // ONE document identity for BOTH ledger maps — see [`contents_key`].
+    let document_key = contents_key(path);
 
     // `Unchanged` returns before a frame exists, so the arms below are exactly the
     // notifications that reach the wire — there is no mode without a frame.
-    let (mode, version, method, params) = match versions_guard.get(path) {
+    let (mode, version, method, params) = match versions_guard.get(&document_key) {
         Some(version) => {
             if contents_guard
-                .get(&contents_key)
+                .get(&document_key)
                 .is_some_and(|held| held.as_ref() == content)
             {
                 return Ok(DocumentSyncMode::Unchanged);
@@ -1008,9 +1009,25 @@ async fn deliver_document_sync(
 
     transport.try_notify_with_priority(method, &params, priority)?;
 
-    versions_guard.insert(path.to_string(), version);
-    contents_guard.insert(contents_key, Arc::from(content));
+    versions_guard.insert(document_key.clone(), version);
+    contents_guard.insert(document_key, Arc::from(content));
     Ok(mode)
+}
+
+/// A closed document's cached diagnostics are stale the moment it closes
+/// (the next open republishes), so the cache forgets them; without this the
+/// cache keeps one entry per document ever opened for the life of the
+/// engine. Keys are matched in normalized form because the publish path
+/// stores the engine's own spelling of the URI.
+async fn forget_cached_diagnostics(
+    diagnostics_cache: &Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
+    path: &str,
+) {
+    let closed = normalize_file_uri(&TsgoTypeProvider::path_to_uri(path));
+    diagnostics_cache
+        .lock()
+        .await
+        .retain(|uri, _| normalize_file_uri(uri) != closed);
 }
 
 /// Deliver a `didClose` for `path` and retire the ledger entry ONLY once the
@@ -1019,16 +1036,39 @@ async fn deliver_document_sync(
 /// A refused `didClose` leaves the entry in place, which is the accurate record:
 /// the child still holds the document open, so the next sync must keep treating it
 /// as open rather than replaying a `didOpen` over a live buffer.
+///
+/// **The ledger owns this choice too.** `versions` is the open set, exactly as it
+/// is for [`deliver_document_sync`]: a path with no row is a document the child
+/// does not hold — its publication was refused, or it has already been retracted.
+/// A `didClose` for such a path is not a far-side no-op; tsgo PANICS with
+/// "overlay not found for closed file", the engine dies, and the restart re-reads
+/// the whole workspace while every open document waits. So a close with no
+/// recorded open sends NO frame and only releases the local content cache.
+///
+/// Every close — delivered, frameless or refused — forgets the document's cached
+/// diagnostics (see [`forget_cached_diagnostics`]).
 async fn deliver_document_close(
     transport: &LspTransport,
     versions: &Mutex<HashMap<String, i32>>,
     contents: &Mutex<HashMap<String, Arc<str>>>,
+    diagnostics_cache: &Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
     path: &str,
     priority: ProviderPriority,
 ) -> Result<(), TypeProviderError> {
     let uri = TsgoTypeProvider::path_to_uri(path);
     let mut versions_guard = versions.lock().await;
     let mut contents_guard = contents.lock().await;
+    // ONE document identity for BOTH ledger maps — see [`contents_key`].
+    let document_key = contents_key(path);
+    // Forgotten while the contents lock is held through the content's
+    // retirement below, so no diagnostics admission can land in between (see
+    // [`admit_diagnostics_for_incarnation`]).
+    forget_cached_diagnostics(diagnostics_cache, path).await;
+
+    if !versions_guard.contains_key(&document_key) {
+        contents_guard.remove(&document_key);
+        return Ok(());
+    }
 
     transport.try_notify_with_priority(
         "textDocument/didClose",
@@ -1036,8 +1076,8 @@ async fn deliver_document_close(
         priority,
     )?;
 
-    versions_guard.remove(path);
-    contents_guard.remove(&contents_key(path));
+    versions_guard.remove(&document_key);
+    contents_guard.remove(&document_key);
     Ok(())
 }
 
@@ -1221,29 +1261,13 @@ async fn read_loop(
                         // match our path_to_uri keys (literal colon, original case).
                         let uri = normalize_file_uri(raw_uri);
                         // Look up the file content so we can resolve LSP positions
-                        // to byte offsets. The content cache is keyed by file path, so
-                        // convert the URI first; on a case-insensitive filesystem
-                        // (Windows / default macOS) fall back to a case-folded match so
-                        // a case-variant key still resolves.
-                        let content = {
-                            let path = uri_to_file_path(raw_uri);
-                            let cache = contents_cache.lock().await;
-                            // Exact match first, then — only on a case-insensitive
-                            // filesystem — a folded match through the single shared
-                            // FS-identity policy (`verter_span::path`), so the case
-                            // policy never diverges per OS at this call site.
-                            cache.get(&path).cloned().or_else(|| {
-                                if verter_span::path::fs_is_case_insensitive() {
-                                    cache
-                                        .iter()
-                                        .find(|(k, _)| verter_span::path::fs_paths_equal(k, &path))
-                                        .map(|(_, v)| v.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                        };
-                        if let Some(content) = content.as_deref() {
+                        // to byte offsets. The batch is admitted only if this
+                        // incarnation is still registered once it is parsed (see
+                        // `admit_diagnostics_for_incarnation`).
+                        let content =
+                            registered_content_for_uri(&*contents_cache.lock().await, raw_uri);
+                        if let Some(incarnation) = content {
+                            let content = incarnation.as_ref();
                             let diag_file = uri_to_file_path(raw_uri);
                             // One index for the whole publish batch: every
                             // diagnostic's start, end and related spans convert
@@ -1269,7 +1293,15 @@ async fn read_loop(
                                 uri,
                                 diags.len()
                             );
-                            diagnostics_cache.lock().await.insert(uri, diags);
+                            admit_published_diagnostics(
+                                &contents_cache,
+                                &diagnostics_cache,
+                                raw_uri,
+                                &incarnation,
+                                uri,
+                                diags,
+                            )
+                            .await;
                         } else {
                             // File not in our cache (tsconfig, node_modules, etc.) — skip
                             tracing::trace!(
@@ -1292,6 +1324,130 @@ async fn read_loop(
             }
         }
     }
+}
+
+/// The content registered for the document the engine's `raw_uri` names.
+///
+/// The content cache is keyed by file path, so the URI is converted first; on a
+/// case-insensitive filesystem (Windows / default macOS) a case-variant key still
+/// resolves: exact match first, then a folded match through the single shared
+/// FS-identity policy (`verter_span::path`), so the case policy never diverges
+/// per OS at this call site.
+fn registered_content_for_uri(
+    cache: &HashMap<String, Arc<str>>,
+    raw_uri: &str,
+) -> Option<Arc<str>> {
+    let path = uri_to_file_path(raw_uri);
+    cache.get(&path).cloned().or_else(|| {
+        if verter_span::path::fs_is_case_insensitive() {
+            cache
+                .iter()
+                .find(|(k, _)| verter_span::path::fs_paths_equal(k, &path))
+                .map(|(_, v)| v.clone())
+        } else {
+            None
+        }
+    })
+}
+
+/// Cache a `publishDiagnostics` batch computed against `incarnation`, the
+/// content registered for `raw_uri` when the batch was read — ONLY while that
+/// incarnation is still the registered one. Says whether it was cached.
+async fn admit_published_diagnostics(
+    contents_cache: &Mutex<HashMap<String, Arc<str>>>,
+    diagnostics_cache: &Mutex<HashMap<String, Vec<TypeDiagnostic>>>,
+    raw_uri: &str,
+    incarnation: &Arc<str>,
+    uri: String,
+    diagnostics: Vec<TypeDiagnostic>,
+) -> bool {
+    admit_diagnostics_for_incarnation(
+        contents_cache,
+        diagnostics_cache,
+        |contents| registered_content_for_uri(contents, raw_uri),
+        incarnation,
+        uri,
+        diagnostics,
+    )
+    .await
+}
+
+/// Parse a `textDocument/diagnostic` response against `issued_under`, the
+/// content registered for `path` when the pull was ISSUED — or refuse it as
+/// superseded when the document has since closed, reopened or changed.
+///
+/// The response describes the text the engine held when it answered, which is
+/// the issuing incarnation only while that incarnation is still registered (the
+/// same `Arc` identity [`admit_diagnostics_for_incarnation`] fences on). Reading
+/// the content only once the response arrives parsed a response computed for
+/// one incarnation against the next one's text, mapping its ranges onto the
+/// wrong source. A superseded pull fails like any other failed pull, so a strict
+/// caller makes its explicit fallback decision instead of serving it.
+async fn diagnostics_for_pulled_incarnation(
+    contents_cache: &Mutex<HashMap<String, Arc<str>>>,
+    path: &str,
+    issued_under: Option<&Arc<str>>,
+    value: &serde_json::Value,
+) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {
+    let current = contents_cache
+        .lock()
+        .await
+        .get(&contents_key(path))
+        .cloned();
+    let unchanged = match (issued_under, current.as_ref()) {
+        (Some(issued), Some(current)) => Arc::ptr_eq(issued, current),
+        (None, None) => true,
+        _ => false,
+    };
+    if !unchanged {
+        return Err(TypeProviderError::new(format!(
+            "diagnostics pull for {path} was answered after the document changed; \
+             the response is superseded"
+        )));
+    }
+    // One index for the whole pull response — see `parse_lsp_diagnostic`.
+    let index = issued_under.map(|content| SourceIndex::new_utf16(content));
+    Ok(value
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|diagnostic| {
+                    parse_lsp_diagnostic(diagnostic, index.as_ref(), Some(path))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default())
+}
+
+/// The diagnostics-admission fence shared by the push and pull paths.
+///
+/// Every sync registers a fresh content `Arc` and every close retires it, so
+/// the registered `Arc` IS the document's incarnation. The identity check and
+/// the insertion hold the contents lock, which [`deliver_document_close`] holds
+/// from forgetting the document's diagnostics through retiring its content. A
+/// batch read before a close therefore either lands first and is forgotten by
+/// it, or finds its incarnation retired (or replaced by a reopen) and is
+/// dropped: it can never repopulate the cache for a closed document, nor serve
+/// the previous incarnation's diagnostics after a reopen. Checking the content
+/// when the batch is read and inserting after releasing the lock — what the
+/// read loop did — leaves exactly that window open.
+async fn admit_diagnostics_for_incarnation(
+    contents_cache: &Mutex<HashMap<String, Arc<str>>>,
+    diagnostics_cache: &Mutex<HashMap<String, Vec<TypeDiagnostic>>>,
+    registered: impl FnOnce(&HashMap<String, Arc<str>>) -> Option<Arc<str>>,
+    incarnation: &Arc<str>,
+    uri: String,
+    diagnostics: Vec<TypeDiagnostic>,
+) -> bool {
+    let contents = contents_cache.lock().await;
+    if !registered(&contents).is_some_and(|current| Arc::ptr_eq(&current, incarnation)) {
+        return false;
+    }
+    diagnostics_cache.lock().await.insert(uri, diagnostics);
+    drop(contents);
+    true
 }
 
 /// Parse a single LSP Diagnostic JSON value into a `TypeDiagnostic`.
@@ -1622,7 +1778,8 @@ fn normalize_file_uri(uri: &str) -> String {
     normalize_file_uri_for_cache(uri)
 }
 
-/// The single key convention for the `contents` cache.
+/// The single key convention for the document ledger — BOTH the `contents` cache
+/// and the `versions` open set.
 ///
 /// The cache is keyed by canonical filesystem path so every producer/consumer of
 /// a carrier's content agrees on identity: the file-lifecycle inserts, the
@@ -1633,6 +1790,16 @@ fn normalize_file_uri(uri: &str) -> String {
 /// slashed / drive-cased lookup (e.g. the engine echoes `c:/…` while a didOpen
 /// used `C:\…`) is a FALSE miss that would strand a carrier's content; routing
 /// every access through this helper makes the insert and lookup forms agree.
+///
+/// The OPEN SET keys by this same identity, because `versions` and `contents` must
+/// answer for the same document. Keying the open set by the caller's raw spelling
+/// while the content map canonicalized made two equivalent spellings of one path
+/// disagree: a `didOpen` delivered as `C:\Ws\Src\A.ts` and a retract arriving as
+/// the engine's own `root_files` form `c:/Ws/Src/A.ts`. The retract found no open
+/// row, so it sent no `didClose` and removed only the content entry — leaving the
+/// ledger row and the child's overlay alive for the rest of the session, while the
+/// next update under the original spelling was delivered as a `didChange` over a
+/// buffer the caller believed was closed.
 fn contents_key(path: &str) -> String {
     verter_span::path::canonicalize_path(path)
 }
@@ -2334,8 +2501,9 @@ impl TsgoTypeProvider {
     /// Used by a non-owning feature facade whose real overlay lifecycle is driven
     /// through the relay's separately tracked carrier-injection channel.
     pub async fn forget_cached_content(&self, path: &str) {
-        self.contents.lock().await.remove(&contents_key(path));
-        self.versions.lock().await.remove(path);
+        let document_key = contents_key(path);
+        self.contents.lock().await.remove(&document_key);
+        self.versions.lock().await.remove(&document_key);
     }
 
     /// Wait until the engine has processed every notification sent before this
@@ -2364,6 +2532,7 @@ impl TsgoTypeProvider {
         path: &str,
     ) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {
         let uri = Self::path_to_uri(path);
+        let issued_under = self.contents.lock().await.get(&contents_key(path)).cloned();
         let value = self
             .transport
             .request(
@@ -2371,25 +2540,22 @@ impl TsgoTypeProvider {
                 serde_json::json!({ "textDocument": { "uri": uri } }),
             )
             .await?;
-        let content = self.contents.lock().await.get(&contents_key(path)).cloned();
-        // One index for the whole pull response — see `parse_lsp_diagnostic`.
-        let index = content.as_deref().map(SourceIndex::new_utf16);
-        let diagnostics = value
-            .get("items")
-            .and_then(serde_json::Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|diagnostic| {
-                        parse_lsp_diagnostic(diagnostic, index.as_ref(), Some(path))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        self.diagnostics_cache
-            .lock()
-            .await
-            .insert(normalize_file_uri(&uri), diagnostics.clone());
+        let diagnostics =
+            diagnostics_for_pulled_incarnation(&self.contents, path, issued_under.as_ref(), &value)
+                .await?;
+        // Cached under the same incarnation fence as pushed batches: a pull
+        // answered across a close must not outlive it.
+        if let Some(incarnation) = issued_under.as_ref() {
+            admit_diagnostics_for_incarnation(
+                &self.contents,
+                &self.diagnostics_cache,
+                |contents| contents.get(&contents_key(path)).cloned(),
+                incarnation,
+                normalize_file_uri(&uri),
+                diagnostics.clone(),
+            )
+            .await;
+        }
         Ok(diagnostics)
     }
 
@@ -2456,11 +2622,13 @@ impl TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
+        let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
         Box::pin(async move {
             deliver_document_close(
                 &transport,
                 &versions,
                 &contents_cache,
+                &diagnostics_cache,
                 &path_owned,
                 priority,
             )
@@ -2752,6 +2920,7 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
+        let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
         Box::pin(async move {
             crate::type_runtime_trace_scope_async!(
                 "tsgo_close_file",
@@ -2761,6 +2930,7 @@ impl TypeProvider for TsgoTypeProvider {
                         &transport,
                         &versions,
                         &contents_cache,
+                        &diagnostics_cache,
                         &path_owned,
                         ProviderPriority::Interactive,
                     )
@@ -3940,37 +4110,26 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let result = transport
+            let issued_under = contents_cache
+                .lock()
+                .await
+                .get(&contents_key(&path_owned))
+                .cloned();
+            let value = transport
                 .request_with_priority(
                     "textDocument/diagnostic",
                     serde_json::json!({ "textDocument": { "uri": uri } }),
                     None,
                     ProviderPriority::Background,
                 )
-                .await;
-            match result {
-                Ok(val) => {
-                    let items = val
-                        .get("items")
-                        .and_then(|v| v.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-                    let content = contents_cache
-                        .lock()
-                        .await
-                        .get(&contents_key(&path_owned))
-                        .cloned();
-                    // One index for the whole pull response — see `parse_lsp_diagnostic`.
-                    let index = content.as_deref().map(SourceIndex::new_utf16);
-                    Ok(items
-                        .iter()
-                        .filter_map(|d| {
-                            parse_lsp_diagnostic(d, index.as_ref(), Some(path_owned.as_str()))
-                        })
-                        .collect())
-                }
-                Err(error) => Err(error),
-            }
+                .await?;
+            diagnostics_for_pulled_incarnation(
+                &contents_cache,
+                &path_owned,
+                issued_under.as_ref(),
+                &value,
+            )
+            .await
         })
     }
 

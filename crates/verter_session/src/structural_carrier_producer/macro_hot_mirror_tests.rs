@@ -923,3 +923,65 @@ fn concurrent_first_macro_arg_demands_singleflight_one_cold_build() {
          the cold build (the `check/build/set` regression double-lowers)"
     );
 }
+
+// ── Close / reopen ──────────────────────────────────────────────────────────
+
+/// Closing an SFC releases the carrier nodes its macro mirror lowered, while
+/// the content-addressed `IndexedReady` artifact, and with it the mirror,
+/// stays for the disk reload. Reloading the SAME bytes serves that same
+/// artifact, so the mirror must not hand back the handle the close released:
+/// the reopened owner's demand re-lowers a live carrier of the same shape,
+/// and a later demand is warm on it.
+///
+/// Discriminating: the mirror's write-once cell served the tombstoned handle,
+/// which reads as the released placeholder (`Opaque(Miss)`) instead of the
+/// props object.
+#[test]
+fn a_reopened_unchanged_owner_relowers_the_macro_mirror_its_close_released() {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace};
+    const PATH: &str = "/Reopen.vue";
+    const SFC: &str = "<script setup lang=\"ts\">\ndefineProps<{ a: string }>()\n</script>\n<template><div /></template>\n";
+    let ws = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    ws.inject_file(PATH.to_string(), Arc::from(SFC));
+    let host = VerterHost::new(HostConfig::default(), ws);
+    assert!(host.ensure_loaded(PATH));
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let macro_index = first_macro_index(&host, PATH);
+    let indexed_before = host.ensure_indexed_ready(PATH).expect("indexed");
+    let before = macro_type_arg_hot_ref(&host, PATH, macro_index)
+        .expect("the inline props macro arg mirrors to a hot ref");
+    assert!(graph.node_is_live(before.node()));
+
+    host.evict(PATH);
+    assert!(
+        !graph.node_is_live(before.node()),
+        "fixture: the close releases the mirrored carrier"
+    );
+
+    assert!(host.ensure_loaded(PATH), "the closed SFC reloads from disk");
+    let indexed_after = host.ensure_indexed_ready(PATH).expect("indexed");
+    assert!(
+        Arc::ptr_eq(&indexed_before, &indexed_after),
+        "fixture: the unchanged reload serves the same indexed artifact and mirror"
+    );
+    let after = macro_type_arg_hot_ref(&host, PATH, macro_index)
+        .expect("the reopened owner's macro arg mirrors to a hot ref");
+    assert!(
+        graph.node_is_live(after.node()),
+        "the mirror must not serve the handle the close released"
+    );
+    assert!(
+        matches!(
+            node_data(&dispatch, after.node()),
+            Some(SemanticNodeData::Object(_))
+        ),
+        "the re-lowered carrier is the props object again"
+    );
+    let again = macro_type_arg_hot_ref(&host, PATH, macro_index).expect("warm demand");
+    assert_eq!(
+        again.node(),
+        after.node(),
+        "the re-lowered handle is served warm"
+    );
+}

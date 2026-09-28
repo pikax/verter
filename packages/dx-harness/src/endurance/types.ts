@@ -8,6 +8,8 @@
  */
 import type { EditorNeutralProviderRoute } from "@verter/lsp-test-client";
 
+import type { ChurnPlateauBands } from "./scenarios/churn.js";
+
 /** The three verter-lsp type-provider routes the harness can exercise. */
 export type EnduranceProviderRoute = EditorNeutralProviderRoute;
 
@@ -152,6 +154,71 @@ export interface EnduranceConfig {
   readonly scaleOpenFiles: number;
   /** Synthetic corpus size for the scale lane. */
   readonly scaleCorpusFiles: number;
+  /**
+   * Document open→edit→query→close cycles the CHURN lane runs
+   * (VERTER_ENDURANCE_CHURN_CYCLES, default 1000 — the long-editing-session
+   * figure the lane exists to bound).
+   */
+  readonly churnCycles: number;
+  /**
+   * Cycles run BEFORE the baseline reading (VERTER_ENDURANCE_CHURN_WARMUP_CYCLES,
+   * default 100). Every one-time cost — project load, provider program, lazily
+   * initialised caches — is inside the baseline, so the comparison measures
+   * retention rather than startup.
+   */
+  readonly churnWarmupCycles: number;
+  /**
+   * Blocks in the generated churn carrier (VERTER_ENDURANCE_CHURN_CARRIER_BLOCKS,
+   * default 140, ~230 source bytes each). Retention is per synced document
+   * version, so the per-cycle cost of a leak scales with the document: a tiny
+   * fixture would hide a real leak inside allocator noise.
+   */
+  readonly churnCarrierBlocks: number;
+  /** Final tree RSS must be <= baseline * this factor + the floor below. */
+  readonly churnGrowthFactor: number;
+  /**
+   * Absolute slack (bytes) added to the churn growth bound
+   * (VERTER_ENDURANCE_CHURN_GROWTH_FLOOR_BYTES, default 64 MiB). The factor
+   * catches proportional growth on a large baseline; this keeps a small-baseline
+   * run from failing on allocator noise.
+   */
+  readonly churnGrowthFloorBytes: number;
+  /** Budget (ms) for reaching host quiescence before each churn memory reading. */
+  readonly churnQuiesceMs: number;
+  /**
+   * Quiesced process-tree readings taken AFTER the baseline
+   * (VERTER_ENDURANCE_CHURN_SLOPE_WINDOWS, default 18, minimum 2: one every 50
+   * cycles of a 1000-cycle run). Two endpoints can only describe a destination;
+   * readings describe the trajectory, which is what "no unbounded retained-byte
+   * slope" is a claim about. The slope verdict reads the readings from the
+   * run's midpoint on and refuses fewer than five of them.
+   */
+  readonly churnSlopeWindows: number;
+  /**
+   * The absolute bands the churn plateau verdicts are read against (see
+   * `decideChurnSlope`): the server's exact-heap rise
+   * (VERTER_ENDURANCE_CHURN_HEAP_PLATEAU_BYTES, default 2 MiB), the server's
+   * resident-set settling allowance (VERTER_ENDURANCE_CHURN_RSS_SETTLING_BYTES,
+   * default 8 MiB), a child's per-segment resident-set rise
+   * (VERTER_ENDURANCE_CHURN_CHILD_PLATEAU_BYTES, default 8 MiB), the smallest
+   * increment read as a level shift (VERTER_ENDURANCE_CHURN_SHIFT_BYTES,
+   * default 8 MiB) and the readings a plateau needs
+   * (VERTER_ENDURANCE_CHURN_MIN_PLATEAU_READINGS, default 5). Absolute, so a
+   * longer run has to fit the same band.
+   */
+  readonly churnPlateauBands: ChurnPlateauBands;
+  /**
+   * Cycles the churn run may add past the planned count to prove a plateau
+   * after a late level shift (VERTER_ENDURANCE_CHURN_MAX_EXTENSION_CYCLES,
+   * default 400).
+   */
+  readonly churnMaxExtensionCycles: number;
+  /**
+   * Objects a retained-object counter's fitted late-span rise may reach
+   * before a significantly rising trend counts as a breach
+   * (VERTER_ENDURANCE_CHURN_RETENTION_PLATEAU_OBJECTS, default 4).
+   */
+  readonly churnRetentionPlateauObjects: number;
   /** Receipt destination (file path or directory), if set. */
   readonly receiptPath: string | null;
 }

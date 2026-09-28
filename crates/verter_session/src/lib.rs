@@ -77,8 +77,6 @@ mod cold_artifact_dedup_tests;
 mod compile;
 #[cfg(test)]
 mod request_view_reuse_tests;
-#[cfg(test)]
-mod stack_refusal_tests;
 pub use compile::VueMainAssemblyFailure;
 pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment};
 pub use compile::{SfcRewriteRefusal, UncomposableCode, UncomposableFamily};
@@ -386,7 +384,9 @@ pub mod route_analysis_inputs;
 pub mod semantic_capability;
 pub mod semantic_query;
 pub(crate) mod semantic_query_memo;
-pub(crate) mod semantic_retention_account;
+/// The one PROCESS-wide aggregate retention account: public so the LSP
+/// provider-surface store charges THIS one, not a second per-crate ceiling.
+pub mod semantic_retention_account;
 #[cfg(test)]
 mod semantic_retention_account_tests;
 pub(crate) mod session_runtime;

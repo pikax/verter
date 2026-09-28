@@ -5603,6 +5603,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             });
         let mut evaluator = FlowEvaluator {
             dispatch: self,
+            call_receivers: rustc_hash::FxHashMap::default(),
             call_arguments: Arc::clone(&ir.call_arguments),
             self_slot: Some(key),
             resolving_functions: std::rc::Rc::default(),
@@ -8440,6 +8441,13 @@ pub(super) mod schedule;
 /// The per-frame evaluator state.
 struct FlowEvaluator<'d, 'b> {
     dispatch: &'d ProjectSemanticDispatch<'d>,
+    /// The receiver value of a member call on a value the indexed program
+    /// cannot evaluate (a call's result: `b.m().m()`), by the call's source
+    /// offset: the executor route reads it where it would evaluate the
+    /// authored receiver. Request-scoped: filled by the frame's evaluation
+    /// of the call (one entry per such call site of the frame) and dropped
+    /// with the frame, a cancel or a budget trip included.
+    call_receivers: rustc_hash::FxHashMap<u32, SemanticNodeId>,
     /// The frame-lowered argument values of each call, by the call's span
     /// ([`crate::flow_slice_content::SliceContent::call_arguments`]).
     call_arguments: Arc<
@@ -24304,15 +24312,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.call_return_of_callee_node(callee_node, site)
             }
             crate::flow_slice_content::SliceCall::OnValue { object, member } => {
-                // `new C().m()`: the member of the constructed value is the
-                // callee, resolved through the executor (receiver included)
-                // exactly like a frame-rooted member callee, else through
-                // the one call sink.
+                // `new C().m()`, `b.m().m()`: the member of the value is
+                // the callee, resolved through the executor (the value its
+                // receiver) exactly like a frame-rooted member callee, else
+                // through the one call sink.
                 let object = match self.call_operand_value(object, site) {
                     Positional::Value(node) => node,
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
+                self.call_receivers.insert(site.span().start, object);
                 let Some(callee) = self
                     .project_path_navigate(object, std::slice::from_ref(member))
                     .filter(|callee| {
