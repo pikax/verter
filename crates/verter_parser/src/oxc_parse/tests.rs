@@ -2085,6 +2085,13 @@ fn called_names<'b>(parameters: &str, body: &'b str) -> std::collections::BTreeS
         let end = at + bytes[at..].iter().take_while(|&&b| ident(b)).count();
         let name = &body[at..end];
         let before = &body[..at];
+        // A nested function's definition (`fn name(`) names it, not a call.
+        let defined = before.trim_end().strip_suffix("fn").is_some_and(|rest| {
+            !rest
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
         let direct = before.ends_with("self.")
             || before.ends_with("Self::")
             || !before
@@ -2119,7 +2126,7 @@ fn called_names<'b>(parameters: &str, body: &'b str) -> std::collections::BTreeS
             method.len() < call.len() && method.ends_with('.') && after.starts_with(')')
         };
         let called_or_passed = after.starts_with('(') || (passed() && !bound(name));
-        if direct && called_or_passed {
+        if direct && !defined && called_or_passed {
             called.insert(name);
         }
         at = end;
