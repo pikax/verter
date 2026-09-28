@@ -2,9 +2,10 @@
 /**
  * Reusing a pull request's green CI instead of repeating it.
  *
- * `main` requires every change to land through a pull request that is up to
- * date and whose `CI Required` passed, so a commit that is the merge of such a
- * pull request has the tree that pull request's CI just tested. Two consumers
+ * `main` requires every change to land through a pull request whose `CI
+ * Required` passed, and each pull request run records the tree it tested (a
+ * `ci-tested` annotation), so a squash whose tree is that tree was already
+ * tested. Two consumers
  * rely on proving exactly that, from GitHub's own records, instead of testing
  * the same tree again:
  *
@@ -49,10 +50,39 @@ function matches(family, name) {
   return family.endsWith("*") ? name.startsWith(family.slice(0, -1)) : name === family;
 }
 
+/** The annotation a `ci.yml` pull request run's `detect-changes` job leaves. */
+export const TESTED_ANNOTATION = "ci-tested";
+const TESTED_JOB = "detect-changes";
+
+/**
+ * What a `ci.yml` run recorded it tested: `{ pull, tree }` from its
+ * `detect-changes` job's `ci-tested` annotation, or null. A `pull_request` run
+ * tests `refs/pull/N/merge` (the head merged into the base as it was then), not
+ * the head, and GitHub empties a run's `pull_requests` once the pull request
+ * merges, so the run itself records which pull request and which tree it tested.
+ * @param {{ repo: string; runId: number; api: (path: string) => Promise<any> }} input
+ */
+export async function testedByRun({ repo, runId, api }) {
+  const jobs = await listAll(api, `/repos/${repo}/actions/runs/${runId}/jobs`, "jobs");
+  const job = jobs.find((row) => row?.name === TESTED_JOB);
+  if (!job?.id) return null;
+  const annotations = await api(`/repos/${repo}/check-runs/${job.id}/annotations?per_page=100`);
+  for (const row of Array.isArray(annotations) ? annotations : []) {
+    if (row?.title !== TESTED_ANNOTATION) continue;
+    const found = /\bpull=(\d+)\s+tree=([0-9a-f]{40})\b/u.exec(String(row.message ?? ""));
+    if (found) return { pull: Number(found[1]), tree: found[2] };
+  }
+  return null;
+}
+
 /**
  * The pull request `sha` merged, when its CI already tested `sha`'s tree:
- * `sha` is that pull request's merge commit, the pull request's head has the
- * same tree, and a `ci.yml` run for that head succeeded.
+ * `sha` is that pull request's merge commit (its squash), and a successful
+ * `ci.yml` run for its head recorded that it ran for THIS pull request (not
+ * another one sharing the head) and tested exactly `sha`'s tree. Its lanes were
+ * selected from that pull request's own diff, the selection its green check
+ * already vouched for. A run that recorded nothing (a fork's, or one from
+ * before the record existed) proves nothing, so its merge runs CI as usual.
  * @param {{ repo: string; sha: string; api: (path: string) => Promise<any> }} input
  * @returns {Promise<{ pullRequest: number; title: string; head: string; runId: number }>}
  */
@@ -66,27 +96,25 @@ export async function landedPullProof({ repo, sha, api }) {
   if (!pull)
     throw new Error(`release-proof: ${sha.slice(0, 12)} is not the merge of a pull request`);
   const head = pull.head?.sha;
-  const [landed, tested] = await Promise.all([
-    api(`/repos/${repo}/git/commits/${sha}`),
-    api(`/repos/${repo}/git/commits/${head}`),
-  ]);
-  if (!landed?.tree?.sha || landed.tree.sha !== tested?.tree?.sha)
-    throw new Error(
-      `release-proof: ${sha.slice(0, 12)}'s tree ${landed?.tree?.sha ?? "?"} is not pull request #${pull.number}'s tested head tree ${tested?.tree?.sha ?? "?"}`,
-    );
-  const runs = await listAll(
-    api,
-    `/repos/${repo}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=${head}&event=pull_request&status=success`,
-    "workflow_runs",
-  );
-  const run = runs
+  const tree = (await api(`/repos/${repo}/git/commits/${sha}`))?.tree?.sha;
+  if (!tree) throw new Error(`release-proof: ${sha.slice(0, 12)} has no tree`);
+  const runs = (
+    await listAll(
+      api,
+      `/repos/${repo}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=${head}&event=pull_request&status=success`,
+      "workflow_runs",
+    )
+  )
     .filter((row) => row?.conclusion === "success" && row.head_sha === head)
-    .sort((a, b) => b.run_number - a.run_number)[0];
-  if (!run)
-    throw new Error(
-      `release-proof: no successful ${CI_WORKFLOW} run for pull request #${pull.number}'s head ${head.slice(0, 12)}`,
-    );
-  return { pullRequest: pull.number, title: String(pull.title ?? ""), head, runId: run.id };
+    .sort((a, b) => b.run_number - a.run_number);
+  for (const run of runs) {
+    const tested = await testedByRun({ repo, runId: run.id, api });
+    if (tested?.pull === pull.number && tested.tree === tree)
+      return { pullRequest: pull.number, title: String(pull.title ?? ""), head, runId: run.id };
+  }
+  throw new Error(
+    `release-proof: no successful ${CI_WORKFLOW} run of pull request #${pull.number} (head ${String(head).slice(0, 12)}) recorded testing ${sha.slice(0, 12)}'s tree ${tree.slice(0, 12)}`,
+  );
 }
 
 /**

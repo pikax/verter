@@ -68,6 +68,15 @@ jobs:
       release: ${{ steps.gates.outputs.release }}
     steps:
       - uses: actions/checkout@v5
+      # Records what this pull request run tests: the tree of the
+      # refs/pull/N/merge commit checked out above. GitHub empties a run's
+      # pull request list once the pull request merges, so the squash's push
+      # reads this annotation to reuse the run (scripts/release-proof.mjs).
+      - name: Record the tree this pull request run tests
+        if: github.event_name == 'pull_request'
+        env:
+          PULL: ${{ github.event.pull_request.number }}
+        run: echo "::notice title=ci-tested::pull=$PULL tree=$(git rev-parse 'HEAD^{tree}')"
       - uses: dorny/paths-filter@v4
         id: filter
         with:
