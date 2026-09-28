@@ -1012,9 +1012,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // A global namespace without a value of its own
                 // declaration is its object.
                 _ => {
-                    let Some((object, roots)) =
-                        self.global_namespace_object(value_root.name.as_ref(), context)
-                    else {
+                    let Some((object, roots)) = self.global_namespace_object(
+                        value_root.scope.canonical_id.as_ref(),
+                        value_root.name.as_ref(),
+                        context,
+                    ) else {
                         return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
                     };
                     let output = if path.is_empty() {
@@ -6387,6 +6389,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// named the global through them — including a read that found none.
     pub(super) fn global_contributors_in(
         &self,
+        demand_canonical: &str,
         name: &str,
         space: verter_semantic::facts::SymbolSpace,
     ) -> crate::global_contributors::SymbolContributors {
@@ -6416,7 +6419,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 },
             ),
         );
-        population.lookup_in_space(&target, name, overlay_discriminator, true, space)
+        let contributors =
+            population.lookup_in_space(&target, name, overlay_discriminator, true, space);
+        // The global scope is one program's: a contributor of another
+        // project's program declares nothing the demand reads.
+        let project = host.resolve_project_for_canonical(demand_canonical);
+        if contributors.entries.iter().all(|entry| {
+            host.resolve_project_for_canonical(&entry.artifact_key.canonical) == project
+        }) {
+            return contributors;
+        }
+        crate::global_contributors::SymbolContributors {
+            entries: contributors
+                .entries
+                .iter()
+                .filter(|entry| {
+                    host.resolve_project_for_canonical(&entry.artifact_key.canonical) == project
+                })
+                .cloned()
+                .collect(),
+            fingerprint: contributors.fingerprint,
+        }
     }
 
     /// The declaration of the global `name` in `space` that the library of
@@ -6482,8 +6505,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return Some(lib);
         }
         let host = self.ctx.host_for_fact_tracer_install();
-        let population =
-            self.global_contributors_in(name, verter_semantic::facts::SymbolSpace::Type);
+        let population = self.global_contributors_in(
+            demand_canonical,
+            name,
+            verter_semantic::facts::SymbolSpace::Type,
+        );
         let first = population
             .entries
             .iter()
@@ -6516,6 +6542,61 @@ impl<'a> ProjectSemanticDispatch<'a> {
             first.owner,
             name,
         ))
+    }
+
+    /// The declaration the qualified type name `name` (`Ns.T`,
+    /// `Ns.Inner.T`) names through the GLOBAL namespace its head names: the
+    /// member a script's top-level namespace of that name exports, the first
+    /// in declaration precedence order. `None` when no script's namespace
+    /// declares it.
+    pub(super) fn global_namespace_type_declaration(
+        &self,
+        demand_canonical: &str,
+        name: &str,
+    ) -> Option<ResolvedRootIdentity> {
+        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
+        let (head, _) = name.split_once('.')?;
+        let host = self.ctx.host_for_fact_tracer_install();
+        let population = self.global_contributors_in(
+            demand_canonical,
+            head,
+            verter_semantic::facts::SymbolSpace::Namespace,
+        );
+        let mut declarations: Vec<&crate::global_contributors::ContributorEntry> = population
+            .entries
+            .iter()
+            .filter(|entry| {
+                !entry.is_automatic_lib
+                    && entry.origin == ContributorOrigin::FileScopeNamespace
+                    && entry.module_kind == FileModuleKind::Script
+            })
+            .collect();
+        declarations.sort_by(|left, right| {
+            host.declaration_sequence_rank(left.artifact_key.canonical.as_ref())
+                .cmp(&host.declaration_sequence_rank(right.artifact_key.canonical.as_ref()))
+                .then_with(|| {
+                    left.artifact_key
+                        .canonical
+                        .as_ref()
+                        .cmp(right.artifact_key.canonical.as_ref())
+                })
+        });
+        declarations.into_iter().find_map(|entry| {
+            let indexed = self
+                .ctx
+                .ensure_indexed_ready_serve(entry.artifact_key.canonical.as_ref())?
+                .indexed;
+            let headers = indexed.shallow_state.decl_bodies().header_index();
+            (headers.type_header_in(entry.owner, name).is_some()
+                && headers.namespace_member_is_exported(entry.owner, name))
+            .then(|| {
+                ResolvedRootIdentity::new_in_owner(
+                    Arc::clone(&entry.artifact_key.canonical),
+                    entry.owner,
+                    name,
+                )
+            })
+        })
     }
 
     /// The GLOBAL value declaration named `name` that a reference in
@@ -6582,8 +6663,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .kind;
                 Some((identity, kind))
             });
-        let population =
-            self.global_contributors_in(name, verter_semantic::facts::SymbolSpace::Value);
+        let population = self.global_contributors_in(
+            demand_canonical,
+            name,
+            verter_semantic::facts::SymbolSpace::Value,
+        );
         let mut declarations: Vec<(&crate::global_contributors::ContributorEntry, ValueDeclKind)> =
             Vec::new();
         for entry in population.entries.iter() {

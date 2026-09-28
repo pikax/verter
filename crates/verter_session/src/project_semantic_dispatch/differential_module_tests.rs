@@ -272,14 +272,16 @@ fn a_scripts_global_types_read_from_another_module() {
 }
 
 /// A type another module names through a script's namespace: `Ns.NT`, and
-/// `Mo.MT` through the legacy `module` keyword (TS1540, still declared).
+/// `Mo.MT` through the legacy `module` keyword (TS1540, still declared) —
+/// a qualified name whose head nothing in scope declares reads through the
+/// global namespace of that name.
 ///
 /// Measured on TypeScript 7.0.2, alike under every setting: `Ns.NT` is
 /// `4`, `Mo.MT` `3`.
 ///
-/// What the lane gives: each an unresolved qualified name (`BareRef`).
+/// Mutation: reading no qualified type name through a global namespace
+/// answers each an unresolved qualified name (`BareRef`).
 #[test]
-#[ignore = "a qualified type name reads through a global script's namespace from another module"]
 fn a_scripts_namespace_types_read_from_another_module() {
     let matrix = Matrix::new("").files(SCRIPT_GLOBAL_TYPES);
     let failures = matrix.types(&[("Ns.NT", "4"), ("Mo.MT", "3")]);
@@ -293,11 +295,12 @@ fn a_scripts_namespace_types_read_from_another_module() {
 /// setting: `nc` and `np` return `number`, `InstanceType<typeof Pc>['x']`
 /// is `number`.
 ///
-/// What the lane gives: `nc` and `np` an unmodeled position degraded by
-/// UnrepresentableCallee, the `typeof` row a miss degraded by
-/// UnresolvedValue.
+/// Mutation: reading the global population across every project answers
+/// `nc` and `np` an unmodeled position degraded by UnrepresentableCallee
+/// and the `typeof` row a miss degraded by UnresolvedValue — each project's
+/// `Pc` is a class of its own, and classes declared in several files are no
+/// one global value.
 #[test]
-#[ignore = "a global script's class constructs and reads through typeof from another module"]
 fn a_scripts_class_value_reads_from_another_module() {
     let matrix = Matrix::new(
         "export function nc() { return new C().x; }\nexport function np() { return new Pc().x; }\n",
@@ -307,6 +310,42 @@ fn a_scripts_class_value_reads_from_another_module() {
         (Read::Return("nc"), "number"),
         (Read::Return("np"), "number"),
         (Read::Type("InstanceType<typeof Pc>['x']"), "number"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A script global differing per project: `var gv` and `class Gc` are
+/// `1` / `{ x = 1 }` in the `strictNullChecks` projects and `"s"` /
+/// `{ x = "s" }` in the others.
+const PER_PROJECT_GLOBALS: [&str; 4] = [
+    "var gv: 1;\nclass Gc { x = 1 }\n",
+    "var gv: \"s\";\nclass Gc { x = \"s\" }\n",
+    "var gv: 1;\nclass Gc { x = 1 }\n",
+    "var gv: \"s\";\nclass Gc { x = \"s\" }\n",
+];
+
+/// The global scope is one program's: a module reads the globals of its own
+/// project's scripts, never another project's.
+///
+/// Measured on TypeScript 7.0.2 (each project checked alone): `typeof gv` is
+/// `1` and `InstanceType<typeof Gc>['x']` `number` over the first source,
+/// `"s"` and `string` over the second, alike under every setting.
+///
+/// Mutation: reading the global population across every project answers
+/// `typeof gv` with another project's declaration (`"s"` in the strict
+/// project), and `InstanceType<typeof Gc>['x']` with a miss.
+#[test]
+fn a_module_reads_its_own_projects_script_globals() {
+    let matrix = Matrix::new("").file_per_setting("g.ts", &PER_PROJECT_GLOBALS);
+    let failures = matrix.four(&[
+        (Read::Type("typeof gv"), "1", "\"s\"", "1", "\"s\""),
+        (
+            Read::Type("InstanceType<typeof Gc>['x']"),
+            "number",
+            "string",
+            "number",
+            "string",
+        ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
