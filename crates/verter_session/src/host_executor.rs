@@ -40,6 +40,17 @@ pub(crate) fn scheduler_dep_resolution_count_for_test(canonical_id: &str) -> u64
         .unwrap_or(0)
 }
 
+/// A source stage publishes nothing for a script whose parse, or the
+/// walk-stack lease of its walks, was refused: the stage fails with the
+/// typed [`StageErrorKind::StackUnavailable`] instead of publishing a
+/// snapshot read off a program the source is not.
+fn refuse_unparsed(parse_snapshot: &ParseSnapshot) -> Result<(), StageError> {
+    match parse_snapshot.refused {
+        Some(refused) => Err(StageError::stack_unavailable(refused.needed)),
+        None => Ok(()),
+    }
+}
+
 /// Host-specific data stored in a [`SourceSnapshot`].
 ///
 /// Wraps a `ParseSnapshot` — the result of SFC tokenization, hashing, and analysis.
@@ -381,6 +392,7 @@ impl StageExecutor for HostStageExecutor {
             .ok_or_else(|| {
                 StageError::new("published carrier artifact does not match its registered language")
             })?;
+            refuse_unparsed(&parse_snapshot)?;
             // Sealed-identity wire tokens attach ONCE at record build, so
             // every serve reuses the stored styles Arc unchanged.
             crate::parse::attach_style_block_tokens(&structure, &mut parse_snapshot.style_analyses);
@@ -421,6 +433,7 @@ impl StageExecutor for HostStageExecutor {
                 &file_language,
                 &self.provenance,
             );
+            refuse_unparsed(&parse_snapshot)?;
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type = imported_eval_source_type(&file_language, None);
             let script_parse_key =
@@ -615,3 +628,7 @@ impl StageExecutor for HostStageExecutor {
 /// The underlying function lives in [`crate::parse::imported_eval_source_type`]
 /// so WASM-only fall-back paths can reach it without the scheduler feature.
 pub(crate) use crate::parse::imported_eval_source_type;
+
+#[cfg(test)]
+#[path = "stack_refusal_tests.rs"]
+mod stack_refusal_tests;

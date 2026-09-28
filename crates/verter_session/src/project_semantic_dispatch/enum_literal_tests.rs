@@ -12,6 +12,7 @@
 //! The four settings agree on every row except where a row says otherwise.
 
 use super::checker_probe_lane_tests::{mismatches_in, ProbeProject};
+use super::differential_harness_tests::Matrix;
 
 const ENUMS: &str = "\
 export enum E { A, B }
@@ -463,4 +464,166 @@ fn operators_over_an_enum_type_reduce_as_the_checker_reduces_them() {
             ("F.A & G.A", "never"),
         ],
     );
+}
+
+/// Enum members referencing members declared after them, themselves, and
+/// the spellings `Infinity` and `NaN`.
+const REFERENCE_ORDER: &str = "\
+enum Cyc { A = B, B = A }
+enum Fwd { A = B, B = 1 }
+enum Self1 { A = A, B }
+enum SelfQ { A = SelfQ.A }
+declare enum AmbFwd { A = B, B = 1 }
+const enum CFwd { A = B, B = 1, C = CFwd.D, D = 2 }
+enum W { A = W.B + 1, B = 5 }
+enum EI { Infinity = 5, A = Infinity }
+enum FI { A = Infinity, Infinity = 5 }
+enum GI { A = Infinity, B = NaN, C = -Infinity }
+";
+
+/// A member of an enum body referencing a member declared after it reads
+/// `0`, the value the checker gives a member used before its declaration
+/// (TS2651), so `enum Cyc { A = B, B = A }` is `0` twice; one referencing
+/// itself is used before it is assigned (TS2565) and computed; in an
+/// ambient enum a later member is not yet computed, so the reference is
+/// computed too. `Infinity` and `NaN` name a member of the enum first
+/// (declared before or after the reference), and the global numbers
+/// otherwise.
+///
+/// Measured on TypeScript 7.0.2 (`declare const p: <probe>; const s: never
+/// = p;`), alike under every `strictNullChecks` × `noImplicitAny` setting:
+/// `Cyc.A extends 0`, `Cyc.B extends 0`, `Fwd.A extends 0`, `1 extends
+/// Self1.A`, `1 extends Self1.B`, `1 extends SelfQ.A`, `1 extends
+/// AmbFwd.A`, `CFwd.A extends 0`, `CFwd.C extends 0`, `W.A extends 1`,
+/// `EI.A extends 5`, `FI.A extends 0` are each `"y"`; `1 extends GI.A` and
+/// `1 extends GI.B` are `"n"`.
+///
+/// Mutation: evaluating a later member's own value instead of `0` answers
+/// `Fwd.A extends 0` `"n"`; folding `Infinity` by its spelling answers
+/// `EI.A extends 5` `"n"`.
+#[test]
+fn a_reference_to_a_member_declared_after_it_reads_as_the_checker_reads_it() {
+    let yes = |probe: &'static str| (probe, "\"y\"");
+    let failures = Matrix::new(REFERENCE_ORDER).types(&[
+        yes("Cyc.A extends 0 ? \"y\" : \"n\""),
+        yes("Cyc.B extends 0 ? \"y\" : \"n\""),
+        yes("Fwd.A extends 0 ? \"y\" : \"n\""),
+        yes("1 extends Self1.A ? \"y\" : \"n\""),
+        yes("1 extends Self1.B ? \"y\" : \"n\""),
+        yes("1 extends SelfQ.A ? \"y\" : \"n\""),
+        yes("1 extends AmbFwd.A ? \"y\" : \"n\""),
+        yes("CFwd.A extends 0 ? \"y\" : \"n\""),
+        yes("CFwd.C extends 0 ? \"y\" : \"n\""),
+        yes("W.A extends 1 ? \"y\" : \"n\""),
+        yes("EI.A extends 5 ? \"y\" : \"n\""),
+        yes("FI.A extends 0 ? \"y\" : \"n\""),
+        ("1 extends GI.A ? \"y\" : \"n\"", "\"n\""),
+        ("1 extends GI.B ? \"y\" : \"n\"", "\"n\""),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A module declaring its own `Infinity` and `NaN`: an enum initializer
+/// naming them reads those constants, not the global numbers.
+const SHADOWED_NUMBERS: &str = "\
+const Infinity = 9;
+const NaN = 8;
+enum K { A = Infinity, B = NaN, C = -Infinity }
+";
+
+/// `Infinity` and `NaN` resolve as every value reference does before the
+/// global numbers apply: a module's own `const Infinity = 9` is `9`.
+///
+/// Measured on TypeScript 7.0.2, alike under every setting: `K.A extends
+/// 9`, `K.B extends 8`, `K.C extends -9` are each `"y"`.
+///
+/// Mutation: folding `Infinity` and `NaN` by their spelling answers each
+/// `"n"`.
+#[test]
+fn a_shadowed_infinity_or_nan_reads_the_declaration_in_scope() {
+    let yes = |probe: &'static str| (probe, "\"y\"");
+    let failures = Matrix::new(SHADOWED_NUMBERS).types(&[
+        yes("K.A extends 9 ? \"y\" : \"n\""),
+        yes("K.B extends 8 ? \"y\" : \"n\""),
+        yes("K.C extends -9 ? \"y\" : \"n\""),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `Infinity` and `NaN` naming the library's global declarations are the
+/// global numbers: `enum GI { A = Infinity, B = NaN }` beside a library
+/// declaring `declare var Infinity: number;` holds the constants, not
+/// computed members.
+///
+/// Measured on TypeScript 7.0.2 (its own library declares both), alike
+/// under every setting: `1 extends GI.A` and `1 extends GI.B` are `"n"`,
+/// `GI.C extends number` is `"y"`.
+///
+/// Mutation: reading a reference that resolves to the library's `var` as
+/// a variable answers `1 extends GI.A` `"y"` (computed).
+#[test]
+fn infinity_and_nan_naming_the_library_globals_are_the_global_numbers() {
+    let failures = Matrix::new("enum GI { A = Infinity, B = NaN, C = -Infinity }\n")
+        .lib("declare var Infinity: number;\ndeclare var NaN: number;\n")
+        .types(&[
+            ("1 extends GI.A ? \"y\" : \"n\"", "\"n\""),
+            ("1 extends GI.B ? \"y\" : \"n\"", "\"n\""),
+            ("GI.C extends number ? \"y\" : \"n\"", "\"y\""),
+        ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A member referencing a member of ANOTHER enum declaration (another enum,
+/// or another declaration of a merged enum) declared after it in the same
+/// file reads `0` (TS2651), and one referencing a `const` declared after it
+/// is computed (TS2448) — the checker's declared-before-use rule across
+/// declarations.
+///
+/// Measured on TypeScript 7.0.2, alike under every setting: `F.A extends
+/// 0`, `G.A extends 0`, `M.A extends 0`, `1 extends Q.A` and `5 extends
+/// Q.A` are each `"y"`.
+///
+/// What the lane gives: `"n"` for each but `5 extends Q.A` (it reads the
+/// later declaration's own value: `F.A`, `G.A` and `M.A` are computed or
+/// `1`, `Q.A` is `5`).
+#[test]
+#[ignore = "a reference to a member or const declared after it in another declaration of the same file reads the checker's declared-before-use value"]
+fn a_reference_to_a_later_declaration_reads_as_the_checker_reads_it() {
+    let yes = |probe: &'static str| (probe, "\"y\"");
+    let failures = Matrix::new(
+        "enum F { A = G.A, B = 1 }\nenum G { A = F.A }\nenum M { A = B }\nenum M { B = 1 }\nenum Q { A = c }\nconst c = 5;\n",
+    )
+    .types(&[
+        yes("F.A extends 0 ? \"y\" : \"n\""),
+        yes("G.A extends 0 ? \"y\" : \"n\""),
+        yes("M.A extends 0 ? \"y\" : \"n\""),
+        yes("1 extends Q.A ? \"y\" : \"n\""),
+        yes("5 extends Q.A ? \"y\" : \"n\""),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An enum in a namespace naming the namespace's own non-exported `const`
+/// — `k`, or `Infinity` / `NaN` shadowing the global numbers — reads its
+/// value.
+///
+/// Measured on TypeScript 7.0.2, alike under every setting: `N.E.A extends
+/// 2`, `N.E.B extends 3`, `N2.E.A extends 4` are each `"y"`.
+///
+/// What the lane gives: `"n"` for each (a namespace's non-exported value
+/// declaration is not indexed, so `Infinity` / `NaN` read the global
+/// numbers and `k` names nothing).
+#[test]
+#[ignore = "an enum initializer reads its namespace's non-exported const declarations"]
+fn an_enum_reads_its_namespaces_non_exported_constants() {
+    let yes = |probe: &'static str| (probe, "\"y\"");
+    let failures = Matrix::new(
+        "namespace N { const Infinity = 2; const NaN = 3; export enum E { A = Infinity, B = NaN } }\nnamespace N2 { const k = 4; export enum E { A = k } }\n",
+    )
+    .types(&[
+        yes("N.E.A extends 2 ? \"y\" : \"n\""),
+        yes("N.E.B extends 3 ? \"y\" : \"n\""),
+        yes("N2.E.A extends 4 ? \"y\" : \"n\""),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

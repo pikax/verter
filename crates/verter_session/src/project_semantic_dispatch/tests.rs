@@ -13477,12 +13477,183 @@ fn a_resolved_workload_arena_is_a_dag() {
                 child.0
             );
         };
-        if let crate::semantic_query::ChildWalk::Sealed = data.for_each_child(&mut check) {
-            if let SemanticNodeData::DeferredCallable(callable) = data.as_ref() {
-                callable.for_each_child_node(&mut check);
-            }
+        data.for_each_retained_child(&mut check);
+    }
+}
+
+/// The node ids `data`'s `Debug` form prints: every `SemanticNodeId` the
+/// payload holds, however deep in its fields. Independent of either child
+/// walk, so a field a walk forgets still shows here.
+fn node_ids_printed_in(data: &SemanticNodeData) -> Vec<u64> {
+    const MARK: &str = "SemanticNodeId(";
+    let printed = format!("{data:?}");
+    let mut ids = Vec::new();
+    let mut rest = printed.as_str();
+    while let Some(at) = rest.find(MARK) {
+        rest = &rest[at + MARK.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(id) = digits.parse() {
+            ids.push(id);
         }
     }
+    ids
+}
+
+/// Whether the retention workload below must produce a node of `tag`. The
+/// match names every variant, so a new one does not compile until it is
+/// placed here: either the workload produces it (and the sweep checks
+/// that every id it holds is retained) or the arm says why it cannot.
+fn retention_workload_produces(tag: crate::semantic_query::SemanticNodeTag) -> bool {
+    use crate::semantic_query::SemanticNodeTag as Tag;
+    match tag {
+        Tag::Object
+        | Tag::Union
+        | Tag::Intersection
+        | Tag::Primitive
+        | Tag::Literal
+        | Tag::Array
+        | Tag::Tuple
+        | Tag::TemplateLiteral
+        | Tag::Mapped
+        | Tag::TypeParam
+        | Tag::Infer
+        | Tag::InferRef
+        | Tag::Conditional
+        | Tag::Signature
+        | Tag::InstantiationRef
+        | Tag::KeyOf
+        | Tag::IndexedAccess
+        | Tag::Opaque => true,
+        // Payloads this type-only workload does not intern: value-side and
+        // host-bridge carriers, and the forms its reads reduce before they
+        // are interned. The arena checks every payload any test interns in
+        // the same way, so each is swept wherever its own producer's tests
+        // build it.
+        Tag::Alias
+        | Tag::DeclRef
+        | Tag::EnumLiteral
+        | Tag::IntrinsicApplication
+        | Tag::ObjectSpreadProgram
+        | Tag::TypeOf
+        | Tag::TypeOfNominal
+        | Tag::MergedDecl
+        | Tag::DeferredCallable
+        | Tag::ClassExpressionInstance
+        | Tag::BareRef
+        | Tag::ImportType
+        | Tag::RawFallback
+        | Tag::SyntheticBinding => false,
+    }
+}
+
+/// Every node id a payload holds is visited by
+/// `SemanticNodeData::for_each_retained_child`, over the arena of a real
+/// workload: generic, recursive, mapped, conditional, template, intrinsic,
+/// enum and overloaded declarations, their instantiations, and relations
+/// between references to generic interfaces (whose variance measurement
+/// interns marker instantiations). The held ids are read off each
+/// payload's `Debug` form, independently of the walk, so a field or a
+/// variant the walk forgets fails here — and a releasing holder that walks
+/// it would otherwise keep the node that field names alive.
+#[test]
+fn every_node_id_a_payload_holds_is_a_retained_child() {
+    use crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR;
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/retained.ts",
+        "export interface Box<T> { value: T; map<U>(f: (v: T) => U): Box<U> }\n\
+         export interface Sink<T> { put(v: T): void }\n\
+         export interface Node<T> { value: T; next: Node<T> | null; children: Node<T>[] }\n\
+         export type Json = string | number | boolean | null | Json[] | { [k: string]: Json };\n\
+         export type Partialize<T> = { [K in keyof T]?: T[K] };\n\
+         export type Unwrap<T> = T extends Promise<infer U> ? Unwrap<U> : T;\n\
+         export type Lazy<T> = T extends string ? { s: T } : { n: T };\n\
+         export type Pair<T> = [T, number?];\n\
+         export type Greeting<N extends string> = `hello ${Uppercase<N>}`;\n\
+         export enum Color { Red, Green = \"g\" }\n\
+         export type Red = Color.Red;\n\
+         export type Both<T> = { a: T } & { b: 2 };\n\
+         export type Keys<T> = keyof T;\n\
+         export type At<T> = T[keyof T];\n\
+         export declare function pick<T, K extends keyof T>(o: T, k: K): T[K];\n\
+         export declare function pick(o: string): number;\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let instantiate = |name: &str, arg: SemanticNodeId| {
+        dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                decl_identity(&host, "/w/retained.ts", name),
+                Arc::from(vec![arg].into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                ),
+            ),
+        ))
+    };
+    for name in ["Json", "Color", "Red", "pick"] {
+        let _ = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+            "/w/retained.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name,
+        )));
+    }
+    for name in [
+        "Node",
+        "Partialize",
+        "Unwrap",
+        "Lazy",
+        "Pair",
+        "Both",
+        "Keys",
+        "At",
+    ] {
+        let _ = instantiate(name, number);
+    }
+    let _ = instantiate("Greeting", string);
+    for name in ["Box", "Sink"] {
+        let (QueryResult::Value(of_number), QueryResult::Value(of_string)) =
+            (instantiate(name, number), instantiate(name, string))
+        else {
+            panic!("premise: {name} instantiates");
+        };
+        let _ = dispatch.execute_relate(dispatch.relate_key_for(of_number.value, of_string.value));
+    }
+
+    let count = graph.node_count() as u64;
+    let mut seen = std::collections::BTreeSet::new();
+    for id in 0..count {
+        let Some(data) = graph.node_data(SemanticNodeId(id)) else {
+            continue;
+        };
+        seen.insert(data.node_tag());
+        let mut retained = std::collections::BTreeSet::new();
+        data.for_each_retained_child(|child| {
+            retained.insert(child.0);
+        });
+        for held in node_ids_printed_in(&data) {
+            assert!(
+                held >= UNALLOCATABLE_ID_FLOOR || retained.contains(&held),
+                "node {id} ({:?}) holds node {held}, which its retained walk never visits",
+                data.node_tag()
+            );
+        }
+    }
+    let missing: Vec<_> = crate::semantic_query::SemanticNodeTag::ALL
+        .into_iter()
+        .filter(|&tag| retention_workload_produces(tag) && !seen.contains(&tag))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the workload produced no {missing:?} node; seen {seen:?}"
+    );
 }
 
 /// Substitute-rebuild arms must preserve the origin scope. A plain

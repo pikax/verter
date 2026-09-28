@@ -179,12 +179,23 @@ impl ProjectSemanticDispatch<'_> {
                 Some((array_name(*readonly), vec![*element]))
             }
             SemanticNodeData::Tuple { elements, readonly } => {
+                let declaring_file = self
+                    .graph()
+                    .node_scope(node)
+                    .and_then(|scope| scope.canonical_file());
                 let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(elements.len());
                 for element in elements.iter() {
+                    // An optional element reads as the tuple's indexed
+                    // access reads it (`number | undefined` for `[number?]`
+                    // under `strictNullChecks`).
                     let value = if element.rest {
                         self.rest_array_element(element.value)?
                     } else {
-                        element.value
+                        self.optional_member_read(
+                            element.value,
+                            element.optional,
+                            declaring_file.as_deref(),
+                        )
                     };
                     match self.graph().node_data(value).as_deref() {
                         Some(SemanticNodeData::Union(members)) => arms.extend(members.iter()),
@@ -196,6 +207,57 @@ impl ProjectSemanticDispatch<'_> {
             }
             _ => None,
         }
+    }
+
+    /// The type an indexed access reads off a property or tuple element
+    /// whose declared type is `value`, declared in `declaring_file` —
+    /// TypeScript's indexed-access read. Under the declaring project's
+    /// `strictNullChecks` an OPTIONAL one reads `value | undefined` (`{ o?:
+    /// 3 }['o']` is `3 | undefined`; `exactOptionalPropertyTypes` does not
+    /// change the read). With it off, `null` and `undefined` are not types
+    /// of their own: the read is the declared type with them erased (`o?: 3
+    /// | undefined` reads `3`), the checker's union construction under that
+    /// option.
+    pub(super) fn optional_member_read(
+        &self,
+        value: SemanticNodeId,
+        optional: bool,
+        declaring_file: Option<&str>,
+    ) -> SemanticNodeId {
+        use crate::semantic_query::NullabilityPolicy;
+        let strict = declaring_file.is_none_or(|canonical| {
+            self.ctx
+                .host_for_fact_tracer_install()
+                .semantic_compiler_options_for(canonical)
+                .strict_null_checks
+        });
+        let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(2);
+        match self.graph().node_data(value).as_deref() {
+            Some(SemanticNodeData::Union(members)) => arms.extend(members.iter().copied()),
+            _ => arms.push(value),
+        }
+        if strict {
+            if !optional {
+                return value;
+            }
+            arms.push(
+                self.graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
+            );
+            return self.intern_normalized_union(&arms, NullabilityPolicy::Strict);
+        }
+        let nullable = |arm: &SemanticNodeId| {
+            matches!(
+                self.graph().node_data(*arm).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        };
+        if arms.len() < 2 || !arms.iter().any(nullable) {
+            return value;
+        }
+        self.intern_normalized_union(&arms, NullabilityPolicy::Erased)
     }
 
     /// A tuple's `length`: `number` with a rest element, else the union of

@@ -15,6 +15,7 @@ fn main() {
     let _ = DischargeEvidence {
         input_basis: todo!(),
         result_contract: todo!(),
+        ancestry: todo!(),
         dependencies: todo!(),
         suboperations: todo!(),
     };

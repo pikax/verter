@@ -150,17 +150,15 @@ fn a_recursive_interface_reference_is_not_deeply_nested() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// An infinitely recursive generic interface: the checker measures its
-/// variance through the recursion, which stops as deeply nested.
+/// An infinitely recursive generic interface relates by the variance the
+/// checker measures through its recursion: its references to itself answer
+/// `Unknown` while the measurement is open, so it never descends a level
+/// per nesting.
 ///
 /// Measured: over `interface R<T> { v: R<[T]>; t: T }`, `[R<1>] extends
 /// [R<number>] ? 1 : 2` is `1` and `[R<string>] extends [R<number>] ? 1 :
-/// 2` is `2`. This engine relates the references structurally and has no
-/// recursion identity for an interface (see
-/// `a_recursive_interface_reference_is_not_deeply_nested`), so the first
-/// probe overflows the depth limit instead: `2`.
+/// 2` is `2`.
 #[test]
-#[ignore = "two references to one generic interface relate by the variance of its type arguments"]
 fn an_infinitely_recursive_interface_relates_by_its_variance() {
     let failures = mismatches(
         "interface R<T> { v: R<[T]>; t: T }\n",
@@ -172,37 +170,147 @@ fn an_infinitely_recursive_interface_relates_by_its_variance() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// The relations an overflowed one computed are never admitted: a relation
-/// checked after it answers as it does alone.
+/// A relation answers what it answers cold, whatever the relations checked
+/// before it left in the memo: the answer of a fixed demand never depends
+/// on query order. The checker's own relation cache does make it depend:
+/// its answers in ONE file, in order, are what the rows below call warm.
 ///
-/// Measured in ONE file, in this order: `[Box<…99…<1>>] extends
-/// [Box<…99…<number>>] ? 1 : 2` is `1`, and the same over 100 applications
-/// after it is `1` too — the checker's relation cache holds the 99-deep
-/// pair, so the 100-deep relation never reaches the limit. This engine's
-/// memo holds the pair the same way.
+/// Measured: `[Box<…99…<1>>] extends [Box<…99…<number>>] ? 1 : 2` is `1`
+/// and the 100-deep relation is `2` with TS2321, each in a file (and a
+/// checker) of its own. In one file, the 99-deep relation first makes the
+/// 100-deep one `1` (the cached 99-deep pair spares it the depth that
+/// overflows it), and the 100-deep relation first makes the 99-deep one
+/// `2` (the failures its overflow cached). Here both orders answer the
+/// cold answers: an entry is replayed inside a relation only where its
+/// recorded height fits the depth left.
 #[test]
-fn a_relation_after_a_shallower_one_reads_its_cached_pairs() {
+fn a_relation_answers_its_cold_answer_in_either_order_around_the_depth_limit() {
     let (b99, t99) = (boxed(99, "1"), boxed(99, "number"));
     let (b100, t100) = (boxed(100, "1"), boxed(100, "number"));
-    let first = format!("[{b99}] extends [{t99}] ? 1 : 2");
-    let second = format!("[{b100}] extends [{t100}] ? 1 : 2");
-    let failures = mismatches_in_one_host(BOX, &[(first.as_str(), "1"), (second.as_str(), "1")]);
+    let shallow = format!("[{b99}] extends [{t99}] ? 1 : 2");
+    let deep = format!("[{b100}] extends [{t100}] ? 1 : 2");
+    let mut failures = Vec::new();
+    for rows in [
+        [(shallow.as_str(), "1"), (deep.as_str(), "2")],
+        [(deep.as_str(), "2"), (shallow.as_str(), "1")],
+    ] {
+        failures.extend(mismatches_in_one_host(BOX, &rows));
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Measured in ONE file, in this order: the 100-deep relation is `2` with
-/// TS2321, and the 99-deep one after it is `2` too — the checker caches
-/// the failures its overflow produced. This engine never admits an answer
-/// computed under an overflow (it depends on where the relation began, and
-/// the memo is shared across requests), so the 99-deep relation answers
-/// `1`, as it does alone.
+const NESTED_ALIAS: &str =
+    "type N<T, D extends unknown[]> = D['length'] extends 3 ? T : { v: N<T, [...D, 0]> };\n";
+
+/// A relation deeply nested cold is deeply nested after a relation whose
+/// memo entries sit inside its recursion, and one that is not stays so.
+///
+/// Measured over [`NESTED_ALIAS`], each probe in a file of its own:
+/// `[N<1, [0, 0]>] extends [N<string, [0, 0]>] ? 1 : 2` is `2` (two
+/// instantiations of `N` before its body answers `T`), and `[N<1, []>]
+/// extends [N<string, []>] ? 1 : 2` is `1` (the third instantiation is
+/// deeply nested). In one file the checker answers the second relation
+/// `2` after the first, and the first `1` after the second. Here both
+/// orders answer the cold answers: an entry is replayed only where the
+/// instantiations it stacks, with those below the read, cannot complete a
+/// deeply-nested stack.
 #[test]
-#[ignore = "the relation memo keeps the failures a checker overflow produced"]
-fn a_relation_after_an_overflowed_one_reads_its_failures() {
-    let (b99, t99) = (boxed(99, "1"), boxed(99, "number"));
-    let (b100, t100) = (boxed(100, "1"), boxed(100, "number"));
-    let first = format!("[{b100}] extends [{t100}] ? 1 : 2");
-    let second = format!("[{b99}] extends [{t99}] ? 1 : 2");
-    let failures = mismatches_in_one_host(BOX, &[(first.as_str(), "2"), (second.as_str(), "2")]);
+fn a_relation_answers_its_cold_answer_in_either_order_around_a_deeply_nested_stack() {
+    let deep = "[N<1, [0, 0]>] extends [N<string, [0, 0]>] ? 1 : 2";
+    let shallow = "[N<1, []>] extends [N<string, []>] ? 1 : 2";
+    let mut failures = Vec::new();
+    for rows in [[(deep, "2"), (shallow, "1")], [(shallow, "1"), (deep, "2")]] {
+        failures.extend(mismatches_in_one_host(NESTED_ALIAS, &rows));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// One snapshot answers every query order alike: the same probes, read
+/// from one host forward, backward and interleaved, each answer its cold
+/// answer.
+///
+/// Measured, each probe in a file of its own: over `Box` applied 98, 99,
+/// 100 and 101 times the relation is `1`, `1`, `2`, `2`; over
+/// [`NESTED_ALIAS`], `[N<1, D>] extends [N<string, D>]` is `2` for `D` of
+/// length 2 and 1 and `1` for `[]`.
+#[test]
+fn one_snapshot_answers_every_query_order_alike() {
+    let source = format!("{BOX}{NESTED_ALIAS}");
+    let box_rows: Vec<(String, &str)> = [(98, "1"), (99, "1"), (100, "2"), (101, "2")]
+        .into_iter()
+        .map(|(depth, answer)| {
+            (
+                format!(
+                    "[{}] extends [{}] ? 1 : 2",
+                    boxed(depth, "1"),
+                    boxed(depth, "number")
+                ),
+                answer,
+            )
+        })
+        .collect();
+    let alias_rows = [
+        (
+            "[N<1, [0, 0]>] extends [N<string, [0, 0]>] ? 1 : 2".to_owned(),
+            "2",
+        ),
+        (
+            "[N<1, [0]>] extends [N<string, [0]>] ? 1 : 2".to_owned(),
+            "2",
+        ),
+        ("[N<1, []>] extends [N<string, []>] ? 1 : 2".to_owned(), "1"),
+    ];
+    let rows: Vec<(&str, &str)> = box_rows
+        .iter()
+        .chain(alias_rows.iter())
+        .map(|(probe, answer)| (probe.as_str(), *answer))
+        .collect();
+    let backward: Vec<(&str, &str)> = rows.iter().rev().copied().collect();
+    let interleaved: Vec<(&str, &str)> = rows
+        .iter()
+        .step_by(2)
+        .chain(rows.iter().skip(1).step_by(2))
+        .copied()
+        .collect();
+    let mut failures = Vec::new();
+    for (order, rows) in [
+        ("forward", &rows),
+        ("backward", &backward),
+        ("interleaved", &interleaved),
+    ] {
+        failures.extend(
+            mismatches_in_one_host(&source, rows)
+                .into_iter()
+                .map(|failure| format!("{order}: {failure}")),
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Written inline on both sides, nested object types overflow at the same
+/// depth as through an alias: the tuple's element pair is the checker's
+/// second nested structured relation.
+///
+/// Measured: `[{ v: …99…1… }] extends [{ v: …99…number… }] ? 1 : 2` is `1`
+/// and over 100 nested literals it is `2` with TS2321. This engine relates
+/// a tuple's or an array's element pair of two object literal types inside
+/// the enclosing relation's frame, so that pair never counts toward the
+/// depth: the 100-deep relation answers `1`.
+#[test]
+#[ignore = "an element pair of two inline object literal types counts toward the relation depth"]
+fn inline_nested_object_types_overflow_at_the_checkers_depth() {
+    let failures: Vec<String> = [(99, "1"), (100, "2")]
+        .into_iter()
+        .flat_map(|(depth, expected)| {
+            let probe = format!(
+                "[{}] extends [{}] ? 1 : 2",
+                nested(depth, "1"),
+                nested(depth, "number")
+            );
+            mismatches("", &[(probe.as_str(), expected)])
+                .into_iter()
+                .map(move |failure| format!("depth {depth}: {failure}"))
+        })
+        .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -351,6 +351,15 @@ fn build_ts_type<'b, 'a>(
         TSType::TSTypeQuery(query) => lower_type_query(query, source, lower),
 
         // -- infer T --
+        // A constrained `infer X extends C` is unsupported syntax: the IR's
+        // `Infer` carries no constraint, and dropping it would read the
+        // placeholder as unconstrained (the checker filters and parses its
+        // candidate by the constraint).
+        TSType::TSInferType(infer) if infer.type_parameter.constraint.is_some() => {
+            TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
+                source, infer.span,
+            )))
+        }
         TSType::TSInferType(infer) => TypeExpr::Infer {
             name: infer.type_parameter.name.to_string(),
         },

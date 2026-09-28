@@ -1708,3 +1708,87 @@ fn union_reduction_classifies_each_node_once_per_store() {
         );
     }
 }
+
+/// Every node id a payload retains is visited by the retention walk,
+/// including the ids the semantic descent treats as leaves — a recursive
+/// back-edge's instantiation arguments, a class expression's prototype and
+/// a pending conditional frame's parameters — so a releasing holder needs
+/// no arm of its own per variant, and a forward reference hidden in any of
+/// them fails closed at interning.
+#[test]
+fn the_retention_walk_visits_every_retained_id() {
+    use crate::semantic_query::QueryError;
+    let graph = SemanticGraphStore::new();
+    let argument = prim(&graph, PrimitiveKind::Number);
+    let back_edge = SemanticNodeData::Opaque(QueryError::RecursiveRef {
+        name: Arc::from("Tree"),
+        args: Arc::from([argument]),
+    });
+    let mut semantic = Vec::new();
+    let _ = back_edge.for_each_child(|child| semantic.push(child));
+    let mut retained = Vec::new();
+    back_edge.for_each_retained_child(|child| retained.push(child));
+    assert!(
+        semantic.is_empty(),
+        "premise: the semantic walk treats it as a leaf"
+    );
+    assert_eq!(
+        retained,
+        vec![argument],
+        "the retention walk visits its arguments"
+    );
+
+    let prototype = prim(&graph, PrimitiveKind::String);
+    let surface = prim(&graph, PrimitiveKind::Boolean);
+    let instance = SemanticNodeData::ClassExpressionInstance {
+        identity: Arc::new(crate::semantic_query::ClassExpressionIdentity {
+            canonical_id: Arc::from("file:///a.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            offset: 0,
+            name: Arc::from("C"),
+            outer_clauses: Arc::from([]),
+            own_arity: 0,
+            constructor_visibility: None,
+            prototype: Some(prototype),
+            object_literal: false,
+        }),
+        type_arguments: Arc::from([]),
+        surface,
+    };
+    let mut retained = Vec::new();
+    instance.for_each_retained_child(|child| retained.push(child));
+    assert!(
+        retained.contains(&prototype) && retained.contains(&surface),
+        "the retention walk visits a class expression's prototype"
+    );
+
+    let parameter = prim(&graph, PrimitiveKind::Null);
+    let pending = crate::semantic_query::ConditionalPendingSubstitution::empty()
+        .append_true(parameter, argument);
+    let conditional = SemanticNodeData::Conditional {
+        check: argument,
+        extends: argument,
+        true_branch_ref: argument,
+        false_branch_ref: argument,
+        distributive: false,
+        pending: Some(Arc::new(pending)),
+    };
+    let mut retained = Vec::new();
+    conditional.for_each_retained_child(|child| retained.push(child));
+    assert!(
+        retained.contains(&parameter),
+        "the retention walk visits a pending frame's parameters"
+    );
+
+    let forward = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
+        name: Arc::from("Tree"),
+        args: Arc::from([SemanticNodeId(graph.node_count() as u64 + 3)]),
+    }));
+    assert!(
+        matches!(
+            graph.node_data(forward).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::ForeignSemanticOperand))
+        ),
+        "a forward argument of a back-edge fails closed"
+    );
+}

@@ -98,6 +98,10 @@ pub(crate) struct LoweringOutcome<R> {
 pub(crate) struct LeaseOutcome {
     pub lease: SnapshotLease,
     pub parsed_now: bool,
+    /// The retained parse was refused for want of stack: the program is
+    /// not retained, and the flight holding the lease publishes nothing
+    /// for the source.
+    pub refused: Option<verter_parser::oxc_parse::StackUnavailable>,
 }
 
 /// A live pin on the retained parse snapshot for one [`SnapshotKey`].
@@ -162,6 +166,9 @@ struct ShardEntry {
     /// so repeated demands against the same broken content do not
     /// re-parse it.
     parsed: Option<std::rc::Rc<crate::ParsedEvalProgram>>,
+    /// The stack refusal of a fatal parse that was refused for want of
+    /// stack rather than for its syntax.
+    refused: Option<verter_parser::oxc_parse::StackUnavailable>,
     /// Live lease count. The entry is removed (and its `Rc` dropped) when
     /// this reaches zero.
     refcount: usize,
@@ -184,20 +191,23 @@ impl SnapshotShard {
 
     /// Pin the snapshot for `key`: parse it if not already retained,
     /// otherwise bump the refcount on the existing entry. Returns
-    /// whether this acquisition had to parse.
+    /// whether this acquisition had to parse, and the parse's stack refusal.
     fn acquire(
         &mut self,
         account: &Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
         key: &SnapshotKey,
         source: &Arc<str>,
         source_type: oxc_span::SourceType,
-    ) -> bool {
+    ) -> (bool, Option<verter_parser::oxc_parse::StackUnavailable>) {
         if let Some(entry) = self.entries.get_mut(key) {
             entry.refcount += 1;
-            return false;
+            return (false, entry.refused);
         }
-        let parsed =
-            crate::ParsedEvalProgram::parse(Arc::clone(source), source_type).map(std::rc::Rc::new);
+        let (parsed, refused) =
+            match crate::ParsedEvalProgram::parse_outcome(Arc::clone(source), source_type) {
+                Ok(parsed) => (Some(std::rc::Rc::new(parsed)), None),
+                Err(refused) => (None, refused),
+            };
         // Charged from SOURCE bytes rather than by walking the arena:
         // the lease path is hot, and an arena walk per acquisition would
         // cost more than the accounting is worth. See
@@ -209,11 +219,12 @@ impl SnapshotShard {
             key.clone(),
             ShardEntry {
                 parsed,
+                refused,
                 refcount: 1,
                 _pin: pin,
             },
         );
-        true
+        (true, refused)
     }
 
     /// Release one pin on `key`. At refcount zero the entry — and its
@@ -504,6 +515,13 @@ pub(crate) struct DeclLoweringService {
     /// a test may inject a private one so pin accounting is observable
     /// without racing another test's snapshots.
     account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    /// Number of [`SnapshotLease`]s currently alive across every shard —
+    /// the object-lifetime figure a retention measurement reads alongside
+    /// the byte account. A lease is counted when [`Self::acquire_lease`]
+    /// hands it out and uncounted when its `Drop` releases the key, so the
+    /// figure follows the lease objects themselves, not the shard entries
+    /// (several leases may share one retained snapshot).
+    live_leases: std::sync::atomic::AtomicUsize,
     // On `wasm32` the shard itself lives in the
     // `WASM_DECL_LOWERING_SHARD` thread-local, never here, so the
     // service stays `Send + Sync` without any `unsafe impl`; only the
@@ -573,6 +591,7 @@ impl DeclLoweringService {
             workers,
             profile: global_handoff_stats().cloned(),
             account,
+            live_leases: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -597,7 +616,10 @@ impl DeclLoweringService {
         _worker_count: usize,
         account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
     ) -> Self {
-        Self { account }
+        Self {
+            account,
+            live_leases: std::sync::atomic::AtomicUsize::new(0),
+        }
     }
 
     /// Test-only single-worker constructor: forces every key onto one
@@ -655,7 +677,7 @@ impl DeclLoweringService {
     ) -> LeaseOutcome {
         verter_audit::attribute!(ArtifactPinAcquire);
         #[cfg(not(target_arch = "wasm32"))]
-        let parsed_now = {
+        let (parsed_now, refused) = {
             // First lowering demand spawns the worker threads if the
             // service was constructed lazily (`batch_typecheck`).
             let workers = self.workers();
@@ -695,7 +717,7 @@ impl DeclLoweringService {
                     workers[shard_index]
                         .send(job)
                         .expect("decl-lowering worker channel must outlive the service");
-                    let (parsed_now, started, finished) = result_rx
+                    let ((parsed_now, refused), started, finished) = result_rx
                         .recv()
                         .expect("decl-lowering worker must answer every acquire");
                     stats.record_acquire(
@@ -705,29 +727,48 @@ impl DeclLoweringService {
                         std::time::Instant::now(),
                         parsed_now,
                     );
-                    parsed_now
+                    (parsed_now, refused)
                 }
             }
         };
         #[cfg(target_arch = "wasm32")]
-        let parsed_now = WASM_DECL_LOWERING_SHARD.with(|cell| {
+        let (parsed_now, refused) = WASM_DECL_LOWERING_SHARD.with(|cell| {
             cell.borrow_mut()
                 .acquire(&self.account, key, source, source_type)
         });
 
+        self.live_leases
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         LeaseOutcome {
             lease: SnapshotLease {
                 key: key.clone(),
                 service: Arc::clone(self),
             },
             parsed_now,
+            refused,
         }
+    }
+
+    /// Number of live [`SnapshotLease`]s: the retained-parse object count
+    /// a long-session retention measurement compares across quiesced
+    /// checkpoints. Every lease pins one retained snapshot for as long as
+    /// the artifact holding it lives, so a count that climbs with the
+    /// number of superseded document versions is the signature of
+    /// artifacts that outlive their reachability.
+    #[must_use]
+    pub(crate) fn live_lease_count(&self) -> usize {
+        self.live_leases.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Release one pin on `key`. Fire-and-forget: dropping a lease must
     /// not block, and a worker that has already shut down (service
     /// teardown) simply drops the release.
     fn release_key(&self, key: &SnapshotKey) {
+        // Uncounted at the lease drop, not at the shard's refcount decrement:
+        // the count follows lease OBJECTS, and the native release is a
+        // fire-and-forget worker job whose completion nobody observes.
+        self.live_leases
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         #[cfg(not(target_arch = "wasm32"))]
         {
             // A release only happens through a `SnapshotLease` drop, and a

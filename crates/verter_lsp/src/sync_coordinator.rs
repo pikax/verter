@@ -21,13 +21,58 @@ use tower_lsp_server::Client;
 use crate::documents::line_index::LineIndex;
 use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
-    close_stale_provider_paths, commit_sync_transition, genuinely_stale_after_sync,
+    close_stale_provider_paths_with, commit_sync_transition, genuinely_stale_after_sync,
     non_decl_close_targets, open_unresolved_carrier_commit, open_unresolved_carrier_state,
-    revert_unsynced_kinds, ProviderPathKind, ProviderSyncState,
+    revert_unsynced_kinds, NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
+    RedeliverReopenedSurface, RedeliveryFuture,
 };
 use crate::type_provider::merge;
 use crate::type_provider::project_sync::ProjectSync;
 use crate::type_provider::traits::TypeProvider;
+
+/// The carrier-sync surface's re-delivery of a provider surface that was REOPENED
+/// while its stale close was in flight, so the landed close is repaired with the
+/// reopened generation's exact bytes (see
+/// [`crate::provider_sync::close_stale_provider_path`]).
+///
+/// Defined here — on the bounded carrier-sync surface the
+/// `sealed_carrier_store_mutators_allowlist` guard permits to push carrier
+/// companion content — and shared by every stale-close site (the drain, the
+/// scanner, the server's provider-state close and this coordinator), so the
+/// re-delivery verbs exist in exactly one place. It carries no state beyond the
+/// `ProjectSync` handle and delivers exactly the snapshot it is handed.
+pub(crate) struct ProjectSyncRedelivery<'a> {
+    sync: &'a ProjectSync,
+}
+
+impl<'a> ProjectSyncRedelivery<'a> {
+    pub(crate) fn new(sync: &'a ProjectSync) -> Self {
+        Self { sync }
+    }
+}
+
+impl RedeliverReopenedSurface for ProjectSyncRedelivery<'_> {
+    fn redeliver<'a>(
+        &'a self,
+        kind: NonDeclProviderPathKind,
+        path: &'a str,
+        snapshot: Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
+    ) -> RedeliveryFuture<'a> {
+        Box::pin(async move {
+            let content = &snapshot.payload.provider_content;
+            match kind {
+                // The API companion is re-established through the same content
+                // verb its publishers deliver it with (an upsert on every engine).
+                NonDeclProviderPathKind::Api => self.sync.open_dts(path, content).await,
+                // A shadow buffer is always delivered through `sync_file`.
+                NonDeclProviderPathKind::Shadow => self.sync.sync_file(path, content).await,
+                // Never handed over by the close (the IDE lane keeps its own
+                // log-only handling); nothing to deliver.
+                NonDeclProviderPathKind::Ide => Ok(()),
+            }
+        })
+    }
+}
 
 /// Per-canonical bookkeeping for changes the server has RECEIVED but has not
 /// finished processing.
@@ -98,6 +143,10 @@ pub(crate) struct CoordinatorReceipts {
     /// at the moment the sync receipt lands. A monotonic count makes "this
     /// tick's publish has finished" an exact predicate.
     pub(crate) diags_published_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Milliseconds each pull stays running after releasing its slot. Zero
+    /// unless a test widens the moment between a pull's release and its
+    /// handle reporting it finished.
+    pub(crate) hold_after_slot_release_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Clone, Debug)]
@@ -570,13 +619,20 @@ struct CoordinatorShared {
     scanning: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// One in-flight provider pull. Dropping it — on completion OR cancellation —
-/// tells the coordinator a slot is free.
-struct PullSlot(mpsc::Sender<()>);
+/// One in-flight provider pull, named by the task that runs it. Dropping it —
+/// on completion OR cancellation — tells the coordinator which pull freed its
+/// slot.
+///
+/// The release lands as the pull's body returns, a moment BEFORE its handle
+/// reports the task finished. The coordinator therefore settles the named pull
+/// by awaiting its handle, never by asking whether it has finished yet: a loop
+/// that woke inside that moment would find the slot still taken, arm no timer
+/// for the work queued behind it, and park with no release left to wake it.
+struct PullSlot(mpsc::UnboundedSender<tokio::task::Id>, tokio::task::Id);
 
 impl Drop for PullSlot {
     fn drop(&mut self) {
-        let _ = self.0.try_send(());
+        let _ = self.0.send(self.1);
     }
 }
 
@@ -604,50 +660,98 @@ fn reap_finished_pulls(
         let Some(task) = diagnostic_tasks.remove(&canonical_id) else {
             continue;
         };
-        let complete = task
-            .now_or_never()
-            .and_then(|joined| joined.ok())
-            .unwrap_or(true);
-        if complete {
-            incomplete_resyncs.remove(&canonical_id);
-            continue;
-        }
-        let Some(uri) = deps.documents.canonical_id_to_uri(&canonical_id) else {
-            incomplete_resyncs.remove(&canonical_id);
-            continue;
-        };
-        let attempts = incomplete_resyncs.entry(canonical_id.clone()).or_insert(0);
-        if *attempts >= 1 {
-            continue;
-        }
-        *attempts += 1;
-        tracing::debug!(
-            "sync_coordinator: pull for {canonical_id} landed incomplete; re-syncing once"
+        let joined = task.now_or_never().and_then(|joined| joined.ok());
+        settle_pull(
+            deps,
+            canonical_id,
+            joined,
+            pending_files,
+            incomplete_resyncs,
+            last_attention,
         );
-        deps.needs_provider_sync.insert(canonical_id.clone());
-        let received_at = Instant::now();
-        let attended = last_attention.get(&canonical_id).copied();
-        pending_files
-            .entry(canonical_id)
-            .and_modify(|(changed_at, pending)| {
-                *changed_at = (*changed_at).max(received_at);
-                pending.requires_sync = true;
-                pending.force_diagnostics = true;
-                pending.sync_retries_remaining = pending.sync_retries_remaining.max(1);
-            })
-            .or_insert((
-                received_at,
-                PendingSignal {
-                    uri: uri.to_string(),
-                    requires_sync: true,
-                    force_diagnostics: true,
-                    sync_retries_remaining: 1,
-                    received_at,
-                    user_received_at: attended,
-                    edited: false,
-                },
-            ));
     }
+}
+
+/// Settle the pull whose slot release named `task_id`: wait out the moment
+/// between its release and its handle reporting it finished, then reap it.
+/// A release from a pull no longer tracked — cancelled, or already reaped at
+/// the top of the loop — owes nothing.
+async fn settle_released_pull(
+    deps: &SyncCoordinatorDeps,
+    task_id: tokio::task::Id,
+    diagnostic_tasks: &mut HashMap<String, tokio::task::JoinHandle<bool>>,
+    pending_files: &mut HashMap<String, (Instant, PendingSignal)>,
+    incomplete_resyncs: &mut HashMap<String, u8>,
+    last_attention: &HashMap<String, Instant>,
+) {
+    let Some(canonical_id) = diagnostic_tasks
+        .iter()
+        .find(|(_, task)| task.id() == task_id)
+        .map(|(canonical_id, _)| canonical_id.clone())
+    else {
+        return;
+    };
+    let Some(task) = diagnostic_tasks.remove(&canonical_id) else {
+        return;
+    };
+    let joined = task.await.ok();
+    settle_pull(
+        deps,
+        canonical_id,
+        joined,
+        pending_files,
+        incomplete_resyncs,
+        last_attention,
+    );
+}
+
+/// Reap one finished pull given what it returned (`None` when it was
+/// cancelled or panicked).
+fn settle_pull(
+    deps: &SyncCoordinatorDeps,
+    canonical_id: String,
+    joined: Option<bool>,
+    pending_files: &mut HashMap<String, (Instant, PendingSignal)>,
+    incomplete_resyncs: &mut HashMap<String, u8>,
+    last_attention: &HashMap<String, Instant>,
+) {
+    if joined.unwrap_or(true) {
+        incomplete_resyncs.remove(&canonical_id);
+        return;
+    }
+    let Some(uri) = deps.documents.canonical_id_to_uri(&canonical_id) else {
+        incomplete_resyncs.remove(&canonical_id);
+        return;
+    };
+    let attempts = incomplete_resyncs.entry(canonical_id.clone()).or_insert(0);
+    if *attempts >= 1 {
+        return;
+    }
+    *attempts += 1;
+    tracing::debug!("sync_coordinator: pull for {canonical_id} landed incomplete; re-syncing once");
+    deps.needs_provider_sync.insert(canonical_id.clone());
+    let received_at = Instant::now();
+    let attended = last_attention.get(&canonical_id).copied();
+    pending_files
+        .entry(canonical_id)
+        .and_modify(|(changed_at, pending)| {
+            *changed_at = (*changed_at).max(received_at);
+            pending.requires_sync = true;
+            pending.force_diagnostics = true;
+            pending.sync_retries_remaining = pending.sync_retries_remaining.max(1);
+        })
+        .or_insert((
+            received_at,
+            PendingSignal {
+                uri: uri.to_string(),
+                requires_sync: true,
+                force_diagnostics: true,
+                sync_retries_remaining: 1,
+                received_at,
+                user_received_at: attended,
+                edited: false,
+            },
+        ));
 }
 
 fn absorb_inbox(
@@ -720,8 +824,9 @@ async fn coordinator_loop(
     // the file is re-examined the instant it becomes quiescent.
     let quiescent = |canonical_id: &str| !changes.lock().contains_key(canonical_id);
 
-    // A finished (or cancelled) pull frees its slot and wakes the loop. Capacity
-    // one: a full channel means a wake is already queued.
+    // A finished (or cancelled) pull frees its slot and wakes the loop with
+    // the task that ran it. One release per spawned pull, so the channel holds
+    // at most the pulls released since the loop last drained it.
     let max_inflight = max_inflight_diagnostics(&deps.type_provider_kind);
     let max_background = max_background_diagnostics(&deps.type_provider_kind);
     // When the user last turned to each document, kept PAST the service that
@@ -735,7 +840,7 @@ async fn coordinator_loop(
     // The in-flight pulls that are background work (see `max_background`).
     let mut background_inflight: std::collections::HashSet<String> =
         std::collections::HashSet::new();
-    let (pull_done_tx, mut pull_done_rx) = mpsc::channel::<()>(1);
+    let (pull_done_tx, mut pull_done_rx) = mpsc::unbounded_channel::<tokio::task::Id>();
 
     loop {
         // Calculate next deadline from pending files. With every pull slot
@@ -912,8 +1017,18 @@ async fn coordinator_loop(
                     }
                 }
             }
-            // A slot freed: fall through and recompute what is dispatchable.
-            Some(()) = pull_done_rx.recv() => {}
+            // A slot freed: settle its pull, then recompute what is dispatchable.
+            Some(task_id) = pull_done_rx.recv() => {
+                settle_released_pull(
+                    &deps,
+                    task_id,
+                    &mut diagnostic_tasks,
+                    &mut pending_files,
+                    &mut incomplete_resyncs,
+                    &last_attention,
+                )
+                .await;
+            }
             _ = async {
                 match next_deadline {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -1085,9 +1200,12 @@ async fn coordinator_loop(
                                 let diag_tasks_live = Arc::clone(&receipts.diag_tasks_live);
                                 #[cfg(test)]
                                 let diags_published_count = Arc::clone(&receipts.diags_published_count);
-                                let slot = PullSlot(pull_done_tx.clone());
+                                #[cfg(test)]
+                                let hold_after_slot_release_ms =
+                                    Arc::clone(&receipts.hold_after_slot_release_ms);
+                                let pull_done_tx = pull_done_tx.clone();
                                 async move {
-                                    let _slot = slot;
+                                    let slot = PullSlot(pull_done_tx, tokio::task::id());
                                     let complete = {
                                         #[cfg(test)]
                                         let _live = DiagTaskLiveGuard::new(diag_tasks_live);
@@ -1103,6 +1221,15 @@ async fn coordinator_loop(
                                         diags_published_count
                                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                         diags_published.notify_waiters();
+                                    }
+                                    drop(slot);
+                                    #[cfg(test)]
+                                    {
+                                        let hold = hold_after_slot_release_ms
+                                            .load(std::sync::atomic::Ordering::SeqCst);
+                                        if hold > 0 {
+                                            tokio::time::sleep(std::time::Duration::from_millis(hold)).await;
+                                        }
                                     }
                                     complete
                                 }
@@ -1304,7 +1431,7 @@ fn refresh_carrier_ide_surface(deps: &SyncCoordinatorDeps, canonical_id: &str) {
     let profile = deps.documents.tsx_profile.read().clone();
     let compiled = crate::server::block_in_place_guarded(|| {
         deps.documents
-            .host
+            .host()
             .ensure_ide_compiled(canonical_id, &profile)
     });
     if !compiled.unwrap_or(false) {
@@ -1433,11 +1560,11 @@ async fn sync_file(
     let profile = deps.documents.tsx_profile.read().clone();
     let _ = tokio::task::block_in_place(|| {
         deps.documents
-            .host
+            .host()
             .ensure_ide_compiled(canonical_id, &profile)
     });
     tracing::info!("sync_coordinator: HOST_GET_IDE_START {canonical_id}");
-    let ide = tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
+    let ide = tokio::task::block_in_place(|| deps.documents.host().get_ide(canonical_id, &profile));
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
 
     // TEST SEAM: a one-shot pause, keyed by canonical id, that fires HERE —
@@ -1480,7 +1607,7 @@ async fn sync_file(
     // closed one. The receipt gates every commit. Ownership resolves from the SAME
     // published `vfs` for both engines.
     match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
-        host: deps.documents.host(),
+        host: &deps.documents.host(),
         vfs: vfs.as_deref(),
         ownership_ready: snapshot.ownership_ready,
         resolver: &snapshot.resolver,
@@ -1504,7 +1631,7 @@ async fn sync_file(
         } => {
             // The plugin serves both store-resident companions: no buffer I/O.
             if deps.carrier_transaction_coordinator.admit_owned(
-                deps.documents.host(),
+                &deps.documents.host(),
                 &deps.provider_sync_states,
                 canonical_id,
                 committed_state,
@@ -1591,7 +1718,7 @@ async fn sync_file(
                                 crate::provider_surface_store::record_carrier_ide_surface_fenced(
                                     deps.documents.provider_surfaces(),
                                     Some(&deps.documents),
-                                    deps.documents.host(),
+                                    &deps.documents.host(),
                                     canonical_id,
                                     &ide_path,
                                     &delivered,
@@ -1609,7 +1736,7 @@ async fn sync_file(
             }
 
             let api = match tokio::task::block_in_place(|| {
-                deps.documents.host.get_public_api(canonical_id)
+                deps.documents.host().get_public_api(canonical_id)
             }) {
                 Ok(api) => api,
                 Err(error) => {
@@ -1641,7 +1768,7 @@ async fn sync_file(
                             crate::provider_surface_store::record_carrier_api_surface(
                                 deps.documents.provider_surfaces(),
                                 Some(&deps.documents),
-                                deps.documents.host(),
+                                &deps.documents.host(),
                                 canonical_id,
                                 &dts_path,
                                 api_code,
@@ -1674,7 +1801,7 @@ async fn sync_file(
                 // the provider-surface store so a closed `{carrier}.ts` is never later
                 // vouched as current by a rename).
                 if deps.carrier_transaction_coordinator.admit_owned(
-                    deps.documents.host(),
+                    &deps.documents.host(),
                     &deps.provider_sync_states,
                     canonical_id,
                     committed_state,
@@ -1685,11 +1812,12 @@ async fn sync_file(
                         .insert(canonical_id.to_string());
                     return SyncFileOutcome::Retry;
                 } else {
-                    close_stale_provider_paths(
+                    close_stale_provider_paths_with(
                         project_sync,
                         deps.documents.provider_surfaces(),
                         &non_decl_close_targets(&genuinely_stale),
                         "sync_coordinator(carrier)",
+                        Some(&ProjectSyncRedelivery::new(project_sync)),
                     )
                     .await;
                 }
@@ -1802,7 +1930,7 @@ async fn preserve_open_unresolved_carrier(
                     crate::provider_surface_store::record_carrier_ide_surface_fenced(
                         deps.documents.provider_surfaces(),
                         Some(&deps.documents),
-                        deps.documents.host(),
+                        &deps.documents.host(),
                         canonical_id,
                         &ide_path,
                         &delivered,
@@ -1825,20 +1953,22 @@ async fn preserve_open_unresolved_carrier(
     let commit = open_unresolved_carrier_commit(previous.as_ref(), target, ide_synced);
     commit_sync_transition(&deps.provider_sync_states, canonical_id, commit.committed);
     if let Some(dropped) = commit.dropped_api {
-        close_stale_provider_paths(
+        close_stale_provider_paths_with(
             project_sync,
             deps.documents.provider_surfaces(),
             &non_decl_close_targets(std::slice::from_ref(&dropped)),
             "sync_coordinator(open_unresolved)",
+            Some(&ProjectSyncRedelivery::new(project_sync)),
         )
         .await;
     }
     if let Some(stale) = commit.stale_ide_after_success {
-        close_stale_provider_paths(
+        close_stale_provider_paths_with(
             project_sync,
             deps.documents.provider_surfaces(),
             &non_decl_close_targets(std::slice::from_ref(&stale)),
             "sync_coordinator(open_unresolved_ext_flip)",
+            Some(&ProjectSyncRedelivery::new(project_sync)),
         )
         .await;
     }
@@ -1858,11 +1988,12 @@ async fn clear_provider_sync_state(
         // The declaration overlay (`Decl`), if any, is released by `DeclOverlayOwner`
         // via the `did_close` lifecycle, never closed here — the generic close
         // touches only non-decl artifacts.
-        close_stale_provider_paths(
+        close_stale_provider_paths_with(
             sync,
             provider_surfaces,
             &state.active_non_decl_paths(),
             "sync_coordinator(clear_state)",
+            Some(&ProjectSyncRedelivery::new(sync)),
         )
         .await;
     }

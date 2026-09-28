@@ -232,6 +232,11 @@ impl OverlayArtifactIdentity {
     }
 }
 
+/// Marks an overlay (editor content) registration's incarnation, as opposed
+/// to the base registration keyed by the host instance: the bit the close
+/// path uses to retract a document's overlay registrations only.
+pub(crate) const OVERLAY_INCARNATION_BIT: u64 = 1_u64 << 63;
+
 impl VerterHost {
     /// Return the registered carrier structure owned by the active view.
     /// Overlay source is registered through the same authority used by
@@ -267,7 +272,7 @@ impl VerterHost {
         }
         let content_hash = view.content_hash_for(canonical_id)?;
         let generation = u64::from_le_bytes(content_hash[..8].try_into().ok()?).max(1);
-        let incarnation = fingerprint | (1_u64 << 63);
+        let incarnation = fingerprint | OVERLAY_INCARNATION_BIT;
         let registered = self
             .carrier_publication
             .source_authority
@@ -279,6 +284,16 @@ impl VerterHost {
                 source,
             )
             .ok()?;
+        // The registry follows the document's content: this overlay's
+        // predecessor stays (a validation in flight may still hold it), the
+        // overlays before it can never be validated again and go now, and
+        // the base registration is untouched.
+        let _ = self
+            .carrier_publication
+            .source_authority
+            .retain_recent_incarnations(&CanonicalFileId::new(canonical_id), 2, |registered| {
+                registered.get() & OVERLAY_INCARNATION_BIT != 0
+            });
         // Registered-identity fact read: the grammar comes from the file's
         // frontend catalog row, keyed adapter × carrier language. A miss
         // (unregistered carrier, or a row without a grammar fact) fails
@@ -718,6 +733,9 @@ impl VerterHost {
             snapshot: Option<crate::types::FileAnalysisSnapshot>,
             svelte_component_runes_mode: bool,
             owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
+            /// The snapshot's walks, or a parse of its own, were refused for
+            /// want of stack: the flight publishes nothing.
+            refused: bool,
         }
         let job_canonical = analysis_canonical_id.to_string();
         let job_raw_source = Arc::clone(&raw_source);
@@ -733,6 +751,12 @@ impl VerterHost {
         let cold_lease = self
             .decl_lowering
             .acquire_lease(&snapshot_key, &eval_source, source_type);
+        // A program refused for want of stack is not retained: the flight
+        // publishes nothing for the source, never an artifact read off an
+        // empty program.
+        if cold_lease.refused.is_some() {
+            return None;
+        }
         if cold_lease.parsed_now {
             self.provenance
                 .eval_program_parses
@@ -781,6 +805,7 @@ impl VerterHost {
                 let vue_parsed = job_framework_parse
                     .as_deref()
                     .and_then(crate::typeinfo::adapters::vue::vue_parse);
+                let mut refused = false;
                 let snapshot = if let Some(parsed_sfc) = vue_parsed {
                     let parse = crate::parse::build_vue_snapshot_from_parsed(
                         &job_canonical,
@@ -795,12 +820,13 @@ impl VerterHost {
                         VerterHost::vue_flight_script_program(eval_is_extracted_script, program),
                         Some(&owner_table),
                     );
-                    Some(VerterHost::build_snapshot_from_parse(parse))
+                    refused = parse.refused.is_some();
+                    (!refused).then(|| VerterHost::build_snapshot_from_parse(parse))
                 } else if is_carrier {
                     // A non-Vue carrier (Svelte) overlay: the snapshot's script
                     // program is the flight's retained eval program — walk it,
                     // parse nothing.
-                    job_framework_parse.as_deref().map(|artifact| {
+                    job_framework_parse.as_deref().and_then(|artifact| {
                         let parse = crate::parse::build_carrier_snapshot_from_artifact_with_program(
                             &job_canonical,
                             job_raw_source.as_ref(),
@@ -814,7 +840,8 @@ impl VerterHost {
                             ),
                             Some(&owner_table),
                         );
-                        VerterHost::build_snapshot_from_parse(parse)
+                        refused = parse.refused.is_some();
+                        (!refused).then(|| VerterHost::build_snapshot_from_parse(parse))
                     })
                 } else if let Some(parsed) = program {
                     let parse = crate::parse::build_non_sfc_snapshot_from_program(
@@ -824,7 +851,8 @@ impl VerterHost {
                         parsed.borrow_dependent(),
                         parsed.had_errors(),
                     );
-                    Some(VerterHost::build_snapshot_from_parse(parse))
+                    refused = parse.refused.is_some();
+                    (!refused).then(|| VerterHost::build_snapshot_from_parse(parse))
                 } else {
                     // Fatal (panicked) eval-program parse on a non-carrier
                     // overlay: a re-parse over the same bytes under the
@@ -838,6 +866,7 @@ impl VerterHost {
                     snapshot,
                     svelte_component_runes_mode,
                     owner_table,
+                    refused,
                 })
             },
         );
@@ -866,6 +895,9 @@ impl VerterHost {
                 return None;
             }
         };
+        if products.refused {
+            return None;
+        }
         let snapshot = Arc::new(products.snapshot.unwrap_or_default());
         let route_inventory = Arc::new(products.route_inventory);
 

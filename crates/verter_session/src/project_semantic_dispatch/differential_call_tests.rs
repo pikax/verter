@@ -818,3 +818,124 @@ fn a_union_rebuilt_around_a_reduced_operator_keeps_the_nullability_algebra() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Overloads whose first candidate relates through a method parameter, and
+/// arguments inferred against a union parameter's fixed members.
+const OVERLOADS_AND_UNION_MEMBERS: &str = r##"
+declare function pick(v: { m(x: string | number): void }): "wide";
+declare function pick(v: {}): "fallback";
+declare function pickP(v: { m: (x: string | number) => void }): "wide";
+declare function pickP(v: {}): "fallback";
+declare const a: { m(x: string): void };
+export function oMethod() { return pick(a); }
+export function oProperty() { return pickP(a); }
+declare function inferObject<T>(x: T | { a: unknown }): T;
+declare const anyObject: { a: any } | 1;
+declare const unknownObject: { a: unknown } | 1;
+export function uAny() { return inferObject(anyObject); }
+export function uUnknown() { return inferObject(unknownObject); }
+declare function inferBoolean<T>(x: T | boolean): T;
+declare function inferTrue<T>(x: T | true): T;
+declare const trueOrOne: true | 1;
+declare const booleanOrOne: boolean | 1;
+export function uTrue() { return inferBoolean(trueOrOne); }
+export function uBoolean() { return inferBoolean(booleanOrOne); }
+export function uFalse() { return inferTrue(booleanOrOne); }
+"##;
+
+/// A method member keeps its bivariant parameters in every overload pass,
+/// the subtype pass included, so `{ m(x: string): void }` selects the
+/// method candidate (`"wide"`) while a function-typed property stays
+/// contravariant (`"fallback"`). Measured on TypeScript 7.0.2, alike under
+/// all four settings.
+#[test]
+fn a_method_parameter_stays_bivariant_in_the_overload_subtype_pass() {
+    let matrix = Matrix::new(OVERLOADS_AND_UNION_MEMBERS);
+    let failures = matrix.returns(&[("oMethod", "\"wide\""), ("oProperty", "\"fallback\"")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An argument member matches a fixed member of the union parameter only by
+/// the checker's identity: `{ a: any }` is not `{ a: unknown }` (`uAny` is
+/// `1 | { a: any; }`), and `boolean` on either side is its two literals
+/// (`true | 1` against `T | boolean` infers `1`, `boolean | 1` against `T |
+/// true` infers `1 | false`). Measured on TypeScript 7.0.2, alike under all
+/// four settings.
+#[test]
+fn a_union_argument_matches_a_fixed_member_by_the_checkers_identity() {
+    let matrix = Matrix::new(OVERLOADS_AND_UNION_MEMBERS);
+    let failures = matrix.returns(&[
+        ("uAny", "1 | { a: any; }"),
+        ("uUnknown", "1"),
+        ("uTrue", "1"),
+        ("uBoolean", "1"),
+        ("uFalse", "1 | false"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Calls through a rigid type parameter and through local overloads.
+const RIGID_AND_LOCAL_OVERLOADS: &str = r##"
+declare class Box2<U> { put<T>(x: T, y: U | string): T; }
+export function rigidArgument<U>(b: Box2<U>, u: U) { return b.put(1, u); }
+export function localOverloads<U>(u: U) { function k(x: string): 1; function k(x: number): 2; function k(x: any): any { return x; } return k("s"); }
+export function localGenericOverloads<U>(u: U) { function k<T>(x: T, y: U | string): "first"; function k(x: unknown, y: unknown): "second"; function k(x: any, y: any): any { return x; } const v = "a" as "a" | "b"; return k(1, v); }
+"##;
+
+/// A rigid type parameter argument relates to a union parameter holding it
+/// through that identical member, so `b.put(1, u)` over `put<T>(x: T, y: U
+/// | string): T` infers `T` from `1`: `number`. Measured on TypeScript
+/// 7.0.2, alike under all four settings.
+#[test]
+fn a_rigid_type_parameter_relates_to_a_union_holding_it() {
+    let matrix = Matrix::new(RIGID_AND_LOCAL_OVERLOADS);
+    let failures = matrix.returns(&[("rigidArgument", "number")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The rows of local overloaded functions, with the checker's answers:
+/// the call resolves over the overload signatures, never the
+/// implementation's (`1` and `"first"`). Measured on TypeScript 7.0.2, alike
+/// under all four settings.
+const LOCAL_OVERLOAD_ROWS: [(&str, &str); 2] = [
+    ("localOverloads", "1"),
+    ("localGenericOverloads", "\"first\""),
+];
+
+/// Each local-overload row that does not read the checker's answer, only
+/// those the lane publishes clean when `clean_only`.
+fn local_overload_misses(clean_only: bool) -> Vec<String> {
+    let matrix = Matrix::new(RIGID_AND_LOCAL_OVERLOADS);
+    let rows: Vec<(Read<'_>, Vec<&str>)> = LOCAL_OVERLOAD_ROWS
+        .iter()
+        .map(|(function, answer)| (Read::Return(function), vec![*answer; 4]))
+        .collect();
+    LOCAL_OVERLOAD_ROWS
+        .iter()
+        .zip(matrix.verdicts(&rows))
+        .flat_map(|((function, _), verdicts)| {
+            verdicts
+                .into_iter()
+                .filter(|verdict| !verdict.matched && (!clean_only || verdict.class != "GAP"))
+                .map(move |verdict| format!("`{function}`: {}", verdict.lane))
+        })
+        .collect()
+}
+
+/// A local function with overload signatures is never called through its
+/// implementation's signature (whose `any` return the checker never
+/// exposes): the call degrades rather than publishing `any`.
+#[test]
+fn a_local_overloaded_function_is_never_called_through_its_implementation() {
+    let wrong = local_overload_misses(true);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// What the lane gives: each row degrades (the overloaded local function
+/// has no modelled value).
+#[test]
+#[ignore = "a local overloaded function resolves the call over its overload signatures"]
+fn a_local_overloaded_function_resolves_over_its_overloads() {
+    let failures = local_overload_misses(false);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

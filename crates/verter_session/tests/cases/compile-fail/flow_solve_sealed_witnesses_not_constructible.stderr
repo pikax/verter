@@ -1,4 +1,4 @@
-error[E0451]: fields `input_basis`, `result_contract`, `dependencies` and `suboperations` of struct `DischargeEvidence` are private
+error[E0451]: fields `input_basis`, `result_contract`, `ancestry`, `dependencies` and `suboperations` of struct `DischargeEvidence` are private
  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_sealed_witnesses_not_constructible.rs
   |
   |     let _ = DischargeEvidence {
@@ -7,6 +7,8 @@ error[E0451]: fields `input_basis`, `result_contract`, `dependencies` and `subop
   |         ^^^^^^^^^^^ private field
   |         result_contract: todo!(),
   |         ^^^^^^^^^^^^^^^ private field
+  |         ancestry: todo!(),
+  |         ^^^^^^^^ private field
   |         dependencies: todo!(),
   |         ^^^^^^^^^^^^ private field
   |         suboperations: todo!(),

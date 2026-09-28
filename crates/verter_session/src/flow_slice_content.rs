@@ -4633,8 +4633,8 @@ fn member_target_chain<'a>(
 
 /// Whether a member access's object is a flow VALUE with no reference
 /// behind it: a `new` expression, an object literal, a primitive literal
-/// (read through its apparent type), or a static member chain rooted at
-/// one.
+/// (read through its apparent type), a call's result, or a static member
+/// chain rooted at one.
 fn value_rooted_member_object(object: &Expression<'_>) -> bool {
     match unwrap_parenthesized(object) {
         Expression::NewExpression(_)
@@ -4643,6 +4643,7 @@ fn value_rooted_member_object(object: &Expression<'_>) -> bool {
         | Expression::NumericLiteral(_)
         | Expression::BooleanLiteral(_)
         | Expression::BigIntLiteral(_) => true,
+        Expression::CallExpression(call) => !call.optional,
         Expression::StaticMemberExpression(member) => value_rooted_member_object(&member.object),
         _ => false,
     }
@@ -17046,10 +17047,62 @@ impl<'a> Lowerer<'a> {
             self.walks
                 .with_node_stack(self.program.span, || finder.visit_program(self.program));
             if let Some(function) = finder.found {
+                // An overloaded function is called through its overload
+                // signatures, never its implementation's (the checker's
+                // `getSignaturesOfSymbol` drops the implementation when
+                // overloads precede it): its value is not the declaration
+                // this reads.
+                if self.declaration_has_overloads(function) {
+                    return None;
+                }
                 return Some((function, gate, own_frame));
             }
         }
         None
+    }
+
+    /// Whether the function declaration `function` has overload signatures:
+    /// bodiless declarations of its name in the statement list it sits in.
+    fn declaration_has_overloads(&self, function: &oxc_ast::ast::Function<'_>) -> bool {
+        let Some(id) = function.id.as_ref() else {
+            return false;
+        };
+        struct Siblings<'n> {
+            declaration: oxc_span::Span,
+            name: &'n str,
+            overloaded: Option<bool>,
+        }
+        impl<'a> Visit<'a> for Siblings<'_> {
+            fn visit_statements(&mut self, statements: &oxc_allocator::Vec<'a, Statement<'a>>) {
+                if self.overloaded.is_some() {
+                    return;
+                }
+                let holds_declaration = statements.iter().any(|statement| {
+                    matches!(statement, Statement::FunctionDeclaration(sibling)
+                        if sibling.span == self.declaration)
+                });
+                if holds_declaration {
+                    self.overloaded = Some(statements.iter().any(|statement| {
+                        matches!(statement, Statement::FunctionDeclaration(sibling)
+                            if sibling.body.is_none()
+                                && sibling
+                                    .id
+                                    .as_ref()
+                                    .is_some_and(|id| id.name.as_str() == self.name))
+                    }));
+                    return;
+                }
+                walk::walk_statements(self, statements);
+            }
+        }
+        let mut siblings = Siblings {
+            declaration: function.span,
+            name: id.name.as_str(),
+            overloaded: None,
+        };
+        self.walks
+            .with_node_stack(self.program.span, || siblings.visit_program(self.program));
+        siblings.overloaded == Some(true)
     }
 
     /// Whether `argument` of a `return` is a bare call of this frame's own

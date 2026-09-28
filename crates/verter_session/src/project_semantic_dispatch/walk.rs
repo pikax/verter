@@ -2312,55 +2312,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     }
 
     /// The type an indexed access reads off a property whose declared type
-    /// is `value`, declared in `declaring_file` — TypeScript's indexed-access
-    /// read. Under the declaring project's `strictNullChecks` an OPTIONAL
-    /// property reads `value | undefined` (`{ o?: 3 }['o']` is
-    /// `3 | undefined`; `exactOptionalPropertyTypes` does not change the
-    /// read). With it off, `null` and `undefined` are not types of their
-    /// own: the read is the declared type with them erased (`o?: 3 |
-    /// undefined` reads `3`), the checker's union construction under that
-    /// option.
+    /// is `value`, declared in `declaring_file`
+    /// ([`ProjectSemanticDispatch::optional_member_read`]).
     fn index_read(
         &self,
         value: SemanticNodeId,
         optional: bool,
         declaring_file: Option<&str>,
     ) -> SemanticNodeId {
-        use crate::semantic_query::{NullabilityPolicy, PrimitiveKind};
-        let strict = declaring_file.is_none_or(|canonical| {
-            self.dispatch
-                .ctx
-                .host_for_fact_tracer_install()
-                .semantic_compiler_options_for(canonical)
-                .strict_null_checks
-        });
-        let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(2);
-        self.push_union_flattened(&mut arms, value);
-        if strict {
-            if !optional {
-                return value;
-            }
-            arms.push(
-                self.graph()
-                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
-            );
-            return self
-                .dispatch
-                .intern_normalized_union(&arms, NullabilityPolicy::Strict);
-        }
-        let nullable = |arm: &SemanticNodeId| {
-            matches!(
-                self.graph().node_data(*arm).as_deref(),
-                Some(SemanticNodeData::Primitive(
-                    PrimitiveKind::Null | PrimitiveKind::Undefined
-                ))
-            )
-        };
-        if arms.len() < 2 || !arms.iter().any(nullable) {
-            return value;
-        }
         self.dispatch
-            .intern_normalized_union(&arms, NullabilityPolicy::Erased)
+            .optional_member_read(value, optional, declaring_file)
     }
 
     /// The apparent wrapper surface a primitive, an array or a tuple reads

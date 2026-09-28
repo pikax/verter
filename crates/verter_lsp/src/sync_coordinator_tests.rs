@@ -6,6 +6,7 @@
 //! child of `sync_coordinator`, so `use super::*` resolves to its items.
 
 use super::*;
+use crate::provider_sync::close_stale_provider_paths;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::ProjectSyncMode;
 use futures_util::{FutureExt, StreamExt};
@@ -4037,6 +4038,83 @@ const msg = '{marker}'
             || panic!("the whole backlog must still drain"),
         )
         .await;
+}
+
+/// A pull releases its slot as its body returns, a moment before its handle
+/// reports the task finished. A coordinator that wakes on the release inside
+/// that moment still sees the slot taken: with the background window full it
+/// arms no timer for the re-armed document queued behind it, and a loop that
+/// only asks whether the pull has finished parks with no release left to wake
+/// it. The released pull is settled, so the queued document is still pulled.
+///
+/// The paused clock widens the moment deterministically: each pull stays
+/// running for a second after its release, and the clock only reaches that
+/// second once the coordinator has nothing else to do.
+#[tokio::test(start_paused = true)]
+async fn a_document_queued_behind_a_released_pull_is_still_published() {
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let deps = make_provider_less_deps(&documents);
+    assert_eq!(
+        crate::sync_coordinator::max_background_diagnostics(&deps.type_provider_kind),
+        1,
+        "the second re-armed document must wait for the first one's slot"
+    );
+    let handle = spawn_sync_coordinator(deps);
+    handle
+        .receipts
+        .hold_after_slot_release_ms
+        .store(1_000, std::sync::atomic::Ordering::SeqCst);
+
+    // Background re-arms, deposited together as the post-scan sweep does.
+    let overdue = Instant::now() - Duration::from_secs(60);
+    let uris: Vec<Uri> = ["First", "Second"]
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let uri: Uri = format!("file:///workspace/src/{name}.vue")
+                .parse()
+                .expect("test uri");
+            let _ = documents.did_open(&TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "vue".to_string(),
+                version: 1,
+                text: vue_carrier_source(false),
+            });
+            let canonical_id = documents
+                .get_canonical_id(&uri)
+                .expect("the document must be open");
+            handle.signal_diagnostics_only(
+                canonical_id,
+                uri.as_str().to_string(),
+                overdue + Duration::from_millis(index as u64),
+            );
+            uri
+        })
+        .collect();
+
+    let all_published = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let published = handle.receipts.diags_published.notified();
+            tokio::pin!(published);
+            published.as_mut().enable();
+            if uris.iter().all(|uri| documents.diagnostics_ready(uri)) {
+                return;
+            }
+            published.await;
+        }
+    })
+    .await;
+    let unpublished: Vec<&str> = uris
+        .iter()
+        .filter(|uri| !documents.diagnostics_ready(uri))
+        .map(|uri| uri.as_str())
+        .collect();
+    assert!(
+        all_published.is_ok(),
+        "the document queued behind a released pull was never published: {unpublished:?}"
+    );
 }
 
 /// A follow-up the server owes a document — its receipt outdated by another

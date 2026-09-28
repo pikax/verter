@@ -220,3 +220,93 @@ fn a_module_augmented_interface_keeps_its_own_and_added_members() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Global scripts beside the probe module, each declaring one global type:
+/// a decorated class, a class after a byte-order mark, a `declare class`
+/// after a comment, a type alias (plain and `declare`d), a namespace
+/// (one spelled with the legacy `module` keyword), a class and an enum.
+const SCRIPT_GLOBAL_TYPES: &[(&str, &str)] = &[
+    (
+        "decl.ts",
+        "declare function dec(value: any, context: any): any;\n",
+    ),
+    ("a.ts", "@dec class C { x = 1 }\n"),
+    ("bom.ts", "\u{FEFF}class Bom { y = \"s\" }\n"),
+    ("cm.ts", "/* c */ declare class Dc { z: boolean }\n"),
+    ("ty.ts", "type TT = { q: 1 };\n"),
+    ("dty.ts", "declare type DT = { r: 2 };\n"),
+    ("mo.ts", "module Mo { export type MT = 3; }\n"),
+    ("ns.ts", "namespace Ns { export type NT = 4; }\n"),
+    ("pc.ts", "class Pc { x = 1 }\n"),
+    ("en.ts", "enum GE { A = 1 }\n"),
+];
+
+/// A script's file-scope class, type alias and enum are global types
+/// another module names: a class however its declaration opens (a
+/// decorator, a byte-order mark, a comment before `declare`), a type alias
+/// (plain and `declare`d), an enum.
+///
+/// Measured on TypeScript 7.0.2 (`--target es2022`), alike under every
+/// setting: `C` is `C`, `C["x"]` `number`, `Bom["y"]` `string`, `Dc["z"]`
+/// `boolean`, `TT["q"]` `1`, `DT["r"]` `2`, `Pc["x"]` `number`, `GE`
+/// `GE`.
+///
+/// Mutation: recording only a script's interfaces in the global type
+/// population answers every row with no declaration; ending the scan's
+/// statement at a top-level `@` answers `C` and `C["x"]` with no
+/// declaration.
+#[test]
+fn a_scripts_global_types_read_from_another_module() {
+    let matrix = Matrix::new("").files(SCRIPT_GLOBAL_TYPES);
+    let failures = matrix.types(&[
+        ("C", "C"),
+        ("C['x']", "number"),
+        ("Bom['y']", "string"),
+        ("Dc['z']", "boolean"),
+        ("TT['q']", "1"),
+        ("DT['r']", "2"),
+        ("Pc['x']", "number"),
+        ("GE", "GE"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A type another module names through a script's namespace: `Ns.NT`, and
+/// `Mo.MT` through the legacy `module` keyword (TS1540, still declared).
+///
+/// Measured on TypeScript 7.0.2, alike under every setting: `Ns.NT` is
+/// `4`, `Mo.MT` `3`.
+///
+/// What the lane gives: each an unresolved qualified name (`BareRef`).
+#[test]
+#[ignore = "a qualified type name reads through a global script's namespace from another module"]
+fn a_scripts_namespace_types_read_from_another_module() {
+    let matrix = Matrix::new("").files(SCRIPT_GLOBAL_TYPES);
+    let failures = matrix.types(&[("Ns.NT", "4"), ("Mo.MT", "3")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A script's class read as a VALUE from another module: constructed, and
+/// through `typeof`.
+///
+/// Measured on TypeScript 7.0.2 (`--target es2022`), alike under every
+/// setting: `nc` and `np` return `number`, `InstanceType<typeof Pc>['x']`
+/// is `number`.
+///
+/// What the lane gives: `nc` and `np` an unmodeled position degraded by
+/// UnrepresentableCallee, the `typeof` row a miss degraded by
+/// UnresolvedValue.
+#[test]
+#[ignore = "a global script's class constructs and reads through typeof from another module"]
+fn a_scripts_class_value_reads_from_another_module() {
+    let matrix = Matrix::new(
+        "export function nc() { return new C().x; }\nexport function np() { return new Pc().x; }\n",
+    )
+    .files(SCRIPT_GLOBAL_TYPES);
+    let failures = matrix.same(&[
+        (Read::Return("nc"), "number"),
+        (Read::Return("np"), "number"),
+        (Read::Type("InstanceType<typeof Pc>['x']"), "number"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

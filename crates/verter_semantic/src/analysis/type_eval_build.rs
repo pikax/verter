@@ -30,6 +30,8 @@ use oxc_ast::ast::{
     VariableDeclarator,
 };
 use oxc_ast_visit::Visit;
+
+use crate::analysis::namespace_walk::for_each_namespace;
 use oxc_span::GetSpan;
 use verter_parser::utils::oxc::script::route_inventory::statements_have_export_declarations;
 use verter_type_expr::facts::{
@@ -1757,11 +1759,15 @@ pub(crate) fn class_heritage_value_name(class_name: &str) -> String {
 
 /// The synthetic value declaration a class field reads its type through,
 /// when the field's initializer is an expression whose type derives from
-/// a call (`static origin = new Pt()`): its value reads through the indexed
-/// program expression at the initializer, as a declarator initializer's
-/// does. `None` for a field with an annotation, without an initializer, with
-/// a function value (served at its own member position), with an
-/// authoritative assertion, or without a static name.
+/// a call (`static origin = new Pt()`) or reads `this` (`b = this.a + 1`):
+/// its value reads through the indexed program expression at the
+/// initializer, as a declarator initializer's does. The checker types a
+/// `this` read through the class's instance or constructor type, which no
+/// syntactic inference knows, so such an initializer is outside the indexed
+/// expression domain there: a gap, never a guessed `any`. `None` for a field
+/// with an annotation, without an initializer, with a function value
+/// (served at its own member position), with an authoritative assertion,
+/// or without a static name.
 pub(crate) fn class_field_value_name(
     class_name: &str,
     prop: &oxc_ast::ast::PropertyDefinition<'_>,
@@ -1774,7 +1780,7 @@ pub(crate) fn class_field_value_name(
     if matches!(
         value,
         Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-    ) || !value_type_derives_from_a_call(value, source)
+    ) || !(value_type_derives_from_a_call(value, source) || value_reads_this(value, source))
         || has_authoritative_value_assertion(value)
     {
         return None;
@@ -1917,7 +1923,9 @@ fn collect_external_module_declaration(
     }
 }
 
-/// The identifier-named half of [`collect_external_module_declaration`].
+/// The identifier-named half of [`collect_external_module_declaration`]:
+/// the namespace and every namespace nested in it, walked from an explicit
+/// stack ([`for_each_namespace`]).
 fn collect_module_declaration(
     decl: &TSNamespaceDeclaration<'_>,
     source: &str,
@@ -1925,25 +1933,91 @@ fn collect_module_declaration(
     prefix: Option<&str>,
     ambient: bool,
 ) {
-    let module_name = qualified_module_name(prefix, &decl.id);
-    let ambient = ambient || decl.declare;
+    for_each_namespace(
+        decl,
+        &mut CollectedNamespaces {
+            source,
+            out,
+            path: crate::analysis::namespace_walk::QualifiedPath::under(prefix),
+            ambient,
+            scope: None,
+        },
+    );
+}
 
-    match &decl.body {
-        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
-            collect_module_declaration(inner, source, out, Some(module_name.as_str()), ambient);
-        }
-        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
-            let implicit_export = ambient && !statements_have_export_declarations(&block.body);
-            for stmt in &block.body {
-                collect_namespaced_statement(
-                    stmt,
-                    source,
-                    out,
-                    module_name.as_str(),
-                    ambient,
-                    implicit_export,
-                );
+/// [`collect_module_declaration`]'s walk, and
+/// [`collect_augmentation_module_declaration`]'s under its `scope`.
+struct CollectedNamespaces<'o, 'x> {
+    source: &'o str,
+    out: &'o mut LoweredStatementParts,
+    /// The qualified name of the namespace being walked.
+    path: crate::analysis::namespace_walk::QualifiedPath,
+    /// Whether the root namespace is in an ambient context.
+    ambient: bool,
+    /// The augmentation scope the members register in, or none for the
+    /// file scope.
+    scope: Option<&'x AugmentationScopeKind>,
+}
+
+/// One namespace being collected.
+struct CollectedNamespace {
+    /// The qualified path's length before it was entered.
+    enclosing: usize,
+    ambient: bool,
+    implicit_export: bool,
+}
+
+impl<'s, 'a> crate::analysis::namespace_walk::NamespaceVisitor<'s, 'a>
+    for CollectedNamespaces<'_, '_>
+{
+    type Frame = CollectedNamespace;
+
+    fn enter(
+        &mut self,
+        decl: &'s TSNamespaceDeclaration<'a>,
+        parent: Option<&CollectedNamespace>,
+        _nesting: crate::analysis::namespace_walk::Nesting,
+    ) -> CollectedNamespace {
+        let ambient = parent.map_or(self.ambient, |parent| parent.ambient) || decl.declare;
+        let enclosing = self.path.enter(decl.id.name.as_str());
+        // An augmentation block is ambient, so a namespace body inside it
+        // without an export declaration exports every member.
+        let implicit_export = match &decl.body {
+            TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => false,
+            TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+                (ambient || self.scope.is_some())
+                    && !statements_have_export_declarations(&block.body)
             }
+        };
+        CollectedNamespace {
+            enclosing,
+            ambient,
+            implicit_export,
+        }
+    }
+
+    fn exit(&mut self, frame: CollectedNamespace, _parent: Option<&mut CollectedNamespace>) {
+        self.path.leave(frame.enclosing);
+    }
+
+    fn statement(&mut self, frame: &mut CollectedNamespace, statement: &'s Statement<'a>) {
+        match self.scope {
+            None => collect_namespaced_statement(
+                statement,
+                self.source,
+                self.out,
+                self.path.name(),
+                frame.ambient,
+                frame.implicit_export,
+            ),
+            Some(scope) => collect_namespaced_statement_into_augmentation(
+                statement,
+                self.source,
+                self.out,
+                self.path.name(),
+                scope,
+                frame.implicit_export,
+            ),
         }
     }
 }
@@ -2070,31 +2144,18 @@ fn collect_augmentation_module_declaration(
     // A string-literal module name (`declare module "X"`) nested inside another
     // augmentation block is not a namespace-member contributor; only
     // identifier-named namespaces (`namespace JSX`) qualify members here.
-    let namespace = qualified_module_name(prefix, &decl.id);
-    match &decl.body {
-        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
-            collect_augmentation_module_declaration(
-                inner,
-                source,
-                out,
-                scope,
-                Some(namespace.as_str()),
-            );
-        }
-        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
-            let implicit_export = !statements_have_export_declarations(&block.body);
-            for stmt in &block.body {
-                collect_namespaced_statement_into_augmentation(
-                    stmt,
-                    source,
-                    out,
-                    namespace.as_str(),
-                    scope,
-                    implicit_export,
-                );
-            }
-        }
-    }
+    // The namespace and every namespace nested in it are walked from an
+    // explicit stack ([`for_each_namespace`]).
+    for_each_namespace(
+        decl,
+        &mut CollectedNamespaces {
+            source,
+            out,
+            path: crate::analysis::namespace_walk::QualifiedPath::under(prefix),
+            ambient: true,
+            scope: Some(scope),
+        },
+    );
 }
 
 /// Augmentation-scope mirror of [`collect_namespaced_statement`]: register a
@@ -2129,9 +2190,9 @@ fn collect_namespaced_statement_into_augmentation(
                 ),
             ));
         }
-        Statement::TSNamespaceDeclaration(module) => {
-            collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
-        }
+        // A nested namespace is a frame of
+        // [`collect_augmentation_module_declaration`]'s walk.
+        Statement::TSNamespaceDeclaration(_) => {}
         // An augmentation block is ambient, so a namespace body inside it
         // without an export declaration exports every member, written
         // `export` or not (an ambient namespace in
@@ -2190,9 +2251,9 @@ fn collect_namespaced_declaration_into_augmentation(
                 ),
             ));
         }
-        Declaration::TSNamespaceDeclaration(module) => {
-            collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
-        }
+        // A nested namespace is a frame of
+        // [`collect_augmentation_module_declaration`]'s walk.
+        Declaration::TSNamespaceDeclaration(_) => {}
         Declaration::VariableDeclaration(var_decl) => {
             // A namespaced value member registers under its qualified `NS.M`
             // name into the augmentation VALUE scope (lowered exactly as the
@@ -2309,9 +2370,9 @@ fn collect_namespaced_statement(
                 );
             }
         }
-        Statement::TSNamespaceDeclaration(module) => {
-            collect_module_declaration(module, source, out, Some(namespace), ambient);
-        }
+        // A nested namespace is a frame of [`collect_module_declaration`]'s
+        // walk.
+        Statement::TSNamespaceDeclaration(_) => {}
         Statement::TSExternalModuleDeclaration(module) => {
             collect_external_module_declaration(module, source, out);
         }
@@ -2388,9 +2449,9 @@ fn collect_namespaced_declaration(
                 );
             }
         }
-        Declaration::TSNamespaceDeclaration(module) => {
-            collect_module_declaration(module, source, out, Some(namespace), ambient);
-        }
+        // A nested namespace is a frame of [`collect_module_declaration`]'s
+        // walk.
+        Declaration::TSNamespaceDeclaration(_) => {}
         Declaration::TSExternalModuleDeclaration(module) => {
             collect_external_module_declaration(module, source, out);
         }
@@ -2420,13 +2481,6 @@ fn collect_namespaced_declaration(
             }
         }
         _ => {}
-    }
-}
-
-fn qualified_module_name(prefix: Option<&str>, id: &oxc_ast::ast::BindingIdentifier<'_>) -> String {
-    match prefix {
-        Some(prefix) => qualified_name(prefix, &id.name),
-        None => id.name.to_string(),
     }
 }
 
@@ -3238,8 +3292,9 @@ fn infer_declaration_or_unknown(
 ///
 /// Member VALUES follow the checker's enum member value computation: an
 /// initializer is read into the constant evaluator's program
-/// ([`enum_constant_expr`]) and evaluated against the earlier members of
-/// this declaration; a member without one takes the previous member's
+/// ([`enum_constant_expr`]) and evaluated against the members of this
+/// declaration by position ([`own_references_read`]); a member without one
+/// takes the previous member's
 /// numeric value plus one (0 for the first member) — except in an AMBIENT
 /// non-`const` enum (a `declare enum`, or any enum of a declaration file or
 /// an ambient namespace), where a member without an initializer is
@@ -3258,12 +3313,21 @@ fn collect_enum(
 ) {
     use crate::analysis::enum_constant::{
         enum_constant_expr, enum_first_member_expr, enum_increment_expr, evaluate_enum_constant,
-        EnumConstant,
     };
     let enum_name = decl.id.name.as_str();
     let ambient = ambient || decl.declare;
+    // Where each member name is first declared in this body: a reference
+    // to a member of the body reads it by position, as the checker's
+    // declared-before-use rule reads it.
+    let mut declared: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
+    for (position, member) in decl.body.members.iter().enumerate() {
+        declared
+            .entry(member.id.static_name().to_string())
+            .or_insert(position);
+    }
     let mut members: Vec<(String, EnumMemberValue)> = Vec::new();
-    for member in &decl.body.members {
+    let mut member_slot: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
+    for (position, member) in decl.body.members.iter().enumerate() {
         // Member NAME resolution is SHARED with `index_enum`'s header walk.
         let member_name = member.id.static_name().to_string();
         let program = match &member.initializer {
@@ -3276,42 +3340,34 @@ fn collect_enum(
         };
         let value = match program {
             None => EnumMemberValue::Deferred(EnumPrimitiveDomain::Number),
-            Some(program) => {
+            Some(program) => match own_references_read(
+                &program,
+                enum_name,
+                position,
+                ambient,
+                &declared,
+                |name| member_slot.get(name).map(|&slot| &members[slot].1),
+            ) {
                 // A reference this declaration cannot answer — another
                 // declaration's value, or an earlier member that is itself
                 // pending — leaves the program for the session to evaluate.
-                let mut pending = false;
-                let constant = evaluate_enum_constant(&program, |path| {
-                    let member = match path {
-                        [member] => member,
-                        [owner, member] if owner == enum_name => member,
-                        _ => {
-                            pending = true;
-                            return None;
-                        }
-                    };
-                    match members.iter().find(|(earlier, _)| earlier == member) {
-                        Some((_, EnumMemberValue::Folded(scalar))) => {
-                            EnumConstant::from_scalar(scalar)
-                        }
-                        Some((_, EnumMemberValue::Pending(_))) | None => {
-                            pending = true;
-                            None
-                        }
-                        Some((_, EnumMemberValue::Deferred(_))) => None,
+                OwnReferences::Open(program) => EnumMemberValue::Pending(program),
+                OwnReferences::Closed(program) => {
+                    match evaluate_enum_constant(&program, |_| None) {
+                        Some(constant) => EnumMemberValue::Folded(constant.to_scalar()),
+                        None => EnumMemberValue::Deferred(EnumPrimitiveDomain::Number),
                     }
-                });
-                match constant {
-                    Some(constant) => EnumMemberValue::Folded(constant.to_scalar()),
-                    None if pending => EnumMemberValue::Pending(program),
-                    None => EnumMemberValue::Deferred(EnumPrimitiveDomain::Number),
                 }
-            }
+                OwnReferences::NotConstant => {
+                    EnumMemberValue::Deferred(EnumPrimitiveDomain::Number)
+                }
+            },
         };
         // Members are unique within a single enum body (TS forbids a repeated
         // member name); dedup defensively so a malformed repeat does not
         // double-count, keeping the first occurrence's entry.
-        if !members.iter().any(|(existing, _)| existing == &member_name) {
+        if !member_slot.contains_key(&member_name) {
+            member_slot.insert(member_name.clone(), members.len());
             members.push((member_name, value));
         }
     }
@@ -3366,6 +3422,90 @@ fn collect_enum(
         body: TypeExpr::Primitive(PrimitiveName::Never),
         unique_symbol_members: Vec::new(),
     });
+}
+
+/// A member's program once the references its own declaration answers are
+/// read.
+enum OwnReferences {
+    /// No constant: it names the member itself, a computed member, or (in
+    /// an ambient enum) a member declared after it.
+    NotConstant,
+    /// Every reference read: the program evaluates alone.
+    Closed(verter_type_expr::facts::EnumConstantExpr),
+    /// References another declaration, or a pending earlier member, answers.
+    Open(verter_type_expr::facts::EnumConstantExpr),
+}
+
+/// Read the references `program` — the initializer of the member at
+/// `position` of the enum body named `enum_name` — makes to members of that
+/// body (a bare `A`, or `E.A` through the enum's own name), as the checker's
+/// evaluator reads an enum member reference: an earlier member stands for
+/// its value; the member itself is used before it is assigned, and is no
+/// constant; a member declared after it reads `0`, the value the checker
+/// gives a member referenced before its declaration — except in an ambient
+/// enum, whose later members are not yet computed and so are no constant.
+/// `earlier` reads the value of a member already lowered.
+fn own_references_read<'m>(
+    program: &verter_type_expr::facts::EnumConstantExpr,
+    enum_name: &str,
+    position: usize,
+    ambient: bool,
+    declared: &rustc_hash::FxHashMap<String, usize>,
+    earlier: impl Fn(&str) -> Option<&'m EnumMemberValue>,
+) -> OwnReferences {
+    use crate::analysis::enum_constant::EnumConstant;
+    use verter_type_expr::facts::{EnumConstantExpr, EnumConstantStep, EnumScalar};
+    let literal = |constant: EnumConstant| match constant.to_scalar() {
+        EnumScalar::Number(text) => EnumConstantStep::Number(text),
+        EnumScalar::String(text) => EnumConstantStep::String(text),
+        EnumScalar::Primitive(_) => unreachable!("a constant stores a literal scalar"),
+    };
+    let mut open = false;
+    let mut steps = Vec::with_capacity(program.steps.len());
+    for step in program.steps.iter() {
+        let EnumConstantStep::Reference(path) = step else {
+            steps.push(step.clone());
+            continue;
+        };
+        let own = match &path[..] {
+            [member] => Some(member),
+            [owner, member] if owner == enum_name => Some(member),
+            _ => None,
+        };
+        let Some((member, at)) =
+            own.and_then(|member| declared.get(member.as_str()).map(|&at| (member, at)))
+        else {
+            open = true;
+            steps.push(step.clone());
+            continue;
+        };
+        if at == position || (at > position && ambient) {
+            return OwnReferences::NotConstant;
+        }
+        if at > position {
+            steps.push(literal(EnumConstant::Number(0.0)));
+            continue;
+        }
+        match earlier(member) {
+            Some(EnumMemberValue::Folded(scalar)) => match EnumConstant::from_scalar(scalar) {
+                Some(constant) => steps.push(literal(constant)),
+                None => return OwnReferences::NotConstant,
+            },
+            Some(EnumMemberValue::Deferred(_)) => return OwnReferences::NotConstant,
+            Some(EnumMemberValue::Pending(_)) | None => {
+                open = true;
+                steps.push(step.clone());
+            }
+        }
+    }
+    let program = EnumConstantExpr {
+        steps: Arc::from(steps.into_boxed_slice()),
+    };
+    if open {
+        OwnReferences::Open(program)
+    } else {
+        OwnReferences::Closed(program)
+    }
 }
 
 fn lower_function_parts(func: &Function<'_>, source: &str) -> Option<LoweredValueDeclParts> {
@@ -7907,6 +8047,33 @@ fn lower_indexed_explicit_type_arguments(
 /// either.
 pub fn value_inference_fabricates_a_call(expr: &Expression<'_>, source: &str) -> bool {
     !has_authoritative_value_assertion(expr) && value_type_derives_from_a_call(expr, source)
+}
+
+/// Whether a value expression reads `this` — the `this` of its own
+/// position, so neither a nested function's nor a nested class's (an
+/// arrow function's `this` is its position's).
+pub(crate) fn value_reads_this(expr: &Expression<'_>, source: &str) -> bool {
+    #[derive(Default)]
+    struct ThisProbe(bool);
+
+    impl<'a> Visit<'a> for ThisProbe {
+        fn visit_this_expression(&mut self, _this: &oxc_ast::ast::ThisExpression) {
+            self.0 = true;
+        }
+
+        fn visit_function(
+            &mut self,
+            _function: &oxc_ast::ast::Function<'a>,
+            _flags: oxc_syntax::scope::ScopeFlags,
+        ) {
+        }
+
+        fn visit_class(&mut self, _class: &oxc_ast::ast::Class<'a>) {}
+    }
+
+    let mut probe = ThisProbe::default();
+    verter_parser::oxc_parse::with_span_stack(source, expr.span(), || probe.visit_expression(expr));
+    probe.0
 }
 
 fn value_type_derives_from_a_call(expr: &Expression<'_>, source: &str) -> bool {

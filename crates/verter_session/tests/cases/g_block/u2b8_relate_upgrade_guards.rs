@@ -694,6 +694,7 @@ pub(crate) fn relate_query_value_carries_relation_proof_and_budget_state() {
         // Proof rides the payload-side table BY OPAQUE ID — there is no embedded
         // `proof: CoinductiveProof` field (the old field would fail to compile).
         relation_proof: RelationProofId(7),
+        recursion: Default::default(),
     };
 
     assert!(
@@ -803,6 +804,7 @@ fn relation_payload_uses_payload_side_relation_proofs_table() {
             Vec::<verter_session::semantic_query::InferBinding>::new().into_boxed_slice(),
         ),
         relation_proof: RelationProofId(1),
+        recursion: Default::default(),
     };
     let RelationProofId(idx) = payload.relation_proof;
     assert!(

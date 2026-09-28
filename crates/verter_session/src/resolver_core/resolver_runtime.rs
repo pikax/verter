@@ -15,6 +15,10 @@ use crate::resolver_core::{
     ValidatedFactAdmission, ValidatedFactCache,
 };
 
+/// View fingerprints per (document, mode) whose component-meta states the
+/// runtime keeps: the current one and the one before it.
+const RECENT_COMPONENT_META_VIEWS: usize = 2;
+
 pub struct StableRequestState<K, V>
 where
     K: Eq + Hash,
@@ -164,6 +168,17 @@ where
         self.cache.retain(predicate);
     }
 
+    /// Keys with at least one candidate (retention observability).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+
     pub(crate) fn singleflight(
         &self,
     ) -> &SingleflightGroup<K, StableExecutionValue<Option<V>>, ()> {
@@ -196,6 +211,11 @@ where
     pub fallthrough: FallthroughResolverState,
     /// Top-level materialized component-meta request state.
     pub component_meta: StableRequestState<ResolutionNodeKey, MetaV>,
+    /// View fingerprints admitted most recently per (document, mode), newest
+    /// last, [`RECENT_COMPONENT_META_VIEWS`] deep (see
+    /// [`Self::admit_component_meta_view`]).
+    recent_component_meta_views:
+        parking_lot::Mutex<rustc_hash::FxHashMap<(String, u32), std::collections::VecDeque<u64>>>,
     /// Host-owned prepared declaration bundles, keyed by canonical file ID.
     /// Validated by file whole hash and import-route facts.
     pub prepared_decl_bundles: StableRequestState<String, PreparedDeclBundle>,
@@ -253,6 +273,7 @@ where
         Self {
             fallthrough: FallthroughResolverState::new(counters.clone()),
             component_meta: StableRequestState::new(),
+            recent_component_meta_views: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             prepared_decl_bundles: StableRequestState::new(),
             top_level_fallthrough_singleflight: SingleflightGroup::default(),
             counters,
@@ -273,6 +294,7 @@ where
         Self {
             fallthrough: FallthroughResolverState::new(counters.clone()),
             component_meta: StableRequestState::new(),
+            recent_component_meta_views: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             prepared_decl_bundles: StableRequestState::new(),
             top_level_fallthrough_singleflight: SingleflightGroup::default(),
             counters,
@@ -302,7 +324,14 @@ where
     /// Clear all cached results in both subsystems.
     pub fn clear_caches(&self) {
         self.fallthrough.clear_cache();
-        self.component_meta.clear();
+        // The view bookkeeping goes with the states it tracks, under the
+        // admission lock, so a reset host keeps no fingerprint queue for a
+        // document it no longer holds.
+        {
+            let mut recent = self.recent_component_meta_views.lock();
+            recent.clear();
+            self.component_meta.clear();
+        }
         self.prepared_decl_bundles.clear();
         self.top_level_fallthrough_singleflight.clear();
         self.indexed_singleflight.clear();
@@ -339,6 +368,85 @@ where
         self.prepared_decl_bundles.remove(&canonical_id.to_string());
         self.routes.evict_provider(canonical_id);
         self.imported_roots.evict_provider(canonical_id);
+    }
+
+    /// The ONE admission operation for component-meta states: note `key`'s
+    /// view as the document and mode's newest, admit `state` under `key` when
+    /// given one, drop the states cached under all but the two most recent
+    /// view fingerprints, and run `alongside` (the host's derived-mirror
+    /// update, handed the superseded fingerprint to trim) — all under the
+    /// view bookkeeping lock.
+    ///
+    /// The view a request in flight still holds is at most one view old, and
+    /// an older view can never be asked for again. Without the bound the cache
+    /// gains a key per overlay view for the life of the owner. Holding the
+    /// lock across the insertion is what keeps it: a publisher that noted its
+    /// view, then paused while newer views superseded it, would otherwise
+    /// insert a state no later trim can reach.
+    pub(crate) fn admit_component_meta_view<R>(
+        &self,
+        key: ResolutionNodeKey,
+        state: Option<(Arc<MetaV>, Vec<FactVersionRef>)>,
+        alongside: impl FnOnce(Option<u64>) -> R,
+    ) -> (Option<ValidatedFactAdmission<MetaV>>, R) {
+        let mut recent = self.recent_component_meta_views.lock();
+        let fingerprints = recent
+            .entry((key.symbol_id.clone(), key.behavior_flags))
+            .or_default();
+        if !fingerprints.contains(&key.view_fingerprint) {
+            fingerprints.push_back(key.view_fingerprint);
+        }
+        let superseded = if fingerprints.len() > RECENT_COMPONENT_META_VIEWS {
+            fingerprints.pop_front()
+        } else {
+            None
+        };
+        if let Some(superseded) = superseded {
+            // Every component-meta key comes from
+            // `resolved_meta_cache_key_with_view_fingerprint`, which fixes all
+            // columns but the document, the mode and the view fingerprint, so
+            // the superseded state's key is this key under the superseded
+            // fingerprint: one exact removal, never a scan of the whole cache
+            // under this lock.
+            self.component_meta.remove(&ResolutionNodeKey {
+                view_fingerprint: superseded,
+                ..key.clone()
+            });
+        }
+        let admission = state.and_then(|(value, facts)| {
+            self.component_meta
+                .insert_arc_with_kind(key, value, facts, "component_meta.results")
+        });
+        let alongside = alongside(superseded);
+        drop(recent);
+        (admission, alongside)
+    }
+
+    /// Drop the component-meta states cached for `canonical_id` under every
+    /// view fingerprint (a close or a deletion: none of them can be asked for
+    /// again), and say how many keys went.
+    pub fn release_component_meta_states(&self, canonical_id: &str) -> usize {
+        let mut recent = self.recent_component_meta_views.lock();
+        recent.retain(|(symbol_id, _), _| symbol_id != canonical_id);
+        let before = self.component_meta.len();
+        self.component_meta
+            .retain(|key| key.symbol_id != canonical_id);
+        drop(recent);
+        before - self.component_meta.len()
+    }
+
+    /// Documents and modes whose recent view fingerprints the admission
+    /// bookkeeping tracks.
+    #[cfg(test)]
+    pub(crate) fn component_meta_view_bookkeeping_len(&self) -> usize {
+        self.recent_component_meta_views.lock().len()
+    }
+
+    /// Cached component-meta states across every document, mode and view
+    /// fingerprint (retention observability).
+    #[must_use]
+    pub fn component_meta_state_count(&self) -> usize {
+        self.component_meta.len()
     }
 
     /// Take a snapshot of the current counter values.
@@ -434,5 +542,96 @@ mod tests {
         let snap = runtime.counter_snapshot();
         assert_eq!(snap.node_cache_hits, 0);
         assert_eq!(snap.node_cache_misses, 0);
+    }
+
+    fn view_key(canonical: &str, view_fingerprint: u64) -> ResolutionNodeKey {
+        crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
+            canonical,
+            crate::types::ProjectionMode::Expanded,
+            view_fingerprint,
+        )
+    }
+
+    fn admit_view(runtime: &UnifiedResolverRuntime<u32, ()>, key: ResolutionNodeKey) {
+        let facts = vec![FactVersionRef::FileWholeHash {
+            canonical_id: key.symbol_id.clone(),
+            hash: [1u8; 16],
+        }];
+        let (admission, ()) =
+            runtime.admit_component_meta_view(key, Some((Arc::new(1), facts)), |_| ());
+        assert!(admission.is_some(), "fixture: the state is admitted");
+    }
+
+    fn holds(runtime: &UnifiedResolverRuntime<u32, ()>, key: &ResolutionNodeKey) -> bool {
+        !runtime
+            .component_meta
+            .candidate_signatures_for_key(key)
+            .is_empty()
+    }
+
+    /// A third view of one owner removes exactly that owner's superseded view
+    /// key: other owners' states and any other key are untouched.
+    ///
+    /// Discriminating: the trim used to `retain` over the whole cache on every
+    /// superseding admission (a visit per cached key, under the global view
+    /// lock) and dropped every key of the owner, mode and fingerprint — here
+    /// the unrelated `foreign` key sharing those three columns.
+    #[test]
+    fn a_superseding_view_removes_only_its_owners_superseded_key() {
+        let runtime = UnifiedResolverRuntime::<u32, ()>::for_tests();
+        for view in [1, 2] {
+            admit_view(&runtime, view_key("/src/A.vue", view));
+            admit_view(&runtime, view_key("/src/B.vue", view));
+        }
+        let foreign = ResolutionNodeKey {
+            node_kind: crate::resolver_core::ResolutionNodeKind::DeclarationMetadata,
+            ..view_key("/src/A.vue", 1)
+        };
+        runtime.component_meta.insert_arc_with_kind(
+            foreign.clone(),
+            Arc::new(2),
+            vec![FactVersionRef::FileWholeHash {
+                canonical_id: "/src/A.vue".to_string(),
+                hash: [1u8; 16],
+            }],
+            "component_meta.results",
+        );
+        assert_eq!(runtime.component_meta_state_count(), 5);
+
+        admit_view(&runtime, view_key("/src/A.vue", 3));
+
+        assert!(
+            !holds(&runtime, &view_key("/src/A.vue", 1)),
+            "the superseded view goes"
+        );
+        for kept in [
+            view_key("/src/A.vue", 2),
+            view_key("/src/A.vue", 3),
+            view_key("/src/B.vue", 1),
+            view_key("/src/B.vue", 2),
+            foreign,
+        ] {
+            assert!(holds(&runtime, &kept), "{kept:?} is untouched");
+        }
+        assert_eq!(runtime.component_meta_state_count(), 5);
+    }
+
+    /// A whole-runtime reset (host `close()` / `set_workspace()`) drops the
+    /// view bookkeeping with the states it tracks.
+    ///
+    /// Discriminating: `clear_caches` cleared the states but kept every
+    /// document's fingerprint queue, so a host reused across workspaces kept
+    /// the old canonicals for its life.
+    #[test]
+    fn clearing_the_caches_drops_the_view_bookkeeping() {
+        let runtime = UnifiedResolverRuntime::<u32, ()>::for_tests();
+        admit_view(&runtime, view_key("/src/A.vue", 1));
+        admit_view(&runtime, view_key("/src/B.vue", 1));
+        assert_eq!(runtime.component_meta_view_bookkeeping_len(), 2);
+
+        runtime.clear_caches();
+
+        assert_eq!(runtime.component_meta_state_count(), 0);
+        assert_eq!(runtime.component_meta_view_bookkeeping_len(), 0);
     }
 }

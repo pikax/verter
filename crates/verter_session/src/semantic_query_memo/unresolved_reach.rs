@@ -23,6 +23,11 @@
 //! the way the `(node_id, ctx) -> result_id` hash-cons memos do. Those are
 //! cleared on every edit; this one must not be, and clearing it would only
 //! cost recomputation.
+//!
+//! The one exception is a document CLOSE: `release_canonical` drops the
+//! bits of the nodes it tombstones (their payloads are gone, so the bits
+//! are pure retention). A released id asked again reads the `Opaque(Miss)`
+//! placeholder and memoizes `true` — the conservative answer.
 
 use super::*;
 
@@ -98,7 +103,7 @@ impl SemanticGraphStore {
                 stack.pop();
                 on_path.remove(&node);
                 local.insert(node, bit);
-                if !cycle_seen {
+                if !cycle_seen && self.keeps_structure_bits(node) {
                     self.unresolved_reach
                         .lock()
                         .entry(node)
@@ -350,7 +355,18 @@ impl SemanticGraphStore {
     }
 
     fn set_inert_bit(&self, node: SemanticNodeId, bit: bool) {
-        self.unresolved_reach.lock().entry(node).or_default().inert = Some(bit);
+        if self.keeps_structure_bits(node) {
+            self.unresolved_reach.lock().entry(node).or_default().inert = Some(bit);
+        }
+    }
+
+    /// Whether `node`'s structure bits are memoized. A released id is
+    /// answered (it reads the placeholder) but never memoized: no later
+    /// release names it, so its entry would be a residue for the life of
+    /// the store. Until the first release every id is live and this is one
+    /// relaxed load.
+    fn keeps_structure_bits(&self, node: SemanticNodeId) -> bool {
+        !self.released_any.load(std::sync::atomic::Ordering::Relaxed) || self.arena.is_live(node)
     }
 
     /// The memoized structural bits of `node`, if any was decided.

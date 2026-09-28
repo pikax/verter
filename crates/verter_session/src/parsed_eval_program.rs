@@ -61,9 +61,21 @@ pub(crate) struct ParsedEvalProgram {
 }
 
 impl ParsedEvalProgram {
+    #[cfg(test)]
     pub(crate) fn parse(source: Arc<str>, source_type: oxc_span::SourceType) -> Option<Self> {
+        Self::parse_outcome(source, source_type).ok()
+    }
+
+    /// Parse `source`: the program, or, for a fatal parse, the stack
+    /// refusal it carries when it was refused for want of stack rather
+    /// than for its syntax.
+    pub(crate) fn parse_outcome(
+        source: Arc<str>,
+        source_type: oxc_span::SourceType,
+    ) -> Result<Self, Option<verter_parser::oxc_parse::StackUnavailable>> {
         verter_audit::attribute_n!(EvalProgramParse, source.len());
         let mut panicked = false;
+        let mut refused = None;
         let mut had_errors = false;
         let cell = ParsedEvalProgramCell::new(
             ParsedEvalProgramOwner {
@@ -83,6 +95,7 @@ impl ParsedEvalProgram {
                 })
                 .parse();
                 panicked = result.fatal_error;
+                refused = verter_parser::oxc_parse::parse_refusal(&result);
                 had_errors = !result.diagnostics.is_empty();
                 // The retained arena is the dominant per-file live footprint;
                 // `used_bytes()` walks the chunk list, which is why the amount
@@ -92,7 +105,10 @@ impl ParsedEvalProgram {
                 result.program
             },
         );
-        (!panicked).then_some(Self {
+        if panicked {
+            return Err(refused);
+        }
+        Ok(Self {
             cell: Rc::new(cell),
             functions: OnceCell::new(),
             nesting: OnceCell::new(),

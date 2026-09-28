@@ -186,6 +186,12 @@ pub(crate) trait CarrierStableUnitStore: Send + Sync {
         cohort: PersistedCarrierArtifactCohort,
     );
     fn discard(&self, id: &FrameworkArtifactId, accepted: &AcceptedRegisteredCarrierSource);
+    /// Number of stable units currently retained: the object count the host
+    /// reports as `carrier_candidates` in its retention snapshot. A store that
+    /// retains nothing in memory reports zero.
+    fn retained_unit_count(&self) -> usize {
+        0
+    }
 }
 
 /// Bounded least-recently-used retention of immutable stable units.
@@ -261,6 +267,10 @@ impl Default for InMemoryStableUnitStore {
 }
 
 impl CarrierStableUnitStore for InMemoryStableUnitStore {
+    fn retained_unit_count(&self) -> usize {
+        self.units.lock().map_or(0, |units| units.units.len())
+    }
+
     fn retained(
         &self,
         id: &FrameworkArtifactId,
