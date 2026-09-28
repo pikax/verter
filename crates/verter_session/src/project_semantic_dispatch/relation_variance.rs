@@ -404,6 +404,11 @@ impl ProjectSemanticDispatch<'_> {
         else {
             return None;
         };
+        // A class's polymorphic `this` binder sits past every marker
+        // position; it is no marker.
+        if *param_index == super::substitute::THIS_BINDER_INDEX {
+            return None;
+        }
         let offset = param_index.checked_sub(MARKER_PARAM_INDEX)?;
         let role = match offset % 3 {
             0 => MarkerRole::Sub,

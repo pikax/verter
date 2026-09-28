@@ -21,6 +21,7 @@
 //!   features (`:deep`, `:global`, `v-bind()`).
 
 mod build;
+pub mod class_field_value;
 mod classify;
 pub mod component_meta;
 pub mod decl_dependencies;

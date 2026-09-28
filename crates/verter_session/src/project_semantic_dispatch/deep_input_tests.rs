@@ -1171,3 +1171,47 @@ fn an_enum_reference_chain_evaluates_in_linear_work() {
     assert!(through_members(200) > 0);
     assert_eq!(through_members(400), 2 * through_members(200));
 }
+
+/// A module of an interface of `length` members `k0 … k{length-1}` and the
+/// union of their names, twice over (`K`).
+fn index_key_union(length: usize) -> String {
+    let members: String = (0..length).map(|i| format!("  k{i}: {i};\n")).collect();
+    let names: Vec<String> = (0..length).map(|i| format!("\"k{i}\"")).collect();
+    format!(
+        "interface I {{\n{members}}}\ntype K = {union} | {union};\n",
+        union = names.join(" | ")
+    )
+}
+
+/// An access by a union of keys reads each distinct key once, and its key
+/// set is deduplicated — across a union's members and against an
+/// intersection's — in work linear in the keys: a scan of the keys kept so
+/// far made a long key union quadratic.
+///
+/// Measured on TypeScript 7.0.2 (`--strict`): `I[K] extends number ? "y" :
+/// "n"` and `I[keyof I & K] extends number ? "y" : "n"` are `"y"` at both
+/// lengths.
+///
+/// Mutation: deduplicating through a scan of the keys kept so far takes
+/// four times the comparisons at twice the length.
+#[test]
+fn an_access_by_a_key_union_dedups_in_linear_work() {
+    let work = |length: usize| {
+        let before = super::build::index_key_probes_for_tests();
+        let source = index_key_union(length);
+        assert_eq!(
+            mismatches(
+                &source,
+                &[
+                    ("I[K] extends number ? \"y\" : \"n\"", "\"y\""),
+                    ("I[keyof I & K] extends number ? \"y\" : \"n\"", "\"y\""),
+                ],
+            ),
+            Vec::<String>::new()
+        );
+        super::build::index_key_probes_for_tests() - before
+    };
+    let short = work(200);
+    assert!(short > 0);
+    assert_eq!(work(400), 2 * short);
+}

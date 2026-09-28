@@ -789,6 +789,10 @@ fn collect_from_indexed(
     if module_kind == FileModuleKind::Script && !is_automatic_lib {
         let headers = indexed.shallow_state.decl_bodies().header_index();
         for (binding, header) in headers.value_headers.iter() {
+            // A namespace member its namespace does not export is no global.
+            if !headers.namespace_member_is_exported(binding.owner, binding.name.as_ref()) {
+                continue;
+            }
             facts.push(GlobalContributionFact {
                 symbol: InternedName::from(binding.name.as_ref()),
                 space: SymbolSpace::Value,

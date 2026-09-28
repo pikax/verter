@@ -9,6 +9,8 @@
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
+use crate::analysis::class_field_value::ClassFieldValues;
+
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
@@ -412,6 +414,20 @@ pub struct LoweredStatementParts {
     /// registration, mirror the declared-name type symbol under the `default`
     /// export name (see [`alias_default_export_type_symbol`]).
     pub alias_default_type_to: Option<String>,
+    /// INPUT, not output: the header walk's classification of the class
+    /// fields this lowering meets ([`ClassFieldValues`]), read instead of
+    /// walking an initializer again.
+    pub class_fields: Arc<ClassFieldValues>,
+}
+
+impl LoweredStatementParts {
+    /// Empty parts that read `class_fields`.
+    fn reading(class_fields: &Arc<ClassFieldValues>) -> Self {
+        Self {
+            class_fields: Arc::clone(class_fields),
+            ..Self::default()
+        }
+    }
 }
 
 /// Build an inventory environment from an OXC program AST.
@@ -425,15 +441,21 @@ pub struct LoweredStatementParts {
 ///   signature / shape / enum facts)
 pub fn build_eval_env(program: &Program<'_>, source: &str, ctx: &BuildEvalEnvContext) -> EvalEnv {
     let owners = TopLevelOwnerTable::ordinary_file(program.body.len());
-    build_eval_env_with_owners(program, source, ctx, &owners)
+    // No header walk ran: each class's fields are classified as it lowers.
+    build_eval_env_with_owners(program, source, ctx, &owners, &Arc::default())
 }
 
 /// Build an eval environment under an explicit validated lexical-owner table.
+///
+/// `class_fields` is the header walk's classification of the program's
+/// class fields ([`ClassFieldValues`]); a class it does not cover is
+/// classified as it lowers.
 pub fn build_eval_env_with_owners(
     program: &Program<'_>,
     source: &str,
     ctx: &BuildEvalEnvContext,
     owners: &TopLevelOwnerTable,
+    class_fields: &Arc<ClassFieldValues>,
 ) -> EvalEnv {
     assert_eq!(
         owners.len(),
@@ -456,6 +478,7 @@ pub fn build_eval_env_with_owners(
             },
             source,
             program.source_type.is_typescript_definition(),
+            class_fields,
             &mut env,
         );
     }
@@ -499,9 +522,10 @@ pub fn lower_top_level_statement(
     ctx: StatementLowerCtx<'_>,
     source: &str,
     declaration_file: bool,
+    class_fields: &Arc<ClassFieldValues>,
     env: &mut EvalEnv,
 ) {
-    let parts = lower_statement_parts(stmt, source, declaration_file);
+    let parts = lower_statement_parts(stmt, source, declaration_file, class_fields);
     register_statement_parts(parts, ctx, env);
 }
 
@@ -510,13 +534,15 @@ pub fn lower_top_level_statement(
 /// walk and the in-crate lowering tests consume — one lowering path, no fork.
 ///
 /// `declaration_file` says the statement belongs to a declaration file,
-/// where every declaration is ambient.
+/// where every declaration is ambient. `class_fields` is the header walk's
+/// classification of the class fields ([`ClassFieldValues`]).
 pub fn lower_statement_parts(
     stmt: &Statement<'_>,
     source: &str,
     declaration_file: bool,
+    class_fields: &Arc<ClassFieldValues>,
 ) -> LoweredStatementParts {
-    let mut out = LoweredStatementParts::default();
+    let mut out = LoweredStatementParts::reading(class_fields);
     collect_statement_parts(stmt, source, declaration_file, &mut out);
     out
 }
@@ -536,8 +562,9 @@ pub fn lower_statement_parts(
 pub fn lower_svelte_runes_statement_parts(
     stmt: &Statement<'_>,
     source: &str,
+    class_fields: &Arc<ClassFieldValues>,
 ) -> LoweredStatementParts {
-    let mut out = lower_statement_parts(stmt, source, false);
+    let mut out = lower_statement_parts(stmt, source, false, class_fields);
     apply_svelte_rune_initializer_inference(stmt, source, &mut out.value_decls);
     out
 }
@@ -562,6 +589,7 @@ pub fn register_statement_parts(
         aug_type_decls,
         aug_value_decls,
         alias_default_type_to,
+        class_fields: _,
     } = parts;
     for parts in type_decls {
         env.add_type(mint_type_decl(
@@ -1798,34 +1826,18 @@ pub(crate) fn class_heritage_value_name(class_name: &str) -> String {
     format!("{class_name}:extends")
 }
 
-/// The synthetic value declaration a class field reads its type through,
-/// when the field's initializer is an expression whose type derives from
-/// a call (`static origin = new Pt()`) or reads `this` (`b = this.a + 1`):
-/// its value reads through the indexed program expression at the
-/// initializer, as a declarator initializer's does. The checker types a
-/// `this` read through the class's instance or constructor type, which no
-/// syntactic inference knows, so such an initializer is outside the indexed
-/// expression domain there: a gap, never a guessed `any`. `None` for a field
-/// with an annotation, without an initializer, with a function value
-/// (served at its own member position), with an authoritative assertion,
-/// or without a static name.
+/// The name of the synthetic value declaration a class field reads its type
+/// through (`C:field:x`, `C:static:x`), when its initializer's type derives
+/// from a call (`static origin = new Pt()`: the indexed program expression
+/// at the initializer, as a declarator initializer's) or it reads `this`
+/// (`b = this.a + 1`: the initializer's served position, whose frame reads
+/// the receiver). Which fields those are is the one classification
+/// [`ClassFieldValues`] records; this is only the name, `None` for a field
+/// without a static name.
 pub(crate) fn class_field_value_name(
     class_name: &str,
     prop: &oxc_ast::ast::PropertyDefinition<'_>,
-    source: &str,
 ) -> Option<String> {
-    if prop.type_annotation.is_some() || matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
-        return None;
-    }
-    let value = prop.value.as_ref()?;
-    if matches!(
-        value,
-        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-    ) || !(value_type_derives_from_a_call(value, source) || value_reads_this(value, source))
-        || has_authoritative_value_assertion(value)
-    {
-        return None;
-    }
     let key = crate::analysis::function_program::static_property_key_name(&prop.key)?;
     let side = if prop.r#static { "static" } else { "field" };
     Some(format!("{class_name}:{side}:{key}"))
@@ -2049,7 +2061,6 @@ impl<'s, 'a> crate::analysis::namespace_walk::NamespaceVisitor<'s, 'a>
                 self.out,
                 self.path.name(),
                 frame.ambient,
-                frame.implicit_export,
             ),
             Some(scope) => collect_namespaced_statement_into_augmentation(
                 statement,
@@ -2149,7 +2160,7 @@ fn collect_augmentation_declaration(
         Declaration::VariableDeclaration(_)
         | Declaration::FunctionDeclaration(_)
         | Declaration::ClassDeclaration(_) => {
-            let mut inner = LoweredStatementParts::default();
+            let mut inner = LoweredStatementParts::reading(&out.class_fields);
             collect_from_declaration(decl, source, true, &mut inner);
             move_value_parts_into_augmentation(inner, out, scope);
         }
@@ -2324,7 +2335,7 @@ fn collect_value_statement_into_augmentation(
     out: &mut LoweredStatementParts,
     scope: &AugmentationScopeKind,
 ) {
-    let mut inner = LoweredStatementParts::default();
+    let mut inner = LoweredStatementParts::reading(&out.class_fields);
     match stmt {
         Statement::ClassDeclaration(decl) => collect_class(decl, source, &mut inner),
         Statement::FunctionDeclaration(func) => {
@@ -2384,7 +2395,6 @@ fn collect_namespaced_statement(
     out: &mut LoweredStatementParts,
     namespace: &str,
     ambient: bool,
-    implicit_export: bool,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
@@ -2428,19 +2438,18 @@ fn collect_namespaced_statement(
                 out,
             );
         }
-        // Namespace value indexing is EXPORT-ONLY: a non-exported
-        // `namespace N { const hidden = … }` is private to the namespace body
-        // (TS: `N.hidden` does not exist on `typeof N`), so a DIRECT
-        // `Statement::VariableDeclaration` is NOT indexed under its qualified
-        // name. The exported path below (`export const VERSION = …` →
-        // `collect_namespaced_declaration`) registers a qualified value member
-        // such as `N.VERSION` — and a namespace body that is an export
-        // context exports every member, written `export` or not.
+        // A namespace's values register under their qualified names: the
+        // exported path below (`export const VERSION = …` →
+        // `collect_namespaced_declaration`) and a direct declaration alike.
+        // A non-exported `namespace N { const hidden = … }` is private to
+        // its block (TS: `N.hidden` does not exist on `typeof N`); the
+        // header index records it private, so only a reference inside the
+        // block names it.
         Statement::ExportDeclaration(export) => {
             let decl = &export.declaration;
             collect_namespaced_declaration(decl, source, out, namespace, ambient);
         }
-        Statement::VariableDeclaration(var_decl) if implicit_export => {
+        Statement::VariableDeclaration(var_decl) => {
             for declarator in &var_decl.declarations {
                 for parts in
                     lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
@@ -2449,7 +2458,7 @@ fn collect_namespaced_statement(
                 }
             }
         }
-        Statement::FunctionDeclaration(func) if implicit_export => {
+        Statement::FunctionDeclaration(func) => {
             if let Some(parts) = lower_function_parts_in(func, source, Some(namespace)) {
                 out.value_decls.push(parts);
             }
@@ -2840,8 +2849,9 @@ fn collect_named_class(
                 // `let` does.
                 let field_value = function_value
                     .is_none()
-                    .then(|| class_field_value_name(&name, prop, source))
+                    .then(|| out.class_fields.field(decl, prop, source))
                     .flatten()
+                    .and_then(|_| class_field_value_name(&name, prop))
                     .map(|field_name| {
                         out.value_decls.push(LoweredValueDeclParts {
                             name: field_name.clone(),
@@ -3965,7 +3975,7 @@ fn unwrap_expression_wrappers<'a>(mut expr: &'a Expression<'a>) -> &'a Expressio
     }
 }
 
-fn has_authoritative_value_assertion(mut expr: &Expression<'_>) -> bool {
+pub(crate) fn has_authoritative_value_assertion(mut expr: &Expression<'_>) -> bool {
     loop {
         match expr {
             Expression::ParenthesizedExpression(parenthesized) => {
@@ -4080,7 +4090,7 @@ pub(crate) fn for_each_indexed_call_source_type_query<'a>(
 
 /// The class expression a declarator's initializer is, through
 /// parentheses.
-fn initializer_class_expression<'a>(init: &'a Expression<'a>) -> Option<&'a Class<'a>> {
+pub(crate) fn initializer_class_expression<'a>(init: &'a Expression<'a>) -> Option<&'a Class<'a>> {
     match init {
         Expression::ClassExpression(class) => Some(class),
         Expression::ParenthesizedExpression(inner) => {
@@ -7400,6 +7410,7 @@ pub fn parse_and_lower_parts(source: &str) -> LoweredFileParts {
             stmt,
             source,
             ret.program.source_type.is_typescript_definition(),
+            &Arc::default(),
         );
         out.type_decls.extend(parts.type_decls);
         out.value_decls.extend(parts.value_decls);
@@ -8135,33 +8146,6 @@ fn lower_indexed_explicit_type_arguments(
 /// either.
 pub fn value_inference_fabricates_a_call(expr: &Expression<'_>, source: &str) -> bool {
     !has_authoritative_value_assertion(expr) && value_type_derives_from_a_call(expr, source)
-}
-
-/// Whether a value expression reads `this` — the `this` of its own
-/// position, so neither a nested function's nor a nested class's (an
-/// arrow function's `this` is its position's).
-pub(crate) fn value_reads_this(expr: &Expression<'_>, source: &str) -> bool {
-    #[derive(Default)]
-    struct ThisProbe(bool);
-
-    impl<'a> Visit<'a> for ThisProbe {
-        fn visit_this_expression(&mut self, _this: &oxc_ast::ast::ThisExpression) {
-            self.0 = true;
-        }
-
-        fn visit_function(
-            &mut self,
-            _function: &oxc_ast::ast::Function<'a>,
-            _flags: oxc_syntax::scope::ScopeFlags,
-        ) {
-        }
-
-        fn visit_class(&mut self, _class: &oxc_ast::ast::Class<'a>) {}
-    }
-
-    let mut probe = ThisProbe::default();
-    verter_parser::oxc_parse::with_span_stack(source, expr.span(), || probe.visit_expression(expr));
-    probe.0
 }
 
 fn value_type_derives_from_a_call(expr: &Expression<'_>, source: &str) -> bool {

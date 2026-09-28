@@ -116,14 +116,16 @@ fn fold_function_body(
             visitor.fold_ts_type_annotation(arrow.return_type.as_ref());
             visitor.fold_ts_type_parameters(arrow.type_parameters.as_ref());
         }
+        // An initializer is its one expression: a tag of its own keeps it
+        // apart from an arrow whose body is the same expression.
+        crate::analysis::function_program::FunctionNode::Initializer(_) => {
+            visitor.tag(0x49);
+        }
     }
     // The parameter's CONTENT is whole-body identity: its authored
     // annotation and its default initializer lower into the served
     // parameter type, so an edit to either changes the hash.
-    let ast_params: &[oxc_ast::ast::FormalParameter<'_>] = match node {
-        crate::analysis::function_program::FunctionNode::Function(func) => &func.params.items,
-        crate::analysis::function_program::FunctionNode::Arrow(arrow) => &arrow.params.items,
-    };
+    let ast_params: &[oxc_ast::ast::FormalParameter<'_>] = node.param_items();
     for (index, param) in params.iter().enumerate() {
         visitor.tag(0x50);
         visitor.fold_u8(u8::from(param.optional));
@@ -140,19 +142,9 @@ fn fold_function_body(
             }
         }
     }
-    let ast_rest_ty: Option<&oxc_allocator::Box<'_, oxc_ast::ast::TSTypeAnnotation<'_>>> =
-        match node {
-            crate::analysis::function_program::FunctionNode::Function(func) => func
-                .params
-                .rest
-                .as_ref()
-                .and_then(|rest| rest.type_annotation.as_ref()),
-            crate::analysis::function_program::FunctionNode::Arrow(arrow) => arrow
-                .params
-                .rest
-                .as_ref()
-                .and_then(|rest| rest.type_annotation.as_ref()),
-        };
+    let ast_rest_ty: Option<&oxc_allocator::Box<'_, oxc_ast::ast::TSTypeAnnotation<'_>>> = node
+        .param_rest()
+        .and_then(|rest| rest.type_annotation.as_ref());
     visitor.fold_ts_type_annotation(ast_rest_ty);
     // Type-affecting JSDoc payloads (@param / @returns / @return / @type):
     // folded as payload text; descriptions and other tags are cosmetic.

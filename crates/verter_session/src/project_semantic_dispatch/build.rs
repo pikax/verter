@@ -798,9 +798,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // A namespace member path: a namespace block has no value surface
         // the path could walk, and its members register under their
-        // QUALIFIED names, so `typeof N.M.f` reads the value `N.M.f` names.
-        // A function-local root is never a namespace (a namespace declares
-        // only at file or namespace scope).
+        // QUALIFIED names, so `typeof N.M.f` reads the value `N.M.f` names
+        // — a member the namespace exports: read from outside its body, a
+        // private one is no member of it. A function-local root is never a
+        // namespace (a namespace declares only at file or namespace scope).
         if value_root.scope.local_scope.is_none() {
             let mut joined = value_root.name.to_string();
             for (split, segment) in path.iter().enumerate() {
@@ -809,7 +810,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if matches!(
                     shallow.visible_value_binding(value_root.scope.owner, &joined),
                     Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(_))
-                ) {
+                ) && shallow
+                    .decl_bodies()
+                    .header_index()
+                    .namespace_member_is_exported(value_root.scope.owner, &joined)
+                {
                     let member_root = ValueRootKey {
                         scope: value_root.scope.clone(),
                         name: Arc::from(joined),
@@ -1007,9 +1012,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // A global namespace without a value of its own
                 // declaration is its object.
                 _ => {
-                    let Some((object, roots)) =
-                        self.global_namespace_object(value_root.name.as_ref(), context)
-                    else {
+                    let Some((object, roots)) = self.global_namespace_object(
+                        value_root.scope.canonical_id.as_ref(),
+                        value_root.name.as_ref(),
+                        context,
+                    ) else {
                         return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
                     };
                     let output = if path.is_empty() {
@@ -2257,7 +2264,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         (1..=path.len()).rev().find_map(|length| {
             let name = qualified(value_root.name.as_ref(), &path[..length]);
             let visible = shallow.visible_value_binding(owner, &name);
-            let declared = matches!(visible, Some(LexicalValueBinding::Local(_)))
+            // A qualified read names a namespace's member from outside its
+            // body: one the namespace does not export is no member of it
+            // (TS2339).
+            let declared = (matches!(visible, Some(LexicalValueBinding::Local(_)))
+                && shallow
+                    .decl_bodies()
+                    .header_index()
+                    .namespace_member_is_exported(owner, &name))
                 || (visible.is_none()
                     && matches!(
                         shallow.value_fallback_augmentation_scope(owner, &name),
@@ -6400,6 +6414,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// named the global through them — including a read that found none.
     pub(super) fn global_contributors_in(
         &self,
+        demand_canonical: &str,
         name: &str,
         space: verter_semantic::facts::SymbolSpace,
     ) -> crate::global_contributors::SymbolContributors {
@@ -6429,7 +6444,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 },
             ),
         );
-        population.lookup_in_space(&target, name, overlay_discriminator, true, space)
+        let contributors =
+            population.lookup_in_space(&target, name, overlay_discriminator, true, space);
+        // The global scope is one program's: a contributor of another
+        // project's program declares nothing the demand reads.
+        let project = host.resolve_project_for_canonical(demand_canonical);
+        if contributors.entries.iter().all(|entry| {
+            host.resolve_project_for_canonical(&entry.artifact_key.canonical) == project
+        }) {
+            return contributors;
+        }
+        crate::global_contributors::SymbolContributors {
+            entries: contributors
+                .entries
+                .iter()
+                .filter(|entry| {
+                    host.resolve_project_for_canonical(&entry.artifact_key.canonical) == project
+                })
+                .cloned()
+                .collect(),
+            fingerprint: contributors.fingerprint,
+        }
     }
 
     /// The declaration of the global `name` in `space` that the library of
@@ -6495,8 +6530,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return Some(lib);
         }
         let host = self.ctx.host_for_fact_tracer_install();
-        let population =
-            self.global_contributors_in(name, verter_semantic::facts::SymbolSpace::Type);
+        let population = self.global_contributors_in(
+            demand_canonical,
+            name,
+            verter_semantic::facts::SymbolSpace::Type,
+        );
         let first = population
             .entries
             .iter()
@@ -6529,6 +6567,61 @@ impl<'a> ProjectSemanticDispatch<'a> {
             first.owner,
             name,
         ))
+    }
+
+    /// The declaration the qualified type name `name` (`Ns.T`,
+    /// `Ns.Inner.T`) names through the GLOBAL namespace its head names: the
+    /// member a script's top-level namespace of that name exports, the first
+    /// in declaration precedence order. `None` when no script's namespace
+    /// declares it.
+    pub(super) fn global_namespace_type_declaration(
+        &self,
+        demand_canonical: &str,
+        name: &str,
+    ) -> Option<ResolvedRootIdentity> {
+        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
+        let (head, _) = name.split_once('.')?;
+        let host = self.ctx.host_for_fact_tracer_install();
+        let population = self.global_contributors_in(
+            demand_canonical,
+            head,
+            verter_semantic::facts::SymbolSpace::Namespace,
+        );
+        let mut declarations: Vec<&crate::global_contributors::ContributorEntry> = population
+            .entries
+            .iter()
+            .filter(|entry| {
+                !entry.is_automatic_lib
+                    && entry.origin == ContributorOrigin::FileScopeNamespace
+                    && entry.module_kind == FileModuleKind::Script
+            })
+            .collect();
+        declarations.sort_by(|left, right| {
+            host.declaration_sequence_rank(left.artifact_key.canonical.as_ref())
+                .cmp(&host.declaration_sequence_rank(right.artifact_key.canonical.as_ref()))
+                .then_with(|| {
+                    left.artifact_key
+                        .canonical
+                        .as_ref()
+                        .cmp(right.artifact_key.canonical.as_ref())
+                })
+        });
+        declarations.into_iter().find_map(|entry| {
+            let indexed = self
+                .ctx
+                .ensure_indexed_ready_serve(entry.artifact_key.canonical.as_ref())?
+                .indexed;
+            let headers = indexed.shallow_state.decl_bodies().header_index();
+            (headers.type_header_in(entry.owner, name).is_some()
+                && headers.namespace_member_is_exported(entry.owner, name))
+            .then(|| {
+                ResolvedRootIdentity::new_in_owner(
+                    Arc::clone(&entry.artifact_key.canonical),
+                    entry.owner,
+                    name,
+                )
+            })
+        })
     }
 
     /// The GLOBAL value declaration named `name` that a reference in
@@ -6595,8 +6688,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .kind;
                 Some((identity, kind))
             });
-        let population =
-            self.global_contributors_in(name, verter_semantic::facts::SymbolSpace::Value);
+        let population = self.global_contributors_in(
+            demand_canonical,
+            name,
+            verter_semantic::facts::SymbolSpace::Value,
+        );
         let mut declarations: Vec<(&crate::global_contributors::ContributorEntry, ValueDeclKind)> =
             Vec::new();
         for entry in population.entries.iter() {
@@ -10290,11 +10386,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let resolved = self
             .evaluate_deferred_semantic_node_with_context(*index_node, context)
             .into_active_query_build_node(self);
-        if matches!(
-            self.graph().node_data(resolved).as_deref(),
-            Some(SemanticNodeData::Literal(_))
-        ) {
-            return None;
+        match self.graph().node_data(resolved).as_deref() {
+            Some(SemanticNodeData::Literal(_)) => return None,
+            // An access by `never` — the empty key set — reads nothing:
+            // `T[never]` IS `never` (the checker's `getIndexedAccessType`
+            // over an empty index union).
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
+                let never = self
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+                return Some(
+                    crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                        QueryResult::Value(never),
+                        self.project_generation_signature(),
+                    ))
+                    .with_observed_self_roots(self.observed_self_roots_from_nodes([base])),
+                );
+            }
+            _ => {}
         }
         let keys = self.finite_index_keys(resolved, 0)?;
         if keys.is_empty() {
@@ -10404,10 +10513,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Union(members) => {
                 let members = members.members_arc();
                 drop(data);
+                // First occurrence order, deduplicated through a set: a
+                // scan of the keys kept so far made a long key union
+                // quadratic.
                 let mut keys = Vec::with_capacity(members.len());
+                let mut seen: FxHashSet<IndexKey> = FxHashSet::default();
                 for member in members.iter() {
                     for key in self.finite_index_keys(*member, depth + 1)? {
-                        if !keys.contains(&key) {
+                        if first_index_key(&mut seen, &key) {
                             keys.push(key);
                         }
                     }
@@ -10422,10 +10535,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let keys = self.finite_index_keys(*member, depth + 1)?;
                     common = Some(match common {
                         None => keys,
-                        Some(common) => common
-                            .into_iter()
-                            .filter(|key| keys.contains(key))
-                            .collect(),
+                        Some(common) => {
+                            let mut present: FxHashSet<IndexKey> = FxHashSet::default();
+                            for key in &keys {
+                                first_index_key(&mut present, key);
+                            }
+                            common
+                                .into_iter()
+                                .filter(|key| index_key_present(&present, key))
+                                .collect()
+                        }
                     });
                 }
                 common
@@ -10821,6 +10940,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // augmenter) misses the warm keyof entry. Nested-read partiality
             // (an incomplete heritage projection) folds through the
             // re-dispatched output verbatim.
+            // A class expression's instance has the keys of the surface it
+            // reads through: its public members (a `#private` or
+            // `private` member is no key). Two or more keep the class as
+            // their origin, the checker's `keyof (Anonymous class)` /
+            // `keyof Expr`; the key set a relation reads is
+            // [`Self::key_set_of`].
+            Some(SemanticNodeData::ClassExpressionInstance { .. }) => {
+                drop(data);
+                let Some(surface) = self.class_expression_read_surface(base) else {
+                    return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                        QueryResult::Value(self.opaque(QueryError::Miss)),
+                        fence,
+                    ));
+                };
+                let observed_self_roots = self.observed_self_roots_from_nodes([base, surface]);
+                let mut keys = self.build_key_of(surface, context);
+                let keeps_origin = matches!(
+                    &keys.result,
+                    QueryResult::Value(node) if matches!(
+                        self.graph().node_data(*node).as_deref(),
+                        Some(SemanticNodeData::Union(members)) if members.len() > 1
+                    )
+                );
+                if keeps_origin {
+                    keys.result =
+                        QueryResult::Value(self.graph().intern_node(SemanticNodeData::KeyOf { base }));
+                }
+                return keys.with_observed_self_roots(observed_self_roots);
+            }
             Some(SemanticNodeData::MergedDecl { contributors }) => {
                 let merged = self.reduce_merged_decl(contributors);
                 let observed_self_roots = self.observed_self_roots_from_nodes(
@@ -10977,7 +11125,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if settled == base {
             return None;
         }
-        let keys = settled_keys(read(settled)?)?;
+        let keys = read(settled)?;
+        // A class expression's instance is the class the checker names its
+        // keys by (`keyof (Anonymous class)`), whatever alias or application
+        // reaches it.
+        if let Some(SemanticNodeData::KeyOf { base: kept }) =
+            self.graph().node_data(keys).as_deref()
+        {
+            if matches!(
+                self.graph().node_data(*kept).as_deref(),
+                Some(SemanticNodeData::ClassExpressionInstance { .. })
+            ) {
+                return Some(keys);
+            }
+        }
+        let keys = settled_keys(keys)?;
         // A union's keys are those every member shares and an
         // intersection's those of any member (`getIndexType` over a union or
         // intersection), read off the members, so an alias naming one leaves
@@ -11044,21 +11206,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             QueryResult::Value(node) => Some(node),
             _ => None,
         };
-        let keys = read(base)?;
-        let kept = match self.graph().node_data(keys).as_deref() {
-            Some(SemanticNodeData::KeyOf { base: kept }) => *kept,
-            _ => return Some(keys),
-        };
-        let settled = self.resolve_signature_source_carrier(kept, published);
-        if settled == kept {
-            return None;
+        // Each step settles the carrier a `keyof` kept to the type it
+        // stands for — a declaration or application to its body, a class
+        // expression's instance (which keeps its `keyof` origin) to the
+        // surface it reads through — until the keys settle; a carrier that
+        // settles to itself keeps its keys open.
+        let mut keys = read(base)?;
+        let mut seen = FxHashSet::default();
+        loop {
+            let kept = match self.graph().node_data(keys).as_deref() {
+                Some(SemanticNodeData::KeyOf { base: kept }) => *kept,
+                _ => return Some(keys),
+            };
+            if !seen.insert(kept) {
+                return None;
+            }
+            let settled = match self.class_expression_read_surface(kept) {
+                Some(surface) => surface,
+                None => self.resolve_signature_source_carrier(kept, published),
+            };
+            if settled == kept {
+                return None;
+            }
+            keys = read(settled)?;
         }
-        let keys = read(settled)?;
-        (!matches!(
-            self.graph().node_data(keys).as_deref(),
-            Some(SemanticNodeData::KeyOf { .. })
-        ))
-        .then_some(keys)
     }
 
     pub(super) fn intern_keyspace_keys<I>(
@@ -17285,4 +17456,37 @@ mod awaited_path_tests {
         assert!(!path.contains(AwaitedRelation::Normalize, operand(2)));
         assert_eq!(path.len(), 0);
     }
+}
+
+/// Whether `key` is new to `seen`, recording it: the one membership test
+/// of [`ProjectSemanticDispatch::finite_index_keys`], a hash probe.
+fn first_index_key(
+    seen: &mut FxHashSet<crate::semantic_query::IndexKey>,
+    key: &crate::semantic_query::IndexKey,
+) -> bool {
+    #[cfg(test)]
+    INDEX_KEY_PROBES.with(|probes| probes.set(probes.get() + 1));
+    seen.insert(key.clone())
+}
+
+/// Whether `key` is in `present` (a hash probe).
+fn index_key_present(
+    present: &FxHashSet<crate::semantic_query::IndexKey>,
+    key: &crate::semantic_query::IndexKey,
+) -> bool {
+    #[cfg(test)]
+    INDEX_KEY_PROBES.with(|probes| probes.set(probes.get() + 1));
+    present.contains(key)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static INDEX_KEY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The key comparisons the finite index-key sets made on this thread, so
+/// far (test-only).
+#[cfg(test)]
+pub(super) fn index_key_probes_for_tests() -> usize {
+    INDEX_KEY_PROBES.with(std::cell::Cell::get)
 }

@@ -145,51 +145,109 @@ const THIS_READ_ROWS: &[(&str, &str)] = &[
 ];
 
 /// A class field whose initializer reads `this` takes the type the checker
-/// gives it ([`THIS_READ_ROWS`]).
+/// gives it ([`THIS_READ_ROWS`]): the initializer is a served position of
+/// its own whose frame reads the receiver — the instance for an instance
+/// field, the class for a static one — and a field read back while its own
+/// initializer is being evaluated is `any`.
 ///
-/// What the lane gives: each row reduced to a partial demand, or a miss
-/// degraded by UnresolvedValue for a static — never a published answer. A
-/// declared class's field initializer lowers without a receiver, so the
-/// field is outside the indexed expression domain.
+/// Mutation: discovering no served position for such an initializer answers
+/// every row a typed gap (the field's synthetic value reads nothing);
+/// answering the in-progress read as a gap instead of `any` answers
+/// `Circ['p']` a partial demand.
 #[test]
-#[ignore = "a field initializer reading this reads the class instance or constructor type"]
 fn a_field_initializer_reads_this() {
     let matrix = Matrix::new(THIS_READS);
     let failures = matrix.types(THIS_READ_ROWS);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// No field whose initializer reads `this` publishes a complete,
-/// undegraded answer the checker does not give: until the lane reads the
-/// receiver, each is a gap.
+/// Fields whose `this`-reading initializers produce fresh literals, a
+/// template, an object literal and an optional member's read; statics; and
+/// a generic class's field.
+const THIS_READ_WIDENING: &str = r##"
+class W {
+  flag = true;
+  k: 1 = 1;
+  a = this.flag ? 1 : 2;
+  readonly r = this.flag ? 1 : 2;
+  b = this.k;
+  s = `${this.k}`;
+  o = { v: this.k };
+  n = this.maybe;
+  maybe?: string;
+  static z = 3;
+  static y = this.z > 0 ? "p" : "q";
+  static readonly x = this.z > 0 ? "p" : "q";
+}
+class G<T> { v!: T; w = this.v; }
+"##;
+
+/// A mutable field widens its initializer's fresh literals and a
+/// `readonly` one keeps them (the checker's widened literal type of a
+/// property); a literal read through `this` is no fresh literal.
 ///
-/// Mutation: lowering such an initializer syntactically, as any other
-/// field's, publishes `Init['b']` as a clean `any` and `T2['b']` as a
-/// clean `unknown`.
+/// Measured on TypeScript 7.0.2 (`--target es2022`): `W['a']` is `number`,
+/// `W['r']` `1 | 2`, `W['b']` `1`, `W['s']` `string`, `W['o']` `{ v: 1; }`,
+/// `(typeof W)['y']` `string`, `(typeof W)['x']` `"p" | "q"`,
+/// `G<number>['w']` `number` in every setting; `W['n']` is `string |
+/// undefined` with `strictNullChecks` and `string` without.
+///
+/// Mutation: keeping the fresh literals of a mutable field answers
+/// `W['a']` `1 | 2` and `(typeof W)['y']` `"p" | "q"`.
 #[test]
-fn a_field_initializer_reading_this_is_never_a_clean_wrong_answer() {
-    let matrix = Matrix::new(THIS_READS);
-    let rows: Vec<(Read<'_>, Vec<&str>)> = THIS_READ_ROWS
-        .iter()
-        .map(|(probe, answer)| (Read::Type(probe), vec![*answer; 4]))
-        .collect();
-    let wrong_clean: Vec<String> = rows
-        .iter()
-        .zip(matrix.verdicts(&rows))
-        .flat_map(|((read, _), verdicts)| {
-            verdicts
-                .into_iter()
-                .filter(|verdict| !verdict.matched && verdict.class == "WRONG-CLEAN")
-                .map(move |verdict| format!("{}: {}", read_text(read), verdict.lane))
-        })
-        .collect();
-    assert!(wrong_clean.is_empty(), "{}", wrong_clean.join("\n"));
+fn a_this_reading_field_widens_as_a_property_does() {
+    let matrix = Matrix::new(THIS_READ_WIDENING);
+    let mut failures = matrix.types(&[
+        ("W['a']", "number"),
+        ("W['r']", "1 | 2"),
+        ("W['b']", "1"),
+        ("W['s']", "string"),
+        ("W['o']", "{ v: 1; }"),
+        ("(typeof W)['y']", "string"),
+        ("(typeof W)['x']", "\"p\" | \"q\""),
+        ("G<number>['w']", "number"),
+    ]);
+    failures.extend(matrix.nullness(&[(Read::Type("W['n']"), "string | undefined", "string")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-fn read_text<'a>(read: &Read<'a>) -> &'a str {
-    match read {
-        Read::Type(text) | Read::Return(text) => text,
-    }
+/// Methods passing `this` (bare, in an array, in an object) to a generic
+/// function, and reading a `private` or `#private` member through
+/// `this`.
+const THIS_ARGUMENTS: &str = r##"
+declare function id<T>(x: T): T;
+class TA { m2() { return id(this); } m3() { return id([this]); } m4() { return id({ o: this }); } c = id([this]); }
+class TP { private s = 1; #p = 2; t = this.s; m() { return this.s; } q() { return this.#p; } }
+"##;
+
+/// A generic call infers its type argument from `this` (the class's
+/// polymorphic `this`, which is no variance-measurement marker), from an
+/// array or object holding it, and a class reads its own non-public
+/// members through `this`.
+///
+/// Measured on TypeScript 7.0.2, alike under every setting:
+/// `ReturnType<TA['m2']>` is `TA`, `ReturnType<TA['m3']>` `TA[]`,
+/// `ReturnType<TA['m4']>` `{ o: TA; }`, `TA['c']` `TA[]`, `TP['t']`,
+/// `ReturnType<TP['m']>` and `ReturnType<TP['q']>` `number`.
+///
+/// Mutation: reading the `this` binder as a variance marker answers
+/// `ReturnType<TA['m2']>` a partial demand; leaving an argument's `this`
+/// to its indexed record answers `ReturnType<TA['m3']>` a clean `any[]`;
+/// reading non-public members through the public walk answers the `TP`
+/// rows a partial demand.
+#[test]
+fn this_as_an_argument_and_a_private_read_resolve() {
+    let matrix = Matrix::new(THIS_ARGUMENTS);
+    let failures = matrix.types(&[
+        ("ReturnType<TA['m2']>", "TA"),
+        ("ReturnType<TA['m3']>", "TA[]"),
+        ("ReturnType<TA['m4']>", "{ o: TA; }"),
+        ("TA['c']", "TA[]"),
+        ("TP['t']", "number"),
+        ("ReturnType<TP['m']>", "number"),
+        ("ReturnType<TP['q']>", "number"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// `get v() { return this.#v; }` beside `#v = 0` is `number`.
@@ -522,34 +580,237 @@ fn a_class_expressions_private_names_brand_its_instance_type() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `keyof` a class expression's instance type is its public keys: `keyof
-/// IA` is `never` and `keyof IG` is `"y"` (a `#private` name is no key).
+/// Class expressions whose keys `keyof` reads: returned from functions (with
+/// a private name, several public members beside `private` and `protected`
+/// ones, and a base), and held by module constants.
+const KEYED_CLASS_EXPRESSIONS: &str = r##"
+function a() { return class { #x = 1 }; }
+function g() { return class { #x = 1; y = 2 }; }
+function h() { return class { y = 2; z = 3; private p = 1; protected q = 2 }; }
+class B { b = 1 }
+function k() { return class extends B { own = 1 }; }
+const A1 = class { #x = 1 };
+let C1 = class { #x = 1; y = 2 };
+const Expr = class { e = "e"; f = 1 };
+class K2 { a = 1; b = 2 }
+type IA = InstanceType<ReturnType<typeof a>>;
+type IG = InstanceType<ReturnType<typeof g>>;
+type IH = InstanceType<ReturnType<typeof h>>;
+type IK = InstanceType<ReturnType<typeof k>>;
+"##;
+
+/// `keyof` a class expression's instance type is its public keys (a
+/// `#private`, `private` or `protected` member is no key, a base's public
+/// member is one): none is `never`, one is that key, and two or more keep the
+/// class as their origin, `keyof (Anonymous class)` — a key set a relation
+/// reads as its keys.
 ///
-/// Measured on TypeScript 7.0.2, alike under every setting.
+/// Measured on TypeScript 7.0.2 (`--target es2022`), alike under every
+/// setting: `keyof IA` is `never`, `keyof IG` `"y"`, `keyof IH` and `keyof
+/// IK` `keyof (Anonymous class)`, `keyof InstanceType<typeof A1>` `never`,
+/// `keyof InstanceType<typeof C1>` `"y"`; the key-set equality checks each
+/// answer `1`.
 ///
-/// What the lane gives: `keyof IA` and `keyof IG` unreduced (`keyof IA`,
-/// `keyof InstanceType<ReturnType<…>>`) — `keyof` over a class
-/// expression's instance type stays deferred, with or without a private
-/// name.
+/// Mutation: reading `keyof` over a class expression's instance as a miss
+/// leaves `keyof IA`, `keyof IG`, `keyof IH` and `keyof IK` their
+/// declarations' `keyof` carriers and the key-set checks unreduced.
 #[test]
-#[ignore = "keyof over a class expression's instance type reduces to its public keys"]
 fn keyof_a_class_expressions_instance_type_is_its_public_keys() {
-    let matrix = Matrix::new(PRIVATE_BRANDS);
-    let failures = matrix.types(&[("keyof IA", "never"), ("keyof IG", "\"y\"")]);
+    let matrix = Matrix::new(KEYED_CLASS_EXPRESSIONS);
+    let failures = matrix.types(&[
+        ("keyof IA", "never"),
+        ("keyof IG", "\"y\""),
+        ("keyof IH", "keyof (Anonymous class)"),
+        ("keyof IK", "keyof (Anonymous class)"),
+        ("keyof InstanceType<typeof A1>", "never"),
+        ("keyof InstanceType<typeof C1>", "\"y\""),
+        (
+            "[keyof IH] extends [\"y\" | \"z\"] ? [\"y\" | \"z\"] extends [keyof IH] ? 1 : 2 : 3",
+            "1",
+        ),
+        (
+            "[keyof IK] extends [\"own\" | \"b\"] ? [\"own\" | \"b\"] extends [keyof IK] ? 1 : 2 : 3",
+            "1",
+        ),
+        (
+            "[keyof InstanceType<typeof Expr>] extends [\"e\" | \"f\"] ? [\"e\" | \"f\"] extends [keyof InstanceType<typeof Expr>] ? 1 : 2 : 3",
+            "1",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `[keyof K1] extends [never] ? 1 : 2` over `class K1 { #x = 1 }` is `1`:
-/// the class's only member is private, so its key set is empty.
+/// `keyof` a class's instance read through `InstanceType` keeps the class as
+/// its origin: `keyof InstanceType<typeof K2>` prints `keyof K2` and `keyof
+/// InstanceType<typeof Expr>` prints `keyof Expr` (the key sets agree, as
+/// [`keyof_a_class_expressions_instance_type_is_its_public_keys`] checks).
 ///
 /// Measured on TypeScript 7.0.2, alike under every setting.
 ///
-/// What the lane gives: `2` — `keyof K1` alone reads `never`, but inside
-/// the checked tuple the conditional does not relate it as `never`.
+/// What the lane gives: the key unions `"b" | "a"` and `"f" | "e"` — a
+/// `keyof` over a library application reads no origin through it.
 #[test]
-#[ignore = "a keyof of a class with only private members relates as never inside a conditional's checked tuple"]
+#[ignore = "keyof over InstanceType of a class keeps the class as the key union's origin"]
+fn keyof_an_instance_type_application_keeps_the_class_origin() {
+    let matrix = Matrix::new(KEYED_CLASS_EXPRESSIONS);
+    let failures = matrix.types(&[
+        ("keyof InstanceType<typeof K2>", "keyof K2"),
+        ("keyof InstanceType<typeof Expr>", "keyof Expr"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The pinned print difference of
+/// [`keyof_an_instance_type_application_keeps_the_class_origin`] has no
+/// effect: `keyof InstanceType<typeof K2>` relates to `keyof K2` both ways,
+/// and maps and filters as its keys do.
+///
+/// Measured on TypeScript 7.0.2 (`--target es2022`), alike under every
+/// setting: the relation and `Exclude` rows are `1` and the mapped type is
+/// `{ a: "a"; b: "b"; }`.
+///
+/// Mutation: adding a stray key `"c"` to a class instance's keys answers
+/// the `Exclude` row `3`.
+#[test]
+fn keyof_an_instance_type_application_has_its_class_keys_effect() {
+    let matrix = Matrix::new(KEYED_CLASS_EXPRESSIONS);
+    let failures = matrix.types(&[
+        (
+            "[keyof InstanceType<typeof K2>] extends [keyof K2] ? [keyof K2] extends [keyof InstanceType<typeof K2>] ? 1 : 2 : 3",
+            "1",
+        ),
+        (
+            "{ [P in keyof InstanceType<typeof K2>]: P }",
+            "{ a: \"a\"; b: \"b\"; }",
+        ),
+        (
+            "[Exclude<keyof InstanceType<typeof K2>, \"a\">] extends [\"b\"] ? [\"b\"] extends [Exclude<keyof InstanceType<typeof K2>, \"a\">] ? 1 : 2 : 3",
+            "1",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A class whose members are all private has no key: `[keyof K1] extends
+/// [never]` is `1` over `class K1 { #x = 1 }`, and so over `class K3 {}` and
+/// `class K4 { private p = 1 }`; `[keyof K5] extends ["y"]` over `class K5 {
+/// #x = 1; y = 2 }` is `1`.
+///
+/// Measured on TypeScript 7.0.2 (`--target es2022`), alike under every
+/// setting.
+///
+/// Mutation: reading the `keyof` below `never` with the bottom rule before
+/// its key set settles answers the three `never` rows `2`.
+#[test]
 fn a_keyof_of_only_private_members_relates_as_never() {
-    let matrix = Matrix::new("class K1 { #x = 1 }\n");
-    let failures = matrix.types(&[("[keyof K1] extends [never] ? 1 : 2", "1")]);
+    let matrix = Matrix::new(
+        "class K1 { #x = 1 }\nclass K3 {}\nclass K4 { private p = 1 }\nclass K5 { #x = 1; y = 2 }\n",
+    );
+    let failures = matrix.types(&[
+        ("[keyof K1] extends [never] ? 1 : 2", "1"),
+        ("[keyof K3] extends [never] ? 1 : 2", "1"),
+        ("[keyof K4] extends [never] ? 1 : 2", "1"),
+        ("[keyof K5] extends [\"y\"] ? 1 : 2", "1"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A module whose class `name` has a field of each classification — none
+/// (`k`), a call's (`a`), a `this` read (`b`) — and one holding a callback
+/// of `statements` statements that reads `this`; and a class expression a
+/// variable holds, with a `this` read.
+fn classified_fields(name: &str, statements: usize) -> String {
+    let body = "    0;\n".repeat(statements);
+    format!(
+        "declare function id<T>(x: T): T;\n\
+         class {name} {{\n  k = 1;\n  a = id(1);\n  b = this.k;\n  cb = [() => {{\n{body}    return this.k;\n  }}];\n}}\n\
+         const {name}E = class {{\n  k = 1;\n  b = this.k;\n}};\n"
+    )
+}
+
+/// A class field is classified — read through a call, through a served
+/// initializer position, or by syntactic inference — once per content
+/// generation, by the header walk; the class lowering, the function-program
+/// discovery and every demand read that one answer. The classification
+/// stops at a callback, whose body it never walks: its work is the same
+/// for a callback of one statement as for one of a hundred.
+///
+/// Measured on TypeScript 7.0.2, alike under every setting: `C['k']`,
+/// `C['a']` and `C['b']` are `number` and `C['cb']` is `(() => number)[]`, so
+/// the probe below is `1`.
+///
+/// Mutation: classifying again where the class lowers counts every
+/// classified field twice; walking into a callback's body makes the
+/// callback field's work grow with its statements.
+#[test]
+fn a_class_field_is_classified_once_without_walking_callbacks() {
+    let classify = |name: &'static str, statements: usize| {
+        verter_semantic::analysis::class_field_value::watch_class_field_classifications_for_tests(
+            name,
+        );
+        let probe: &'static str =
+            Box::leak(format!("[{name}['k'], {name}['a'], {name}['b'], {name}['cb']] extends [number, number, number, (() => number)[]] ? 1 : 2").into_boxed_str());
+        let failures = super::checker_probe_lane_tests::mismatches(
+            &classified_fields(name, statements),
+            &[(probe, "1")],
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        verter_semantic::analysis::class_field_value::take_class_field_classifications_for_tests(
+            name,
+        )
+    };
+    let short = classify("ClassifiedOnceShort", 1);
+    let long = classify("ClassifiedOnceLong", 100);
+    assert_eq!(short.len(), 6, "every field is classified: {short:?}");
+    assert!(
+        short.iter().chain(&long).all(|(_, count, _)| *count == 1),
+        "each field is classified once: {short:?} {long:?}"
+    );
+    let work =
+        |records: &[(u32, u32, u64)]| records.iter().map(|record| record.2).collect::<Vec<_>>();
+    assert_eq!(work(&short), work(&long), "a callback's body is not walked");
+}
+
+/// Fields holding callbacks: bare, in an object, and passed to a call,
+/// reading `this` in the callback's body or not.
+const CALLBACK_FIELDS: &str = r##"
+declare function id<T>(x: T): T;
+declare function map<T, U>(xs: T[], f: (x: T) => U): U[];
+declare const arr: number[];
+class CB {
+  k: 1 = 1;
+  cb = [() => 1];
+  h = { a: () => this.k };
+  n = map(arr, (x) => this.k + x);
+  m = map(arr, (x) => [x]);
+  r = id(() => this.k);
+  static s = 3;
+  static t = [() => this.s];
+}
+"##;
+
+/// A field whose initializer holds a callback is served as a position of
+/// its own, whose frame reads the receiver: the classification does not
+/// walk the callback's body, which may read the field's `this`.
+///
+/// Measured on TypeScript 7.0.2, alike under every setting: `CB['cb']` is
+/// `(() => number)[]`, `CB['h']` `{ a: () => 1; }`, `CB['n']` `number[]`,
+/// `CB['m']` `number[][]`, `CB['r']` `() => 1`, `(typeof CB)['t']` `(() =>
+/// number)[]`.
+///
+/// Mutation: leaving a field that holds a callback to the classification
+/// of its own level answers `CB['h']` `{ a: () => any; }` (syntactic
+/// inference) and `CB['n']`, `CB['m']`, `CB['r']` through the call's indexed
+/// expression, which types a callback reading `this` as returning `any`.
+#[test]
+fn a_field_holding_a_callback_reads_through_its_position() {
+    let failures = Matrix::new(CALLBACK_FIELDS).types(&[
+        ("CB['cb']", "(() => number)[]"),
+        ("CB['h']", "{ a: () => 1; }"),
+        ("CB['n']", "number[]"),
+        ("CB['m']", "number[][]"),
+        ("CB['r']", "() => 1"),
+        ("(typeof CB)['t']", "(() => number)[]"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

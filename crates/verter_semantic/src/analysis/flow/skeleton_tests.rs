@@ -858,6 +858,9 @@ fn prepared_occurrences_distinguish_free_shadowed_and_captured_targets() {
                 FunctionBodySource::from_function(function).unwrap()
             }
             FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
+            FunctionNode::Initializer(expression) => {
+                FunctionBodySource::from_initializer(expression)
+            }
         };
         let prepared = build_indexed_function_body_skeleton(&body, source, entry).unwrap();
         let bindings = prepared.bindings();
@@ -923,6 +926,7 @@ fn prepared_class_occurrences_distinguish_outer_free_and_static_local_bindings()
         source,
         &owners,
         Arc::from("/class.ts"),
+        &Default::default(),
     );
     let entry = index.matches_named("f").next().unwrap().entry();
     let prepared =

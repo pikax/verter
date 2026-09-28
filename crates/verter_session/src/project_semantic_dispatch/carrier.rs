@@ -771,6 +771,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .then(|| self.first_global_declaration(canonical_id.as_ref(), name.as_ref()))
                 .flatten()
             })
+            // A qualified name whose head nothing in scope declares or
+            // imports reads through the GLOBAL namespace of that name.
+            .or_else(|| {
+                let (head, _) = name.split_once('.')?;
+                (!self.unresolved_head_is_authored_import(scope, name.as_ref())
+                    && resolve_bare_name_in_scope(
+                        self.ctx,
+                        canonical_id.as_ref(),
+                        *owner,
+                        scope_payload,
+                        head,
+                    )
+                    .is_none())
+                .then(|| {
+                    self.global_namespace_type_declaration(canonical_id.as_ref(), name.as_ref())
+                })
+                .flatten()
+            })
         } else {
             None
         };

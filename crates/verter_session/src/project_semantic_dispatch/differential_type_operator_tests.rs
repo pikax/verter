@@ -602,3 +602,49 @@ fn a_number_placeholder_refuses_an_overflowing_numeric_string() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Types that settle to `never` where they are written: an empty `keyof`,
+/// an alias of `never`, an access by `never`, a property typed `never`,
+/// and a conditional that excludes every member.
+const SETTLES_TO_NEVER: &str = r##"
+class Empty {}
+interface Y { y: 2 }
+type N = never;
+type Box<T> = { v: T };
+"##;
+
+/// Below `never` each of [`SETTLES_TO_NEVER`]'s carriers relates as the type
+/// it settles to — `never`, so the conditional takes its true branch — and a
+/// carrier that settles to anything else does not; an access by `never` is
+/// `never`.
+///
+/// Measured on TypeScript 7.0.2, alike under every setting: `keyof {}
+/// extends never`, `[keyof {}] extends [never]`, `[N] extends [never]`,
+/// `[Empty[never]] extends [never]`, `[Box<never>['v']] extends [never]` and
+/// `[Exclude<1, 1>] extends [never]` are `1`; `[keyof Y] extends [never]`
+/// and `[Box<1>['v']] extends [never]` are `2`; `Empty[never]`, `{ a: 1
+/// }[never]` and `Y[never]` are `never`.
+///
+/// Mutation: reading a carrier source below `never` with the bottom rule
+/// before it settles answers each `1` row `2`; reading an access by
+/// `never` through the per-key distribution only answers `Empty[never]`,
+/// `{ a: 1 }[never]` and `Y[never]` with a miss, and leaves
+/// `[Empty[never]] extends [never]` unreduced.
+#[test]
+fn a_carrier_that_settles_to_never_relates_as_never() {
+    let matrix = Matrix::new(SETTLES_TO_NEVER);
+    let failures = matrix.types(&[
+        ("keyof {} extends never ? 1 : 2", "1"),
+        ("[keyof {}] extends [never] ? 1 : 2", "1"),
+        ("[N] extends [never] ? 1 : 2", "1"),
+        ("[Empty[never]] extends [never] ? 1 : 2", "1"),
+        ("[Box<never>['v']] extends [never] ? 1 : 2", "1"),
+        ("[Exclude<1, 1>] extends [never] ? 1 : 2", "1"),
+        ("[keyof Y] extends [never] ? 1 : 2", "2"),
+        ("[Box<1>['v']] extends [never] ? 1 : 2", "2"),
+        ("Empty[never]", "never"),
+        ("{ a: 1 }[never]", "never"),
+        ("Y[never]", "never"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

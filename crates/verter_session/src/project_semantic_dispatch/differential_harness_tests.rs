@@ -94,6 +94,9 @@ pub(super) struct Matrix<'a> {
     lib: Option<&'a str>,
     script: bool,
     files: &'a [(&'a str, &'a str)],
+    /// A file whose source differs per project, one source per setting in
+    /// setting order.
+    file_per_setting: Option<(&'a str, &'a [&'a str])>,
 }
 
 impl<'a> Matrix<'a> {
@@ -105,7 +108,15 @@ impl<'a> Matrix<'a> {
             lib: None,
             script: false,
             files: &[],
+            file_per_setting: None,
         }
+    }
+
+    /// With a file `name` beside the probe module whose source is
+    /// `sources[i]` in the i-th setting's project.
+    pub(super) fn file_per_setting(mut self, name: &'a str, sources: &'a [&'a str]) -> Self {
+        self.file_per_setting = Some((name, sources));
+        self
     }
 
     /// With `(file name, source)` modules beside the probe module in
@@ -206,8 +217,17 @@ impl<'a> Matrix<'a> {
     pub(super) fn verdicts(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Vec<Vec<Verdict>> {
         let host = Arc::new(matrix_host(self.settings));
         let module = self.module(rows);
-        for setting in self.settings {
+        for (index, setting) in self.settings.iter().enumerate() {
             let canonical = format!("{}/probe.ts", setting.root);
+            if let Some((name, sources)) = self.file_per_setting {
+                let path = format!("{}/{name}", setting.root);
+                crate::u6_flow_shape_corpus_tests::upsert(
+                    &host,
+                    &path,
+                    sources[index],
+                    crate::FileLanguage::script_ts(),
+                );
+            }
             if let Some(lib) = self.lib {
                 crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::register_lib_environment(
                     &host,

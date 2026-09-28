@@ -7124,6 +7124,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ShallowRelation::Assignable
                 }
             }
+            // A carrier may settle to `never`: the structural reducer reads
+            // the type it settles to.
+            (source, SemanticNodeData::Primitive(PrimitiveKind::Never))
+                if is_settling_carrier(source) =>
+            {
+                ShallowRelation::Unknown
+            }
             (_, SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
                 ShallowRelation::NotAssignable
             }
@@ -8713,6 +8720,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
             drop(source_data);
             drop(target_data);
             work.push(same_pair(source, target));
+            return;
+        }
+
+        // ── A carrier the checker resolves where it is written (`keyof {}`,
+        //    `K[never]`, an alias of `never`) may BE `never`: below
+        //    `never` it relates as the type it settles to, and one that
+        //    stays open may yet be `never`. ────────────────────────────────
+        if matches!(
+            &*target_data,
+            SemanticNodeData::Primitive(PrimitiveKind::Never)
+        ) && is_settling_carrier(&source_data)
+        {
+            drop(source_data);
+            drop(target_data);
+            match self.unwrap_identity_carrier_for_relation(source) {
+                IdentityCarrierUnwrap::Concrete(settled) if settled != source => {
+                    work.push(same_pair(settled, target));
+                }
+                _ => results.push(RelationResult::Unknown),
+            }
             return;
         }
 
@@ -12255,6 +12282,25 @@ fn tag_level_disjoint(
     b: SemanticNodeId,
 ) -> bool {
     super::canonical_algebra::tag_level_disjoint(graph, a, b)
+}
+
+/// Whether a relation operand is a carrier the checker resolves where it is
+/// written — a declaration reference or instantiation, `keyof`, an indexed
+/// access, a mapped or conditional type — so the type it stands for, which
+/// may be `never`, is read before the top and bottom rules.
+fn is_settling_carrier(data: &SemanticNodeData) -> bool {
+    matches!(
+        data,
+        SemanticNodeData::DeclRef { .. }
+            | SemanticNodeData::InstantiationRef { .. }
+            | SemanticNodeData::KeyOf { .. }
+            | SemanticNodeData::IndexedAccess { .. }
+            | SemanticNodeData::Mapped { .. }
+            | SemanticNodeData::Conditional { .. }
+            | SemanticNodeData::Opaque(
+                QueryError::DeclPlaceholder { .. } | QueryError::RecursiveRef { .. }
+            )
+    )
 }
 
 #[cfg(test)]
