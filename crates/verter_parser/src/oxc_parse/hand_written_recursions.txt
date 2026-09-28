@@ -246,7 +246,6 @@ verter_session/src/flow_slice_content.rs suffix_return_of
 verter_session/src/flow_slice_content.rs test_may_narrow_parameter
 verter_session/src/flow_slice_content.rs unwrap_freshness_transparent
 verter_session/src/flow_slice_content.rs unwrap_reference_transparent
-verter_session/src/flow_slice_content.rs value_rooted_member_object
 verter_session/src/flow_slice_content.rs walk_statement
 verter_session/src/flow_slice_content.rs widening_nullish_type
 verter_session/src/typeinfo/oracle_core/admission.rs admit_hover_ast
