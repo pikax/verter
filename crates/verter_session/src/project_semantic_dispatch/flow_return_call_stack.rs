@@ -731,6 +731,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             None => None,
         };
+        // The callee's polymorphic `this` is the receiver it is read
+        // through.
+        let callee = receiver.map_or(callee, |receiver| {
+            self.dispatch.bind_callee_receiver(callee, receiver)
+        });
         let key = crate::semantic_query::ResolveCallKey {
             point: crate::semantic_query::ProgramPointId {
                 canonical_id: Arc::from(self.canonical),

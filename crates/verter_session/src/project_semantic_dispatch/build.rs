@@ -2360,12 +2360,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
         super::walk::observe_typeof_internal_path_mode(internal_context.mode);
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
             base,
-            path: projection_path,
+            path: Arc::clone(&projection_path),
             context: internal_context,
         });
         let node = match read.value {
             QueryResult::Value(id) => id,
             _ => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+        };
+        // The member's declared polymorphic `this` is the reference it is
+        // read through (`typeof t.self` over `self(): this` is `() => T`):
+        // the value the path's last member is read off.
+        let node = if self.receiver_this_types(node).is_empty() {
+            node
+        } else {
+            let receiver = match path.split_last() {
+                Some((_, [])) | None => Some(base),
+                Some((_, object)) => match self
+                    .execute_read(SemanticQueryKey::ProjectPath {
+                        base,
+                        path: Arc::from(&projection_path[..object.len()]),
+                        context: internal_context,
+                    })
+                    .value
+                {
+                    QueryResult::Value(id) => Some(id),
+                    _ => None,
+                },
+            };
+            match receiver {
+                Some(receiver) => self.bind_callee_receiver(node, receiver),
+                None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+            }
         };
         let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
             QueryResult::Value(node),
