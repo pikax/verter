@@ -958,8 +958,21 @@ fn canonical_member(member: &str) -> String {
         };
         let rest = member[parts[0].len() + 2..].to_owned();
         let (name, rest) = if let Some(optional) = name.strip_suffix('?') {
-            // `name?: (T | undefined)` prints the optional member's own
-            // `undefined`; both sides keep it.
+            // Without `exactOptionalPropertyTypes` (off in every setting)
+            // `name?: T | undefined` and `name?: T` are one type; the
+            // checker's declaration emit spells a declared `b?: string`
+            // as authored and a synthesized optional (a spread's partial)
+            // as `a?: number | undefined`, so both sides drop the
+            // optional member's `undefined` arm.
+            let arms: Vec<String> = split_top(&rest, " | ")
+                .into_iter()
+                .filter(|arm| arm.trim() != "undefined")
+                .collect();
+            let rest = if arms.is_empty() {
+                rest
+            } else {
+                arms.join(" | ")
+            };
             (format!("{optional}?"), rest)
         } else {
             (name, rest)
