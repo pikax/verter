@@ -949,7 +949,58 @@ Recorded plainly so no reader mistakes absence for a pass:
   `code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks`
   return the plan's typed budget failure at 10,000 levels on a 1 MiB
   caller and answer `number` under the 256-return-site budget; evaluating
-  the unreachable region in place overflows the former.
+  the unreachable region in place overflows the former. A loop body
+  behind a literal `false` test is entered the same way, a frame of the
+  run on a dead path its pass restores:
+  `dead_loops_nested_10000_deep_return_on_production_stacks` returns the
+  plan's typed budget failure for `while (false)` and `for (; false; )`
+  nested 10,000 deep and answers `1 | 2` 1,000 deep; evaluating the body
+  through a nested drive overflowed at 100 levels. Past a call the
+  evaluator settles as `never`-returning (a method, a callee typed by a
+  parameter) the dead tail reads declared types, as tsc does
+  (`nStop`: `string | number`), while past an exhaustive `switch` it keeps
+  reading the no-matching-case edge.
+
+* **Type-level nests lower and evaluate from explicit stacks.**
+  - Every walk registering a namespace's members under qualified names —
+    the header index, the declaration-body collection and the dependency
+    collection, for the file scope and an augmentation block — shares one
+    explicit-stack walk (`verter_semantic` `namespace_walk.rs`) holding one
+    qualified path for the nest; a namespace block's instantiation settles
+    when its frame closes instead of re-searching its subtree at every
+    level. `namespaces_nested_10000_deep_answer_on_production_stacks`
+    answers `1`; the recursive walks overflow it.
+  - A template literal type in a template's hole splices into the
+    template (`getTemplateLiteralType`) from an explicit stack before the
+    reduction, instead of reducing each nested template by its own query:
+    `template_literal_types_nested_10000_deep_answer_on_production_stacks`
+    answers `"1"`; reducing nested templates by query overflows it.
+  - A mapped type's source, value and `as` clause lower as children on the
+    locator lowering's stack; each body's binder frames push onto a shared
+    chain; a binder's identity folds each nested mapped type by a digest
+    its drive computes once; and the openness walk's recursive arms are
+    functions of their own (the walk is bounded by its 256-node budget, and
+    a level now carries only the arm it takes).
+    `mapped_types_nested_10000_deep_return_on_production_stacks` returns
+    the connected-demand work budget's typed failure 10,000 deep (5.9 s,
+    against 256 s before the digest fix) and answers `"a"` 1,000 deep;
+    `a_mapped_type_nest_lowers_in_linear_work` holds the structural walk
+    (3,000 nodes at 500 levels against 300 at 50) and the binder-frame
+    copies (none) linear, which re-hashing each value subtree (501,000
+    against 5,100) and copying the frames (125,250 against 1,275) fail.
+
+* **Nested loops take polynomial passes.** A loop's head analysis runs a
+  pass per carried reference and then the converged pass, so each nested
+  loop's body ran once per pass of every loop around it. A pass is a
+  function of its start state: a reference whose pass would start from a
+  state an earlier pass of the loop started from takes its back edge, and
+  a converged head equal to such a start takes that pass, its side outputs
+  set aside and replayed (a loop head restores values without the analysis
+  passes' write receipts, so an unchanged head is that start).
+  `nested_loops_take_passes_polynomial_in_their_depth` counts 65 passes at
+  10 levels and 230 at 20 for `x = 0`, `x = 0; y = 0` and `x = 1` (tsc:
+  `0`, `readonly [0, 0]`, `0 | 1`); without the reuse the 20-level nest
+  exhausts the work budget.
 
 * **A nest's per-function work does not read the nest around it.** Four
   paths repeated work proportional to the nest for every nested function,

@@ -30,6 +30,8 @@ use oxc_ast::ast::{
     VariableDeclarator,
 };
 use oxc_ast_visit::Visit;
+
+use crate::analysis::namespace_walk::for_each_namespace;
 use oxc_span::GetSpan;
 use verter_parser::utils::oxc::script::route_inventory::statements_have_export_declarations;
 use verter_type_expr::facts::{
@@ -1917,7 +1919,9 @@ fn collect_external_module_declaration(
     }
 }
 
-/// The identifier-named half of [`collect_external_module_declaration`].
+/// The identifier-named half of [`collect_external_module_declaration`]:
+/// the namespace and every namespace nested in it, walked from an explicit
+/// stack ([`for_each_namespace`]).
 fn collect_module_declaration(
     decl: &TSNamespaceDeclaration<'_>,
     source: &str,
@@ -1925,25 +1929,91 @@ fn collect_module_declaration(
     prefix: Option<&str>,
     ambient: bool,
 ) {
-    let module_name = qualified_module_name(prefix, &decl.id);
-    let ambient = ambient || decl.declare;
+    for_each_namespace(
+        decl,
+        &mut CollectedNamespaces {
+            source,
+            out,
+            path: crate::analysis::namespace_walk::QualifiedPath::under(prefix),
+            ambient,
+            scope: None,
+        },
+    );
+}
 
-    match &decl.body {
-        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
-            collect_module_declaration(inner, source, out, Some(module_name.as_str()), ambient);
-        }
-        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
-            let implicit_export = ambient && !statements_have_export_declarations(&block.body);
-            for stmt in &block.body {
-                collect_namespaced_statement(
-                    stmt,
-                    source,
-                    out,
-                    module_name.as_str(),
-                    ambient,
-                    implicit_export,
-                );
+/// [`collect_module_declaration`]'s walk, and
+/// [`collect_augmentation_module_declaration`]'s under its `scope`.
+struct CollectedNamespaces<'o, 'x> {
+    source: &'o str,
+    out: &'o mut LoweredStatementParts,
+    /// The qualified name of the namespace being walked.
+    path: crate::analysis::namespace_walk::QualifiedPath,
+    /// Whether the root namespace is in an ambient context.
+    ambient: bool,
+    /// The augmentation scope the members register in, or none for the
+    /// file scope.
+    scope: Option<&'x AugmentationScopeKind>,
+}
+
+/// One namespace being collected.
+struct CollectedNamespace {
+    /// The qualified path's length before it was entered.
+    enclosing: usize,
+    ambient: bool,
+    implicit_export: bool,
+}
+
+impl<'s, 'a> crate::analysis::namespace_walk::NamespaceVisitor<'s, 'a>
+    for CollectedNamespaces<'_, '_>
+{
+    type Frame = CollectedNamespace;
+
+    fn enter(
+        &mut self,
+        decl: &'s TSNamespaceDeclaration<'a>,
+        parent: Option<&CollectedNamespace>,
+        _nesting: crate::analysis::namespace_walk::Nesting,
+    ) -> CollectedNamespace {
+        let ambient = parent.map_or(self.ambient, |parent| parent.ambient) || decl.declare;
+        let enclosing = self.path.enter(decl.id.name.as_str());
+        // An augmentation block is ambient, so a namespace body inside it
+        // without an export declaration exports every member.
+        let implicit_export = match &decl.body {
+            TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => false,
+            TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+                (ambient || self.scope.is_some())
+                    && !statements_have_export_declarations(&block.body)
             }
+        };
+        CollectedNamespace {
+            enclosing,
+            ambient,
+            implicit_export,
+        }
+    }
+
+    fn exit(&mut self, frame: CollectedNamespace, _parent: Option<&mut CollectedNamespace>) {
+        self.path.leave(frame.enclosing);
+    }
+
+    fn statement(&mut self, frame: &mut CollectedNamespace, statement: &'s Statement<'a>) {
+        match self.scope {
+            None => collect_namespaced_statement(
+                statement,
+                self.source,
+                self.out,
+                self.path.name(),
+                frame.ambient,
+                frame.implicit_export,
+            ),
+            Some(scope) => collect_namespaced_statement_into_augmentation(
+                statement,
+                self.source,
+                self.out,
+                self.path.name(),
+                scope,
+                frame.implicit_export,
+            ),
         }
     }
 }
@@ -2070,31 +2140,18 @@ fn collect_augmentation_module_declaration(
     // A string-literal module name (`declare module "X"`) nested inside another
     // augmentation block is not a namespace-member contributor; only
     // identifier-named namespaces (`namespace JSX`) qualify members here.
-    let namespace = qualified_module_name(prefix, &decl.id);
-    match &decl.body {
-        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
-            collect_augmentation_module_declaration(
-                inner,
-                source,
-                out,
-                scope,
-                Some(namespace.as_str()),
-            );
-        }
-        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
-            let implicit_export = !statements_have_export_declarations(&block.body);
-            for stmt in &block.body {
-                collect_namespaced_statement_into_augmentation(
-                    stmt,
-                    source,
-                    out,
-                    namespace.as_str(),
-                    scope,
-                    implicit_export,
-                );
-            }
-        }
-    }
+    // The namespace and every namespace nested in it are walked from an
+    // explicit stack ([`for_each_namespace`]).
+    for_each_namespace(
+        decl,
+        &mut CollectedNamespaces {
+            source,
+            out,
+            path: crate::analysis::namespace_walk::QualifiedPath::under(prefix),
+            ambient: true,
+            scope: Some(scope),
+        },
+    );
 }
 
 /// Augmentation-scope mirror of [`collect_namespaced_statement`]: register a
@@ -2129,9 +2186,9 @@ fn collect_namespaced_statement_into_augmentation(
                 ),
             ));
         }
-        Statement::TSNamespaceDeclaration(module) => {
-            collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
-        }
+        // A nested namespace is a frame of
+        // [`collect_augmentation_module_declaration`]'s walk.
+        Statement::TSNamespaceDeclaration(_) => {}
         // An augmentation block is ambient, so a namespace body inside it
         // without an export declaration exports every member, written
         // `export` or not (an ambient namespace in
@@ -2190,9 +2247,9 @@ fn collect_namespaced_declaration_into_augmentation(
                 ),
             ));
         }
-        Declaration::TSNamespaceDeclaration(module) => {
-            collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
-        }
+        // A nested namespace is a frame of
+        // [`collect_augmentation_module_declaration`]'s walk.
+        Declaration::TSNamespaceDeclaration(_) => {}
         Declaration::VariableDeclaration(var_decl) => {
             // A namespaced value member registers under its qualified `NS.M`
             // name into the augmentation VALUE scope (lowered exactly as the
@@ -2309,9 +2366,9 @@ fn collect_namespaced_statement(
                 );
             }
         }
-        Statement::TSNamespaceDeclaration(module) => {
-            collect_module_declaration(module, source, out, Some(namespace), ambient);
-        }
+        // A nested namespace is a frame of [`collect_module_declaration`]'s
+        // walk.
+        Statement::TSNamespaceDeclaration(_) => {}
         Statement::TSExternalModuleDeclaration(module) => {
             collect_external_module_declaration(module, source, out);
         }
@@ -2388,9 +2445,9 @@ fn collect_namespaced_declaration(
                 );
             }
         }
-        Declaration::TSNamespaceDeclaration(module) => {
-            collect_module_declaration(module, source, out, Some(namespace), ambient);
-        }
+        // A nested namespace is a frame of [`collect_module_declaration`]'s
+        // walk.
+        Declaration::TSNamespaceDeclaration(_) => {}
         Declaration::TSExternalModuleDeclaration(module) => {
             collect_external_module_declaration(module, source, out);
         }
@@ -2420,13 +2477,6 @@ fn collect_namespaced_declaration(
             }
         }
         _ => {}
-    }
-}
-
-fn qualified_module_name(prefix: Option<&str>, id: &oxc_ast::ast::BindingIdentifier<'_>) -> String {
-    match prefix {
-        Some(prefix) => qualified_name(prefix, &id.name),
-        None => id.name.to_string(),
     }
 }
 

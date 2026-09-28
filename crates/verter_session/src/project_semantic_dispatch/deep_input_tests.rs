@@ -637,10 +637,10 @@ fn a_nest_derives_its_source_parse_identity_a_fixed_number_of_times() {
     assert_eq!(derivations(20), derivations(200));
 }
 
-/// Template literal types nested 10,000 deep. TypeScript 7.0.2: `"1"`,
+/// Template literal types nested 10,000 deep: a template in a template's
+/// hole splices into it from an explicit stack. TypeScript 7.0.2: `"1"`,
 /// under every setting.
 #[test]
-#[ignore = "a template literal type nested in a template literal type evaluates a query a native level per nesting"]
 fn template_literal_types_nested_10000_deep_answer_on_production_stacks() {
     let source = format!("type D = {};\n", wrap(DEPTH, "`${", "}`"));
     assert_eq!(
@@ -649,22 +649,49 @@ fn template_literal_types_nested_10000_deep_answer_on_production_stacks() {
     );
 }
 
+fn mapped_types(depth: usize) -> String {
+    format!("type D = {};\n", wrap(depth, "{ [K in \"a\"]: ", " }"))
+}
+
+/// A mapped-type nest the connected-demand work budget admits.
+const MAPPED_TYPES_UNDER_THE_WORK_BUDGET: usize = 1_000;
+
+/// Mapped types nested deep lower as frames of the locator lowering's
+/// stack (their binder frames a shared chain) and are judged open by a
+/// walk whose levels carry only the arm they take. 10,000 deep the probe
+/// returns the connected-demand work budget's typed failure; under it
+/// TypeScript 7.0.2 answers `"a"`, under every setting.
+#[test]
+fn mapped_types_nested_10000_deep_return_on_production_stacks() {
+    assert!(!returns_on_a_small_stack(format!(
+        "{}export function pf() {{ const p: keyof D = null as any; return p; }}\n",
+        mapped_types(DEPTH)
+    )));
+    assert_eq!(
+        mismatches_on_a_small_stack(
+            mapped_types(MAPPED_TYPES_UNDER_THE_WORK_BUDGET),
+            "keyof D",
+            "\"a\""
+        ),
+        Vec::<String>::new()
+    );
+}
+
 /// Mapped types nested 10,000 deep. TypeScript 7.0.2: `"a"`, under every
 /// setting.
 #[test]
-#[ignore = "a mapped type nested in a mapped type lowers its locator shape a native level per nesting"]
+#[ignore = "the connected-demand work budget admits no 10,000-deep mapped-type nest"]
 fn mapped_types_nested_10000_deep_answer_on_production_stacks() {
-    let source = format!("type D = {};\n", wrap(DEPTH, "{ [K in \"a\"]: ", " }"));
     assert_eq!(
-        mismatches_on_a_small_stack(source, "keyof D", "\"a\""),
+        mismatches_on_a_small_stack(mapped_types(DEPTH), "keyof D", "\"a\""),
         Vec::<String>::new()
     );
 }
 
 /// Namespaces nested 10,000 deep, read through a 10,000-segment qualified
-/// name. TypeScript 7.0.2: `1`, under every setting.
+/// name: every walk registering a namespace's members descends the nest
+/// from an explicit stack. TypeScript 7.0.2: `1`, under every setting.
 #[test]
-#[ignore = "a namespace nested in a namespace indexes its declaration headers a native level per nesting"]
 fn namespaces_nested_10000_deep_answer_on_production_stacks() {
     let source = format!(
         "namespace A {{ {}export type V = 1;{}\ntype D = {}V;\n",
@@ -751,4 +778,100 @@ fn code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks(
         mismatches_on_a_small_stack(source(UNDER_THE_RETURN_SITE_BUDGET), RETURN, "number"),
         Vec::<String>::new()
     );
+}
+
+/// A nest of mapped types lowers in work that grows with the nest, not its
+/// square: each binder's identity reads the mapped types nested in it once
+/// (each hashed its whole value subtree), and each body's binder stack
+/// shares the frames around it (each copied them).
+#[test]
+fn a_mapped_type_nest_lowers_in_linear_work() {
+    let work = |depth: usize| {
+        let walked = crate::mapper_binder_registry::type_expr_visits_for_tests();
+        let copied = super::locator_shape::binder_frame_clones_for_tests();
+        assert_eq!(
+            mismatches(&mapped_types(depth), &[("keyof D", "\"a\"")]),
+            Vec::<String>::new()
+        );
+        (
+            crate::mapper_binder_registry::type_expr_visits_for_tests() - walked,
+            super::locator_shape::binder_frame_clones_for_tests() - copied,
+        )
+    };
+    let ((shallow_walked, shallow_copied), (deep_walked, deep_copied)) = (work(50), work(500));
+    assert!(
+        deep_walked <= 20 * shallow_walked,
+        "a ten-times-deeper nest walked {deep_walked} nodes against {shallow_walked}"
+    );
+    assert!(
+        deep_copied <= 20 * shallow_copied,
+        "a ten-times-deeper nest copied {deep_copied} binder frames against {shallow_copied}"
+    );
+}
+
+/// A dead loop nest the flow-slice plan budget admits.
+const DEAD_LOOPS_UNDER_THE_PLAN_BUDGET: usize = 1_000;
+
+/// Loops behind a literal `false` test nested deep: each dead body
+/// evaluates as a frame of the run, on a dead path its pass restores. 10,000
+/// deep the demand slice exceeds the plan budget (the return is its typed
+/// budget failure); under it TypeScript 7.0.2 answers `1 | 2`, under every
+/// setting.
+#[test]
+fn dead_loops_nested_10000_deep_return_on_production_stacks() {
+    for open in ["while (false) { ", "for (; false; ) { "] {
+        let source = |depth: usize| {
+            format!(
+                "export function pf() {{ {}return 1;{} return 2; }}\n",
+                open.repeat(depth),
+                " }".repeat(depth)
+            )
+        };
+        assert!(!returns_on_a_small_stack(source(DEPTH)), "{open}");
+        assert_eq!(
+            mismatches_on_a_small_stack(source(DEAD_LOOPS_UNDER_THE_PLAN_BUDGET), RETURN, "1 | 2"),
+            Vec::<String>::new(),
+            "{open}"
+        );
+    }
+}
+
+/// Loops nested `depth` deep, the innermost writing `body` over `let x: 0 |
+/// 1 = 0` (and `y`, alike).
+fn nested_loops(depth: usize, body: &str, result: &str) -> String {
+    format!(
+        "export function pf(b: boolean) {{ let x: 0 | 1 = 0; let y: 0 | 1 = 0; {}{body}{} return {result}; }}\n",
+        "while (b) { ".repeat(depth),
+        " }".repeat(depth)
+    )
+}
+
+/// Nested loops take work polynomial in their depth: a loop pass from a
+/// state an earlier pass of the loop started from is that pass, so the
+/// nested loops of a pass whose head did not change are not evaluated
+/// again (each loop's body ran once per pass of every loop around it, `2 ^
+/// depth` times). TypeScript 7.0.2, 20 deep, under every setting: `0` for
+/// `x = 0`, `readonly [0, 0]` for `x = 0; y = 0`, `0 | 1` for `x = 1`.
+#[test]
+fn nested_loops_take_passes_polynomial_in_their_depth() {
+    for (body, result, answer) in [
+        ("x = 0;", "x", "0"),
+        ("x = 0; y = 0;", "[x, y] as const", "readonly [0, 0]"),
+        ("x = 1;", "x", "0 | 1"),
+    ] {
+        let passes = |depth: usize| {
+            let before = super::flow_return::loop_passes_for_tests();
+            assert_eq!(
+                mismatches(&nested_loops(depth, body, result), &[(RETURN, answer)]),
+                Vec::<String>::new(),
+                "{body}"
+            );
+            super::flow_return::loop_passes_for_tests() - before
+        };
+        let (shallow, deep) = (passes(10), passes(20));
+        assert!(
+            deep <= 5 * shallow,
+            "`{body}` 20 deep took {deep} passes against {shallow} 10 deep"
+        );
+    }
 }
