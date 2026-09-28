@@ -4,15 +4,17 @@ on:
   push:
     tags:
       - "v*"
-  # Callable so an explicitly dispatched release REHEARSAL runs this exact job
-  # graph with publishing switched off, rather than a parallel copy that
-  # drifts. Pull requests cannot safely inherit this workflow's publishing
-  # permissions, so release-check.yml runs its read-only contract lane there.
+  # Callable so the release REHEARSAL runs this exact job graph with publishing
+  # switched off, rather than a parallel copy that drifts: ci.yml calls it on a
+  # release pull request, release-check.yml on demand. The rehearsal builds,
+  # packages and smoke-tests every artifact; a tag push then proves that pull
+  # request's CI passed for the tagged tree and publishes the artifacts it
+  # built, so nothing is tested or built twice (scripts/release-proof.mjs).
   workflow_call:
     inputs:
       dry_run:
         description: >-
-          Run validation, the full test matrix and every build, but skip all
+          Run validation and every build, package and smoke test, but skip all
           publishing (crates.io, npm, Marketplace, GitHub Release) and the
           post-release integration tests.
         type: boolean
@@ -26,6 +28,10 @@ permissions:
   contents: write
   id-token: write
   deployments: write
+  # The tag's release reads its release pull request and that pull request's
+  # CI run, and downloads the artifacts the run built.
+  actions: read
+  pull-requests: read
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -39,6 +45,8 @@ jobs:
       is-prerelease: ${{ steps.check.outputs.is-prerelease }}
       dist-tag: ${{ steps.check.outputs.dist-tag }}
       dry-run: ${{ steps.check.outputs.dry-run }}
+      # The CI run whose artifacts a tag publishes; empty in a rehearsal.
+      artifacts-run: ${{ steps.proof.outputs.artifacts-run }}
     steps:
       - uses: actions/checkout@v5
       - id: check
@@ -67,6 +75,20 @@ jobs:
             echo "is-prerelease=false" >> $GITHUB_OUTPUT
             echo "dist-tag=latest" >> $GITHUB_OUTPUT
           fi
+
+      # A tag publishes only the tree its release pull request's CI tested and
+      # built: the tag must be that pull request's squash, the trees must match,
+      # and the run must have passed with its rehearsal and hold every artifact
+      # family published below. Anything else stops the release here.
+      - name: Release proof
+        id: proof
+        if: steps.check.outputs.dry-run != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          node scripts/release-proof.mjs --sha "$GITHUB_SHA" --title-prefix "release: "
+          --rehearsal "Release Check"
+          --artifacts "native-*,native-loader,tsc-*,lsp-*,mcp-*,wasm,vsix"
 
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: pnpm/action-setup@v6
@@ -103,234 +125,14 @@ jobs:
           echo "All pre-publish checks passed"
 
   # ---------------------------------------------------------------------------
-  # Test
+  # Tests
   # ---------------------------------------------------------------------------
-  # BLOCKING. This job gates publish-crates, publish-npm and publish-vscode:
-  # a red suite stops the release rather than shipping past it.
-  test:
-    name: Test
-    # The JavaScript test step runs @verter/wasm's suite, which imports the
-    # built module from `packages/wasm/wasm/`. Only the wasm build produces it,
-    # so this job waits for that artifact instead of compiling wasm32 a second
-    # time.
-    needs: build-wasm
-    runs-on: ubuntu-latest
-    timeout-minutes: 110
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          components: clippy, rustfmt
-          # REQUIRED by the gate's wasm JavaScript-boundary lane — this job runs
-          # the same canonical gate exhaustively, and its prerequisite preflight
-          # fails loudly on a missing target rather than skipping those tests.
-          targets: wasm32-unknown-unknown
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Build TypeScript package entrypoints
-        run: pnpm run build:ts
-      - name: Provision the Rust gate's offline oracle npm cache
-        run: node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      # REQUIRED by the gate's wasm JavaScript-boundary lane. The runner and the
-      # `wasm-bindgen` library are ONE ABI, so the gate derives the required
-      # version from the tree and refuses a mismatched runner; keep this pin
-      # equal to the `wasm-bindgen` dependency in `crates/verter_wasm/Cargo.toml`.
-      - name: Install wasm-bindgen CLI (test runner for the gate's wasm lane)
-        uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-bindgen-cli@0.2.122
-      # One dev archive/list feeds archive-backed Surface 1. After listing,
-      # Surface 1 overlaps an isolated shipped-cfg lane: workspace/all-targets
-      # compile check followed serially by the small verter_shipped_cfg_contract
-      # run under `no-debug-assertions`. `--exhaustive` changes failure
-      # collection only; commands, filters, profiles, and coverage stay fixed.
-      # GitHub's dedicated 16 GiB runner grants the contained build forest 12
-      # GiB, retaining 4 GiB for the OS and runner services. The shared-machine
-      # gate default intentionally stays at 50% of physical memory.
-      - name: Rust gate
-        run: node scripts/gate.mjs --exhaustive --memory-limit 12GiB
-      - name: Proto generated sources
-        run: pnpm proto:check
-      - name: Svelte conformance
-        run: >-
-          cargo test --no-fail-fast -p verter_svelte_conformance
-          --features conformance-tests --lib --bin verter_svelte_conformance
-          --test main -- --test-threads=4
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Format
-        run: cargo fmt --all -- --check
-      # `packages/native`'s own `pretest` refuses to run without the napi
-      # loader (`dist/index.js`), which only the napi build produces. ci.yml
-      # builds it once in `build-native-node` and hands it to the test jobs as
-      # an artifact; this job is standalone and had no equivalent, so
-      # `pnpm test` died in pretest on v0.0.1-beta.4 before a single JS test
-      # ran. Debug, not release: nothing here ships this binding — the release
-      # artifacts come from the `Build Native` matrix.
-      - name: Build the napi binding the JS tests load
-        run: pnpm --filter @verter/native build:debug
-      # `@verter/wasm`'s tests import the built module from `packages/wasm/wasm/`
-      # (`Cannot find module '../wasm/verter_wasm.js'` killed the JavaScript
-      # tests on v0.0.1-beta.5 after every Rust lane had passed). The artifact holds the
-      # package's `wasm/` and `dist/` directories, so it unpacks straight into
-      # the package — the same module that ships, as ci.yml's playground lane
-      # tests it.
-      - uses: actions/download-artifact@v7
-        with:
-          name: wasm
-          path: packages/wasm
-      - name: JS tests
-        run: pnpm test
-
-  # Real providers own their process lifecycle and run serially outside the
-  # archive-backed nextest gate. Keep the release proof aligned with CI.
-  provider-tsserver:
-    name: Provider (tsserver)
-    runs-on: ubuntu-latest
-    timeout-minutes: 95
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_VERSION: "verter-release-provider-tsserver-v1"
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-provider-tsserver
-      - uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: v0.17.0
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Build the tsserver plugin prerequisites
-        run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
-      - name: Run serial tsserver provider tests
-        env:
-          VERTER_REQUIRE_TSSERVER: "1"
-        run: node scripts/provider-ci.mjs run tsserver
-
-  provider-tsgo:
-    name: Provider (tsgo)
-    runs-on: ubuntu-latest
-    timeout-minutes: 95
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_VERSION: "verter-release-provider-tsgo-v1"
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-provider-tsgo
-      - uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: v0.17.0
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Run serial tsgo provider tests
-        env:
-          VERTER_REQUIRE_TSGO: "1"
-        run: node scripts/provider-ci.mjs run tsgo
-
-  compiler-contracts:
-    name: Compiler Contracts
-    runs-on: ubuntu-latest
-    timeout-minutes: 95
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_VERSION: "verter-release-compiler-contracts-v1"
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          # Same reason ci.yml's compile-contracts job installs it: a trybuild
-          # `.stderr` is EXACT rustc output, and rustc renders the snippet
-          # behind a `help:` pointing into the standard library only when the
-          # library source is present. The action installs `--profile minimal`,
-          # which has no `rust-src`, so those lines vanish here while they are
-          # there on the developer machine the fixture was blessed on —
-          # register_frontend_does_not_take_runtime_identity failed exactly that
-          # way on v0.0.1-beta.4, 1 of 28, for a reason unrelated to the seal it
-          # protects. ci.yml was fixed and this lane was not.
-          components: rust-src
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-compiler-contracts
-          cache-directories: target/tests/trybuild
-      - uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: v0.17.0
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Verify compiler contracts lane and cache ownership
-        run: node --test scripts/compiler-ci-lane-selftest.mjs
-      - name: Run workspace compile contracts
-        run: node scripts/compile-contracts.mjs
-      - name: Verify generated Svelte artifacts
-        run: >-
-          cargo test --package verter_compiler --test main
-          cases::svelte_generated_artifacts_freshness::generated_svelte_artifacts_match_their_authoritative_inputs
-          -- --exact
-      - name: verter_compiler default feature-off build + lib tests (isolated)
-        run: |
-          cargo build -p verter_compiler
-          cargo test -p verter_compiler --lib
-
-  # Required release prerequisite, parallel with the core test job. BF2 owns
-  # its pinned oracle setup and exact source/list coverage outside gate.mjs so
-  # removing the feature from the core archive cannot weaken a release.
-  bf2-authoritative:
-    name: BF2 Authoritative
-    runs-on: ubuntu-latest
-    timeout-minutes: 95
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_VERSION: "verter-release-bf2-authoritative-v1"
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-bf2-authoritative
-      - uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: v0.17.0
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Build BF2 TypeScript declaration prerequisites
-        run: pnpm run build:ts
-      - name: Provision BF2's offline oracle npm cache
-        run: node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      - name: Verify BF2 release lane contract
-        run: node --test scripts/bf2-ci-lane-selftest.mjs
-      - name: Run exact BF2 authoritative inventory
-        env:
-          NEXTEST_PROFILE: ci
-        run: node scripts/bf2-authoritative.mjs
+  # None here. The tests are CI's own lanes (ci.yml), split and gated there:
+  # the Rust gate shards, clippy, fmt, proto, Svelte conformance, providers,
+  # compiler contracts, BF2 and the JavaScript suite. A release pull request
+  # runs them beside this workflow's rehearsal, and a tag publishes only once
+  # `validate` has proven that pull request's CI passed for the tagged tree
+  # (scripts/release-proof.mjs). Repeating them here tested the same tree twice.
 
   # ---------------------------------------------------------------------------
   # Build native binaries (matrix — for npm platform packages)
@@ -338,6 +140,8 @@ jobs:
   build-native:
     name: Build Native (${{ matrix.target }})
     needs: validate
+    # Built once, in the rehearsal; a tag publishes that run's artifacts.
+    if: needs.validate.outputs.dry-run == 'true'
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
@@ -438,6 +242,8 @@ jobs:
   build-tsc:
     name: Build TSC (${{ matrix.target }})
     needs: validate
+    # Built once, in the rehearsal; a tag publishes that run's artifacts.
+    if: needs.validate.outputs.dry-run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -522,6 +328,8 @@ jobs:
   build-lsp:
     name: Build LSP (${{ matrix.target }})
     needs: validate
+    # Built once, in the rehearsal; a tag publishes that run's artifacts.
+    if: needs.validate.outputs.dry-run == 'true'
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
@@ -618,6 +426,8 @@ jobs:
   build-mcp:
     name: Build MCP (${{ matrix.target }})
     needs: validate
+    # Built once, in the rehearsal; a tag publishes that run's artifacts.
+    if: needs.validate.outputs.dry-run == 'true'
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
@@ -702,6 +512,8 @@ jobs:
   build-wasm:
     name: Build WASM
     needs: validate
+    # Built once, in the rehearsal; a tag publishes that run's artifacts.
+    if: needs.validate.outputs.dry-run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -757,6 +569,8 @@ jobs:
   build-editor-lsp:
     name: Build editor LSP (${{ matrix.slug }})
     needs: validate
+    # Built once, in the rehearsal; a tag publishes that run's artifacts.
+    if: needs.validate.outputs.dry-run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -792,324 +606,14 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  editor-helix:
-    name: Editor matrix — Helix (${{ matrix.os }})
-    needs: [validate, build-editor-lsp]
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        # Verification runs on Linux ONLY. macOS and Windows runners bill at
-        # 10x and 2x, and these legs TEST rather than ship: the macOS/Windows
-        # binaries users receive still come from build-native / build-tsc /
-        # build-lsp / build-mcp, which are untouched. Uncomment to
-        # restore cross-OS verification.
-        include:
-          - os: ubuntu-latest
-            slug: linux
-          # - os: macos-latest
-          #   slug: macos
-          # - os: windows-latest
-          #   slug: windows
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-editor-helix-${{ matrix.slug }}
-
-      # Cross-platform portability: the contract resolves the snippet path and
-      # parses it on all three host OSes. `shell: bash` keeps one script under
-      # Git-bash on the Windows runner.
-      - name: Run the Helix config-contract test
-        shell: bash
-        run: cargo test -p verter-editor-client --test main cases::helix_config_contract
-
-      - name: Run the whole verter-editor-client suite
-        shell: bash
-        run: cargo test -p verter-editor-client
-
-      - name: Test the exported rootless Helix shipping plan
-        shell: bash
-        run: cargo test -p verter-editor-client --example helix_plan
-
-      - name: Clippy
-        shell: bash
-        run: cargo clippy -p verter-editor-client -- -D warnings
-
-      - name: Rustfmt check
-        shell: bash
-        run: cargo fmt -p verter-editor-client --check
-
-      # The real-client lane is Linux-only: the pinned Helix release asset is a
-      # linux-x86_64 archive.
-      - uses: pnpm/action-setup@v6
-        if: runner.os == 'Linux'
-      - uses: actions/setup-node@v5
-        if: runner.os == 'Linux'
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-
-      - name: Download shared verter-lsp
-        if: runner.os == 'Linux'
-        uses: actions/download-artifact@v7
-        with:
-          name: editor-lsp-${{ matrix.slug }}
-          path: target/release
-
-      - name: Install pinned Helix with checksum verification
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          archive="${RUNNER_TEMP}/helix-25.07.1-x86_64-linux.tar.xz"
-          curl --fail --location --retry 3 \
-            --output "$archive" \
-            https://github.com/helix-editor/helix/releases/download/25.07.1/helix-25.07.1-x86_64-linux.tar.xz
-          echo "3f08e63ecd388fff657ad39722f88bb03dcf326f1f2da2700d99e1dc40ab2e8b  $archive" | sha256sum --check --strict
-          tar -xJf "$archive" -C "$RUNNER_TEMP"
-          echo "${RUNNER_TEMP}/helix-25.07.1-x86_64-linux" >> "$GITHUB_PATH"
-          echo "HELIX_RUNTIME=${RUNNER_TEMP}/helix-25.07.1-x86_64-linux/runtime" >> "$GITHUB_ENV"
-
-      - name: Provision the shipped Helix configuration and server
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          config="${RUNNER_TEMP}/helix-config/helix"
-          mkdir -p "$config" "${RUNNER_TEMP}/verter-bin"
-          cp editors/helix/languages.toml "$config/languages.toml"
-          cp target/release/verter-lsp "${RUNNER_TEMP}/verter-bin/verter-lsp"
-          chmod +x "${RUNNER_TEMP}/verter-bin/verter-lsp"
-          echo "XDG_CONFIG_HOME=${RUNNER_TEMP}/helix-config" >> "$GITHUB_ENV"
-          echo "${RUNNER_TEMP}/verter-bin" >> "$GITHUB_PATH"
-
-      - name: Prove Vue and Svelte select only the executable Verter server
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          hx --version | grep -F "helix 25.07.1"
-          for language in vue svelte; do
-            output=$(NO_COLOR=1 hx --health "$language" 2>&1)
-            printf '%s\n' "$output"
-            printf '%s\n' "$output" | grep -F "verter-lsp"
-            if printf '%s\n' "$output" | grep -Eiq 'vue-language-server|svelteserver|svelte-language-server'; then
-              echo "::error::$language has a second framework language server configured"
-              exit 1
-            fi
-          done
-
-      - name: Install neutral-client fixture dependencies
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          corepack enable
-          pnpm install --frozen-lockfile
-          npm ci --ignore-scripts --prefix editors/nvim/tests/fixtures/real-client
-          pnpm --filter @verter/lsp-test-client build
-
-      - name: Drive the parsed Helix shipping plan over stdio
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --test scripts/editor-contracts/plan-contract.test.mjs
-          root="${GITHUB_WORKSPACE}/editors/nvim/tests/fixtures/real-client"
-          bin="${RUNNER_TEMP}/verter-bin/verter-lsp"
-          plan="${RUNNER_TEMP}/helix-launch-plan.json"
-          cargo run --quiet -p verter-editor-client --example helix_plan -- "$bin" > "$plan"
-          node scripts/editor-contracts/run-plan-smoke.mjs --plan="$plan" --root="$root"
-
-  editor-lapce:
-    name: Editor matrix — Lapce volt (${{ matrix.os }})
-    needs: [validate, build-editor-lsp]
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        # Verification runs on Linux ONLY. macOS and Windows runners bill at
-        # 10x and 2x, and these legs TEST rather than ship: the macOS/Windows
-        # binaries users receive still come from build-native / build-tsc /
-        # build-lsp / build-mcp, which are untouched. Uncomment to
-        # restore cross-OS verification.
-        include:
-          - os: ubuntu-latest
-            slug: linux
-          # - os: macos-latest
-          #   slug: macos
-          # - os: windows-latest
-          #   slug: windows
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          targets: wasm32-wasip1
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-editor-lapce-${{ matrix.slug }}
-
-      # extensions/lapce is a SEPARATE cargo manifest, not a workspace member,
-      # so none of this is covered by the workspace `test` job above. The
-      # portability rule mandates the volt build and host launch surface pass
-      # on macOS, Windows AND Linux, so these run on all three.
-      - name: Build the volt (wasm32-wasip1)
-        shell: bash
-        run: cargo build --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 --release
-
-      - name: Run host-target unit tests
-        shell: bash
-        run: cargo test --manifest-path extensions/lapce/Cargo.toml
-
-      - name: Clippy (wasm32-wasip1)
-        shell: bash
-        run: cargo clippy --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 -- -D warnings
-
-      - name: Rustfmt check
-        shell: bash
-        working-directory: extensions/lapce
-        run: cargo fmt --check
-
-      - uses: pnpm/action-setup@v6
-        if: runner.os == 'Linux'
-      - uses: actions/setup-node@v5
-        if: runner.os == 'Linux'
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-
-      - name: Download shared verter-lsp
-        if: runner.os == 'Linux'
-        uses: actions/download-artifact@v7
-        with:
-          name: editor-lsp-${{ matrix.slug }}
-          path: target/release
-      - name: Make verter-lsp executable
-        if: runner.os == 'Linux'
-        run: chmod +x target/release/verter-lsp
-
-      - name: Install JavaScript test dependencies
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          corepack enable
-          pnpm install --frozen-lockfile
-          npm ci --ignore-scripts --prefix editors/nvim/tests/fixtures/real-client
-          pnpm --filter @verter/lsp-test-client build
-
-      - name: Drive the exact Lapce launch plan over stdio
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --test scripts/editor-contracts/plan-contract.test.mjs
-          root="${GITHUB_WORKSPACE}/editors/nvim/tests/fixtures/real-client"
-          bin="${GITHUB_WORKSPACE}/target/release/verter-lsp"
-          plan="${RUNNER_TEMP}/lapce-launch-plan.json"
-          cargo run --quiet --manifest-path extensions/lapce/Cargo.toml --example contract_plan -- "$root" "$bin" > "$plan"
-          node scripts/editor-contracts/run-plan-smoke.mjs --plan="$plan" --root="$root"
-
-  editor-zed:
-    name: Editor matrix — Zed extension (${{ matrix.os }})
-    needs: [validate, build-editor-lsp]
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        # Verification runs on Linux ONLY. macOS and Windows runners bill at
-        # 10x and 2x, and these legs TEST rather than ship: the macOS/Windows
-        # binaries users receive still come from build-native / build-tsc /
-        # build-lsp / build-mcp, which are untouched. Uncomment to
-        # restore cross-OS verification.
-        include:
-          - os: ubuntu-latest
-            slug: linux
-          # - os: macos-latest
-          #   slug: macos
-          # - os: windows-latest
-          #   slug: windows
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          targets: wasm32-wasip2
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-editor-zed-${{ matrix.slug }}
-
-      # extensions/zed is a SEPARATE cargo manifest, not a workspace member. A
-      # wasip1/wasip2 mismatch yields a `__wasi_init_tp` load error in Zed,
-      # which only this build catches.
-      - name: Build the extension (wasm32-wasip2)
-        shell: bash
-        run: cargo build --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip2 --release
-
-      - name: Run host-target unit tests
-        shell: bash
-        run: cargo test --manifest-path extensions/zed/Cargo.toml
-
-      - name: Clippy (wasm32-wasip2)
-        shell: bash
-        run: cargo clippy --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip2 -- -D warnings
-
-      - name: Rustfmt check
-        shell: bash
-        working-directory: extensions/zed
-        run: cargo fmt --check
-
-      - uses: pnpm/action-setup@v6
-        if: runner.os == 'Linux'
-      - uses: actions/setup-node@v5
-        if: runner.os == 'Linux'
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-
-      - name: Download shared verter-lsp
-        if: runner.os == 'Linux'
-        uses: actions/download-artifact@v7
-        with:
-          name: editor-lsp-${{ matrix.slug }}
-          path: target/release
-      - name: Make verter-lsp executable
-        if: runner.os == 'Linux'
-        run: chmod +x target/release/verter-lsp
-
-      - name: Install JavaScript test dependencies
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          corepack enable
-          pnpm install --frozen-lockfile
-          npm ci --ignore-scripts --prefix editors/nvim/tests/fixtures/real-client
-          pnpm --filter @verter/lsp-test-client build
-
-      - name: Drive the exact Zed launch plan over stdio
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --test scripts/editor-contracts/plan-contract.test.mjs
-          root="${GITHUB_WORKSPACE}/editors/nvim/tests/fixtures/real-client"
-          bin="${GITHUB_WORKSPACE}/target/release/verter-lsp"
-          plan="${RUNNER_TEMP}/zed-launch-plan.json"
-          cargo run --quiet --manifest-path extensions/zed/Cargo.toml --example contract_plan -- "$root" "$bin" > "$plan"
-          node scripts/editor-contracts/run-plan-smoke.mjs --plan="$plan" --root="$root"
+  # Helix, Lapce, Zed and Neovim stable are CI's editor-contracts lane, which
+  # drives each editor against a release-built verter-lsp on every change that
+  # touches them. The release keeps only the Neovim legs CI does not run.
 
   editor-neovim:
     name: Editor matrix — nvim ${{ matrix.neovim }} (${{ matrix.os }})
     needs: [validate, build-editor-lsp]
+    if: needs.validate.outputs.dry-run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -1117,9 +621,10 @@ jobs:
         # strings and resolve the binary on all three host OSes.
         os: [ubuntu-latest]
         # v0.11.0 is the supported floor (`vim.lsp.config` / `vim.lsp.enable`
-        # first landed in 0.11), v0.12.3 is current stable, nightly catches
-        # upstream LSP-client changes before they ship.
-        neovim: [v0.11.0, v0.12.3, nightly]
+        # first landed in 0.11) and nightly catches upstream LSP-client changes
+        # before they ship. Current stable (v0.12.3) is CI's editor-contracts
+        # lane; neither leg below runs there.
+        neovim: [v0.11.0, nightly]
         include:
           - os: ubuntu-latest
             slug: linux
@@ -1246,19 +751,10 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-crates:
     name: Publish Crates
-    needs:
-      [
-        validate,
-        test,
-        provider-tsserver,
-        provider-tsgo,
-        compiler-contracts,
-        bf2-authoritative,
-        editor-helix,
-        editor-lapce,
-        editor-zed,
-        editor-neovim,
-      ]
+    # A tag publishes what its release pull request's CI built and tested:
+    # validate proved that run (scripts/release-proof.mjs), so nothing here
+    # waits on a test or a build of its own.
+    needs: validate
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -1295,14 +791,6 @@ jobs:
     needs:
       [
         validate,
-        test,
-        provider-tsserver,
-        provider-tsgo,
-        compiler-contracts,
-        bf2-authoritative,
-        editor-helix,
-        editor-lapce,
-        editor-zed,
         editor-neovim,
         build-native,
         build-lsp,
@@ -1310,6 +798,9 @@ jobs:
         build-tsc,
         build-wasm,
       ]
+    # A rehearsal smoke test of the artifacts this run built; a tag publishes
+    # those same artifacts once validate proves this run passed.
+    if: needs.validate.outputs.dry-run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -1343,25 +834,10 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-npm:
     name: Publish npm
-    needs:
-      [
-        validate,
-        test,
-        provider-tsserver,
-        provider-tsgo,
-        compiler-contracts,
-        bf2-authoritative,
-        editor-helix,
-        editor-lapce,
-        editor-zed,
-        editor-neovim,
-        build-native,
-        build-lsp,
-        build-mcp,
-        build-tsc,
-        build-wasm,
-        clean-room,
-      ]
+    # A tag publishes what its release pull request's CI built and tested:
+    # validate proved that run (scripts/release-proof.mjs), so nothing here
+    # waits on a test or a build of its own.
+    needs: validate
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -1387,6 +863,8 @@ jobs:
       # code a local release runs against the same run's artifacts.
       - uses: actions/download-artifact@v7
         with:
+          run-id: ${{ needs.validate.outputs.artifacts-run }}
+          github-token: ${{ github.token }}
           pattern: "{native-*,tsc-*,lsp-*,mcp-*,wasm}"
           path: ${{ runner.temp }}/release-artifacts
 
@@ -1442,21 +920,11 @@ jobs:
   # ---------------------------------------------------------------------------
   build-vsix:
     name: Package VS Code Extension
-    needs:
-      [
-        validate,
-        test,
-        provider-tsserver,
-        provider-tsgo,
-        compiler-contracts,
-        bf2-authoritative,
-        build-lsp,
-        build-native,
-        build-mcp,
-      ]
-    # Skipped in a rehearsal, as the publish job it feeds always has been —
-    # packaging five platform VSIXes is cost the dry run does not pay today.
-    if: needs.validate.outputs.dry-run != 'true'
+    needs: [validate, build-lsp, build-native, build-mcp]
+    # Packaged once, in the rehearsal: a tag publishes these VSIXes instead of
+    # packaging them again, and a packaging fault fails the release pull
+    # request rather than the tag.
+    if: needs.validate.outputs.dry-run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -1609,7 +1077,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-vscode:
     name: Publish VS Code Extension
-    needs: [validate, build-vsix, publish-npm]
+    needs: [validate, publish-npm]
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -1628,6 +1096,8 @@ jobs:
 
       - uses: actions/download-artifact@v7
         with:
+          run-id: ${{ needs.validate.outputs.artifacts-run }}
+          github-token: ${{ github.token }}
           name: vsix
           path: /tmp/vsix
 
@@ -1667,7 +1137,10 @@ jobs:
   # ---------------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    needs: [validate, bf2-authoritative, build-native, build-lsp, build-mcp, build-wasm, build-vsix]
+    # A tag publishes what its release pull request's CI built and tested:
+    # validate proved that run (scripts/release-proof.mjs), so nothing here
+    # waits on a test or a build of its own.
+    needs: validate
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -1726,16 +1199,22 @@ jobs:
 
       - uses: actions/download-artifact@v7
         with:
+          run-id: ${{ needs.validate.outputs.artifacts-run }}
+          github-token: ${{ github.token }}
           pattern: native-*
           path: /tmp/release-assets/native
 
       - uses: actions/download-artifact@v7
         with:
+          run-id: ${{ needs.validate.outputs.artifacts-run }}
+          github-token: ${{ github.token }}
           name: wasm
           path: /tmp/release-assets/wasm
 
       - uses: actions/download-artifact@v7
         with:
+          run-id: ${{ needs.validate.outputs.artifacts-run }}
+          github-token: ${{ github.token }}
           name: vsix
           path: /tmp/release-assets/vsix
 
@@ -1745,6 +1224,8 @@ jobs:
       # deliberately NOT a release asset.
       - uses: actions/download-artifact@v7
         with:
+          run-id: ${{ needs.validate.outputs.artifacts-run }}
+          github-token: ${{ github.token }}
           pattern: lsp-*
           path: /tmp/release-assets/lsp
 
@@ -1755,6 +1236,8 @@ jobs:
       # architecture guard.
       - uses: actions/download-artifact@v7
         with:
+          run-id: ${{ needs.validate.outputs.artifacts-run }}
+          github-token: ${{ github.token }}
           pattern: mcp-*
           path: /tmp/release-assets/mcp
 

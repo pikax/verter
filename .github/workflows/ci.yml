@@ -15,6 +15,12 @@ permissions:
 
 jobs:
   detect-changes:
+    # Reads the pull request a push to main merged, and that pull request's CI
+    # run, to reuse its result (scripts/release-proof.mjs --landed).
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Every gate below is composed by `scripts/ci-impact.mjs` from TWO
@@ -55,8 +61,10 @@ jobs:
       native_artifact: ${{ steps.gates.outputs.gate_native_artifact }}
       wasm_artifact: ${{ steps.gates.outputs.gate_wasm_artifact }}
       impact_full: ${{ steps.gates.outputs.impact_full }}
-      # `project` or `ide` on a release pull request (every gate above is
-      # then off and the release rehearsal is the CI); empty otherwise.
+      # `project` or `ide` on a release pull request (the rehearsal runs
+      # beside the selected lanes), `landed` on a push to main whose merged
+      # pull request's CI passed for the same tree (every gate above is off);
+      # empty otherwise.
       release: ${{ steps.gates.outputs.release }}
     steps:
       - uses: actions/checkout@v5
@@ -376,18 +384,30 @@ jobs:
       # holds for any file name: a quoted heredoc expands nothing, and `toJSON`
       # escapes newlines inside values, so no expanded line can equal the
       # delimiter. `any_files`, the whole changed-file list, travels inside it.
+      # A push to main that is the merge of a pull request whose CI already
+      # passed for this exact tree runs no lane again; CI Required still
+      # reports, so main keeps its green tick. A force-push or a direct push
+      # has no such proof and runs CI as usual.
+      - name: Reuse the merged pull request's CI
+        id: landed
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-proof.mjs --landed --sha "$GITHUB_SHA"
       - name: Compose the lane gates from the path filters and the crate graph
         id: gates
         env:
           # A release pull request (`release: v…` or `release(ide): v…`, from
-          # this repository) carries only the version bump; what it must prove
-          # is that the release can be published, so its CI is the release
-          # rehearsal below rather than the ordinary lanes.
+          # this repository) runs the lanes its change selects plus the release
+          # rehearsal below; the tag's release reuses both instead of repeating
+          # them. A push to main proven above to be a merge of a pull request
+          # whose CI passed for this tree (`landed`) runs no lane.
           CI_IMPACT_RELEASE: >-
             ${{ github.event_name == 'pull_request' &&
             github.event.pull_request.head.repo.full_name == github.repository &&
             (startsWith(github.event.pull_request.title, 'release(ide): ') && 'ide' ||
             startsWith(github.event.pull_request.title, 'release: ') && 'project') ||
+            github.event_name == 'push' && steps.landed.outputs.landed == 'true' && 'landed' ||
             '' }}
         run: |
           outputs="$RUNNER_TEMP/ci-impact-filter-outputs.json"
@@ -1185,7 +1205,7 @@ jobs:
       - name: Download native binding
         uses: ./.github/actions/download-artifact
         with:
-          name: native-node
+          name: ci-native-node
           path: packages/native/dist
       - name: Build TS packages
         run: pnpm run build:ts
@@ -1347,7 +1367,7 @@ jobs:
         run: cargo build -p verter_lsp -p verter_relay_shim -p verter_dx_baseline -p verter_mcp
       - uses: actions/upload-artifact@v6
         with:
-          name: lsp-debug-bins
+          name: ci-lsp-debug-bins
           path: |
             target/debug/verter-lsp
             target/debug/verter-relay-shim
@@ -1374,6 +1394,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Test VS Code E2E harness units
         run: pnpm --filter verter-vscode test:e2e:lib:unit
+      # The acceptance units are the one part of the extension's own suite
+      # (`pnpm --filter verter-vscode test`) no other lane ran; release-ide.yml
+      # used to run it again at release time instead.
+      - name: Test VS Code acceptance units
+        run: pnpm --filter verter-vscode test:e2e:acceptance:unit
       # The TS half of `prepare:e2e` only. Its cargo half is `prepare:e2e:rust`,
       # covered by build-lsp-debug above; `prepare:e2e` still runs both for
       # local development.
@@ -1411,7 +1436,7 @@ jobs:
       - name: Download editor integration binaries
         uses: ./.github/actions/download-artifact
         with:
-          name: lsp-debug-bins
+          name: ci-lsp-debug-bins
           path: target/debug
       - name: Make editor integration binaries executable
         run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim target/debug/verter-mcp
@@ -1464,7 +1489,7 @@ jobs:
       - name: Download editor integration binaries
         uses: ./.github/actions/download-artifact
         with:
-          name: lsp-debug-bins
+          name: ci-lsp-debug-bins
           path: target/debug
       - name: Make editor integration binaries executable
         run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim target/debug/verter-mcp
@@ -1525,7 +1550,7 @@ jobs:
         run: pnpm run build:native
       - uses: actions/upload-artifact@v6
         with:
-          name: native-node
+          name: ci-native-node
           path: packages/native/dist/
           if-no-files-found: error
           retention-days: 1
@@ -1555,7 +1580,7 @@ jobs:
       - name: Download native binding
         uses: ./.github/actions/download-artifact
         with:
-          name: native-node
+          name: ci-native-node
           path: packages/native/dist
       - name: Build TS packages
         run: pnpm run build:ts
@@ -1611,7 +1636,7 @@ jobs:
       - name: Download native binding
         uses: ./.github/actions/download-artifact
         with:
-          name: native-node
+          name: ci-native-node
           path: packages/native/dist
       - name: Syntax-check the WASM transport probe
         run: node --check packages/wasm/scripts/probe-transport-surface.mjs
@@ -1688,7 +1713,7 @@ jobs:
       - name: Download debug LSP binaries
         uses: ./.github/actions/download-artifact
         with:
-          name: lsp-debug-bins
+          name: ci-lsp-debug-bins
           path: target/debug
       - name: Make debug LSP binaries executable
         run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim target/debug/verter-mcp target/debug/verter-dx-baseline
@@ -2179,20 +2204,24 @@ jobs:
         run: node scripts/jetbrains-gate.mjs
 
   # ---------------------------------------------------------------------------
-  # Release pull requests. Their CI is the release rehearsal: the release
-  # workflow itself with `dry_run: true`, which builds and packages every
-  # artifact and skips every publishing job. `release: v…` rehearses the
-  # project release (release.yml); `release(ide): v…` rehearses the editors
-  # release, which ships the editors only (release-ide.yml). Only a pull
-  # request from this repository qualifies (`detect-changes` checks), so the
-  # write scopes the release graph declares never reach fork code, and no
-  # registry or Marketplace secret is passed.
+  # Release pull requests. Beside the lanes above (the tests), a release PR
+  # runs the release workflow itself with `dry_run: true`: it builds,
+  # packages and smoke-tests every artifact and skips every publishing job.
+  # `release: v…` rehearses the project release (release.yml);
+  # `release(ide): v…` rehearses the editors release, which ships the editors
+  # only (release-ide.yml). The tag's release then proves this run passed for
+  # the tagged tree and publishes the artifacts this run built, so neither the
+  # tests nor the builds run twice. Only a pull request from this repository
+  # qualifies (`detect-changes` checks), so the write scopes the release graph
+  # declares never reach fork code, and no registry or Marketplace secret is
+  # passed.
   # ---------------------------------------------------------------------------
   release-check:
     name: Release Check
     needs: detect-changes
     if: needs.detect-changes.outputs.release == 'project'
     permissions:
+      actions: read
       contents: write
       deployments: write
       id-token: write
@@ -2208,7 +2237,9 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.release == 'ide'
     permissions:
+      actions: read
       contents: write
+      pull-requests: read
     uses: ./.github/workflows/release-ide.yml
     with:
       dry_run: true

@@ -47,7 +47,11 @@ on:
   # has no unpublish, so the only safe way to exercise this lane is a run that
   # cannot reach it.
   # The same rehearsal as CI on a `release(ide): v…` pull request (ci.yml,
-  # `release-ide-check`): the caller passes `dry_run: true`.
+  # `release-ide-check`): the caller passes `dry_run: true`. That pull
+  # request's CI runs the tests; the rehearsal builds and packages everything.
+  # A tag push then proves that run passed for the tagged tree and publishes
+  # the artifacts it built, so nothing is tested or built twice
+  # (scripts/release-proof.mjs).
   workflow_call:
     inputs:
       dry_run:
@@ -69,6 +73,10 @@ concurrency:
 
 permissions:
   contents: write
+  # The tag's release reads its release pull request and that pull request's
+  # CI run, and downloads the artifacts the run built.
+  actions: read
+  pull-requests: read
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -85,6 +93,8 @@ jobs:
     outputs:
       version: ${{ steps.check.outputs.version }}
       dry-run: ${{ steps.check.outputs.dry-run }}
+      # The CI run whose artifacts a tag publishes; empty in a rehearsal.
+      artifacts-run: ${{ steps.proof.outputs.artifacts-run }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -126,31 +136,28 @@ jobs:
       - name: Verify the version is complete
         run: node scripts/set-ide-version.mjs --check "${{ steps.check.outputs.version }}"
 
-  # ---------------------------------------------------------------------------
-  # Test
-  #
-  # The extension's own suite: its unit tests plus the e2e library and
-  # acceptance units (vitest — no VS Code download, no display). The full
-  # editor-driven e2e matrix stays in ci.yml where a pull request already runs
-  # it; this lane asserts that what is about to be published still passes its
-  # own contracts.
-  # ---------------------------------------------------------------------------
-  test:
-    name: Test Extension
-    needs: validate
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Run the extension suite
-        run: pnpm --filter verter-vscode test
+      # A tag publishes only the tree its release pull request's CI tested and
+      # built: the tag must be that pull request's squash, the trees must match,
+      # and the run must have passed with its rehearsal and hold every artifact
+      # family published below. Anything else stops the release here.
+      - name: Release proof
+        id: proof
+        if: steps.check.outputs.dry-run != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          node scripts/release-proof.mjs --sha "$GITHUB_SHA" --title-prefix "release(ide): "
+          --rehearsal "Release IDE Check"
+          --artifacts "lsp-*,mcp-*,native-*,vsix,editor-integrations"
 
+  # ---------------------------------------------------------------------------
+  # Tests
+  #
+  # None here. The extension suite (its unit specs, the e2e library units and
+  # the acceptance units) and the editor-driven e2e matrix are CI's own lanes,
+  # which the release pull request runs; validate proves they passed for the
+  # tagged tree. Repeating them here tested the same tree twice.
+  # ---------------------------------------------------------------------------
   # ---------------------------------------------------------------------------
   # Build LSP binary (matrix)
   #
@@ -162,7 +169,9 @@ jobs:
   # ---------------------------------------------------------------------------
   build-lsp:
     name: Build LSP (${{ matrix.target }})
-    needs: [validate, test]
+    needs: validate
+    # Built once, in the rehearsal; a tag publishes that run's artifacts.
+    if: needs.validate.outputs.dry-run == 'true'
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
@@ -256,7 +265,9 @@ jobs:
   # ---------------------------------------------------------------------------
   build-mcp:
     name: Build MCP (${{ matrix.target }})
-    needs: [validate, test]
+    needs: validate
+    # Built once, in the rehearsal; a tag publishes that run's artifacts.
+    if: needs.validate.outputs.dry-run == 'true'
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
@@ -337,7 +348,9 @@ jobs:
   # ---------------------------------------------------------------------------
   build-native:
     name: Build Native (${{ matrix.target }})
-    needs: [validate, test]
+    needs: validate
+    # Built once, in the rehearsal; a tag publishes that run's artifacts.
+    if: needs.validate.outputs.dry-run == 'true'
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
@@ -408,6 +421,7 @@ jobs:
   build-vsix:
     name: Package VS Code Extension
     needs: [validate, build-lsp, build-mcp, build-native]
+    if: needs.validate.outputs.dry-run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -546,6 +560,7 @@ jobs:
   build-editor-integrations:
     name: Editor integrations
     needs: [validate]
+    if: needs.validate.outputs.dry-run == 'true'
     uses: ./.github/workflows/editor-packages.yml
 
   # ---------------------------------------------------------------------------
@@ -557,7 +572,9 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-vscode:
     name: Publish VS Code Extension
-    needs: [validate, build-vsix, build-editor-integrations]
+    # A tag publishes what its release pull request's CI built and tested:
+    # validate proved that run (scripts/release-proof.mjs).
+    needs: validate
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -576,6 +593,8 @@ jobs:
 
       - uses: actions/download-artifact@v7
         with:
+          run-id: ${{ needs.validate.outputs.artifacts-run }}
+          github-token: ${{ github.token }}
           name: vsix
           path: /tmp/vsix
 
@@ -616,7 +635,9 @@ jobs:
   # ---------------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    needs: [validate, build-lsp, build-mcp, build-vsix, build-editor-integrations]
+    # A tag publishes what its release pull request's CI built and tested:
+    # validate proved that run (scripts/release-proof.mjs).
+    needs: validate
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -625,21 +646,29 @@ jobs:
 
       - uses: actions/download-artifact@v7
         with:
+          run-id: ${{ needs.validate.outputs.artifacts-run }}
+          github-token: ${{ github.token }}
           name: vsix
           path: /tmp/release-assets/vsix
 
       - uses: actions/download-artifact@v7
         with:
+          run-id: ${{ needs.validate.outputs.artifacts-run }}
+          github-token: ${{ github.token }}
           pattern: lsp-*
           path: /tmp/release-assets/lsp
 
       - uses: actions/download-artifact@v7
         with:
+          run-id: ${{ needs.validate.outputs.artifacts-run }}
+          github-token: ${{ github.token }}
           pattern: mcp-*
           path: /tmp/release-assets/mcp
 
       - uses: actions/download-artifact@v7
         with:
+          run-id: ${{ needs.validate.outputs.artifacts-run }}
+          github-token: ${{ github.token }}
           name: editor-integrations
           path: /tmp/release-assets/editors
 

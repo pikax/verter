@@ -12,6 +12,8 @@ Verter uses GitHub Actions for continuous integration, testing, and releases.
 
 Runs on push to `main` and on pull requests. The `detect-changes` job decides which jobs run from two halves composed by `scripts/ci-impact.mjs`: a [dorny/paths-filter](https://github.com/dorny/paths-filter) filter per lane owns every non-crate input, and the crate-graph classifier owns `crates/**`. A consumer lane (the native binding, the wasm32 artifact, the debug and release LSP builds and everything behind them, the compile contracts, BF2, the provider suites, Svelte conformance) runs when a changed crate is in the transitive dependency closure of that lane's root crates as `cargo metadata --all-features` reports it, so a change to a crate an artifact does not link no longer rebuilds it. Two kinds of gate come out: a subsystem gate ("the native binding changed") drives that subsystem's suites, and an artifact gate ("the native artifact is needed") is the OR of every consumer's gate and drives the producer, so a consumer is never scheduled behind a producer that was not (transport equivalence, which compares both artifacts, demands both). Workspace manifests, the lockfile, the toolchain pin, `.cargo/`, the workflows, the local actions, the classifier itself, proc-macro crates and any file that no crate, no path filter and the classifier's small explicit inert list (`CI_INERT_PATHS`: docs, editor config, licence and changelog) does not own force every impact-bearing lane on — no directory is inert by assumption, so `schemas/**` and `test-corpora/**`, which Rust tests read, are owned by the rust filter; a stale lane root fails the job. Lane roots are derived from the lanes' own inventories where one exists (the provider selectors, the compile-contract owners). `LANE_ROOTS`, `LANE_GATES` and the fail-closed paths are unit-tested by `scripts/ci-impact.test.mjs`, including that every consumer gate implies its producer's artifact gate over every input combination.
 
+**A merge is not tested twice.** On a push to `main`, `detect-changes` first runs `scripts/release-proof.mjs --landed`: when the pushed commit is the merge of a pull request whose head has the same tree and whose CI passed, every lane is off and `CI Required` passes on that proof, so the commit on `main` keeps its green tick without re-running the pull request's lanes. `main` requires pull requests to be up to date, which is what makes the trees equal. A force-push, a direct push or any commit the proof cannot vouch for runs CI as usual.
+
 - **Rust changes** (`crates/**`, `Cargo.toml`, etc.) -- `rust-fmt`, `rust-clippy`, `rust-build-configs`, one provider-free `rust-test-build` archive consumed by `rust-test`; the closure-gated `rust-providers-live` job (serial tsserver then tsgo libtest lanes in one job, compiled once), the standalone `compiler-contracts` lane, BF2 and the Svelte conformance lane run when their root crates' closure is touched
 - **Proto changes** -- `proto-fmt` regenerates with the pinned `buf`/`oxfmt` tools and byte-compares the complete committed TypeScript binding tree
 - **JS changes** (`packages/**`, `package.json`, etc.) -- `js-build-test`; its script self-tests run `test:scripts:ci`, which omits the tests another required lane already owns (the ARH dirty twins in `architecture-health`, the lane self-tests in their lanes, the aggregate test in its own step)
@@ -68,29 +70,43 @@ only warnings remain.
 
 Triggered on push of tags matching `v*` (e.g., `v0.0.1-beta.1`, `v1.0.0`).
 
+**Nothing is tested or built twice.** A release lands as the squash of a
+release pull request (`release: v<version>`), and that pull request's CI does
+the work once:
+
+- the ordinary CI lanes are the tests (a version bump rewrites the workspace
+  manifests, which selects every lane);
+- `Release Check` runs this workflow with `dry_run: true` beside them: every
+  build, the VSIX packaging, the Neovim floor/nightly legs CI does not run, and
+  the clean-room smoke test of the built packages. Publishing is skipped.
+
+The tag push then runs only `validate` and the publish jobs. `validate` runs
+`scripts/release-proof.mjs`, which requires the tag to be the squash of a
+merged `release: …` pull request, the tagged tree to equal that pull request's
+head, and a successful CI run for that head whose `Release Check` ran and still
+holds every artifact family. It then hands that run's id to the publish jobs,
+which download its artifacts: what ships is what was rehearsed. Without that
+proof nothing is published.
+
 **Job graph:**
 
 ```
-validate
-  +-- build-wasm
-        +-- test                            <- blocking; gates publishing AND the release
-                                               (runs `pnpm test`, whose @verter/wasm suite
-                                               loads the wasm artifact build-wasm produced)
-  +-- build-native      (matrix: 7 targets) <- parallel
-  +-- build-lsp         (matrix: 7 targets) <- parallel
-  +-- build-tsc         (matrix: 7 targets) <- parallel
-  +-- build-mcp         (matrix: 7 targets) <- parallel
-  +-- build-wasm                            <- parallel
-  +-- build-editor-lsp
-        +-- editor-helix / editor-lapce / editor-zed / editor-neovim
+Release pull request (ci.yml): the CI lanes  +  Release Check (dry_run):
+  validate
+    +-- build-native / build-lsp / build-tsc / build-mcp (matrix: 7 targets)
+    +-- build-wasm
+    +-- build-editor-lsp
+          +-- editor-neovim (v0.11.0 floor, nightly)
+    +-- clean-room   (needs: the builds, editor-neovim)
+    +-- build-vsix   (needs: build-lsp, build-native, build-mcp)
 
-build-vsix (needs: validate, test, build-lsp, build-native)
-  +-- github-release (needs: validate, build-native, build-lsp, build-mcp, build-wasm, build-vsix)
-  +-- publish-vscode (needs: validate, build-vsix, publish-npm)
-
-publish-crates (needs: validate, test, editor matrix)
-publish-npm    (needs: validate, test, editor matrix, build-native, build-lsp, build-mcp, build-tsc, build-wasm)
-  +-- integration-test (consumes the published npm packages)
+Tag push (release.yml):
+  validate (release proof → artifacts-run)
+    +-- publish-crates
+    +-- publish-npm            (downloads artifacts-run)
+          +-- publish-vscode   (downloads artifacts-run's VSIXes)
+          +-- integration-test (consumes the published npm packages)
+    +-- github-release         (downloads artifacts-run)
 ```
 
 **The GitHub Release is gated on builds, not on publishing.** Every asset it
@@ -99,10 +115,10 @@ and the
 platform VSIXes — is build output, so a failed npm or Marketplace publish no
 longer withholds the release and its downloadable assets; publishing runs in
 parallel and is retried on its own. Packaging the VSIXes is therefore a build
-job (`build-vsix`); `publish-vscode` only pushes the prebuilt artifact, and stays
-ordered after `publish-npm` so the extension never lands on the Marketplace
-before the packages of the same version reach the registry. The release remains
-test-gated transitively, through `build-vsix`.
+job (`build-vsix`, run in the rehearsal); `publish-vscode` only pushes the
+prebuilt artifact, and stays ordered after `publish-npm` so the extension never
+lands on the Marketplace before the packages of the same version reach the
+registry. The release remains test-gated through the proof.
 
 Consequence to be aware of: the release (and the `CHANGELOG.md` commit it pushes
 to `main`) can now exist for a version whose npm publish failed. That is the
@@ -333,8 +349,8 @@ Releases start from a local version bump and end with an automatic tag:
    the whole surface (`set-version.mjs --check` and `check-versions.mjs`), then
    creates and pushes the annotated tag `v<version>`. For any other commit —
    including the CHANGELOG commit the release workflow pushes — it is a no-op.
-6. The tag push triggers the `release.yml` workflow, which publishes
-   everything.
+6. The tag push triggers the `release.yml` workflow, which proves the
+   release pull request's CI (see above) and publishes the artifacts it built.
 
 #### The editor distribution
 
@@ -369,17 +385,22 @@ at 0.0.2, the Zed extension and the Lapce volt at 0.1.0). `pnpm bump:ide` takes
 the **highest** of them as the current version and says so, so the first unified
 release moves all three forward and none of them backwards.
 
-To rehearse it without publishing, dispatch `release-ide.yml` manually — the dry
-run builds and packages everything and cannot reach the Marketplace.
+A `release(ide): v<version>` pull request's CI runs `release-ide.yml` as the
+`Release IDE Check` rehearsal beside the CI lanes, and the `ide/v*` tag
+publishes that run's artifacts after the same proof, so the editors are neither
+tested nor built twice. To rehearse without a pull request, dispatch
+`release-ide.yml` manually — the dry run builds and packages everything and
+cannot reach the Marketplace.
 
 ### Publishing locally
 
 When `release.yml` cannot finish a release the build matrix already completed
 (a red test lane, a publish credential problem), the npm and crates.io publish
 runs locally through the SAME code the workflow runs —
-`scripts/release-publish.mjs` — against the SAME build artifacts (the run's
-`native-*`, `tsc-*`, `lsp-*`, `mcp-*`, `wasm` and `native-loader` artifacts are
-retained for 90 days). Nothing is rebuilt from a developer machine: the
+`scripts/release-publish.mjs` — against the SAME build artifacts: the release
+pull request's CI run, found by the same proof (its `native-*`, `tsc-*`,
+`lsp-*`, `mcp-*`, `wasm` and `native-loader` artifacts are retained for 90
+days). Nothing is rebuilt from a developer machine: the
 binaries are the tag's CI builds, and the TypeScript packages are built from
 the tagged commit, which the script requires to be checked out.
 
@@ -394,8 +415,7 @@ node scripts/release-publish.mjs local --dry-run --skip-crates   # rehearse: pac
 ```
 
 `local` runs the preflight (tag = HEAD = workspace version, clean tree,
-`set-version.mjs --check`, `npm whoami`), downloads the tag's completed
-`release.yml` run with `gh run download` into `.release/<tag>/artifacts/`
+`set-version.mjs --check`, `npm whoami`), downloads the proven CI run's artifacts with `gh run download` into `.release/<tag>/artifacts/`
 (gitignored, reused on the next invocation; `--redownload` refreshes), then
 `stage → prepare → publish-npm → verify-npm → publish-crates`. Each step is
 also its own subcommand (`node scripts/release-publish.mjs <step>`), so a run

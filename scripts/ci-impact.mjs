@@ -376,24 +376,30 @@ export function ownedFilesFromFilterOutputs(filterOutputs) {
 }
 
 /** `$GITHUB_OUTPUT` lines: one `gate_<name>` per gate, then the fallback flag. */
-/** The release pull request kinds whose CI is the release rehearsal: `release: v…` and `release(ide): v…`. */
-export const RELEASE_KINDS = ["project", "ide"];
+/**
+ * `project` and `ide`: a release pull request (`release: v…`, `release(ide): v…`).
+ * `landed`: that pull request's squash commit, pushed to main.
+ */
+export const RELEASE_KINDS = ["project", "ide", "landed"];
 
 /**
- * A release pull request carries only the version bump, and what it must prove
- * is that the release it lands can be published, so its CI is the release
- * rehearsal (`release.yml` or `release-ide.yml` with `dry_run`), not the
- * ordinary lanes: every gate is off. The kind is emitted as `release`.
+ * A release pull request runs the ordinary lanes its change selects (a project
+ * version bump rewrites the workspace manifests, which already selects every
+ * lane) and, beside them, the release rehearsal; nothing is turned off, and
+ * the tag's release later reuses this run's tests and artifacts instead of
+ * repeating them. Its squash commit on main has the tree that pull request's
+ * CI just tested (the ruleset requires it to be up to date), so `landed`
+ * turns every lane off rather than testing that tree a second time.
  */
 export function releaseGates(gates, release) {
-  if (!release) return gates;
+  if (release !== "landed") return gates;
   return Object.fromEntries(Object.keys(gates).map((gate) => [gate, "false"]));
 }
 
 export function formatGithubOutput(gates, impact, release = "") {
   return [
     ...Object.entries(gates).map(([gate, value]) => `gate_${gate}=${value}`),
-    `impact_full=${impact.full && !release ? "true" : "false"}`,
+    `impact_full=${impact.full && release !== "landed" ? "true" : "false"}`,
     `release=${release}`,
   ];
 }
@@ -532,9 +538,12 @@ export function main(argv = process.argv.slice(2), env = process.env, cwd = proc
   gates = releaseGates(gates, release);
   const lines = formatGithubOutput(gates, impact, release);
   if (githubOutput) appendFileSync(githubOutput, `${lines.join("\n")}\n`);
-  const summary = release
-    ? `### CI lane selection\n\nRelease pull request (${release}): every lane is off; the release rehearsal is this pull request's CI.`
-    : summaryMarkdown(changedFiles, impact, gates);
+  const summary =
+    release === "landed"
+      ? "### CI lane selection\n\nLanded release commit: every lane is off; its release pull request's CI tested this tree."
+      : release
+        ? `${summaryMarkdown(changedFiles, impact, gates)}\n\nRelease pull request (${release}): the release rehearsal runs beside these lanes.`
+        : summaryMarkdown(changedFiles, impact, gates);
   if (summaryPath) appendFileSync(summaryPath, `${summary}\n`);
   process.stdout.write(`${summary}\n`);
   return 0;

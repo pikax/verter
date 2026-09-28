@@ -86,12 +86,13 @@ git push origin v0.0.1-beta.1
 
 The `release.yml` workflow runs automatically on tag push:
 
-1. **validate** — clippy, fmt, test
-2. **build-native** — 7 platform targets (parallel)
-3. **build-wasm** — WASM binary (parallel)
-4. **publish-crates** — crates.io (after validate)
-5. **publish-npm** — npm with `--tag beta` (after native + wasm builds)
-6. **github-release** — GitHub Release with binaries
+1. **validate** — proves the tag is the squash of the release pull request
+   whose CI passed for this tree (`scripts/release-proof.mjs`); the tests and
+   every build already ran there, as its CI lanes and `Release Check`
+2. **publish-crates** — crates.io (after validate)
+3. **publish-npm** — npm with `--tag beta`, from the release pull request's
+   CI artifacts
+4. **github-release** — GitHub Release with the same binaries
 7. **deploy-playground** — Netlify deployment
 
 ## 6. Post-Release Verification

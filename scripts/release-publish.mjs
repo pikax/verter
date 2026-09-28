@@ -64,6 +64,7 @@ import {
 import { createInterface } from "node:readline/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { computePublishSet, PUBLISHED_CRATES, scanWorkspacePackages } from "./lib/publish-set.mjs";
+import { releaseProof } from "./release-proof.mjs";
 import {
   BINARY_FAMILIES,
   invokedAsEntrypoint,
@@ -606,28 +607,28 @@ function ghJson(args) {
   return JSON.parse(result.stdout);
 }
 
-/** The completed release.yml run for the tag's commit, newest first. */
-function findReleaseRun(tag, tagSha) {
-  const runs = ghJson([
-    "run",
-    "list",
-    "--workflow",
-    "release.yml",
-    "--branch",
-    tag,
-    "--limit",
-    "20",
-    "--json",
-    "databaseId,headSha,status,createdAt",
-  ]);
-  const candidates = runs.filter((r) => r.headSha === tagSha && r.status === "completed");
-  if (candidates.length === 0) {
-    fail(
-      `no completed release.yml run found for ${tag} at ${tagSha} — pass --run <id> once the build jobs have finished`,
+/**
+ * The run whose artifacts the tag ships: its release pull request's CI run,
+ * whose rehearsal built them for the tagged tree (scripts/release-proof.mjs).
+ * The tag's own release.yml run builds nothing; it publishes that run's
+ * artifacts, and so does this.
+ */
+async function findReleaseRun(tag, tagSha) {
+  const repo = ghJson(["repo", "view", "--json", "nameWithOwner"]).nameWithOwner;
+  try {
+    return await releaseProof({
+      repo,
+      sha: tagSha,
+      titlePrefix: "release: ",
+      rehearsal: "Release Check",
+      artifacts: ["native-*", "native-loader", "tsc-*", "lsp-*", "mcp-*", "wasm"],
+      api: async (path) => ghJson(["api", path]),
+    });
+  } catch (error) {
+    return fail(
+      `${tag}: ${error instanceof Error ? error.message : String(error)} — pass --run <id> to name the run`,
     );
   }
-  candidates.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-  return candidates[0].databaseId;
 }
 
 async function local(flags) {
@@ -676,7 +677,8 @@ async function local(flags) {
 
   // --- Download the tag's release-run artifacts (the exact binaries CI built
   // for this tag), unless a previous invocation already did.
-  const runId = flags.get("run") ?? findReleaseRun(tag, tagSha);
+  const proven = flags.get("run") ? null : await findReleaseRun(tag, tagSha);
+  const runId = flags.get("run") ?? proven.runId;
   const runInfo = ghJson([
     "run",
     "view",
@@ -684,8 +686,15 @@ async function local(flags) {
     "--json",
     "headSha,status,conclusion,workflowName",
   ]);
-  if (runInfo.headSha !== tagSha) {
-    fail(`run ${runId} built ${runInfo.headSha}, not the tagged commit ${tagSha}`);
+  // The proven run tested the release pull request's head, whose tree is the
+  // tagged tree; a named run must be that head's or the tag's own.
+  const treeOf = (sha) => ghJson(["api", `/repos/{owner}/{repo}/git/commits/${sha}`]).tree?.sha;
+  if (
+    runInfo.headSha !== tagSha &&
+    runInfo.headSha !== proven?.head &&
+    treeOf(runInfo.headSha) !== treeOf(tagSha)
+  ) {
+    fail(`run ${runId} built ${runInfo.headSha}, whose tree is not the tagged commit ${tagSha}'s`);
   }
   log(`Release run: ${runId} (${runInfo.workflowName}, ${runInfo.status}/${runInfo.conclusion})`);
 

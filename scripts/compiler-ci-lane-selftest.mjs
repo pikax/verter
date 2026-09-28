@@ -68,17 +68,25 @@ test("Svelte conformance runs for golden-generator changes", () => {
   assert.match(conformanceJob, /gen-svelte-goldens\.mjs --conformance --check/);
 });
 
-// @ai-generated - Guards clean-checkout package entrypoints used by release JavaScript tests.
-test("release builds TypeScript package entrypoints before JavaScript tests", () => {
-  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "release.yml"), "utf8");
-  const testJob = yamlJob(workflow, "test");
+// @ai-generated - Guards clean-checkout package entrypoints used by the JavaScript tests.
+// The JavaScript suite is CI's js-build-test lane, which a release pull request
+// runs and a tag's release reuses; release.yml runs no JavaScript tests itself.
+test("CI builds TypeScript package entrypoints before JavaScript tests", () => {
+  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+  const testJob = yamlJob(workflow, "js-build-test");
   const build = testJob.indexOf("pnpm run build:ts");
-  const tests = testJob.indexOf("pnpm test");
+  const tests = testJob.indexOf("name: Run tests");
 
-  assert.notEqual(build, -1, "release tests must build untracked package dist entrypoints");
-  assert.notEqual(tests, -1, "release must execute the JavaScript test suite");
+  assert.notEqual(build, -1, "the JavaScript lane must build untracked package dist entrypoints");
+  assert.notEqual(tests, -1, "the JavaScript lane must execute the JavaScript test suite");
   assert.ok(
     build < tests,
     "TypeScript package entrypoints must exist before JavaScript tests start",
+  );
+  const release = readFileSync(join(REPO_ROOT, ".github", "workflows", "release.yml"), "utf8");
+  assert.doesNotMatch(
+    release,
+    /pnpm test\b/,
+    "release.yml reuses CI's JavaScript suite instead of repeating it",
   );
 });

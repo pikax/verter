@@ -850,10 +850,12 @@ test("every workflow runner pin equals the wasm-bindgen version the gate derives
   const expected = deriveWasmBindgenPin([{ name: "verter_wasm", bindgenReqs: [declared[1]] }]);
   assert.equal(expected.error, null, expected.error || "");
 
+  // Every workflow that still pins the runner pins the tree's version; ci.yml
+  // must pin it, because ci.yml runs the lane (release.yml reuses CI's run).
   for (const workflow of ["ci.yml", "release.yml"]) {
     const source = readFileSync(join(REPO_ROOT, ".github", "workflows", workflow), "utf8");
     const pins = [...source.matchAll(/wasm-bindgen-cli@([0-9][^\s"']*)/g)].map((m) => m[1]);
-    assert.ok(pins.length > 0, `${workflow} must pin wasm-bindgen-cli`);
+    if (workflow === "ci.yml") assert.ok(pins.length > 0, `${workflow} must pin wasm-bindgen-cli`);
     for (const pin of pins) {
       assert.equal(
         pin,
@@ -863,14 +865,14 @@ test("every workflow runner pin equals the wasm-bindgen version the gate derives
     }
   }
 
-  // Each workflow must actually RUN the lane, and provision what it needs. Which
-  // entry point runs it is not the invariant — `release.yml` reaches it through
-  // the canonical gate, while `ci.yml` builds one shared nextest archive and
-  // therefore drives the lane through its standalone entry. The invariant is
-  // that a workflow does not merely install the target and the runner and then
-  // never execute the only run that can reach a `#[wasm_bindgen_test]` case.
+  // CI must actually RUN the lane, and provision what it needs: `ci.yml` builds
+  // one shared nextest archive and drives the lane through its standalone entry.
+  // The invariant is that it does not merely install the target and the runner
+  // and then never execute the only run that can reach a `#[wasm_bindgen_test]`
+  // case. A release reuses the release pull request's CI run instead of running
+  // the lane again, so release.yml is not held to it.
   const LANE_ENTRIES = ["node scripts/gate.mjs --exhaustive", "scripts/wasm-js-boundary-lane.mjs"];
-  for (const workflow of ["ci.yml", "release.yml"]) {
+  for (const workflow of ["ci.yml"]) {
     const source = readFileSync(join(REPO_ROOT, ".github", "workflows", workflow), "utf8");
     assert.ok(
       LANE_ENTRIES.some((entry) => source.includes(entry)),
