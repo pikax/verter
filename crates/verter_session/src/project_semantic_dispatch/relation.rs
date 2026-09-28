@@ -10821,12 +10821,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // literals compare as the top-level ones do, so `{ o: { a: 1, b: 2
         // } }` is not below `{ o: { a: 1 } }`.
         if self.subtype_mode() && surface_is_object_literal(target) {
+            let target_keys = target.key_index();
             let lists_unknown = source.positive_members().iter().any(|member| {
                 let Some(key) = member.key.cloned_known() else {
                     return false;
                 };
                 matches!(
-                    target.project_known_key(&key),
+                    target_keys.project_known_key(&key),
                     crate::semantic_query::SurfaceKeyProjection::AbsentProven
                 ) && !matches!(
                     self.graph().node_data(member.value).as_deref(),
@@ -10845,7 +10846,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // else its setter's parameter — related once per key, never as the
         // accessor functions.
         let graph = self.graph();
-        let mut accessor_keys: Vec<crate::semantic_query::PropertyKey> = Vec::new();
+        // Each target property looks its key up on the source: through an
+        // index of the source's keys, so the relation costs one lookup per
+        // property rather than a scan of the source per property.
+        let source_keys = source.key_index();
+        let mut accessor_keys: rustc_hash::FxHashSet<crate::semantic_query::PropertyKey> =
+            rustc_hash::FxHashSet::default();
         for t_prop in closed_target.complete_members() {
             let Some(target_key) = t_prop.key.cloned_known() else {
                 return RelationResult::Unknown;
@@ -10856,10 +10862,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     verter_type_expr::ObjectMethodKind::Get
                     | verter_type_expr::ObjectMethodKind::Set,
                 ) => {
-                    if accessor_keys.contains(&target_key) {
+                    if !accessor_keys.insert(target_key.clone()) {
                         continue;
                     }
-                    accessor_keys.push(target_key.clone());
                     match target
                         .project_known_key_accessor(&target_key)
                         .and_then(|accessor| accessor.property_member(graph))
@@ -10880,7 +10885,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 _ => t_prop,
             };
-            if let Some(accessor) = source.project_known_key_accessor(&target_key) {
+            if let Some(accessor) = source_keys.project_known_key_accessor(&target_key) {
                 let prop_result = match accessor.property_member(graph) {
                     Some(source_member) => {
                         self.relate_property_pair(&source_member, t_prop, bindings)
@@ -10893,7 +10898,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 continue;
             }
-            let prop_result = match source.project_known_key(&target_key) {
+            let prop_result = match source_keys.project_known_key(&target_key) {
                 crate::semantic_query::SurfaceKeyProjection::Exact(source_member) => {
                     self.relate_property_pair(source_member, t_prop, bindings)
                 }

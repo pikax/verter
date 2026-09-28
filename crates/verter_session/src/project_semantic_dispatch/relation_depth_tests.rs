@@ -481,3 +481,76 @@ fn a_small_union_source_is_no_recursion_entry_of_its_own() {
         .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Relating two wide object types looks each target property up on the
+/// source without scanning it: the member comparisons key lookups make by
+/// scanning a surface grow linearly with the width at 500, 1,000 and 2,000
+/// members, as the relation checks do.
+///
+/// Oracle: `[{ k0: { a: 1 }, … }] extends [{ k0: { a: number }, … }] ? 1 :
+/// 2` holds, `1`, at every width.
+#[test]
+fn relating_wide_object_types_costs_the_same_per_member() {
+    let members = |width: usize, value: &str| {
+        (0..width)
+            .map(|index| format!("k{index}: {{ a: {value} }}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let work = |width: usize| {
+        let probe = format!(
+            "[{{ {} }}] extends [{{ {} }}] ? 1 : 2",
+            members(width, "1"),
+            members(width, "number")
+        );
+        let scans = crate::semantic_query::key_scan_comparisons_for_tests();
+        let (checks, answer) =
+            super::checker_probe_lane_tests::with_probe("", &probe, |dispatch, node| {
+                (
+                    dispatch.graph().stats_snapshot().relation_check_count,
+                    crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                        dispatch, node, 0,
+                    ),
+                )
+            });
+        assert_eq!(answer, "1", "the {width}-member relation holds");
+        (
+            checks,
+            crate::semantic_query::key_scan_comparisons_for_tests() - scans,
+        )
+    };
+    let (at_500, at_1000, at_2000) = (work(500), work(1000), work(2000));
+    assert_eq!(
+        (at_1000.0 - at_500.0) * 2,
+        at_2000.0 - at_1000.0,
+        "relation checks at 500 / 1,000 / 2,000 members: {at_500:?} / {at_1000:?} / {at_2000:?}"
+    );
+    assert_eq!(
+        (at_1000.1 - at_500.1) * 2,
+        at_2000.1 - at_1000.1,
+        "scanned key comparisons at 500 / 1,000 / 2,000 members: {at_500:?} / {at_1000:?} / {at_2000:?}"
+    );
+}
+
+/// A target property finds the source member addressing the same JS
+/// property, whichever spelling each writes.
+///
+/// Measured: `[{ 1: 1 }] extends [{ "1": number }] ? 1 : 2`, `[{ "1": 1 }]
+/// extends [{ 1: number }]` and `[{ 1: 1; b: 2 }] extends [{ "1": number;
+/// b: number }]` are `1`; `[{ "01": 1 }] extends [{ 1: number }]` is `2`.
+#[test]
+fn a_property_finds_the_member_of_either_spelling() {
+    let failures = mismatches(
+        "",
+        &[
+            (r#"[{ 1: 1 }] extends [{ "1": number }] ? 1 : 2"#, "1"),
+            (r#"[{ "1": 1 }] extends [{ 1: number }] ? 1 : 2"#, "1"),
+            (
+                r#"[{ 1: 1; b: 2 }] extends [{ "1": number; b: number }] ? 1 : 2"#,
+                "1",
+            ),
+            (r#"[{ "01": 1 }] extends [{ 1: number }] ? 1 : 2"#, "2"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

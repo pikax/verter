@@ -1204,6 +1204,19 @@ Recorded plainly so no reader mistakes absence for a pass:
   difference over 8/12/16 equal to that over 12/16/20; it fails with the
   re-recording restored), and 256 nested calls lower in 0.5 s optimized.
 
+* **Relating two object types looks each property up once.** Each
+  target property found its source member by scanning the source's
+  members, so relating two object types of `n` members made `n²` key
+  comparisons: 1,000, 2,000 and 5,000 members took 115, 323 and 1,408 ms
+  to relate unoptimized (the best of five cold relations), 251,500 to
+  4,006,000 comparisons from 500 to 2,000 members. The relation indexes
+  the source's keys once (`SurfaceView::key_index`, dropped with the
+  relation) and looks each target property up there under the JS
+  property spelling (`{ 1: … }` and `{ "1": … }` are one property): 145,
+  305 and 609 ms, and no scanned comparison
+  (`relation_depth_tests.rs` →
+  `relating_wide_object_types_costs_the_same_per_member`,
+  `a_property_finds_the_member_of_either_spelling`).
 * **A pair of literal types relates without a query.** Two literal types
   relate, under every relation kind, exactly when they are one value, so
   the relation authority decides such a pair before its reentry intercept,
