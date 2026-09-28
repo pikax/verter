@@ -24,16 +24,14 @@ use crate::analysis::top_level_owners::TopLevelOwnerTable;
 use crate::analysis::types::*;
 
 /// Whether `statements` declare a `TSInterfaceDeclaration` named exactly
-/// `AppConfig`: at the statement level, in an `ExportNamedDeclaration`,
-/// in an `ExportDefaultDeclaration`, or anywhere inside the bodies of the
-/// `namespace` / `declare module` / `declare global` blocks among them,
-/// however deeply those nest (a dotted `namespace A.B` reaches its block
-/// through each of its names). Type aliases (`type AppConfig = ...`) are
-/// not interfaces and are excluded — the AppConfig override surface only
-/// merges across `interface` declarations.
+/// `AppConfig`: at the statement level, in an `export` declaration, in an
+/// `export default` declaration, or nested inside a namespace, a `declare
+/// module` or a `declare global` block. Type aliases (`type AppConfig =
+/// ...`) are not interfaces and are excluded — the AppConfig override
+/// surface only merges across `interface` declarations.
 ///
-/// The nested blocks are walked from an explicit stack, so a namespace
-/// nest of any depth reads without a native frame per level.
+/// A block nested in a block costs no native level: the blocks still to
+/// search are an explicit stack.
 fn statements_declare_interface_app_config(statements: &[Statement<'_>]) -> bool {
     let mut pending = vec![statements.iter()];
     while let Some(statements) = pending.last_mut() {
@@ -42,62 +40,67 @@ fn statements_declare_interface_app_config(statements: &[Statement<'_>]) -> bool
             continue;
         };
         match app_config_in_statement(statement) {
-            AppConfigInStatement::Declared => return true,
-            AppConfigInStatement::Absent => {}
-            AppConfigInStatement::Block(block) => pending.push(block.body.iter()),
+            AppConfigSearch::Found => return true,
+            AppConfigSearch::Absent => {}
+            AppConfigSearch::Block(block) => pending.push(block.body.iter()),
         }
     }
     false
 }
 
-/// What one statement says of an `AppConfig` interface: declared by it,
-/// absent from it, or left to the module block it opens.
-enum AppConfigInStatement<'s, 'a> {
-    Declared,
+/// What one statement says about an `AppConfig` interface: it declares
+/// one, it does not, or its answer is the block it nests.
+enum AppConfigSearch<'s, 'a> {
+    Found,
     Absent,
     Block(&'s TSModuleBlock<'a>),
 }
 
-fn app_config_in_statement<'s, 'a>(statement: &'s Statement<'a>) -> AppConfigInStatement<'s, 'a> {
-    let is_app_config = |iface: &TSInterfaceDeclaration<'_>| {
-        if iface.id.name.as_str() == "AppConfig" {
-            AppConfigInStatement::Declared
-        } else {
-            AppConfigInStatement::Absent
+/// The block a namespace declaration's body is, past a dotted name's
+/// segments (`namespace A.B { … }`).
+fn namespace_body_block<'s, 'a>(decl: &'s TSNamespaceDeclaration<'a>) -> &'s TSModuleBlock<'a> {
+    let mut body = &decl.body;
+    loop {
+        match body {
+            TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => body = &inner.body,
+            TSNamespaceDeclarationBody::TSModuleBlock(block) => return block,
         }
-    };
-    let block = |block: Option<&'s TSModuleBlock<'a>>| match block {
-        Some(block) => AppConfigInStatement::Block(block),
-        None => AppConfigInStatement::Absent,
-    };
-    match statement {
-        Statement::TSInterfaceDeclaration(iface) => is_app_config(iface),
-        Statement::ExportDeclaration(export) => match &export.declaration {
-            Declaration::TSInterfaceDeclaration(iface) => is_app_config(iface),
-            Declaration::TSNamespaceDeclaration(module) => block(Some(namespace_block(module))),
-            Declaration::TSExternalModuleDeclaration(module) => block(module.body.as_deref()),
-            Declaration::TSGlobalDeclaration(global) => block(Some(&global.body)),
-            _ => AppConfigInStatement::Absent,
-        },
-        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
-            ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => is_app_config(iface),
-            _ => AppConfigInStatement::Absent,
-        },
-        Statement::TSNamespaceDeclaration(module) => block(Some(namespace_block(module))),
-        Statement::TSExternalModuleDeclaration(module) => block(module.body.as_deref()),
-        Statement::TSGlobalDeclaration(global) => block(Some(&global.body)),
-        _ => AppConfigInStatement::Absent,
     }
 }
 
-/// The block a `namespace` declaration opens, through each name of a
-/// dotted `namespace A.B.C`.
-fn namespace_block<'s, 'a>(mut module: &'s TSNamespaceDeclaration<'a>) -> &'s TSModuleBlock<'a> {
-    loop {
-        match &module.body {
-            TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => module = inner,
-            TSNamespaceDeclarationBody::TSModuleBlock(block) => return block,
+fn app_config_in_statement<'s, 'a>(stmt: &'s Statement<'a>) -> AppConfigSearch<'s, 'a> {
+    let named = |iface: &TSInterfaceDeclaration<'_>| {
+        if iface.id.name.as_str() == "AppConfig" {
+            AppConfigSearch::Found
+        } else {
+            AppConfigSearch::Absent
         }
+    };
+    let external = |module: &'s TSExternalModuleDeclaration<'a>| match module.body.as_ref() {
+        Some(block) => AppConfigSearch::Block(block),
+        None => AppConfigSearch::Absent,
+    };
+    match stmt {
+        Statement::TSInterfaceDeclaration(iface) => named(iface),
+        Statement::ExportDeclaration(export) => match &export.declaration {
+            Declaration::TSInterfaceDeclaration(iface) => named(iface),
+            Declaration::TSNamespaceDeclaration(module) => {
+                AppConfigSearch::Block(namespace_body_block(module))
+            }
+            Declaration::TSExternalModuleDeclaration(module) => external(module),
+            Declaration::TSGlobalDeclaration(global) => AppConfigSearch::Block(&global.body),
+            _ => AppConfigSearch::Absent,
+        },
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => named(iface),
+            _ => AppConfigSearch::Absent,
+        },
+        Statement::TSNamespaceDeclaration(module) => {
+            AppConfigSearch::Block(namespace_body_block(module))
+        }
+        Statement::TSExternalModuleDeclaration(module) => external(module),
+        Statement::TSGlobalDeclaration(global) => AppConfigSearch::Block(&global.body),
+        _ => AppConfigSearch::Absent,
     }
 }
 
