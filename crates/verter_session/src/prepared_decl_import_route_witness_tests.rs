@@ -380,8 +380,8 @@ fn component_meta_admits_nothing_for_an_owner_with_an_unrootable_witness() {
 
 // Sibling fixture modules, declared here rather than in `lib.rs`: both
 // pin behaviour of the same import-route-witness / prepared-decl-bundle
-// rail this module documents, and `lib.rs` carries a line ceiling that
-// exists to keep module declarations from accumulating there.
+// rail this module documents, and `lib.rs` stays a thin crate root rather
+// than accumulating module declarations.
 #[path = "resolution_signature_growth_tests.rs"]
 mod resolution_signature_growth_tests;
 
