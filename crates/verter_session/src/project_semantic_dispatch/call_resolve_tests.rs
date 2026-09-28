@@ -2506,9 +2506,11 @@ fn dependent_type_parameter_default_substitutes_earlier_bindings() {
 // Ambient `Function.prototype.call` rebasing
 // ---------------------------------------------------------------------------
 
-/// The vendored non-generic ambient `call`.
+/// A non-generic ambient `call` on `CallableFunction`, the apparent
+/// interface whose `call` the prototype rebase covers.
 const AMBIENT_PLAIN_CALL: &str = r#"
-interface Function {
+interface Function {}
+interface CallableFunction {
   call(this: Function, thisArg: any, ...argArray: any[]): any;
 }
 "#;

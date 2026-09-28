@@ -24731,11 +24731,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     )
                 };
                 let mut callee_node = receiver;
+                // The object the called member is read off: the call's
+                // receiver, which the executor route reads.
+                let mut object = receiver;
                 for name in member.iter() {
                     // A member of an `any` receiver is `any`.
                     if is_any(callee_node) {
                         break;
                     }
+                    object = callee_node;
                     let this_source = self.this_member_source(callee_node, name);
                     let Some(read) = this_source
                         .and_then(|source| self.receiver_non_public_member(source, name))
@@ -24758,6 +24762,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 if is_any(callee_node) {
                     return Positional::Value(CallValue::modeled_any(self.dispatch));
                 }
+                self.call_receivers.insert(site.span(), object);
                 if let Some(value) = self.eval_call_via_resolve_call(callee_node, site, arguments) {
                     return value;
                 }
@@ -24776,10 +24781,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.call_member_of_value(object, member, site, arguments)
             }
             crate::flow_slice_content::SliceCall::OnElement { object, index } => {
-                // `t[k]()`: the key is a binding read (evaluated here, in
-                // constant depth), and its literal type names the member of
-                // the object the call resolves over, the object its
-                // receiver. A key of any other type is the typed marker.
+                // `t[k]()`: the key is a binding read (a leaf, evaluated
+                // here), and its literal type names the member of the
+                // object the call resolves over, the object its receiver.
+                // A key of any other type is the typed marker.
                 let object = match self.call_operand_value(object, site) {
                     Positional::Value(node) => node,
                     Positional::Hold => return Positional::Hold,
