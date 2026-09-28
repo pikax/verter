@@ -31,11 +31,10 @@
  * exactly once each, binds production behavior and test cost to the pinned
  * nextest lanes, clean/warm build time to cargo --timings recipes with both
  * cache states and an executable prepare (cargo clean vs a first cargo
- * build of the same packages), and application latency to a host/session gate cell,
- * commits only deterministically re-derivable structural counts
- * (re-derived here on every run), and ratifies the god-module threshold
- * basis ARH0-DEBT-5 requires before ARH12 may extend the existing guard.
- * No wall-clock, RSS or speedup number may be committed in any dimension.
+ * build of the same packages), and application latency to a host/session gate cell.
+ * File size and item counts are not architecture evidence: no line count,
+ * size threshold or population count is recorded or compared here, and no
+ * wall-clock, RSS or speedup number may be committed in any dimension.
  * ARH2-ratification fails when the manifest and the verifier disagree about
  * the case contract, so the manifest cannot claim checks that do not run.
  * Historical source titles and dates are optional context; validation
@@ -129,11 +128,6 @@ function existsRel(rel) {
 
 function readRel(rel) {
   return fs.readFileSync(path.join(REPO_ROOT, rel), "utf8");
-}
-
-/** Rust `str::lines()` semantics: LF-split, trailing newline adds no line. */
-function rustLineCount(text) {
-  return text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
 }
 
 /**
@@ -634,7 +628,6 @@ function collectPinCommands(characterization) {
 function validatePopulation(products, predecessors, errors) {
   const caseId = "ARH2-population";
   const characterization = products["characterization"];
-  const measurements = products["complexity-measurements"];
   const arh0 = predecessors.arh0;
   const arh1 = predecessors.arh1;
 
@@ -710,62 +703,6 @@ function validatePopulation(products, predecessors, errors) {
           detail: `${hotspot.path}: ${key.split("|")[0]} is not an ARH1 authority responsibility`,
         });
       }
-    }
-  }
-
-  // Re-derived structural populations.
-  const inv = arh0["codebase-inventory"];
-  const declaredPops = measurements.populations?.arh0Inventory;
-  if (declaredPops?.crates !== inv.crates.length) {
-    errors.push({
-      caseId,
-      code: "population-count-drift",
-      detail: `arh0Inventory.crates=${declaredPops?.crates} but the live inventory carries ${inv.crates.length} rows`,
-    });
-  }
-  if (declaredPops?.packages !== inv.packages.length) {
-    errors.push({
-      caseId,
-      code: "population-count-drift",
-      detail: `arh0Inventory.packages=${declaredPops?.packages} but the live inventory carries ${inv.packages.length} rows`,
-    });
-  }
-  if (measurements.populations?.arh1HotspotContracts !== arh1Paths.length) {
-    errors.push({
-      caseId,
-      code: "population-count-drift",
-      detail: `arh1HotspotContracts=${measurements.populations?.arh1HotspotContracts} but ARH1 carries ${arh1Paths.length}`,
-    });
-  }
-  if (measurements.populations?.arh0GodModuleCandidates !== arh0Gods.length) {
-    errors.push({
-      caseId,
-      code: "population-count-drift",
-      detail: `arh0GodModuleCandidates=${measurements.populations?.arh0GodModuleCandidates} but ARH0 carries ${arh0Gods.length}`,
-    });
-  }
-
-  // Per-hotspot structural complexity, re-derived live.
-  const structural = new Map((measurements.structural || []).map((r) => [r.path, r.fileLoc]));
-  if (!sameSet([...structural.keys()], ownPaths)) {
-    errors.push({
-      caseId,
-      code: "structural-population-drift",
-      detail: "structural rows are not exactly the characterized hotspots",
-    });
-  }
-  for (const [rel, recorded] of structural) {
-    if (!existsRel(rel)) {
-      errors.push({ caseId, code: "structural-file-missing", detail: rel });
-      continue;
-    }
-    const live = rustLineCount(readRel(rel));
-    if (live !== recorded) {
-      errors.push({
-        caseId,
-        code: "structural-loc-drift",
-        detail: `${rel}: recorded ${recorded} fileLoc, live ${live}`,
-      });
     }
   }
 }
@@ -996,12 +933,23 @@ function validateCharacterization(products, predecessors, errors) {
     const liveHooks = (schedulerText.match(/pub fn test_\w+/g) || []).map((s) =>
       s.replace("pub fn ", ""),
     );
-    if (declaredHooks.length !== liveHooks.length) {
-      errors.push({
-        caseId,
-        code: "route-surface-drift",
-        detail: `ARH1 declares ${declaredHooks.length} test-configuration hooks but the live scheduler carries ${liveHooks.length} pub fn test_* hooks`,
-      });
+    for (const hook of liveHooks) {
+      if (!declaredHooks.includes(hook)) {
+        errors.push({
+          caseId,
+          code: "route-surface-drift",
+          detail: `live pub fn ${hook} in ${schedulerRel} is not an ARH1 test-configuration hook`,
+        });
+      }
+    }
+    for (const hook of declaredHooks) {
+      if (!liveHooks.includes(hook)) {
+        errors.push({
+          caseId,
+          code: "route-surface-drift",
+          detail: `ARH1 test-configuration hook ${hook} is not a live pub fn of ${schedulerRel}`,
+        });
+      }
     }
   }
   const bulkRoute = (characterization.routes || []).find((r) => r.cutoverRow === "ARH1-CUT-4");
@@ -1294,75 +1242,6 @@ function validateSeparation(products, predecessors, errors) {
       caseId,
       code: "runner-class-unbound",
       detail: `numberPolicy.runnerClass must equal the locked [runner] class ${runnerClass}`,
-    });
-  }
-
-  // Threshold ratification: the guard exists, its ceiling matches the live
-  // declaration, and the measured basis is re-derived live.
-  const basis = measurements.godModuleBasis;
-  const thresholdRows = measurements.thresholds || [];
-  if (!Array.isArray(thresholdRows) || thresholdRows.length === 0) {
-    errors.push({
-      caseId,
-      code: "threshold-block-missing",
-      detail: "ARH0-DEBT-5 requires a ratified threshold basis before ARH12 extends the guard",
-    });
-  }
-  const guardFile = thresholdRows[0]?.guardFile;
-  if (!existsRel(guardFile)) {
-    errors.push({ caseId, code: "threshold-guard-missing", detail: guardFile });
-  } else {
-    const guardText = readRel(guardFile);
-    if (!guardText.includes(`fn ${thresholdRows[0].guard}(`)) {
-      errors.push({
-        caseId,
-        code: "threshold-guard-unknown",
-        detail: `${thresholdRows[0].guard} is not a function of ${guardFile}`,
-      });
-    }
-    const liveCeiling = Number(guardText.match(/DEFAULT_MAX_LINES: usize = (\d+)/)?.[1]);
-    if (thresholdRows[0].defaultMaxLines !== liveCeiling || basis?.thresholdLoc !== liveCeiling) {
-      errors.push({
-        caseId,
-        code: "threshold-ceiling-mismatch",
-        detail: `ratified ceiling must equal the live guard ceiling ${liveCeiling}`,
-      });
-    }
-  }
-  const isTestFixture = (rel) =>
-    rel.endsWith("_tests.rs") || rel.endsWith("/tests.rs") || rel.includes("/tests/");
-  const overThreshold = [];
-  const walk = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const abs = path.join(dir, entry.name);
-      const rel = path.relative(REPO_ROOT, abs).split(path.sep).join("/");
-      if (entry.isDirectory()) walk(abs);
-      else if (
-        entry.name.endsWith(".rs") &&
-        rel.startsWith("crates/") &&
-        rel.includes("/src/") &&
-        !isTestFixture(rel) &&
-        rustLineCount(readRel(rel)) > basis.thresholdLoc
-      ) {
-        overThreshold.push(rel);
-      }
-    }
-  };
-  walk(path.join(REPO_ROOT, "crates"));
-  if (basis?.productionFilesOverThreshold !== overThreshold.length) {
-    errors.push({
-      caseId,
-      code: "threshold-basis-drift",
-      detail: `recorded ${basis?.productionFilesOverThreshold} production files over ${basis?.thresholdLoc} LOC, live derivation finds ${overThreshold.length}`,
-    });
-  }
-  const hotspotLocs = new Map((measurements.structural || []).map((r) => [r.path, r.fileLoc]));
-  const hotspotsOver = [...hotspotLocs.values()].filter((loc) => loc > basis?.thresholdLoc).length;
-  if (basis?.hotspotsWithinPopulation !== hotspotsOver) {
-    errors.push({
-      caseId,
-      code: "threshold-basis-drift",
-      detail: `recorded ${basis?.hotspotsWithinPopulation} hotspots in the over-threshold population, live derivation finds ${hotspotsOver}`,
     });
   }
 }

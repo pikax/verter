@@ -219,6 +219,27 @@ by node identity, so equal structures keep equal keys however their subtrees
 are shared. `Eq`, `Ord` and `Hash` all read the same `(fingerprint, exact)`
 pair.
 
+Ordering a union's members reads their keys without writing them. The store
+keeps a hash-consed table of key classes (`KeyClasses`: one class per distinct
+subtree, each node classified once per store), and a member is ordered by its
+class's fingerprint, with exact bytes written only when two fingerprints
+collide. A class whose key is its full expansion — at most one child longer
+than `SHARED_SUBTREE_MIN_BYTES`, itself such a class, so no back-reference is
+ever written inside it — gets its fingerprint folded from its parts: one
+FNV-1a byte step moves the hash by XOR only in its low byte, so a run of `n`
+bytes maps a state `h` to `P^n · h + T[h mod 256]`, and a class's `T` entries
+are memoized (for classes standing for at least `FOLD_MEMO_MIN_BYTES`, 2048,
+of their own key bytes — the size of a full `T`). The fingerprint values, and
+therefore every order and key byte, are unchanged; the work of reducing a
+nested union chain is linear in its depth
+(`union_reduction_work_is_linear_in_the_chain_depth`,
+`a_folded_fingerprint_is_the_hash_of_the_written_key`). Any other class is
+written and hashed once. The table is store-owned and resident: a document
+close forgets its released nodes' entries and empties the table once released
+entries outnumber live ones (`the_key_table_releases_the_classes_of_released_nodes`);
+`stable_key_class_count`, `stable_key_classified_count` and
+`stable_key_memo_count` measure it.
+
 ### Encoding revisions under `VerterStableV1`
 
 The schema version byte stays `1`. No stable key outlives its process — the

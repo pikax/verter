@@ -1122,7 +1122,7 @@ const WALK_ENTRIES: [&str; 5] = [
 ];
 
 /// The containments a walk of oxc's runs under.
-const CONTAINMENTS: [&str; 7] = [
+const CONTAINMENTS: [&str; 10] = [
     "with_program_stack",
     "with_node_stack",
     "with_ast_stack",
@@ -1130,6 +1130,9 @@ const CONTAINMENTS: [&str; 7] = [
     "with_span_stack",
     "with_nesting_stack",
     "with_own_syntax_stack",
+    "leased_program_walk",
+    "leased_span_walk",
+    "leased_ast_walk",
 ];
 
 /// `source` with its comments, strings and character literals blanked
@@ -1405,7 +1408,7 @@ fn no_crate_walks_oxc_syntax_around_the_containment() {
     assert!(
         bypasses.is_empty(),
         "walk oxc syntax under `with_program_stack`, `with_node_stack`, `with_ast_stack`, \
-         `with_source_stack`, `with_span_stack` or `with_nesting_stack` ({} sites):\n{}",
+         `with_source_stack`, `with_span_stack`, `with_nesting_stack` or a leased walk ({} sites):\n{}",
         bypasses.len(),
         bypasses.join("\n")
     );
@@ -1685,6 +1688,144 @@ fn a_walk_stack_lease_that_cannot_be_reserved_starts_no_walk() {
     assert!(refused, "the lease is refused");
     assert!(!started, "no walk starts under a refused lease");
     assert_eq!(retried, Ok(1));
+}
+
+/// An operation recording its refusals learns of a parse refused its stack
+/// inside it, of an expression parse's, and of a walk-stack lease's, however
+/// the operation went on to use the refusal; an operation enclosing it
+/// learns of it too, one recording nothing learns of none made outside it,
+/// and a refusal made where no operation records is recorded nowhere.
+#[test]
+fn an_operation_learns_of_every_stack_refusal_made_inside_it() {
+    let outcomes = on_a_small_thread(|| {
+        let source = deep_source();
+        let parenthesized = format!("{}1{}", "(".repeat(10_000), ")".repeat(10_000));
+        let allocator = Allocator::default();
+        let parse = || {
+            super::faults::fail_next_reservations(1);
+            // The operation reads the refused parse as an empty program.
+            Parser::new(&allocator, &source, SourceType::ts())
+                .parse()
+                .program
+                .body
+                .len()
+        };
+        let parsed = super::refusals_within(parse);
+        let expression = super::refusals_within(|| {
+            super::faults::fail_next_reservations(1);
+            Parser::new(&allocator, &parenthesized, SourceType::ts())
+                .parse_expression()
+                .is_err()
+        });
+        let program = Parser::new(&allocator, &source, SourceType::ts())
+            .parse()
+            .program;
+        let leased = super::refusals_within(|| {
+            super::faults::fail_next_reservations(1);
+            super::with_program_walk_stack_lease(&program, || ()).is_err()
+        });
+        let enclosing = super::refusals_within(|| super::refusals_within(parse).1);
+        let complete = super::refusals_within(|| {
+            Parser::new(&allocator, &source, SourceType::ts())
+                .parse()
+                .program
+                .body
+                .len()
+        });
+        let unrecorded = parse();
+        let after = super::refusals_within(|| ()).1;
+        (
+            parsed, expression, leased, enclosing, complete, unrecorded, after,
+        )
+    });
+    let (parsed, expression, leased, enclosing, complete, unrecorded, after) = outcomes;
+    assert_eq!(parsed.0, 0);
+    assert!(parsed.1.is_some(), "the parse's refusal");
+    assert!(expression.0);
+    assert!(expression.1.is_some(), "the expression parse's refusal");
+    assert!(leased.0);
+    assert!(leased.1.is_some(), "the lease's refusal");
+    assert_eq!(enclosing.0, parsed.1, "the inner operation's");
+    assert_eq!(enclosing.1, parsed.1, "carried to the outer");
+    assert_eq!(complete, (1, None));
+    assert_eq!(unrecorded, 0);
+    assert_eq!(after, None, "no operation recorded the unrecorded refusal");
+}
+
+/// A walk under a walk-stack lease of its own reserves nothing past the
+/// lease: a refused lease is the typed refusal, the walk does not run, the
+/// operation around it learns of the refusal, and the thread goes on (no
+/// failed reservation ends the process). The lease retried runs the walk.
+/// Test builds report a leased walk that could reserve while no operation
+/// records, whose refusal would reach none.
+#[test]
+fn a_leased_walk_refused_its_lease_is_the_typed_refusal() {
+    let (recorded, unrecorded, retried, reported) = on_a_small_thread(|| {
+        let source = deep_source();
+        let allocator = Allocator::default();
+        let program = Parser::new(&allocator, &source, SourceType::ts())
+            .parse()
+            .program;
+        let _ = super::faults::take_unleased_walks();
+        let walked = std::cell::Cell::new(false);
+        let walk = || walked.set(true);
+        super::faults::fail_next_reservations(1);
+        let recorded = super::refusals_within(|| super::leased_program_walk(&program, walk));
+        let recorded = (recorded.0.is_err(), recorded.1.is_some(), walked.get());
+        super::faults::fail_next_reservations(1);
+        let site = format!("oxc_parse/tests.rs:{}", line!() + 1);
+        let unrecorded = super::leased_program_walk(&program, walk).is_err();
+        let unrecorded = (unrecorded, walked.get(), site);
+        let retried = super::refusals_within(|| super::leased_program_walk(&program, walk));
+        let retried = (retried.0.is_ok(), retried.1.is_none(), walked.get());
+        (
+            recorded,
+            unrecorded,
+            retried,
+            super::faults::take_unleased_walks(),
+        )
+    });
+    let (unrecorded, unrecorded_walked, site) = unrecorded;
+    assert_eq!(recorded, (true, true, false), "refused, recorded, not run");
+    assert_eq!(
+        (unrecorded, unrecorded_walked),
+        (true, false),
+        "refused, not run, not aborted"
+    );
+    assert_eq!(
+        retried,
+        (true, true, true),
+        "granted, nothing recorded, run"
+    );
+    assert_eq!(
+        reported.len(),
+        1,
+        "the unrecorded walk's site: {reported:?}"
+    );
+    assert!(reported[0].ends_with(&site), "{reported:?} vs {site}");
+}
+
+/// An operation that unwinds restores the record of the one enclosing it,
+/// which keeps the refusal it learned of before.
+#[test]
+fn an_unwinding_operation_restores_the_enclosing_record() {
+    let (inner_unwound, outer) = on_a_small_thread(|| {
+        let source = deep_source();
+        super::refusals_within(|| {
+            let allocator = Allocator::default();
+            super::faults::fail_next_reservations(1);
+            Parser::new(&allocator, &source, SourceType::ts()).parse();
+            std::panic::catch_unwind(|| {
+                super::refusals_within(|| -> () { std::panic::resume_unwind(Box::new("unwinds")) })
+            })
+            .is_err()
+        })
+    });
+    assert!(inner_unwound);
+    assert!(
+        outer.is_some(),
+        "the refusal made before the inner operation"
+    );
 }
 
 /// Every walk inside a walk-stack lease, of the whole program, of its
@@ -1984,29 +2125,76 @@ fn takes_oxc_syntax(parameters: &str) -> bool {
     })
 }
 
-/// Whether `body` calls the function `name`: `name(`, `self.name(` or
-/// `Self::name(`, not a method of that name on another value.
-fn calls_itself(body: &str, name: &str) -> bool {
-    body.match_indices(name).any(|(at, _)| {
-        let after = body[at + name.len()..].trim_start();
-        if !after.starts_with('(') {
-            return false;
+/// The names of the functions `body` calls, `name(`, `self.name(` or
+/// `Self::name(`, or passes by name as an argument, not a method of that
+/// name on another value.
+fn called_names<'b>(parameters: &str, body: &'b str) -> std::collections::BTreeSet<&'b str> {
+    let bytes = body.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut called = std::collections::BTreeSet::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if !ident(bytes[at]) || (at > 0 && ident(bytes[at - 1])) {
+            at += 1;
+            continue;
         }
+        let end = at + bytes[at..].iter().take_while(|&&b| ident(b)).count();
+        let name = &body[at..end];
         let before = &body[..at];
-        if before.ends_with("self.") || before.ends_with("Self::") {
-            return true;
+        // A nested function's definition (`fn name(`) names it, not a call.
+        let defined = before.trim_end().strip_suffix("fn").is_some_and(|rest| {
+            !rest
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        let direct = before.ends_with("self.")
+            || before.ends_with("Self::")
+            || !before
+                .chars()
+                .next_back()
+                .is_some_and(|c| c == '.' || c == ':');
+        let after = body[end..].trim_start();
+        // A call, or the function passed by name (`.any(walk)`).
+        // A name bound as a parameter, a `let` or a closure parameter is a
+        // value of that name, not the function.
+        let bound = |name: &str| {
+            let binds = |text: &str, pattern: String| {
+                text.match_indices(&pattern).any(|(at, _)| {
+                    !text[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                })
+            };
+            binds(parameters, format!("{name}:"))
+                || binds(body, format!("let {name}"))
+                || binds(body, format!("let mut {name}"))
+                || binds(body, format!("|{name}"))
+        };
+        // A function passed by name is the one argument of a method call, as
+        // an iterator adaptor takes it: `.any(walk)`.
+        let passed = || {
+            let Some(call) = before.trim_end().strip_suffix('(') else {
+                return false;
+            };
+            let method = call.trim_end_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
+            method.len() < call.len() && method.ends_with('.') && after.starts_with(')')
+        };
+        let called_or_passed = after.starts_with('(') || (passed() && !bound(name));
+        if direct && !defined && called_or_passed {
+            called.insert(name);
         }
-        !before
-            .chars()
-            .next_back()
-            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == ':')
-    })
+        at = end;
+    }
+    called
 }
 
-/// Every function in `code` that takes oxc syntax by reference and calls
-/// itself: its name.
-fn self_recursions_over_oxc_syntax(code: &str) -> Vec<String> {
-    let mut found = Vec::new();
+/// Every function in `code` that takes oxc syntax by reference and lies on
+/// a cycle of calls among the functions of `code`, itself or through
+/// others: its name. Functions of one name are one node of the call graph.
+fn recursions_over_oxc_syntax(code: &str) -> Vec<String> {
+    let mut functions: Vec<(String, bool, &str, &str)> = Vec::new();
     for (at, _) in code.match_indices("fn ") {
         if code[..at]
             .chars()
@@ -2044,9 +2232,7 @@ fn self_recursions_over_oxc_syntax(code: &str) -> Vec<String> {
         let Some(close) = close else {
             continue;
         };
-        if !takes_oxc_syntax(&rest[open..close]) {
-            continue;
-        }
+        let takes = takes_oxc_syntax(&rest[open..close]);
         let Some(body_open) = rest[close..].find(['{', ';']).map(|offset| close + offset) else {
             continue;
         };
@@ -2068,10 +2254,44 @@ fn self_recursions_over_oxc_syntax(code: &str) -> Vec<String> {
                 _ => {}
             }
         }
-        if calls_itself(&rest[body_open + 1..body_end], &name) {
-            found.push(name);
-        }
+        functions.push((
+            name,
+            takes,
+            &rest[open + 1..close],
+            &rest[body_open + 1..body_end],
+        ));
     }
+    let mut calls: std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> =
+        std::collections::BTreeMap::new();
+    for (name, _, _, _) in &functions {
+        calls.entry(name.as_str()).or_default();
+    }
+    for (name, _, parameters, body) in &functions {
+        let callees: Vec<&str> = called_names(parameters, body)
+            .into_iter()
+            .filter(|callee| calls.contains_key(callee))
+            .collect();
+        calls.entry(name.as_str()).or_default().extend(callees);
+    }
+    let on_a_cycle = |start: &str| {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut stack: Vec<&str> = calls[start].iter().copied().collect();
+        while let Some(name) = stack.pop() {
+            if name == start {
+                return true;
+            }
+            if seen.insert(name) {
+                stack.extend(calls[name].iter().copied());
+            }
+        }
+        false
+    };
+    let mut found: Vec<String> = functions
+        .iter()
+        .filter(|(name, takes, _, _)| *takes && on_a_cycle(name))
+        .map(|(name, _, _, _)| name.clone())
+        .collect();
+    found.dedup();
     found
 }
 
@@ -2079,7 +2299,8 @@ fn self_recursions_over_oxc_syntax(code: &str) -> Vec<String> {
 /// once per level of it, as oxc's walks do, but no containment guard sees
 /// them: they belong on explicit work stacks. The census in
 /// `hand_written_recursions.txt` lists the ones that do (a function over
-/// oxc syntax that calls itself directly; mutual recursion is not found);
+/// oxc syntax on a cycle of calls within its file: calling itself, or
+/// calling or passing by name a function that leads back to it);
 /// a new one fails here. Move it to an explicit stack, or, when its depth
 /// is bounded by something other than the source's nesting, list it with
 /// that bound. An entry that no longer recurses is removed from the list.
@@ -2130,7 +2351,7 @@ fn hand_written_recursions_over_oxc_syntax_do_not_grow() {
                 .expect("under the crates directory")
                 .to_string_lossy()
                 .replace('\\', "/");
-            for function in self_recursions_over_oxc_syntax(&code) {
+            for function in recursions_over_oxc_syntax(&code) {
                 live.insert(format!("{relative} {function}"));
             }
         }

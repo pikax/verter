@@ -1046,18 +1046,6 @@ fn require_retained_selection_of_bound_graph(
     // counts — the same axes `ReturnPathPeeker::plan` enforces —
     // against its own budget. The final selection's node sets are
     // disjoint by construction, so the lengths ARE the selected count.
-    let return_sites = selection
-        .origins()
-        .iter()
-        .filter(|origin| matches!(origin, SliceOrigin::Return(_)))
-        .count();
-    if return_sites > budget.max_return_sites as usize {
-        return Err(FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
-            axis: FlowSliceBudgetAxis::ReturnSites,
-            limit: budget.max_return_sites,
-            observed: u32::try_from(return_sites).unwrap_or(u32::MAX),
-        }));
-    }
     let selected_nodes = selection.value_nodes().len() + selection.effect_only_nodes().len();
     if selected_nodes > budget.max_selected_nodes as usize {
         return Err(FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {

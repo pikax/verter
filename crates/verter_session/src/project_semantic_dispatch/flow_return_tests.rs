@@ -2659,7 +2659,6 @@ pub(crate) fn flow_slice_budget_exceeded_is_return_only_at_the_memo() {
     host.project_type_store()
         .flow_slice()
         .set_budget_for_test(FlowSliceBudget {
-            max_return_sites: 256,
             max_selected_nodes: 1,
             ..FlowSliceBudget::default()
         });

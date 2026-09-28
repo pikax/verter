@@ -81,9 +81,12 @@ pub fn infer_combined_program_mode(
 #[must_use]
 pub fn script_uses_runes(program: &Program<'_>, store_exempt: &FxHashSet<String>) -> bool {
     let statements = program.body.iter().collect::<Vec<_>>();
-    crate::oxc_parse::with_program_stack(program, || {
+    // A walk refused its stack answers no runes; the operation around it is
+    // refused with the refusal.
+    crate::oxc_parse::leased_program_walk(program, || {
         statements_use_runes(&statements, store_exempt)
     })
+    .unwrap_or(false)
 }
 
 /// Detect rune use across a combined position-preserving program while
@@ -103,9 +106,12 @@ pub fn partitioned_program_uses_runes(
             instance.push(statement);
         }
     }
-    crate::oxc_parse::with_program_stack(program, || {
+    // A walk refused its stack answers no runes; the operation around it is
+    // refused with the refusal.
+    crate::oxc_parse::leased_program_walk(program, || {
         statements_use_runes(&instance, store_exempt) || statements_use_runes(&module, store_exempt)
     })
+    .unwrap_or(false)
 }
 
 /// Compute the rune-root store accessor exemptions from a combined program.

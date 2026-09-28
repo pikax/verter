@@ -80,6 +80,7 @@ pub fn remaining() -> Option<usize> {
 /// place when the stack this thread runs on has them; on the lease's
 /// region, without reserving, when the thread holds a lease covering them;
 /// on a region of `needed` bytes reserved for it otherwise.
+#[track_caller]
 pub fn with_stack<R>(
     needed: usize,
     purpose: Reservation,
@@ -100,11 +101,23 @@ pub fn with_stack<R>(
                 region if !region.busy.get() => Ok(region.run(work)),
                 // Work on the region is suspended under a region reserved
                 // past the lease: this walk gets one of its own.
-                _ => Ok(Region::reserve(needed, purpose)?.run(work)),
+                _ => Ok(reserve_past_lease(needed, purpose)?.run(work)),
             },
         },
-        _ => Ok(Region::reserve(needed, purpose)?.run(work)),
+        _ => Ok(reserve_past_lease(needed, purpose)?.run(work)),
     }
+}
+
+/// Reserve a region for work no lease covers: a parse, or a walk outside
+/// its operation's lease (which test builds record by its call site,
+/// [`faults::take_unleased_walks`]).
+#[track_caller]
+fn reserve_past_lease(needed: usize, purpose: Reservation) -> Result<Region, StackUnavailable> {
+    #[cfg(any(test, feature = "stack-fault-injection"))]
+    if purpose == Reservation::Walk {
+        faults::unleased_walk(std::panic::Location::caller());
+    }
+    Region::reserve(needed, purpose)
 }
 
 /// Run `operation` holding a walk-stack lease of `needed` bytes: the
@@ -125,13 +138,64 @@ pub fn with_walk_stack_lease<R>(
     let region = if remaining().is_some_and(|left| left >= needed) {
         None
     } else {
-        Some(Region::reserve(needed, Reservation::Lease)?)
+        match Region::reserve(needed, Reservation::Lease) {
+            Ok(region) => Some(region),
+            Err(unavailable) => return Err(record_refusal(unavailable)),
+        }
     };
     let _lease = LeaseScope::enter(Lease {
         bytes: needed,
         region: region.as_ref().map(|region| region as *const Region),
     });
     Ok(operation())
+}
+
+thread_local! {
+    /// While an operation records its refusals ([`refusals_within`]), the
+    /// first stack refusal made inside it on this thread; `None` while no
+    /// operation records.
+    static REFUSALS: Cell<Option<Option<StackUnavailable>>> = const { Cell::new(None) };
+}
+
+/// Run `operation`, returning with its result the first stack refusal made
+/// inside it on this thread: a parse not run, or a walk-stack lease not
+/// reserved. An operation that made one is incomplete whatever it
+/// returns, and so is every operation enclosing it that records its
+/// refusals.
+pub fn refusals_within<R>(operation: impl FnOnce() -> R) -> (R, Option<StackUnavailable>) {
+    /// Restores the enclosing operation's record, on return and on unwind
+    /// alike, carrying this operation's refusal into it.
+    struct Recording(Option<Option<StackUnavailable>>);
+    impl Drop for Recording {
+        fn drop(&mut self) {
+            let inner = REFUSALS.with(|refusals| refusals.replace(self.0)).flatten();
+            if let (Some(refused), Some(None)) = (inner, self.0) {
+                REFUSALS.with(|refusals| refusals.set(Some(Some(refused))));
+            }
+        }
+    }
+    let recording = Recording(REFUSALS.with(|refusals| refusals.replace(Some(None))));
+    let result = operation();
+    let refused = REFUSALS.with(Cell::get).flatten();
+    drop(recording);
+    (result, refused)
+}
+
+/// Whether an operation records its refusals on this thread
+/// ([`refusals_within`]).
+pub(super) fn recording() -> bool {
+    REFUSALS.with(Cell::get).is_some()
+}
+
+/// Record `unavailable` for the operation recording its refusals on this
+/// thread, if one is; returns it.
+pub(super) fn record_refusal(unavailable: StackUnavailable) -> StackUnavailable {
+    REFUSALS.with(|refusals| {
+        if refusals.get() == Some(None) {
+            refusals.set(Some(Some(unavailable)));
+        }
+    });
+    unavailable
 }
 
 /// Whether the thread holds a walk-stack lease covering `needed` bytes.
@@ -219,6 +283,12 @@ pub mod faults {
     thread_local! {
         static FAILING: Cell<usize> = const { Cell::new(0) };
         static RESERVED: Cell<usize> = const { Cell::new(0) };
+        /// This thread's own reservations to fail, keyed by purpose and bytes:
+        /// the matching ones still to let through first, then the ones to fail.
+        static HERE: Cell<Option<(Reservation, usize, usize, usize)>> = const { Cell::new(None) };
+        /// This thread's own reservations so far, by purpose and bytes.
+        static MADE_HERE: std::cell::RefCell<Vec<(Reservation, usize, usize)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
     }
 
     /// Reservations on any thread to fail, keyed by purpose and bytes.
@@ -236,9 +306,83 @@ pub mod faults {
     /// Every reservation on any thread so far, by purpose and bytes.
     static MADE: Mutex<Vec<(Reservation, usize, usize)>> = Mutex::new(Vec::new());
 
+    /// The call sites of the walks, on any thread, whose stack refusal no
+    /// operation would report: a walk no walk-stack lease covered, which can
+    /// reserve a region of its own, and a leased walk that could reserve
+    /// while no operation records its refusals.
+    static UNLEASED: Mutex<Vec<&'static std::panic::Location<'static>>> = Mutex::new(Vec::new());
+
+    pub(in crate::oxc_parse) fn unleased_walk(at: &'static std::panic::Location<'static>) {
+        let mut unleased = UNLEASED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !unleased.contains(&at) {
+            unleased.push(at);
+        }
+    }
+
+    /// The call sites (`file:line`) of the walks, on any thread, whose stack
+    /// refusal no operation would report, since the last call.
+    pub fn take_unleased_walks() -> Vec<String> {
+        let mut unleased = UNLEASED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut sites: Vec<String> = unleased
+            .drain(..)
+            .map(|at| format!("{}:{}", at.file().replace('\\', "/"), at.line()))
+            .collect();
+        sites.sort();
+        sites
+    }
+
     /// Make the next `count` reservations on this thread fail.
     pub fn fail_next_reservations(count: usize) {
         FAILING.with(|failing| failing.set(count));
+    }
+
+    /// Make the next `count` reservations for `purpose` of exactly `needed`
+    /// bytes that this thread makes fail; another thread's, of the same
+    /// purpose and size, go through.
+    pub fn fail_reservations_here(purpose: Reservation, needed: usize, count: usize) {
+        fail_reservations_here_after(purpose, needed, 0, count);
+    }
+
+    /// Let the next `skip` reservations for `purpose` of exactly `needed`
+    /// bytes that this thread makes through, then make the `count` after
+    /// them fail; another thread's go through.
+    pub fn fail_reservations_here_after(
+        purpose: Reservation,
+        needed: usize,
+        skip: usize,
+        count: usize,
+    ) {
+        HERE.with(|here| here.set((count > 0).then_some((purpose, needed, skip, count))));
+    }
+
+    /// The size [`fail_reservations_here_after`] takes to match a reservation
+    /// of any size.
+    pub const ANY_SIZE: usize = usize::MAX;
+
+    /// The reservations this thread made so far for `purpose`, of any size.
+    pub fn reservations_here_of(purpose: Reservation) -> usize {
+        MADE_HERE.with(|made| {
+            made.borrow()
+                .iter()
+                .filter(|&&(held, _, _)| held == purpose)
+                .map(|&(_, _, count)| count)
+                .sum()
+        })
+    }
+
+    /// The reservations this thread made so far for `purpose` of exactly
+    /// `needed` bytes.
+    pub fn reservations_here(purpose: Reservation, needed: usize) -> usize {
+        MADE_HERE.with(|made| {
+            made.borrow()
+                .iter()
+                .find(|&&(held, bytes, _)| (held, bytes) == (purpose, needed))
+                .map_or(0, |&(_, _, count)| count)
+        })
     }
 
     /// Make the next `count` reservations for `purpose` of exactly `needed`
@@ -305,6 +449,32 @@ pub mod faults {
             left > 0
         });
         if thread_fails {
+            return true;
+        }
+        MADE_HERE.with(|made| {
+            let mut made = made.borrow_mut();
+            match made
+                .iter_mut()
+                .find(|(held, bytes, _)| (*held, *bytes) == (purpose, needed))
+            {
+                Some(entry) => entry.2 += 1,
+                None => made.push((purpose, needed, 1)),
+            }
+        });
+        let here_fails = HERE.with(|here| match here.get() {
+            Some((held, bytes, skip, fail))
+                if held == purpose && (bytes == needed || bytes == ANY_SIZE) =>
+            {
+                if skip > 0 {
+                    here.set(Some((held, bytes, skip - 1, fail)));
+                    return false;
+                }
+                here.set((fail > 1).then_some((held, bytes, 0, fail - 1)));
+                true
+            }
+            _ => false,
+        });
+        if here_fails {
             return true;
         }
         let mut targeted = TARGETED

@@ -123,7 +123,43 @@ impl ParsedEvalProgram {
 
     /// Demand the content-free index and register arena addresses once under
     /// this retained parse owner. Neither the arena nor its node table leaves it.
+    ///
+    /// The index's walks of the program run under a walk-stack lease for it,
+    /// the one fallible step: a refused lease is `None`, recorded for the
+    /// operation around it, and leaves nothing indexed, so a later demand
+    /// whose lease is granted indexes the program.
     pub(crate) fn function_program_index(
+        &self,
+        owners: &verter_semantic::analysis::top_level_owners::TopLevelOwnerTable,
+        canonical: Arc<str>,
+        parse_env_hash: &crate::types::Hash16,
+    ) -> Option<Arc<FunctionProgramIndex>> {
+        if let Some(cell) = self.functions.get() {
+            return Some(Arc::clone(&cell.borrow_dependent().index));
+        }
+        self.leased(|| self.index_functions(owners, canonical, parse_env_hash))
+    }
+
+    /// Run `walks`, walks of this program, under a walk-stack lease for it,
+    /// sized from the program's one shared scan: the lease is the walks'
+    /// one fallible step. A refused lease is `None`, recorded for the
+    /// operation around it, and the result that would have read the walks
+    /// is partial, so no cache retains what was computed without them.
+    fn leased<R>(&self, walks: impl FnOnce() -> R) -> Option<R> {
+        let program = self.borrow_dependent();
+        let nesting = *self.nesting.get_or_init(|| {
+            verter_parser::oxc_parse::syntax_nesting(program.source_text, program.source_type)
+        });
+        match verter_parser::oxc_parse::with_walk_stack_lease(nesting, walks) {
+            Ok(result) => Some(result),
+            Err(_) => {
+                crate::request_context::mark_request_result_partial();
+                None
+            }
+        }
+    }
+
+    fn index_functions(
         &self,
         owners: &verter_semantic::analysis::top_level_owners::TopLevelOwnerTable,
         canonical: Arc<str>,
@@ -175,7 +211,8 @@ impl ParsedEvalProgram {
         {
             return None;
         }
-        Some(lower(retained.nodes.get(&entry.key)?, indexed))
+        let node = retained.nodes.get(&entry.key)?;
+        self.leased(|| lower(node, indexed))
     }
 
     /// Lower the indexed call, `new` or tagged template addressed by `span`.
@@ -187,7 +224,8 @@ impl ParsedEvalProgram {
         ) -> R,
     ) -> Option<R> {
         let cell = self.functions.get()?;
-        Some(lower(cell.borrow_dependent().nodes.call_site(span)?))
+        let site = cell.borrow_dependent().nodes.call_site(span)?;
+        self.leased(|| lower(site))
     }
 
     /// Whether the parse recovered from errors (`ParserReturn::errors`

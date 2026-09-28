@@ -111,6 +111,23 @@ fn parentheses_nested_10000_deep_answer_on_production_stacks() {
     );
 }
 
+/// A chain of 10,000 member reads off a constructed value
+/// (`new C().c.c…`): its lowering and its evaluation read the chain from
+/// explicit stacks, deciding once that it is rooted at a value, so the
+/// work grows with the chain's length. TypeScript 7.0.2: `C`, under every
+/// setting.
+#[test]
+fn value_rooted_member_chains_10000_long_answer_on_production_stacks() {
+    let source = format!(
+        "class C {{ c: C = this; }}\nexport function pf() {{ return new C(){}; }}\n",
+        ".c".repeat(DEPTH)
+    );
+    assert_eq!(
+        mismatches_on_a_small_stack(source, RETURN, "C"),
+        Vec::<String>::new()
+    );
+}
+
 #[test]
 fn logical_nots_nested_10000_deep_answer_on_production_stacks() {
     let source = returning(format!("{}1", "!".repeat(DEPTH)));
@@ -464,11 +481,12 @@ export const v = b{};
 }
 
 /// A module constant initialized by a receiver chain reads as the chain's
-/// last call. TypeScript 7.0.2: `B`, under every setting.
+/// last call: its indexed initializer reads each call's callee as a member
+/// of the value of the call before it, from an explicit stack. TypeScript
+/// 7.0.2: `B` for 2, 3 and 400 links, under every setting.
 #[test]
-#[ignore = "a module constant's indexed initializer has no member read of a call's value, so a member call on a call's result is a typed miss"]
 fn module_receiver_chains_answer() {
-    for links in [2, 3] {
+    for links in [2, 3, RECEIVER_CHAINS_UNDER_THE_WORK_BUDGET] {
         assert_eq!(
             mismatches_on_a_small_stack(module_receiver_chain(links), "typeof v", "B"),
             Vec::<String>::new(),
@@ -477,18 +495,18 @@ fn module_receiver_chains_answer() {
     }
 }
 
-/// A module constant initialized by a receiver chain 10,000 links long
-/// reads on the production stacks: the indexed initializer's calls
-/// evaluate from an explicit stack.
+/// A module constant initialized by a receiver chain 10,000 links long,
+/// read in a function, returns the connected-demand work budget's typed
+/// failure on the production stacks.
 #[test]
 fn module_receiver_chains_10000_deep_read_on_production_stacks() {
     assert_eq!(
-        mismatches_on_a_small_stack(module_receiver_chain(1), "typeof v", "B"),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        mismatches_on_a_small_stack(module_receiver_chain(DEPTH), "typeof v", "B"),
-        mismatches_on_a_small_stack(module_receiver_chain(3), "typeof v", "B")
+        return_on_a_small_stack(format!(
+            "{}export function pf() {{ return v; }}
+",
+            module_receiver_chain(DEPTH)
+        )),
+        WORK_BUDGET_EXCEEDED
     );
 }
 
@@ -829,7 +847,7 @@ fn label_chains_4000_deep_answer_on_production_stacks() {
 /// An `else if` chain 10,000 long. TypeScript 7.0.2: `1 | 2` (reporting
 /// TS2563, body too large for control-flow analysis), under every setting.
 #[test]
-#[ignore = "the flow-slice plan's return-site budget admits no 10,001 return sites"]
+#[ignore = "the flow-slice plan budget admits no demand slice of 10,001 return sites"]
 fn else_if_chains_10000_long_answer_on_production_stacks() {
     assert_eq!(
         mismatches_on_a_small_stack(else_if_chain(DEPTH), RETURN, "1 | 2"),
@@ -849,27 +867,71 @@ fn else_if_chains_10000_long_return_on_production_stacks() {
     );
 }
 
-/// An `else if` chain 250 long, whose return sites the flow-slice plan's
-/// return-site budget admits. TypeScript 7.0.2: `1 | 2`, under every
+/// `else if` chains 250, 300 and 800 long: each return site is work the
+/// connected demand pays for, not a fixed ceiling. TypeScript 7.0.2: `1 |
+/// 2`, under every setting.
+#[test]
+fn else_if_chains_250_300_and_800_long_answer_on_production_stacks() {
+    for length in [250, 300, 800] {
+        assert_eq!(
+            mismatches_on_a_small_stack(else_if_chain(length), RETURN, "1 | 2"),
+            Vec::<String>::new(),
+            "{length} arms"
+        );
+    }
+}
+
+/// A `switch` whose `cases` cases each return their own literal, and whose
+/// `default` returns `-1`.
+fn switch_returns(cases: usize) -> String {
+    let arms: String = (0..cases)
+        .map(|case| format!("case {case}: return {case}; "))
+        .collect();
+    format!("export function pf(x: number) {{ switch (x) {{ {arms}default: return -1; }} }}\n")
+}
+
+/// The union `-1 | 0 | 1 | … | cases - 1` of [`switch_returns`]'s literals.
+fn switch_returns_union(cases: usize) -> &'static str {
+    let union: Vec<String> = std::iter::once("-1".to_owned())
+        .chain((0..cases).map(|case| case.to_string()))
+        .collect();
+    Box::leak(union.join(" | ").into_boxed_str())
+}
+
+/// A `switch` with 300 and with 800 returning cases and a returning
+/// `default`: the return is the union of every case's literal. TypeScript
+/// 7.0.2: `-1 | 0 | 1 | … | 299` and `-1 | 0 | 1 | … | 799`, under every
 /// setting.
 #[test]
-fn else_if_chains_250_long_answer_on_production_stacks() {
+fn switches_with_300_and_800_returning_cases_answer_on_production_stacks() {
+    for cases in [300, 800] {
+        assert_eq!(
+            mismatches_on_a_small_stack(switch_returns(cases), RETURN, switch_returns_union(cases)),
+            Vec::<String>::new(),
+            "{cases} cases"
+        );
+    }
+}
+
+/// A `switch` with 10,000 returning cases returns the connected-demand work
+/// budget's typed failure on the production stacks.
+#[test]
+fn switches_with_10000_returning_cases_return_on_production_stacks() {
     assert_eq!(
-        mismatches_on_a_small_stack(else_if_chain(250), RETURN, "1 | 2"),
-        Vec::<String>::new()
+        return_on_a_small_stack(switch_returns(DEPTH)),
+        WORK_BUDGET_EXCEEDED
     );
 }
 
-/// A nest whose return statements the flow-slice plan's return-site budget
-/// (256) admits: the unreachable and dead-path chains below carry one and
-/// two returns per level.
-const UNDER_THE_RETURN_SITE_BUDGET: usize = 120;
+/// A nest whose demand slice the flow-slice plan budget admits: the
+/// unreachable and dead-path chains below carry one and two returns per
+/// level.
+const UNDER_THE_SLICE_BUDGET: usize = 120;
 
 /// Unreachable code nested deep, each level a block behind a `return`: each
 /// unreachable region evaluates as a frame of its enclosing region's run.
 /// 10,000 deep the return is the plan's typed budget failure; under the
-/// return-site budget TypeScript 7.0.2 answers `number`, under every
-/// setting.
+/// slice budget TypeScript 7.0.2 answers `number`, under every setting.
 #[test]
 fn unreachable_code_nested_10000_deep_returns_on_production_stacks() {
     let source = |depth: usize| {
@@ -881,7 +943,7 @@ fn unreachable_code_nested_10000_deep_returns_on_production_stacks() {
     };
     assert_eq!(return_on_a_small_stack(source(DEPTH)), WORK_BUDGET_EXCEEDED);
     assert_eq!(
-        mismatches_on_a_small_stack(source(UNDER_THE_RETURN_SITE_BUDGET), RETURN, "number"),
+        mismatches_on_a_small_stack(source(UNDER_THE_SLICE_BUDGET), RETURN, "number"),
         Vec::<String>::new()
     );
 }
@@ -889,8 +951,7 @@ fn unreachable_code_nested_10000_deep_returns_on_production_stacks() {
 /// Code past an exhaustive `switch` nested deep: each region's statements
 /// past the dead path evaluate on its own dead tail, a frame of the run.
 /// 10,000 deep the return is the plan's typed budget failure; under the
-/// return-site budget TypeScript 7.0.2 answers `number`, under every
-/// setting.
+/// slice budget TypeScript 7.0.2 answers `number`, under every setting.
 #[test]
 fn code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks() {
     let source = |depth: usize| {
@@ -902,7 +963,7 @@ fn code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks(
     };
     assert_eq!(return_on_a_small_stack(source(DEPTH)), WORK_BUDGET_EXCEEDED);
     assert_eq!(
-        mismatches_on_a_small_stack(source(UNDER_THE_RETURN_SITE_BUDGET), RETURN, "number"),
+        mismatches_on_a_small_stack(source(UNDER_THE_SLICE_BUDGET), RETURN, "number"),
         Vec::<String>::new()
     );
 }

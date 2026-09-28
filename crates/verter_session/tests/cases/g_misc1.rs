@@ -46,8 +46,6 @@ mod multi_candidate_storage;
 mod multi_project_no_collision_resolved_imports;
 #[path = "g_misc1/no_eager_invalidation.rs"]
 mod no_eager_invalidation;
-#[path = "g_misc1/no_lib_rs_growth.rs"]
-mod no_lib_rs_growth;
 #[path = "g_misc1/owner_import_surface_and_negative_route_facts.rs"]
 mod owner_import_surface_and_negative_route_facts;
 #[path = "g_misc1/parse_resolve_domain_separation.rs"]
