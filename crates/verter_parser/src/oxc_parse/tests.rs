@@ -1984,29 +1984,69 @@ fn takes_oxc_syntax(parameters: &str) -> bool {
     })
 }
 
-/// Whether `body` calls the function `name`: `name(`, `self.name(` or
-/// `Self::name(`, not a method of that name on another value.
-fn calls_itself(body: &str, name: &str) -> bool {
-    body.match_indices(name).any(|(at, _)| {
-        let after = body[at + name.len()..].trim_start();
-        if !after.starts_with('(') {
-            return false;
+/// The names of the functions `body` calls, `name(`, `self.name(` or
+/// `Self::name(`, or passes by name as an argument, not a method of that
+/// name on another value.
+fn called_names<'b>(parameters: &str, body: &'b str) -> std::collections::BTreeSet<&'b str> {
+    let bytes = body.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut called = std::collections::BTreeSet::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if !ident(bytes[at]) || (at > 0 && ident(bytes[at - 1])) {
+            at += 1;
+            continue;
         }
+        let end = at + bytes[at..].iter().take_while(|&&b| ident(b)).count();
+        let name = &body[at..end];
         let before = &body[..at];
-        if before.ends_with("self.") || before.ends_with("Self::") {
-            return true;
+        let direct = before.ends_with("self.")
+            || before.ends_with("Self::")
+            || !before
+                .chars()
+                .next_back()
+                .is_some_and(|c| c == '.' || c == ':');
+        let after = body[end..].trim_start();
+        // A call, or the function passed by name (`.any(walk)`).
+        // A name bound as a parameter, a `let` or a closure parameter is a
+        // value of that name, not the function.
+        let bound = |name: &str| {
+            let binds = |text: &str, pattern: String| {
+                text.match_indices(&pattern).any(|(at, _)| {
+                    !text[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                })
+            };
+            binds(parameters, format!("{name}:"))
+                || binds(body, format!("let {name}"))
+                || binds(body, format!("let mut {name}"))
+                || binds(body, format!("|{name}"))
+        };
+        // A function passed by name is the one argument of a method call, as
+        // an iterator adaptor takes it: `.any(walk)`.
+        let passed = || {
+            let Some(call) = before.trim_end().strip_suffix('(') else {
+                return false;
+            };
+            let method = call.trim_end_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
+            method.len() < call.len() && method.ends_with('.') && after.starts_with(')')
+        };
+        let called_or_passed = after.starts_with('(') || (passed() && !bound(name));
+        if direct && called_or_passed {
+            called.insert(name);
         }
-        !before
-            .chars()
-            .next_back()
-            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == ':')
-    })
+        at = end;
+    }
+    called
 }
 
-/// Every function in `code` that takes oxc syntax by reference and calls
-/// itself: its name.
-fn self_recursions_over_oxc_syntax(code: &str) -> Vec<String> {
-    let mut found = Vec::new();
+/// Every function in `code` that takes oxc syntax by reference and lies on
+/// a cycle of calls among the functions of `code`, itself or through
+/// others: its name. Functions of one name are one node of the call graph.
+fn recursions_over_oxc_syntax(code: &str) -> Vec<String> {
+    let mut functions: Vec<(String, bool, &str, &str)> = Vec::new();
     for (at, _) in code.match_indices("fn ") {
         if code[..at]
             .chars()
@@ -2044,9 +2084,7 @@ fn self_recursions_over_oxc_syntax(code: &str) -> Vec<String> {
         let Some(close) = close else {
             continue;
         };
-        if !takes_oxc_syntax(&rest[open..close]) {
-            continue;
-        }
+        let takes = takes_oxc_syntax(&rest[open..close]);
         let Some(body_open) = rest[close..].find(['{', ';']).map(|offset| close + offset) else {
             continue;
         };
@@ -2068,10 +2106,44 @@ fn self_recursions_over_oxc_syntax(code: &str) -> Vec<String> {
                 _ => {}
             }
         }
-        if calls_itself(&rest[body_open + 1..body_end], &name) {
-            found.push(name);
-        }
+        functions.push((
+            name,
+            takes,
+            &rest[open + 1..close],
+            &rest[body_open + 1..body_end],
+        ));
     }
+    let mut calls: std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> =
+        std::collections::BTreeMap::new();
+    for (name, _, _, _) in &functions {
+        calls.entry(name.as_str()).or_default();
+    }
+    for (name, _, parameters, body) in &functions {
+        let callees: Vec<&str> = called_names(parameters, body)
+            .into_iter()
+            .filter(|callee| calls.contains_key(callee))
+            .collect();
+        calls.entry(name.as_str()).or_default().extend(callees);
+    }
+    let on_a_cycle = |start: &str| {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut stack: Vec<&str> = calls[start].iter().copied().collect();
+        while let Some(name) = stack.pop() {
+            if name == start {
+                return true;
+            }
+            if seen.insert(name) {
+                stack.extend(calls[name].iter().copied());
+            }
+        }
+        false
+    };
+    let mut found: Vec<String> = functions
+        .iter()
+        .filter(|(name, takes, _, _)| *takes && on_a_cycle(name))
+        .map(|(name, _, _, _)| name.clone())
+        .collect();
+    found.dedup();
     found
 }
 
@@ -2079,7 +2151,8 @@ fn self_recursions_over_oxc_syntax(code: &str) -> Vec<String> {
 /// once per level of it, as oxc's walks do, but no containment guard sees
 /// them: they belong on explicit work stacks. The census in
 /// `hand_written_recursions.txt` lists the ones that do (a function over
-/// oxc syntax that calls itself directly; mutual recursion is not found);
+/// oxc syntax on a cycle of calls within its file: calling itself, or
+/// calling or passing by name a function that leads back to it);
 /// a new one fails here. Move it to an explicit stack, or, when its depth
 /// is bounded by something other than the source's nesting, list it with
 /// that bound. An entry that no longer recurses is removed from the list.
@@ -2130,7 +2203,7 @@ fn hand_written_recursions_over_oxc_syntax_do_not_grow() {
                 .expect("under the crates directory")
                 .to_string_lossy()
                 .replace('\\', "/");
-            for function in self_recursions_over_oxc_syntax(&code) {
+            for function in recursions_over_oxc_syntax(&code) {
                 live.insert(format!("{relative} {function}"));
             }
         }

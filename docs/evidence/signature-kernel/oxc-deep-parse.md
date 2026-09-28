@@ -315,15 +315,22 @@ each in a child process; restoring any pass's recursion overflows the
 forms that reach it. The dynamic event-name walks of the Vue projection
 walk from explicit stacks too.
 
-A census of the functions over oxc AST types that call themselves
-directly counts 161 left (51 in `verter_semantic`, 38 in `verter_parser`,
-35 each in `verter_session` and `verter_compiler`, 2 in `verter_lsp`);
-mutual recursion is not counted. Some are bounded by a depth of their
-own, and some run inside a walk's containment. They are tracked, not
-converted: `hand_written_recursions_over_oxc_syntax_do_not_grow` fails on
-a new self-recursive function over oxc syntax (listed in
+A census of the functions over oxc AST types that lie on a cycle of
+calls within their file (calling themselves, or calling or passing by
+name a function that leads back to them) counts 251 left (67 in
+`verter_parser`, 66 in `verter_session`, 65 in `verter_semantic`, 51 in
+`verter_compiler`, 2 in `verter_lsp`); a cycle through another file is
+not counted. Some are bounded by a depth of their own, and some run
+inside a walk's containment. They are tracked, not converted:
+`hand_written_recursions_over_oxc_syntax_do_not_grow` fails on a new
+recursive function over oxc syntax (listed in
 `oxc_parse/hand_written_recursions.txt`), pointing it to an explicit
-stack, and on a listed one that no longer recurses.
+stack, and on a listed one that no longer recurses. The analysis
+flagging an `AppConfig` interface in a namespace nest, a cycle of three
+functions the census missed while it counted only direct calls,
+overflowed the scheduler's I/O thread on namespaces nested 10,000 deep
+once analysis ran off the parse's stack region; it walks the nest from
+an explicit stack.
 
 ## Canary
 
