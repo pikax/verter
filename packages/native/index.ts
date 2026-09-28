@@ -608,7 +608,8 @@ export type HostTscProjectionDetailCode =
   | "unsupported-declaration-shape"
   | "invalid-authored-member-ordinal"
   | "invalid-macro-anchor"
-  | "missing-authored-argument-geometry";
+  | "missing-authored-argument-geometry"
+  | "stack-unavailable";
 
 export type HostMacroPartialReason =
   | "budget-exceeded"
@@ -638,9 +639,17 @@ export interface HostTscScriptSetupAttrsFailureSubject {
   sourceRange: { start: number; end: number };
 }
 
-export type HostTscFailureSubject =
+/** The whole source: a failure not attributable to one syntax slot. */
+export interface HostTscSourceFailureSubject {
+  kind: "source";
+}
+
+/** The syntax slot a failure is attributed to. */
+export type HostTscSyntaxFailureSubject =
   | HostTscMacroFailureSubject
   | HostTscScriptSetupAttrsFailureSubject;
+
+export type HostTscFailureSubject = HostTscSyntaxFailureSubject | HostTscSourceFailureSubject;
 
 export type HostTscUnavailableOutcome =
   | {
@@ -688,13 +697,13 @@ interface HostPublicApiProjectionErrorBase {
 export type HostPublicApiProjectionError =
   | (HostPublicApiProjectionErrorBase & {
       detailCode: "unsupported-declaration-shape";
-      subject: HostTscFailureSubject;
+      subject: HostTscSyntaxFailureSubject;
       declarationShapeReason: HostTscDeclarationShapeReason;
       memberOrdinal: null;
     } & HostNoTscUnavailableOutcome)
   | (HostPublicApiProjectionErrorBase & {
       detailCode: "invalid-authored-member-ordinal";
-      subject: HostTscFailureSubject;
+      subject: HostTscSyntaxFailureSubject;
       declarationShapeReason: null;
       memberOrdinal: number;
     } & HostNoTscUnavailableOutcome)
@@ -707,9 +716,19 @@ export type HostPublicApiProjectionError =
   | (HostPublicApiProjectionErrorBase & {
       detailCode: Exclude<
         HostTscProjectionDetailCode,
-        "unavailable-outcome" | "unsupported-declaration-shape" | "invalid-authored-member-ordinal"
+        | "unavailable-outcome"
+        | "unsupported-declaration-shape"
+        | "invalid-authored-member-ordinal"
+        | "stack-unavailable"
       >;
-      subject: HostTscFailureSubject;
+      subject: HostTscSyntaxFailureSubject;
+      declarationShapeReason: null;
+      memberOrdinal: null;
+    } & HostNoTscUnavailableOutcome)
+  | (HostPublicApiProjectionErrorBase & {
+      /** A parse of the source refused its stack: typed incompleteness. */
+      detailCode: "stack-unavailable";
+      subject: HostTscSourceFailureSubject;
       declarationShapeReason: null;
       memberOrdinal: null;
     } & HostNoTscUnavailableOutcome);

@@ -786,8 +786,15 @@ pub struct FfiTscResponse {
     rename_all_fields = "camelCase"
 )]
 pub enum PublicApiProjectionSubject {
-    Macro { syntax_index: u32 },
-    ScriptSetupAttrs { source_range: verter_span::Span },
+    Macro {
+        syntax_index: u32,
+    },
+    ScriptSetupAttrs {
+        source_range: verter_span::Span,
+    },
+    /// The whole source: a failure not attributable to one syntax slot (a
+    /// parse of the source refused its stack).
+    Source,
 }
 
 impl std::fmt::Display for PublicApiProjectionSubject {
@@ -801,6 +808,7 @@ impl std::fmt::Display for PublicApiProjectionSubject {
                 "script setup attrs source range {}..{}",
                 source_range.start, source_range.end
             ),
+            Self::Source => formatter.write_str("the source"),
         }
     }
 }
@@ -824,6 +832,10 @@ mod public_api_projection_subject_tests {
                 "kind": "scriptSetupAttrs",
                 "sourceRange": { "start": 31, "end": 37 },
             })
+        );
+        assert_eq!(
+            serde_json::to_value(PublicApiProjectionSubject::Source).unwrap(),
+            serde_json::json!({ "kind": "source" })
         );
     }
 }

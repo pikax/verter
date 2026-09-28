@@ -302,6 +302,9 @@ fn public_api_projection_mcp_error(
                 "sourceRange": { "start": source_range.start, "end": source_range.end },
             })
         }
+        verter_session::PublicApiProjectionSubject::Source => {
+            serde_json::json!({ "kind": "source" })
+        }
     };
     ErrorData {
         code: rmcp::model::ErrorCode::INTERNAL_ERROR,
