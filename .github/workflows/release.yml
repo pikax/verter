@@ -844,9 +844,12 @@ jobs:
     environment:
       name: npm
       url: https://www.npmjs.com/package/@verter/native
+    # A job's own map replaces the workflow's: the cross-run artifact download
+    # below needs actions: read here too.
     permissions:
       id-token: write
       contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v6

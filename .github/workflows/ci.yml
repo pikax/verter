@@ -1607,6 +1607,27 @@ jobs:
       # native-eval regression fails this required job.
       - name: Native-eval @verter/component-meta
         run: pnpm --filter @verter/component-meta test:native
+      # The workspace suites no other lane runs: until the release stopped
+      # repeating CI, only release.yml's `pnpm test` ran them. They sit here
+      # because component-meta's default suite loads the native binding; the
+      # rest need only the built workspace (`build:ts` above), and the harness
+      # its offline oracle cache.
+      - name: Provision the oracle npm cache (framework-conformance-harness)
+        run: node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs
+      - name: Workspace package suites no other lane runs
+        run: >-
+          pnpm
+          --filter @verter/benchmark
+          --filter @verter/component-meta
+          --filter @verter/framework-conformance-harness
+          --filter @verter/language-shared
+          --filter @verter/lsp-test-client
+          --filter @verter/proto
+          --filter @verter/svelte-runtime-tests
+          --filter @verter/type-ir
+          --filter @verter/typeinfo
+          --filter @verter/vue-conformance-oracle
+          run test
 
   # Native + WASM transport-route comparison, executed. Clippy in
   # rust-build-configs only compiles the feature; this job builds the two

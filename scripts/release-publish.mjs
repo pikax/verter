@@ -686,8 +686,9 @@ async function local(flags) {
     "--json",
     "headSha,status,conclusion,workflowName",
   ]);
-  // The proven run tested the release pull request's head, whose tree is the
-  // tagged tree; a named run must be that head's or the tag's own.
+  // The proven run ran for the release pull request's head and recorded testing
+  // exactly the tagged tree; a run named with --run must be for the tag, that
+  // head, or a commit with the tagged tree.
   const treeOf = (sha) => ghJson(["api", `/repos/{owner}/{repo}/git/commits/${sha}`]).tree?.sha;
   if (
     runInfo.headSha !== tagSha &&

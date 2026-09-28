@@ -82,9 +82,10 @@ the work once:
 
 The tag push then runs only `validate` and the publish jobs. `validate` runs
 `scripts/release-proof.mjs`, which requires the tag to be the squash of a
-merged `release: …` pull request, the tagged tree to equal that pull request's
-head, and a successful CI run for that head whose `Release Check` ran and still
-holds every artifact family. It then hands that run's id to the publish jobs,
+merged `release: …` pull request, and a successful CI run of that pull request
+whose `ci-tested` notice records exactly the tagged tree (see "A merge is not
+tested twice" above), whose `Release Check` ran, and which still holds every
+artifact family. It then hands that run's id to the publish jobs,
 which download its artifacts: what ships is what was rehearsed. Without that
 proof nothing is published.
 
