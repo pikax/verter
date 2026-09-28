@@ -6051,6 +6051,7 @@ pub(crate) mod lowering_probe {
     pub(crate) struct LoweringWork {
         pub(crate) guard_classifications: AtomicUsize,
         pub(crate) expressions: AtomicUsize,
+        pub(crate) declaration_lookup_visits: AtomicUsize,
     }
     thread_local! {
         static ACTIVE: RefCell<Option<Arc<LoweringWork>>> = const { RefCell::new(None) };
@@ -6076,6 +6077,10 @@ pub(crate) mod lowering_probe {
     }
     pub(crate) fn expression() {
         record(|work| &work.expressions);
+    }
+    /// One node a local function declaration lookup visits.
+    pub(super) fn declaration_lookup_visit() {
+        record(|work| &work.declaration_lookup_visits);
     }
 }
 
@@ -16993,6 +16998,8 @@ impl<'a> Lowerer<'a> {
         }
         impl<'a> Visit<'a> for Finder<'a> {
             fn visit_statement(&mut self, statement: &Statement<'a>) {
+                #[cfg(test)]
+                lowering_probe::declaration_lookup_visit();
                 let span = statement.span();
                 if self.found.is_none()
                     && span.start <= self.name.start
@@ -17002,6 +17009,8 @@ impl<'a> Lowerer<'a> {
                 }
             }
             fn visit_expression(&mut self, expression: &Expression<'a>) {
+                #[cfg(test)]
+                lowering_probe::declaration_lookup_visit();
                 let span = expression.span();
                 if self.found.is_none()
                     && span.start <= self.name.start
@@ -17055,58 +17064,20 @@ impl<'a> Lowerer<'a> {
                 // signatures, never its implementation's (the checker's
                 // `getSignaturesOfSymbol` drops the implementation when
                 // overloads precede it): its value is not the declaration
-                // this reads.
-                if self.declaration_has_overloads(function) {
+                // this reads. The skeleton recorded each bodiless
+                // declaration of the runtime variable when it discovered it.
+                if gate
+                    .bindings
+                    .runtime_declarations(candidate)
+                    .iter()
+                    .any(|declaration| gate.skeleton.binding(*declaration).overload_signature)
+                {
                     return None;
                 }
                 return Some((function, gate, own_frame));
             }
         }
         None
-    }
-
-    /// Whether the function declaration `function` has overload signatures:
-    /// bodiless declarations of its name in the statement list it sits in.
-    fn declaration_has_overloads(&self, function: &oxc_ast::ast::Function<'_>) -> bool {
-        let Some(id) = function.id.as_ref() else {
-            return false;
-        };
-        struct Siblings<'n> {
-            declaration: oxc_span::Span,
-            name: &'n str,
-            overloaded: Option<bool>,
-        }
-        impl<'a> Visit<'a> for Siblings<'_> {
-            fn visit_statements(&mut self, statements: &oxc_allocator::Vec<'a, Statement<'a>>) {
-                if self.overloaded.is_some() {
-                    return;
-                }
-                let holds_declaration = statements.iter().any(|statement| {
-                    matches!(statement, Statement::FunctionDeclaration(sibling)
-                        if sibling.span == self.declaration)
-                });
-                if holds_declaration {
-                    self.overloaded = Some(statements.iter().any(|statement| {
-                        matches!(statement, Statement::FunctionDeclaration(sibling)
-                            if sibling.body.is_none()
-                                && sibling
-                                    .id
-                                    .as_ref()
-                                    .is_some_and(|id| id.name.as_str() == self.name))
-                    }));
-                    return;
-                }
-                walk::walk_statements(self, statements);
-            }
-        }
-        let mut siblings = Siblings {
-            declaration: function.span,
-            name: id.name.as_str(),
-            overloaded: None,
-        };
-        self.walks
-            .with_node_stack(self.program.span, || siblings.visit_program(self.program));
-        siblings.overloaded == Some(true)
     }
 
     /// Whether `argument` of a `return` is a bare call of this frame's own
