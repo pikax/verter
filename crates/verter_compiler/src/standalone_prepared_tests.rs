@@ -2315,3 +2315,139 @@ fn mixed_product_compile_publishes_primary_diagnostics_only() {
          compile's diagnostic set — never a duplicated secondary-leg copy"
     );
 }
+
+/// Run `work` on a fresh 1 MiB thread, where a script 157 levels deep needs
+/// a stack region for its parse.
+fn on_a_small_thread<R: Send>(work: impl FnOnce() -> R + Send) -> R {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn_scoped(scope, work)
+            .expect("spawn the thread")
+            .join()
+            .expect("the work returns")
+    })
+}
+
+/// A component whose script nests 157 parentheses deep.
+fn deep_vue_component() -> String {
+    format!(
+        "<script setup lang=\"ts\">const v = {}1{}\nconst w = 2</script>\n<template><div>{{{{ w }}}}</div></template>\n",
+        "(".repeat(157),
+        ")".repeat(157)
+    )
+}
+
+fn deep_svelte_component() -> String {
+    format!(
+        "<script>let v = {}1{};\nlet count = $state(0);</script>\n<button>{{count}}</button>\n",
+        "(".repeat(163),
+        ")".repeat(163)
+    )
+}
+
+/// A component whose markup expression nests 167 parentheses deep: its
+/// preparation parses the expression.
+fn deep_svelte_markup() -> String {
+    format!(
+        "<script>let n = $state(0);</script>
+<p>{{{}n{}}}</p>
+",
+        "(".repeat(167),
+        ")".repeat(167)
+    )
+}
+
+fn is_stack_refusal(outcome: &Result<DirectCompileOutput, DirectCompileError>) -> bool {
+    matches!(outcome, Err(DirectCompileError::StackUnavailable(_)))
+}
+
+/// A standalone compile whose parse is refused its stack is the typed
+/// refusal, for either framework, never an output built from the empty
+/// program; the same compile once the stack can be had compiles.
+#[test]
+fn a_standalone_compile_whose_parse_is_refused_is_the_typed_refusal() {
+    let vue_source = deep_vue_component();
+    let svelte_source = deep_svelte_component();
+    let vue = vue_request(vec![CompileProduct::RuntimeClient(Default::default())]);
+    let svelte = svelte_request(vec![CompileProduct::RuntimeClient(Default::default())]);
+    on_a_small_thread(|| {
+        for (source, request, inputs) in [
+            (
+                &vue_source,
+                &vue,
+                vue_inputs as fn() -> DirectExecutionInputs<'static>,
+            ),
+            (&svelte_source, &svelte, svelte_inputs),
+        ] {
+            verter_parser::oxc_parse::faults::fail_next_reservations(1);
+            let refused = StandaloneCompiler.compile(source, request, inputs());
+            assert!(is_stack_refusal(&refused), "{:?}", refused.err());
+            assert!(StandaloneCompiler
+                .compile(source, request, inputs())
+                .is_ok());
+        }
+    });
+}
+
+/// A Svelte carrier whose preparation parse (of a markup expression) was
+/// refused its stack refuses every compile from it, and a carrier prepared
+/// once the stack can be had compiles. A preparation parses no script; a
+/// compile from a Vue carrier whose own parse is refused is the typed
+/// refusal. A
+/// batch refuses its item either way.
+#[test]
+fn a_prepared_compile_whose_parse_was_refused_is_the_typed_refusal() {
+    let vue_source = deep_vue_component();
+    let svelte_source = deep_svelte_markup();
+    let vue = vue_request(vec![CompileProduct::RuntimeClient(Default::default())]);
+    let svelte = svelte_request(vec![CompileProduct::RuntimeClient(Default::default())]);
+    on_a_small_thread(|| {
+        use verter_parser::oxc_parse::faults::fail_next_reservations;
+        fail_next_reservations(1);
+        let refused = StandaloneCompiler.prepare(&svelte_source, &svelte);
+        for _ in 0..2 {
+            let compiled = StandaloneCompiler.compile_prepared(
+                &svelte_source,
+                &refused,
+                &svelte,
+                svelte_inputs(),
+            );
+            assert!(is_stack_refusal(&compiled), "{:?}", compiled.err());
+        }
+        let prepared = StandaloneCompiler.prepare(&svelte_source, &svelte);
+        assert!(StandaloneCompiler
+            .compile_prepared(&svelte_source, &prepared, &svelte, svelte_inputs())
+            .is_ok());
+
+        let prepared = StandaloneCompiler.prepare(&vue_source, &vue);
+        fail_next_reservations(1);
+        let compiled =
+            StandaloneCompiler.compile_prepared(&vue_source, &prepared, &vue, vue_inputs());
+        assert!(is_stack_refusal(&compiled), "{:?}", compiled.err());
+        assert!(StandaloneCompiler
+            .compile_prepared(&vue_source, &prepared, &vue, vue_inputs())
+            .is_ok());
+
+        for (source, request, inputs) in [
+            (
+                &vue_source,
+                &vue,
+                vue_inputs as fn() -> DirectExecutionInputs<'static>,
+            ),
+            (&svelte_source, &svelte, svelte_inputs),
+        ] {
+            fail_next_reservations(1);
+            let batch = StandaloneCompiler.compile_batch(&[BatchCompileItem {
+                source,
+                request,
+                inputs: inputs(),
+            }]);
+            assert!(
+                is_stack_refusal(&batch.results[0]),
+                "{:?}",
+                batch.results[0].as_ref().err()
+            );
+        }
+    });
+}

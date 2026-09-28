@@ -45,12 +45,16 @@ impl ComponentApiProjector for VueComponentApiProjector {
         // The render is one operation: a parse or walk-stack lease refused its
         // stack anywhere inside it (the script extract, the template facts
         // the fallthrough surface reads) leaves some input read off an empty
-        // program, so the projection is absent until the stack can be had.
+        // program, so the projection fails with the typed stack refusal.
         let (rendered, refused) = verter_parser::oxc_parse::refusals_within(|| {
             host.render_vue_public_api_legacy(resolved_canonical, mode, profile, render_seed)
         });
         match refused {
-            Some(_) => Ok(None),
+            Some(unavailable) => Err(crate::PublicApiProjectionError::TscGeneration(
+                verter_compiler::tsc::TscGenerationError::StackUnavailable {
+                    needed: unavailable.needed,
+                },
+            )),
             None => rendered,
         }
     }
