@@ -113,7 +113,8 @@ pub(crate) struct SemanticActivityGate {
     active: AtomicUsize,
     reclaiming: AtomicBool,
     /// Serialises reclaimers. A second reclaimer waits for the first and
-    /// re-checks rather than skipping (see [`Self::try_reclaim`]).
+    /// re-checks rather than skipping (see [`Self::try_reclaim`]); a
+    /// computation that meets a running reclaim parks on it the same way.
     reclaim: parking_lot::Mutex<()>,
     pending: parking_lot::Mutex<Vec<PendingRelease>>,
     has_pending: AtomicBool,
@@ -147,9 +148,11 @@ impl SemanticActivityGate {
             // A reclaim saw `active == 0` before this increment and is
             // switching payloads now: step back out and wait for it.
             self.active.fetch_sub(1, Ordering::SeqCst);
-            while self.reclaiming.load(Ordering::SeqCst) {
-                std::thread::yield_now();
-            }
+            // Park on the reclaimer's serial lock rather than spinning. The
+            // flag is only ever raised while that lock is held, and its
+            // `Reset` lowers the flag before the lock drops, so acquiring
+            // the lock means the reclaim that was running has finished.
+            drop(self.reclaim.lock());
         }
     }
 
@@ -218,7 +221,8 @@ impl SemanticActivityGate {
         }
         self.reclaiming.store(true, Ordering::SeqCst);
         // Reset the flag on every exit, including an unwinding release, so a
-        // failed reclaim can never leave new computations spinning.
+        // failed reclaim can never leave new computations parked. Declared
+        // after `_serial`, so the flag is lowered before the lock releases.
         struct Reset<'a>(&'a AtomicBool);
         impl Drop for Reset<'_> {
             fn drop(&mut self) {
@@ -350,5 +354,56 @@ mod tests {
         let last = stats.last.expect("the receipt of the release just applied");
         assert_eq!((last.nodes_released, last.nodes_scanned), (3, 40));
         assert_eq!(gate.pending_count(), 0);
+    }
+
+    /// A computation that arrives while a release is being applied waits for
+    /// it — it never enters mid-release — and enters as soon as the release
+    /// finishes, without any further wake-up from the reclaimer.
+    #[test]
+    fn a_computation_arriving_mid_release_waits_for_it_then_enters() {
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+
+        let gate = Arc::new(SemanticActivityGate::default());
+        gate.enqueue("/a.ts", u64::MAX);
+        let (applying_tx, applying_rx) = channel::<()>();
+        let (finish_tx, finish_rx) = channel::<()>();
+        let reclaimer = {
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                gate.try_reclaim(&move |_: &str, _: u64| {
+                    applying_tx.send(()).unwrap();
+                    finish_rx.recv().unwrap();
+                    None
+                })
+            })
+        };
+        applying_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the release starts applying");
+
+        let (entered_tx, entered_rx) = channel::<()>();
+        let computation = {
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                gate.enter();
+                entered_tx.send(()).unwrap();
+            })
+        };
+        assert_eq!(
+            entered_rx.recv_timeout(Duration::from_millis(100)),
+            Err(RecvTimeoutError::Timeout),
+            "a computation must not enter while a release is switching payloads"
+        );
+
+        finish_tx.send(()).unwrap();
+        assert_eq!(reclaimer.join().unwrap(), 1);
+        entered_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the waiting computation enters once the release finishes");
+        computation.join().unwrap();
+        assert!(
+            !gate.exit(),
+            "the entered computation is the only one, and nothing is queued"
+        );
     }
 }
