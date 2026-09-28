@@ -970,38 +970,148 @@ fn each_call_of_a_receiver_chain_reads_its_own_receiver() {
     );
 }
 
-/// Calls whose value depends on their receiver: a `this`-typed return, a
-/// type parameter inferred from a `this` parameter, and `Function`'s
-/// `call` / `apply` over the function they are read off.
+/// Calls whose value depends on the receiver they are called through: a
+/// member's polymorphic `this` (the reference the member is read through
+/// binds it), a type parameter a `this` parameter infers, and overloads a
+/// `this` parameter selects between.
 const RECEIVER_SENSITIVE_CALLS: &str = r##"
-interface S { self(): this; n: number }
+interface Box<V> { v: V }
+interface S { self(): this; wrap(): Box<this>; pair(o: this): this; n: number }
 interface T extends S { t: string }
 declare const t: T;
 interface G { id<X>(this: X): X; next(): H }
 interface H { tag: "h" }
 declare const g: G;
-declare const f: (x: number) => string;
-declare function mk(): (x: number) => string;
+class K { self(): this { return this; } k = 1 }
+declare function mkT(): T;
+declare const u: T | K;
+interface O { pick(this: O & { a: 1 }): "a"; pick(this: O): "o" }
+declare const o: O;
+declare const oa: O & { a: 1 };
 export function selfOnce() { return t.self(); }
 export function selfTwice() { return t.self().self(); }
 export function idOnce() { return g.id(); }
 export function idThenNext() { return g.id().next().tag; }
+export function onParam(p: T) { return p.self(); }
+export function onLocal() { const l = t; return l.self(); }
+export function onClass(k: K) { return k.self(); }
+export function onResult() { return mkT().self(); }
+export function onUnion() { return u.self(); }
+export function wrapped() { return t.wrap().v; }
+export function paired() { return t.pair(t); }
+export function spreadArg() { const a: [T] = [t]; return t.pair(...a); }
+export function detached() { const fn = t.self; return fn(); }
+export function detachedOnResult() { const fn = mkT().self; return fn(); }
+export function parenthesized() { return (t.self)(); }
+export function overloadPlain() { return o.pick(); }
+export function overloadA() { return oa.pick(); }
+export const constSelf = t.self();
+export const constId = g.id();
+"##;
+
+/// TypeScript 7.0.2, under every setting, with no diagnostics: `T` for
+/// every call of `self`, `pair` and `wrap().v` through a `T` (a detached
+/// `self` read off one too), `G` and `"h"` through `g`, `K` through `k`,
+/// `K | T` through `u`, `"o"` and `"a"` for the overloads, and `T` and `G`
+/// for the two module constants.
+#[test]
+fn a_call_reads_its_receiver_where_its_value_depends_on_it() {
+    let matrix = Matrix::new(RECEIVER_SENSITIVE_CALLS);
+    let mut failures = matrix.returns(&[
+        ("selfOnce", "T"),
+        ("selfTwice", "T"),
+        ("idOnce", "G"),
+        ("idThenNext", "\"h\""),
+        ("onParam", "T"),
+        ("onLocal", "T"),
+        ("onClass", "K"),
+        ("onResult", "T"),
+        ("onUnion", "K | T"),
+        ("wrapped", "T"),
+        ("paired", "T"),
+        ("spreadArg", "T"),
+        ("detached", "T"),
+        ("detachedOnResult", "T"),
+        ("parenthesized", "T"),
+        ("overloadPlain", "\"o\""),
+        ("overloadA", "\"a\""),
+    ]);
+    failures.extend(matrix.same(&[
+        (Read::Type("typeof constSelf"), "T"),
+        (Read::Type("typeof constId"), "G"),
+    ]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Calls with no receiver: the checker's this-argument is `void`.
+const RECEIVERLESS_CALLS: &str = r##"
+function d<X>(this: X): X { return this; }
+function q<X>(this: X, x: number): X { return this; }
+function vo(this: void) { return 1 as const; }
+export function direct() { return d(); }
+export function inferVoid() { return q(1); }
+export function voidThis() { return vo(); }
+export function bareGeneric(f: <X>(this: X) => X) { return f(); }
+"##;
+
+/// TypeScript 7.0.2, under every setting, with no diagnostics: `void` for
+/// each `this` type parameter a bare call infers, and `1` for the
+/// `this: void` function.
+#[test]
+fn a_call_without_a_receiver_passes_void_as_its_this() {
+    let matrix = Matrix::new(RECEIVERLESS_CALLS);
+    let failures = matrix.returns(&[
+        ("direct", "void"),
+        ("inferVoid", "void"),
+        ("voidThis", "1"),
+        ("bareGeneric", "void"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A `super` call of a base member returning its polymorphic `this`: the
+/// member's `this` is the calling class's own, which the heritage read does
+/// not carry.
+const SUPER_THIS_CALL: &str = r##"
+declare class A { self(): this; a: number }
+class B extends A { m() { return super.self(); } b = 1 }
+export function viaSuper(b: B) { return b.m(); }
+"##;
+
+/// TypeScript 7.0.2, under every setting: `B`. The lane gives the typed
+/// `UnrepresentableCallee` marker, never the base's instance `A` or an
+/// unbound `this`.
+#[test]
+fn a_super_call_of_a_this_typed_member_is_the_typed_marker() {
+    let verdicts =
+        Matrix::new(SUPER_THIS_CALL).verdicts(&[(Read::Return("viaSuper"), vec!["B"; 4])]);
+    let unmarked: Vec<String> = verdicts
+        .into_iter()
+        .flatten()
+        .filter(|verdict| {
+            verdict.matched || !verdict.lane.ends_with("degraded by UnrepresentableCallee")
+        })
+        .map(|verdict| verdict.lane)
+        .collect();
+    assert!(unmarked.is_empty(), "{}", unmarked.join("\n"));
+}
+
+/// `Function`'s `call` / `apply` over the function they are read off.
+const FUNCTION_CALL_AND_APPLY: &str = r##"
+declare const f: (x: number) => string;
+declare function mk(): (x: number) => string;
 export function called() { return f.call(null, 1); }
 export function calledOnResult() { return mk().call(null, 1); }
 export function appliedOnResult() { return mk().apply(null, [1]); }
 "##;
 
-/// TypeScript 7.0.2, under every setting: `T`, `T`, `G`, `"h"`, and
-/// `string` for each of the three `call` / `apply` forms.
+/// TypeScript 7.0.2, under every setting: `string` for each of the three
+/// `call` / `apply` forms.
 #[test]
-#[ignore = "a call reads its receiver for a this-typed return, a this-parameter inference and Function call/apply"]
-fn a_call_reads_its_receiver_where_its_value_depends_on_it() {
-    let matrix = Matrix::new(RECEIVER_SENSITIVE_CALLS);
+#[ignore = "Function call and apply over a function value degrade as an unrepresentable callee"]
+fn function_call_and_apply_read_the_function_they_are_read_off() {
+    let matrix = Matrix::new(FUNCTION_CALL_AND_APPLY);
     let failures = matrix.returns(&[
-        ("selfOnce", "T"),
-        ("selfTwice", "T"),
-        ("idOnce", "G"),
-        ("idThenNext", "\"h\""),
         ("called", "string"),
         ("calledOnResult", "string"),
         ("appliedOnResult", "string"),

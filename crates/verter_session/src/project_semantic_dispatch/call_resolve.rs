@@ -1722,16 +1722,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .receiver
             .map(|receiver| self.substitute_canonical(receiver, &key.context.substitution));
         let (receiver_param, ordinary_params) = crate::semantic_query::split_this_receiver(&params);
-        // A receiver-LESS call site supplies `undefined` as its receiver, so a
-        // candidate whose authored `this` ACCEPTS `undefined` stays applicable
-        // — `this: void` is the canonical "callable without a receiver"
-        // annotation, and `unknown` / `any` / `undefined` accept it too. Both
-        // receiver gates below run the same typed assignability relation an
-        // explicit receiver takes, so a `this` demanding a concrete surface is
-        // still rejected.
+        // A receiver-LESS call site supplies `void` as its receiver, the
+        // checker's this-argument type for a call with no receiver: a
+        // candidate whose authored `this` accepts `void` stays applicable
+        // (`this: void`, `unknown`, `any`), and a `this` type parameter
+        // infers `void`. Both receiver gates below run the same typed
+        // assignability relation an explicit receiver takes, so a `this`
+        // demanding a concrete surface (or `undefined`) is rejected.
         let call_receiver = receiver_param.map(|_| {
             receiver_source.unwrap_or_else(|| {
-                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void))
             })
         });
         let rest = ordinary_params

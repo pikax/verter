@@ -464,6 +464,59 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
+    /// The bare `this` types a callee reads in its own signature positions —
+    /// a declared member's polymorphic `this` (`self(): this`,
+    /// `wrap(): Promise<this>`), which the reference the member is read
+    /// through binds. The walk stops at object surfaces and declaration
+    /// contributors: a `this` inside one belongs to that type.
+    pub(super) fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        let mut found: Vec<SemanticNodeId> = Vec::new();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                continue;
+            };
+            if data
+                .bare_ref_head()
+                .is_some_and(|(name, _)| name.as_ref() == "this")
+            {
+                found.push(current);
+                continue;
+            }
+            if matches!(
+                data.as_ref(),
+                SemanticNodeData::Object(_)
+                    | SemanticNodeData::MergedDecl { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. }
+            ) {
+                continue;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        found
+    }
+
+    /// `callee` read through `receiver`: its polymorphic `this` — a class
+    /// member's `this` binder and a declared member's bare `this` — bound to
+    /// the receiver, the checker's instantiation of a member's `this` type
+    /// with the reference it is accessed through.
+    pub(crate) fn bind_callee_receiver(
+        &self,
+        callee: SemanticNodeId,
+        receiver: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let bound = self.bind_this_receiver(callee, receiver);
+        self.receiver_this_types(bound)
+            .into_iter()
+            .fold(bound, |result, this| {
+                self.substitute_semantic_type_param(result, this, receiver)
+            })
+    }
+
     /// Rebind the ENCLOSING type parameters a body-derived return mentions
     /// to what the declaration lowering reading it binds them to.
     ///

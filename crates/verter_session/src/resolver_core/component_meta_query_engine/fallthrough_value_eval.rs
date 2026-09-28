@@ -467,6 +467,11 @@ impl ComponentMetaQueryEngine<'_> {
                 ProjectionMode::Navigate,
             )?);
         }
+        // The callee's polymorphic `this` is the receiver it is read
+        // through.
+        let callee = receiver.map_or(callee, |receiver| {
+            dispatch.bind_callee_receiver(callee, receiver)
+        });
         let result = dispatch.execute_indexed_resolve_call(crate::semantic_query::ResolveCallKey {
             point: crate::semantic_query::ProgramPointId {
                 canonical_id: Arc::from(scope_canonical_id),
