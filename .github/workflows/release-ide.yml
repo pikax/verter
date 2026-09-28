@@ -46,6 +46,14 @@ on:
   # A rehearsal: build and package everything, publish nothing. The Marketplace
   # has no unpublish, so the only safe way to exercise this lane is a run that
   # cannot reach it.
+  # The same rehearsal as CI on a `release(ide): v…` pull request (ci.yml,
+  # `release-ide-check`): the caller passes `dry_run: true`.
+  workflow_call:
+    inputs:
+      dry_run:
+        description: Build and package everything; publish nothing.
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       dry_run:
