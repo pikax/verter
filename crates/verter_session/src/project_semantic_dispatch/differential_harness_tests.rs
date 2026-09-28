@@ -66,6 +66,30 @@ pub(super) const LOOSE_IMPLICIT: Setting = Setting {
 /// The four settings, in the order a four-answer row lists them.
 pub(super) const ALL: [Setting; 4] = [STRICT, LOOSE, STRICT_IMPLICIT, LOOSE_IMPLICIT];
 
+/// The four settings with `strictBindCallApply` off, in the same order.
+pub(super) const BIND_CALL_APPLY_OFF: [Setting; 4] = [
+    Setting {
+        root: "/strict-loose-bind",
+        label: "strict, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/loose-loose-bind",
+        label: "strictNullChecks off, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictNullChecks": false, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/strict-implicit-loose-bind",
+        label: "noImplicitAny off, strictBindCallApply off",
+        options: r#"{ "strict": true, "noImplicitAny": false, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/loose-implicit-loose-bind",
+        label: "both off, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictNullChecks": false, "noImplicitAny": false, "strictBindCallApply": false }"#,
+    },
+];
+
 /// How long one row may take before it is reported overdue.
 const ROW_DEADLINE: Duration = Duration::from_secs(60);
 
@@ -112,6 +136,12 @@ impl<'a> Matrix<'a> {
     /// each project.
     pub(super) fn files(mut self, files: &'a [(&'a str, &'a str)]) -> Self {
         self.files = files;
+        self
+    }
+
+    /// Checked in `settings` instead of the four default ones.
+    pub(super) fn settings(mut self, settings: &'a [Setting]) -> Self {
+        self.settings = settings;
         self
     }
 

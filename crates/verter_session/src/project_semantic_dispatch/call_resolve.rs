@@ -106,6 +106,16 @@ enum CandidateVerdict {
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
+    /// `value` with its polymorphic `this` bound to the call's `receiver`,
+    /// when the call has one.
+    fn receiver_bound_return(
+        &self,
+        value: SemanticNodeId,
+        receiver: Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        receiver.map_or(value, |receiver| self.bind_callee_receiver(value, receiver))
+    }
+
     /// The typed call-resolution authority: reentry hold, validated warm
     /// result, then root-family or inline mixed-obligation execution.
     pub(crate) fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
@@ -1124,7 +1134,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let project = host
                     .resolve_project_for_canonical(key.point.canonical_id.as_ref())
                     .and_then(|project| host.workspace().project_stable_key(project));
+                // Only `CallableFunction`'s generic `call` returns the
+                // extracted callable's value; `Function`'s (the apparent
+                // interface without `strictBindCallApply`) returns `any`,
+                // which its own signature answers.
+                let callable_function = visible.iter().all(|candidate| {
+                    candidate.occurrence.authored().is_some_and(|occurrence| {
+                        occurrence
+                            .function
+                            .declaration_slot
+                            .merged_symbol_name
+                            .as_ref()
+                            == "CallableFunction"
+                    })
+                });
                 if !first_is_spread
+                    && callable_function
                     && project.is_some_and(|project| {
                         self.prove_prototype_call(project, &visible).is_some()
                     })
@@ -2478,8 +2503,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 .pending_len()
                                 == pending_before =>
                         {
-                            let seed =
-                                self.substitute_canonical(result.return_type(), &substitution);
+                            // A body-derived return's polymorphic `this` (a
+                            // class method returning `this`) is the receiver
+                            // the call reads the method through.
+                            let seed = self.receiver_bound_return(
+                                self.substitute_canonical(result.return_type(), &substitution),
+                                key.receiver,
+                            );
                             // Per-binder freshness at the call boundary,
                             // exactly as the declared-annotation arm: a
                             // fresh deposit KEPT at top level of the
@@ -2644,9 +2674,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                             .pending_len()
                                             == widened_pending_before =>
                                     {
-                                        concrete_seeds.push(self.substitute_canonical(
-                                            widened.return_type(),
-                                            &widened_substitution,
+                                        concrete_seeds.push(self.receiver_bound_return(
+                                            self.substitute_canonical(
+                                                widened.return_type(),
+                                                &widened_substitution,
+                                            ),
+                                            key.receiver,
                                         ));
                                     }
                                     // The widened instantiation did not
