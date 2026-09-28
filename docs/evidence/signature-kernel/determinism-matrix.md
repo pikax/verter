@@ -125,13 +125,22 @@ read off TS2322; `strictNullChecks` × `noImplicitAny` all agree), with
 
 Verter answers the cold column in every order. A published relation carries
 its `RelationRecursionFootprint` — the most structured relations its
-computation stacked, and per side the most distinct instantiations of one
-recursion identity it stacked on one path — and a warm read inside another
+computation stacked, and per side and per recursion identity the most
+distinct instantiations of that identity it stacked on one path (with the
+most of any one identity beside them) — and a warm read inside another
 relation replays the entry only where the cold computation from that position
 takes the same course: the height fits the depth the chain has left, and on a
-side not yet expanding the chain's most instantiations of one identity plus
-the entry's own stay under the checker's three. Anywhere else the relation is
-computed. An overflowed or deeply-nested answer is never admitted (it depends
+side not yet expanding, for every identity, the chain's instantiations of
+that identity plus the entry's own stay under the checker's three. Anywhere
+else the relation is computed. The count is per identity because the
+checker's is: summing the most of one identity with the most of another
+refused replays the cold computation takes, so a pair reached along every
+one of `2ⁿ` paths was recomputed on each. An alias named without type
+arguments has one instantiation, which never makes three, so it is no
+recursion identity at all. The same rule serves a relation this transaction
+already decided and has not yet published (the checker's relation cache
+within one `checkTypeRelatedTo`): it is read through its footprint like a
+memo entry, and the table holding it is request-scoped. An overflowed or deeply-nested answer is never admitted (it depends
 on where its chain began); a member of a cyclic component publishes the
 component's counted frames and deepest replay as its bound, since its own
 computation stopped at an assumption its cold computation relates.
@@ -163,6 +172,14 @@ f: (x: T) => void }`, `E` is contravariant whichever relation comes first
 extends [D<number>]`); measured inside `D`'s measurement it reads
 independent, which the memo must never keep. Driver:
 `relation_variance_tests::mutually_dependent_variances_answer_alike_in_either_order`.
+
+A measurement's markers and marker instantiations are nodes of the measured
+declaration's own file generation, at most six per type parameter: an edit
+drains the memo and the arena's dedup entries, so a superseded generation's
+markers are never read or interned again, and the document's close releases
+them with every other node of the file, whichever generation interned them.
+Drivers: `relation_variance_tests::variance_markers_belong_to_their_declarations_file_generation`
+and `…::closing_the_declaring_document_releases_its_variance_markers`.
 
 ## §5.4 stable-key table
 

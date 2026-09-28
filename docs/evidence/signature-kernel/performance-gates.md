@@ -1217,6 +1217,36 @@ Recorded plainly so no reader mistakes absence for a pass:
   (`relation_depth_tests.rs` →
   `relating_wide_object_types_costs_the_same_per_member`,
   `a_property_finds_the_member_of_either_spelling`).
+* **A pair every union member reaches is related once.** Over
+  `type Si = { v: S(i-1); a?: 1 } | { v: S(i-1); b?: 1 }`, every member of
+  every level reaches the same pair below it, along `2ⁿ` paths. A decided
+  pair was reused only once its batch published, so a relation inside one
+  transaction related it along every path (8, 32 and 128 reductions at 2,
+  4 and 6 levels), and the probe gave no answer at 8 levels. The relation now
+  reads a pair this transaction already decided from the transaction's
+  `settled` table (the checker's relation cache within one
+  `checkTypeRelatedTo`; request-scoped, cleared with the member batch it
+  mirrors, at most one entry per queued member), through the same recursion
+  footprint a memo entry is read through. The footprint counts
+  instantiations per recursion identity, as `isDeeplyNestedType` does, and
+  an alias named without type arguments is no identity: a sum over
+  different identities refused the replays the cold computation takes.
+  Relating the chain costs the same per level now (two reductions a level
+  at 10, 20 and 40 levels) and answers as the checker does at 10, 20, 50,
+  99 and 100 levels, for the two-member, three-member and reversed shapes
+  (`relation_depth_tests.rs` → `relating_doubling_unions_costs_the_same_per_level`,
+  `a_pair_every_union_member_reaches_is_related_once`).
+* **A union over aliases of unions relates as one union.** `type Ai =
+  A(i-1) | T` is, to the checker's `getUnionType`, one flat union of
+  `A0` and `T`. The relation related each alias as a union of its own, one
+  frame a level: 200 aliases answered `2` where the checker answers `1`,
+  and 2,000 overflowed the stack. It flattens a union member that names an
+  alias of a union from an explicit stack (`relation_union_members`), so
+  1,000 aliases relate one level deep
+  (`a_union_over_aliases_of_unions_relates_as_one_union`). From 1,995
+  aliases the request's projection-operation fuse (2,000 by default),
+  which counts the one `Instantiate` query each alias costs, ends the
+  probe with no answer (see *Known limits*).
 * **A pair of literal types relates without a query.** Two literal types
   relate, under every relation kind, exactly when they are one value, so
   the relation authority decides such a pair before its reentry intercept,
@@ -1240,3 +1270,14 @@ Recorded plainly so no reader mistakes absence for a pass:
   return-site cap, not super-linear work; the skipped
   `differential_depth_tests.rs` →
   `an_800_return_if_chain_answers_within_the_work_budget` holds it open.
+* **A request reads at most 2,000 aliases of one union chain.** Each
+  alias of `type Ai = A(i-1) | T` is read with one `Instantiate` query, and
+  the request's projection-operation fuse (`HostConfig::projection_op_budget`,
+  2,000 by default) counts every one: from 1,995 aliases
+  `[An] extends [{ v: 1 } | { w: 1 }] ? 1 : 2` ends in
+  `Budget(WorkBudgetExceeded)` where the checker answers `1` (measured at
+  200, 2,000 and 10,000). The work is linear (seven connected-work units an
+  alias from 250 to 1,900 aliases, far under the connected demand's
+  262,144), so the fuse, not super-linear work, stops it; the skipped
+  `relation_depth_tests.rs` →
+  `a_union_over_2000_aliases_of_unions_relates_as_one_union` holds it open.
