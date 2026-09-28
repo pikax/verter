@@ -405,9 +405,12 @@ impl TypeInfoSurface {
             // routes through the one authority (recursive flatten +
             // structural dedup replace the hand-rolled one-level splice);
             // the evidence threads to the caller's disposition boundary.
-            let composite = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
-                graph, &values,
-            );
+            let composite =
+                crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+                    graph,
+                    &values,
+                    crate::semantic_query::NullabilityPolicy::Strict,
+                );
             evidence.absorb(composite.evidence);
             composite.node
         }

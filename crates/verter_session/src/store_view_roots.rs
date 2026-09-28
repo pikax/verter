@@ -947,22 +947,34 @@ impl StoreViewRoots {
     /// Per-symbol global-contributor fingerprint, including a proved-empty
     /// set. Read from the live published snapshot: a membership edit that
     /// does not rebuild this view fails closed against a moved fingerprint.
+    /// `None` while a contributor recorded at upsert waits for ingestion —
+    /// it may declare the name, so no published fingerprint vouches for it.
+    ///
+    /// That miss is sound, never a stale warm answer: it only refuses the
+    /// warm entry, and the recompute that follows reads the population
+    /// through contribution collection, which ingests every pending
+    /// contributor first and then observes the fingerprint of the complete
+    /// population. The cost is one recompute for each warm read made while
+    /// a contributor waits.
     pub(crate) fn global_contributor_fingerprint(
         &self,
         target: crate::file_artifact_store::AugmentationTargetKind,
         decl_name: &str,
         overlay_discriminator: Option<Hash16>,
-    ) -> Hash16 {
+    ) -> Option<Hash16> {
         note_owner_visit();
         let Some(reader) = self.artifact_reader.as_ref() else {
-            return crate::file_artifact_store::compute_augmenter_set_fingerprint(&[]);
+            return Some(crate::file_artifact_store::compute_augmenter_set_fingerprint(&[]));
         };
-        reader
-            .indexed()
-            .global_contributor_index()
-            .snapshot()
-            .lookup(&target, decl_name, overlay_discriminator, true)
-            .fingerprint
+        let index = reader.indexed().global_contributor_index();
+        if index.has_pending_overlay_ambient() {
+            return None;
+        }
+        Some(
+            index
+                .snapshot()
+                .observation_fingerprint(&target, decl_name, overlay_discriminator),
+        )
     }
 }
 

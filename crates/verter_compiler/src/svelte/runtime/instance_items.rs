@@ -15,6 +15,7 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{BindingPattern, Comment, Expression, Statement, VariableDeclarationKind};
 use oxc_span::GetSpan;
+use verter_parser::utils::oxc::script::export_parts::NamedExportParts;
 
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::expr::{
@@ -498,7 +499,15 @@ fn classify_instance_statement(
         // class` are the `$$exports` component-export surface with their OWN
         // fail-closed identity (any mode); every other export form keeps its
         // precise fail-closed residual.
-        Statement::ExportNamedDeclaration(export) => classify_export_statement(export, legacy),
+        Statement::ExportDeclaration(export) => {
+            classify_export_statement(NamedExportParts::of_declaration(export), legacy)
+        }
+        Statement::ExportNamedDeclaration(export) => {
+            classify_export_statement(NamedExportParts::of_named(export), legacy)
+        }
+        Statement::ExportFromDeclaration(export) => {
+            classify_export_statement(NamedExportParts::of_from(export), legacy)
+        }
         // Functions used by bind/store/event fast paths retain a dedicated carrier;
         // other ordinary functions fall back to the canonical general carrier.
         Statement::FunctionDeclaration(func) => classify_function_declaration(
@@ -580,7 +589,8 @@ fn classify_instance_statement(
                     span,
                 });
             }
-            let facts = super::legacy_reactive::reactive_statement_facts(&labeled.body);
+            let facts =
+                super::legacy_reactive::reactive_statement_facts(&labeled.body, instance_source);
             let body = super::legacy_reactive::classify_reactive_statement_body(
                 &labeled.body,
                 instance_source,
@@ -595,7 +605,8 @@ fn classify_instance_statement(
         // These TypeScript constructs produce runtime values and cannot be erased;
         // fail closed with their precise construct identity.
         Statement::TSEnumDeclaration(_)
-        | Statement::TSModuleDeclaration(_)
+        | Statement::TSExternalModuleDeclaration(_)
+        | Statement::TSNamespaceDeclaration(_)
         | Statement::TSImportEqualsDeclaration(_) => {
             Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
                 construct: top_level_statement_label(stmt),
@@ -672,7 +683,7 @@ fn ordinary_variable_declaration(decl: &oxc_ast::ast::VariableDeclaration<'_>) -
 /// - A specifier list (`export { a }`) / any other named-export form → the
 ///   generic export residual.
 fn classify_export_statement(
-    export: &oxc_ast::ast::ExportNamedDeclaration<'_>,
+    export: NamedExportParts<'_, '_>,
     legacy: &LegacyScriptFacts,
 ) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
     use oxc_ast::ast::Declaration;
@@ -680,7 +691,7 @@ fn classify_export_statement(
     let refuse = |construct: &'static str| {
         Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, span })
     };
-    match &export.declaration {
+    match export.declaration {
         Some(Declaration::VariableDeclaration(decl)) => match decl.kind {
             VariableDeclarationKind::Let => {
                 if !legacy.legacy_mode {
@@ -899,7 +910,7 @@ fn classify_class_declaration(
     // rewrite the verbatim `StoreClassDecl` emit does not perform. Fail closed on
     // any such class (the SIMPLE `subscribe`-bearing store class with NO inner
     // reactive surface stays supported via verbatim lowering).
-    if super::store_subscriptions::class_body_has_inner_reactive_reference(class) {
+    if super::store_subscriptions::class_body_has_inner_reactive_reference(class, instance_source) {
         return Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
             construct: "class with an inner $-reactive reference",
             span: Span::new(class.span.start, class.span.end),
@@ -1303,7 +1314,7 @@ pub(super) fn scan_magic_identifiers(source: &str) -> Option<UnsupportedSvelteRu
         found: None,
     };
     use oxc_ast_visit::Visit;
-    scan.visit_program(&program);
+    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
     scan.found
 }
 
@@ -1380,13 +1391,17 @@ fn top_level_statement_label(stmt: &Statement<'_>) -> &'static str {
         Statement::FunctionDeclaration(_) => "function",
         Statement::ClassDeclaration(_) => "class",
         Statement::TSEnumDeclaration(_) => "enum",
-        Statement::TSModuleDeclaration(_) => "namespace",
+        Statement::TSExternalModuleDeclaration(_) | Statement::TSNamespaceDeclaration(_) => {
+            "namespace"
+        }
         Statement::TSInterfaceDeclaration(_) => "interface",
         Statement::TSTypeAliasDeclaration(_) => "type alias",
         Statement::TSImportEqualsDeclaration(_) => "import-equals",
         Statement::LabeledStatement(_) => "$: label",
         Statement::ImportDeclaration(_) => "import",
-        Statement::ExportNamedDeclaration(_)
+        Statement::ExportDeclaration(_)
+        | Statement::ExportNamedDeclaration(_)
+        | Statement::ExportFromDeclaration(_)
         | Statement::ExportAllDeclaration(_)
         | Statement::ExportDefaultDeclaration(_) => "export",
         Statement::ExpressionStatement(_) => "expression statement",

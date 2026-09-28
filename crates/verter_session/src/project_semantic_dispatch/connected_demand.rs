@@ -52,6 +52,7 @@ impl<'a> DemandCancellation<'a> {
     }
 
     /// Cheap cancellation checkpoint, consulted at every charge boundary.
+    #[cfg_attr(feature = "test-support", track_caller)]
     fn is_cancelled(&self) -> bool {
         self.ctx.is_cancelled()
     }
@@ -143,6 +144,20 @@ impl<'a> ConnectedDemandLedger<'a> {
             },
             trip,
         )
+    }
+
+    /// The trip that refuses one more natively nested inline evaluation
+    /// when `nesting` evaluations are already open on the native stack —
+    /// `None` when it may run. Nesting takes the same cap as nested query
+    /// boundaries: an evaluation that re-enters inline, without a query
+    /// boundary, would otherwise grow the native stack unbounded. The
+    /// refusal is the depth rail's typed incompleteness, sticky like every
+    /// trip.
+    pub(super) fn nesting_trip(&self, nesting: usize) -> Option<PartialReasonSet> {
+        if nesting < usize::from(self.query_depth_limit.get()) {
+            return None;
+        }
+        Some(self.record_trip(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT))
     }
 
     /// Whether this demand has ALREADY tripped. A sub-query suppressed under a
@@ -250,6 +265,13 @@ impl<'a> ConnectedDemandLedger<'a> {
         );
         self.work_limit.set(work);
         self.query_depth_limit.set(depth);
+    }
+
+    /// The work units the last connected demand charged. Test-only: kept
+    /// after the demand ends, and reset when the next one enters.
+    #[cfg(test)]
+    pub(super) fn work_used_for_tests(&self) -> usize {
+        self.work_used.get()
     }
 
     /// Fold `reason` into the sticky trip set and return the widened set.

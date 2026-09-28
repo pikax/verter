@@ -1479,7 +1479,7 @@ fn semantic_query_warm_entry_has_non_empty_dep_signature_slice11() {
     );
 }
 
-/// Derived semantic queries (Instantiate, NormalizeUnion, etc.) record a
+/// Derived semantic queries (Instantiate, ReduceUnion, etc.) record a
 /// project-generation anchor so warm hits can still be validated by the
 /// completion fence. Absent any project-gen fact, an entry would appear
 /// valid across project-shape changes.
@@ -1498,8 +1498,9 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
     let b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let members: Arc<[SemanticNodeId]> = Arc::from(vec![a, b].into_boxed_slice());
 
-    let key = SemanticQueryKey::NormalizeUnion {
+    let key = SemanticQueryKey::ReduceUnion {
         members: members.clone(),
+        nullability: crate::semantic_query::NullabilityPolicy::Strict,
     };
     let _ = dispatch.execute_type_node(key.clone());
     // After canonicalization, the on-memo key holds the members in
@@ -1511,8 +1512,9 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
         crate::semantic_query::stable_key::stable_key_for_node(graph, *a)
             == crate::semantic_query::stable_key::stable_key_for_node(graph, *b)
     });
-    let lookup_key = SemanticQueryKey::NormalizeUnion {
+    let lookup_key = SemanticQueryKey::ReduceUnion {
         members: Arc::from(sorted.into_boxed_slice()),
+        nullability: crate::semantic_query::NullabilityPolicy::Strict,
     };
     let warm = host
         .project_type_store()

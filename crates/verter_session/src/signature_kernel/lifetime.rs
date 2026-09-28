@@ -5,7 +5,7 @@
 //! readers finish against their epoch; new requests use the replacement.
 //! A stale handle (wrong epoch, or epoch 0) is rejected.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -92,6 +92,10 @@ pub(super) struct EpochInner {
     pub store_live_readers: Arc<AtomicU64>,
     pub descriptor_chain_walks: AtomicU64,
     pub apply_count: AtomicU64,
+    /// Type tokens of this epoch whose graph node was released
+    /// ([`SignatureStore::note_released_nodes`]): every record reached
+    /// through one of them is garbage no live request can name again.
+    pub stranded_tokens: AtomicUsize,
 }
 
 impl EpochInner {
@@ -120,6 +124,7 @@ impl EpochInner {
             store_live_readers,
             descriptor_chain_walks: AtomicU64::new(0),
             apply_count: AtomicU64::new(0),
+            stranded_tokens: AtomicUsize::new(0),
         }
     }
 
@@ -141,7 +146,52 @@ impl EpochInner {
             + self.locators.shard_lock_acquires()
             + self.type_tokens.shard_lock_acquires()
     }
+
+    fn record_count(&self) -> usize {
+        self.shapes.record_count()
+            + self.templates.record_count()
+            + self.descriptors.record_count()
+            + self.recipes.record_count()
+            + self.provenances.record_count()
+            + self.substitutions.record_count()
+            + self.layouts.record_count()
+            + self.slots.record_count()
+            + self.spaces.record_count()
+            + self.sets.record_count()
+            + self.results.record_count()
+            + self.strings.record_count()
+            + self.sequences.record_count()
+            + self.environments.record_count()
+            + self.locators.record_count()
+            + self.type_tokens.record_count()
+    }
 }
+
+/// Records the current epoch's interners may hold before the edit path
+/// replaces the epoch ([`SignatureStore::replace_epoch_if_over`]).
+///
+/// Every record is epoch-local and append-only, and type tokens name graph
+/// nodes, so an edited project keeps interning records for content no
+/// reader can reach again. Replacing the epoch is the only reclamation;
+/// this cap bounds the garbage between two replacements. A holder that
+/// releases graph nodes also reports them
+/// ([`SignatureStore::note_released_nodes`]), and the epoch is then
+/// replaced once its tokens naming released nodes outnumber the rest
+/// ([`SignatureStore::replace_epoch_if_mostly_stranded`]), which keeps the
+/// tables proportional to the live set; the cap is the bound where nothing
+/// is released.
+///
+/// Measured on the signature-kernel benchmark corpus with every witness
+/// answered: the working set is about 100 records per module (468 at 8
+/// modules of depth 4, 2,438 at 24 and 9,710 at 96 modules of depth 8).
+/// Reverting an edit interns nothing, since records are content-interned;
+/// a UNIQUE edit of one module interns 41 to 69 records, and the editor's
+/// open/edit/close churn lane measured about 11 records (about 0.5 KiB)
+/// per cycle. 262,144 records, about 12 MiB at that rate, is 27 times the
+/// 96-module working set: a demanded working set stays far below it, so a
+/// replacement comes thousands of unique edits apart and never thrashes,
+/// while a long-lived editor's kernel tables stop growing at a fixed size.
+pub const EPOCH_RECORD_CAP: usize = 1 << 18;
 
 /// Intentionally retained result: owns the epoch tables it was published in.
 struct RetainedRoot {
@@ -162,6 +212,9 @@ pub struct SignatureStore {
     next_epoch: AtomicU64,
     epoch_publish: Mutex<()>,
     bodies_forced: AtomicU64,
+    /// Test-only override of [`EPOCH_RECORD_CAP`]; zero keeps the constant.
+    #[cfg(test)]
+    record_cap_for_tests: std::sync::atomic::AtomicUsize,
 }
 
 impl SignatureStore {
@@ -177,7 +230,28 @@ impl SignatureStore {
             next_epoch: AtomicU64::new(GraphEpoch::FIRST.as_u32() as u64 + 1),
             epoch_publish: Mutex::new(()),
             bodies_forced: AtomicU64::new(0),
+            #[cfg(test)]
+            record_cap_for_tests: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// The record count past which the edit path replaces the epoch.
+    #[must_use]
+    pub fn record_cap(&self) -> usize {
+        #[cfg(test)]
+        {
+            let cap = self.record_cap_for_tests.load(Ordering::Relaxed);
+            if cap != 0 {
+                return cap;
+            }
+        }
+        EPOCH_RECORD_CAP
+    }
+
+    /// Lower the record cap so a test reaches a replacement in a few edits.
+    #[cfg(test)]
+    pub(crate) fn set_record_cap_for_tests(&self, cap: usize) {
+        self.record_cap_for_tests.store(cap, Ordering::Relaxed);
     }
 
     #[must_use]
@@ -218,11 +292,87 @@ impl SignatureStore {
             .load(Ordering::Relaxed)
     }
 
+    /// Records the current epoch's interners hold, summed over every table.
+    /// Retired epochs a pinned reader or retained result still holds are
+    /// not counted: they are released with their last root.
+    #[must_use]
+    pub fn interned_len(&self) -> usize {
+        self.current.load().record_count()
+    }
+
+    /// Note that the graph released `released` for good: its ids are never
+    /// handed out again, so a current-epoch type token naming one strands
+    /// every record reached through it. Each node is released once, so a
+    /// token is counted at most once. Returns how many of `released` the
+    /// current epoch holds a token for.
+    pub fn note_released_nodes(&self, released: impl IntoIterator<Item = SemanticNodeId>) -> usize {
+        let inner = self.current.load();
+        let stranded = released
+            .into_iter()
+            .filter(|node| inner.type_tokens.lookup(node).is_some())
+            .count();
+        inner.stranded_tokens.fetch_add(stranded, Ordering::Relaxed);
+        stranded
+    }
+
+    /// Type tokens of the current epoch that name a released node
+    /// ([`Self::note_released_nodes`]).
+    #[must_use]
+    pub fn stranded_token_count(&self) -> usize {
+        self.current.load().stranded_tokens.load(Ordering::Relaxed)
+    }
+
+    /// Replace the current epoch once more of its type tokens name released
+    /// nodes than name live ones. The tables are append-only within an
+    /// epoch, so replacement is the only reclamation, and this trigger
+    /// keeps what they hold proportional to the live working set: a
+    /// replacement discards at least as many stranded tokens as the live
+    /// ones the next requests re-intern, so the rebuild is paid for by the
+    /// garbage it drops and a replacement never follows another without
+    /// that much release in between. The check repeats under the
+    /// publication gate, like [`Self::replace_epoch_if_over`].
+    pub fn replace_epoch_if_mostly_stranded(&self) -> Option<GraphEpoch> {
+        let mostly_stranded = |inner: &EpochInner| {
+            let stranded = inner.stranded_tokens.load(Ordering::Relaxed);
+            stranded > 0 && stranded * 2 > inner.type_tokens.record_count()
+        };
+        if !mostly_stranded(&self.current.load()) {
+            return None;
+        }
+        let _gate = self.epoch_publish.lock();
+        if !mostly_stranded(&self.current.load()) {
+            return None;
+        }
+        self.publish_next_epoch().ok()
+    }
+
     /// Replace the current epoch. Old pinned readers keep their `Arc`.
     /// Publication is serialized so concurrent callers cannot leave a
     /// lower-numbered epoch current.
     pub fn replace_epoch(&self) -> Result<GraphEpoch, StoreError> {
         let _gate = self.epoch_publish.lock();
+        self.publish_next_epoch()
+    }
+
+    /// Replace the current epoch only while its interners hold more than
+    /// `cap` records. The check repeats under the publication gate, so
+    /// triggers that race past the first check retire one epoch, not one
+    /// each. `None`: at or under the cap, or the epoch space is exhausted
+    /// (the tables then keep growing, which is retention and never a stale
+    /// read).
+    pub fn replace_epoch_if_over(&self, cap: usize) -> Option<GraphEpoch> {
+        if self.interned_len() <= cap {
+            return None;
+        }
+        let _gate = self.epoch_publish.lock();
+        if self.interned_len() <= cap {
+            return None;
+        }
+        self.publish_next_epoch().ok()
+    }
+
+    /// Publish a new empty epoch. The caller holds `epoch_publish`.
+    fn publish_next_epoch(&self) -> Result<GraphEpoch, StoreError> {
         let next_raw = self.next_epoch.fetch_add(1, Ordering::Relaxed);
         let next = u32::try_from(next_raw).map_err(|_| StoreError::Overflow)?;
         if next == 0 {
@@ -311,7 +461,11 @@ impl SignatureStore {
             result.recipe.index(),
             &inner.recipes,
         )?;
-        for token in result.return_type.into_iter().chain(result.effects) {
+        for token in result
+            .return_type
+            .into_iter()
+            .chain(result.effects.and_then(|effect| effect.ty))
+        {
             let raw = token.as_u64();
             Self::require_id(
                 inner,

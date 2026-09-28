@@ -155,8 +155,9 @@ pub fn resolve_custom_element_expr(
     expr_src: &str,
 ) -> Result<AcceptedCustomElementValue, &'static str> {
     let alloc = Allocator::default();
-    let parsed = oxc_parser::Parser::new(&alloc, alloc.alloc_str(expr_src), SourceType::mjs())
-        .parse_expression();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, alloc.alloc_str(expr_src), SourceType::mjs())
+            .parse_expression();
     let Ok(expr) = parsed else {
         // FIRST CHECK — the PREFIX expression does not PARSE. Upstream reads the attribute
         // expression with acorn during element parsing — BEFORE `read_options` — so a

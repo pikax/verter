@@ -246,7 +246,23 @@ where
                 victims.push((*seq, key.clone()));
             }
         }
-        if !victims.is_empty() {
+        // Victims that are the ledger's oldest records — every trim that
+        // skipped no exempt key — leave from the front, which touches only
+        // them. The ledger is held under the memo's host-wide lock on
+        // every admission, and a full-ledger pass per admission made each
+        // cold publish wait on the whole ledger.
+        let prefix = ledger
+            .iter()
+            .zip(&victims)
+            .take_while(|((seq, _), (victim, _))| seq == victim)
+            .count();
+        if prefix == victims.len() {
+            ledger.drain(..prefix);
+            #[cfg(test)]
+            TRIM_VISITS.with(|visits| visits.set(visits.get() + prefix));
+        } else {
+            #[cfg(test)]
+            TRIM_VISITS.with(|visits| visits.set(visits.get() + ledger.len()));
             // Admission seqs are unique per admission and the victim list
             // was built by walking the ledger, so a single forward cursor
             // removes exactly the selected records — no O(n·k) membership
@@ -285,10 +301,11 @@ where
     /// race. A caller that only holds a shared read guard MUST use
     /// `forget_seq` with the removed entry's own admission seq instead.
     ///
-    /// The single in-tree caller is the `SemanticGraphStore` family
-    /// memo's per-canonical drain, which runs inside the `entries`
-    /// `Mutex` hold — the exact lock domain `record_family_admission_locked`
-    /// records under and `invalidate_all` clears under. Identity-scoped
+    /// The in-tree callers are the `SemanticGraphStore` family memo's
+    /// per-canonical drain and its retired-kernel-epoch sweep, both of
+    /// which run inside the `entries` `Mutex` hold — the exact lock domain
+    /// `record_family_admission_locked` records under and `invalidate_all`
+    /// clears under. Identity-scoped
     /// caches (`BoundedCandidateMap`, the
     /// `component_meta_caches` DBs) use `forget_seq` and never call this.
     pub fn forget_key_under_exclusive_lock(&self, key: &K) {
@@ -320,6 +337,12 @@ where
     pub fn tracked_len(&self) -> usize {
         self.ledger.lock().len()
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Ledger records the removal step of a trim touched on this thread.
+    static TRIM_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Default total cap for a `GlobalRetentionBudget` constructed via

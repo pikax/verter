@@ -271,7 +271,6 @@ fn mode_boundary_identity_does_not_materialize_alias_body() {
 // (`LargeValue_10 | "value_11"`) must remain SHALLOW — not full
 // 12-level dependent-chain expansions.
 #[test]
-#[ignore = "verter currently treats Shallow mode as Expanded for the `parent` member — it materialises `parent: Pick<LargeRecord_10, \"id\" | \"tag\">` into the full `{ id: 10, tag: \"tag_10\" }` Object shape (probe at 12-level scale: expansions=23, depth=12, hops=47; tsgo-audit probe on 500-level fixture: hops=2503, expansions=1002, depth=501). The /type-resolution SKILL.md contract is that Shallow exposes ONE shell level — member names plus per-member reference nodes, no recursive member-body expansion. For an interface member typed as `Pick<...>` (an operator carrier), the per-member shell must remain a Ref / unevaluated operator, NOT a fully reduced Object. Suspect call site: lower.rs:596 (`build_instantiate` advertises one shell level but the object lowering path lowers every property value with the caller's current mode). Keep as the future shallow-mode-bounded-object-lowering contract."]
 fn mode_boundary_shallow_does_not_expand_member_bodies() {
     let host = make_host_with_footprint();
     upsert_chain(&host);

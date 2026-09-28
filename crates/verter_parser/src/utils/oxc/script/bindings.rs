@@ -98,14 +98,18 @@ pub fn callee_identifier_name(callee: &Expression<'_>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oxc_parse::Parser;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
 
     fn parse_and<R>(source: &str, f: impl FnOnce(&oxc_ast::ast::Program<'_>, &str) -> R) -> R {
         let alloc = Allocator::default();
         let ret = Parser::new(&alloc, source, SourceType::tsx()).parse();
-        assert!(ret.errors.is_empty(), "parse errors: {:?}", ret.errors);
+        assert!(
+            ret.diagnostics.is_empty(),
+            "parse errors: {:?}",
+            ret.diagnostics
+        );
         f(&ret.program, source)
     }
 

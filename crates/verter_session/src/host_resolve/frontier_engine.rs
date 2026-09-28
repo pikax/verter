@@ -543,6 +543,48 @@ impl VerterHost {
                             route_shallow_cache,
                         );
                     }
+                    // A module whose value is `export = X` (it may export
+                    // nothing else) exports X's members: `default` names X
+                    // itself, as the checker's interop does, and any other
+                    // name the member `X.name` a namespace merged into X
+                    // declares. Only the requested module's own assignment
+                    // counts: `export *` of such a module is the checker's
+                    // TS2498 error.
+                    if let (RouteLayerNode::Resolved(_), Some(assigned)) =
+                        (node, state.export_assignment_target())
+                    {
+                        let ordinary = verter_type_expr::TopLevelOwnerId::ordinary_file();
+                        if exported_name == "default" {
+                            let target = crate::resolver_core::ExportTarget::Local {
+                                owner: ordinary,
+                                symbol_name: assigned.to_string(),
+                            };
+                            return self.resolve_named_type_export_route_from_target(
+                                ctx,
+                                canonical.as_str(),
+                                &target,
+                                active,
+                                participants,
+                                unresolved_edge_owners,
+                                route_shallow_cache,
+                            );
+                        }
+                        let member = format!("{assigned}.{exported_name}");
+                        let headers = state.decl_bodies().header_index();
+                        let declared = (state.effective_value_header_present_in(ordinary, &member)
+                            || state.effective_type_header_present_in(ordinary, &member)
+                            || headers.namespace_blocks.iter().any(|block| {
+                                block.owner == ordinary && block.qualified_name == member
+                            }))
+                            && headers.namespace_member_is_exported(ordinary, &member);
+                        if declared {
+                            return Some(crate::resolver_core::RouteResult::Resolved {
+                                defining_canonical: canonical.clone(),
+                                defining_owner: ordinary,
+                                defining_symbol: member,
+                            });
+                        }
+                    }
                     layer_states.push((canonical, state));
                 }
 

@@ -77,8 +77,9 @@ fn ide_tsx(source: &str) -> String {
 /// OXC parse errors of a generated TSX string — empty == valid virtual file.
 fn oxc_parse_errors(code: &str) -> Vec<String> {
     let alloc = Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
-    parsed.errors.iter().map(|e| e.to_string()).collect()
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
+    parsed.diagnostics.iter().map(|e| e.to_string()).collect()
 }
 
 /// POSITIVE CONTROL: the working case (`a` with no trailing dot) must produce

@@ -36,7 +36,7 @@
 //! (`E0616`) — the one rebuild,
 //! [`FlowReturnResult::with_return_type`], re-derives.
 
-use super::{FlowReturnDegradation, SemanticNodeId};
+use super::{FlowReturnDegradation, SemanticNodeId, SignaturePredicate};
 use crate::flow_completion_inventory::{transports_completion, NormalCompletion};
 
 /// The SUCCESS carrier of a `FlowReturn` query — including DEGRADED
@@ -114,7 +114,34 @@ pub struct FlowReturnResult {
     /// `Generator<Y, join, N>`, and `AsyncGenerator<Y, join, N>` whose
     /// two iteration parameters take the async iteration rule. See
     /// [`FlowReturnWrap`].
-    wrap: Option<FlowReturnWrap>,
+    ///
+    /// The same slot carries the type predicate the checker INFERS for a
+    /// PLAIN function from its body: a function with no return annotation
+    /// whose single returned expression is a `boolean` that narrows a
+    /// parameter to a type on its true edge and to `never` from that type
+    /// on its false edge (`(x: unknown) => typeof x === "string"` is `x is
+    /// string`). It rides beside the `boolean` return exactly as an
+    /// authored predicate does. The two never meet: only an `async` /
+    /// generator body takes a wrap, and only a plain function infers a
+    /// predicate.
+    facet: FunctionKindFacet,
+    /// The diagnostics the checker reports for the body's own calls that
+    /// no candidate applies to, each answered by the checker's
+    /// error-recovery candidate: the value IS the checker's answer, and
+    /// these ride with it so it is never a silent success. They are the
+    /// body's own — a caller of this function reads its signature, not
+    /// its errors. Every rebuild carries them.
+    checker_diagnostics: std::sync::Arc<[super::CheckerDiagnostic]>,
+}
+
+/// What a function's authored kind adds to its body join — see
+/// [`FlowReturnResult::function_wrap`] and
+/// [`FlowReturnResult::inferred_predicate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FunctionKindFacet {
+    None,
+    Wrap(FlowReturnWrap),
+    Predicate(SignaturePredicate),
 }
 
 /// The deferred function-kind wrap of one flow-return value — the
@@ -196,8 +223,26 @@ impl FlowReturnResult {
             can_fall_through,
             degradation,
             fresh_literal_arms: retained_fresh_literal_arms(graph, return_type, fresh_literal_arms),
-            wrap: None,
+            facet: FunctionKindFacet::None,
+            checker_diagnostics: std::sync::Arc::from([]),
         }
+    }
+
+    /// The diagnostics riding with the value (see the field).
+    #[must_use]
+    pub fn checker_diagnostics(&self) -> &std::sync::Arc<[super::CheckerDiagnostic]> {
+        &self.checker_diagnostics
+    }
+
+    /// Attach the diagnostics the evaluation recorded — or carry a
+    /// rebuilt value's source diagnostics over.
+    #[must_use]
+    pub(crate) fn with_checker_diagnostics(
+        mut self,
+        diagnostics: std::sync::Arc<[super::CheckerDiagnostic]>,
+    ) -> Self {
+        self.checker_diagnostics = diagnostics;
+        self
     }
 
     /// The whole-function return type.
@@ -223,7 +268,10 @@ impl FlowReturnResult {
     /// and publication has not materialized it yet.
     #[must_use]
     pub fn function_wrap(&self) -> Option<&FlowReturnWrap> {
-        self.wrap.as_ref()
+        match &self.facet {
+            FunctionKindFacet::Wrap(wrap) => Some(wrap),
+            FunctionKindFacet::None | FunctionKindFacet::Predicate(_) => None,
+        }
     }
 
     /// Attach the deferred function-kind wrap. Idempotent by construction
@@ -231,7 +279,25 @@ impl FlowReturnResult {
     /// rebuild untouched until the publication closure consumes it.
     #[must_use]
     pub(crate) fn with_function_wrap(mut self, wrap: FlowReturnWrap) -> Self {
-        self.wrap = Some(wrap);
+        self.facet = FunctionKindFacet::Wrap(wrap);
+        self
+    }
+
+    /// The type predicate inferred from a plain function's body, when it
+    /// has one (see the `facet` field).
+    #[must_use]
+    pub fn inferred_predicate(&self) -> Option<SignaturePredicate> {
+        match self.facet {
+            FunctionKindFacet::Predicate(predicate) => Some(predicate),
+            FunctionKindFacet::None | FunctionKindFacet::Wrap(_) => None,
+        }
+    }
+
+    /// Attach the type predicate inferred from a plain function's body. It
+    /// rides every rebuild untouched, like the function-kind wrap.
+    #[must_use]
+    pub(crate) fn with_inferred_predicate(mut self, predicate: SignaturePredicate) -> Self {
+        self.facet = FunctionKindFacet::Predicate(predicate);
         self
     }
 
@@ -244,7 +310,10 @@ impl FlowReturnResult {
     /// drops out of the list with the value it named. A pending
     /// function-kind wrap carries forward untouched — the rebuild is a
     /// BODY-join transformation (widening, substitution), and the wrap
-    /// materializes over the rebuilt body at publication.
+    /// materializes over the rebuilt body at publication. An inferred
+    /// predicate carries forward too; a substitution that maps the return
+    /// maps the predicate's target itself. The checker diagnostics carry
+    /// forward untouched.
     #[must_use]
     pub(crate) fn with_return_type(
         &self,
@@ -258,9 +327,10 @@ impl FlowReturnResult {
             self.degradation,
             &self.fresh_literal_arms,
         );
-        match self.wrap {
-            Some(wrap) => rebuilt.with_function_wrap(wrap),
-            None => rebuilt,
+        Self {
+            facet: self.facet,
+            checker_diagnostics: std::sync::Arc::clone(&self.checker_diagnostics),
+            ..rebuilt
         }
     }
 }

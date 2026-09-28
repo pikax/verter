@@ -116,7 +116,7 @@ pub static SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS: AtomicU64 = AtomicU64::new(0
 ///   5 = MappedType
 ///   6 = Conditional
 ///   7 = TypeOf
-///   8 = NormalizeUnion
+///   8 = ReduceUnion
 ///   9 = ReduceIntersection
 ///  10 = ProjectObjectSpread
 ///  11 = ProjectPath
@@ -154,7 +154,7 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
     "MappedType",
     "Conditional",
     "TypeOf",
-    "NormalizeUnion",
+    "ReduceUnion",
     "ReduceIntersection",
     "ProjectObjectSpread",
     "ProjectPath",
@@ -385,7 +385,7 @@ pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usiz
         SemanticQueryKey::MappedType { .. } => 5,
         SemanticQueryKey::Conditional { .. } => 6,
         SemanticQueryKey::TypeOf { .. } => 7,
-        SemanticQueryKey::NormalizeUnion { .. } => 8,
+        SemanticQueryKey::ReduceUnion { .. } => 8,
         SemanticQueryKey::ReduceIntersection { .. } => 9,
         SemanticQueryKey::ProjectObjectSpread { .. } => 10,
         SemanticQueryKey::ProjectPath { .. } => 11,
@@ -883,8 +883,9 @@ mod tests {
             distributive: false,
             pending: None,
         };
-        let normalize_union = SemanticQueryKey::NormalizeUnion {
+        let reduce_union = SemanticQueryKey::ReduceUnion {
             members: Arc::from(Vec::new().into_boxed_slice()),
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
         };
         let normalize_intersection = SemanticQueryKey::reduce_intersection_operands(Arc::from(
             Vec::new().into_boxed_slice(),
@@ -1031,7 +1032,7 @@ mod tests {
             kind_index_for_key(&indexed_access),
             kind_index_for_key(&key_of),
             kind_index_for_key(&conditional),
-            kind_index_for_key(&normalize_union),
+            kind_index_for_key(&reduce_union),
             kind_index_for_key(&normalize_intersection),
             kind_index_for_key(&project_object_spread),
             kind_index_for_key(&project_path),

@@ -33,11 +33,12 @@ use oxc_ast::ast::{
     Statement,
 };
 use oxc_ast_visit::{walk, Visit};
-use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder, SymbolFlags};
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::scope::ScopeFlags;
 use rustc_hash::FxHashSet;
+use verter_parser::oxc_parse::Parser;
+use verter_parser::utils::oxc::script::export_parts::NamedExportParts;
 
 use crate::cursor::ScriptLanguage;
 use crate::utils::oxc::vue::parse_generic;
@@ -401,19 +402,24 @@ fn project_normal(
     let grammar = grammar_of(block.lang)?;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, block.content, grammar.source_type()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(SetupProjectionRefusal::SyntaxErrors { setup: false });
     }
     collect_imports(&parsed.program, block.content_start, false, module);
     for statement in &parsed.program.body {
         match statement {
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(declaration) = &export.declaration {
+            Statement::ExportDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_) => {
+                let Some(export) = NamedExportParts::of_statement(statement) else {
+                    continue;
+                };
+                if let Some(declaration) = export.declaration {
                     if !is_type_only_declaration(declaration) {
                         module.named_exports.extend(declaration_names(declaration));
                     }
                 }
-                for specifier in &export.specifiers {
+                for specifier in export.specifiers {
                     if export.export_kind.is_type() || specifier.export_kind.is_type() {
                         continue;
                     }
@@ -440,7 +446,10 @@ fn project_normal(
             _ => {}
         }
     }
-    let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+    let semantic = verter_parser::oxc_parse::with_program_stack(&parsed.program, || {
+        SemanticBuilder::new().build(&parsed.program)
+    })
+    .semantic;
     let scoping = semantic.scoping();
     module.normal_script_bindings = root_bindings(scoping);
     Ok(value_bindings(scoping))
@@ -471,13 +480,16 @@ fn project_setup(
     let grammar = grammar_of(block.lang)?;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, block.content, grammar.source_type()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(SetupProjectionRefusal::SyntaxErrors { setup: true });
     }
     let program = &parsed.program;
     collect_imports(program, block.content_start, true, module);
 
-    let semantic = SemanticBuilder::new().build(program).semantic;
+    let semantic = verter_parser::oxc_parse::with_program_stack(program, || {
+        SemanticBuilder::new().build(program)
+    })
+    .semantic;
     let module_bound: FxHashSet<&str> = normal_value_bindings.iter().map(String::as_str).collect();
     let vue_macro_imports = vue_runtime_macro_imports(program);
     let mut collector = SetupCollector {
@@ -492,7 +504,7 @@ fn project_setup(
         top_level_await: None,
         macros: Vec::new(),
     };
-    collector.visit_program(program);
+    verter_parser::oxc_parse::with_program_stack(program, || collector.visit_program(program));
 
     let statements = program
         .body
@@ -633,7 +645,7 @@ impl<'a> Visit<'a> for ComputedKeyAwaitVisitor {
         if self.found.is_some() {
             return;
         }
-        if let Some(super_class) = &it.super_class {
+        if let Some(super_class) = it.heritage.as_ref().map(|heritage| &heritage.expression) {
             self.visit_expression(super_class);
         }
         for element in &it.body.body {
@@ -672,7 +684,7 @@ impl<'a> Visit<'a> for SetupCollector<'_> {
     fn visit_class(&mut self, it: &Class<'a>) {
         if self.depth == 0 {
             // Heritage is evaluated eagerly in the enclosing scope.
-            if let Some(super_class) = &it.super_class {
+            if let Some(super_class) = it.heritage.as_ref().map(|heritage| &heritage.expression) {
                 let mut probe = ComputedKeyAwaitVisitor { found: None };
                 probe.visit_expression(super_class);
                 if let Some(span) = probe.found {

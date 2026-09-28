@@ -430,7 +430,7 @@ pub(crate) fn template_literal_reduce_key_covers_context() {
 
     // NEGATIVE: arg ORDER matters — `${a}-${b}` and `${b}-${a}` are
     // DISTINCT concatenations and MUST NOT collide. A reorder/sort applied
-    // to `args` (as NormalizeUnion does for its order-insensitive members)
+    // to `args` (as ReduceUnion does for its order-insensitive members)
     // would make these share a slot — `assert_distinct_identity` then sees
     // count 1 and FAILS. This is the discriminating negative.
     assert_distinct_identity(

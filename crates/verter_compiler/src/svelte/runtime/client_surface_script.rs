@@ -156,23 +156,25 @@ fn instance_script_writes_a_prop(instance_source: &str, ir: &SvelteRuntimeIr) ->
     // itself: a LEGACY `$:` labeled statement is a SUPPORTED prop-read surface
     // and is skipped whole.
     use oxc_ast_visit::Visit;
-    let mut frame = rustc_hash::FxHashSet::default();
-    super::expr::collect_direct_decls(&program.body, &mut frame);
-    super::expr::collect_var_hoists(&program.body, &mut frame);
-    for name in &prop_locals {
-        frame.remove(name);
-    }
-    scan.scopes.push(frame);
-    for stmt in &program.body {
-        if legacy_mode {
-            if let oxc_ast::ast::Statement::LabeledStatement(labeled) = stmt {
-                if labeled.label.name == "$" {
-                    continue;
+    verter_parser::oxc_parse::with_program_stack(&program, || {
+        let mut frame = rustc_hash::FxHashSet::default();
+        super::expr::collect_direct_decls(&program.body, &mut frame);
+        super::expr::collect_var_hoists(&program.body, &mut frame);
+        for name in &prop_locals {
+            frame.remove(name);
+        }
+        scan.scopes.push(frame);
+        for stmt in &program.body {
+            if legacy_mode {
+                if let oxc_ast::ast::Statement::LabeledStatement(labeled) = stmt {
+                    if labeled.label.name == "$" {
+                        continue;
+                    }
                 }
             }
+            scan.visit_statement(stmt);
         }
-        scan.visit_statement(stmt);
-    }
+    });
     scan.found
 }
 
@@ -270,18 +272,18 @@ impl<'a> oxc_ast_visit::Visit<'a> for PropWriteScan<'_> {
         oxc_ast_visit::walk::walk_variable_declarator(self, it);
     }
 
-    fn visit_export_named_declaration(&mut self, it: &oxc_ast::ast::ExportNamedDeclaration<'a>) {
+    fn visit_export_declaration(&mut self, it: &oxc_ast::ast::ExportDeclaration<'a>) {
         // Skip a legacy `export let` PROP DECLARATION entirely — its declarators
         // BIND props, and a DEFAULT INITIALIZER reading a sibling prop
         // (`export let b = a`) is part of the declaration, exactly as a runes
         // `$props()` destructure default (the declarator skip above). Any other
         // export form is walked.
-        if let Some(oxc_ast::ast::Declaration::VariableDeclaration(decl)) = &it.declaration {
+        if let oxc_ast::ast::Declaration::VariableDeclaration(decl) = &it.declaration {
             if decl.kind == oxc_ast::ast::VariableDeclarationKind::Let {
                 return;
             }
         }
-        oxc_ast_visit::walk::walk_export_named_declaration(self, it);
+        oxc_ast_visit::walk::walk_export_declaration(self, it);
     }
 
     fn visit_function(
@@ -590,13 +592,17 @@ fn refuse_module_item_containing(
             Statement::VariableDeclaration(_) => "variable declaration",
             Statement::FunctionDeclaration(_) => "function",
             Statement::ClassDeclaration(_) => "class",
-            Statement::ExportNamedDeclaration(_)
+            Statement::ExportDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_)
             | Statement::ExportAllDeclaration(_)
             | Statement::ExportDefaultDeclaration(_) => "export",
             Statement::ExpressionStatement(_) => "expression statement",
             Statement::EmptyStatement(_) => "empty statement",
             Statement::TSEnumDeclaration(_) => "enum",
-            Statement::TSModuleDeclaration(_) => "namespace",
+            Statement::TSExternalModuleDeclaration(_) | Statement::TSNamespaceDeclaration(_) => {
+                "namespace"
+            }
             Statement::TSInterfaceDeclaration(_) => "interface",
             Statement::TSTypeAliasDeclaration(_) => "type alias",
             Statement::TSImportEqualsDeclaration(_) => "import-equals",
@@ -629,12 +635,14 @@ fn collect_module_statement_spans(
         match stmt {
             oxc_ast::ast::Statement::ImportDeclaration(_) => continue,
             oxc_ast::ast::Statement::TSEnumDeclaration(_)
-            | oxc_ast::ast::Statement::TSModuleDeclaration(_)
+            | oxc_ast::ast::Statement::TSExternalModuleDeclaration(_)
+            | oxc_ast::ast::Statement::TSNamespaceDeclaration(_)
             | oxc_ast::ast::Statement::TSImportEqualsDeclaration(_) => {
                 return Err(UnsupportedSvelteRuntimeSurface::ModuleScriptItem {
                     construct: match stmt {
                         oxc_ast::ast::Statement::TSEnumDeclaration(_) => "enum",
-                        oxc_ast::ast::Statement::TSModuleDeclaration(_) => "namespace",
+                        oxc_ast::ast::Statement::TSExternalModuleDeclaration(_)
+                        | oxc_ast::ast::Statement::TSNamespaceDeclaration(_) => "namespace",
                         _ => "import-equals",
                     },
                     span: Span::new(stmt.span().start, stmt.span().end),
@@ -686,7 +694,7 @@ fn scan_unsupported_rune_forms(
         store_exempt.clone(),
     );
     use oxc_ast_visit::Visit;
-    scan.visit_program(&program);
+    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
     RuneScanOutcome {
         uses_host: scan.uses_host(),
         first_host_span: scan.first_host_span(),

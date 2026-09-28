@@ -126,7 +126,7 @@ use crate::semantic_query::{
     AuthoredPropertyKey, DeclIdentity, FunctionParam, HotTypeRef, IndexKey, IndexSignature,
     MacroOwnBodyStamp, MapperKey, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind,
     QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SignatureKind,
-    SurfaceEntry, SurfaceMember, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
+    SurfaceEntry, SurfaceMember, TupleElement, TypeParamDecl, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -513,10 +513,7 @@ fn lower_node(
         // key's `value_node` ordinal is value-side provenance carried
         // alongside, NOT folded into identity.
         TypeExpr::SyntheticSlotBinding(key) => Ok(graph.intern_node_with_scope(
-            SemanticNodeData::SyntheticBinding {
-                id: SyntheticBindingId::from_carrier_key(key),
-                value_node: key.value_node,
-            },
+            SemanticNodeData::synthetic_binding(key, graph.node_count()),
             scope.clone(),
         )),
 
@@ -714,7 +711,17 @@ fn lower_node(
             ..
         } => {
             let mapper_display_name: Arc<str> = Arc::from(parameter.as_str());
-            let mapper_decl = DeclIdentity::from_scope(scope, Arc::from("<mapper-param>"));
+            let mapper_decl = DeclIdentity::from_scope(
+                scope,
+                crate::mapper_binder_registry::mapper_binder_decl_name(
+                    graph,
+                    source,
+                    value,
+                    *optional,
+                    *readonly,
+                    name_type.as_ref(),
+                ),
+            );
             let parameter_node = graph.intern_node_with_scope(
                 SemanticNodeData::TypeParam {
                     decl: mapper_decl,
@@ -792,6 +799,12 @@ fn lower_node(
                 readonly,
                 name_remap,
                 kind,
+                over_type_variable: match source.as_ref() {
+                    TypeExpr::KeyOf(_) => {
+                        crate::semantic_query::keyof_operand_is_type_variable(graph, source_node)
+                    }
+                    _ => false,
+                },
             };
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::Mapped {
@@ -975,6 +988,7 @@ fn lower_function_signature(
             optional: p.optional,
             rest: p.rest,
             span: p.span,
+            declared_literal: crate::semantic_query::declares_literal_type(&p.ty),
         });
     }
     let return_type = match func.return_type.as_deref() {
@@ -988,6 +1002,17 @@ fn lower_function_signature(
             verter_type_expr::facts::FunctionReturnSource::Absent,
         )
     };
+    let predicate = match func.predicate.as_deref() {
+        Some(predicate) => {
+            let target = predicate
+                .ty
+                .as_deref()
+                .map(|target| lower_node(graph, target, scope, &inner_ctx))
+                .transpose()?;
+            crate::semantic_query::SignaturePredicate::resolve(predicate, &params, target)
+        }
+        None => None,
+    };
     Ok(graph.intern_node_with_scope(
         SemanticNodeData::Signature {
             kind,
@@ -998,6 +1023,8 @@ fn lower_function_signature(
             return_carrier,
             signature_span: func.spans.signature,
             return_type_span: func.spans.return_type,
+            predicate,
+            is_abstract: func.is_abstract,
         },
         scope.clone(),
     ))

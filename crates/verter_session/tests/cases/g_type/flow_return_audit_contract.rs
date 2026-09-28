@@ -32,7 +32,9 @@ use std::sync::Arc;
 use verter_audit::payloads::flow_return::{FlowDegradationTag, FlowFailureTag, FlowPartialityTag};
 use verter_audit::{AuditCaptureState, RequestKind, StructuredAuditEvent};
 use verter_session::host_flow_return_audit::FlowReturnError;
-use verter_session::semantic_query::{demand, FlowReturnFailure, ReturnProjectionDemand};
+use verter_session::semantic_query::{
+    demand, FlowReturnFailure, FlowReturnResult, ReturnProjectionDemand,
+};
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
@@ -309,10 +311,12 @@ fn whole() -> ReturnProjectionDemand {
 /// The audit record must explain WHY a request came back partial, not
 /// only THAT it did.
 ///
-/// A `typeof`-guard over an unenumerable subject (`unknown`) retains a
-/// superset and records the typed guard-narrowing gap, so the value is
-/// usable but never warm: both calls recompute cold. Each record must
-/// name that reason. The `string | number` control classifies every arm,
+/// A `switch` case naming a literal-typed constant, a relation the guard
+/// vocabulary does not carry, retains a superset and records the typed
+/// guard-narrowing gap, so the value is usable but never warm: both calls
+/// recompute cold. Each record must name that reason. The `string | number`
+/// control classifies every arm, so it reports NO partiality and its second
+/// call is a warm hit.| number` control classifies every arm,
 /// so it reports NO partiality and its second call is a warm hit.
 ///
 /// Discrimination: against a payload that carries only the three
@@ -326,7 +330,8 @@ fn flow_return_audit_explains_partial_cold_recompute() {
     upsert(
         &host,
         canonical,
-        "export function gapped(x: unknown) { if (typeof x === \"string\") return x; return 0; }\n\
+        "export {};\n\
+         export function gapped(x: 1 | 2) { const k: 1 = 1; switch (x) { case k: return x; } return 0; }\n\
          export function complete(x: string | number) { if (typeof x === \"string\") return x; return 0; }\n",
     );
 
@@ -465,7 +470,8 @@ fn partiality_projection_does_not_change_admission_or_warmth() {
         complete_warm: bool,
     }
 
-    let source = "export function gapped(x: unknown) { if (typeof x === \"string\") return x; return 0; }\n\
+    let source = "export {};\n\
+                  export function gapped(x: 1 | 2) { const k: 1 = 1; switch (x) { case k: return x; } return 0; }\n\
                   export function complete(x: string | number) { if (typeof x === \"string\") return x; return 0; }\n";
     let canonical = "/w/flow-audit-partiality-equiv.ts";
 
@@ -554,5 +560,129 @@ fn partiality_projection_does_not_change_admission_or_warmth() {
         "the partiality projection is observability only — the served \
          value, the degradation verdict, the warm/cold sequence, and the \
          cache identity behind it must not depend on whether it ran"
+    );
+}
+
+/// The caller's cancellation reaches the evaluation on BOTH registration
+/// arms. A request cancelled before it starts answers the typed
+/// `Cancelled` error — an active record names it as the no-value reason —
+/// and a retry under a fresh token answers what the uncancelled entry
+/// answers.
+///
+/// Discrimination: the dispatch reads cancellation from the installed
+/// request context, which the `Noop` arm installed only for the audited
+/// arm; against that tree the denied leg completes despite the cancelled
+/// token. Against a tree that reports the cancellation as the budget trip
+/// it causes, both legs fail the typed-`Cancelled` assertion.
+#[test]
+fn caller_cancellation_answers_cancelled_on_both_registration_arms() {
+    use verter_scheduler::cancellation::CancellationToken;
+    for (filter, capture) in [
+        (
+            verter_audit::AuditConsumerFilter::allow_all(),
+            AuditCaptureState::ActiveStored,
+        ),
+        (
+            verter_audit::AuditConsumerFilter::deny_all(),
+            AuditCaptureState::FilteredNoop,
+        ),
+    ] {
+        let mut host = VerterHost::new_standalone(HostConfig {
+            audit_enabled: true,
+            footprint_capture: false,
+            ..HostConfig::default()
+        });
+        host.replace_host_audit_runtime_for_test(verter_audit::AuditConfig {
+            consumer_filter: filter,
+            ..verter_audit::AuditConfig::default()
+        });
+        upsert(&host, CANONICAL, FIXTURE);
+        let ident = identity(CANONICAL, "makeThing");
+
+        let token = CancellationToken::new();
+        token.cancel();
+        let cancelled = host.get_flow_return_type_with_audit_cancellable(&ident, whole(), token);
+        assert_eq!(cancelled.audit().capture_state, capture);
+        assert!(
+            matches!(cancelled.as_result(), Err(FlowReturnError::Cancelled)),
+            "{capture:?}: a pre-cancelled request must answer Cancelled, got {:?}",
+            cancelled.as_result().map(|result| result.degradation())
+        );
+        if capture == AuditCaptureState::ActiveStored {
+            assert_eq!(
+                cancelled
+                    .audit()
+                    .flow_return_inference_payload()
+                    .expect("flow payload")
+                    .partiality,
+                Some(FlowPartialityTag::NoValue(FlowFailureTag::Cancelled)),
+                "the record names the cancellation as the no-value reason"
+            );
+        }
+
+        let retried = host.get_flow_return_type_with_audit_cancellable(
+            &ident,
+            whole(),
+            CancellationToken::new(),
+        );
+        let plain = host.get_flow_return_type_with_audit(&ident, whole());
+        let served =
+            |carrier: &verter_audit::AuditedResult<Arc<FlowReturnResult>, FlowReturnError>| {
+                match carrier.as_result() {
+                    Ok(result) => format!("ok:{:?}", result.degradation()),
+                    Err(err) => format!("err:{err:?}"),
+                }
+            };
+        assert_eq!(
+            served(&retried),
+            "ok:None",
+            "{capture:?}: the retry completes"
+        );
+        assert_eq!(served(&retried), served(&plain));
+    }
+}
+
+/// A request whose token was cancelled before it started answers
+/// `Cancelled` even when its answer is warm: the warm read is part of the
+/// request's work, and a pre-start cancellation cancels all of it. The
+/// shared warm entry stays: an uncancelled request afterwards is served
+/// from it, with no cold evaluation.
+///
+/// Discrimination: against a tree that serves the warm read before any
+/// cancellation check, the pre-cancelled request answers the clean warm
+/// value.
+#[test]
+fn a_pre_cancelled_request_answers_cancelled_over_a_warm_answer() {
+    use verter_scheduler::cancellation::CancellationToken;
+    let host = build_host(false);
+    let ident = identity(CANONICAL, "makeThing");
+    let cold = host.get_flow_return_type_with_audit(&ident, whole());
+    assert!(cold.as_result().is_ok(), "cold prime must resolve");
+    let warm = host.get_flow_return_type_with_audit(&ident, whole());
+    assert!(warm.audit().from_cache, "the answer is warm");
+
+    let token = CancellationToken::new();
+    token.cancel();
+    let cancelled = host.get_flow_return_type_with_audit_cancellable(&ident, whole(), token);
+    assert!(
+        matches!(cancelled.as_result(), Err(FlowReturnError::Cancelled)),
+        "a pre-cancelled request answers Cancelled over a warm answer, got {:?}",
+        cancelled.as_result().map(|result| result.degradation())
+    );
+
+    let after =
+        host.get_flow_return_type_with_audit_cancellable(&ident, whole(), CancellationToken::new());
+    assert!(after.as_result().is_ok(), "an uncancelled request answers");
+    assert!(
+        after.audit().from_cache,
+        "the shared warm entry survives the cancelled request"
+    );
+    assert_eq!(
+        after
+            .audit()
+            .flow_return_inference_payload()
+            .expect("flow payload")
+            .cold_computes,
+        0
     );
 }

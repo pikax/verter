@@ -1793,12 +1793,16 @@ let count = $state(0);
 
         assert!(out.is_jsx, "a no-lang Svelte component must publish .jsx");
         let allocator = oxc_allocator::Allocator::default();
-        let parsed =
-            oxc_parser::Parser::new(&allocator, &out.code, oxc_span::SourceType::jsx()).parse();
+        let parsed = verter_parser::oxc_parse::Parser::new(
+            &allocator,
+            &out.code,
+            oxc_span::SourceType::jsx(),
+        )
+        .parse();
         assert!(
-            parsed.errors.is_empty(),
+            parsed.diagnostics.is_empty(),
             "the JavaScript carrier must be syntactically valid JSX:\n{:?}\n{}",
-            parsed.errors,
+            parsed.diagnostics,
             out.code
         );
         assert!(

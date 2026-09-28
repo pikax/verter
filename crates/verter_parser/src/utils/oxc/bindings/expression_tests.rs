@@ -1,7 +1,7 @@
 use super::super::types::Dynamism;
 use super::*;
+use crate::oxc_parse::Parser;
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 
 /// Helper to parse and extract bindings from an expression
@@ -503,10 +503,10 @@ fn extract_program_result<'a>(
 ) -> BindingExtractionResult<'a> {
     let parsed = Parser::new(alloc, source, SourceType::tsx()).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "fixture must parse: {source:?} → {:?}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>()

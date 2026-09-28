@@ -1799,8 +1799,15 @@ fn node_reaches_non_owner_ref(
         SemanticNodeData::Signature {
             params,
             return_type,
+            predicate,
             ..
-        } => params.iter().any(|p| recur(p.ty)) || recur(*return_type),
+        } => {
+            params.iter().any(|p| recur(p.ty))
+                || recur(*return_type)
+                || predicate
+                    .and_then(|predicate| predicate.ty)
+                    .is_some_and(&recur)
+        }
         SemanticNodeData::Conditional {
             check,
             extends,

@@ -438,7 +438,7 @@ semantic_query_names! {
     MappedType,
     Conditional,
     TypeOf,
-    NormalizeUnion,
+    ReduceUnion,
     ReduceIntersection,
     ProjectObjectSpread,
     ProjectPath,
@@ -692,7 +692,7 @@ struct BlockContractRow {
 /// (its `SemanticQueryKey/facts touched:` producer line), NOT an absolute doc
 /// line number — line numbers drift as the docs are edited, the block heading
 /// does not:
-/// - foundational decl/value keys (`ResolveDecl`, `TypeOf`, `NormalizeUnion`,
+/// - foundational decl/value keys (`ResolveDecl`, `TypeOf`, `ReduceUnion`,
 ///   `ReduceIntersection`) PLUS `Instantiate` at
 ///   `U2.QUERY_VALUE_DOMAIN` (its `Context` adds/upgrades the U2 key surface +
 ///   value-domain arms; generic substitution is a value-domain instantiation,
@@ -734,7 +734,7 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
     use SemanticQueryName::*;
     use TypeInfoParityBlockId::*;
     match key {
-        ResolveDecl | TypeOf | NormalizeUnion | ReduceIntersection | Instantiate | LowerLocator => {
+        ResolveDecl | TypeOf | ReduceUnion | ReduceIntersection | Instantiate | LowerLocator => {
             U2QueryValueDomain
         }
         Relate | Conditional => U2RelationInfer,
@@ -2033,7 +2033,7 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         // Foundational decl/value keys at U2.QUERY_VALUE_DOMAIN.
         (ResolveDecl, U2QueryValueDomain),
         (TypeOf, U2QueryValueDomain),
-        (NormalizeUnion, U2QueryValueDomain),
+        (ReduceUnion, U2QueryValueDomain),
         (ReduceIntersection, U2QueryValueDomain),
         // Generic substitution (`Instantiate`) is a value-domain instantiation
         // produced by U2.QUERY_VALUE_DOMAIN's foundation, NOT a relation

@@ -195,8 +195,8 @@ impl ObjectExpr {
 
 impl FunctionExpr {
     /// Recursively rebase the signature/return spans, each parameter's span and
-    /// nested type, the return type, and every type-parameter constraint /
-    /// default by a signed byte `delta`.
+    /// nested type, the return type, every type-parameter constraint /
+    /// default, and the predicate target by a signed byte `delta`.
     pub(crate) fn shift_spans(&mut self, delta: i64) {
         self.spans.shift(delta);
         for param in &mut self.parameters {
@@ -214,11 +214,18 @@ impl FunctionExpr {
                 Arc::make_mut(default).shift_spans(delta);
             }
         }
+        if let Some(target) = self
+            .predicate
+            .as_mut()
+            .and_then(|predicate| Arc::make_mut(predicate).ty.as_mut())
+        {
+            Arc::make_mut(target).shift_spans(delta);
+        }
     }
 
     /// Recursively drop the signature/return spans, each parameter's span and
-    /// nested type, the return type, and every type-parameter constraint /
-    /// default.
+    /// nested type, the return type, every type-parameter constraint /
+    /// default, and the predicate target.
     pub(crate) fn clear_spans(&mut self) {
         self.spans.clear();
         for param in &mut self.parameters {
@@ -235,6 +242,13 @@ impl FunctionExpr {
             if let Some(default) = type_param.default.as_mut() {
                 Arc::make_mut(default).clear_spans();
             }
+        }
+        if let Some(target) = self
+            .predicate
+            .as_mut()
+            .and_then(|predicate| Arc::make_mut(predicate).ty.as_mut())
+        {
+            Arc::make_mut(target).clear_spans();
         }
     }
 }

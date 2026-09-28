@@ -30,11 +30,11 @@ use crate::VerterHost;
 fn prepared_of(source: &str) -> PreparedFunctionBodySkeleton {
     let allocator = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::ts();
-    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+    let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
     assert!(
-        ret.errors.is_empty(),
+        ret.diagnostics.is_empty(),
         "fixture must parse: {:?}",
-        ret.errors
+        ret.diagnostics
     );
     let owners = TopLevelOwnerTable::ordinary_file(ret.program.body.len());
     let index =
@@ -47,7 +47,7 @@ fn prepared_of(source: &str) -> PreparedFunctionBodySkeleton {
                     .next()
                     .unwrap()
                     .entry();
-                return build_indexed_function_body_skeleton(&body_source, entry).unwrap();
+                return build_indexed_function_body_skeleton(&body_source, source, entry).unwrap();
             }
         }
     }
@@ -98,8 +98,9 @@ impl FlowBodySkeletonSource for FixtureSkeletonSource {
         self.builds.fetch_add(1, Ordering::SeqCst);
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
-            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
-        assert!(parsed.errors.is_empty(), "fixture must parse");
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse();
+        assert!(parsed.diagnostics.is_empty(), "fixture must parse");
         let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
         let index = build_function_program_index(
             &parsed.program,
@@ -130,6 +131,7 @@ impl FlowBodySkeletonSource for FixtureSkeletonSource {
             .expect("fixture function");
         let prepared = build_indexed_function_body_skeleton(
             &FunctionBodySource::from_function(function).unwrap(),
+            source,
             &entry,
         )?;
         Ok(Some(build_prepared_bundle(prepared)))
@@ -225,8 +227,9 @@ fn enclosing_binding_changes_split_unchanged_child_body_bundles() {
     ) {
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
-            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
-        assert!(parsed.errors.is_empty());
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse();
+        assert!(parsed.diagnostics.is_empty());
         let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
         let index = build_function_program_index(
             &parsed.program,

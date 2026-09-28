@@ -6,10 +6,10 @@
 //! callers fail open and never publish a false unused-binding diagnostic.
 
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 use verter_css_syntax::CssDialect;
+use verter_parser::oxc_parse::Parser;
 
 use crate::style_planner::{
     transform_vue_v_bind, AuthoredStyleInput, PreparedStyleIr, StyleRewriteOutcome,
@@ -153,7 +153,7 @@ fn collect_expr_identifier_roots(expr_text: &str, used: &mut FxHashSet<String>) 
     let alloc = Allocator::default();
     match Parser::new(&alloc, trimmed, SourceType::tsx()).parse_expression() {
         Ok(expr) => {
-            for reference in collect_expression_free_refs(&expr) {
+            for reference in collect_expression_free_refs(&expr, trimmed) {
                 used.insert(reference.to_string());
             }
             true

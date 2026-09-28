@@ -70,6 +70,12 @@ pub enum FlowReturnError {
         /// Number of retry attempts made before giving up.
         attempts: u8,
     },
+    /// The caller cancelled the request before it produced a complete
+    /// answer. Whatever incomplete state the evaluation reached — a budget
+    /// trip at the next cancellation check, or a nested read that stopped
+    /// and degraded the value — is the CANCELLATION, never a statement about
+    /// the program, and nothing it computed was admitted.
+    Cancelled,
 }
 
 impl VerterHost {
@@ -98,6 +104,63 @@ impl VerterHost {
         function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
         demand: ReturnProjectionDemand,
     ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
+        self.flow_return_with_audit(function, demand, None)
+    }
+
+    /// [`Self::get_flow_return_type_with_audit`] under the CALLER's
+    /// cancellation: cancelling any clone of `cancellation` — before the
+    /// request starts or while it runs — cancels it. A request that had not
+    /// finished answers [`FlowReturnError::Cancelled`]; one that completed
+    /// before the cancellation landed keeps its answer. A retry under a
+    /// fresh token recomputes from whatever the cancelled attempt left,
+    /// which is never a partial answer.
+    #[must_use]
+    pub fn get_flow_return_type_with_audit_cancellable(
+        &self,
+        function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+        demand: ReturnProjectionDemand,
+        cancellation: verter_scheduler::cancellation::CancellationToken,
+    ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
+        self.flow_return_with_audit(function, demand, Some(cancellation))
+    }
+
+    fn flow_return_with_audit(
+        &self,
+        function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+        demand: ReturnProjectionDemand,
+        cancellation: Option<verter_scheduler::cancellation::CancellationToken>,
+    ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
+        self.flow_return_request(function, cancellation, |dispatch| {
+            let key = dispatch.flow_return_key_with_demand(function, demand);
+            let step = dispatch.execute_flow_return(key);
+            #[cfg(feature = "test-support")]
+            crate::for_tests::signature_kernel_bench_support::cancel_trace::mark("evaluated");
+            match step {
+                crate::semantic_query::FlowReturnStep::Complete(result) => Ok(Arc::new(result)),
+                crate::semantic_query::FlowReturnStep::NoValue(failure) => {
+                    Err(FlowReturnError::Failure(failure))
+                }
+                // A hold cannot surface at a fresh top-level
+                // transaction (no in-flight frame exists to
+                // re-enter); treat a torn surfacing as
+                // undecided, never a fabricated value.
+                crate::semantic_query::FlowReturnStep::Hold(_) => {
+                    Err(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
+                }
+            }
+        })
+    }
+
+    /// One audited flow-return request for `function` around `run`: the
+    /// request id, context, audit registration, proven-current store view
+    /// and dispatch every flow-return request builds, `run` over that
+    /// dispatch, then the cancellation mapping and the audit record.
+    pub(crate) fn flow_return_request(
+        &self,
+        function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+        cancellation: Option<verter_scheduler::cancellation::CancellationToken>,
+        run: impl FnOnce(&ProjectSemanticDispatch<'_>) -> Result<Arc<FlowReturnResult>, FlowReturnError>,
+    ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
         let canonical_id: &str = function.anchor.canonical_id.as_ref();
         let function_symbol: &str = function.anchor.symbol.as_ref();
 
@@ -117,14 +180,26 @@ impl VerterHost {
             request_id,
             footprint_capture,
         );
-        let ctx = RequestContext::with_kind_and_timing(
-            request_id,
-            Arc::<str>::from(canonical_id),
-            RequestKind::FlowReturnInference,
-            footprint_capture,
-            timing_capture,
-            footprint_scope.accumulator(),
-        );
+        let caller_cancellable = cancellation.is_some();
+        let ctx = match cancellation {
+            None => RequestContext::with_kind_and_timing(
+                request_id,
+                Arc::<str>::from(canonical_id),
+                RequestKind::FlowReturnInference,
+                footprint_capture,
+                timing_capture,
+                footprint_scope.accumulator(),
+            ),
+            Some(cancellation) => RequestContext::with_kind_timing_and_cancellation(
+                request_id,
+                Arc::<str>::from(canonical_id),
+                RequestKind::FlowReturnInference,
+                footprint_capture,
+                timing_capture,
+                footprint_scope.accumulator(),
+                cancellation,
+            ),
+        };
 
         // BEFORE installing the TLS guard: construct the registration.
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
@@ -139,7 +214,12 @@ impl VerterHost {
         // churn surface the typed `UnstableState` error rather than
         // answering from superseded state.
         let request_start = Instant::now();
-        let outcome: Result<Arc<FlowReturnResult>, FlowReturnError> =
+        let outcome: Result<Arc<FlowReturnResult>, FlowReturnError> = if ctx.is_cancelled() {
+            // A request cancelled before it starts runs none of its work —
+            // a warm read included, which checks no cancellation — and
+            // answers `Cancelled`; the shared memo is left as it was.
+            Err(FlowReturnError::Cancelled)
+        } else {
             match crate::typeinfo::current_store_view_for_query(self) {
                 Some(current_view) => {
                     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -150,24 +230,6 @@ impl VerterHost {
                     );
                     let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext =
                         &host_ctx;
-                    let run = |dispatch: &ProjectSemanticDispatch<'_>| {
-                        let key = dispatch.flow_return_key_with_demand(function, demand.clone());
-                        match dispatch.execute_flow_return(key) {
-                            crate::semantic_query::FlowReturnStep::Complete(result) => {
-                                Ok(Arc::new(result))
-                            }
-                            crate::semantic_query::FlowReturnStep::NoValue(failure) => {
-                                Err(FlowReturnError::Failure(failure))
-                            }
-                            // A hold cannot surface at a fresh top-level
-                            // transaction (no in-flight frame exists to
-                            // re-enter); treat a torn surfacing as
-                            // undecided, never a fabricated value.
-                            crate::semantic_query::FlowReturnStep::Hold(_) => {
-                                Err(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
-                            }
-                        }
-                    };
                     match registration.as_ref() {
                         AuditRequestRegistration::Active(_) => {
                             let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
@@ -176,6 +238,11 @@ impl VerterHost {
                         }
                         AuditRequestRegistration::Noop => {
                             let _noop_guard = verter_audit::install_noop_observer();
+                            // The dispatch reads cancellation from the
+                            // installed request context, so a caller's
+                            // token needs it installed even with no audit.
+                            let _ctx_guard = caller_cancellable
+                                .then(|| RequestContextGuard::install(Arc::clone(&ctx)));
                             let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
                             run(&dispatch)
                         }
@@ -184,7 +251,24 @@ impl VerterHost {
                 None => Err(FlowReturnError::UnstableState {
                     attempts: crate::typeinfo::TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS as u8,
                 }),
-            };
+            }
+        };
+        #[cfg(feature = "test-support")]
+        crate::for_tests::signature_kernel_bench_support::cancel_trace::mark("released");
+        // A cancelled request's incomplete answer IS the cancellation: the
+        // evaluation stops at its next check with a budget trip, or a nested
+        // read stops and degrades the value it feeds. Neither says anything
+        // about the program. A complete answer finished before the
+        // cancellation landed and stands.
+        let outcome = match outcome {
+            Ok(result) if ctx.is_cancelled() && result.degradation().is_some() => {
+                Err(FlowReturnError::Cancelled)
+            }
+            Err(FlowReturnError::Failure(_)) if ctx.is_cancelled() => {
+                Err(FlowReturnError::Cancelled)
+            }
+            other => other,
+        };
         let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
 
         // Filtered kinds: return the cheap default-filled record. The
@@ -296,6 +380,9 @@ fn observed_partiality(
         Err(FlowReturnError::UnstableState { .. }) => {
             Some(FlowPartialityTag::NoValue(FlowFailureTag::UnstableState))
         }
+        Err(FlowReturnError::Cancelled) => {
+            Some(FlowPartialityTag::NoValue(FlowFailureTag::Cancelled))
+        }
     }
 }
 
@@ -353,7 +440,10 @@ fn failure_tag(failure: FlowReturnFailure) -> FlowFailureTag {
         FlowReturnFailure::CallResolution(call) => match call {
             ResolveCallFailure::NotCallable => FlowFailureTag::CallNotCallable,
             ResolveCallFailure::NoApplicableOverload => FlowFailureTag::CallNoApplicableOverload,
-            ResolveCallFailure::Undecidable => FlowFailureTag::CallUndecidable,
+            ResolveCallFailure::Undecidable
+            | ResolveCallFailure::ContextSensitiveInference { .. } => {
+                FlowFailureTag::CallUndecidable
+            }
             ResolveCallFailure::Budget => FlowFailureTag::CallBudget,
         },
         FlowReturnFailure::Budget(reason) => match reason {

@@ -49,6 +49,16 @@
 //! push the node. Storage stays global and dense so `id.0 as usize`
 //! indexing + `a.0 + 1 == b.0` serial-id invariant are preserved.
 //!
+//! **Acyclic by contract.** A payload names children the arena already
+//! holds: every child id is below the id the payload is interned at, so the
+//! node graph is a DAG and every structural walk over it terminates without
+//! cycle detection. A payload naming a child the arena could still allocate
+//! (an id at or above the new node's, below [`UNALLOCATABLE_ID_FLOOR`]) is a
+//! forward reference, the only way to close a cycle; it interns as the typed
+//! `Opaque(ForeignSemanticOperand)` refusal instead, never as its payload.
+//! Ids from the floor up are never allocated (binder tokens, sentinels), so
+//! they can dangle but never close a cycle.
+//!
 //! Dispatch builders query the sidecar via [`super::SemanticGraphStore::node_scope`]
 //! to route per-base-scope lookups through the correct
 //! [`SessionSolverHost`](crate::resolver_core::solver_host::SessionSolverHost)
@@ -63,6 +73,22 @@ use smallvec::SmallVec;
 
 use crate::instant::Instant;
 use crate::semantic_query::{NodeScopeId, SemanticNodeData, SemanticNodeId};
+
+/// Node ids from here up are never allocated: they name non-arena operands
+/// (signature-kernel binder tokens live at bit 63) or absent-node sentinels,
+/// so a payload naming one can dangle but never close a cycle.
+pub(crate) const UNALLOCATABLE_ID_FLOOR: u64 = 1 << 62;
+
+/// Whether `data`, interned at `id`, names a child the arena could allocate
+/// at or after `id`: a forward reference, the only way to close a cycle.
+fn names_forward_child(data: &SemanticNodeData, id: SemanticNodeId) -> bool {
+    let mut forward = false;
+    let mut check = |child: SemanticNodeId| {
+        forward |= child.0 >= id.0 && child.0 < UNALLOCATABLE_ID_FLOOR;
+    };
+    data.for_each_retained_child(&mut check);
+    forward
+}
 
 pub(super) const NUM_SHARDS: usize = 16;
 pub(super) const SHARD_MASK: u64 = (NUM_SHARDS as u64) - 1;
@@ -284,6 +310,16 @@ impl NodeArena {
                     let mut inner = self.inner.write();
                     let wait = write_start.elapsed().as_nanos() as u64;
                     let id = SemanticNodeId(inner.nodes.len() as u64);
+                    if names_forward_child(&data, id) {
+                        drop(inner);
+                        drop(shard);
+                        return self.push_impl(
+                            SemanticNodeData::Opaque(
+                                crate::semantic_query::QueryError::ForeignSemanticOperand,
+                            ),
+                            scope,
+                        );
+                    }
                     // ONE payload allocation, shared by refcount between the
                     // dense arena storage and the dedup bucket — the payload
                     // is never deep-cloned into the index.

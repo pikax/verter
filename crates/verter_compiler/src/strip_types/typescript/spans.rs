@@ -78,8 +78,13 @@ fn collect_expr_ts_spans(expr: &Expression, out: &mut Vec<(u32, u32)>) {
                 out.push((rt.span.start, rt.span.end));
             }
             collect_formal_params_ts_spans(&arrow.params, out);
-            for stmt in &arrow.body.statements {
-                collect_stmt_ts_spans(stmt, out);
+            if let Some(expression) = arrow.get_expression() {
+                // An expression body collects as its one expression statement.
+                collect_expr_ts_spans(expression, out);
+            } else if let Some(body) = arrow.get_function_body() {
+                for stmt in &body.statements {
+                    collect_stmt_ts_spans(stmt, out);
+                }
             }
         }
         Expression::FunctionExpression(func) => {

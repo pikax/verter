@@ -263,30 +263,27 @@ parity_contract!(
     }
 );
 
-future_parity_contract!(
+parity_contract!(
     flow_return_tp07_satisfies_never_exhaustiveness_does_not_pollute_return,
     "TP07",
-    "typeinfo currently does not treat satisfies-never exhaustive tails as unreachable for return joins; keep as the future TP07 satisfies-never contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
     }
 );
 
-future_parity_contract!(
+parity_contract!(
     flow_return_tp08_finally_disposal_side_effect_preserves_try_callback_return,
     "TP08",
-    "typeinfo currently does not preserve callback return joins through cleanup-only finally blocks; keep as the future TP08 disposal-style finally contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
     }
 );
 
-future_parity_contract!(
+parity_contract!(
     flow_return_tp09_variadic_tuple_conditional_infers_first_literal,
     "TP09",
-    "typeinfo currently does not infer variadic tuple conditional returns at body call sites; keep as the future TP09 variadic tuple conditional contract",
     |expr| assert_string_literal(expr, "first")
 );
 

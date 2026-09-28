@@ -5,6 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 use oxc_allocator::Box as OxcBox;
 use oxc_ast::ast::*;
 use oxc_semantic::{AstNodes, NodeId, Scoping};
+use verter_parser::utils::oxc::script::export_parts::NamedExportParts;
 
 use super::classify::Classifier;
 use super::{Canon, ImportEntry};
@@ -28,7 +29,9 @@ pub(crate) fn kind_name_of_declaration(declaration: &Declaration) -> &'static st
         Declaration::TSTypeAliasDeclaration(_) => "TSTypeAliasDeclaration",
         Declaration::TSInterfaceDeclaration(_) => "TSInterfaceDeclaration",
         Declaration::TSEnumDeclaration(_) => "TSEnumDeclaration",
-        Declaration::TSModuleDeclaration(_) => "TSModuleDeclaration",
+        Declaration::TSExternalModuleDeclaration(_) | Declaration::TSNamespaceDeclaration(_) => {
+            "TSModuleDeclaration"
+        }
         Declaration::TSGlobalDeclaration(_) => "TSGlobalDeclaration",
         Declaration::TSImportEqualsDeclaration(_) => "TSImportEqualsDeclaration",
     }
@@ -250,7 +253,21 @@ impl<'a, 'b> Canonizer<'a, 'b> {
                 };
                 Canon::node(kind, vec![Canon::leaf("str", import.source.value.as_str())])
             }
-            Statement::ExportNamedDeclaration(export) => self.canon_export_named(export),
+            Statement::ExportDeclaration(export) => self.canon_export_named(
+                NamedExportParts::of_declaration(export),
+                &None,
+                export.node_id.get(),
+            ),
+            Statement::ExportNamedDeclaration(export) => self.canon_export_named(
+                NamedExportParts::of_named(export),
+                &None,
+                export.node_id.get(),
+            ),
+            Statement::ExportFromDeclaration(export) => self.canon_export_named(
+                NamedExportParts::of_from(export),
+                &export.with_clause,
+                export.node_id.get(),
+            ),
             Statement::ExportDefaultDeclaration(export) => {
                 let declaration = match &export.declaration {
                     ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
@@ -285,7 +302,8 @@ impl<'a, 'b> Canonizer<'a, 'b> {
             Statement::TSTypeAliasDeclaration(_)
             | Statement::TSInterfaceDeclaration(_)
             | Statement::TSEnumDeclaration(_)
-            | Statement::TSModuleDeclaration(_)
+            | Statement::TSExternalModuleDeclaration(_)
+            | Statement::TSNamespaceDeclaration(_)
             | Statement::TSGlobalDeclaration(_)
             | Statement::TSImportEqualsDeclaration(_)
             | Statement::TSExportAssignment(_)
@@ -332,8 +350,13 @@ impl<'a, 'b> Canonizer<'a, 'b> {
         self.wrap("VariableDeclaration", children, variable.node_id.get())
     }
 
-    fn canon_export_named(&self, export: &ExportNamedDeclaration) -> Canon {
-        let declaration = match &export.declaration {
+    fn canon_export_named(
+        &self,
+        export: NamedExportParts<'_, 'a>,
+        with_clause: &Option<OxcBox<'a, WithClause<'a>>>,
+        node_id: NodeId,
+    ) -> Canon {
+        let declaration = match export.declaration {
             Some(declaration) => self.canon_declaration(declaration),
             None => Canon::none(),
         };
@@ -363,15 +386,15 @@ impl<'a, 'b> Canonizer<'a, 'b> {
             })
             .collect();
         specifiers.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
-        let source = match &export.source {
+        let source = match export.source {
             Some(source) => Canon::leaf("str", source.value.as_str()),
             None => Canon::none(),
         };
         let mut children = vec![declaration];
         children.extend(specifiers);
         children.push(source);
-        children.push(self.canon_with_clause(&export.with_clause));
-        self.wrap("ExportNamedDeclaration", children, export.node_id.get())
+        children.push(self.canon_with_clause(with_clause));
+        self.wrap("ExportNamedDeclaration", children, node_id)
     }
 
     fn canon_with_clause(&self, with_clause: &Option<OxcBox<'a, WithClause<'a>>>) -> Canon {
@@ -551,15 +574,29 @@ impl<'a, 'b> Canonizer<'a, 'b> {
     fn canon_arrow(&self, arrow: &ArrowFunctionExpression) -> Canon {
         let params = self.canon_formal_parameters(&arrow.params);
         let mut body_children = Vec::new();
-        for directive in &arrow.body.directives {
-            body_children.push(self.canon_directive(directive));
+        match &arrow.body {
+            ArrowFunctionBody::FunctionBody(body) => {
+                for directive in &body.directives {
+                    body_children.push(self.canon_directive(directive));
+                }
+                self.canon_statement_list(&body.statements, &mut body_children);
+            }
+            // An expression body canonizes as the one expression statement
+            // oxc's AST carried it as before 0.151.
+            body => {
+                if let Some(expression) = body.as_expression() {
+                    body_children.push(Canon::node(
+                        "ExpressionStatement",
+                        vec![self.canon_expression(expression)],
+                    ));
+                }
+            }
         }
-        self.canon_statement_list(&arrow.body.statements, &mut body_children);
         let mut flags = String::new();
         if arrow.r#async {
             flags.push('a');
         }
-        if arrow.expression {
+        if arrow.is_expression() {
             flags.push('e');
         }
         if arrow.pure {
@@ -584,8 +621,8 @@ impl<'a, 'b> Canonizer<'a, 'b> {
             Some(id) => self.classifier.classify_binding(id),
             None => Canon::none(),
         };
-        let super_class = match &class.super_class {
-            Some(super_class) => self.canon_expression(super_class),
+        let super_class = match &class.heritage {
+            Some(heritage) => self.canon_expression(&heritage.expression),
             None => Canon::none(),
         };
         let mut elements = Vec::new();
@@ -875,12 +912,13 @@ impl<'a, 'b> Canonizer<'a, 'b> {
             Expression::Identifier(ident) => {
                 self.classifier.classify_reference(self.scoping, ident)
             }
-            Expression::MetaProperty(meta) => Canon::node(
+            Expression::ImportMeta(_) => Canon::node(
                 "MetaProperty",
-                vec![
-                    Canon::leaf("ident", meta.meta.name.as_str()),
-                    Canon::leaf("ident", meta.property.name.as_str()),
-                ],
+                vec![Canon::leaf("ident", "import"), Canon::leaf("ident", "meta")],
+            ),
+            Expression::NewTarget(_) => Canon::node(
+                "MetaProperty",
+                vec![Canon::leaf("ident", "new"), Canon::leaf("ident", "target")],
             ),
             Expression::Super(sup) => self.wrap("Super", vec![], sup.node_id.get()),
             Expression::ArrayExpression(array) => {

@@ -400,6 +400,21 @@ macro_rules! future_cross_contract {
     };
 }
 
+/// A cross-file catalog row whose contract the engine ALREADY satisfies.
+macro_rules! cross_contract {
+    ($name:ident, $alias:literal, $selected:expr, $unselected:expr, $check:expr) => {
+        #[test]
+        fn $name() {
+            assert_cross_alias_warm_with_dependency_footprint(
+                $alias,
+                $check,
+                $selected,
+                $unselected,
+            );
+        }
+    };
+}
+
 macro_rules! future_cross_package_contract {
     ($name:ident, $alias:literal, $reason:literal, $check:expr) => {
         #[test]
@@ -548,27 +563,24 @@ catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl04_adds_implicit_undefined_for_fallthrough,
     "BL04",
-    "typeinfo currently collects explicit return expressions only and does not add implicit undefined for reachable function fallthrough; keep as the future BL04 fallthrough contract",
     |expr| {
         assert_union_contains_undefined(expr);
         assert_union_contains_number_literal(expr, 1.0);
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl06_ignores_throw_branch_and_widens_surviving_return,
     "BL06",
-    "typeinfo currently lacks terminating throw-flow modeling plus return-literal widening; keep as the future BL06 throw branch contract",
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl07_wraps_async_return_in_promise,
     "BL07",
-    "typeinfo currently does not synthesize Promise<joined return> for inferred async function bodies; keep as the future BL07 async return contract",
     |expr| {
         let args = assert_ref_with_args(expr, "Promise", 1);
         assert_primitive(&args[0], PrimitiveName::Number);
@@ -601,10 +613,9 @@ catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl10_widens_mutable_array_element_union,
     "BL10",
-    "typeinfo currently does not apply TypeScript array-literal return widening from literal elements to string | number; keep as the future BL10 mutable-array contract",
     |expr| {
         let element = array_element(expr);
         assert_union_contains_primitive(element, PrimitiveName::String);
@@ -650,48 +661,42 @@ catalog_contract!(
     |expr| assert_primitive(expr, PrimitiveName::Void)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_lr01_resolves_parameter_identifier_return,
     "LR01",
-    "typeinfo currently lowers function-body parameter identifiers to unresolved typeof roots instead of resolving against the function parameter environment; keep as the future LR01 parameter-flow contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_lr02_resolves_const_local_identifier_return,
     "LR02",
-    "typeinfo currently does not capture same-body const local flow facts for identifier returns; keep as the future LR02 local-const contract",
     |expr| assert_string_literal(expr, "a")
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_lr03_tracks_let_alias_narrowing,
     "LR03",
-    "typeinfo currently does not build flow slots for let aliases or branch narrowing before return joins; keep as the future LR03 alias-flow contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_lr04_applies_reassignment_before_return,
     "LR04",
-    "typeinfo currently does not model assignment effects on mutable local flow facts before identifier returns; keep as the future LR04 reassignment contract",
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_lr05_widens_mutated_let_literal,
     "LR05",
-    "typeinfo currently does not apply declaration-kind-aware widening and assignment joins for mutated let bindings; keep as the future LR05 mutable-widening contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_lr06_tracks_destructuring_alias_flow,
     "LR06",
-    "typeinfo currently does not create flow facts for destructured local aliases before narrowing and return joins; keep as the future LR06 destructuring-alias contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
@@ -709,20 +714,18 @@ catalog_contract!(
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_lr08_propagates_optional_chain_undefined,
     "LR08",
-    "typeinfo currently does not lower optional chaining as member projection plus nullish undefined propagation; keep as the future LR08 optional-chain contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Undefined);
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_lr09_applies_non_null_assertion,
     "LR09",
-    "typeinfo currently does not lower non-null assertion expressions to NonNullable flow facts; keep as the future LR09 non-null assertion contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
@@ -730,10 +733,9 @@ future_catalog_contract!(
 // to its primitive). Passing `() => { x = 1 }` to `cb` does NOT invalidate the
 // local narrowing because TS only invalidates after the callback is actually
 // invoked, and the call is opaque at the type level. Final inferred return: `string`.
-future_catalog_contract!(
+catalog_contract!(
     flow_return_lr10_invalidates_captured_local_after_unknown_call,
     "LR10",
-    "typeinfo currently does not preserve TypeScript's narrowed local return type after callback registration; keep as the future LR10 callback-registration flow contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
@@ -743,72 +745,63 @@ future_catalog_contract!(
 // at the return position, and does NOT widen the inferred return into
 // `number | undefined`. Verter must keep the return-type inference and the
 // definite-assignment diagnostic on independent tracks.
-future_catalog_contract!(
+catalog_contract!(
     flow_return_lr11_models_var_hoist_and_maybe_assignment,
     "LR11",
-    "typeinfo currently does not model var hoisting while keeping TypeScript's definite-assignment diagnostic separate from the return type; keep as the future LR11 var-hoist contract",
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_lr12_tracks_member_assignment_fact,
     "LR12",
-    "typeinfo currently does not write flow facts for object member assignments before member returns; keep as the future LR12 member-assignment contract",
     |expr| assert_string_literal(expr, "ready")
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn01_tracks_typeof_positive_and_negative_branches,
     "CN01",
-    "typeinfo currently lacks typeof guard facts for both true and false branches; keep as the future CN01 branch-narrowing contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn02_filters_truthy_and_falsy_literals,
     "CN02",
-    "typeinfo currently does not filter known falsy literal constituents through truthiness checks; keep as the future CN02 truthiness contract",
     |expr| assert_mixed_literal_union(expr, &["a", "fallback"], &[1.0])
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn03_applies_nullish_equality_narrowing,
     "CN03",
-    "typeinfo currently does not treat x != null as excluding both null and undefined before member projection; keep as the future CN03 nullish narrowing contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn04_applies_strict_undefined_narrowing,
     "CN04",
-    "typeinfo currently does not subtract undefined from the continuation branch after x === undefined; keep as the future CN04 strict-undefined contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn05_applies_literal_equality_narrowing,
     "CN05",
-    "typeinfo currently does not filter literal-union constituents across equality branches; keep as the future CN05 literal-equality contract",
     |expr| assert_mixed_literal_union(expr, &["b", "c"], &[1.0])
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn06_switch_discriminant_joins_case_returns,
     "CN06",
-    "typeinfo currently does not build switch CFG case facts for discriminated unions; keep as the future CN06 switch-discriminant contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn07_in_operator_narrows_object_union,
     "CN07",
-    "typeinfo currently does not apply property-presence facts from the in operator before member projection; keep as the future CN07 in-narrowing contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
@@ -822,17 +815,15 @@ future_catalog_contract!(
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn09_models_instanceof_class_narrowing,
     "CN09",
-    "typeinfo currently does not use constructor value identity to narrow class unions under instanceof; keep as the future CN09 instanceof contract",
     |expr| assert_mixed_literal_union(expr, &["x"], &[1.0])
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn10_composes_nested_boolean_guard_facts,
     "CN10",
-    "typeinfo currently does not compose typeof facts through nested && and || boolean expressions; keep as the future CN10 boolean-fact contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
@@ -851,24 +842,21 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn12_eliminates_exhaustive_never_tail,
     "CN12",
-    "typeinfo currently does not accumulate discriminant exclusions to reduce exhaustive tail paths to never; keep as the future CN12 exhaustive-narrowing contract",
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn13_narrows_optional_property_truthiness,
     "CN13",
-    "typeinfo currently does not attach truthiness facts to optional object member paths; keep as the future CN13 optional-member contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn14_correlates_equality_between_variables,
     "CN14",
-    "typeinfo currently does not intersect literal unions for equality facts shared between two variables; keep as the future CN14 correlated-equality contract",
     |expr| assert_literal_union(expr, &["b", "c"])
 );
 
@@ -880,10 +868,9 @@ future_catalog_contract!(
 // verified through CN15-style fixtures that emit DIFFERENT types per branch,
 // covered in flow_return_path_contracts FP05/FP07 (where the contributing
 // branch-load footprint is independently asserted).
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn15_narrows_nested_discriminant_paths,
     "CN15",
-    "typeinfo currently does not attach discriminant facts to nested member paths like x.meta.kind; keep as the future CN15 nested-discriminant contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
@@ -896,20 +883,18 @@ future_catalog_contract!(
 // under test (linking `const { kind } = x` back to `x`'s union) is NOT
 // distinguishable from the unnarrowed case at the return-type surface alone.
 // See FP05 in flow_return_path_contracts for a per-branch correlated test.
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn16_preserves_destructured_discriminant_correlation,
     "CN16",
-    "typeinfo currently does not correlate destructured discriminant aliases back to the source object union; keep as the future CN16 destructured-discriminant contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_pa01_applies_local_type_predicate_signature,
     "PA01",
-    "typeinfo currently does not apply local x is T predicate signatures as caller flow facts; keep as the future PA01 predicate contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
@@ -930,34 +915,30 @@ future_catalog_contract!(
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_pa04_instantiates_generic_predicate,
     "PA04",
-    "typeinfo currently does not instantiate generic x is NonNullable<T> predicate signatures at the call site; keep as the future PA04 generic-predicate contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_pa05_applies_importable_predicate_signature,
     "PA05",
-    "typeinfo currently does not apply predicate call effects from reusable function signatures before return joins; keep as the future PA05 predicate-signature contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_pa06_sequences_chained_predicates,
     "PA06",
-    "typeinfo currently does not sequence short-circuit predicate facts so later predicates can rely on earlier narrowing; keep as the future PA06 chained-predicate contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_number_literal(expr, 0.0);
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_pa07_refines_property_shape_from_predicate,
     "PA07",
-    "typeinfo currently does not refine object member shape from predicate target types; keep as the future PA07 property-predicate contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Undefined);
@@ -971,10 +952,9 @@ future_catalog_contract!(
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_pa09_uses_declared_predicate_without_body,
     "PA09",
-    "typeinfo currently does not apply declared predicate signatures when the predicate body is unavailable; keep as the future PA09 signature-only predicate contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Undefined);
@@ -1000,43 +980,38 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cg03_instantiates_generic_wrapper_return_annotation,
     "CG03",
-    "typeinfo currently does not instantiate generic function return annotations from call-site value arguments; keep as the future CG03 generic-wrapper contract",
     |expr| {
         let props = assert_object_has_props(expr, &["value"]);
         assert_string_literal(&props["value"].ty, "x");
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cg04_selects_matching_overload_return,
     "CG04",
-    "typeinfo currently does not select overload candidates from value argument assignability; keep as the future CG04 overload-resolution contract",
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cg05_infers_rest_parameter_literal_union,
     "CG05",
-    "typeinfo currently does not infer rest parameter element unions or account for indexed-access undefined policy; keep as the future CG05 rest-parameter contract",
     |expr| {
         assert_literal_union(expr, &["a", "b"]);
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cg06_uses_default_parameter_initializer_type,
     "CG06",
-    "typeinfo currently does not infer parameter types from default initializers for call-site return inference; keep as the future CG06 default-parameter contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cg07_infers_generic_from_callback_return,
     "CG07",
-    "typeinfo currently does not infer generic type arguments from callback return bodies; keep as the future CG07 callback-inference contract",
     |expr| assert_mixed_literal_union(expr, &["a"], &[1.0])
 );
 
@@ -1066,10 +1041,9 @@ future_catalog_contract!(
     |expr| assert_ref(expr, "CG11User")
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ho01_infers_computed_style_callback_return,
     "HO01",
-    "typeinfo currently does not infer generic helper type arguments from callback return bodies; keep as the future HO01 computed-style callback contract",
     |expr| {
         let props = assert_object_has_props(expr, &["value"]);
         assert_mixed_literal_union(&props["value"].ty, &["on"], &[0.0]);
@@ -1108,10 +1082,9 @@ future_catalog_contract!(
     |expr| assert_array_of_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ho06_infers_custom_generic_callback_helper,
     "HO06",
-    "typeinfo currently does not infer return types through ordinary generic callback helper signatures; keep as the future HO06 custom-callback contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
@@ -1137,17 +1110,15 @@ future_catalog_contract!(
 );
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this declared-callback resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that an unknown-typed declared callback result stays opaque as `unknown` with the warm cross-file dependency footprint attached. Keep as the future HO09 declared-callback-opaque contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn flow_return_ho09_keeps_unknown_declared_callback_result_opaque() {
     assert_catalog_alias_warm("HO09", |expr| {
         assert_primitive(expr, PrimitiveName::Unknown)
     });
 }
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ho10_returns_closure_with_captured_substitution,
     "HO10",
-    "typeinfo currently does not construct returned closure types with captured generic substitutions; keep as the future HO10 closure-return contract",
     |expr| {
         let function = function_type(expr);
         assert_string_literal(
@@ -1176,10 +1147,9 @@ future_catalog_contract!(
 // at the return-type surface alone because both arms return the same field.
 // Per-branch typing is exercised by symmetric-friend tests in
 // flow_return_path_contracts (FP01 etc.) where the branch types diverge.
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ob01_tracks_member_path_flow_facts,
     "OB01",
-    "typeinfo currently does not attach narrowing facts to object member paths before returning narrowed fields; keep as the future OB01 member-flow contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
@@ -1218,10 +1188,9 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ob04_preserves_deep_const_assertion_readonly_literals,
     "OB04",
-    "typeinfo currently does not preserve deep readonly modifiers from as const object return expressions; keep as the future OB04 deep-const contract",
     |expr| {
         let props = assert_object_has_props(expr, &["mode", "nested"]);
         assert!(props["mode"].readonly);
@@ -1239,20 +1208,18 @@ future_catalog_contract!(
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ob07_evaluates_computed_literal_object_key,
     "OB07",
-    "typeinfo currently does not resolve computed object literal keys from const value identities; keep as the future OB07 computed-literal-key contract",
     |expr| {
         let props = assert_object_has_props(expr, &["name"]);
         assert_string_literal(&props["name"].ty, "Ada");
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ob08_preserves_readonly_parameter_shape,
     "OB08",
-    "typeinfo currently returns unresolved typeof roots for parameter object values instead of preserving readonly object shape; keep as the future OB08 readonly-parameter contract",
     |expr| {
         let props = assert_object_has_props(expr, &["id"]);
         assert!(props["id"].readonly);
@@ -1260,17 +1227,15 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ob09_instantiates_keyof_driven_array_return,
     "OB09",
-    "typeinfo currently does not infer keyof unions through generic Object.keys-style helper returns; keep as the future OB09 keyof-helper contract",
     |expr| assert_literal_union(array_element(expr), &["a", "b"])
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ob10_instantiates_mapped_return_annotation,
     "OB10",
-    "typeinfo currently does not instantiate mapped return annotations from rest literal call-site arguments; keep as the future OB10 mapped-return contract",
     |expr| {
         let props = assert_object_has_props(expr, &["a", "b"]);
         assert_primitive(&props["a"].ty, PrimitiveName::Boolean);
@@ -1278,10 +1243,9 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ob11_reduces_conditional_return_annotation,
     "OB11",
-    "typeinfo currently does not reduce conditional return annotations under concrete generic substitutions; keep as the future OB11 conditional-return contract",
     |expr| {
         let props = assert_object_has_props(expr, &["text"]);
         assert_string_literal(&props["text"].ty, "x");
@@ -1339,10 +1303,9 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cf01_joins_nested_if_flow_returns,
     "CF01",
-    "typeinfo currently does not build a CFG with boolean guard facts for nested if conditions; keep as the future CF01 CFG contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
@@ -1350,58 +1313,51 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cf02_types_logical_and_short_circuit_expression,
     "CF02",
-    "typeinfo currently does not type && short-circuit expressions with truthiness narrowing in the right operand; keep as the future CF02 short-circuit contract",
     |expr| {
         assert_expr_contains_primitive(expr, PrimitiveName::Null);
         assert_union_has_object_arm(expr, &["value"]);
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cf03_filters_falsy_left_side_of_logical_or,
     "CF03",
-    "typeinfo currently does not type || expressions by removing falsy left-side constituents before joining fallback; keep as the future CF03 logical-or contract",
     |expr| assert_literal_union(expr, &["a", "fallback"])
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cf04_removes_nullish_constituents_for_coalescing,
     "CF04",
-    "typeinfo currently does not type ?? expressions by removing only nullish constituents; keep as the future CF04 nullish-coalescing contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cf05_narrows_continuation_after_early_return,
     "CF05",
-    "typeinfo currently does not propagate continuation facts after terminating early-return branches; keep as the future CF05 early-return narrowing contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cf06_joins_try_and_catch_returns,
     "CF06",
-    "typeinfo currently does not collect return paths through try/catch/finally CFG edges; keep as the future CF06 try-catch contract",
     |expr| assert_mixed_literal_union(expr, &["err"], &[1.0])
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cf07_models_loop_break_return_paths,
     "CF07",
-    "typeinfo currently does not build loop CFG edges for for-of iteration variables, break, and post-loop returns; keep as the future CF07 loop-break contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Undefined);
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cf08_joins_continue_and_accumulator_assignment,
     "CF08",
-    "typeinfo currently does not compute loop fixed points with continue edges and accumulator assignments; keep as the future CF08 loop-accumulator contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Undefined);
@@ -1415,10 +1371,9 @@ future_catalog_contract!(
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cf10_models_finally_reference_behavior,
     "CF10",
-    "typeinfo currently does not collect return paths through try/finally statements or pin TypeScript-compatible finally behavior; keep as the future CF10 finally contract",
     |expr| assert_mixed_literal_union(expr, &["final"], &[1.0])
 );
 
@@ -1427,34 +1382,30 @@ future_catalog_contract!(
 // `() => { x = 1 }` to `run` does NOT widen `x` back to `string | number` because
 // TS does not invalidate local-variable narrowing on opaque callback escapes.
 // Final return: `string`.
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cf11_invalidates_closure_captured_flow_facts,
     "CF11",
-    "typeinfo currently does not preserve TypeScript's narrowed return fact after passing a capturing callback to an unknown caller; keep as the future CF11 capture-callback contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cf12_invalidates_object_member_facts_after_unknown_call,
     "CF12",
-    "typeinfo currently does not apply conservative mutation barriers when object values are passed to unknown functions; keep as the future CF12 call-barrier contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cf14_models_switch_fallthrough_case_facts,
     "CF14",
-    "typeinfo currently does not model switch case grouping and fallthrough facts before return joins; keep as the future CF14 switch-fallthrough contract",
     |expr| assert_mixed_literal_union(expr, &["a", "b"], &[0.0])
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cf15_separates_definite_assignment_diagnostics_from_return_type,
     "CF15",
-    "typeinfo currently does not maintain maybe-assigned facts that allow return inference while reporting use-before-assignment separately; keep as the future CF15 definite-assignment contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
@@ -1484,7 +1435,6 @@ future_cross_contract!(
 );
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this cross-file resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that imported value-function returns expand to their published `{ mode: \"dark\" }` literal surface with the cross-file dependency footprint attached. Keep as the future XF02 cross-file value-function expansion contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn flow_return_xf02_expands_imported_value_function_return() {
     assert_cross_alias_warm(
         "XF02",
@@ -1517,7 +1467,6 @@ future_cross_contract!(
 );
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this barrel-imported resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that barrel-imported value-function returns expand to their published `{ id: \"x\" }` literal surface with the cross-file dependency footprint attached. Keep as the future XF04 cross-file barrel-imported expansion contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn flow_return_xf04_expands_barrel_imported_value_function_return() {
     assert_cross_alias_warm(
         "XF04",
@@ -1556,7 +1505,6 @@ fn flow_return_xf04_records_barrel_route_before_selected_leaf() {
 }
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this namespace-import resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that namespace-import value calls resolve to their published `{ ok: true }` literal surface with the cross-file dependency footprint attached. Keep as the future XF05 cross-file namespace-import contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn flow_return_xf05_resolves_namespace_import_value_call() {
     assert_cross_alias_warm(
         "XF05",
@@ -1575,7 +1523,6 @@ fn flow_return_xf05_resolves_namespace_import_value_call() {
 }
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this value/type-separated namespace path under the audit-passive-observer footprint-attachment pipeline; the contract is that the value namespace stays separate from the type namespace, resolving to `{ valueOnly: true }` with the cross-file dependency footprint attached. Keep as the future XF06 value-type-namespace separation contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn flow_return_xf06_keeps_value_type_namespace_separate() {
     assert_cross_alias_warm(
         "XF06",
@@ -1624,7 +1571,6 @@ future_cross_contract!(
 );
 
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on the cross-file recursive resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that cross-file recursive return cycles terminate with a `number | string` union projection and the cross-file dependency footprint attached. Keep as the future XF09 cross-file recursive-return termination contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn flow_return_xf09_terminates_cross_file_recursive_returns() {
     assert_cross_alias_warm(
         "XF09",
@@ -1650,7 +1596,7 @@ future_cross_package_contract!(
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_cross_contract!(
+cross_contract!(
     flow_return_xf11_applies_ambient_global_predicate,
     "XF11",
     &[],
@@ -1661,7 +1607,6 @@ future_cross_contract!(
         "/fixtures/flow_return_cross_source.ts",
         "/fixtures/flow_return_cross_index.ts",
     ],
-    "typeinfo currently does not apply ambient/global predicate signatures as flow facts in function bodies; keep as the future XF11 ambient predicate contract",
     |expr| assert_primitive(expr, PrimitiveName::Boolean)
 );
 
@@ -1681,14 +1626,16 @@ future_cross_contract!(
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_vv01_infers_computed_callback_union_value,
     "VV01",
-    "typeinfo currently does not infer computed-style generic helper results from discriminated callback object unions; keep as the future VV01 computed contract",
     |expr| {
         let props = assert_object_has_props(expr, &["value"]);
         let TypeExpr::Union(types) = &props["value"].ty else {
-            panic!("expected computed value object union, got {:?}", props["value"].ty);
+            panic!(
+                "expected computed value object union, got {:?}",
+                props["value"].ty
+            );
         };
         assert!(types.iter().any(|ty| {
             let props = object_props(ty);
@@ -1717,10 +1664,9 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_vv02_pins_ref_literal_widening_policy,
     "VV02",
-    "typeinfo currently does not provide a helper/intrinsic model for ref-like literal widening; keep as the future VV02 ref policy contract",
     |expr| {
         let props = assert_object_has_props(expr, &["value"]);
         assert_primitive(&props["value"].ty, PrimitiveName::String);
@@ -1736,10 +1682,9 @@ future_catalog_contract!(
 // signature errors on `string | VV03Ref<number>` (TS2345), which is why the
 // fixture is structured this way: the test exercises legitimate union unref
 // inference rather than locking in a TS-impossible contract.
-future_catalog_contract!(
+catalog_contract!(
     flow_return_vv03_infers_unref_union_helper_return,
     "VV03",
-    "typeinfo currently does not combine branch narrowing with overloaded generic unref helper return inference; keep as the future VV03 unref contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
@@ -1753,10 +1698,9 @@ future_catalog_contract!(
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_vv05_expands_props_factory_returntype_with_widening,
     "VV05",
-    "typeinfo currently does not apply full TypeScript function-return widening when expanding ReturnType of a props factory; keep as the future VV05 factory ReturnType contract",
     |expr| {
         let props = assert_object_has_props(expr, &["disabled", "label"]);
         assert_primitive(&props["label"].ty, PrimitiveName::String);
@@ -1868,10 +1812,9 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_vv11_resolves_emit_call_signature_return,
     "VV11",
-    "typeinfo currently does not select object call signatures from literal event arguments for emit-like values; keep as the future VV11 emit-call contract",
     |expr| assert_primitive(expr, PrimitiveName::Boolean)
 );
 
@@ -1882,10 +1825,9 @@ future_catalog_contract!(
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_vv13_applies_callback_mutation_policy_for_watch,
     "VV13",
-    "typeinfo currently does not model callback scheduling and mutation barriers for watch-like helpers; keep as the future VV13 watch-callback contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
@@ -1916,10 +1858,9 @@ future_cross_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_vv16_calls_union_of_dynamic_component_factories,
     "VV16",
-    "typeinfo currently does not infer a union of callable values and then call each function arm for dynamic component patterns; keep as the future VV16 dynamic-component contract",
     |expr| {
         let TypeExpr::Union(types) = expr else {
             panic!("expected object union, got {expr:?}");
@@ -1963,10 +1904,9 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl18_bare_return_joins_undefined_with_value_return,
     "BL18",
-    "typeinfo currently does not join bare return paths as undefined alongside value-return paths; keep as the future BL18 bare-return join contract",
     |expr| {
         assert_union_contains_undefined(expr);
         assert_union_contains_string_literal(expr, "ready");
@@ -1983,20 +1923,18 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn18_negative_in_operator_narrows_else_branch,
     "CN18",
-    "typeinfo currently does not apply negative property-presence facts from !(key in x); keep as the future CN18 negative-in contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cn19_nested_payload_facts_survive_boolean_composition,
     "CN19",
-    "typeinfo currently does not compose nested discriminant and truthiness facts across && before returning payload members; keep as the future CN19 nested-boolean contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
@@ -2034,17 +1972,15 @@ future_catalog_contract!(
 // `"fallback"` literal is a subtype of `string`, so the union
 // `string | "fallback"` normalises to `string`. The "future contract" should
 // match TS7: a single `string` primitive, NOT a union containing the literal.
-future_catalog_contract!(
+catalog_contract!(
     flow_return_pa12_generic_predicate_refines_box_member,
     "PA12",
-    "typeinfo currently does not apply generic object predicates to refine contained member values; keep as the future PA12 boxed predicate contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cg12_infers_rest_tuple_and_projects_literal_slot,
     "CG12",
-    "typeinfo currently does not infer rest tuple call-site literals or reduce tuple-index projections; keep as the future CG12 rest-tuple contract",
     |expr| assert_number_literal(expr, 1.0)
 );
 
@@ -2062,17 +1998,15 @@ future_catalog_contract!(
     |expr| assert_string_literal(expr, "x")
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cg15_reduces_conditional_return_after_generic_literal_argument,
     "CG15",
-    "typeinfo currently does not reduce conditional generic return annotations after literal call-site arguments; keep as the future CG15 conditional-call contract",
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_cg16_applies_default_generic_return_substitution,
     "CG16",
-    "typeinfo currently does not apply default generic type arguments while resolving declared return bodies; keep as the future CG16 default-generic return contract",
     |expr| assert_string_literal(expr, "default")
 );
 
@@ -2117,10 +2051,9 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ob14_infers_method_return_inside_returned_object,
     "OB14",
-    "typeinfo currently does not infer object-literal method return types inside returned object surfaces; keep as the future OB14 method-return contract",
     |expr| {
         let props = assert_object_has_props(expr, &["run"]);
         let function = function_type(&props["run"].ty);
@@ -2140,10 +2073,9 @@ future_catalog_contract!(
 // as `{ [key: string]: "Ada" }` (string index signature with literal "Ada"
 // value), NOT `{ fieldName: "Ada" }`. Template-literal key inference is a
 // type-level operation; at the value level, computed keys widen to `string`.
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ob15_evaluates_template_literal_computed_object_key,
     "OB15",
-    "typeinfo currently does not preserve TypeScript's computed template-key string index signature for returned object literals; keep as the future OB15 template-key contract",
     |expr| {
         let signatures = object_index_signatures(expr);
         assert_eq!(signatures.len(), 1);
@@ -2152,10 +2084,9 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ob16_preserves_nested_readonly_tuple_const_shape,
     "OB16",
-    "typeinfo currently does not preserve nested readonly tuple/object shapes from as const return values; keep as the future OB16 nested-const contract",
     |expr| {
         let props = assert_object_has_props(expr, &["items"]);
         assert!(props["items"].readonly);
@@ -2170,23 +2101,25 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ob17_merges_conditional_spread_union_members_precisely,
     "OB17",
-    "typeinfo currently does not preserve conditional spread branch-specific object members; keep as the future OB17 conditional-spread union contract",
     |expr| {
         let TypeExpr::Union(types) = expr else {
             panic!("expected conditional spread object union, got {expr:?}");
         };
-        assert!(types.iter().any(|ty| object_props(ty).contains_key("enabled")));
-        assert!(types.iter().any(|ty| object_props(ty).contains_key("disabled")));
+        assert!(types
+            .iter()
+            .any(|ty| object_props(ty).contains_key("enabled")));
+        assert!(types
+            .iter()
+            .any(|ty| object_props(ty).contains_key("disabled")));
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ob18_satisfies_nested_shape_widens_against_target_type,
     "OB18",
-    "typeinfo currently does not use nested satisfies target types to widen returned value shapes; keep as the future OB18 nested-satisfies contract",
     |expr| {
         let props = assert_object_has_props(expr, &["count", "nested"]);
         assert_primitive(&props["count"].ty, PrimitiveName::Number);
@@ -2271,10 +2204,9 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl19_arrow_expression_body_applies_return_widening,
     "BL19",
-    "typeinfo currently does not apply function-return widening to arrow expression bodies while preserving explicit const literal members; keep as the future BL19 arrow-return contract",
     |expr| {
         let props = assert_object_has_props(expr, &["count", "tag"]);
         assert_primitive(&props["count"].ty, PrimitiveName::Number);
@@ -2292,10 +2224,9 @@ catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl21_async_return_await_preserves_fulfilled_payload,
     "BL21",
-    "typeinfo currently does not model return-await payload normalization for async function bodies; keep as the future BL21 return-await contract",
     |expr| {
         let args = assert_ref_with_args(expr, "Promise", 1);
         let props = assert_object_has_props(&args[0], &["id"]);

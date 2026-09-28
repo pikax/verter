@@ -1809,3 +1809,51 @@ fn svelte_unknown_block_and_tag_project_unknown_node_kinds() {
                     && inventory.slice(*authored_name).expect("tag name").starts_with("@wat"))
     )));
 }
+
+/// A template nested 10,000 deep projects on a 1 MiB thread: a node's
+/// children project from an explicit stack of the elements waiting on
+/// them.
+#[test]
+fn a_template_nested_10000_deep_projects_on_a_small_stack() {
+    const DEPTH: usize = 10_000;
+    let (elements, deepest) = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let source = format!(
+                "<template>{}x{}</template>\n",
+                "<div>".repeat(DEPTH),
+                "</div>".repeat(DEPTH)
+            );
+            let (_, _, accepted) = accepted(
+                "file:///workspace/Deep.vue",
+                verter_language::FileLanguage::vue(),
+                &source,
+            );
+            let projection = project(&accepted);
+            let inventory = projection.inventory();
+            let markup = inventory.markup();
+            let elements = markup
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.kind(), MarkupNodeKind::Element(_)))
+                .count();
+            // Follow first children down from the template's root.
+            let mut deepest = 0;
+            let mut node = &markup.nodes()[markup.roots()[0].0 as usize];
+            while let MarkupNodeKind::Element(_) = node.kind() {
+                deepest += 1;
+                let Some(child) = markup.child_ids().get(node.children.start as usize) else {
+                    break;
+                };
+                if node.children.is_empty() {
+                    break;
+                }
+                node = &markup.nodes()[child.0 as usize];
+            }
+            (elements, deepest)
+        })
+        .expect("spawn the projecting thread")
+        .join()
+        .expect("the projection returns");
+    assert_eq!((elements, deepest), (DEPTH, DEPTH));
+}

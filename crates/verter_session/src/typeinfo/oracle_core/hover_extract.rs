@@ -46,8 +46,8 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Statement, TSType};
-use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
+use verter_parser::oxc_parse::Parser;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HoverExtractError {
@@ -175,7 +175,7 @@ fn parse_probe_alias(candidate: &str, probe_name: &str) -> Option<String> {
     }
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, trimmed, SourceType::ts()).parse();
-    if ret.panicked || !ret.errors.is_empty() {
+    if ret.fatal_error || !ret.diagnostics.is_empty() {
         // A parse error (truncated/unbalanced/invalid) is NOT a clean probe alias.
         return None;
     }

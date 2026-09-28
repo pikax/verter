@@ -11,9 +11,9 @@ use oxc_ast::ast::{
     TSTypeName,
 };
 #[cfg(test)]
-use oxc_parser::Parser;
-#[cfg(test)]
 use oxc_span::SourceType;
+#[cfg(test)]
+use verter_parser::oxc_parse::Parser;
 
 use crate::framework_common::projection_plan::ComponentUseId;
 use crate::ide::vue_projection::attribute_operations::{
@@ -346,7 +346,7 @@ impl ScriptPropFacts {
             .with(|count| count.set(count.get() + 1));
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::ts().with_module(true)).parse();
-        if parsed.panicked || !parsed.errors.is_empty() {
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() {
             return false;
         }
         self.absorb_program(&parsed.program);
@@ -854,7 +854,7 @@ fn resolve_name<'a>(
     let mut found = false;
     for statement in &program.body {
         let Some(declaration) = (match statement {
-            Statement::ExportNamedDeclaration(export) => export.declaration.as_ref(),
+            Statement::ExportDeclaration(export) => Some(&export.declaration),
             other => other.as_declaration(),
         }) else {
             continue;

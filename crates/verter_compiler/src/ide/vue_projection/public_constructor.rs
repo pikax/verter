@@ -75,12 +75,12 @@ use oxc_ast::ast::{
     Statement, TSSignature, TSType, TSTypeName, VariableDeclarationKind,
 };
 use oxc_ast_visit::{walk, Visit};
-use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeFlags;
 use oxc_syntax::symbol::SymbolId;
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_parser::oxc_parse::Parser;
 
 use super::script_setup::{
     binder_product_from, grammar_of, macro_positions, range, value_bindings,
@@ -802,9 +802,20 @@ pub(crate) fn project_public_constructor_in<'a>(
     };
     contract.source = ConstructorSource::ScriptSetup;
 
-    let semantic = SemanticBuilder::new().build(program).semantic;
+    let semantic = verter_parser::oxc_parse::with_program_stack(program, || {
+        SemanticBuilder::new().build(program)
+    })
+    .semantic;
     let normal_bindings = normal_program
-        .map(|program| value_bindings(SemanticBuilder::new().build(program).semantic.scoping()))
+        .map(|program| {
+            value_bindings(
+                verter_parser::oxc_parse::with_program_stack(program, || {
+                    SemanticBuilder::new().build(program)
+                })
+                .semantic
+                .scoping(),
+            )
+        })
         .unwrap_or_default();
     let module_bound: FxHashSet<&str> = normal_bindings.iter().map(String::as_str).collect();
     let vue_macro_imports = vue_runtime_macro_imports(program);
@@ -842,7 +853,7 @@ pub(crate) fn project_public_constructor_in<'a>(
         literal_consts: &literal_consts,
         used_consts: FxHashSet::default(),
     };
-    collector.visit_program(program);
+    verter_parser::oxc_parse::with_program_stack(program, || collector.visit_program(program));
     let requirement = collector.requirement;
     let top_level_await = collector.top_level_await;
     let mut used_consts: Vec<&(u32, String)> = collector
@@ -884,7 +895,7 @@ fn parse_block<'a>(
     #[cfg(test)]
     SCRIPT_BLOCK_PARSES.with(|count| count.set(count.get() + 1));
     let parsed = Parser::new(allocator, content, grammar.source_type()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(SetupProjectionRefusal::SyntaxErrors { setup });
     }
     Ok(allocator.alloc(parsed.program))
@@ -950,17 +961,19 @@ fn provider_statements(program: &Program<'_>, content: &str) -> Vec<String> {
             | Statement::ExportAllDeclaration(_)
             | Statement::ExportDefaultDeclaration(_)
             | Statement::TSExportAssignment(_)
-            | Statement::TSNamespaceExportDeclaration(_) => None,
-            Statement::ExportNamedDeclaration(export) => export
-                .declaration
-                .as_ref()
+            | Statement::TSNamespaceExportDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_) => None,
+            Statement::ExportDeclaration(export) => Some(&export.declaration)
                 .filter(|declaration| !declaration.declare())
                 .map(|declaration| text(declaration.span())),
             other => match other.as_declaration() {
                 Some(declaration) if declaration.declare() => None,
-                Some(Declaration::TSModuleDeclaration(_) | Declaration::TSGlobalDeclaration(_)) => {
-                    None
-                }
+                Some(
+                    Declaration::TSExternalModuleDeclaration(_)
+                    | Declaration::TSNamespaceDeclaration(_)
+                    | Declaration::TSGlobalDeclaration(_),
+                ) => None,
                 _ => Some(text(other.span())),
             },
         })
@@ -981,7 +994,7 @@ impl<'a> LocalTypes<'a> {
         for program in self.programs.iter().flatten() {
             for statement in &program.body {
                 let declaration = match statement {
-                    Statement::ExportNamedDeclaration(export) => export.declaration.as_ref(),
+                    Statement::ExportDeclaration(export) => Some(&export.declaration),
                     other => other.as_declaration(),
                 };
                 let requirement = match declaration {
@@ -1412,7 +1425,9 @@ impl PublicCollector<'_, '_> {
             names: self.binder_names,
             found: false,
         };
-        refs.visit_ts_type(ty);
+        verter_parser::oxc_parse::with_span_stack(self.content, ty.span(), || {
+            refs.visit_ts_type(ty)
+        });
         refs.found
     }
 
@@ -1435,8 +1450,11 @@ impl PublicCollector<'_, '_> {
         contextual: Option<&str>,
     ) {
         let text = self.text(expression.span());
+        let content = self.content;
         self.hoist_scanned(name, text, surface, contextual, |refs| {
-            refs.visit_expression(expression);
+            verter_parser::oxc_parse::with_span_stack(content, expression.span(), || {
+                refs.visit_expression(expression)
+            });
         });
     }
 
@@ -1634,6 +1652,7 @@ impl PublicCollector<'_, '_> {
                     .iter()
                     .map(|property| self.text(property.span()))
                     .collect();
+                let content = self.content;
                 self.hoist_scanned(
                     format!("{MODEL_OPTIONS}{ordinal}"),
                     format!("{{ {} }}", members.join(", ")),
@@ -1641,7 +1660,11 @@ impl PublicCollector<'_, '_> {
                     Some("{ readonly required?: boolean; readonly [key: string]: unknown }"),
                     |refs| {
                         for property in deciding {
-                            refs.visit_object_property_kind(property);
+                            verter_parser::oxc_parse::with_span_stack(
+                                content,
+                                property.span(),
+                                || refs.visit_object_property_kind(property),
+                            );
                         }
                     },
                 );

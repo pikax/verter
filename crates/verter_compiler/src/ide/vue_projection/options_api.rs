@@ -34,10 +34,11 @@ use oxc_ast::ast::{
     Argument, BindingPattern, Declaration, Expression, ImportDeclarationSpecifier, ImportSpecifier,
     ModuleExportName, ObjectExpression, ObjectPropertyKind, Program, PropertyKey, Statement,
 };
-use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType};
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_parser::oxc_parse::Parser;
+use verter_parser::utils::oxc::script::export_parts::NamedExportParts;
 
 use crate::cursor::ScriptLanguage;
 
@@ -451,11 +452,14 @@ pub fn project_options_block(
     let (source_type, dialect) = source_type_of(block.lang);
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, block.content, source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(SetupProjectionRefusal::SyntaxErrors { setup: false });
     }
     let program = &parsed.program;
-    let semantic = SemanticBuilder::new().build(program).semantic;
+    let semantic = verter_parser::oxc_parse::with_program_stack(program, || {
+        SemanticBuilder::new().build(program)
+    })
+    .semantic;
     let values = value_bindings(semantic.scoping());
     let vue_imports = vue_runtime_imports(program);
 
@@ -689,13 +693,18 @@ fn collect_option_members(
 fn collect_named_exports(program: &Program<'_>, into: &mut Vec<String>) {
     for statement in &program.body {
         match statement {
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(declaration) = &export.declaration {
+            Statement::ExportDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_) => {
+                let Some(export) = NamedExportParts::of_statement(statement) else {
+                    continue;
+                };
+                if let Some(declaration) = export.declaration {
                     if is_value_declaration(declaration) {
                         into.extend(declaration_names(declaration));
                     }
                 }
-                for specifier in &export.specifiers {
+                for specifier in export.specifiers {
                     if export.export_kind.is_type() || specifier.export_kind.is_type() {
                         continue;
                     }

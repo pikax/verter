@@ -210,6 +210,7 @@ impl VerterHost {
             meta: hd.parse.meta.clone(),
             script_analysis: hd.parse.script_analysis.clone(),
             framework_parse: hd.framework_parse.clone(),
+            script_parse_key: hd.script_parse_key.clone(),
             whole_hash: hd.parse.whole_hash,
         })
     }

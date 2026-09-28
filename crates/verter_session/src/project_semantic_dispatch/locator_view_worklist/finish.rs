@@ -127,6 +127,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::Alias(target) => projected(memo, *target, context),
+            // The same class expression over its projected type arguments
+            // and instance surface.
+            SemanticNodeData::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => {
+                let projected_arguments: Vec<SemanticNodeId> = type_arguments
+                    .iter()
+                    .map(|argument| projected(memo, *argument, context))
+                    .collect();
+                let projected_surface = projected(memo, *surface, context);
+                if projected_surface == *surface && projected_arguments[..] == type_arguments[..] {
+                    node
+                } else {
+                    graph.intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ClassExpressionInstance {
+                            identity: Arc::clone(identity),
+                            type_arguments: Arc::from(projected_arguments.into_boxed_slice()),
+                            surface: projected_surface,
+                        },
+                    )
+                }
+            }
             SemanticNodeData::TypeParam {
                 decl,
                 param_index,
@@ -206,13 +231,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // canonical authority, Global intern.
                     self.intern_normalized_union_or_intersection(&ids, false)
                 } else {
-                    // Order- and scope-preserving projection rebuild: an
-                    // ordered heritage/overload carrier (or a possibly-
-                    // callable rebuilt arm set) keeps its verbatim order.
+                    // Order- and scope-preserving projection rebuild: a
+                    // heritage body or an ordered overload carrier (or a
+                    // possibly-callable rebuilt arm set) keeps its verbatim
+                    // order, and a heritage body stays one.
                     graph.intern_preserving_scope(
                         node,
                         SemanticNodeData::Intersection(
-                            crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                            crate::semantic_query::composite::CompositeList::rebuilt_from(
+                                category,
                                 Arc::from(ids.into_boxed_slice()),
                             ),
                         ),
@@ -415,6 +442,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_carrier,
                 signature_span,
                 return_type_span,
+                predicate,
+                is_abstract,
             } => {
                 let params: Vec<_> = params
                     .iter()
@@ -424,6 +453,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         optional: parameter.optional,
                         rest: parameter.rest,
                         span: parameter.span,
+                        declared_literal: parameter.declared_literal,
                     })
                     .collect();
                 let type_parameters: Vec<_> = type_parameters
@@ -466,6 +496,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         },
                         signature_span: *signature_span,
                         return_type_span: *return_type_span,
+                        predicate: predicate
+                            .map(|predicate| predicate.map_type(|ty| projected(memo, ty, context))),
+                        is_abstract: *is_abstract,
                     },
                 )
             }
@@ -607,6 +640,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
                 ) {
                     rebuild(projected_args)
+                } else if self.is_instantiate_active(
+                    base.canonical_id.as_ref(),
+                    base.owner,
+                    base.decl_name.as_ref(),
+                ) {
+                    // An application of the declaration an enclosing
+                    // `build_instantiate` frame is still materialising is its
+                    // recursive back-edge, recording the instantiation it
+                    // stands for — the same rule as a 0-arg `DeclRef`.
+                    self.recursive_ref_sentinel(base, projected_args)
                 } else {
                     match self.execute_type_node(SemanticQueryKey::Instantiate(
                         crate::semantic_query::InstantiateKey::new(
@@ -626,6 +669,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::RawFallback { .. }
             | SemanticNodeData::Infer { .. }

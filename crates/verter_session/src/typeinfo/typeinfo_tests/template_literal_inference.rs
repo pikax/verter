@@ -52,7 +52,6 @@ fn template_literal_split_on_dot_produces_segment_tuple() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not strip a literal prefix with `infer Rest` + Uncapitalize; keep as the future template-literal prefix-strip contract"]
 fn template_literal_strip_on_prefix_uncapitalises_remainder() {
     // TS7 contract: `StripOnPrefix<"onClick">` matches `\`on${infer Rest}\``
     // (Rest = "Click"), then applies `Uncapitalize<"Click">` = `"click"`.
@@ -72,7 +71,6 @@ fn template_literal_strip_on_prefix_uncapitalises_remainder() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not select the false branch of a template-literal conditional when the pattern fails to match; keep as the future template-literal no-match contract"]
 fn template_literal_strip_returns_input_unchanged_when_prefix_missing() {
     // TS7 contract: `StripOnPrefix<"submit">` fails the `\`on${infer Rest}\``
     // pattern check and selects the false branch, returning the input string

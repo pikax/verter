@@ -60,8 +60,8 @@ pub(super) fn assess_partial_ast(
 
     let error_ranges: Vec<(u32, u32)> = errors
         .iter()
-        .flat_map(|e| e.labels.iter().flatten())
-        .map(|label| (label.offset() as u32, (label.offset() + label.len()) as u32))
+        .flat_map(|e| e.labels.iter())
+        .map(|label| (label.offset(), label.offset() + label.len()))
         .collect();
 
     let clean_stmt_count = program

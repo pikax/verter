@@ -1775,16 +1775,20 @@ fn prepared_type_decl_mints_content_free_class_heritage_base_facts() {
         plain.heritage_bases
     );
 
-    // A NON-class Intersection body must NOT mint class-heritage facts: an
-    // interface's extends fold and an alias's authored intersection are not
-    // class heritage.
+    // An interface's extends fold mints its heritage facts as a class body
+    // does (its `extends` clauses are its bases); an alias's authored
+    // intersection is no heritage and mints none.
     let iface = host
         .prepared_type_decl("/src/derived.ts", "NotAClass")
         .expect("prepared decl should materialize the interface");
-    assert!(
-        iface.heritage_bases.is_empty(),
-        "an interface extends fold mints no CLASS heritage facts: {:?}",
-        iface.heritage_bases
+    assert_eq!(
+        iface
+            .heritage_bases
+            .iter()
+            .map(|fact| fact.name.as_str())
+            .collect::<Vec<_>>(),
+        ["LocalIface"],
+        "an interface extends fold mints one heritage fact per extends clause"
     );
     let alias = host
         .prepared_type_decl("/src/derived.ts", "AliasIx")
@@ -1796,19 +1800,23 @@ fn prepared_type_decl_mints_content_free_class_heritage_base_facts() {
     );
 
     // The UNNAMED-heritage fact. A class whose `extends` clause is an
-    // EXPRESSION folds no heritage `Ref` arm into its body, so it mints the
-    // SAME empty base list a heritage-free class does — and a NOMINAL
-    // consumer reading that emptiness as a proof of "no heritage" would
-    // publish a fabricated negative. `heritage_undecidable` separates the
-    // two; it is meaningless on a non-class declaration and stays false
-    // there.
+    // EXPRESSION folds the synthetic value its expression registers under
+    // (`Mixed:extends`), which reads the expression's value — never a
+    // declaration a NOMINAL consumer could name, so reading that base list
+    // as the class's nominal ancestry would publish a fabricated answer.
+    // `heritage_undecidable` says so; it is meaningless on a non-class
+    // declaration and stays false there.
     let mixed = host
         .prepared_type_decl("/src/derived.ts", "Mixed")
         .expect("prepared decl should materialize the mixin-based class");
-    assert!(
-        mixed.heritage_bases.is_empty(),
-        "a call-expression base folds no heritage Ref arm: {:?}",
-        mixed.heritage_bases
+    assert_eq!(
+        mixed
+            .heritage_bases
+            .iter()
+            .map(|fact| fact.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Mixed:extends"],
+        "a call-expression base folds its synthetic value arm"
     );
     assert!(
         mixed.heritage_undecidable,

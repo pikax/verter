@@ -300,6 +300,7 @@ impl<'a, T> Drop for EntriesLockGuard<'a, T> {
         #[cfg(any(test, feature = "test-support"))]
         crate::capture_token::with_active_capture(|t| {
             t.record_entries_mutex_timing(wait_ns, hold_ns);
+            t.record_counter(crate::capture_token::ENTRIES_MUTEX_ACQUISITIONS, 1);
         });
     }
 }

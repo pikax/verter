@@ -49,6 +49,7 @@ verter_type_expr = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
+verter_parser = { path = "../verter_parser" }
 oxc_span = { workspace = true }
 oxc_sourcemap = "7.0.0"
 blake3 = { workspace = true }

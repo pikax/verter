@@ -496,6 +496,30 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "VueMacroDtoKey",
     "VueMacroDtos",
     "VueMacroDtosEntry",
+    // The union/intersection normalization authority is ONE ordered
+    // reduction pair: the `ReduceUnion` / `ReduceIntersection` queries over
+    // the crate-private builders `intern_ordered_union` /
+    // `intern_ordered_intersection`. The superseded spellings named a
+    // separate "normalize" authority (`NormalizeUnion` /
+    // `NormalizeIntersection`, `SemanticMeet`) and the superseded builder
+    // spelling `canonical_intersection`. Re-introducing any of them would
+    // resurrect a second composite-construction authority beside the ordered
+    // reduction queries, which is exactly how ordering divergence between two
+    // producers re-enters. The union builder's superseded spelling is NOT
+    // listed: `canonical_union` is also an ordinary English phrase that
+    // unrelated code legitimately uses for a set union, so the scanner would
+    // fire on it. Its structural rail is what holds the invariant -- the
+    // builder is crate-private and reached only through `ReduceUnion`.
+    "NormalizeUnion",
+    "NormalizeIntersection",
+    "build_normalize_union",
+    "SemanticMeet",
+    "canonical_intersection",
+    // Per-arm union call acceptance. DELETED: call resolution selects one
+    // signature set through the shared positional matcher; a union-arm
+    // "selected" result carried a per-arm ordinal that made the accepted
+    // overload depend on arm traversal order.
+    "UnionSelected",
 ];
 
 /// File names whose presence at the head of the path should make us

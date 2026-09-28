@@ -32,7 +32,6 @@ fn index_signatures_numeric_index_publishes_signature() {}
 fn index_signatures_symbol_index_publishes_signature() {}
 
 #[test]
-#[ignore = "the U2 IndexedAccess-reduction bridge has landed (operator-bodied alias reduction in resolve_named_symbol); the remaining blocker is index-signature lookup — reducing `NumericIndexed[42]` against the `[key: number]` signature to its value type"]
 fn index_signatures_numeric_lookup_returns_signature_value() {
     // TS7 contract: `NumericIndexed[42]` = `string` (numeric literal `42`
     // matches the `[key: number]` signature, returning the declared value
@@ -53,7 +52,6 @@ fn index_signatures_numeric_lookup_returns_signature_value() {
 }
 
 #[test]
-#[ignore = "the U2 IndexedAccess-reduction bridge has landed (operator-bodied alias reduction in resolve_named_symbol); the remaining blocker is index-signature lookup — reducing `SymbolIndexed[symbol]` against the `[key: symbol]` signature to its value type"]
 fn index_signatures_symbol_lookup_returns_signature_value() {
     // TS7 contract: `SymbolIndexed[symbol]` = `number`.
     let host = make_host_with_footprint();
@@ -72,7 +70,6 @@ fn index_signatures_symbol_lookup_returns_signature_value() {
 }
 
 #[test]
-#[ignore = "the U2 IndexedAccess-reduction bridge has landed (operator-bodied alias reduction in resolve_named_symbol); the remaining blocker is index-signature precedence — selecting the string-key signature's value union for a string-literal key against a dual string/numeric index signature"]
 fn index_signatures_dual_string_key_returns_string_signature_value() {
     // TS7 contract: `DualIndexed["any-string-here"]` returns the string-key
     // signature's value type = `number | boolean`. The numeric signature
@@ -98,7 +95,6 @@ fn index_signatures_dual_string_key_returns_string_signature_value() {
 }
 
 #[test]
-#[ignore = "the U2 IndexedAccess-reduction bridge has landed (operator-bodied alias reduction in resolve_named_symbol); the remaining blocker is index-signature precedence — selecting the numeric-key signature's value for a numeric-literal key when both string and numeric index signatures match"]
 fn index_signatures_dual_numeric_key_returns_numeric_signature_value() {
     // TS7 contract: `DualIndexed[0]` returns the numeric-key signature's
     // value type = `number`. When both signatures could match, the more

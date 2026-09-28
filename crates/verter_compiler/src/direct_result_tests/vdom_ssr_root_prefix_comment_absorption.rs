@@ -162,12 +162,14 @@ fn compile_server(source: &str, is_production: bool) -> String {
 fn assert_parses(code: &str, label: &str) {
     let alloc = oxc_allocator::Allocator::new();
     let wrapped = format!("import {{}} from \"vue\";\n{code}");
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, oxc_span::SourceType::mjs()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, oxc_span::SourceType::mjs())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "{label}: generated JS failed to parse: {:?}\n--- code ---\n{code}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>()

@@ -1,7 +1,8 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
-use oxc_parser::{ParseOptions, Parser};
+use oxc_parser::ParseOptions;
 use oxc_span::SourceType;
+use verter_parser::oxc_parse::Parser;
 
 use crate::analysis::classify::classify_vue_api;
 use crate::analysis::types::{
@@ -21,7 +22,7 @@ pub fn extract_import_sources(
         ..ParseOptions::default()
     });
     let result = parser.parse();
-    if result.panicked {
+    if result.fatal_error {
         return Vec::new();
     }
 
@@ -55,20 +56,19 @@ pub fn extract_import_sources(
                     bindings,
                 });
             }
-            Statement::ExportNamedDeclaration(decl) => {
+            Statement::ExportFromDeclaration(decl) => {
                 // Re-exports: `export { Foo } from './other'`
-                if let Some(ref source) = decl.source {
-                    let mut bindings = Vec::new();
-                    for spec in &decl.specifiers {
-                        let name = spec.exported.name().to_string();
-                        bindings.push(name);
-                    }
-                    out.push(ImportSourceInfo {
-                        source: source.value.to_string(),
-                        is_type_only: decl.export_kind.is_type(),
-                        bindings,
-                    });
+                let source = &decl.source;
+                let mut bindings = Vec::new();
+                for spec in &decl.specifiers {
+                    let name = spec.exported.name().to_string();
+                    bindings.push(name);
                 }
+                out.push(ImportSourceInfo {
+                    source: source.value.to_string(),
+                    is_type_only: decl.export_kind.is_type(),
+                    bindings,
+                });
             }
             _ => {}
         }

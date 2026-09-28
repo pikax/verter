@@ -2,8 +2,8 @@
 //! item G). Each test asserts a SPECIFIC erased fact is captured AND a clean
 //! peer is captured WITHOUT the fact — an empty/broken capture would fail.
 
+use crate::oxc_parse::Parser;
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 
 use super::*;
@@ -12,7 +12,7 @@ use verter_type_expr::MemberVisibility;
 fn capture_all(src: &str) -> Vec<CapturedSurface> {
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, src, SourceType::ts()).parse();
-    assert!(!ret.panicked, "fixture must parse: {src}");
+    assert!(!ret.fatal_error, "fixture must parse: {src}");
     let captured: Vec<CapturedSurface> = ret
         .program
         .body

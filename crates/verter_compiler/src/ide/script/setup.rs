@@ -9,9 +9,9 @@
 //! ever reparsing a synthetic view.
 
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_parser::oxc_parse::Parser;
 
 use crate::ast::types::TemplateAst;
 use crate::code_transform::CodeTransform;
@@ -123,12 +123,12 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     // body on error, so `parser_ret.program` contributes nothing on this path —
     // every recovered fact comes from the real-source scan, never a synthetic view.
     let recovery_plan: Option<crate::ide::script_recover::ScriptSetupRecoveryPlan> =
-        if parser_ret.errors.is_empty() {
+        if parser_ret.diagnostics.is_empty() {
             None
         } else {
             let ts_alloc = Allocator::default();
             let ts_check = Parser::new(&ts_alloc, content_str, SourceType::ts()).parse();
-            if ts_check.errors.is_empty() {
+            if ts_check.diagnostics.is_empty() {
                 // TSX-only failure (angle-bracket assertion) — clean-path metadata.
                 None
             } else {
@@ -152,7 +152,7 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     // genuinely-used binding from the unwrap surface → false TS6133. So a script
     // with parse errors is INCOMPLETE and the liveness gate must fail open. (This
     // is purely a liveness signal; it does NOT change the recovery codegen path.)
-    let script_complete = parser_ret.errors.is_empty();
+    let script_complete = parser_ret.diagnostics.is_empty();
 
     let parse_result = parse_script(
         effective_program,

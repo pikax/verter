@@ -10,8 +10,8 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 fn collect_jsdoc_typedefs_lowers_braced_typedef_to_alias_body() {
     use super::collect_jsdoc_typedefs;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::ObjectMember;
 
     let source = "/** @typedef {{a: number}} Alias */\n";
@@ -44,8 +44,8 @@ fn collect_jsdoc_typedefs_lowers_braced_typedef_to_alias_body() {
 fn collect_jsdoc_typedefs_skips_payloadless_typedef() {
     use super::collect_jsdoc_typedefs;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
 
     // The `@property`-aggregation form (`@typedef Foo` with no `{T}`) carries
     // no self-contained alias body; it must be skipped, not registered as an
@@ -78,8 +78,8 @@ fn collect_jsdoc_typedefs_skips_payloadless_typedef() {
 fn collect_jsdoc_typedefs_member_spans_are_file_coordinates() {
     use super::collect_jsdoc_typedefs;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_type_expr::ObjectMember;
 
     // `const x = 1;\n` is 13 bytes, so the JSDoc block — and the `{a: number}`

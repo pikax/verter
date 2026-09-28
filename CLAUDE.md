@@ -153,6 +153,22 @@ Guards: `session_overlay_augmenter_isolated_from_base_index`, `session_overlay_a
 
 See `/type-resolution` skill for the stitch chain and the overlay-aware index, and `/type-cache-architecture` for the content-addressed vs query-identity augmentation key split.
 
+### Semantic Signature Kernel (CRITICAL)
+
+Callable shape, composite reduction and publication ORDER have exactly one owner. `crates/verter_session/src/signature_kernel/` holds the signature records, the epoch-safe append-only interner, the request-pinned borrowed read view, the shared positional model, provenance, and the two-stage call substitution; `project_semantic_dispatch/signature_discovery.rs` is its single consumer. A consumer that needs callable shape goes through it — never through a private walker over `SemanticNodeData::Signature`.
+
+**Ordered reduction is ONE pair of queries.** Union and intersection construction is closed over `SemanticQueryKey::ReduceUnion` → `canonical_algebra::intern_ordered_union` and `SemanticQueryKey::ReduceIntersection` → `canonical_algebra::intern_ordered_intersection`. Both builders are crate-private (§15 "keep raw interning private"); every flow/meta-resolve/locator producer reaches them through the dispatch funnel `intern_normalized_union_or_intersection`. Two composite constructions are deliberately outside the reducer, both `CompositeList::ordered_carrier` mints: same-name method OVERLOAD groups, and a POSSIBLY-CALLABLE member-value intersection (call resolution tries intersection arms in declaration order, so a commutative sort would break overload precedence). Neither is an authored sequence a commutative reducer may touch; callable MERGING across those arms still belongs to `SignaturesOfType`, never to a local concatenation of signature nodes. An interface/class body with `extends` heritage is a third, minted `CompositeList::heritage`: a declaration, not an intersection type, whose signatures `SignaturesOfType` reads from that category as TypeScript's `resolveObjectTypeMembers` does — own signatures first, then each base's, no identical-signature dedup, no mixin composition. `NormalizeUnion`, `NormalizeIntersection`, `SemanticMeet`, `canonical_intersection`, `build_normalize_union` and `UnionSelected` are RETIRED names; reintroducing one resurrects a second composite-construction authority, which is how two producers start ordering arms differently.
+
+**Ordering is `VerterStableV1`, not authored order.** `StableKey::cmp` (`semantic_query/stable_key.rs`) compares `(fingerprint, exact)` — FNV-1a of the exact key bytes FIRST, exact bytes only on collision. Canonical union member order is therefore fingerprint order: `Extract<'a'|'b'|'c', 'a'|'b'>` renders `"b" | "a"`. An authored-order display pin in an older test is an arena-id-sort coincidence, not a contract. Every `SemanticNodeData` variant has an encoding, registered row-by-row against the live declaration.
+
+**Determinism is proven on two bases, never bought.** Each §5.9 replay driver compares the stable-text completed observation AND the generated-bytes digest, so a schedule-dependent answer cannot hide behind an unstable print or a fixed observation with drifting bytes. Serialising node allocation to make a replay agree is forbidden. An ignored matrix row asserts its known state and names the MISSING PUBLIC SURFACE — never a coordination identifier, never an empty body.
+
+**Differences are classified, never dropped.** `docs/evidence/signature-kernel/semantic-difference-ledger.md` is the release authority: exact agreement, presentation-only, `VerterStableV1` order-induced (causal counterfactual required), or independent difference/incompleteness. A corpus verdict moves only through the driver's flip law — which fails in BOTH directions — so a row can never silently start or stop matching.
+
+Guards: `retired_symbols_absent_from_production_source`, `stable_key_table_enumerates_every_semantic_node_data_category`, `determinism_matrix_enumerates_every_5_9_row`, `signature_kernel_interned_identities_are_schedule_independent`, `signature_corpus_flip_law_fires_in_both_directions`, `signature_corpus_live_answers_follow_their_verdicts`, `warm_positional_read_does_not_allocate_or_lock`, `repeated_warm_read_walks_no_descriptor_chain`, `retained_results_outlive_epoch_replacement_until_drained`.
+
+See `/signature-kernel` for the module map, the evidence homes, and the working rules.
+
 ### Two Template Codegen Paths (CRITICAL)
 
 The Rust compiler has two separate template codegen paths; modifying one does NOT affect the other: **VDOM/Vapor** (`template/code_gen/vdom/`) for runtime render functions, and **IDE** (`ide/template/`) for valid JSX/TSX used by LSP/TSGO type checking. The LSP uses the IDE path via `CompileTarget::IDE`.
@@ -673,6 +689,7 @@ Detailed reference material is available as on-demand skills (loaded automatical
 | `/compiler-codegen`      | Template codegen (VDOM/IDE), CodeTransform, cached directives, strict slots, style preprocessing |
 | `/host-session`          | TypeProvider (TSGO/tsserver), workspace management, async scheduler, LSP host integration        |
 | `/architecture`          | High-level module map, TS packages, plugin system, CSS analysis, MCP server, analysis types     |
+| `/signature-kernel`      | Signature records/descriptors, epoch-safe storage + retirement, positional matching, call substitution, ordered union/intersection reduction, `VerterStableV1` ordering, observation corpus, determinism matrix |
 | `/audit-infrastructure`  | `verter_audit` substrate, `HostAuditRuntime`, `AuditRequestRegistration`, `*_with_audit` API, footprint miner, structured events |
 | `/framework-adapters`    | Framework-adapter substrate: registry, descriptor + virtual-file naming column, facts/carrier-only ctx, framework-surface executor, two-pass script-fact seam, Vue as the reference adapter |
 | `/position-encoding`     | Span types, position encoding, coordinate conversions, path normalization                        |

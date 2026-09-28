@@ -50,6 +50,8 @@ mod node_domain;
 mod publication;
 
 pub(crate) use conversions::semantic_primitive_to_primitive_name;
+#[cfg(test)]
+pub(crate) use fold::folded_nodes_for_tests;
 use fold::{fold_node, FoldedFunction, FoldedTupleElement};
 pub(in crate::project_semantic_dispatch) use materialize::{
     fold_to_type_expr, DegradedLeaf, MaterializedTypeExpr,
@@ -291,6 +293,17 @@ struct RaisedFunction {
     type_parameters: Vec<RaisedTypeParam>,
     signature_span: Option<Span>,
     return_type_span: Option<Span>,
+    predicate: Option<RaisedPredicate>,
+    is_abstract: bool,
+}
+
+/// Type-predicate mirror of [`verter_type_expr::TypePredicate`]: the raised
+/// key distinguishes exactly what the typed IR's equality distinguishes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RaisedPredicate {
+    subject: verter_type_expr::TypePredicateSubject,
+    asserts: bool,
+    ty: Option<RaisedShapeKey>,
 }
 
 /// Function-parameter mirror. It carries EXACTLY the fields

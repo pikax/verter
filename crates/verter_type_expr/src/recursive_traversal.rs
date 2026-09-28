@@ -281,6 +281,10 @@ fn drain_function_expr(func: FunctionExpr, worklist: &mut Vec<TypeExpr>) {
         drain_opt_arc(&mut tp.constraint, worklist);
         drain_opt_arc(&mut tp.default, worklist);
     }
+    if let Some(predicate) = func.predicate.and_then(Arc::into_inner) {
+        let mut target = predicate.ty;
+        drain_opt_arc(&mut target, worklist);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +362,11 @@ enum HashStep<'a> {
     IndexSpans(IndexSignatureSpans),
     /// Emit a trailing `FunctionSpans` field.
     FnSpans(FunctionSpans),
+    /// Emit a trailing type-predicate marker (subject + `asserts`, then the
+    /// optional target through the node stack), after `spans`. Pushed ONLY
+    /// for a function carrying a predicate, so every predicate-less
+    /// function's byte stream is unchanged.
+    Predicate(&'a TypePredicate),
     /// Emit a trailing `Option<Span>` field (a function parameter's span).
     OptSpan(Option<Span>),
     /// Decompose one `ObjectMember`.
@@ -399,6 +408,11 @@ impl Hash for TypeExpr {
                 HashStep::MemberSpans(s) => s.hash(state),
                 HashStep::IndexSpans(s) => s.hash(state),
                 HashStep::FnSpans(s) => s.hash(state),
+                HashStep::Predicate(predicate) => {
+                    predicate.subject.hash(state);
+                    predicate.asserts.hash(state);
+                    stack.push(HashStep::OptNode(predicate.ty.as_deref()));
+                }
                 HashStep::OptSpan(s) => s.hash(state),
                 HashStep::Member(m) => hash_object_member_step(m, state, &mut stack),
                 HashStep::TupleElem(el) => hash_tuple_element_step(el, state, &mut stack),
@@ -793,15 +807,20 @@ fn hash_recursive_frame_step<'a, H: Hasher>(
 }
 
 /// `FunctionExpr` derive: parameters (len + each), return_type (Option),
-/// type_parameters (len + each), spans.
+/// type_parameters (len + each), spans, then the predicate marker when the
+/// function carries one.
 fn hash_function_step<'a, H: Hasher>(
     func: &'a FunctionExpr,
     state: &mut H,
     stack: &mut Vec<HashStep<'a>>,
 ) {
     func.parameters.len().hash(state);
-    // Emission order: each param, return_type, tp-len, each tp, spans.
-    // Push reverse: spans, tp frames, tp-len, OptNode(return), param frames.
+    // Emission order: each param, return_type, tp-len, each tp, spans, the
+    // predicate marker. Push reverse: predicate, spans, tp frames, tp-len,
+    // OptNode(return), param frames.
+    if let Some(predicate) = func.predicate.as_deref() {
+        stack.push(HashStep::Predicate(predicate));
+    }
     stack.push(HashStep::FnSpans(func.spans));
     for tp in func.type_parameters.iter().rev() {
         stack.push(HashStep::TyParam(tp));
@@ -1102,6 +1121,13 @@ fn push_function_children<'a>(
     }
     if let Some(return_type) = func.return_type.as_deref() {
         stack.push(NameStep::Node(return_type));
+    }
+    if let Some(target) = func
+        .predicate
+        .as_deref()
+        .and_then(|predicate| predicate.ty.as_deref())
+    {
+        stack.push(NameStep::Node(target));
     }
     for tp in &func.type_parameters {
         push_type_param_children(tp, stack);

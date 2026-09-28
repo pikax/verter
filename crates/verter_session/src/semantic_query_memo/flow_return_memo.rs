@@ -30,6 +30,34 @@ impl SemanticGraphStore {
         self.begin_inline_member_flight(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
     }
 
+    /// Whether the `FlowReturn` family holds a candidate for `key` the warm
+    /// read would serve — the same point, epoch and fact-rail gates — as a
+    /// peek that bubbles no read, touches no LRU order and counts neither a
+    /// hit nor a miss. The flow-return callee schedule reads it to leave a
+    /// callee whose answer is warm to that callee's own demand. A stale
+    /// candidate does not count: after an edit, the callees above it are
+    /// re-evaluated by the schedule, bottom-up, rather than one nested
+    /// demand per invalidated level.
+    pub(crate) fn has_serving_flow_return_candidate(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        key: &crate::semantic_query::FlowReturnKey,
+    ) -> bool {
+        let family = FamilyKey::FlowReturn {
+            key: Box::new(key.clone()),
+        };
+        let requested = MaterializedPoint::new(key.demand.point.clone());
+        // Validated OUTSIDE the lock, as the warm read validates.
+        let snapshot = self
+            .entries_lock_diagnosed()
+            .get(&family)
+            .map(|slots| slots.snapshot_slot(ModeSlot::Single));
+        snapshot.is_some_and(|list| {
+            list.iter()
+                .any(|entry| self.warm_candidate_serves(entry, &requested, ctx))
+        })
+    }
+
     /// The strict warm read of the `FlowReturn` family (design §3.4):
     /// the TWO-GATE hit — `cached_satisfies` over the entry's RECORDED
     /// materialised point against the key's OWN demand point (never the

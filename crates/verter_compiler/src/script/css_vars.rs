@@ -4,9 +4,9 @@
 //! [`CodeGenOutput`]. Used when `<style>` blocks contain `v-bind()` expressions.
 
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashMap;
+use verter_parser::oxc_parse::Parser;
 
 use crate::style_planner::VBindVar;
 use crate::template::code_gen::binding::{is_simple_ident, BindingType};
@@ -147,7 +147,7 @@ fn resolve_complex_css_var_expr(
     let source_type = SourceType::tsx();
     let parser_ret = Parser::new(&alloc, &wrapper, source_type).parse();
 
-    if !parser_ret.errors.is_empty() || parser_ret.program.body.is_empty() {
+    if !parser_ret.diagnostics.is_empty() || parser_ret.program.body.is_empty() {
         return expr.to_string();
     }
 

@@ -15,9 +15,9 @@
 use super::*;
 use crate::semantic_query::{
     CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-    FlowReturnKey, FlowReturnPolicy, FlowReturnResult, PrimitiveKind, RelateMemoKey,
-    RelationContext, RelationOutcome, ResolvedDeclSlotIdentity, ReturnProjectionDemand,
-    SemanticNodeData,
+    FlowReturnKey, FlowReturnPolicy, FlowReturnResult, NullabilityPolicy, PrimitiveKind,
+    RelateMemoKey, RelationContext, RelationOutcome, ResolvedDeclSlotIdentity,
+    ReturnProjectionDemand, SemanticNodeData,
 };
 use crate::semantic_retention_account::{
     ChargeClass, RetainedFootprint, RetentionLimits, SemanticRetentionAccount,
@@ -80,7 +80,12 @@ fn distinct_flow_keys(count: usize) -> Vec<FlowReturnKey> {
                 project_identity: [0u8; 16],
                 result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: CanonicalTypeSubstitution::empty(),
-                policy: FlowReturnPolicy {},
+                policy: FlowReturnPolicy {
+                    nullability: NullabilityPolicy::Strict,
+                    no_implicit_any: true,
+                    use_unknown_in_catch_variables: true,
+                    no_implicit_this: true,
+                },
             },
             demand: ReturnProjectionDemand::whole_return(),
             input: FlowInputContext::empty(),
@@ -129,6 +134,7 @@ fn flow_demand_basis_for_member(
         .expect("a trivial source derives a parse identity")
         .1;
     FlowDemandBasis {
+        ancestry: Default::default(),
         graph_body: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
             canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
             function: verter_semantic::analysis::function_program::FunctionProgramKey {

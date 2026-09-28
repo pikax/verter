@@ -45,7 +45,7 @@ use verter_type_expr::facts::{EnumPrimitiveDomain, EnumScalar};
 use verter_type_expr::{
     AuthoredPropertyKey, FunctionExpr, FunctionParam, IndexSignature, LiteralValue, MappedModifier,
     MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TupleElement,
-    TypeAuthoredPropertyKey, TypeExpr, TypeParam, ValueRef,
+    TypeAuthoredPropertyKey, TypeExpr, TypeParam, TypePredicateSubject, ValueRef,
 };
 
 use crate::analysis::type_eval::{EnumMemberValue, FunctionSignature, ValueDeclKind};
@@ -480,6 +480,16 @@ pub fn exporter_qualifier_salt(exporter: &str) -> FactHash {
 // Internal walker
 // ──────────────────────────────────────────────────────────────────
 
+#[cfg(test)]
+thread_local! {
+    /// How many object members this thread encoded; test-only.
+    static MEMBER_WRITES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The member sort keys of one fingerprint computation, by member address
+/// (see [`Walker::member_sort_key`]).
+type MemberSortKeys = std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashMap<usize, Arc<[u8]>>>>;
+
 /// Inner traversal state.
 struct Walker<'a> {
     buf: Vec<u8>,
@@ -490,10 +500,21 @@ struct Walker<'a> {
     lens: &'a dyn CrossDeclLens,
     default_space: SymbolSpace,
     type_param_frame: Vec<Vec<Arc<str>>>,
+    /// Owned by the computation's root walker and shared with every
+    /// scratch walker it spawns; dropped when the computation returns.
+    member_sort_keys: MemberSortKeys,
 }
 
 impl<'a> Walker<'a> {
     fn new(lens: &'a dyn CrossDeclLens, default_space: SymbolSpace) -> Self {
+        Self::with_member_sort_keys(lens, default_space, MemberSortKeys::default())
+    }
+
+    fn with_member_sort_keys(
+        lens: &'a dyn CrossDeclLens,
+        default_space: SymbolSpace,
+        member_sort_keys: MemberSortKeys,
+    ) -> Self {
         Self {
             buf: Vec::with_capacity(256),
             visited: BTreeMap::new(),
@@ -503,7 +524,38 @@ impl<'a> Walker<'a> {
             lens,
             default_space,
             type_param_frame: Vec::new(),
+            member_sort_keys,
         }
+    }
+
+    /// The bytes `member` encodes to in a fresh walker — the key an object's
+    /// members are sorted by. A fresh walker starts at depth zero with no
+    /// visited node and no type-parameter frame, so the key is a function of
+    /// the member alone, and it is computed once per member for the whole
+    /// computation. Encoding it afresh at every enclosing object re-walked
+    /// each member's subtree once per level above it: a chain of nested
+    /// object types cost `2^n` walks.
+    ///
+    /// Keyed by the member's address, which is stable and unique while the
+    /// computation runs: every object this walker sorts is borrowed from the
+    /// hashed body (or the merged fold the entry point holds for the whole
+    /// computation).
+    fn member_sort_key(&self, member: &ObjectMember) -> Arc<[u8]> {
+        let address = std::ptr::from_ref(member) as usize;
+        if let Some(key) = self.member_sort_keys.borrow().get(&address) {
+            return Arc::clone(key);
+        }
+        let mut scratch = Self::with_member_sort_keys(
+            self.lens,
+            self.default_space,
+            std::rc::Rc::clone(&self.member_sort_keys),
+        );
+        scratch.write_object_member(member);
+        let key: Arc<[u8]> = Arc::from(std::mem::take(&mut scratch.buf).into_boxed_slice());
+        self.member_sort_keys
+            .borrow_mut()
+            .insert(address, Arc::clone(&key));
+        key
     }
 
     fn walk(&mut self, root: &TypeExpr) {
@@ -572,8 +624,10 @@ impl<'a> Walker<'a> {
             // (`0x73`) before reusing the identical `walk_function` body
             // encoding, so the carried signature still hashes alpha-stably while
             // the constructor-ness is part of the hash.
+            // An ABSTRACT constructor type is distinct again (`0x74`): an
+            // abstract signature refuses assignment to a non-abstract one.
             TypeExpr::ConstructorType(func) => {
-                self.buf.push(0x73);
+                self.buf.push(if func.is_abstract { 0x74 } else { 0x73 });
                 self.walk_function(func);
             }
             TypeExpr::Ref {
@@ -968,14 +1022,15 @@ impl<'a> Walker<'a> {
         // hash) under typed keys: sort members by their canonical fact-byte
         // encoding, which totally orders string, numeric, unique-symbol, and
         // computed keys without stringifying any of them.
-        let mut encoded: Vec<(Vec<u8>, &ObjectMember)> = obj
+        // A lone member needs no key.
+        if let [member] = obj.properties.as_slice() {
+            self.write_object_member(member);
+            return;
+        }
+        let mut encoded: Vec<(Arc<[u8]>, &ObjectMember)> = obj
             .properties
             .iter()
-            .map(|member| {
-                let mut scratch = Self::new(self.lens, self.default_space);
-                scratch.write_object_member(member);
-                (std::mem::take(&mut scratch.buf), member)
-            })
+            .map(|member| (self.member_sort_key(member), member))
             .collect();
         encoded.sort_by(|a, b| a.0.cmp(&b.0));
         for (_, member) in encoded {
@@ -984,6 +1039,8 @@ impl<'a> Walker<'a> {
     }
 
     fn write_object_member(&mut self, member: &ObjectMember) {
+        #[cfg(test)]
+        MEMBER_WRITES.with(|count| count.set(count.get() + 1));
         match member {
             ObjectMember::Property(prop) => self.write_property(prop),
             ObjectMember::Method(method) => self.write_method(method),
@@ -1159,6 +1216,32 @@ impl<'a> Walker<'a> {
             self.walk_node(ret);
         } else {
             self.buf.push(0);
+        }
+        // Trailing, present only on a predicate signature, so every
+        // predicate-less function keeps its bytes. The subject is its
+        // parameter SLOT, never the parameter's spelling (parameter
+        // renames stay cosmetic).
+        if let Some(predicate) = func.predicate.as_deref() {
+            self.buf.push(0x72);
+            match &predicate.subject {
+                TypePredicateSubject::This => self.buf.push(0),
+                TypePredicateSubject::Parameter(name) => {
+                    self.buf.push(1);
+                    let slot = func
+                        .parameters
+                        .iter()
+                        .position(|param| param.name.as_deref() == Some(name.as_ref()))
+                        .map_or(u32::MAX, |slot| slot as u32);
+                    self.buf.extend_from_slice(&slot.to_le_bytes());
+                }
+            }
+            self.buf.push(u8::from(predicate.asserts));
+            if let Some(target) = predicate.ty.as_deref() {
+                self.buf.push(1);
+                self.walk_node(target);
+            } else {
+                self.buf.push(0);
+            }
         }
         self.type_param_frame.pop();
     }

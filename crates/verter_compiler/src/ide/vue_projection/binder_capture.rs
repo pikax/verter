@@ -60,11 +60,11 @@ use oxc_ast::ast::{
     TSTypeQueryExprName, TSTypeReference,
 };
 use oxc_ast_visit::{walk, Visit};
-use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeFlags;
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_parser::oxc_parse::Parser;
 
 use super::script_setup::{
     binder_product_from, grammar_of, macro_positions, range, value_bindings,
@@ -421,7 +421,7 @@ fn parse_block<'a>(
     let grammar = grammar_of(block.lang)?;
     let content = allocator.alloc_str(block.content);
     let parsed = Parser::new(allocator, content, grammar.source_type()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(SetupProjectionRefusal::SyntaxErrors { setup });
     }
     Ok(allocator.alloc(parsed.program))
@@ -452,12 +452,14 @@ fn capture_binder(
     if let Some(declaration) = result.type_parameters() {
         for (ordinal, param) in declaration.params.iter().enumerate() {
             let mut refs = RefCollector::new(0);
-            if let Some(constraint) = &param.constraint {
-                refs.visit_ts_type(constraint);
-            }
-            if let Some(default) = &param.default {
-                refs.visit_ts_type(default);
-            }
+            verter_parser::oxc_parse::with_span_stack(text, param.span, || {
+                if let Some(constraint) = &param.constraint {
+                    refs.visit_ts_type(constraint);
+                }
+                if let Some(default) = &param.default {
+                    refs.visit_ts_type(default);
+                }
+            });
             let mut found: Vec<usize> = refs
                 .references
                 .iter()
@@ -484,6 +486,8 @@ struct DeclRecord<'a> {
     base: u32,
     own_type_params: Vec<String>,
     body: DeclBody<'a>,
+    /// The program the declaration is in, whose text sizes the walk of it.
+    program: &'a Program<'a>,
 }
 
 enum DeclBody<'a> {
@@ -529,14 +533,13 @@ fn index_block<'a>(
                     });
                 }
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(declaration) = &export.declaration {
-                    record_declaration(declaration, true, from_setup, base, declarations);
-                }
+            Statement::ExportDeclaration(export) => {
+                let declaration = &export.declaration;
+                record_declaration(program, declaration, true, from_setup, base, declarations);
             }
             other => {
                 if let Some(declaration) = other.as_declaration() {
-                    record_declaration(declaration, false, from_setup, base, declarations);
+                    record_declaration(program, declaration, false, from_setup, base, declarations);
                 }
             }
         }
@@ -555,6 +558,7 @@ fn type_param_names(declaration: Option<&TSTypeParameterDeclaration<'_>>) -> Vec
 }
 
 fn record_declaration<'a>(
+    program: &'a Program<'a>,
     declaration: &'a Declaration<'a>,
     exported: bool,
     from_setup: bool,
@@ -571,6 +575,7 @@ fn record_declaration<'a>(
             base,
             own_type_params,
             body,
+            program,
         });
     };
     match declaration {
@@ -880,11 +885,15 @@ impl RefCollector {
         if let Some(parameters) = &class.type_parameters {
             self.visit_ts_type_parameter_declaration(parameters);
         }
-        if let Some(arguments) = &class.super_type_arguments {
+        if let Some(arguments) = class
+            .heritage
+            .as_ref()
+            .and_then(|heritage| heritage.type_arguments.as_ref())
+        {
             self.visit_ts_type_parameter_instantiation(arguments);
         }
-        if let Some(super_class) = &class.super_class {
-            if let Some((name, span)) = leftmost_expression_identifier(super_class) {
+        if let Some(heritage) = &class.heritage {
+            if let Some((name, span)) = leftmost_expression_identifier(&heritage.expression) {
                 self.note(name, DependencySpace::Value, span);
             }
         }
@@ -1024,7 +1033,7 @@ impl<'a> Visit<'a> for RefCollector {
     }
 
     fn visit_ts_interface_heritage(&mut self, it: &TSInterfaceHeritage<'a>) {
-        if let Some((name, span)) = leftmost_expression_identifier(&it.expression) {
+        if let Some((name, span)) = leftmost_type_name(&it.type_name) {
             self.note(name, DependencySpace::Type, span);
         }
         if let Some(arguments) = &it.type_arguments {
@@ -1210,10 +1219,15 @@ fn capture_slices<'a>(
     normal: Option<&'a Program<'a>>,
     resolver: &Resolver<'_>,
 ) -> Vec<PublicTypeDependencySlice> {
-    let semantic = SemanticBuilder::new().build(setup).semantic;
+    let semantic =
+        verter_parser::oxc_parse::with_program_stack(setup, || SemanticBuilder::new().build(setup))
+            .semantic;
     let normal_bindings = normal
         .map(|program| {
-            let semantic = SemanticBuilder::new().build(program).semantic;
+            let semantic = verter_parser::oxc_parse::with_program_stack(program, || {
+                SemanticBuilder::new().build(program)
+            })
+            .semantic;
             value_bindings(semantic.scoping())
         })
         .unwrap_or_default();
@@ -1231,7 +1245,7 @@ fn capture_slices<'a>(
         depth: 0,
         slices: Vec::new(),
     };
-    visitor.visit_program(setup);
+    verter_parser::oxc_parse::with_program_stack(setup, || visitor.visit_program(setup));
     visitor.slices
 }
 
@@ -1271,27 +1285,37 @@ fn close_over_declarations(
         let record = &declarations[index];
         let mut collector = RefCollector::new(record.base);
         collector.push_scope(record.own_type_params.clone());
-        match &record.body {
-            DeclBody::Alias(alias) => {
-                if let Some(parameters) = &alias.type_parameters {
-                    collector.visit_ts_type_parameter_declaration(parameters);
+        let body_span = match &record.body {
+            DeclBody::Alias(alias) => alias.span,
+            DeclBody::Interface(interface) => interface.span,
+            DeclBody::Class(class) => class.span,
+            DeclBody::Function(function) => function.span,
+            DeclBody::Annotation(Some(ty)) => oxc_span::GetSpan::span(*ty),
+            DeclBody::Annotation(None) | DeclBody::Opaque => oxc_span::Span::default(),
+        };
+        verter_parser::oxc_parse::with_node_stack(record.program, body_span, || {
+            match &record.body {
+                DeclBody::Alias(alias) => {
+                    if let Some(parameters) = &alias.type_parameters {
+                        collector.visit_ts_type_parameter_declaration(parameters);
+                    }
+                    collector.visit_ts_type(&alias.type_annotation);
                 }
-                collector.visit_ts_type(&alias.type_annotation);
+                DeclBody::Interface(interface) => {
+                    if let Some(parameters) = &interface.type_parameters {
+                        collector.visit_ts_type_parameter_declaration(parameters);
+                    }
+                    for heritage in &interface.extends {
+                        collector.visit_ts_interface_heritage(heritage);
+                    }
+                    collector.visit_ts_interface_body(&interface.body);
+                }
+                DeclBody::Class(class) => collector.visit_class_shape(class),
+                DeclBody::Function(function) => collector.visit_signature(function),
+                DeclBody::Annotation(Some(ty)) => collector.visit_ts_type(ty),
+                DeclBody::Annotation(None) | DeclBody::Opaque => {}
             }
-            DeclBody::Interface(interface) => {
-                if let Some(parameters) = &interface.type_parameters {
-                    collector.visit_ts_type_parameter_declaration(parameters);
-                }
-                for heritage in &interface.extends {
-                    collector.visit_ts_interface_heritage(heritage);
-                }
-                collector.visit_ts_interface_body(&interface.body);
-            }
-            DeclBody::Class(class) => collector.visit_class_shape(class),
-            DeclBody::Function(function) => collector.visit_signature(function),
-            DeclBody::Annotation(Some(ty)) => collector.visit_ts_type(ty),
-            DeclBody::Annotation(None) | DeclBody::Opaque => {}
-        }
+        });
         let locally_bound = collector.bound_seen.clone();
         let (dependencies, binder_references) =
             resolve_references(collector.references, resolver, record.from_setup);

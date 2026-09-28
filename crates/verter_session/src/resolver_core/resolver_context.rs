@@ -188,9 +188,18 @@ pub(crate) trait ResolverContext: sealed::Sealed + sealed::RequestBoundSealed {
     }
 
     /// Cheap cancellation checkpoint used at semantic dispatch/work charges.
+    #[cfg_attr(feature = "test-support", track_caller)]
     fn is_cancelled(&self) -> bool {
-        self.cancellation_token()
-            .is_some_and(|token| token.is_cancelled())
+        let cancelled = self
+            .cancellation_token()
+            .is_some_and(|token| token.is_cancelled());
+        #[cfg(feature = "test-support")]
+        if cancelled {
+            crate::for_tests::signature_kernel_bench_support::cancel_trace::observed(
+                std::panic::Location::caller(),
+            );
+        }
+        cancelled
     }
 
     // -------- Cache accessors --------------------------------------
@@ -1646,6 +1655,39 @@ pub(crate) fn observe_fan_out_borrowed(sig: &[crate::resolver_core::FactVersionR
 #[inline]
 pub(crate) fn fact_tracer_installed() -> bool {
     fact_tracer_tls::current_tracer().is_some()
+}
+
+/// The fact reads a computation made, for replay into scopes that were
+/// not live while it ran.
+#[derive(Debug, Clone)]
+pub(crate) struct RecordedFactReads {
+    /// Every distinct fact fanned out while the computation ran.
+    pub(crate) facts: std::sync::Arc<[crate::resolver_core::FactVersionRef]>,
+    /// Whether any non-cacheable read was marked, local-only included.
+    pub(crate) non_cacheable: bool,
+}
+
+/// Run `work` under a passive fact-read recorder and return what it read.
+///
+/// Recording changes nothing the installed tracers observe (see
+/// [`fact_tracer_tls::FactReadRecorder`]). A producer skips deriving an
+/// observation when no tracer is installed, so a recording is complete only
+/// if a tracer was installed throughout — the caller checks
+/// [`fact_tracer_installed`] first.
+pub(crate) fn record_fact_reads<R>(work: impl FnOnce() -> R) -> (R, RecordedFactReads) {
+    let recorder = fact_tracer_tls::FactReadRecorder::default();
+    let result = {
+        let _scope = fact_tracer_tls::install_recorder(&recorder);
+        work()
+    };
+    let (facts, non_cacheable) = recorder.into_parts();
+    (
+        result,
+        RecordedFactReads {
+            facts: facts.into(),
+            non_cacheable,
+        },
+    )
 }
 
 /// A typed reason a read was NON-CACHEABLE — the discriminant a marking

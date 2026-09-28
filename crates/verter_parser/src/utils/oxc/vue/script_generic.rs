@@ -8,10 +8,10 @@
 //! The parser wraps the generic string in an arrow function expression to parse it
 //! as valid TypeScript, then extracts the type parameters.
 
+use crate::oxc_parse::Parser;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, TSTypeParameterDeclaration};
 use oxc_diagnostics::OxcDiagnostic;
-use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use smallvec::SmallVec;
 

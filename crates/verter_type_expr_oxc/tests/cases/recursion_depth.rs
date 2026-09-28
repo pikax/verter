@@ -94,7 +94,7 @@ fn lower_or_panic(source: String) {
     let ret = Parser::new(&allocator, &source, SourceType::ts()).parse();
 
     assert!(
-        !ret.panicked,
+        !ret.fatal_error,
         "OXC parser panicked on fixture (fixture builder bug, not lowering bug)"
     );
 

@@ -588,22 +588,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             SemanticNodeData::Signature {
                 params,
                 return_type,
+                predicate,
                 ..
-            } => {
-                params.iter().any(|param| {
+            } => params
+                .iter()
+                .map(|param| param.ty)
+                .chain(std::iter::once(*return_type))
+                .chain(predicate.and_then(|predicate| predicate.ty))
+                .any(|position| {
                     self.node_contains_imported_utility_route(
                         scope_canonical_id,
                         scope_owner,
-                        param.ty,
+                        position,
                         depth + 1,
                     )
-                }) || self.node_contains_imported_utility_route(
-                    scope_canonical_id,
-                    scope_owner,
-                    *return_type,
-                    depth + 1,
-                )
-            }
+                }),
             SemanticNodeData::Alias(inner) => self.node_contains_imported_utility_route(
                 scope_canonical_id,
                 scope_owner,
@@ -982,8 +981,15 @@ fn node_references_type_param_names(
         SemanticNodeData::Signature {
             params,
             return_type,
+            predicate,
             ..
-        } => params.iter().any(|p| recur(p.ty)) || recur(*return_type),
+        } => {
+            params.iter().any(|p| recur(p.ty))
+                || recur(*return_type)
+                || predicate
+                    .and_then(|predicate| predicate.ty)
+                    .is_some_and(&recur)
+        }
         SemanticNodeData::Conditional {
             check,
             extends,

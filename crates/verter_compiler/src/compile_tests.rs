@@ -1283,11 +1283,12 @@ defineModel<string>('model\n"\\name')
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     let code = result.script.expect("script").code;
     let alloc = Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::mjs()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::mjs()).parse();
     assert!(
-        !parsed.panicked && parsed.errors.is_empty(),
+        !parsed.fatal_error && parsed.diagnostics.is_empty(),
         "escaped public names must produce valid JavaScript: {:?}\n{code}",
-        parsed.errors
+        parsed.diagnostics
     );
 
     use oxc_ast::ast::StringLiteral;
@@ -1499,12 +1500,12 @@ fn validate_vapor_template_result(result: VerterCompileResult) -> String {
     let alloc = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
     let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Vapor template JS parse error: {:?}\n--- generated code ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -1825,12 +1826,12 @@ fn compile_and_validate_template_no_hoist(source: &str) -> String {
     let alloc = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
     let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Template JS parse error: {:?}\n--- generated code ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -1865,12 +1866,12 @@ fn validate_template_result(result: VerterCompileResult) -> String {
     let alloc = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
     let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Template JS parse error: {:?}\n--- generated code ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -4466,12 +4467,12 @@ const props = withDefaults(defineProps<{
     // Validate JS syntax
     let alloc = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
-    let parsed = oxc_parser::Parser::new(&alloc, &script.code, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &script.code, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         script.code,
-        parsed.errors
+        parsed.diagnostics
     );
 }
 
@@ -5126,12 +5127,12 @@ const show = ref(true)
     // Validate JS syntax
     let alloc = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
-    let parsed = oxc_parser::Parser::new(&alloc, &tpl.code, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &tpl.code, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         tpl.code,
-        parsed.errors
+        parsed.diagnostics
     );
 }
 
@@ -5192,12 +5193,12 @@ const items = ref([])
     // Validate JS syntax
     let alloc = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
-    let parsed = oxc_parser::Parser::new(&alloc, &tpl.code, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &tpl.code, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         tpl.code,
-        parsed.errors
+        parsed.diagnostics
     );
 }
 
@@ -5512,12 +5513,12 @@ const msg = 'hello'
     // Validate JS syntax
     let alloc = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
-    let parsed = oxc_parser::Parser::new(&alloc, &script.code, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &script.code, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         script.code,
-        parsed.errors
+        parsed.diagnostics
     );
 }
 
@@ -6706,12 +6707,12 @@ fn comment_between_v_if_branches_does_not_leak_in_prod() {
     let js_alloc = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
     let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
-    let parsed = oxc_parser::Parser::new(&js_alloc, &wrapped, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&js_alloc, &wrapped, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Template JS parse error (nested): {:?}\n--- generated code ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -6740,12 +6741,12 @@ fn comment_between_v_if_branches_does_not_leak_in_prod() {
     let tpl2 = result2.template.as_ref().expect("template block");
     let js_alloc2 = Allocator::new();
     let wrapped2 = format!("import {{ }} from \"vue\";\n{}", tpl2.code);
-    let parsed2 = oxc_parser::Parser::new(&js_alloc2, &wrapped2, source_type).parse();
+    let parsed2 = verter_parser::oxc_parse::Parser::new(&js_alloc2, &wrapped2, source_type).parse();
     assert!(
-        parsed2.errors.is_empty(),
+        parsed2.diagnostics.is_empty(),
         "Template JS parse error (root): {:?}\n--- generated code ---\n{}",
         parsed2
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -8109,13 +8110,13 @@ fn template_only_scoped_style_grid_layout_scope_id_consistency() {
     let alloc = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
     let wrapped = format!("import {{ }} from \"vue\";\n{}", template.code);
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Render function should be valid JS:\n{}\nErrors: {:?}",
         template.code,
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>()
@@ -8293,12 +8294,12 @@ fn template_heavy_vue_full_css_scoping() {
     let alloc = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
     let wrapped = format!("import {{ }} from \"vue\";\n{}", template.code);
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Template render function should be valid JS:\nErrors: {:?}\nCode:\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -8308,12 +8309,12 @@ fn template_heavy_vue_full_css_scoping() {
     // Validate script is valid JS
     eprintln!("=== SCRIPT CODE ===\n{}", script.code);
     let alloc2 = Allocator::new();
-    let parsed2 = oxc_parser::Parser::new(&alloc2, &script.code, source_type).parse();
+    let parsed2 = verter_parser::oxc_parse::Parser::new(&alloc2, &script.code, source_type).parse();
     assert!(
-        parsed2.errors.is_empty(),
+        parsed2.diagnostics.is_empty(),
         "Script should be valid JS:\nErrors: {:?}\nCode:\n{}",
         parsed2
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -8348,12 +8349,12 @@ fn template_heavy_vue_full_css_scoping() {
 
     // Verify the assembled code is valid JS
     let alloc3 = Allocator::new();
-    let parsed3 = oxc_parser::Parser::new(&alloc3, &assembled, source_type).parse();
+    let parsed3 = verter_parser::oxc_parse::Parser::new(&alloc3, &assembled, source_type).parse();
     assert!(
-        parsed3.errors.is_empty(),
+        parsed3.diagnostics.is_empty(),
         "Assembled code should be valid JS:\nErrors: {:?}\nCode:\n{}",
         parsed3
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -12526,12 +12527,12 @@ const props = defineProps({ msg: String, count: Number })
     let alloc2 = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
     let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
-    let parsed = oxc_parser::Parser::new(&alloc2, &wrapped, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc2, &wrapped, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Generated JS parse error: {:?}\n--- generated code ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -12577,12 +12578,12 @@ const props = defineProps({ msg: String, count: Number })
     let alloc2 = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
     let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
-    let parsed = oxc_parser::Parser::new(&alloc2, &wrapped, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc2, &wrapped, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Vapor generated JS parse error: {:?}\n--- generated code ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -13576,12 +13577,12 @@ const props = defineProps<{ render: 'svg' | 'img' }>()
     let wrapper = format!("const x = <>{}</>", iife_region);
     let alloc = oxc_allocator::Allocator::new();
     let source_type = oxc_span::SourceType::tsx();
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapper, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapper, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "IIFE region has syntax errors: {:?}\n--- IIFE ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -13658,12 +13659,14 @@ export default { props: ['msg'] }
     );
     // OXC validation
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Options API TSX must be valid JS: {:?}\n---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -13740,12 +13743,12 @@ fn compile_and_validate_hoisted(source: &str) -> String {
     let parse_alloc = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
     let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
-    let parsed = oxc_parser::Parser::new(&parse_alloc, &wrapped, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&parse_alloc, &wrapped, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Template JS parse error: {:?}\n--- generated code ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -13784,12 +13787,12 @@ fn compile_and_validate_no_hoist(source: &str) -> String {
     let parse_alloc = Allocator::new();
     let source_type = oxc_span::SourceType::mjs();
     let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
-    let parsed = oxc_parser::Parser::new(&parse_alloc, &wrapped, source_type).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&parse_alloc, &wrapped, source_type).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Template JS parse error (no-hoist): {:?}\n--- generated code ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -14560,13 +14563,15 @@ fn assert_tsx_result_parses(result: VerterCompileResult, label: &str) {
         .as_ref()
         .unwrap_or_else(|| panic!("[{}] no tsx block", label));
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "[{}] OXC parse errors: {:?}\n--- TSX output ---\n{}",
         label,
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -14592,13 +14597,15 @@ fn assert_jsx_parses(source: &str, label: &str) {
     assert!(tsx.is_jsx, "[{}] is_jsx should be true for JS SFC", label);
     // Verify the output is valid JSX (JavaScript) — no TypeScript parse errors
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::jsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::jsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "[{}] OXC parse errors (should be valid JS):\n{:?}\n--- JSX output ---\n{}",
         label,
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -15408,12 +15415,14 @@ defineProps<{ name: T }>()
     );
 
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "generic default-attrs TSX must parse: {:?}\n---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|error| error.to_string())
             .collect::<Vec<_>>(),
@@ -15456,12 +15465,14 @@ export default defineComponent({
     );
 
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Options API TSX must parse without the alias: {:?}\n---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|error| error.to_string())
             .collect::<Vec<_>>(),
@@ -17655,12 +17666,13 @@ const arrowPos = ref({})
 
     // Verify TSX parses cleanly (OXC catches duplicate JSX attributes)
     let alloc2 = Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc2, code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc2, code, oxc_span::SourceType::tsx()).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "TSX parse errors: {:?}\n--- code ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -17735,12 +17747,13 @@ const arrowPos = ref({})
 
     // Verify no duplicate attribute names (TSX should parse cleanly)
     let alloc2 = Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc2, code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc2, code, oxc_span::SourceType::tsx()).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "TSX parse errors (may indicate duplicate attrs): {:?}\n--- code ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -18000,17 +18013,17 @@ fn template_expression_overlay_source_type_matrix() {
     // The JS TSX lane emits a `.jsx` (JavaScript) surface, not a `.tsx` one:
     // the JS SFC's TSX block must remain valid when parsed as JSX.
     let jsx_alloc = Allocator::new();
-    let jsx_parsed = oxc_parser::Parser::new(
+    let jsx_parsed = verter_parser::oxc_parse::Parser::new(
         &jsx_alloc,
         &js_combined_tsx.code,
         oxc_span::SourceType::jsx(),
     )
     .parse();
     assert!(
-        jsx_parsed.errors.is_empty(),
+        jsx_parsed.diagnostics.is_empty(),
         "JS SFC TSX output must parse as JSX: {:?}",
         jsx_parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>()
@@ -18498,12 +18511,12 @@ fn compiled_tsx_identifier_facts_with_runtime<'name>(
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let code = &result.tsx.as_ref().expect("tsx block").code;
     let allocator = Allocator::new();
-    let parsed = oxc_parser::Parser::new(&allocator, code, SourceType::tsx()).parse();
+    let parsed = verter_parser::oxc_parse::Parser::new(&allocator, code, SourceType::tsx()).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "generated IDE carrier must remain valid TSX: {:?}\n---\n{code}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
@@ -19246,11 +19259,13 @@ const msg = ref('hello')
     );
     // The merged module is valid JS (single deduped vue import line).
     let alloc = Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &script.code, oxc_span::SourceType::mjs()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &script.code, oxc_span::SourceType::mjs())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "inline output must parse as valid JS: {:?}\n---\n{}",
-        parsed.errors,
+        parsed.diagnostics,
         script.code
     );
 }
@@ -19272,12 +19287,14 @@ fn inline_template_splice_is_valid_js_with_no_trailing_separator_in_setup_body()
     let script = result.script.as_ref().expect("script block");
 
     let alloc = Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &script.code, oxc_span::SourceType::mjs()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &script.code, oxc_span::SourceType::mjs())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "inline output must parse as valid JS even with no separator before \
          </script>: {:?}\n---\n{}",
-        parsed.errors,
+        parsed.diagnostics,
         script.code
     );
 }
@@ -19476,11 +19493,13 @@ fn compile_sfc_script_code(source: &str) -> String {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let script = result.script.as_ref().expect("script block");
     let alloc = Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &script.code, oxc_span::SourceType::mjs()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &script.code, oxc_span::SourceType::mjs())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "output must be valid JS: {:?}\n---\n{}",
-        parsed.errors,
+        parsed.diagnostics,
         script.code
     );
     script.code.clone()
@@ -21322,12 +21341,13 @@ fn compile_and_validate_inline_script(source: &str) -> String {
     );
     let code = result.script.as_ref().expect("script block").code.clone();
     let alloc = Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::mjs()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::mjs()).parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "Inline script JS parse error: {:?}\n--- generated code ---\n{}",
         parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
@@ -21859,4 +21879,36 @@ fn missing_sfc_entry_block_for_empty_style_or_custom_block_only_carriers() {
             result.errors
         );
     }
+}
+
+/// A template nested 10,000 deep compiles on a 1 MiB thread, to the
+/// runtime render function and to TSX with its template data: the
+/// handler-cache and array-group-cache reservations and the template data
+/// walk run from explicit stacks.
+#[test]
+fn a_template_nested_10000_deep_compiles_on_a_small_stack() {
+    const DEPTH: usize = 10_000;
+    let compiled = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let source = format!(
+                "<template>{}x{}</template>
+",
+                "<div>".repeat(DEPTH),
+                "</div>".repeat(DEPTH)
+            );
+            let runtime = compile_sfc(&source);
+            let tsx = compile_tsx_with_template_data(&source);
+            let data = tsx.template_data.as_ref().expect("template data");
+            (
+                runtime.errors.len(),
+                tsx.errors.len(),
+                data.elements.len(),
+                data.max_nesting_depth,
+            )
+        })
+        .expect("spawn the compiling thread")
+        .join()
+        .expect("the compile returns");
+    assert_eq!(compiled, (0, 0, DEPTH, DEPTH as u16));
 }

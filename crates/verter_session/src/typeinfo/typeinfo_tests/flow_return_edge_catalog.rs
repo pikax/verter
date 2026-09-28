@@ -228,6 +228,16 @@ macro_rules! future_edge_package_contract {
     };
 }
 
+/// A package edge-catalog row whose contract the engine ALREADY satisfies.
+macro_rules! edge_package_contract {
+    ($name:ident, $alias:literal, $check:expr) => {
+        #[test]
+        fn $name() {
+            assert_edge_package_alias($alias, $check);
+        }
+    };
+}
+
 #[test]
 fn flow_return_xf17_fixture_resolves_synthetic_package_subpath_declaration_route() {
     let host = make_edge_package_host();
@@ -254,10 +264,9 @@ future_edge_contract!(
     }
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_lr15_array_destructuring_default_preserves_readonly_tuple,
     "LR15",
-    "typeinfo currently does not combine array destructuring defaults with readonly tuple return inference; keep as the future LR15 tuple-destructure contract",
     |expr| {
         let TypeExpr::Tuple { elements, readonly } = expr else {
             panic!("expected readonly tuple, got {expr:?}");
@@ -269,10 +278,9 @@ future_edge_contract!(
     }
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_lr16_logical_assignment_narrows_local_before_return,
     "LR16",
-    "typeinfo currently does not model ??= assignment effects as non-nullish local facts; keep as the future LR16 logical-assignment contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
@@ -291,20 +299,18 @@ future_edge_contract!(
     }
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_cn22_tuple_discriminant_narrows_indexed_slot,
     "CN22",
-    "typeinfo currently does not correlate tuple discriminant slots with indexed tuple payload slots; keep as the future CN22 discriminated-tuple contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
     }
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_cn23_negative_discriminant_guard_keeps_ready_tail,
     "CN23",
-    "typeinfo currently does not carry negative discriminant exclusions into the continuation branch; keep as the future CN23 negative-discriminant contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Undefined);
@@ -317,17 +323,15 @@ future_edge_contract!(
 // `unknown | undefined` to `unknown` because `unknown` is the top of the
 // assignability lattice — every type, including `undefined`, is already
 // assignable to `unknown`, so the union is structurally `unknown`.
-future_edge_contract!(
+edge_contract!(
     flow_return_cn24_unknown_object_in_guard_projects_unknown_property,
     "CN24",
-    "typeinfo currently does not model object/non-null/in guards over unknown values as Record-key facts; keep as the future CN24 unknown-object guard contract",
     |expr| assert_primitive(expr, PrimitiveName::Unknown)
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_pa13_applies_this_is_method_predicate,
     "PA13",
-    "typeinfo currently does not apply this-is method predicates as receiver flow facts; keep as the future PA13 method-predicate contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Undefined);
@@ -352,20 +356,18 @@ future_edge_contract!(
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_pa16_never_assertion_preserves_exhaustive_switch_return,
     "PA16",
-    "typeinfo currently does not use never assertion helpers to preserve exhaustive switch return joins; keep as the future PA16 assert-never contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
     }
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_cg17_selects_interface_call_signature_overload,
     "CG17",
-    "typeinfo currently does not select overloads declared on interface call signatures from literal arguments; keep as the future CG17 call-signature overload contract",
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
@@ -383,10 +385,9 @@ future_edge_contract!(
     |expr| assert_string_literal(expr, "x")
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_cg20_instantiates_generic_class_constructor_value,
     "CG20",
-    "typeinfo currently does not instantiate generic class constructors before projecting instance fields; keep as the future CG20 generic-class contract",
     |expr| assert_string_literal(expr, "boxed")
 );
 
@@ -455,10 +456,9 @@ future_edge_contract!(
     }
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_ob20_function_or_undefined_property_preserves_function_return,
     "OB20",
-    "typeinfo currently does not preserve function-valued conditional object properties with undefined arms; keep as the future OB20 optional-function-property contract",
     |expr| {
         let props = assert_object_has_props(expr, &["maybe"]);
         assert_union_contains_function_returning_string(&props["maybe"].ty, "yes");
@@ -477,10 +477,9 @@ future_edge_contract!(
     }
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_ob22_satisfies_record_widens_literal_values,
     "OB22",
-    "typeinfo currently does not use Record satisfies targets to widen returned object literal values; keep as the future OB22 satisfies-Record contract",
     |expr| {
         let props = assert_object_has_props(expr, &["one", "two"]);
         assert_primitive(&props["one"].ty, PrimitiveName::Number);
@@ -488,54 +487,48 @@ future_edge_contract!(
     }
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_cf17_do_while_definite_execution_updates_return_fact,
     "CF17",
-    "typeinfo currently does not model do-while definite execution and assignment effects before final returns; keep as the future CF17 do-while contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_cf18_default_throw_does_not_add_undefined_to_switch_return,
     "CF18",
-    "typeinfo currently does not treat default throw edges as terminating in switch return joins; keep as the future CF18 terminating-default contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
     }
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_cf19_catch_unknown_absorbs_try_return_union,
     "CF19",
-    "typeinfo currently does not model catch variable unknown flow and union absorption for try/catch returns; keep as the future CF19 catch-unknown contract",
     |expr| assert_primitive(expr, PrimitiveName::Unknown)
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_cf20_for_in_key_return_adds_empty_object_undefined_path,
     "CF20",
-    "typeinfo currently does not model for-in key types or the empty-loop fallthrough path; keep as the future CF20 for-in contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Undefined);
     }
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_cf21_bare_return_after_null_guard_joins_undefined,
     "CF21",
-    "typeinfo currently does not join bare return paths with narrowed continuation return values; keep as the future CF21 null-guard bare-return contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Undefined);
     }
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_cf22_finally_without_return_preserves_try_return,
     "CF22",
-    "typeinfo currently does not preserve try return facts across non-returning finally blocks; keep as the future CF22 non-overriding-finally contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
@@ -546,10 +539,9 @@ future_edge_contract!(
     |expr| assert_string_literal(expr, "ready")
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_vv22_props_destructure_default_returns_widened_string,
     "VV22",
-    "typeinfo currently does not model defineProps-like destructuring defaults as widened local values; keep as the future VV22 props-destructure contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
@@ -563,10 +555,9 @@ future_edge_contract!(
     }
 );
 
-future_edge_contract!(
+edge_contract!(
     flow_return_vv24_callback_result_tracks_discriminated_input_facts,
     "VV24",
-    "typeinfo currently does not infer helper callback results while preserving discriminant facts from outer parameters; keep as the future VV24 captured-prop callback contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);
@@ -600,10 +591,9 @@ future_edge_package_contract!(
     }
 );
 
-future_edge_package_contract!(
+edge_package_contract!(
     flow_return_xf20_package_subpath_overload_selects_literal_branch,
     "XF20",
-    "typeinfo currently does not select overloaded package subpath declarations from literal arguments; keep as the future XF20 package-subpath overload contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 

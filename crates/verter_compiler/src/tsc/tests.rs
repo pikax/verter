@@ -1026,11 +1026,13 @@ defineProps<Props>()
 
 fn assert_generated_tsx_parses(code: &str) {
     let allocator = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&allocator, code, oxc_span::SourceType::tsx()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, code, oxc_span::SourceType::tsx())
+            .parse();
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "generated TSC output must parse as TSX: {:?}\n{code}",
-        parsed.errors
+        parsed.diagnostics
     );
 }
 
@@ -4714,14 +4716,15 @@ fn assert_valid_tsc_output(source: &str, name: &str, props: &[FixturePropRow<'_>
     eprintln!("=== TSC {} ===\n{}\n=== END ===", name, code);
 
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.diagnostics {
         eprintln!("[TSC {name}] OXC ERROR: {err}");
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "[TSC {name}] should have no parse errors. Got {} errors. Output:\n{code}",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 
@@ -5111,14 +5114,15 @@ export default {
 
     // Should parse as valid TypeScript
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &r, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &r, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC TSC ERROR: {err}");
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "generated TSC output should have no parse errors, got {}:\n{r}",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 
@@ -5163,14 +5167,15 @@ fn tsc_dual_script_js_vuetify_figure_pattern() {
 
     // Should parse as valid TypeScript
     let alloc = oxc_allocator::Allocator::new();
-    let parsed = oxc_parser::Parser::new(&alloc, &r, oxc_span::SourceType::tsx()).parse();
-    for err in &parsed.errors {
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &r, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.diagnostics {
         eprintln!("OXC TSC ERROR: {err}");
     }
     assert!(
-        parsed.errors.is_empty(),
+        parsed.diagnostics.is_empty(),
         "generated TSC output should have no parse errors, got {}:\n{r}",
-        parsed.errors.len()
+        parsed.diagnostics.len()
     );
 }
 

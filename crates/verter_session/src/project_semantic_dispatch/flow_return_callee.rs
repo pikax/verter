@@ -40,7 +40,7 @@
 //!   convention but because every constructor is PRIVATE to this module.
 //!   The two entrances both demand the callee's own authority as an
 //!   argument: [`CalleeClause::read_from_program_entry`] /
-//!   [`CalleeClause::read_from_program_entry_at_unknown`] take a
+//!   [`UtilityClause::read_from_program_entry`] take a
 //!   `FunctionProgramEntry` (obtainable only by looking the callee up and
 //!   finding it), and [`CallValue::of_signature_node`] reads the clause
 //!   off a resolved `Signature` node. A serve or index miss has nothing
@@ -323,39 +323,10 @@ impl CalleeClause {
         CalleeClauseLookup::Clause(Self::new(params))
     }
 
-    /// READ a callee's clause for the signature-UTILITY policy, from the
-    /// same [`FunctionProgramEntry`] witness the call-site reader takes.
-    ///
-    /// The utility policy is `unknown` for EVERY declared parameter,
-    /// defaults included (`ReturnType<typeof f>` for `f<T = number>(): T`
-    /// is `unknown`), so this reader states that by naming
-    /// [`CalleeClauseParam::bare`] for each — it is not the call-site
-    /// rule with the defaults switched off.
-    ///
-    /// It exists so the utility route cannot express the asymmetry it
-    /// used to: a clause it FAILED to read left the callee's return
-    /// untouched — the callee's own binder, published warm — while the
-    /// call-site route degraded on the identical miss.
-    pub(super) fn read_from_program_entry_at_unknown(matched: FunctionProgramMatch<'_>) -> Self {
-        Self::new(
-            matched
-                .entry()
-                .type_parameters
-                .iter()
-                .map(|param| CalleeClauseParam::bare(Arc::clone(&param.name))),
-        )
-    }
-
-    /// The clause parameter NAMES, in declaration order — the read-only
-    /// projection the signature-UTILITY policy instantiates at `unknown`.
-    pub(super) fn param_names(&self) -> impl Iterator<Item = &str> {
-        self.params.iter().map(|param| param.name.as_ref())
-    }
-
     /// Whether the callee declares NO parameters — a statement about the
     /// callee, distinct from "the clause could not be read", which has no
     /// `CalleeClause` at all.
-    pub(super) fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.params.is_empty()
     }
 
@@ -422,6 +393,74 @@ impl CalleeClause {
             self.params.iter().map(|param| (param.name.as_ref(), None)),
             default,
             ClauseSpelling::WithOwnerScopeResolution,
+        )
+    }
+}
+
+/// A CALLEE's own clause under the signature-UTILITY policy: a
+/// `ReturnType<typeof f>` read carries no call site, so every declared
+/// parameter instantiates at its BASE constraint and a declared default
+/// never applies (`ReturnType<typeof f>` for `f<T = number>(): T` is
+/// `unknown`, for `f<T extends string = 'x'>(): T` it is `string`).
+///
+/// Read only from the callee's own [`FunctionProgramMatch`] witness, like
+/// [`CalleeClause`], so a clause the route FAILED to read cannot leave the
+/// callee's return untouched — the callee's own binder, published warm —
+/// while the call-site route degrades on the identical miss.
+#[derive(Debug, Clone)]
+pub(super) struct UtilityClause {
+    /// Each declared parameter's name and lowered constraint, in
+    /// declaration order.
+    params: Arc<[(Arc<str>, Option<SemanticNodeId>)]>,
+}
+
+impl UtilityClause {
+    /// READ a callee's utility-policy clause from the entry the index
+    /// ANSWERED WITH. `constraint_of` lowers ONE parameter's constraint,
+    /// by ordinal: `Some(None)` for a parameter that authors none, `None`
+    /// when the authored constraint could not be recovered — a MISS for
+    /// the whole clause, never an unconstrained parameter, because an
+    /// `unknown` there is a confident wrong answer, warm admitted.
+    pub(super) fn read_from_program_entry(
+        matched: FunctionProgramMatch<'_>,
+        mut constraint_of: impl FnMut(
+            usize,
+            &FunctionProgramTypeParam,
+        ) -> Option<Option<SemanticNodeId>>,
+    ) -> Option<Self> {
+        let params = matched
+            .entry()
+            .type_parameters
+            .iter()
+            .enumerate()
+            .map(|(ordinal, param)| {
+                constraint_of(ordinal, param)
+                    .map(|constraint| (Arc::clone(&param.name), constraint))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self {
+            params: Arc::from(params.into_boxed_slice()),
+        })
+    }
+
+    /// Instantiate the clause out of `node`, a value taken from the
+    /// callee's BODY-DERIVED return: that return is evaluated with the
+    /// clause bound, so its parameters spell as binders or deferred heads
+    /// ([`ReturnOrigin::ClauseScoped`]), while the constraints lowered in
+    /// the callee's owner scope, where the clause is invisible, so every
+    /// spelling is claimed there.
+    pub(super) fn instantiate(
+        &self,
+        dispatch: &ProjectSemanticDispatch<'_>,
+        node: SemanticNodeId,
+    ) -> SemanticNodeId {
+        dispatch.instantiate_clause_at_base_constraints(
+            self.params
+                .iter()
+                .map(|(name, constraint)| (name.as_ref(), *constraint)),
+            node,
+            ClauseSpelling::WithOwnerScopeResolution,
+            ReturnOrigin::ClauseScoped.spelling(),
         )
     }
 }
@@ -689,7 +728,7 @@ fn is_empty_object_node(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNo
 /// arm, where a wrong `true` would delete a real constraint.
 fn is_definitely_non_nullish(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
     match dispatch.graph().node_data(node).as_deref() {
-        Some(SemanticNodeData::Literal(_)) => true,
+        Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => true,
         Some(SemanticNodeData::Primitive(kind)) => match kind {
             PrimitiveKind::String
             | PrimitiveKind::Number

@@ -94,6 +94,53 @@ pub(crate) struct IndexedFlowCallExpression {
         Option<verter_semantic::analysis::type_eval_build::IndexedValueReadRoot>,
 }
 
+/// Lower one call, `new` or tagged template through `lower` while
+/// collecting the read root of each of its `argument_count` arguments and
+/// of its receiver.
+///
+/// Absence of an observer result stays distinct from an explicit
+/// `NonBinding` disposition: an argument or receiver the lowering did not
+/// report exactly once is an invalid observation, and the whole call is
+/// then unavailable — no missing address may fall back to the file's
+/// same-spelled value.
+fn observed_indexed_call(
+    argument_count: usize,
+    lower: impl FnOnce(
+        &mut dyn FnMut(
+            verter_semantic::analysis::type_eval_build::IndexedCallReadSite,
+            verter_semantic::analysis::type_eval_build::IndexedValueReadRoot,
+        ),
+    ) -> verter_type_expr::IndexedValueCall,
+) -> Option<IndexedFlowCallExpression> {
+    use verter_semantic::analysis::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    let mut roots: Vec<Option<IndexedValueReadRoot>> = (0..argument_count).map(|_| None).collect();
+    let mut receiver_root = None;
+    let mut invalid_observation = false;
+    let call = lower(&mut |site, root| match site {
+        IndexedCallReadSite::Argument(ordinal) => match roots.get_mut(ordinal) {
+            Some(slot) => invalid_observation |= slot.replace(root).is_some(),
+            None => invalid_observation = true,
+        },
+        IndexedCallReadSite::Receiver => {
+            invalid_observation |= receiver_root.replace(root).is_some();
+        }
+    });
+    if invalid_observation {
+        return None;
+    }
+    let argument_roots = roots.into_iter().collect::<Option<Box<[_]>>>()?;
+    let receiver_root = match (call.receiver.is_some(), receiver_root) {
+        (true, Some(root)) => Some(root),
+        (false, None) => None,
+        _ => return None,
+    };
+    Some(IndexedFlowCallExpression {
+        call,
+        argument_roots,
+        receiver_root,
+    })
+}
+
 /// The committed value of one per-symbol demand cell.
 ///
 /// The cell carries the [`LeaseMiss`](Self::LeaseMiss) outcome ITSELF (never a
@@ -299,6 +346,10 @@ struct LoweredStatementBatch {
 pub struct DeclBodyMemo {
     #[cfg(test)]
     pub(crate) capture_lookup_work: Arc<std::sync::atomic::AtomicUsize>,
+    /// This memo's slice lowerings' work
+    /// ([`crate::flow_slice_content::lowering_probe`]).
+    #[cfg(test)]
+    pub(crate) lowering_work: Arc<crate::flow_slice_content::lowering_probe::LoweringWork>,
     key: SnapshotKey,
     eval_source: Arc<str>,
     framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
@@ -387,6 +438,8 @@ impl DeclBodyMemo {
         Self {
             #[cfg(test)]
             capture_lookup_work: Arc::default(),
+            #[cfg(test)]
+            lowering_work: Arc::default(),
             key,
             eval_source,
             framework_parse,
@@ -423,6 +476,8 @@ impl DeclBodyMemo {
         let memo = Self {
             #[cfg(test)]
             capture_lookup_work: Arc::default(),
+            #[cfg(test)]
+            lowering_work: Arc::default(),
             key,
             eval_source: Arc::from(""),
             framework_parse: None,
@@ -946,7 +1001,7 @@ impl DeclBodyMemo {
             .into_option()
     }
 
-    fn augmentation_value_decl_outcome_in(
+    pub(crate) fn augmentation_value_decl_outcome_in(
         &self,
         scope: &AugmentationScopeKind,
         owner: TopLevelOwnerId,
@@ -1173,13 +1228,19 @@ impl DeclBodyMemo {
             .mint_bound_flow_graph(key, prepared)
     }
 
+    /// Lower the selected slice content of `entry`. `policy` is the
+    /// function's own project's flow policy: the content lowering types an
+    /// optional parameter under its `strictNullChecks` algebra and an
+    /// object literal member's `this` under its `noImplicitThis` (the rest
+    /// of the content is policy-free syntax).
     pub(crate) fn flow_slice_content(
         &self,
         entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
         selection: crate::flow_slice_content::FlowSliceSelection,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        policy: crate::semantic_query::FlowReturnPolicy,
     ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
-        self.flow_slice_content_with_context(entry, Some(selection), bound, None)
+        self.flow_slice_content_with_context(entry, Some(selection), bound, None, policy)
     }
 
     pub(crate) fn flow_slice_content_with_context(
@@ -1188,6 +1249,7 @@ impl DeclBodyMemo {
         selection: Option<crate::flow_slice_content::FlowSliceSelection>,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
         context: Option<Arc<crate::flow_slice_content::NestedFlowContext>>,
+        policy: crate::semantic_query::FlowReturnPolicy,
     ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
         if bound.key().function != entry.key
             || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash?
@@ -1212,14 +1274,19 @@ impl DeclBodyMemo {
         let snapshot = self.key.clone();
         #[cfg(test)]
         let work = Arc::clone(&self.capture_lookup_work);
+        #[cfg(test)]
+        let lowering_work = Arc::clone(&self.lowering_work);
         let Some(node) = service.run_leased(&self.key, move |program| {
             #[cfg(test)]
             let _probe = crate::flow_slice_content::capture_lookup_probe::enter(work);
+            #[cfg(test)]
+            let _lowering = crate::flow_slice_content::lowering_probe::enter(lowering_work);
             program.and_then(|p| {
                 p.with_indexed_function(&entry, |resolved, entry| {
                     crate::flow_slice_content::build_flow_slice_content(
                         crate::flow_slice_content::FlowSliceSource {
                             program: p.borrow_dependent(),
+                            walks: p.walk_stack(),
                             resolved,
                         },
                         p.source_str(),
@@ -1231,6 +1298,7 @@ impl DeclBodyMemo {
                         carrier_module,
                         &snapshot,
                         context.as_deref(),
+                        policy,
                     )
                 })
                 .flatten()
@@ -1371,12 +1439,13 @@ impl DeclBodyMemo {
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
-        let _index = self.function_program_index();
+        let index = self.function_program_index();
+        let nested_bodies = crate::flow_slice_content::nested_function_bodies(&index, entry);
         let entry = entry.clone();
         let Some(skeleton) = service.run_leased(&self.key, move |program| {
             program.and_then(|p| {
                 use verter_semantic::analysis::flow::{
-                    build_indexed_function_body_skeleton, FunctionBodySource,
+                    build_indexed_function_body_skeleton_in, FunctionBodySource,
                 };
                 use verter_semantic::analysis::function_program::FunctionNode;
                 p.with_indexed_function(&entry, |resolved, entry| {
@@ -1390,7 +1459,12 @@ impl DeclBodyMemo {
                         }
                         FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
                     };
-                    Some(build_indexed_function_body_skeleton(&source, entry))
+                    Some(build_indexed_function_body_skeleton_in(
+                        &source,
+                        p.source_str(),
+                        &nested_bodies,
+                        entry,
+                    ))
                 })
                 .flatten()
             })
@@ -1428,64 +1502,70 @@ impl DeclBodyMemo {
         Some(Arc::new(node))
     }
 
-    /// Transient typed IR for one authored call expression, re-read from
-    /// the retained snapshot at `span`. The call's served-function entry
-    /// is found through the program index (a flow-selected call is inside
-    /// a served function by construction); no body `TypeExpr` is
-    /// memo-owned.
+    /// Transient typed IR for one authored call, `new` expression or tagged
+    /// template, re-read from the retained snapshot at `span`. The call's
+    /// served-function entry is found through the program index (a
+    /// flow-selected call is inside a served function by construction); no
+    /// body `TypeExpr` is memo-owned. The lowered call's `kind` says whether
+    /// it calls or constructs.
     pub(crate) fn indexed_call_expression_at(
         &self,
         span: verter_span::Span,
     ) -> Option<Arc<IndexedFlowCallExpression>> {
+        self.indexed_call_expression_over_frame_at(span, Arc::from([]))
+    }
+
+    /// [`Self::indexed_call_expression_at`] for a flow frame that lowers
+    /// and evaluates the arguments `frame_lowered` names by ordinal itself:
+    /// a direct call among them keeps no record of its own
+    /// (`lower_indexed_call_expression_with_read_roots`).
+    pub(crate) fn indexed_call_expression_over_frame_at(
+        &self,
+        span: verter_span::Span,
+        frame_lowered: Arc<[bool]>,
+    ) -> Option<Arc<IndexedFlowCallExpression>> {
+        use verter_semantic::analysis::function_program::IndexedCallSite;
+        use verter_semantic::analysis::type_eval_build::{
+            lower_indexed_call_expression_with_read_roots,
+            lower_indexed_new_expression_with_read_roots,
+            lower_indexed_tagged_template_expression_with_read_roots,
+        };
         let service = self.service.as_ref()?;
         self.ensure_lease();
         let _index = self.function_program_index();
         let node = service.run_leased(&self.key, move |program| {
             program.and_then(|parsed| {
+                let source = parsed.source_str();
                 parsed
-                    .with_indexed_call(span, |call| {
-                        use verter_semantic::analysis::type_eval_build::{
-                            lower_indexed_call_expression_with_read_roots, IndexedCallReadSite,
-                            IndexedValueReadRoot,
-                        };
-                        // Keep absence of an observer result distinct from an
-                        // explicit NonBinding disposition. No missing address may
-                        // fall back to the file's same-spelled value.
-                        let mut roots: Vec<Option<IndexedValueReadRoot>> =
-                            (0..call.arguments.len()).map(|_| None).collect();
-                        let mut receiver_root = None;
-                        let mut invalid_observation = false;
-                        let call = lower_indexed_call_expression_with_read_roots(
-                            call,
-                            parsed.source_str(),
-                            &mut |site, root| match site {
-                                IndexedCallReadSite::Argument(ordinal) => {
-                                    match roots.get_mut(ordinal) {
-                                        Some(slot) => {
-                                            invalid_observation |= slot.replace(root).is_some()
-                                        }
-                                        None => invalid_observation = true,
-                                    }
-                                }
-                                IndexedCallReadSite::Receiver => {
-                                    invalid_observation |= receiver_root.replace(root).is_some();
-                                }
-                            },
-                        );
-                        if invalid_observation {
-                            return None;
+                    .with_indexed_call_site(span, |site| match site {
+                        IndexedCallSite::Call(call) => {
+                            observed_indexed_call(call.arguments.len(), |observe| {
+                                lower_indexed_call_expression_with_read_roots(
+                                    call,
+                                    source,
+                                    observe,
+                                    &frame_lowered,
+                                )
+                            })
                         }
-                        let argument_roots = roots.into_iter().collect::<Option<Box<[_]>>>()?;
-                        let receiver_root = match (call.receiver.is_some(), receiver_root) {
-                            (true, Some(root)) => Some(root),
-                            (false, None) => None,
-                            _ => return None,
-                        };
-                        Some(IndexedFlowCallExpression {
-                            call,
-                            argument_roots,
-                            receiver_root,
-                        })
+                        IndexedCallSite::Construct(call) => {
+                            observed_indexed_call(call.arguments.len(), |observe| {
+                                lower_indexed_new_expression_with_read_roots(
+                                    call,
+                                    source,
+                                    observe,
+                                    &frame_lowered,
+                                )
+                            })
+                        }
+                        // The template strings are the first argument.
+                        IndexedCallSite::TaggedTemplate(tagged) => {
+                            observed_indexed_call(tagged.quasi.expressions.len() + 1, |observe| {
+                                lower_indexed_tagged_template_expression_with_read_roots(
+                                    tagged, source, observe,
+                                )
+                            })
+                        }
                     })
                     .flatten()
             })
@@ -1507,6 +1587,16 @@ impl DeclBodyMemo {
     pub(crate) fn type_entry_materialized(&self, name: &str) -> bool {
         let key = DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name);
         self.type_entries
+            .get(&key)
+            .is_some_and(|cell| matches!(cell.get(), Some(DemandCell::Ready(_))))
+    }
+
+    /// Whether a per-symbol VALUE cell has a COMMITTED entry (test
+    /// observability — never a validity signal).
+    #[cfg(test)]
+    pub(crate) fn value_entry_materialized(&self, name: &str) -> bool {
+        let key = DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name);
+        self.value_entries
             .get(&key)
             .is_some_and(|cell| matches!(cell.get(), Some(DemandCell::Ready(_))))
     }
@@ -1675,7 +1765,15 @@ impl DeclBodyMemo {
             return DemandLower::Ready(None);
         };
         self.ensure_lease();
-        let contributors = contributors.to_vec();
+        // Several declarations in ONE statement (the overloads of a function
+        // inside one `declare global` block) share its anchor: the statement
+        // is lowered and registered once, which registers every one of them.
+        let mut lowered_statements = rustc_hash::FxHashSet::default();
+        let contributors: Vec<_> = contributors
+            .iter()
+            .filter(|contributor| lowered_statements.insert(contributor.anchor.contributor_index))
+            .cloned()
+            .collect();
         let key = key.clone();
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
         let lens = self.shallow_lens();
@@ -1727,7 +1825,11 @@ impl DeclBodyMemo {
                 let parts = if svelte_component_runes_mode {
                     lower_svelte_runes_statement_parts(stmt, source)
                 } else {
-                    lower_statement_parts(stmt, source)
+                    lower_statement_parts(
+                        stmt,
+                        source,
+                        program.source_type.is_typescript_definition(),
+                    )
                 };
                 for decl in &parts.type_decls {
                     retained_types
@@ -2234,7 +2336,11 @@ impl DeclBodyMemo {
                 else {
                     continue;
                 };
-                let parts = lower_statement_parts(stmt, source);
+                let parts = lower_statement_parts(
+                    stmt,
+                    source,
+                    program.source_type.is_typescript_definition(),
+                );
                 match aug_scope.as_ref() {
                     Some(scope) => {
                         for (part_scope, decl) in &parts.aug_type_decls {
@@ -2610,11 +2716,41 @@ impl DeclBodyMemo {
         else {
             return DemandOutcome::Ready(None);
         };
+        self.transient_value_parts_for(name, contributors, None)
+    }
+
+    /// Augmentation-scoped sibling of [`Self::transient_value_parts_in`].
+    pub(crate) fn transient_augmentation_value_parts_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<TransientValueParts> {
+        let Some(contributors) = self
+            .header_index
+            .augmentation_value_header_in(scope, owner, name)
+            .map(|header| header.contributors.clone())
+        else {
+            return DemandOutcome::Ready(None);
+        };
+        self.transient_value_parts_for(name, contributors, Some(scope))
+    }
+
+    /// Shared lease-only VALUE-body re-lowering over the demanded symbol's
+    /// contributing statements. `aug_scope` selects the augmentation-scoped
+    /// parts vector; `None` reads the file-scope parts.
+    fn transient_value_parts_for(
+        &self,
+        name: &str,
+        contributors: Vec<verter_semantic::analysis::decl_headers::DeclHeaderContributor>,
+        aug_scope: Option<&AugmentationScopeKind>,
+    ) -> DemandOutcome<TransientValueParts> {
         let Some(service) = self.service.as_ref() else {
             return DemandOutcome::Ready(None);
         };
         self.ensure_lease();
         let name = name.to_string();
+        let aug_scope = aug_scope.cloned();
         let svelte_component_runes_mode = self.svelte_component_runes_mode;
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
@@ -2622,7 +2758,14 @@ impl DeclBodyMemo {
             let program = program.borrow_dependent();
             let mut merged = TransientValueParts::default();
             let mut found = false;
+            // Several declarations in ONE statement (the overloads of a
+            // function inside one `declare global` block) share its anchor:
+            // the statement is lowered once and yields every one of them.
+            let mut lowered_statements = rustc_hash::FxHashSet::default();
             for contributor in &contributors {
+                if !lowered_statements.insert(contributor.anchor.contributor_index) {
+                    continue;
+                }
                 let Some(stmt) = program
                     .body
                     .get(contributor.anchor.contributor_index as usize)
@@ -2632,9 +2775,19 @@ impl DeclBodyMemo {
                 let parts = if svelte_component_runes_mode {
                     lower_svelte_runes_statement_parts(stmt, source)
                 } else {
-                    lower_statement_parts(stmt, source)
+                    lower_statement_parts(
+                        stmt,
+                        source,
+                        program.source_type.is_typescript_definition(),
+                    )
                 };
-                for decl in &parts.value_decls {
+                let value_decls = parts.value_decls.iter().filter(|_| aug_scope.is_none());
+                let aug_value_decls = parts
+                    .aug_value_decls
+                    .iter()
+                    .filter(|(part_scope, _)| Some(part_scope) == aug_scope.as_ref())
+                    .map(|(_, decl)| decl);
+                for decl in value_decls.chain(aug_value_decls) {
                     if decl.name != name {
                         continue;
                     }
@@ -2652,7 +2805,13 @@ impl DeclBodyMemo {
                 // `class K<T>` constructor shape references `T`) ride the
                 // SAME statements' type-side parts — union them first-seen
                 // by name so the deref binds the class's own binder shells.
-                for decl in &parts.type_decls {
+                let type_decls = parts.type_decls.iter().filter(|_| aug_scope.is_none());
+                let aug_type_decls = parts
+                    .aug_type_decls
+                    .iter()
+                    .filter(|(part_scope, _)| Some(part_scope) == aug_scope.as_ref())
+                    .map(|(_, decl)| decl);
+                for decl in type_decls.chain(aug_type_decls) {
                     if decl.name != name {
                         continue;
                     }
@@ -2706,7 +2865,8 @@ pub(crate) fn lowered_decls_from_env_and_program(
         FxHashMap::default();
     let mut dep_records: FxHashMap<DeclBindingKey, DeclDependencyFacts> = FxHashMap::default();
     for (index, stmt) in program.body.iter().enumerate() {
-        let parts = lower_statement_parts(stmt, source);
+        let parts =
+            lower_statement_parts(stmt, source, program.source_type.is_typescript_definition());
         let contributor_anchor =
             u32::try_from(index)
                 .ok()
@@ -2976,39 +3136,40 @@ fn lowered_type_decl_from_group(
         }
     }
 
-    // Heritage-base FACTS of a CLASS body's Intersection fold, minted ONCE at
-    // this lazy lowering from the SAME transient contributor bodies — a pure
-    // syntactic extraction (no head resolution, no argument lowering; the
-    // dispatch resolves heads and lowers demanded arguments). Gated on the
-    // group's authoritative kind: only a CLASS Intersection fold encodes
-    // heritage (an alias/interface intersection is not class heritage). A
-    // merged group mints per contributor under its `MergedContributor` path
-    // step so the argument locators deref through the merged body shape; a
-    // single group mints from the primary (last-wins) body — the one body the
-    // locator deref serves.
-    let heritage_bases: Arc<[HeritageBaseFact]> =
-        if enum_type_arms.is_none() && primary.kind == TypeDeclKind::Class {
-            if body.is_merged() {
-                let mut facts: Vec<HeritageBaseFact> = Vec::new();
-                for (ordinal, contributor_body) in retained.bodies.iter().enumerate() {
-                    let prefix = [TypeBodyPathStep::MergedContributor {
-                        ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                    }];
-                    facts.extend(collect_heritage_base_facts(
-                        &root_identity,
-                        contributor_body,
-                        &prefix,
-                    ));
-                }
-                facts.into()
-            } else if let Some(primary_body) = retained.bodies.last() {
-                collect_heritage_base_facts(&root_identity, primary_body, &[]).into()
-            } else {
-                Arc::from([])
+    // Heritage-base FACTS of a CLASS or INTERFACE body's Intersection fold,
+    // minted ONCE at this lazy lowering from the SAME transient contributor
+    // bodies — a pure syntactic extraction (no head resolution, no argument
+    // lowering; the dispatch resolves heads and lowers demanded arguments).
+    // Gated on the group's authoritative kind: a class or interface
+    // Intersection fold encodes its `extends` heritage, an alias
+    // intersection none. A merged group mints per contributor under its
+    // `MergedContributor` path step so the argument locators deref through
+    // the merged body shape; a single group mints from the primary
+    // (last-wins) body — the one body the locator deref serves.
+    let heritage_bases: Arc<[HeritageBaseFact]> = if enum_type_arms.is_none()
+        && matches!(primary.kind, TypeDeclKind::Class | TypeDeclKind::Interface)
+    {
+        if body.is_merged() {
+            let mut facts: Vec<HeritageBaseFact> = Vec::new();
+            for (ordinal, contributor_body) in retained.bodies.iter().enumerate() {
+                let prefix = [TypeBodyPathStep::MergedContributor {
+                    ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                }];
+                facts.extend(collect_heritage_base_facts(
+                    &root_identity,
+                    contributor_body,
+                    &prefix,
+                ));
             }
+            facts.into()
+        } else if let Some(primary_body) = retained.bodies.last() {
+            collect_heritage_base_facts(&root_identity, primary_body, &[]).into()
         } else {
             Arc::from([])
-        };
+        }
+    } else {
+        Arc::from([])
+    };
 
     // KEY-DOMAIN closedness FACT, minted ONCE at this lazy lowering from the
     // SAME transient contributor bodies — a pure syntactic extraction
@@ -3209,6 +3370,7 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
             annotation: Some(instance),
             reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
             expression_source: None,
+            literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
         },
         vec![FunctionSignature {
             type_parameters: Arc::from(Vec::new().into_boxed_slice()),
@@ -3246,22 +3408,17 @@ fn collect_augmentation_statement_dependencies(
     owner: TopLevelOwnerId,
     out: &mut FxHashMap<(AugmentationScopeKind, DeclBindingKey), DeclDependencyFacts>,
 ) {
-    use oxc_ast::ast::{Statement, TSModuleDeclarationBody, TSModuleDeclarationName};
+    use oxc_ast::ast::Statement;
     let (scope, body): (AugmentationScopeKind, &[oxc_ast::ast::Statement<'_>]) = match stmt {
         // `declare global { … }` is its own statement variant.
         Statement::TSGlobalDeclaration(global) => {
             (AugmentationScopeKind::Global, &global.body.body)
         }
-        Statement::TSModuleDeclaration(module) => {
-            let scope = match &module.id {
-                TSModuleDeclarationName::StringLiteral(spec) => {
-                    AugmentationScopeKind::Module(spec.value.to_string())
-                }
-                // An identifier namespace is NOT an augmentation scope — its
-                // inner decls key under qualified `Ns.Name` file-scope records.
-                TSModuleDeclarationName::Identifier(_) => return,
-            };
-            let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = module.body.as_ref() else {
+        // An identifier namespace is NOT an augmentation scope — its inner
+        // decls key under qualified `Ns.Name` file-scope records.
+        Statement::TSExternalModuleDeclaration(module) => {
+            let scope = AugmentationScopeKind::Module(module.id.value.to_string());
+            let Some(block) = module.body.as_ref() else {
                 return;
             };
             (scope, &block.body)

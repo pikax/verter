@@ -330,8 +330,11 @@ pub(super) enum FamilyKey {
         /// demotion to StructuralTransit.
         vue_heritage_policy: VueHeritagePolicy,
     },
-    NormalizeUnion {
+    ReduceUnion {
         members: Arc<[SemanticNodeId]>,
+        /// The union algebra is family identity: a strict-null reduction
+        /// and an erased one over the same members are different answers.
+        nullability: crate::semantic_query::NullabilityPolicy,
     },
     ReduceIntersection {
         input: crate::semantic_query::IntersectionInputRef,
@@ -807,7 +810,7 @@ impl FamilyKey {
             FamilyKey::MappedType { .. } => "MappedType",
             FamilyKey::Conditional { .. } => "Conditional",
             FamilyKey::TypeOf { .. } => "TypeOf",
-            FamilyKey::NormalizeUnion { .. } => "NormalizeUnion",
+            FamilyKey::ReduceUnion { .. } => "ReduceUnion",
             FamilyKey::ReduceIntersection { .. } => "ReduceIntersection",
             FamilyKey::ProjectObjectSpread { .. } => "ProjectObjectSpread",
             FamilyKey::ProjectPath { .. } => "ProjectPath",
@@ -872,7 +875,7 @@ impl FamilyKey {
             FamilyKey::ProjectMember { .. } => 4,
             FamilyKey::IndexedAccess { .. } => 4,
             FamilyKey::KeyOf { .. } => 4,
-            FamilyKey::NormalizeUnion { .. } => 4,
+            FamilyKey::ReduceUnion { .. } => 4,
             FamilyKey::ReduceIntersection { .. } => 4,
             FamilyKey::ProjectPath { .. } => 4,
             FamilyKey::ResolveMacroPayload { .. } => 4,
@@ -1815,9 +1818,13 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             context_to_slot(context.projection_reduction),
         ),
-        SemanticQueryKey::NormalizeUnion { members } => (
-            FamilyKey::NormalizeUnion {
+        SemanticQueryKey::ReduceUnion {
+            members,
+            nullability,
+        } => (
+            FamilyKey::ReduceUnion {
                 members: Arc::clone(members),
+                nullability: *nullability,
             },
             ModeSlot::Single,
         ),

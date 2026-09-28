@@ -201,6 +201,8 @@ fn root_only_projection_root_kind_matches_full_fold() {
         type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
     let call_sig_obj = graph.intern_node(SemanticNodeData::Object(
         empty_surface().with_call_signatures(StdArc::from(vec![func].into_boxed_slice())),
@@ -356,6 +358,8 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
+        is_abstract: false,
     });
 
     let reference = graph.intern_node(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
@@ -467,12 +471,14 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     // raises to a materialized/expanded leaf (root `Other`).
     let recursive_ref = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: StdArc::from("Rec"),
+        args: std::sync::Arc::from([]),
     }));
 
     let mapped_with = |value_expr| {
         graph.intern_node(SemanticNodeData::Mapped {
             source: dummy,
             mapper: MapperKey {
+                over_type_variable: false,
                 parameter_node: dummy,
                 key_space: dummy,
                 value_expr,
@@ -624,6 +630,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     let present = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
     let mapper_with = |key_space, value_expr| MapperKey {
+        over_type_variable: false,
         parameter_node: present,
         key_space,
         value_expr,
@@ -727,6 +734,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             graph.intern_node(SemanticNodeData::Mapped {
                 source: present,
                 mapper: MapperKey {
+                    over_type_variable: false,
                     parameter_node: present,
                     key_space: present,
                     value_expr: present,
@@ -780,6 +788,8 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
+            is_abstract: false,
         }
     };
     let asymmetric = [

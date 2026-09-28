@@ -275,34 +275,33 @@ pub fn process_setup_statement<'a>(
 
         // Named exports in setup are allowed (for type exports).
         // Unwrap exported type declarations so they get stripped from output.
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(decl) = &export.declaration {
-                // Use export's outer span so `export` keyword is also removed
-                let export_span = Span::from(export.span);
-                match decl {
-                    Declaration::TSTypeAliasDeclaration(alias) => {
-                        items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                            span: export_span,
-                            name: Some(alias.id.name.as_str()),
-                            kind: TypeDeclarationKind::TypeAlias,
-                        }));
-                    }
-                    Declaration::TSInterfaceDeclaration(interface) => {
-                        items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                            span: export_span,
-                            name: Some(interface.id.name.as_str()),
-                            kind: TypeDeclarationKind::Interface,
-                        }));
-                    }
-                    Declaration::TSEnumDeclaration(ts_enum) => {
-                        items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                            span: export_span,
-                            name: Some(ts_enum.id.name.as_str()),
-                            kind: TypeDeclarationKind::Enum,
-                        }));
-                    }
-                    _ => {}
+        Statement::ExportDeclaration(export) => {
+            let decl = &export.declaration;
+            // Use export's outer span so `export` keyword is also removed
+            let export_span = Span::from(export.span);
+            match decl {
+                Declaration::TSTypeAliasDeclaration(alias) => {
+                    items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
+                        span: export_span,
+                        name: Some(alias.id.name.as_str()),
+                        kind: TypeDeclarationKind::TypeAlias,
+                    }));
                 }
+                Declaration::TSInterfaceDeclaration(interface) => {
+                    items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
+                        span: export_span,
+                        name: Some(interface.id.name.as_str()),
+                        kind: TypeDeclarationKind::Interface,
+                    }));
+                }
+                Declaration::TSEnumDeclaration(ts_enum) => {
+                    items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
+                        span: export_span,
+                        name: Some(ts_enum.id.name.as_str()),
+                        kind: TypeDeclarationKind::Enum,
+                    }));
+                }
+                _ => {}
             }
         }
         Statement::ExportAllDeclaration(_) => {}
@@ -332,14 +331,17 @@ pub fn process_setup_statement<'a>(
             }));
         }
 
-        Statement::TSModuleDeclaration(module) => {
-            let name = match &module.id {
-                oxc_ast::ast::TSModuleDeclarationName::Identifier(id) => Some(id.name.as_str()),
-                oxc_ast::ast::TSModuleDeclarationName::StringLiteral(s) => Some(s.value.as_str()),
-            };
+        Statement::TSNamespaceDeclaration(module) => {
             items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
                 span: Span::from(module.span),
-                name,
+                name: Some(module.id.name.as_str()),
+                kind: TypeDeclarationKind::Module,
+            }));
+        }
+        Statement::TSExternalModuleDeclaration(module) => {
+            items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
+                span: Span::from(module.span),
+                name: Some(module.id.value.as_str()),
                 kind: TypeDeclarationKind::Module,
             }));
         }

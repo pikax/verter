@@ -1112,12 +1112,13 @@ fn macro_output_is_valid_js() {
     // Validate JS syntax
     let js_alloc = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::mjs();
-    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
+    let parser_result =
+        verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "macro output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 }
 
@@ -1147,12 +1148,13 @@ fn output_is_valid_js() {
     // Validate JS syntax with OXC parser
     let js_alloc = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::mjs();
-    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
+    let parser_result =
+        verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 }
 
@@ -1379,12 +1381,13 @@ fn e2e_complex_sfc_valid_js() {
     // Validate JS syntax
     let js_alloc = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::mjs();
-    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
+    let parser_result =
+        verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "complex SFC should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 
     // Verify key structural elements
@@ -1478,12 +1481,13 @@ fn e2e_inline_mode_valid_js() {
     // Validate JS syntax
     let js_alloc = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::mjs();
-    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
+    let parser_result =
+        verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "inline mode output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 
     // No return statement in inline mode
@@ -1550,12 +1554,13 @@ fn multiple_imports_all_hoisted() {
     // Validate JS
     let js_alloc = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::mjs();
-    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
+    let parser_result =
+        verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 }
 
@@ -1593,12 +1598,13 @@ fn multiple_define_model_deduplicates_imports() {
     // Output should be valid JS (no duplicate import specifiers)
     let js_alloc = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::mjs();
-    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
+    let parser_result =
+        verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "multiple defineModel output should be valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 
     // All three models should be replaced
@@ -1730,12 +1736,13 @@ withDefaults(defineProps<{
     // Validate JS syntax
     let js_alloc = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::mjs();
-    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
+    let parser_result =
+        verter_parser::oxc_parse::Parser::new(&js_alloc, &output, source_type).parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "withDefaults with method shorthand should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 }
 
@@ -1751,12 +1758,13 @@ withDefaults(defineProps<{
 fn assert_valid_js(output: &str) {
     let js_alloc = oxc_allocator::Allocator::default();
     let parser_result =
-        oxc_parser::Parser::new(&js_alloc, output, oxc_span::SourceType::mjs()).parse();
+        verter_parser::oxc_parse::Parser::new(&js_alloc, output, oxc_span::SourceType::mjs())
+            .parse();
     assert!(
-        parser_result.errors.is_empty(),
+        parser_result.diagnostics.is_empty(),
         "force-js output must be valid JavaScript.\nOutput:\n{}\nErrors: {:?}",
         output,
-        parser_result.errors
+        parser_result.diagnostics
     );
 }
 

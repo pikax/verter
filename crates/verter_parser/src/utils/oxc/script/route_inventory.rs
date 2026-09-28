@@ -7,7 +7,7 @@
 
 use oxc_ast::ast::{
     BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression,
-    ImportDeclarationSpecifier, ImportOrExportKind, Program, Statement, TSModuleDeclarationName,
+    ImportDeclarationSpecifier, ImportOrExportKind, Program, Statement,
 };
 use verter_type_expr::TopLevelOwnerId;
 
@@ -39,6 +39,9 @@ pub enum RouteImportForm {
     Named,
     Default,
     Namespace,
+    /// `import x = require("m")`: the module's `export =` value, or its
+    /// namespace when it has none.
+    ImportEquals,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -192,18 +195,48 @@ where
     Ok(build_script_route_inventory_impl(program, owners))
 }
 
+/// Whether a module body or an ambient namespace body holds an EXPORT
+/// DECLARATION — `export { … }` (with or without a source), `export * from`,
+/// `export =`, or `export default <expression>` — as opposed to a
+/// declaration carrying an `export` modifier. An ambient body without one
+/// is an export context: TypeScript exports each of its declarations,
+/// written `export` or not.
+#[must_use]
+pub fn statements_have_export_declarations(statements: &[Statement<'_>]) -> bool {
+    statements.iter().any(|statement| match statement {
+        Statement::ExportNamedDeclaration(_) | Statement::ExportFromDeclaration(_) => true,
+        Statement::ExportAllDeclaration(_) | Statement::TSExportAssignment(_) => true,
+        Statement::ExportDefaultDeclaration(declaration) => {
+            declaration.declaration.as_expression().is_some()
+        }
+        _ => false,
+    })
+}
+
 fn build_script_route_inventory_impl<I>(program: &Program<'_>, owners: I) -> ScriptRouteInventory
 where
     I: Iterator<Item = TopLevelOwnerId>,
 {
     let mut inventory = ScriptRouteInventory::default();
     inventory.counts.top_level_statement_count = program.body.len();
+    // A declaration file's module body without an export declaration is an
+    // export context: its declarations are exported, written `export` or not.
+    let implicit_exports = program.source_type.is_typescript_definition()
+        && !statements_have_export_declarations(&program.body);
+    let mut unexported_declarations: Vec<(&Declaration<'_>, TopLevelOwnerId)> = Vec::new();
 
     for (statement, owner) in program.body.iter().zip(owners) {
+        if implicit_exports {
+            if let Some(declaration) = statement.as_declaration() {
+                unexported_declarations.push((declaration, owner));
+            }
+        }
         inventory.has_module_syntax |= matches!(
             statement,
             Statement::ImportDeclaration(_)
+                | Statement::ExportDeclaration(_)
                 | Statement::ExportNamedDeclaration(_)
+                | Statement::ExportFromDeclaration(_)
                 | Statement::ExportDefaultDeclaration(_)
                 | Statement::ExportAllDeclaration(_)
                 | Statement::TSExportAssignment(_)
@@ -274,26 +307,39 @@ where
                     inventory.imports.push(route);
                 }
             }
-            Statement::ExportNamedDeclaration(declaration) => {
-                if let Some(source) = &declaration.source {
-                    for specifier in &declaration.specifiers {
-                        inventory.reexports.push(ScriptReexportRoute {
-                            owner,
-                            exported: specifier.exported.name().to_string(),
-                            source: source.value.to_string(),
-                            imported: specifier.local.name().to_string(),
-                            capability: if declaration.export_kind == ImportOrExportKind::Type
-                                || specifier.export_kind == ImportOrExportKind::Type
-                            {
-                                RouteCapability::TypeOnly
-                            } else {
-                                RouteCapability::TypeAndValue
-                            },
-                        });
-                    }
-                    continue;
+            Statement::TSImportEqualsDeclaration(declaration) => {
+                if let oxc_ast::ast::TSModuleReference::ExternalModuleReference(reference) =
+                    &declaration.module_reference
+                {
+                    inventory.imports.push(ScriptImportRoute {
+                        owner,
+                        local: declaration.id.name.to_string(),
+                        source: reference.expression.value.to_string(),
+                        form: RouteImportForm::ImportEquals,
+                        capability: RouteCapability::from_import_kind(declaration.import_kind),
+                        imported: RouteImportedName::Namespace,
+                    });
                 }
-
+            }
+            Statement::ExportFromDeclaration(declaration) => {
+                let source = &declaration.source;
+                for specifier in &declaration.specifiers {
+                    inventory.reexports.push(ScriptReexportRoute {
+                        owner,
+                        exported: specifier.exported.name().to_string(),
+                        source: source.value.to_string(),
+                        imported: specifier.local.name().to_string(),
+                        capability: if declaration.export_kind == ImportOrExportKind::Type
+                            || specifier.export_kind == ImportOrExportKind::Type
+                        {
+                            RouteCapability::TypeOnly
+                        } else {
+                            RouteCapability::TypeAndValue
+                        },
+                    });
+                }
+            }
+            Statement::ExportNamedDeclaration(declaration) => {
                 for specifier in &declaration.specifiers {
                     inventory.local_exports.push(ScriptLocalExportRoute {
                         owner,
@@ -308,9 +354,13 @@ where
                         },
                     });
                 }
-                if let Some(declaration) = &declaration.declaration {
-                    record_exported_declaration(declaration, owner, &mut inventory.local_exports);
-                }
+            }
+            Statement::ExportDeclaration(declaration) => {
+                record_exported_declaration(
+                    &declaration.declaration,
+                    owner,
+                    &mut inventory.local_exports,
+                );
             }
             Statement::ExportAllDeclaration(declaration) => {
                 inventory.wildcard_reexports.push(ScriptWildcardRoute {
@@ -337,6 +387,12 @@ where
                 }
             }
             _ => {}
+        }
+    }
+
+    if inventory.has_module_syntax {
+        for (declaration, owner) in unexported_declarations {
+            record_exported_declaration(declaration, owner, &mut inventory.local_exports);
         }
     }
 
@@ -390,10 +446,8 @@ fn record_exported_declaration(
                 }
             }
         }
-        Declaration::TSModuleDeclaration(declaration) => {
-            if let TSModuleDeclarationName::Identifier(identifier) = &declaration.id {
-                record(identifier.name.as_str(), RouteCapability::TypeAndValue);
-            }
+        Declaration::TSNamespaceDeclaration(declaration) => {
+            record(declaration.id.name.as_str(), RouteCapability::TypeAndValue);
         }
         _ => {}
     }

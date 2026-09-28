@@ -146,10 +146,10 @@ fn instantiate_slot_holds_two_concurrent_candidates_for_distinct_views() {
 /// a uniform constant.**
 ///
 /// The inference/substitution-heavy `Instantiate` family caps its slot
-/// at 8 candidates; content-light families such as `NormalizeUnion`
+/// at 8 candidates; content-light families such as `ReduceUnion`
 /// keep the floor of 4. The cap actually GOVERNS retention: five
 /// distinct-discriminant publishes leave all five candidates in the
-/// `Instantiate` slot but bound the `NormalizeUnion` slot at 4, and a
+/// `Instantiate` slot but bound the `ReduceUnion` slot at 4, and a
 /// new cacheable candidate is ALWAYS admitted after local eviction
 /// (bounded occupancy + always-admit). With every candidate still
 /// valid, the victim is the front of the LRU order (the
@@ -170,8 +170,9 @@ pub(crate) fn cache_candidate_cap_is_per_family_not_uniform() {
 
     let instantiate_key = instantiate_identity_key(&host, canonical, "Bar");
     let member = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let normalize_key = SemanticQueryKey::NormalizeUnion {
+    let normalize_key = SemanticQueryKey::ReduceUnion {
         members: Arc::from(vec![member].into_boxed_slice()),
+        nullability: verter_session::semantic_query::NullabilityPolicy::Strict,
     };
 
     // Policy probes — the exhaustive, wildcard-free per-family
@@ -185,7 +186,7 @@ pub(crate) fn cache_candidate_cap_is_per_family_not_uniform() {
     let normalize_cap = graph.family_candidate_cap_for_tests(&normalize_key);
     assert_eq!(
         normalize_cap, 4,
-        "POLICY: the content-light `NormalizeUnion` family must keep the \
+        "POLICY: the content-light `ReduceUnion` family must keep the \
          floor cap of 4. Got {normalize_cap}."
     );
 
@@ -228,7 +229,7 @@ pub(crate) fn cache_candidate_cap_is_per_family_not_uniform() {
          cap-4 (or a uniformized `candidate_cap` mutation) leaves only \
          4. Got {instantiate_gens:?}."
     );
-    // `NormalizeUnion` (floor 4): bounded occupancy at exactly 4; the
+    // `ReduceUnion` (floor 4): bounded occupancy at exactly 4; the
     // all-valid victim is the LRU front (generation 100); the newest
     // candidate (104) is ALWAYS admitted after local eviction.
     let normalize_gens = graph.slot_candidate_generations_for_tests(&normalize_key);
@@ -236,7 +237,7 @@ pub(crate) fn cache_candidate_cap_is_per_family_not_uniform() {
         normalize_gens,
         vec![101, 102, 103, 104],
         "FLOOR-CAP BEHAVIOR: five distinct discriminants must leave \
-         exactly 4 candidates in the floor-cap `NormalizeUnion` slot — \
+         exactly 4 candidates in the floor-cap `ReduceUnion` slot — \
          the all-valid eviction drops the LRU front (100), never the \
          just-admitted candidate (bounded occupancy + always-admit). \
          Got {normalize_gens:?}."

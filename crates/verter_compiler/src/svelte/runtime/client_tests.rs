@@ -1032,8 +1032,8 @@ fn compound_assign_never_carries_trailing_true() {
 fn parses_as_js(code: &str) -> bool {
     let alloc = Allocator::default();
     let source_type = oxc_span::SourceType::default().with_module(true);
-    let ret = oxc_parser::Parser::new(&alloc, code, source_type).parse();
-    !ret.panicked && ret.errors.is_empty()
+    let ret = verter_parser::oxc_parse::Parser::new(&alloc, code, source_type).parse();
+    !ret.fatal_error && ret.diagnostics.is_empty()
 }
 
 /// Count the DECLARED occurrences of a binding `name` (any scope) in the emitted
@@ -1058,7 +1058,7 @@ fn count_declared_binding(code: &str, name: &str) -> usize {
     }
     let alloc = Allocator::default();
     let source_type = oxc_span::SourceType::default().with_module(true);
-    let ret = oxc_parser::Parser::new(&alloc, code, source_type).parse();
+    let ret = verter_parser::oxc_parse::Parser::new(&alloc, code, source_type).parse();
     let mut counter = Counter { name, count: 0 };
     counter.visit_program(&ret.program);
     counter.count
@@ -5492,10 +5492,12 @@ fn bind_value_function_pair_with_class_optional_field_fails_closed() {
 #[test]
 fn bind_value_function_pair_with_class_definite_field_fails_closed() {
     // A DEFINITE-assignment class field (`{class C { x! }, set}`) is TS-only — official
-    // REJECTS it (`Unexpected token`). OXC's `mjs` parse populates
-    // `PropertyDefinition.definite` (the member `!` marker, NOT an expression-position
-    // non-null assertion); the strict-delta scan flags it. RED against the pre-fix tree.
-    assert_function_pair_binding_refused(
+    // REJECTS it (`Unexpected token`). Since oxc 0.151 a definite field without a type
+    // annotation is an OXC parse error even under tsx (TS: "Declarations with definite
+    // assignment assertions must also have type annotations"), so the template expression
+    // fails at the `svelte-runtime-expr-parse` gate before the bind classifier. RED against
+    // the pre-fix tree.
+    assert_function_pair_expr_parse_refused(
         "<script>let v = $state(\"\");</script>\n<input bind:value={class C { x! }, (x) => v = x} />\n",
     );
 }

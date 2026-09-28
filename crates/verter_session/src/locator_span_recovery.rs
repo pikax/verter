@@ -150,7 +150,7 @@ pub(crate) fn recover_index_signature_spans_from_program(
     match member {
         LocatedMember::Signature(TSSignature::TSIndexSignature(idx)) => Ok(IndexSignatureSpans {
             declaration: Some(idx.span.into()),
-            key: idx.parameters.first().map(|param| param.span.into()),
+            key: Some(idx.parameter.span.into()),
             value: Some(idx.type_annotation.type_annotation.span().into()),
         }),
         _ => Err(SpanRecoveryError::AuthoredOriginUnresolved),
@@ -363,10 +363,7 @@ fn statement_member_surface<'a>(stmt: &'a Statement<'a>) -> Option<MemberSurface
             Some(MemberSurface::Signatures(&iface.body.body))
         }
         Statement::ClassDeclaration(class) => Some(MemberSurface::ClassElements(&class.body.body)),
-        Statement::ExportNamedDeclaration(export) => export
-            .declaration
-            .as_ref()
-            .and_then(declaration_member_surface),
+        Statement::ExportDeclaration(export) => declaration_member_surface(&export.declaration),
         Statement::ExportDefaultDeclaration(export) => {
             export_default_member_surface(&export.declaration)
         }
@@ -453,7 +450,7 @@ fn function_type_for(
 fn statement_alias_function_type<'a>(stmt: &'a Statement<'a>) -> Option<&'a TSFunctionType<'a>> {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => tstype_function_type(&alias.type_annotation),
-        Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
+        Statement::ExportDeclaration(export) => match &export.declaration {
             Declaration::TSTypeAliasDeclaration(alias) => {
                 tstype_function_type(&alias.type_annotation)
             }

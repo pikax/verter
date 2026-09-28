@@ -12,7 +12,7 @@
 //! The shape builder here is a direct `NoTypeExpr` mapper over the one-level
 //! [`SurfaceView`]: member sources derive by appending the member name to an
 //! HONEST parent source (the root declaration's authored body slot, or an
-//! already-indexed access fact), complete leaves upgrade to their closed leaf
+//! already-appended member-path route), complete leaves upgrade to their closed leaf
 //! fact (the `published_source_for_node` policy), and a position with no
 //! honest source degrades to the typed Unknown leaf — never a fabricated
 //! locator minted from a node.
@@ -24,7 +24,8 @@ use verter_semantic::analysis::type_expand::{
     ExpandedProperty,
 };
 use verter_type_expr::facts::{
-    ClosedTypeFact, IndexedAccessFact, LeafTypeFact, NarrowTypeParam, SemanticTypeSource,
+    ClosedTypeFact, FactPropertyKey, LeafTypeFact, NarrowTypeParam, ProjectedTypeFact,
+    SemanticTypeSource,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodySlot,
@@ -59,7 +60,7 @@ impl ComponentMetaQueryEngine<'_> {
     /// Member values stay SHALLOW semantic sources on the returned shape — the
     /// host raises a member source on demand through the dispatch bridge. Each
     /// member's source appends the member name to the resolved root
-    /// declaration's authored body slot (an indexed-access fact); a root with
+    /// declaration's authored body slot (a member-path route); a root with
     /// no resolvable declaration yields leaf-or-degraded member sources.
     pub(crate) fn project_intrinsic_root_shape(
         &mut self,
@@ -225,8 +226,9 @@ impl ComponentMetaQueryEngine<'_> {
 ///   complete by itself);
 /// - otherwise the member source appends the member NAME to the parent: an
 ///   `Authored(DeclBody(slot))` parent produces
-///   `Closed(IndexedAccess { object: slot, index_path: [name] })`, and an
-///   existing `Closed(IndexedAccess)` parent extends its `index_path`;
+///   `Projected(MemberPath { base: DeclBody(slot), path: [name] })`, and an
+///   existing member-path parent (or a `Closed(IndexedAccess)` tag source)
+///   extends its path;
 /// - a position with NO honest source (no appendable parent, a non-leaf
 ///   signature parameter/return, an index-signature key/value) degrades to the
 ///   typed Unknown leaf — display-degraded, never a fabricated locator minted
@@ -322,7 +324,13 @@ fn expanded_shape_from_surface_view(
 
 /// The published SOURCE for one surface member value: the complete closed LEAF
 /// fact when the node is one, else the member name appended to the honest
-/// parent (an indexed-access fact), else the typed Unknown-leaf degradation.
+/// parent as a member-path route, else the typed Unknown-leaf degradation.
+///
+/// A member position is the member's DECLARED type — what the surface member
+/// carries, with its optionality on the property — so the route replays the
+/// member read, never the indexed access `Parent['name']`: under
+/// `strictNullChecks` an indexed access of an optional member reads its type
+/// plus `undefined`, and a further hop through it would read off that union.
 fn member_value_source(
     dispatch: &ProjectSemanticDispatch<'_>,
     value: SemanticNodeId,
@@ -332,23 +340,28 @@ fn member_value_source(
     if let Some(leaf) = dispatch.node_leaf_fact(value) {
         return SemanticTypeSource::Closed(ClosedTypeFact::Leaf(leaf));
     }
-    match parent {
+    let key = || FactPropertyKey::String(Arc::from(name));
+    let (base, mut path) = match parent {
         Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(slot))) => {
-            SemanticTypeSource::Closed(ClosedTypeFact::IndexedAccess(IndexedAccessFact {
-                object: slot.clone(),
-                index_path: Arc::from(vec![name.to_string()].into_boxed_slice()),
-            }))
+            (AuthoredBodyLocator::DeclBody(slot.clone()), Vec::new())
         }
-        Some(SemanticTypeSource::Closed(ClosedTypeFact::IndexedAccess(fact))) => {
-            let mut index_path: Vec<String> = fact.index_path.iter().cloned().collect();
-            index_path.push(name.to_string());
-            SemanticTypeSource::Closed(ClosedTypeFact::IndexedAccess(IndexedAccessFact {
-                object: fact.object.clone(),
-                index_path: Arc::from(index_path.into_boxed_slice()),
-            }))
+        Some(SemanticTypeSource::Closed(ClosedTypeFact::IndexedAccess(fact))) => (
+            AuthoredBodyLocator::DeclBody(fact.object.clone()),
+            fact.index_path
+                .iter()
+                .map(|hop| FactPropertyKey::String(Arc::from(hop.as_str())))
+                .collect(),
+        ),
+        Some(SemanticTypeSource::Projected(ProjectedTypeFact::MemberPath { base, path })) => {
+            (base.clone(), path.to_vec())
         }
-        _ => unknown_leaf_source(),
-    }
+        _ => return unknown_leaf_source(),
+    };
+    path.push(key());
+    SemanticTypeSource::Projected(ProjectedTypeFact::MemberPath {
+        base,
+        path: Arc::from(path.into_boxed_slice()),
+    })
 }
 
 /// Build one [`ExpandedCallSignature`] from a `Function`-shaped signature node
@@ -396,6 +409,7 @@ fn expanded_call_signature_from_node(
                     constraint: None,
                     default: None,
                     is_const: param.is_const,
+                    variance: verter_type_expr::facts::TypeParamVariance::Unannotated,
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),

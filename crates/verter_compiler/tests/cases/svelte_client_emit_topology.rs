@@ -2450,7 +2450,7 @@ fn parses_as_js(code: &str) -> bool {
     let alloc = Allocator::default();
     let source_type = oxc_span::SourceType::mjs();
     let ret = oxc_parser::Parser::new(&alloc, code, source_type).parse();
-    !ret.panicked && ret.errors.is_empty()
+    !ret.fatal_error && ret.diagnostics.is_empty()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2894,25 +2894,26 @@ fn expr_sig(expr: &Expression) -> String {
             let params = params_sig(&a.params);
             // The arrow body: either a single expression (an `() => EXPR`) or a block of
             // statements. Both forms are encoded so a body shape change is caught.
-            let body = if a.expression {
-                // An expression body is one ExpressionStatement in the function body (no directive
-                // prologue is possible in an expression-body arrow).
-                a.body
-                    .statements
-                    .first()
-                    .map(|s| stmt_sig(s))
-                    .unwrap_or_else(|| "<empty>".to_string())
-            } else {
+            let body = match &a.body {
                 // A block-body arrow can carry a `FunctionBody.directives` prologue, so sign the full
                 // function body (ordered directives + ordered statements).
-                function_body_sig(&a.body)
+                oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) => function_body_sig(body),
+                // An expression body (no directive prologue is possible in an expression-body arrow)
+                // signs as the one expression statement it is.
+                body => body
+                    .as_expression()
+                    .map(|e| format!("Expr({})", expr_sig(e)))
+                    .unwrap_or_else(|| "<empty>".to_string()),
             };
             // `r#async` is SEMANTIC (`async () => 1` returns a Promise; `() => 1` returns `1`).
             // Arrows can never be generators, so only the async bit applies here. Reachable via
             // source-preserved function literals in dynamic values.
             format!(
                 "Arrow(async={},params={},expr={},body={})",
-                a.r#async, params, a.expression, body
+                a.r#async,
+                params,
+                a.is_expression(),
+                body
             )
         }
         Expression::FunctionExpression(f) => {
@@ -3032,7 +3033,8 @@ fn expr_sig(expr: &Expression) -> String {
             i.phase
         ),
         // `import.meta` / `new.target` — DISTINCT meta-properties with different runtime meaning.
-        Expression::MetaProperty(m) => format!("Meta({}.{})", m.meta.name, m.property.name),
+        Expression::ImportMeta(_) => "Meta(import.meta)".to_string(),
+        Expression::NewTarget(_) => "Meta(new.target)".to_string(),
         // `#x in obj` brand check — ordinary JS inside class bodies; the private-field identifier is
         // semantics-bearing, the operand is paren-transparent via `expr_sig`.
         Expression::PrivateInExpression(p) => {
@@ -3495,9 +3497,9 @@ fn class_sig(c: &Class) -> String {
         c.r#type,
         decorators_sig(&c.decorators),
         c.id.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
-        c.super_class
+        c.heritage
             .as_ref()
-            .map(expr_sig)
+            .map(|heritage| expr_sig(&heritage.expression))
             .unwrap_or_else(|| "<none>".into()),
         c.body
             .body
@@ -3740,24 +3742,35 @@ fn stmt_sig(stmt: &Statement) -> String {
         // a specifier list (`export { a as value }`) OR a re-export source (`export { a } from "x"`),
         // plus the export-kind and `with`-clause. An ORACLE axis (official module-script output can
         // carry these) — a specifier/source/kind/with drift over an otherwise identical export FAILS.
-        Statement::ExportNamedDeclaration(e) => format!(
-            "ExportNamed(decl={},specs=[{}],source={},kind={:?},with={})",
-            e.declaration
-                .as_ref()
-                .map(decl_sig)
-                .unwrap_or_else(|| "<none>".into()),
-            e.specifiers
-                .iter()
-                .map(export_specifier_sig)
-                .collect::<Vec<_>>()
-                .join(";"),
-            e.source
-                .as_ref()
-                .map(|s| format!("{:?}", s.value))
-                .unwrap_or_else(|| "<none>".into()),
-            e.export_kind,
-            with_clause_sig(&e.with_clause)
-        ),
+        Statement::ExportDeclaration(_)
+        | Statement::ExportNamedDeclaration(_)
+        | Statement::ExportFromDeclaration(_) => {
+            let e =
+                verter_parser::utils::oxc::script::export_parts::NamedExportParts::of_statement(
+                    stmt,
+                )
+                .expect("a named export statement");
+            let with_clause = match stmt {
+                Statement::ExportFromDeclaration(from) => with_clause_sig(&from.with_clause),
+                _ => with_clause_sig(&None),
+            };
+            format!(
+                "ExportNamed(decl={},specs=[{}],source={},kind={:?},with={})",
+                e.declaration
+                    .map(decl_sig)
+                    .unwrap_or_else(|| "<none>".into()),
+                e.specifiers
+                    .iter()
+                    .map(export_specifier_sig)
+                    .collect::<Vec<_>>()
+                    .join(";"),
+                e.source
+                    .map(|s| format!("{:?}", s.value))
+                    .unwrap_or_else(|| "<none>".into()),
+                e.export_kind,
+                with_clause
+            )
+        }
         // `export * from "x"` / `export * as ns from "x"` — an ORACLE axis. The source, the optional
         // namespace rename (`exported`), the export-kind, and the `with`-clause are all signed; pre-
         // fix this fell to the `Stmt(discriminant)` fallback (a false-PASS over different sources).
@@ -3930,9 +3943,9 @@ fn conformance_sig(code: &str, side: &str) -> ModuleConformanceSig {
     let source_type = oxc_span::SourceType::mjs();
     let ret = oxc_parser::Parser::new(&alloc, code, source_type).parse();
     assert!(
-        !ret.panicked && ret.errors.is_empty(),
+        !ret.fatal_error && ret.diagnostics.is_empty(),
         "the {side} module did not parse as JS (a hard FAIL):\n{code}\nerrors: {:?}",
-        ret.errors
+        ret.diagnostics
     );
     ModuleConformanceSig {
         module_sig: program_sig(&ret.program),
@@ -3999,7 +4012,7 @@ fn expression_residual_fails_closed_instead_of_producing_a_lossy_signature() {
         oxc_span::SourceType::ts(),
     )
     .parse();
-    assert!(!parsed.panicked && parsed.errors.is_empty());
+    assert!(!parsed.fatal_error && parsed.diagnostics.is_empty());
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         program_sig(&parsed.program)
@@ -4019,7 +4032,7 @@ fn statement_residual_fails_closed_instead_of_producing_a_lossy_signature() {
         oxc_span::SourceType::ts(),
     )
     .parse();
-    assert!(!parsed.panicked && parsed.errors.is_empty());
+    assert!(!parsed.fatal_error && parsed.diagnostics.is_empty());
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         stmt_sig(&parsed.program.body[0])
@@ -4036,7 +4049,7 @@ fn declaration_residual_fails_closed_instead_of_producing_a_lossy_signature() {
         oxc_span::SourceType::ts(),
     )
     .parse();
-    assert!(!parsed.panicked && parsed.errors.is_empty());
+    assert!(!parsed.fatal_error && parsed.diagnostics.is_empty());
     let declaration = parsed.program.body[0]
         .as_declaration()
         .expect("a type alias is a declaration statement");
@@ -4298,8 +4311,10 @@ fn struct_compare_waives_trailing_comment_redundant_paren_before_asi() {
     // redundant paren is cosmetic. Pre-fix the trailing resolver picked the ancestor carrier (ending
     // at `)`) on the `(a)` side but the inner node (ending at `a`) on the bare side → different anchor
     // → a cosmetic-paren FALSE-FAIL. The symmetric trailing paren-transparency aliases close it.
-    let paren = "var x = (a) /*! keep */\nvar y = 1;";
-    let bare = "var x = a /*! keep */\nvar y = 1;";
+    // (The comment is a coverage-ignore one: since oxc 0.151 a legal `/*! … */` comment always
+    // stays Leading.)
+    let paren = "var x = (a) /* istanbul ignore next */\nvar y = 1;";
+    let bare = "var x = a /* istanbul ignore next */\nvar y = 1;";
     // Both must be genuinely Trailing (the mechanism under test).
     assert!(
         first_semantic_comment_anchor(paren).starts_with("pos=Trailing/"),
@@ -4326,8 +4341,8 @@ fn struct_compare_waives_trailing_comment_redundant_paren_before_asi() {
     // trailing aliases could threaten if they over-collapsed. The synthetic candidate inherits the
     // inner node's full path (carrying the `stmt[N]` prefix), so a move across statements cannot
     // collapse.
-    let move_a = "var x = (a) /*! keep */\nvar y = b\n";
-    let move_b = "var x = a\nvar y = (b) /*! keep */\n";
+    let move_a = "var x = (a) /* istanbul ignore next */\nvar y = b\n";
+    let move_b = "var x = a\nvar y = (b) /* istanbul ignore next */\n";
     assert!(
         first_semantic_comment_anchor(move_a).starts_with("pos=Trailing/"),
         "move_a must be Trailing"
@@ -4350,8 +4365,8 @@ fn struct_compare_waives_trailing_comment_redundant_paren_before_asi() {
     // deep inner node on BOTH sides. The synthetic trailing aliases minted by the inner paren descent
     // re-end at the inner paren's `)`, so the inner node is reachable as the closest-preceding
     // candidate regardless of nesting depth.
-    let nested_paren = "var f = function () { return (a) /*! keep */\nreturn 1; };";
-    let nested_bare = "var f = function () { return a /*! keep */\nreturn 1; };";
+    let nested_paren = "var f = function () { return (a) /* istanbul ignore next */\nreturn 1; };";
+    let nested_bare = "var f = function () { return a /* istanbul ignore next */\nreturn 1; };";
     assert!(
         first_semantic_comment_anchor(nested_paren).starts_with("pos=Trailing/"),
         "nested paren side must be Trailing"

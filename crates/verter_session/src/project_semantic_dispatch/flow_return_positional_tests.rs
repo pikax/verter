@@ -40,18 +40,23 @@ const POS_CANONICAL: &str = "/ws/flow-positional.ts";
 /// discriminator: a fix that merely stops fabricating a value, without
 /// making the position local, deletes it.
 const POS_FIXTURE: &str = r#"
-export class Box { readonly tag = "box"; }
+// `notDeclared` is declared nowhere, so every call of it is TS2304
+// ("Cannot find name"): the checker types the call with its error type,
+// which is recovery for a program that does not type-check rather than
+// the semantics of one. The flow-return lane models well-typed programs,
+// so such a call is outside its scope — the unmodelled position every row
+// below places, by design rather than as a gap to close.
 
 // ── B-F1: one unmodelled member inside an object literal ─────────────
 export function objectWithUnmodeledCall() {
-  return { label: "x", made: new Box() };
+  return { label: "x", made: notDeclared() };
 }
 
 // The byte-equivalent local-binding spelling — already survived at HEAD
 // through `FailedBindingInitializer`, and is the control that proves the
 // disposition must not depend on where the evaluator was standing.
 export function objectWithUnmodeledLocal() {
-  const b = new Box();
+  const b = notDeclared();
   return { label: "x", made: b };
 }
 
@@ -63,14 +68,12 @@ export function objectWithUnmodeledBinding() {
 
 // ── B-F2: an array element at a call position ────────────────────────
 //
-// The composite that survives here is the OBJECT, not the array: `made`
-// collapses to ONE marker rather than `Array<string | MARKER>`, losing
-// the modelled `"s"` element (tsgo: `{ label: string; made: (string |
-// Box)[] }`). That collapse is a KNOWN OWED granularity gap, NOT the
-// rule this file states — characterized, with its owner, by
-// `flow_return_frame_seal_tests::an_unmodeled_array_element_collapses_the_array_and_is_owed`.
+// Both composites survive: the OBJECT and the array inside it, whose
+// call element alone carries the marker beside the modelled `"s"` one
+// (tsgo: `{ label: string; made: any[] }`, the error type absorbing the
+// element union).
 export function arrayWithUnmodeledCall() {
-  return { label: "x", made: ["s", new Box()] };
+  return { label: "x", made: ["s", notDeclared()] };
 }
 
 // ── A-F2 / A-F3: the residual warm-fabricated-`any` call forms ───────
@@ -262,12 +265,13 @@ fn is_unresolved_marker(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNo
 /// A composite with ONE unmodelled member keeps every member it DID
 /// model, marks the unmodelled one, and warms nothing.
 ///
-/// This is B-F1 at the evaluator boundary. The checker's answer for
-/// `objectWithUnmodeledCall` is `{ label: string; made: Box }`; the
-/// substrate cannot type `new Box()` (that is `U6.CALL_RESOLVE`), so
-/// `made` is the typed unresolved marker — never a fabricated `any`,
-/// which is indistinguishable from an authored one at every downstream
-/// gate, and never a discarded composite.
+/// This is B-F1 at the evaluator boundary. The checker answers
+/// `objectWithUnmodeledCall` with `{ label: string; made: any }`, the
+/// `any` being its error type for the TS2304 call `notDeclared()`; the
+/// lane does not model a program that does not type-check, so `made` is
+/// the typed unresolved marker — never a fabricated `any`, which is
+/// indistinguishable from an authored one at every downstream gate, and
+/// never a discarded composite.
 ///
 /// Mutation recipe: routing the unmodelled position back through a
 /// frame-level `Err` collapses the whole object and the `label`
@@ -278,15 +282,11 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
     for (name, reason) in [
         (
             "objectWithUnmodeledCall",
-            FlowReturnDegradation::UnmodeledPosition,
+            FlowReturnDegradation::UnrepresentableCallee,
         ),
         (
             "objectWithUnmodeledBinding",
             FlowReturnDegradation::UnmodeledPosition,
-        ),
-        (
-            "arrayWithUnmodeledCall",
-            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
         ),
         (
             "computedMemberOffCall",
@@ -294,10 +294,6 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
         ),
         (
             "optionalCallMemberRead",
-            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
-        ),
-        (
-            "binaryOverCall",
             FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
         ),
     ] {
@@ -331,6 +327,50 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
             "{name} degraded success is ReturnOnly — nothing warms"
         );
     }
+    // A binary expression over a call is modelled: `fs() + "y"` is `string`
+    // by the checker's operand rule (tsc 7.0.2: `{ label: string; made:
+    // string; }` under all four strictNullChecks x noImplicitAny settings).
+    let outcome = evaluate(&host, POS_CANONICAL, "binaryOverCall")
+        .expect("binaryOverCall must produce a value");
+    with_dispatch(&host, |dispatch| {
+        let made = member(dispatch, outcome.node, "made");
+        assert_eq!(
+            dispatch.graph().node_data(made).as_deref(),
+            Some(&SemanticNodeData::Primitive(PrimitiveKind::String)),
+            "binaryOverCall: `fs() + \"y\"` is `string`"
+        );
+    });
+    assert_eq!(outcome.degradation, None, "binaryOverCall is clean");
+
+    // `arrayWithUnmodeledCall` — the ARRAY survives too: its element is
+    // `string | MARKER`, the modelled `"s"` element kept beside the marked
+    // call one.
+    let outcome = evaluate(&host, POS_CANONICAL, "arrayWithUnmodeledCall")
+        .expect("arrayWithUnmodeledCall must produce a value");
+    with_dispatch(&host, |dispatch| {
+        let made = member(dispatch, outcome.node, "made");
+        let element = match dispatch.graph().node_data(made).as_deref() {
+            Some(SemanticNodeData::Array { element, .. }) => *element,
+            other => panic!("arrayWithUnmodeledCall: the array survives, got {other:?}"),
+        };
+        let members = match dispatch.graph().node_data(element).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.to_vec(),
+            other => panic!("arrayWithUnmodeledCall: a two-element union, got {other:?}"),
+        };
+        assert_eq!(members.len(), 2, "{members:?}");
+        assert!(members
+            .iter()
+            .any(|member| is_unresolved_marker(dispatch, *member)));
+        assert!(members.iter().any(|member| matches!(
+            dispatch.graph().node_data(*member).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+        )));
+    });
+    assert_eq!(
+        outcome.degradation,
+        Some(FlowReturnDegradation::UnrepresentableCallee)
+    );
+    assert_eq!(outcome.candidates, 0);
 
     // `assignmentCallPosition` — `(z = fs())` is a whole-binding write in
     // expression position whose right-hand side is a resolved call: the
@@ -481,4 +521,28 @@ fn a_wide_union_with_no_miss_is_clean_and_warm_at_every_arm_count() {
             );
         });
     }
+}
+
+/// An arithmetic operation over a CALL types by the operator's rule over
+/// the call's resolved return: `fs() + "y"` over `fs(): string` is
+/// `string` (TypeScript 7.0.2: `binaryOverCall()` is `{ label: string;
+/// made: string; }`), clean — the call rides the call rails as an operand,
+/// never the shallow pass's fallback.
+#[test]
+fn an_arithmetic_member_over_a_call_types_by_its_operator() {
+    let host = make_pos_host();
+    let outcome = evaluate(&host, POS_CANONICAL, "binaryOverCall")
+        .expect("binaryOverCall must produce a value");
+    assert_eq!(outcome.degradation, None, "binaryOverCall is modelled");
+    with_dispatch(&host, |dispatch| {
+        let made = member(dispatch, outcome.node, "made");
+        assert!(
+            matches!(
+                dispatch.graph().node_data(made).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            ),
+            "binaryOverCall: `made` is `string`, got {:?}",
+            dispatch.graph().node_data(made)
+        );
+    });
 }

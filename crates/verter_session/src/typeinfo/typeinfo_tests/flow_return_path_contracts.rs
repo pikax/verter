@@ -110,6 +110,16 @@ macro_rules! future_path_contract {
     };
 }
 
+/// A path row whose contract the engine ALREADY satisfies.
+macro_rules! path_contract {
+    ($name:ident, $alias:literal, $selected:expr, $unselected:expr, $check:expr) => {
+        #[test]
+        fn $name() {
+            assert_path_alias_warm($alias, $selected, $unselected, $check);
+        }
+    };
+}
+
 #[test]
 fn flow_return_fp_fixture_routes_are_hermetic_and_resolvable() {
     let host = make_host_with_footprint();
@@ -241,12 +251,11 @@ future_path_contract!(
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_path_contract!(
+path_contract!(
     flow_return_fp10_local_only_flow_does_not_touch_import_routes,
     "FP10",
     &[],
     &[BARREL, SELECTED, ALTERNATE, UNUSED],
-    "typeinfo currently does not solve local-only flow returns without touching unrelated owner imports; keep as the future FP10 local-only boundary contract",
     |expr| {
         assert_union_contains_string_literal(expr, "local");
         assert_union_contains_primitive(expr, PrimitiveName::Undefined);

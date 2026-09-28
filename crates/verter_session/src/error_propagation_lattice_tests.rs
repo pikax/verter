@@ -174,21 +174,36 @@ fn error_any_never_propagation_lattice() {
     // not via retired per-reducer hooks.
     use crate::project_semantic_dispatch::canonical_algebra;
     // union: X | never = X (the `never` arm is dropped, singleton folds).
-    let u = canonical_algebra::canonical_union(graph, &[string, never]).node;
+    let u = canonical_algebra::intern_ordered_union(
+        graph,
+        &[string, never],
+        crate::semantic_query::NullabilityPolicy::Strict,
+    )
+    .node;
     assert_eq!(
         kind(u),
         Some(SemanticNodeData::Primitive(PrimitiveKind::String)),
         "X | never = X"
     );
     // union: X | any = any.
-    let u = canonical_algebra::canonical_union(graph, &[string, any]).node;
+    let u = canonical_algebra::intern_ordered_union(
+        graph,
+        &[string, any],
+        crate::semantic_query::NullabilityPolicy::Strict,
+    )
+    .node;
     assert_eq!(
         kind(u),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Any)),
         "X | any = any"
     );
     // union: X | unknown = unknown.
-    let u = canonical_algebra::canonical_union(graph, &[string, unknown]).node;
+    let u = canonical_algebra::intern_ordered_union(
+        graph,
+        &[string, unknown],
+        crate::semantic_query::NullabilityPolicy::Strict,
+    )
+    .node;
     assert_eq!(
         kind(u),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
@@ -196,7 +211,12 @@ fn error_any_never_propagation_lattice() {
     );
     // union: NO absorption for a plain union of ordinary types — the
     // canonical form keeps both arms.
-    let u = canonical_algebra::canonical_union(graph, &[string, number]).node;
+    let u = canonical_algebra::intern_ordered_union(
+        graph,
+        &[string, number],
+        crate::semantic_query::NullabilityPolicy::Strict,
+    )
+    .node;
     assert!(
         matches!(kind(u), Some(SemanticNodeData::Union(members)) if members.len() == 2),
         "string | number must stay a two-arm union"
@@ -355,7 +375,7 @@ fn error_any_never_propagation_lattice() {
 
 /// `any extends T ? X : Y` ⇒ `X | Y` (the union of BOTH branches),
 /// mode-INDEPENDENT (both distributive and non-distributive). Built via
-/// `NormalizeUnion([X, Y])` so the result is a canonical `Union` node, not a
+/// `ReduceUnion([X, Y])` so the result is a canonical `Union` node, not a
 /// raw one. The relation engine would instead pick the TRUE branch for an
 /// `any` check, so the §22 fast-reject must own this row.
 #[test]
@@ -397,7 +417,7 @@ fn conditional_any_check_unions_both_branches() {
     assert_unions_both(false);
     assert_unions_both(true);
 
-    // `X | X` folds to `X` via NormalizeUnion (canonical dedup), not a raw
+    // `X | X` folds to `X` via ReduceUnion (canonical dedup), not a raw
     // 2-member union of identical nodes.
     let same = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let folded = absorbed_node(
@@ -716,6 +736,7 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
     // control flow is preserved — never Assignable.
     let recursive = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Self"),
+        args: std::sync::Arc::from([]),
     }));
     assert!(
         !is_assignable(recursive, string),

@@ -45,7 +45,6 @@ fn resolve_alias(alias: &str) -> TypeExpr {
 // TS7: if-branch sees the a-arm (returns string), else sees the b-arm
 // (returns number). Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate discriminated-union narrowing on `s.kind === \"a\"` through `ReturnType<typeof fn>` to the joined return type; keep as the future Du01 if-equality-discriminant binary-union contract"]
 fn narrow_discriminated_union_du01_if_equality_discriminant() {
     let expr = resolve_alias("Du01Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -55,7 +54,6 @@ fn narrow_discriminated_union_du01_if_equality_discriminant() {
 // ----- 2) switch(s.kind) over "a" | "b" --------------------------------
 // TS7: case "a" returns string, case "b" returns number. Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate switch-on-discriminant narrowing across case arms through `ReturnType<typeof fn>`; keep as the future Du02 switch-discriminant exhaustive contract"]
 fn narrow_discriminated_union_du02_switch_discriminant() {
     let expr = resolve_alias("Du02Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -67,7 +65,6 @@ fn narrow_discriminated_union_du02_switch_discriminant() {
 // (`const _exhaustive: never = s`) and contributes `never` (absorbed).
 // Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate switch-on-discriminant narrowing across cases with a never-typed default through `ReturnType<typeof fn>`; keep as the future Du03 switch-default-never exhaustiveness contract"]
 fn narrow_discriminated_union_du03_switch_default_never() {
     let expr = resolve_alias("Du03Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -89,7 +86,6 @@ fn narrow_discriminated_union_du03_switch_default_never() {
 // TS7: negated if-branch returns s.b (number); else returns s.a (string).
 // Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate negated discriminant narrowing on `s.kind !== \"a\"` through `ReturnType<typeof fn>`; keep as the future Du04 negated-discriminant binary-union contract"]
 fn narrow_discriminated_union_du04_negated_discriminant() {
     let expr = resolve_alias("Du04Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -101,7 +97,6 @@ fn narrow_discriminated_union_du04_negated_discriminant() {
 // `{kind:"a"; tag:1; a1:string}`. if-branch returns s.a1 (string).
 // else returns null. Joined: string | null.
 #[test]
-#[ignore = "typeinfo currently does not propagate compound multi-property discriminant narrowing (`s.kind === \"a\" && s.tag === 1`) through `ReturnType<typeof fn>`; keep as the future Du05 multi-property-discriminant contract"]
 fn narrow_discriminated_union_du05_multi_property_discriminant() {
     let expr = resolve_alias("Du05Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -113,7 +108,6 @@ fn narrow_discriminated_union_du05_multi_property_discriminant() {
 // `s.inner.kind === "ia"` narrows the inner union. if-branch returns
 // s.inner.ia (string). else returns null. Joined: string | null.
 #[test]
-#[ignore = "typeinfo currently does not propagate nested discriminant narrowing (`s.outer === \"o1\" && s.inner.kind === \"ia\"`) through `ReturnType<typeof fn>`; keep as the future Du06 nested-discriminant contract"]
 fn narrow_discriminated_union_du06_nested_discriminant() {
     let expr = resolve_alias("Du06Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -124,7 +118,6 @@ fn narrow_discriminated_union_du06_nested_discriminant() {
 // TS7: if-branch (kind === 1) returns s.a (string); else returns s.b (number).
 // Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate number-literal discriminant narrowing (`s.kind === 1`) through `ReturnType<typeof fn>`; keep as the future Du07 number-literal-discriminant contract"]
 fn narrow_discriminated_union_du07_number_literal_discriminant() {
     let expr = resolve_alias("Du07Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -136,7 +129,6 @@ fn narrow_discriminated_union_du07_number_literal_discriminant() {
 // if-branch (ok === true) returns s.data (string); else (ok === false)
 // returns s.err (number). Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate boolean-literal truthiness discriminant narrowing (`if (s.ok)`) through `ReturnType<typeof fn>`; keep as the future Du08 boolean-literal-discriminant contract"]
 fn narrow_discriminated_union_du08_boolean_literal_discriminant() {
     let expr = resolve_alias("Du08Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -149,7 +141,6 @@ fn narrow_discriminated_union_du08_boolean_literal_discriminant() {
 // narrows BOTH the destructured `kind` AND the original `s`. if-branch
 // returns s.a (string); else returns s.b (number). Joined: string | number.
 #[test]
-#[ignore = "typeinfo currently does not propagate destructured-discriminant correlation (`const {kind} = s; if (kind === \"a\")` narrows s) through `ReturnType<typeof fn>`; keep as the future Du09 destructure-correlation contract"]
 fn narrow_discriminated_union_du09_destructure_correlation() {
     let expr = resolve_alias("Du09Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -161,7 +152,6 @@ fn narrow_discriminated_union_du09_destructure_correlation() {
 // the second arm first; then `s.kind === "a"` selects the first.
 // if-branch returns s.a (string); else returns null. Joined: string | null.
 #[test]
-#[ignore = "typeinfo currently does not propagate `in`-guard combined with discriminant narrowing (`(\"kind\" in s) && s.kind === \"a\"`) through `ReturnType<typeof fn>`; keep as the future Du10 in-guard-plus-discriminant contract"]
 fn narrow_discriminated_union_du10_in_guard_plus_discriminant() {
     let expr = resolve_alias("Du10Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -172,7 +162,6 @@ fn narrow_discriminated_union_du10_in_guard_plus_discriminant() {
 // TS7: case "a" -> string, case "b" -> number. Joined: string | number.
 // Identical structure to scenario 2; pinned as the joined-return contract.
 #[test]
-#[ignore = "typeinfo currently does not propagate switch-on-discriminant per-arm joined return type through `ReturnType<typeof fn>`; keep as the future Du11 switch-per-arm-join contract"]
 fn narrow_discriminated_union_du11_switch_per_arm_join() {
     let expr = resolve_alias("Du11Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);
@@ -184,7 +173,6 @@ fn narrow_discriminated_union_du11_switch_per_arm_join() {
 // of those two arms; s.payload is `string | number`. case "c" returns
 // s.flag (boolean). Joined: string | number | boolean.
 #[test]
-#[ignore = "typeinfo currently does not propagate switch-fall-through narrowing (`case \"a\": case \"b\":` block sees union of both arms) through `ReturnType<typeof fn>`; keep as the future Du12 switch-fall-through contract"]
 fn narrow_discriminated_union_du12_switch_fall_through() {
     let expr = resolve_alias("Du12Result");
     assert_union_contains_primitive(&expr, PrimitiveName::String);

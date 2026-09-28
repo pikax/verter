@@ -540,9 +540,9 @@ function handleClick(event) {}
 fn tsx_script_setup_keeps_authored_event_parameters() {
     use oxc_ast::ast::Function;
     use oxc_ast_visit::{walk, Visit};
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
     use oxc_syntax::scope::ScopeFlags;
+    use verter_parser::oxc_parse::Parser;
 
     #[derive(Default)]
     struct HandlerFacts {
@@ -578,7 +578,10 @@ function handleClick(event) {}
     let (code, _) = gen_tsx_script(source);
     let allocator = oxc_allocator::Allocator::default();
     let parsed = Parser::new(&allocator, &code, SourceType::tsx()).parse();
-    assert!(parsed.errors.is_empty(), "generated TSX must parse cleanly");
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "generated TSX must parse cleanly"
+    );
     let mut facts = HandlerFacts::default();
     facts.visit_program(&parsed.program);
     assert!(facts.found, "the authored handler remains in the carrier");
@@ -594,9 +597,9 @@ function handleClick(event) {}
 fn typescript_handler_used_by_distinct_events_has_a_union_tuple_annotation() {
     use oxc_ast::ast::{Function, TSType};
     use oxc_ast_visit::{walk, Visit};
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
     use oxc_syntax::scope::ScopeFlags;
+    use verter_parser::oxc_parse::Parser;
 
     #[derive(Default)]
     struct HandlerFacts {
@@ -640,7 +643,10 @@ function handleEvent(event) {}
     let (code, _) = gen_tsx_script(source);
     let allocator = oxc_allocator::Allocator::default();
     let parsed = Parser::new(&allocator, &code, SourceType::tsx()).parse();
-    assert!(parsed.errors.is_empty(), "generated TSX must parse cleanly");
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "generated TSX must parse cleanly"
+    );
     let mut facts = HandlerFacts::default();
     facts.visit_program(&parsed.program);
     assert!(facts.found, "the authored handler remains in the carrier");

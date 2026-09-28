@@ -152,7 +152,6 @@ fn utility_composition_deep_payload_reducer_regression() {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `utility_composition_deep_payload_reducer_regression`); NOT oracle-liftable — generation was attempted and measured Reject(DeferredConstruct(indexed-access)) on the indexed-access hop in the UtilitySource payload. Lift pending an oracle source-walk carve-out for utility-rooted indexed-access chains"]
 fn utility_composition_resolves_required_pick_over_nested_nonnullable_payload() {
     let host = make_host_with_footprint();
     upsert_ts(

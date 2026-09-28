@@ -299,14 +299,33 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     /// `self.cache_index` as it reserves — called once, before the main
     /// walk, so these reservations occupy the lowest indices (see the field
     /// doc comment on `handler_cache_reservations`).
+    ///
+    /// Elements nest without bound, so the walk runs from an explicit stack:
+    /// an element waits on it while its children reserve.
     fn reserve_handler_caches(&mut self, ids: &[NodeId], source: &str) {
-        for &id in ids {
-            let AstNodeKind::Element(el) = &self.ast.nodes[id.0].kind else {
+        enum Visit {
+            Enter(NodeId),
+            Reserve(NodeId),
+        }
+        let ast = self.ast;
+        let mut visits: Vec<Visit> = ids.iter().rev().map(|&id| Visit::Enter(id)).collect();
+        while let Some(visit) = visits.pop() {
+            let id = match visit {
+                Visit::Enter(id) => {
+                    let AstNodeKind::Element(el) = &ast.nodes[id.0].kind else {
+                        continue;
+                    };
+                    visits.push(Visit::Reserve(id));
+                    if let Some(children) = el.content.as_ref().map(|c| c.children.as_slice()) {
+                        visits.extend(children.iter().rev().map(|&child| Visit::Enter(child)));
+                    }
+                    continue;
+                }
+                Visit::Reserve(id) => id,
+            };
+            let AstNodeKind::Element(el) = &ast.nodes[id.0].kind else {
                 continue;
             };
-            if let Some(children) = el.content.as_ref().map(|c| c.children.as_slice()) {
-                self.reserve_handler_caches(children, source);
-            }
             let oxc_el = match self.oxc_ast.data.get(id.0) {
                 Some(OxcNodeData::Element(oxc_el)) => Some(oxc_el.as_ref()),
                 _ => None,
@@ -381,9 +400,26 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     /// eligibility (block root, directives, …) does not gate this —
     /// `static-element.vue`'s root `<div id=… title=…>` IS the block root
     /// and still groups its one static `<p>` child.
+    ///
+    /// Elements nest without bound, so the walk runs from an explicit stack:
+    /// an element waits on it while its children reserve.
     fn reserve_array_group_caches(&mut self, ids: &[NodeId], is_root_level: bool) {
-        for &id in ids {
-            let AstNodeKind::Element(el) = &self.ast.nodes[id.0].kind else {
+        enum Visit {
+            Enter(NodeId, bool),
+            Reserve(NodeId, bool),
+        }
+        let ast = self.ast;
+        let mut visits: Vec<Visit> = ids
+            .iter()
+            .rev()
+            .map(|&id| Visit::Enter(id, is_root_level))
+            .collect();
+        while let Some(visit) = visits.pop() {
+            let (id, is_root_level, entering) = match visit {
+                Visit::Enter(id, is_root_level) => (id, is_root_level, true),
+                Visit::Reserve(id, is_root_level) => (id, is_root_level, false),
+            };
+            let AstNodeKind::Element(el) = &ast.nodes[id.0].kind else {
                 continue;
             };
             // Slot outlets (`<slot>` fallback content), `<template>`
@@ -409,7 +445,16 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 .as_ref()
                 .map(|c| c.children.as_slice())
                 .unwrap_or(&[]);
-            self.reserve_array_group_caches(children, false);
+            if entering {
+                visits.push(Visit::Reserve(id, is_root_level));
+                visits.extend(
+                    children
+                        .iter()
+                        .rev()
+                        .map(|&child| Visit::Enter(child, false)),
+                );
+                continue;
+            }
 
             if children.is_empty() {
                 continue;

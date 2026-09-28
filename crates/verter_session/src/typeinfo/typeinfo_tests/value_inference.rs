@@ -165,7 +165,6 @@ fn value_inference_arrow_expression_body_publishes_return_shape() {}
 fn value_inference_arrow_expression_body_substitutes_parameter_references() {}
 
 #[test]
-#[ignore = "the substrate's branch join composes the per-arm return objects, but the text arm's `value` stays `string | number` — `typeof` narrowing is a separate mechanism that has not landed; keep as the future flow-sensitive value inference contract"]
 fn value_inference_flow_variables_narrow_return_value_by_branch() {
     let host = make_host_with_footprint();
     upsert_value_fixture(&host);
@@ -210,7 +209,6 @@ fn value_inference_flow_variables_narrow_return_value_by_branch() {
 }
 
 #[test]
-#[ignore = "`computed<T>(() => ...)` infers `T` from the callback's return body and the published shape carries the asserted `id`/`count`/`nested.ready` slots; the row PASSES under --include-ignored; it stays ignored because it has no `ORACLE_QUERY_SPECS` seat: `ProofRequirement::Ts7Oracle` requires a registry entry, a vendored source, a checked-in tsgo snapshot, and retained lift-migration provenance from the audited lift command. Lift under U6.FLOW_RETURN_SUBSTRATE when the row is seated"]
 fn value_inference_computed_callback_object_value_resolves_from_callback_body() {
     // TS7 contract: ComputedObjectValue =
     //   { id: "computed"; count: number; nested: { ready: boolean } }
@@ -401,17 +399,12 @@ export type TOpenComputed = ReturnType<typeof mOpenComputed>;
         as_const["n"].readonly,
         "and marks the literal's own member `readonly`"
     );
-    // KNOWN DIVERGENCE, asserted so it cannot drift unnoticed: the checker
-    // marks the SPREAD-contributed member `readonly` too, and this
-    // substrate does not — the spread program merges the source's members
-    // with the source's own modifiers. That is the existing
-    // spread-path `readonly` gap reached by one more shape, not a new
-    // class; the member set and every member TYPE are exact.
+    // The const context copies the SPREAD-contributed member `readonly`
+    // too, as the checker does.
     assert!(
-        !as_const["label"].readonly,
-        "the spread-contributed member does NOT yet take the enclosing `as const`'s \
-         `readonly` (checker: `readonly label: string`) — flip this assertion when the \
-         spread path carries the modifier"
+        as_const["label"].readonly,
+        "the spread-contributed member takes the enclosing `as const`'s `readonly` \
+         (checker: `readonly label: string`)"
     );
 
     let as_const_only = object_props(&resolve("TAsConstOnly"));
@@ -428,23 +421,16 @@ export type TOpenComputed = ReturnType<typeof mOpenComputed>;
     // and the spread's reduction — the things this test is about — are
     // exact either way.
     //
-    // RECORDED DIVERGENCE: the checker widens here (`{ ...base(), n: 1 }
-    // satisfies object` is `{ label: string; n: number }`, because
-    // `object` contextually types nothing) and pins where the target does
+    // The satisfies target contextually types the members: `{ ...base(),
+    // n: 1 } satisfies object` is `{ label: string; n: number }` because
+    // `object` contextually types nothing, while a literal target pins
     // (`{ mode: "dark" } satisfies { mode: "dark" | "light" }` is
     // `{ mode: "dark" }`, which `flow_return_catalog::
-    // flow_return_ob05_satisfies_preserves_value_shape` pins). Closing the
-    // split is the deferred contextual-widening contract, and it moves
-    // BOTH rows together.
+    // flow_return_ob05_satisfies_preserves_value_shape` pins).
     let satisfies = object_props(&resolve("TSatisfies"));
     assert_eq!(satisfies.keys().collect::<Vec<_>>(), vec!["label", "n"]);
     assert_primitive(&satisfies["label"].ty, PrimitiveName::String);
-    assert_eq!(
-        satisfies["n"].ty,
-        TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0)),
-        "`satisfies` preserves the member literal uniformly — the target-driven half of \
-         tsc's rule is the deferred contextual-widening contract"
-    );
+    assert_primitive(&satisfies["n"].ty, PrimitiveName::Number);
     assert!(
         !satisfies["n"].readonly,
         "`satisfies` is not a const assertion and mints no `readonly`"

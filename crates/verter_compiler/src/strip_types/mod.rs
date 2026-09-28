@@ -6,8 +6,8 @@
 //! files without a separate `oxc-transform` WASM dependency.
 
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
+use verter_parser::oxc_parse::Parser;
 
 pub(crate) mod typescript;
 
@@ -39,7 +39,11 @@ pub fn strip_types<'a>(source: &'a str, allocator: &'a Allocator) -> StripTypesR
     let parser = Parser::new(allocator, source, source_type);
     let parse_result = parser.parse();
 
-    let errors: Vec<String> = parse_result.errors.iter().map(|e| e.to_string()).collect();
+    let errors: Vec<String> = parse_result
+        .diagnostics
+        .iter()
+        .map(|e| e.to_string())
+        .collect();
 
     let mut code_transform = CodeTransform::new(source, allocator);
 

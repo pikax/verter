@@ -3,8 +3,8 @@
 
 use super::*;
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
+use verter_parser::oxc_parse::Parser;
 
 fn texts(source: &str) -> Vec<String> {
     collect_module_specifier_spans(source)
@@ -118,12 +118,12 @@ fn a_source_that_does_not_parse_cleanly_reports_no_answer() {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, recoverable, SourceType::tsx()).parse();
         assert!(
-            !parsed.panicked,
+            !parsed.fatal_error,
             "precondition: this source must RECOVER, or it tests the hard-failure \
              path over again"
         );
         assert!(
-            !parsed.errors.is_empty(),
+            !parsed.diagnostics.is_empty(),
             "precondition: and it must report an error, or there is nothing to \
              discriminate"
         );

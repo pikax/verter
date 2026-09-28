@@ -95,8 +95,8 @@ pub struct LoweredTypeDecl {
     /// The prepared projection classification FACT, classified at this lazy
     /// lowering (`PreparedTypeDecl::classify_projection`).
     pub projection_class: PreparedProjectionClassFact,
-    /// The producer-minted content-free heritage-base FACTS of a CLASS
-    /// body's Intersection fold, extracted ONCE at this lazy lowering from
+    /// The producer-minted content-free heritage-base FACTS of a CLASS or
+    /// INTERFACE body's Intersection fold, extracted ONCE at this lazy lowering from
     /// the same transient contributor bodies through the shared
     /// `verter_semantic` extractor (`collect_heritage_base_facts`) — the
     /// authored base name + `name_resolution` routing key + per-argument
@@ -104,7 +104,8 @@ pub struct LoweredTypeDecl {
     /// prepared-decl builder COPIES these facts
     /// (`PreparedTypeDecl.heritage_bases`); the dispatch resolves each head
     /// and lowers demanded arguments on demand — no query-time body re-walk.
-    /// Empty for non-class declarations and heritage-free classes.
+    /// Empty for other declarations and heritage-free classes and
+    /// interfaces.
     pub heritage_bases: Arc<[HeritageBaseFact]>,
     /// Whether this CLASS declaration authors a heritage clause the fact
     /// producer could NOT name — `class X extends mixin(K) {}`, whose base

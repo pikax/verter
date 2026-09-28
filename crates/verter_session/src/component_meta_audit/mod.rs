@@ -968,6 +968,9 @@ pub fn audit_key_for_node(
         SemanticNodeData::Primitive(p) => format!("Primitive({p:?})"),
         SemanticNodeData::Literal(LiteralValue::String(s)) => format!("Literal(\"{s}\")"),
         SemanticNodeData::Literal(other) => format!("Literal({other:?})"),
+        SemanticNodeData::EnumLiteral(literal) => {
+            format!("EnumLiteral({})", literal.printed_name())
+        }
         SemanticNodeData::Opaque(_) => format!("Opaque#{}", id.0),
         SemanticNodeData::Array { element, readonly } => {
             format!("Array{{element={},readonly={}}}", element.0, readonly)
@@ -1023,6 +1026,18 @@ pub fn audit_key_for_node(
             base.canonical_id,
             base.decl_name,
             args.len()
+        ),
+        SemanticNodeData::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            surface,
+        } => format!(
+            "ClassExpressionInstance({}::{}@{}[{}],surface={})",
+            identity.canonical_id,
+            identity.name,
+            identity.offset,
+            type_arguments.len(),
+            surface.0
         ),
         SemanticNodeData::MergedDecl { contributors } => {
             format!("MergedDecl[{}]", contributors.len())

@@ -223,7 +223,10 @@ pub(super) struct ReactiveStatementFacts {
 
 /// Collect the [`ReactiveStatementFacts`] of one `$:` labeled statement's BODY
 /// from its typed OXC AST.
-pub(super) fn reactive_statement_facts(body: &Statement<'_>) -> ReactiveStatementFacts {
+pub(super) fn reactive_statement_facts(
+    body: &Statement<'_>,
+    source: &str,
+) -> ReactiveStatementFacts {
     let mut scan = ReactiveFactsScan {
         scopes: ShadowStack::default(),
         mention_order: Vec::new(),
@@ -231,7 +234,9 @@ pub(super) fn reactive_statement_facts(body: &Statement<'_>) -> ReactiveStatemen
         assignments: Vec::new(),
         assignment_set: FxHashSet::default(),
     };
-    scan.visit_statement(body);
+    verter_parser::oxc_parse::with_span_stack(source, oxc_span::GetSpan::span(body), || {
+        scan.visit_statement(body)
+    });
     ReactiveStatementFacts {
         deps: scan
             .mention_order

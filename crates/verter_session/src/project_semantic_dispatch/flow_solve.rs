@@ -587,8 +587,95 @@ pub fn flow_return_result_contract_id() -> ResultContractId {
 #[derive(Debug, Clone)]
 pub struct FlowDemandRequest {
     pub query: SemanticQueryKey, pub input_basis: InputBasisId,
+    /// The bases of the nested evaluations around this one (empty for a
+    /// root demand): with `input_basis` the demand's exact observation
+    /// basis ([`FlowInputAncestry`]).
+    pub ancestry: FlowInputAncestry,
     pub resources: FlowResourcePolicy,
     pub additional_requirements: Arc<[FlowRequirement]>,
+}
+
+/// The input bases of the nested evaluations around one, innermost first.
+///
+/// A nested function's observation basis extends its parent's. Embedding
+/// the parent's whole canonical bytes in the child's made every level's
+/// basis as long as the nest above it — the square of the nesting across
+/// the nest. The child's own `InputBasisId` names its parent by digest
+/// only, and the parent's basis rides here, shared with every sibling:
+/// two bases are equal when their own bytes are and their ancestries are,
+/// level by level, so the identity stays exact (a digest collision between
+/// two parents still tells them apart).
+#[derive(Clone, Default)]
+pub struct FlowInputAncestry(Option<Arc<FlowAncestryLink>>);
+
+/// One enclosing evaluation's basis and the ones around it.
+struct FlowAncestryLink {
+    basis: InputBasisId,
+    outer: FlowInputAncestry,
+}
+
+impl FlowInputAncestry {
+    /// This ancestry with `basis` (the evaluation directly around the new
+    /// one) added innermost.
+    #[must_use]
+    pub fn with(&self, basis: InputBasisId) -> Self {
+        Self(Some(Arc::new(FlowAncestryLink {
+            basis,
+            outer: self.clone(),
+        })))
+    }
+
+    /// The bases, innermost first.
+    fn links(&self) -> impl Iterator<Item = &FlowAncestryLink> {
+        std::iter::successors(self.0.as_deref(), |link| link.outer.0.as_deref())
+    }
+}
+
+impl PartialEq for FlowInputAncestry {
+    fn eq(&self, other: &Self) -> bool {
+        let (mut left, mut right) = (self.0.as_ref(), other.0.as_ref());
+        loop {
+            match (left, right) {
+                (None, None) => return true,
+                (Some(l), Some(r)) => {
+                    // A shared link shares the rest of the ancestry.
+                    if Arc::ptr_eq(l, r) {
+                        return true;
+                    }
+                    if l.basis != r.basis {
+                        return false;
+                    }
+                    (left, right) = (l.outer.0.as_ref(), r.outer.0.as_ref());
+                }
+                _ => return false,
+            }
+        }
+    }
+}
+
+impl Eq for FlowInputAncestry {}
+
+impl std::fmt::Debug for FlowInputAncestry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.links().map(|link| &link.basis))
+            .finish()
+    }
+}
+
+/// An ancestry is as long as the nest it records, and the derived drop
+/// would release it a native level per link: the links this ancestry
+/// solely owns are released from this loop.
+impl Drop for FlowInputAncestry {
+    fn drop(&mut self) {
+        let mut next = self.0.take();
+        while let Some(link) = next {
+            next = match Arc::try_unwrap(link) {
+                Ok(mut link) => link.outer.0.take(),
+                Err(_) => None,
+            };
+        }
+    }
 }
 
 /// The complete basis a flow solve is bound to: a replay under any other
@@ -598,6 +685,8 @@ pub struct FlowDemandRequest {
 pub struct FlowDemandBasis {
     pub(crate) graph_body: FlowSliceFunctionKey,
     pub query: SemanticQueryKey, pub input_basis: InputBasisId, pub result_contract: ResultContractId,
+    /// The observation bases of the evaluations around this one.
+    pub ancestry: FlowInputAncestry,
 }
 
 /// The subject of one flow demand: the demanded return-projection path in
@@ -925,6 +1014,7 @@ fn require_retained_selection_of_bound_graph(
     let origins_in_range = selection.origins().iter().all(|origin| match origin {
         SliceOrigin::Return(site) => site.index() < bundle.skeleton.return_sites.len(),
         SliceOrigin::Expr(site) => site.index() < bundle.skeleton.expr_sites.len(),
+        SliceOrigin::Parameter(binding) => binding.index() < bundle.skeleton.bindings.len(),
     });
     if !origins_in_range {
         return Err(FlowDemandPlanError::SelectionOutOfRange);
@@ -1008,6 +1098,7 @@ pub(crate) fn prepare_flow_execution(
             query: request.query.clone(),
             input_basis: request.input_basis.clone(),
             result_contract: key.result_contract.clone(),
+            ancestry: request.ancestry.clone(),
         },
         subject,
         structural_selection: retained.selection().clone(),
@@ -1260,15 +1351,16 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                 }
             }
             F::Capture => {
-                // Nested function and class DECLARATIONS anchor on the
-                // declared binding identity. The capture SET of a nested
-                // body is beyond this skeleton's authority (nested bodies
-                // carry no reads here, and no index record serves a class
-                // member), so each such subject installs as the family's
-                // accepted typed gap — never an omission.
+                // A class DECLARATION anchors on the declared binding
+                // identity. Its capture SET is beyond this skeleton's
+                // authority (no index record serves a class member), so the
+                // subject installs as the family's accepted typed gap —
+                // never an omission. A function declaration's captures ride
+                // every site that reads it, as that site's own closure
+                // below.
                 for node in &selected {
                     let FlowNodeKind::Binding(binding) = graph.node_kind(*node) else { continue };
-                    if !matches!(bundle.skeleton.binding(binding).kind, SkeletonBindingKind::NestedFunction | SkeletonBindingKind::Class) { continue; }
+                    if !matches!(bundle.skeleton.binding(binding).kind, SkeletonBindingKind::Class) { continue; }
                     let id = push(
                         FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
                         FlowObligationOrigin::Expansion(E::Capture),

@@ -70,8 +70,8 @@ pub fn expr_has_call(
 ) -> Result<bool, ()> {
     let alloc = Allocator::default();
     let wrapped = format!("({source})");
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(());
     }
     let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
@@ -321,8 +321,8 @@ pub(super) fn expr_has_binding_impurity(
 ) -> Result<bool, ()> {
     let alloc = Allocator::default();
     let wrapped = format!("({source})");
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    let parsed = verter_parser::oxc_parse::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(());
     }
     let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {

@@ -49,6 +49,10 @@ self_cell::self_cell!(
 pub(crate) struct ParsedEvalProgram {
     cell: Rc<ParsedEvalProgramCell>,
     functions: OnceCell<IndexedProgramFunctionsCell>,
+    /// The program's nesting scan, shared by every walk stack over it
+    /// (each nested function's skeleton and slice content), computed at
+    /// most once and dropped with the program.
+    nesting: OnceCell<verter_semantic::analysis::walk_stack::Nesting>,
     /// The parse produced RECOVERABLE errors (`ParserReturn::errors` was
     /// non-empty). An error-recovered AST can silently DROP real code, so
     /// provers of non-usage (e.g. macro-usage liveness) must fail open when
@@ -68,7 +72,7 @@ impl ParsedEvalProgram {
                 source_type,
             },
             |owner| {
-                let result = oxc_parser::Parser::new(
+                let result = verter_parser::oxc_parse::Parser::new(
                     &owner.allocator,
                     owner.source.as_ref(),
                     owner.source_type,
@@ -78,8 +82,8 @@ impl ParsedEvalProgram {
                     ..oxc_parser::ParseOptions::default()
                 })
                 .parse();
-                panicked = result.panicked;
-                had_errors = !result.errors.is_empty();
+                panicked = result.fatal_error;
+                had_errors = !result.diagnostics.is_empty();
                 // The retained arena is the dominant per-file live footprint;
                 // `used_bytes()` walks the chunk list, which is why the amount
                 // must never be evaluated when attribution is off.
@@ -91,6 +95,7 @@ impl ParsedEvalProgram {
         (!panicked).then_some(Self {
             cell: Rc::new(cell),
             functions: OnceCell::new(),
+            nesting: OnceCell::new(),
             had_errors,
         })
     }
@@ -131,6 +136,14 @@ impl ParsedEvalProgram {
 
     /// Execute a pure lowerer against one exact retained function address.
     /// The higher-ranked callback returns only owned output, never an arena borrow.
+    /// The containment of walks over this program, sharing its one scan.
+    pub(crate) fn walk_stack(&self) -> verter_semantic::analysis::walk_stack::ProgramWalkStack<'_> {
+        verter_semantic::analysis::walk_stack::ProgramWalkStack::sharing(
+            self.borrow_dependent(),
+            &self.nesting,
+        )
+    }
+
     pub(crate) fn with_indexed_function<R>(
         &self,
         entry: &FunctionProgramEntry,
@@ -149,13 +162,16 @@ impl ParsedEvalProgram {
         Some(lower(retained.nodes.get(&entry.key)?, indexed))
     }
 
-    pub(crate) fn with_indexed_call<R>(
+    /// Lower the indexed call, `new` or tagged template addressed by `span`.
+    pub(crate) fn with_indexed_call_site<R>(
         &self,
         span: verter_span::Span,
-        lower: impl for<'a> FnOnce(&'a oxc_ast::ast::CallExpression<'a>) -> R,
+        lower: impl for<'a> FnOnce(
+            verter_semantic::analysis::function_program::IndexedCallSite<'a>,
+        ) -> R,
     ) -> Option<R> {
         let cell = self.functions.get()?;
-        Some(lower(cell.borrow_dependent().nodes.call(span)?))
+        Some(lower(cell.borrow_dependent().nodes.call_site(span)?))
     }
 
     /// Whether the parse recovered from errors (`ParserReturn::errors`

@@ -19,6 +19,7 @@
 //! | [`UnsupportedSurface`] | `UnrepresentableSurface`, `UnrepresentableSurfaceMember` | Typed unsupported-surface / unsupported-member result, retaining its existing sentinel output semantics. |
 //! | [`Partial`] | `BudgetExceeded`, `Cancelled`, `UnstableState` | Typed partial — `ReturnOnly`, never shared, never warmed. |
 //! | [`Failure`] | `Other`, `UnsupportedIntrinsic`, `ValueDomainMismatch` | Genuine typed failure (the §22 error type). |
+//! | [`CheckerRecovery`] | `CheckerRecovery` | The checker's own error type after a diagnostic it recovers from: the §22 error type, raised AS its recovery (`any`) — never a failure shell, never absence. |
 //!
 //! The classification also carries the PRECISE typed unresolved reason a
 //! consumer publishes, because the disposition classes are deliberately
@@ -34,6 +35,7 @@
 //! [`UnsupportedSurface`]: QueryErrorDisposition::UnsupportedSurface
 //! [`Partial`]: QueryErrorDisposition::Partial
 //! [`Failure`]: QueryErrorDisposition::Failure
+//! [`CheckerRecovery`]: QueryErrorDisposition::CheckerRecovery
 
 use verter_type_expr::{ClosedLiteralDomainUnresolvedReason, ReactiveWrapperUnresolvedReason};
 
@@ -63,25 +65,35 @@ pub(crate) enum QueryErrorDisposition {
     Partial,
     /// A genuine typed failure — the §22 error type.
     Failure,
+    /// The checker's own error type after a diagnostic it recovers from. The
+    /// §22 error type like [`Failure`](Self::Failure) — it dominates the
+    /// absorbers and relates like `any` — but a COMPLETE answer: it raises as
+    /// the diagnostic's recovery, and a boundary publishes it as a value.
+    CheckerRecovery,
 }
 
 impl QueryErrorDisposition {
     /// Whether this disposition is the §22 ERROR TYPE — a genuine "this type
     /// IS an error" result, as opposed to a control / recursion / partial
-    /// signal. Exactly [`Failure`](Self::Failure).
+    /// signal. Exactly [`Failure`](Self::Failure) and
+    /// [`CheckerRecovery`](Self::CheckerRecovery).
     #[must_use]
     pub(crate) const fn is_error_type(self) -> bool {
-        matches!(self, Self::Failure)
+        matches!(self, Self::Failure | Self::CheckerRecovery)
     }
 
     /// Whether an interned `Opaque` carrier with this disposition would
-    /// materialize as a failure `Unknown { raw }` shell. The two legitimately
-    /// publishable carriers — a recursive reference and a declaration
-    /// placeholder — are NOT failures: they raise to real published shapes
-    /// (`TypeExpr::RecursiveRef` and the named `Ref` shell respectively).
+    /// materialize as a failure `Unknown { raw }` shell. The legitimately
+    /// publishable carriers — a recursive reference, a declaration
+    /// placeholder and a checker recovery — are NOT failures: they raise to
+    /// real published shapes (`TypeExpr::RecursiveRef`, the named `Ref` shell
+    /// and the recovery type respectively).
     #[must_use]
     pub(crate) const fn is_unknown_materializing(self) -> bool {
-        !matches!(self, Self::RecursionCarrier | Self::ExpandableDecl)
+        !matches!(
+            self,
+            Self::RecursionCarrier | Self::ExpandableDecl | Self::CheckerRecovery
+        )
     }
 }
 
@@ -217,6 +229,12 @@ pub(crate) const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
         | QueryError::ForeignSemanticOperand => (
             QueryErrorDisposition::Failure,
             ClosedLiteralDomainUnresolvedReason::Fault,
+        ),
+        // The checker's recovered error type reads as `any`: a complete
+        // answer, but not a closed literal domain.
+        QueryError::CheckerRecovery(_) => (
+            QueryErrorDisposition::CheckerRecovery,
+            ClosedLiteralDomainUnresolvedReason::Unsupported,
         ),
     };
     QueryErrorClass {

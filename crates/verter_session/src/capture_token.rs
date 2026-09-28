@@ -357,6 +357,11 @@ fn next_request_id() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// The counter of `SemanticGraphStore::entries` mutex acquisitions: the
+/// one host-wide lock every memo read and publish takes, so the count a
+/// query adds must not depend on how many callers run beside it.
+pub(crate) const ENTRIES_MUTEX_ACQUISITIONS: &str = "semantic_memo_entries_mutex_acquisitions";
+
 /// Per-request capture state — owned by an `Arc` shared between the
 /// guard and the thread-local binding so the guard's drop can rebind
 /// the cell back to `None` even if production code held a clone.

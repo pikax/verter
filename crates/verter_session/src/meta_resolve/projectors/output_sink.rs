@@ -1252,6 +1252,7 @@ fn materialize_output_source(
                             // representation. That is `UnraisableSource`.
                             QueryErrorDisposition::RecursionCarrier
                             | QueryErrorDisposition::ExpandableDecl
+                            | QueryErrorDisposition::CheckerRecovery
                             // Optional absence never reaches here (it is
                             // `Ok(None)`); if the raise contract ever changed,
                             // absence is still the correct answer for it.

@@ -109,6 +109,57 @@ impl DeferredCallable {
         }
     }
 
+    /// The parts as identity inputs for the representation-only stable key,
+    /// the same fields the derived `Eq` / `Hash` read. Visible to the
+    /// `semantic_query` layer only, never to a consumer: a decision that
+    /// reads the parts still presents a sealed witness through
+    /// [`Self::parts`].
+    #[must_use]
+    pub(super) fn stable_identity_parts(&self) -> DeferredCallableParts<'_> {
+        DeferredCallableParts {
+            kind: self.kind,
+            params: &self.params,
+            type_parameters: &self.type_parameters,
+            occurrence: &self.occurrence,
+            return_carrier: &self.return_carrier,
+        }
+    }
+
+    /// Visit every child node the carrier holds (parameter types, binder
+    /// declarations and their bounds, a declared return carrier). Topology
+    /// only, for structural invariants such as the arena's: no decision
+    /// reads the parts through it.
+    pub(crate) fn for_each_child_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        self.params.iter().for_each(|param| visit(param.ty));
+        for decl in self.type_parameters.iter() {
+            visit(decl.param);
+            decl.constraint.into_iter().for_each(&mut visit);
+            decl.default.into_iter().for_each(&mut visit);
+        }
+        if let SignatureReturnCarrier::Declared(node) = &self.return_carrier {
+            visit(*node);
+        }
+    }
+
+    /// A carrier from explicit parts, for this crate's unit tests only.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn from_parts_for_tests(
+        kind: SignatureKind,
+        params: Arc<[FunctionParam]>,
+        type_parameters: Arc<[TypeParamDecl]>,
+        occurrence: SignatureNodeOccurrence,
+        return_carrier: SignatureReturnCarrier,
+    ) -> Self {
+        Self {
+            kind,
+            params,
+            type_parameters,
+            occurrence,
+            return_carrier,
+        }
+    }
+
     /// The canonical that declares this callable's served position.
     ///
     /// Witness-free on purpose: the seal protects the composed parameters
@@ -152,6 +203,9 @@ impl DeferredCallable {
             return_carrier: self.return_carrier,
             signature_span: None,
             return_type_span: None,
+            // A body-derived return carries no authored predicate.
+            predicate: None,
+            is_abstract: false,
         }
     }
 }

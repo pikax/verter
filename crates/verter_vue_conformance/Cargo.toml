@@ -24,6 +24,7 @@ hex = "0.4.3"
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
+verter_parser = { path = "../verter_parser" }
 oxc_semantic = { workspace = true }
 oxc_span = { workspace = true }
 

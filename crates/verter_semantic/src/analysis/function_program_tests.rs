@@ -9,11 +9,11 @@ use verter_type_expr::facts::FunctionPartIdentity;
 fn index_of(source: &str) -> FunctionProgramIndex {
     let allocator = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::ts();
-    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+    let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, source_type).parse();
     assert!(
-        ret.errors.is_empty(),
+        ret.diagnostics.is_empty(),
         "fixture must parse: {:?}",
-        ret.errors
+        ret.diagnostics
     );
     let owners = TopLevelOwnerTable::ordinary_file(ret.program.body.len());
     build_function_program_index(&ret.program, source, &owners, Arc::from("/test.ts"))
@@ -142,7 +142,9 @@ fn nested_value_frames_have_exact_indexed_locators() {
     let index = index_of(source);
     assert_eq!(index.entries.len(), 4, "every nested callable owns a frame");
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     for entry in index.entries.iter() {
         let resolved = resolve_function_node(&parsed.program, &entry.locator)
             .expect("indexed locator resolves");
@@ -322,12 +324,16 @@ fn flow_binding_map_is_bijective_for_value_bindings() {
     let index = index_of(source);
     let entry = entry_of(&index, "inventory");
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
     let Statement::FunctionDeclaration(function) = &parsed.program.body[0] else {
         panic!("function fixture");
     };
-    let skeleton =
-        build_function_body_skeleton(&FunctionBodySource::from_function(function).unwrap());
+    let skeleton = build_function_body_skeleton(
+        &FunctionBodySource::from_function(function).unwrap(),
+        source,
+    );
     let map =
         FlowBindingMap::build(&skeleton, &entry.bindings, &entry.key, entry.span.start).unwrap();
     assert_eq!(map.value_count(), entry.bindings.len());
@@ -1098,6 +1104,7 @@ function outer() {
             kind: FunctionBindingKind::Const,
             defining_function: outer.key.clone(),
             binding_slot: 0,
+            evolving_array: false,
         }],
         "the nested body captures `x` from the parent frame (defining frame + slot)"
     );
@@ -1139,6 +1146,7 @@ function outer() {
             kind: FunctionBindingKind::Const,
             defining_function: entry_of(&index, "outer").key.clone(),
             binding_slot: 0,
+            evolving_array: false,
         }],
         "the callback captures the enclosing `x`"
     );
@@ -1205,6 +1213,7 @@ function outer() {
             kind: FunctionBindingKind::NestedFunction,
             defining_function: entry_of(&index, "outer").key.clone(),
             binding_slot: 0,
+            evolving_array: false,
         }],
         "the hoisted nested name is a capture of kind NestedFunction"
     );
@@ -1337,11 +1346,12 @@ namespace N {
 }
 "#;
     let allocator = oxc_allocator::Allocator::default();
-    let ret = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+        .parse();
     assert!(
-        ret.errors.is_empty(),
+        ret.diagnostics.is_empty(),
         "fixture must parse: {:?}",
-        ret.errors
+        ret.diagnostics
     );
     let owners = TopLevelOwnerTable::ordinary_file(ret.program.body.len());
     let index = build_function_program_index(&ret.program, source, &owners, Arc::from("/test.ts"));
@@ -1358,7 +1368,7 @@ namespace N {
 
     let inner = entry_of(&index, "N.M.make");
     assert_eq!(
-        inner.locator.descent.as_ref(),
+        inner.locator.descent.to_vec().as_slice(),
         &[
             FunctionDescentStep::NamespaceMember {
                 statement_ordinal: 3
@@ -1463,8 +1473,10 @@ fn exact_value_function_lookup_does_not_scan_sibling_functions() {
 fn retained_function_addresses_preserve_exact_locator_metadata() {
     let source = "namespace N { export const arrow = () => 0; export class Box<T> { method<U>(x:T) { return () => x; } field = () => 1; } } const named = function internal(){ return named(); }; const obj = { method() { return () => 2; } }; function root() { return () => ({ method(){ return () => 3; } }); }";
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
-    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse();
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let (index, nodes) = build_function_program_index_with_nodes(
         &parsed.program,
@@ -1513,4 +1525,237 @@ fn class_evaluation_occurrences_are_indexed_without_promoting_static_locals() {
             .any(|binding| binding.name.as_ref() == "y"),
         "static-block locals never enter the function's runtime inventory"
     );
+}
+
+/// Every bare `typeof name` in a frame's type positions is recorded with
+/// the position that reads it — the parameter list, a declarator's
+/// annotation (named by the declared binding), or a type an expression
+/// carries — and resolves through the frame's lexical scope like any other
+/// value-space name. A parameter annotated with a bare type reference
+/// records the name it spells.
+#[test]
+fn type_positions_record_their_typeof_names_and_bare_parameter_annotations() {
+    let source = r#"
+function f() { return 1; }
+function g() { return "g"; }
+function h() { return true; }
+export function reader<T>(p: ReturnType<typeof f>, q: T, r: T[]) {
+  let a!: ReturnType<typeof g>;
+  const local = 1;
+  let b!: typeof local;
+  const { c } = { c: true } as { c: ReturnType<typeof h> };
+  const inner = (y: ReturnType<typeof f>) => y;
+  return [a, b, c, p, q, r, inner];
+}
+"#;
+    let index = index_of(source);
+    let entry = entry_of(&index, "reader");
+    let at = |text: &str| {
+        let start = source.find(text).expect("fixture text") as u32;
+        verter_span::Span::new(start, start + 1)
+    };
+    let queries: Vec<(&str, FunctionTypeQueryPosition, bool)> = entry
+        .type_queries
+        .iter()
+        .map(|query| {
+            (
+                query.name.as_ref(),
+                query.position,
+                matches!(query.binding, FunctionReferenceBinding::Free),
+            )
+        })
+        .collect();
+    assert_eq!(
+        queries,
+        vec![
+            ("f", FunctionTypeQueryPosition::Parameter, true),
+            ("g", FunctionTypeQueryPosition::Declarator(at("a!")), true),
+            ("local", FunctionTypeQueryPosition::Declarator(at("b!")), false),
+            ("h", FunctionTypeQueryPosition::Expression, true),
+        ],
+        "the frame's type positions in source order; a nested function's own signature belongs to its own frame"
+    );
+    let annotations: Vec<Option<&str>> = entry
+        .params
+        .iter()
+        .map(|param| param.annotation_reference.as_deref())
+        .collect();
+    assert_eq!(annotations, vec![None, Some("T"), None]);
+}
+
+#[test]
+fn every_class_records_the_members_its_body_declares() {
+    let source = "class A { x = 1; m(): { p: number } { return { p: 1 }; } }\n\
+                  function f() { class L extends A { y = 2 } return class { constructor(protected z: number, w: number) {} }; }";
+    let index = index_of(source);
+    let span_of = |text: &str| {
+        let start = source.find(text).expect("fixture text") as u32;
+        verter_span::Span::new(start, start + text.len() as u32)
+    };
+    let a = index
+        .class_declaring_member(span_of("x = 1;"))
+        .expect("a class element");
+    assert!(!a.expression && !a.has_heritage);
+    assert!(!index.class_encloses(a.span));
+    assert_eq!(
+        index.class_declaring_member(span_of("m(): { p: number } { return { p: 1 }; }")),
+        Some(a)
+    );
+    assert_eq!(
+        index.class_declaring_member(span_of("p: number")),
+        None,
+        "a type literal's member is no class member"
+    );
+    let local = index
+        .class_declaring_member(span_of("y = 2"))
+        .expect("a local class element");
+    assert!(!local.expression && local.has_heritage);
+    let expression = index
+        .class_declaring_member(span_of("protected z: number"))
+        .expect("a property-declaring constructor parameter");
+    assert!(expression.expression && !expression.has_heritage);
+    assert_eq!(
+        index.class_declaring_member(span_of("w: number")),
+        None,
+        "a plain parameter declares no property"
+    );
+}
+
+/// Callables nested 10,000 deep index on a 1 MiB thread: discovery walks
+/// the nest from an explicit stack of the bodies it is in, and each nested
+/// callable's locator extends its parent's descent by one shared step, so
+/// the nest's locators cost a step each, not a copy of the path above.
+#[test]
+fn callables_nested_10000_deep_index_on_a_small_stack() {
+    let (entries, deepest, shared) = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let source = format!("export const v = {}1;", "() => ".repeat(10_000));
+            let index = index_of(&source);
+            let deepest = index
+                .entries
+                .iter()
+                .map(|entry| entry.locator.descent.len())
+                .max()
+                .unwrap_or(0);
+            let shared = index.entries.iter().all(|entry| {
+                entry.lexical_parent.as_deref().is_none_or(|parent| {
+                    let parent = index.get(parent).expect("the parent is indexed").entry();
+                    entry.locator.descent.extends(&parent.locator.descent)
+                })
+            });
+            (index.entries.len(), deepest, shared)
+        })
+        .expect("spawn the indexing thread")
+        .join()
+        .expect("the index builds");
+    assert_eq!((entries, deepest, shared), (10_000, 10_000, true));
+}
+
+/// The stable and exact hashes of every entry of `source`, in entry order.
+fn hashes_of(
+    source: &str,
+) -> Vec<(
+    crate::analysis::types::Hash16,
+    Option<crate::analysis::types::Hash16>,
+)> {
+    index_of(source)
+        .entries
+        .iter()
+        .map(|entry| (entry.flow_body_stable_hash, entry.flow_body_exact_hash))
+        .collect()
+}
+
+/// A function nested in a function is folded into the one around it from
+/// its own hash, not walked again: the same source always fingerprints the
+/// same, an edit in the innermost body changes every function around it,
+/// the enclosing function stays alpha-normalized over the names its nested
+/// function reads from it, and which of its bindings a nested function
+/// reads stays in its hash.
+#[test]
+fn nested_function_hashes_fold_into_the_function_around_them() {
+    let source = "export function flow(a: number) { return (b: number) => () => a + b + 1; }";
+    assert_eq!(
+        hashes_of(source),
+        hashes_of(source),
+        "identical fingerprints"
+    );
+    let edited =
+        hashes_of("export function flow(a: number) { return (b: number) => () => a + b + 2; }");
+    let base = hashes_of(source);
+    assert_eq!(base.len(), 3);
+    for (before, after) in base.iter().zip(&edited) {
+        assert_ne!(before.0, after.0, "the stable hash sees the nested edit");
+        assert_ne!(before.1, after.1, "the exact hash sees the nested edit");
+    }
+    assert_eq!(
+        hash_of(
+            "export function flow(a: number) { return () => a + 1; }",
+            "flow"
+        ),
+        hash_of(
+            "export function flow(z: number) { return () => z + 1; }",
+            "flow"
+        ),
+        "renaming a binding a nested function reads keeps the enclosing hash"
+    );
+    assert_ne!(
+        hash_of(
+            "export function flow(x: number, y: number) { return () => x; }",
+            "flow"
+        ),
+        hash_of(
+            "export function flow(y: number, x: number) { return () => x; }",
+            "flow"
+        ),
+        "which binding the nested function reads is part of the hash"
+    );
+}
+
+/// Folding the hashes of a nest of functions folds each function's own
+/// syntax once: the expressions folded grow with the nest's depth, where
+/// folding every nested function again for each function around it grew
+/// them with its square.
+#[test]
+fn nested_function_hashes_fold_each_function_once() {
+    let folded = [100, 200, 300].map(|depth| {
+        crate::analysis::function_program_hash::hash_probe::take();
+        index_of(&format!("export const v = {}1;", "() => ".repeat(depth)));
+        crate::analysis::function_program_hash::hash_probe::take()
+    });
+    assert_eq!(
+        folded[1] - folded[0],
+        folded[2] - folded[1],
+        "each hundred nested functions fold the same expressions: {folded:?}"
+    );
+}
+
+/// A descent carries its whole path's hash and whether any step enters a
+/// namespace block, folded as each step is added: descents built apart
+/// with the same steps hash alike, one that differs in any step (the first
+/// included) does not, and a namespace step anywhere is seen from every
+/// extension.
+#[test]
+fn descents_carry_their_hash_and_namespace_steps() {
+    use std::hash::BuildHasher;
+    let build = |first: FunctionDescentStep| {
+        (0..10_000u32).fold(FunctionDescent::new().then(first), |descent, ordinal| {
+            descent.then(FunctionDescentStep::NestedCallable { ordinal })
+        })
+    };
+    let hash = |descent: &FunctionDescent| rustc_hash::FxBuildHasher.hash_one(descent);
+    let namespaced = build(FunctionDescentStep::NamespaceMember {
+        statement_ordinal: 0,
+    });
+    let again = build(FunctionDescentStep::NamespaceMember {
+        statement_ordinal: 0,
+    });
+    let other = build(FunctionDescentStep::BodyStatement {
+        statement_ordinal: 0,
+    });
+    assert_eq!(namespaced, again);
+    assert_eq!(hash(&namespaced), hash(&again));
+    assert_ne!(hash(&namespaced), hash(&other));
+    assert!(namespaced.has_namespace_member());
+    assert!(!other.has_namespace_member());
 }

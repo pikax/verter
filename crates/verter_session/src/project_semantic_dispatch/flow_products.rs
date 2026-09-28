@@ -326,6 +326,12 @@ impl FlowProductStore {
             }))
             .chain(self.values.range((4, 0)..).map(runtime))
     }
+    /// Whether two continuations of the same execution hold equal products
+    /// in every runtime domain — the loop fixed point's convergence test.
+    #[must_use]
+    pub fn same_products(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.scope, &other.scope) && self.values == other.values
+    }
     /// Structural sharing is observable only to the hermetic performance proof.
     #[cfg(any(test, feature = "test-support"))]
     pub fn shares_continuation_storage(&self, other: &Self) -> bool {
@@ -1048,12 +1054,22 @@ pub use super::canonical_algebra::{LiteralFreshness, LiteralProvenance, LiteralP
 
 /// The canonical semantic-type algebra a product join constructs every
 /// semantic composite through. This substrate never assembles a union or
-/// an intersection itself; the sole production implementor forwards to the
-/// dispatch's canonical union authority, which deposits the construction's
-/// evidence on the dispatch's own rails.
+/// an intersection itself; the sole production implementor
+/// ([`DispatchFlowAlgebra`]) forwards to the dispatch's canonical union
+/// authority under the frame's own null algebra, which deposits the
+/// construction's evidence on the dispatch's own rails.
 pub trait FlowSemanticAlgebra {
     /// The canonical union of `members`.
     fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite;
+    /// The canonical union of `members` under SUBTYPE reduction — the
+    /// checker's branch join once an evolving array meets a path holding
+    /// an ordinary value.
+    fn subtype_union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite;
+    /// The final type of an EVOLVING array holding `elements` — `any[]`
+    /// with none, else the array of their subtype-reduced union (the
+    /// checker's `createFinalArrayType`, read as `any[]` where it is
+    /// `autoArrayType`).
+    fn evolving_array(&self, elements: &[EvolvingElement]) -> FlowAlgebraComposite;
     /// One bounded canonical-owner inspection across both inputs and result.
     fn literal_provenance(
         &self,
@@ -1062,16 +1078,31 @@ pub trait FlowSemanticAlgebra {
     ) -> Result<LiteralProvenanceResult, FlowGap>;
 }
 
-impl FlowSemanticAlgebra for super::ProjectSemanticDispatch<'_> {
+/// The production [`FlowSemanticAlgebra`]: the dispatch's canonical union
+/// authority under the `null` / `undefined` algebra of the frame whose
+/// products join — a branch merge in a function whose project runs with
+/// `strictNullChecks` off erases the nullable arms like every other union
+/// of that function.
+pub struct DispatchFlowAlgebra<'a, 'd> {
+    /// The dispatch whose canonical authority constructs the union.
+    pub dispatch: &'a super::ProjectSemanticDispatch<'d>,
+    /// The joining frame's null algebra.
+    pub nullability: crate::semantic_query::NullabilityPolicy,
+}
+
+impl FlowSemanticAlgebra for DispatchFlowAlgebra<'_, '_> {
     fn literal_provenance(
         &self,
         inputs: &[LiteralProvenance<'_>],
         result: SemanticNodeId,
     ) -> Result<LiteralProvenanceResult, FlowGap> {
-        let (membership, evidence) =
-            super::canonical_algebra::inspect_literal_provenance(self.graph(), inputs, result);
+        let (membership, evidence) = super::canonical_algebra::inspect_literal_provenance(
+            self.dispatch.graph(),
+            inputs,
+            result,
+        );
         let incomplete = evidence.incomplete;
-        self.deposit_canonical_evidence(evidence);
+        self.dispatch.deposit_canonical_evidence(evidence);
         if incomplete {
             Err(FlowGap::UnmodeledExpression)
         } else {
@@ -1079,13 +1110,25 @@ impl FlowSemanticAlgebra for super::ProjectSemanticDispatch<'_> {
         }
     }
     fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
-        let composite = super::canonical_algebra::canonical_union(self.graph(), members);
+        let composite = super::canonical_algebra::intern_ordered_union(
+            self.dispatch.graph(),
+            members,
+            self.nullability,
+        );
         let incomplete = composite.evidence.incomplete;
-        self.deposit_canonical_evidence(composite.evidence);
+        self.dispatch.deposit_canonical_evidence(composite.evidence);
         FlowAlgebraComposite {
             node: composite.node,
             incomplete,
         }
+    }
+    fn subtype_union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
+        self.dispatch
+            .subtype_reduced_union(members, self.nullability)
+    }
+    fn evolving_array(&self, elements: &[EvolvingElement]) -> FlowAlgebraComposite {
+        self.dispatch
+            .finalize_evolving_array(elements, self.nullability)
     }
 }
 
@@ -1112,10 +1155,43 @@ impl FlowSemanticAlgebra for GraphSemanticAlgebra<'_> {
         }
     }
     fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
-        let composite = super::canonical_algebra::canonical_union(self.0, members);
+        let composite = super::canonical_algebra::intern_ordered_union(
+            self.0,
+            members,
+            crate::semantic_query::NullabilityPolicy::Strict,
+        );
         FlowAlgebraComposite {
             node: composite.node,
             incomplete: composite.evidence.incomplete,
+        }
+    }
+    /// A bare graph has no relation authority: the plain union.
+    fn subtype_union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
+        self.union(members)
+    }
+    /// A bare graph has no relation authority: the array of the plain
+    /// union (`any[]` with no element).
+    fn evolving_array(&self, elements: &[EvolvingElement]) -> FlowAlgebraComposite {
+        let nodes: Vec<SemanticNodeId> = elements.iter().map(|element| element.node).collect();
+        let element = match nodes.as_slice() {
+            [] => FlowAlgebraComposite {
+                node: self
+                    .0
+                    .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+                        crate::semantic_query::PrimitiveKind::Any,
+                    )),
+                incomplete: false,
+            },
+            _ => self.union(&nodes),
+        };
+        FlowAlgebraComposite {
+            node: self
+                .0
+                .intern_node(crate::semantic_query::SemanticNodeData::Array {
+                    element: element.node,
+                    readonly: false,
+                }),
+            incomplete: element.incomplete,
         }
     }
 }
@@ -1189,11 +1265,42 @@ pub enum WideningMembership {
 /// Predecessors arrive in the control interpreter's source/edge order;
 /// canonical semantic algebra owns structural deduplication and the final
 /// member representation. Literal widening provenance follows these values.
+///
+/// `widening_nullish` is the same kind of provenance for the checker's
+/// WIDENING `null` / `undefined` (the value of a bare `null` written to
+/// an auto-typed variable): it holds only when EVERY path's value is one.
+/// A path holding a declared nullable — or anything else — clears it,
+/// exactly as the checker's union of a widening and a non-widening
+/// `null` is the non-widening `null`.
+///
+/// An EVOLVING array (the checker's `autoArrayType` binding under
+/// `noImplicitAny`) additionally carries the element types its operations
+/// added along the path ([`Self::evolving_elements`]); its `united` value
+/// is the finalized array every ordinary read takes, and only an evolving
+/// operation or a join reads the elements.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReachingTypeProduct {
     contributors: Arc<[SemanticNodeId]>,
     united: Option<SemanticNodeId>,
     widening: Option<WideningMembership>,
+    widening_nullish: bool,
+    /// Whether some path reaching here carries no assignment at all — only
+    /// an auto-typed declaration without an initializer, which the
+    /// checker binds no assignment for.
+    declaration_only: bool,
+    evolving: Option<Arc<[EvolvingElement]>>,
+}
+
+/// One element type an EVOLVING array's operation added: the base type of
+/// the added value's literal, and whether it is the checker's widening
+/// `null` / `undefined` (which vanishes beside any other element, or reads
+/// `any` alone, with `strictNullChecks` off).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EvolvingElement {
+    /// The element type.
+    pub node: SemanticNodeId,
+    /// Whether the element is the widening nullable type.
+    pub widening_nullish: bool,
 }
 
 impl ReachingTypeProduct {
@@ -1205,7 +1312,56 @@ impl ReachingTypeProduct {
             contributors: Arc::from(vec![contributor].into_boxed_slice()),
             united: Some(contributor),
             widening: None,
+            widening_nullish: false,
+            declaration_only: false,
+            evolving: None,
         }
+    }
+
+    /// An EVOLVING array holding `elements`, whose finalized type is
+    /// `finalized` ([`FlowSemanticAlgebra::evolving_array`]).
+    #[must_use]
+    pub fn evolving(finalized: SemanticNodeId, elements: Arc<[EvolvingElement]>) -> Self {
+        Self {
+            evolving: Some(elements),
+            ..Self::of(finalized)
+        }
+    }
+
+    /// The element types of an EVOLVING array, in the order its operations
+    /// added them; `None` for every other value.
+    #[must_use]
+    pub fn evolving_elements(&self) -> Option<&[EvolvingElement]> {
+        self.evolving.as_deref()
+    }
+
+    /// Mark whether this reaching value is the checker's widening
+    /// nullable type.
+    #[must_use]
+    pub fn with_widening_nullish(mut self, widening_nullish: bool) -> Self {
+        self.widening_nullish = widening_nullish;
+        self
+    }
+
+    /// Whether every path's value is the checker's widening nullable type.
+    #[must_use]
+    pub fn widening_nullish(&self) -> bool {
+        self.widening_nullish
+    }
+
+    /// Mark this value as an auto-typed declaration's own, with no
+    /// assignment behind it.
+    #[must_use]
+    pub fn declaration_only(mut self) -> Self {
+        self.declaration_only = true;
+        self
+    }
+
+    /// Whether some path reaching here carries no assignment, only an
+    /// auto-typed declaration without an initializer.
+    #[must_use]
+    pub fn reaches_declaration_only(&self) -> bool {
+        self.declaration_only
     }
 
     /// Literal membership retained by this reaching value.
@@ -1276,6 +1432,11 @@ pub struct FlowNarrowingFact {
     pub path: Arc<[Arc<str>]>,
     /// The type the guard narrows it to.
     pub narrowed_to: SemanticNodeId,
+    /// The compared literal, when the narrow took it from the compared
+    /// VALUE rather than from the reference's own constituents (`x ===
+    /// "s"` over `x: string` reads `"s"`): the checker's fresh literal
+    /// type, which widens wherever a bare literal would.
+    pub fresh_literal: Option<SemanticNodeId>,
 }
 
 /// Identity-only ordering: display names and binding-kind metadata cannot
@@ -1289,8 +1450,18 @@ fn narrowing_order(fact: &FlowNarrowingFact) -> (&FunctionProgramKey, u32, &[Arc
     )
 }
 
-/// The guard facts that hold at the subject. The join INTERSECTS: a fact
-/// survives a merge point only when every incoming edge established it.
+/// The reference a fact narrows: the binding and the member path.
+fn narrowing_reference(fact: &FlowNarrowingFact) -> (&FunctionProgramKey, u32, &[Arc<str>]) {
+    (
+        &fact.binding.defining_function,
+        fact.binding.binding_slot,
+        fact.path.as_ref(),
+    )
+}
+
+/// The guard facts that hold at the subject. The join keeps a reference
+/// only when every incoming edge narrowed it, as the union of their
+/// narrowed types.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NarrowingProduct {
     facts: Arc<[FlowNarrowingFact]>,
@@ -1594,8 +1765,8 @@ pub enum FlowTransferOutcome {
 ///   construction is a typed gap, never an unproven published product.
 /// - **Declared types** agree or gap: a merge point cannot invent a
 ///   declaration neither edge declared.
-/// - **Narrowing** INTERSECTS: a guard fact survives only when EVERY
-///   incoming edge established it.
+/// - **Narrowing** keeps a reference only when EVERY incoming edge
+///   narrowed it, as the canonical union of the narrowed types.
 /// - **Definite assignment** uses its declared lattice.
 ///
 /// Joins are idempotent. Reaching definitions and narrowing use canonical
@@ -1679,29 +1850,41 @@ pub fn join_product(
             else {
                 return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression);
             };
+            // A reference both edges narrow reads, past the merge, the
+            // union of the two narrowed types — the checker's branch label
+            // unions the reference's type on each antecedent. A reference
+            // one edge leaves unnarrowed reads that edge's unnarrowed type,
+            // which contains every narrowing of it: the fact drops.
             let mut common = Vec::new();
-            let (mut a, mut b) = (
-                left.facts().iter().peekable(),
-                right.facts().iter().peekable(),
-            );
-            while let (Some(left), Some(right)) = (a.peek(), b.peek()) {
-                match narrowing_order(left).cmp(&narrowing_order(right)) {
-                    std::cmp::Ordering::Less => {
-                        a.next();
-                    }
-                    std::cmp::Ordering::Greater => {
-                        b.next();
-                    }
-                    std::cmp::Ordering::Equal => {
-                        common.push((*left).clone());
-                        a.next();
-                        b.next();
-                    }
+            for fact in left.facts() {
+                let reference = narrowing_reference(fact);
+                let Some(other) = right
+                    .facts()
+                    .iter()
+                    .find(|other| narrowing_reference(other) == reference)
+                else {
+                    continue;
+                };
+                if other.narrowed_to == fact.narrowed_to {
+                    common.push(FlowNarrowingFact {
+                        fresh_literal: (other.fresh_literal == fact.fresh_literal)
+                            .then_some(fact.fresh_literal)
+                            .flatten(),
+                        ..fact.clone()
+                    });
+                    continue;
                 }
+                let united = algebra.union(&[fact.narrowed_to, other.narrowed_to]);
+                if united.incomplete {
+                    return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression);
+                }
+                common.push(FlowNarrowingFact {
+                    narrowed_to: united.node,
+                    fresh_literal: None,
+                    ..fact.clone()
+                });
             }
-            FlowProductValue::Narrowing(NarrowingProduct {
-                facts: common.into(),
-            })
+            FlowProductValue::Narrowing(NarrowingProduct::new(common))
         }
         FlowDomain::DefiniteAssignment => {
             let (
@@ -1802,6 +1985,62 @@ fn join_reaching_values(
     })
 }
 
+/// The checker's join where an EVOLVING array reaches it
+/// (`getUnionOrEvolvingArrayType`): when every path holds one, the result
+/// evolves on with the union of their elements; otherwise each finalizes
+/// and the paths join under subtype reduction (an ordinary value is never
+/// a subset of the `autoArrayType` declaration, so the checker reduces:
+/// `let a = []; if (c) a = [1]; return a` is `any[]`).
+fn join_evolving_reaching_types(
+    algebra: &dyn FlowSemanticAlgebra,
+    budget: &FlowProductBudget,
+    products: &[&ReachingTypeProduct],
+) -> Result<ReachingTypeProduct, FlowProductFailure> {
+    if products.iter().all(|product| product.evolving.is_some()) {
+        let mut elements: Vec<EvolvingElement> = Vec::new();
+        for product in products {
+            for element in product.evolving.iter().flat_map(|elements| elements.iter()) {
+                match elements
+                    .iter_mut()
+                    .find(|existing| existing.node == element.node)
+                {
+                    // A widening and a non-widening `null` join as the
+                    // non-widening one.
+                    Some(existing) => existing.widening_nullish &= element.widening_nullish,
+                    None => elements.push(*element),
+                }
+                if let Some(exceeded) = width_exceeded(budget, elements.len()) {
+                    return Err(FlowProductFailure::BudgetExceeded(exceeded));
+                }
+            }
+        }
+        let finalized = algebra.evolving_array(&elements);
+        if finalized.incomplete {
+            return Err(FlowProductFailure::Gap(FlowGap::NominalRelation));
+        }
+        return Ok(ReachingTypeProduct::evolving(
+            finalized.node,
+            Arc::from(elements.into_boxed_slice()),
+        ));
+    }
+    let mut members: Vec<SemanticNodeId> = Vec::new();
+    for product in products {
+        for contributor in product.contributors.iter().copied() {
+            if !members.contains(&contributor) {
+                members.push(contributor);
+                if let Some(exceeded) = width_exceeded(budget, members.len()) {
+                    return Err(FlowProductFailure::BudgetExceeded(exceeded));
+                }
+            }
+        }
+    }
+    let united = algebra.subtype_union(&members);
+    if united.incomplete {
+        return Err(FlowProductFailure::Gap(FlowGap::NominalRelation));
+    }
+    Ok(ReachingTypeProduct::of(united.node))
+}
+
 /// One canonical reaching-type operation over the actual incoming paths.
 /// Contributors preserve source/edge order and are deduplicated before the
 /// canonical owner constructs the final type. Temporary binary prefixes never
@@ -1825,6 +2064,9 @@ fn join_reaching_types(
     };
     if products.iter().all(|product| *product == *first) {
         return Ok((*first).clone());
+    }
+    if products.iter().any(|product| product.evolving.is_some()) {
+        return join_evolving_reaching_types(algebra, budget, products);
     }
     let mut seen = rustc_hash::FxHashSet::default();
     let mut contributors = Vec::new();
@@ -1882,6 +2124,9 @@ fn join_reaching_types(
         contributors: contributors.into(),
         united,
         widening,
+        widening_nullish: products.iter().all(|product| product.widening_nullish),
+        declaration_only: products.iter().any(|product| product.declaration_only),
+        evolving: None,
     };
     if let Some(WideningMembership::Partial(members)) = &product.widening {
         if let Some(exceeded) = width_exceeded(budget, members.len()) {

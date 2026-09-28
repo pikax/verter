@@ -37,6 +37,18 @@ pub(super) struct FoldedFunction<O> {
     pub(super) type_parameters: Vec<FoldedTypeParam<O>>,
     pub(super) signature_span: Option<Span>,
     pub(super) return_type_span: Option<Span>,
+    /// The signature's type predicate, its subject spelled the way the
+    /// raised function prints it (the named parameter, or `this`).
+    pub(super) predicate: Option<FoldedPredicate<O>>,
+    /// Whether a construct signature is abstract (`abstract new () => T`).
+    pub(super) is_abstract: bool,
+}
+
+/// A folded type predicate awaiting algebra construction.
+pub(super) struct FoldedPredicate<O> {
+    pub(super) subject: verter_type_expr::TypePredicateSubject,
+    pub(super) asserts: bool,
+    pub(super) ty: Option<O>,
 }
 
 pub(super) struct FoldedFunctionParam<O> {
@@ -77,6 +89,8 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<A::Out> {
+    #[cfg(test)]
+    FOLDED_NODES.with(|folded| folded.set(folded.get() + 1));
     let ctx = dispatch.ctx;
     let data = node_data_for(ctx, node)?;
     Some(match data.as_ref() {
@@ -84,6 +98,11 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             alg.primitive(semantic_primitive_to_primitive_name(*kind))
         }
         SemanticNodeData::Literal(value) => alg.literal(value.clone()),
+        // The checker's print of an enum member's literal: a reference to
+        // the member (`E.A`), or to the enum for its only member.
+        SemanticNodeData::EnumLiteral(literal) => {
+            alg.reference(Arc::from(literal.printed_name()), Vec::new())
+        }
         SemanticNodeData::Alias(target) => {
             if !active.insert(node) {
                 return Some(alg.opaque_sentinel(&QueryError::RaiseAliasCycle));
@@ -92,13 +111,33 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             active.remove(&node);
             return result;
         }
+        // A class expression's instance raises to its raised instance
+        // surface — the declaration emitter's own spelling of it, since a
+        // type expression has no name for a class expression.
+        SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+            if !active.insert(node) {
+                return Some(alg.opaque_sentinel(&QueryError::RaiseAliasCycle));
+            }
+            let result = fold_node(alg, dispatch, *surface, active);
+            active.remove(&node);
+            return result;
+        }
         SemanticNodeData::Union(members) => {
             // Presence-aware: a PRESENT-but-unraisable member fails the WHOLE
-            // composite (never silently erased).
-            let folded: Vec<A::Out> = members
-                .iter()
-                .map(|member| fold_node(alg, dispatch, *member, active))
-                .collect::<Option<_>>()?;
+            // composite (never silently erased). Every member of an enum
+            // raises as the enum, as the checker prints it.
+            let folded: Vec<A::Out> =
+                crate::semantic_query::printed_union_arms(dispatch.graph(), members)
+                    .into_iter()
+                    .map(|arm| match arm {
+                        crate::semantic_query::PrintedUnionArm::Node(member) => {
+                            fold_node(alg, dispatch, member, active)
+                        }
+                        crate::semantic_query::PrintedUnionArm::Enum(decl) => {
+                            Some(alg.reference(Arc::clone(&decl.decl_name), Vec::new()))
+                        }
+                    })
+                    .collect::<Option<_>>()?;
             alg.union(folded)
         }
         SemanticNodeData::Intersection(members) => {
@@ -290,7 +329,13 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             alg.infer(Arc::clone(name))
         }
         SemanticNodeData::Opaque(err) => match err {
-            QueryError::RecursiveRef { name } => alg.recursive_ref(Arc::clone(name)),
+            QueryError::RecursiveRef { name, .. } => alg.recursive_ref(Arc::clone(name)),
+            // The checker's recovered error type raises as the recovery the
+            // diagnostic defines.
+            QueryError::CheckerRecovery(diagnostic) => match diagnostic.recovery() {
+                Some(recovery) => alg.primitive(semantic_primitive_to_primitive_name(recovery)),
+                None => alg.opaque_sentinel(err),
+            },
             // The input is a typed `QueryError`, not a raw carrier — route it
             // through the typed `opaque_sentinel` entry (BORROWED — no clone on
             // this hot traversal arm). The materialize algebra emits the
@@ -307,9 +352,11 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             type_parameters,
             signature_span,
             return_type_span,
+            predicate,
+            is_abstract,
             ..
         } => {
-            let folded = fold_function(
+            let mut folded = fold_function(
                 alg,
                 dispatch,
                 params,
@@ -317,8 +364,10 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
                 type_parameters,
                 *signature_span,
                 *return_type_span,
+                *predicate,
                 active,
             )?;
+            folded.is_abstract = *is_abstract;
             let function = alg.build_function(folded);
             match kind {
                 crate::semantic_query::SignatureKind::Call => alg.function_to_out(function),
@@ -428,6 +477,7 @@ fn fold_function<A: RaisedShapeAlgebra>(
     type_parameters: &[crate::semantic_query::TypeParamDecl],
     signature_span: Option<Span>,
     return_type_span: Option<Span>,
+    predicate: Option<crate::semantic_query::SignaturePredicate>,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<FoldedFunction<A::Out>> {
     // Presence-aware: an unraisable parameter, the REQUIRED return, or a
@@ -454,12 +504,38 @@ fn fold_function<A: RaisedShapeAlgebra>(
             is_const: tp.is_const,
         });
     }
+    // A predicate whose parameter carries no name has no printable subject;
+    // the `boolean` / `void` return still stands on its own.
+    let predicate = match predicate {
+        Some(predicate) => {
+            let subject = match predicate.subject {
+                crate::semantic_query::PredicateSubject::This => {
+                    Some(verter_type_expr::TypePredicateSubject::This)
+                }
+                crate::semantic_query::PredicateSubject::Parameter(_) => predicate
+                    .subject_parameter(params)
+                    .and_then(|param| param.name.clone())
+                    .map(verter_type_expr::TypePredicateSubject::Parameter),
+            };
+            match subject {
+                Some(subject) => Some(FoldedPredicate {
+                    subject,
+                    asserts: predicate.asserts,
+                    ty: fold_optional_slot(alg, dispatch, predicate.ty, active)?,
+                }),
+                None => None,
+            }
+        }
+        None => None,
+    };
     Some(FoldedFunction {
         parameters,
         return_type: Some(return_out),
         type_parameters: type_params,
         signature_span,
         return_type_span,
+        predicate,
+        is_abstract: false,
     })
 }
 
@@ -485,6 +561,16 @@ fn push_surface_member<A: RaisedShapeAlgebra>(
     members: &mut Vec<A::Member>,
     member: &crate::semantic_query::SurfaceMember,
 ) {
+    // An ECMAScript private name (`#h`) brands its class for relations
+    // only; a raised shape names no such member, as `keyof` names none.
+    if member.visibility == verter_type_expr::MemberVisibility::Private
+        && matches!(
+            member.key.as_known(),
+            Some(verter_type_expr::PropertyKey::String(name)) if name.starts_with('#')
+        )
+    {
+        return;
+    }
     let mut active = FxHashSet::default();
     let key = member.key.clone().map(
         |computed| {
@@ -561,6 +647,7 @@ fn fold_object_spread_program<A: RaisedShapeAlgebra>(
         }
         QueryResult::Recursive(_) => alg.opaque_sentinel(&QueryError::RecursiveRef {
             name: Arc::from("object-spread-projection"),
+            args: Arc::from([]),
         }),
         QueryResult::Error(error) => alg.opaque_sentinel(&error),
     }
@@ -702,6 +789,42 @@ fn fold_open_object_spread_program<A: RaisedShapeAlgebra>(
     alg.absorb_dropped(result, dropped)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many nodes this thread's raises folded ([`fold_node`]);
+    /// test-only.
+    static FOLDED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many nodes this thread's raises folded so far (test-only).
+#[cfg(test)]
+pub(crate) fn folded_nodes_for_tests() -> usize {
+    FOLDED_NODES.with(std::cell::Cell::get)
+}
+
+/// Whether `member` is the `prototype` property the checker declares on a
+/// class expression's constructor type
+/// ([`crate::project_semantic_dispatch::build::class_prototype_member`]):
+/// synthetic, with no authored site, whose value is the class's instance.
+/// The checker's printer skips a prototype property (its declaration emit
+/// of a class expression's type is the construct signatures and statics
+/// alone), and printing it spells the instance a second time beside the
+/// construct signature's return: a class expression nested in a method's
+/// return doubled the raised shape per level.
+fn is_class_expression_prototype(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    surface: &SurfaceView,
+    member: &crate::semantic_query::SurfaceMember,
+) -> bool {
+    !surface.construct_signatures.is_empty()
+        && member.key.as_string() == Some("prototype")
+        && member.spans == verter_type_expr::MemberSpans::default()
+        && matches!(
+            node_data_for(dispatch.ctx, member.value).as_deref(),
+            Some(SemanticNodeData::ClassExpressionInstance { .. })
+        )
+}
+
 /// Reconstruct an Object from a [`SurfaceView`] — the non-empty `Object` arm.
 /// Each member / signature value folds through the core with a FRESH cycle set
 /// (matching the materializer's fresh-per-member `active`). A member whose
@@ -738,6 +861,9 @@ fn fold_surface_view<A: RaisedShapeAlgebra>(
 
     let mut members: Vec<A::Member> = Vec::new();
     for member in surface.positive_members().iter() {
+        if is_class_expression_prototype(dispatch, surface, member) {
+            continue;
+        }
         push_surface_member(alg, dispatch, &mut members, member);
     }
 

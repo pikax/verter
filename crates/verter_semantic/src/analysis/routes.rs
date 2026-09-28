@@ -384,7 +384,8 @@ pub fn extract_programmatic_routes(
     } else {
         oxc_span::SourceType::mjs()
     };
-    let parser_ret = oxc_parser::Parser::new(&allocator, content, source_type).parse();
+    let parser_ret =
+        verter_parser::oxc_parse::Parser::new(&allocator, content, source_type).parse();
     let program = &parser_ret.program;
 
     // Collect import map: local_name -> source (for resolving eager component imports)
@@ -436,9 +437,8 @@ pub fn extract_programmatic_routes(
                     }
                 }
             }
-            Statement::ExportNamedDeclaration(export_named) => {
-                if let Some(Declaration::VariableDeclaration(var_decl)) = &export_named.declaration
-                {
+            Statement::ExportDeclaration(export_named) => {
+                if let Declaration::VariableDeclaration(var_decl) = &export_named.declaration {
                     extract_routes_from_var_decl(var_decl, &import_map, project_root, &mut routes);
                 }
             }
@@ -667,9 +667,15 @@ fn extract_string_literal(expr: &Expression<'_>) -> Option<String> {
 fn extract_dynamic_import_from_arrow(
     arrow: &oxc_ast::ast::ArrowFunctionExpression<'_>,
 ) -> Option<String> {
-    // Arrow functions: check all statements in body
-    // Expression body `() => import('./path')` is desugared to a single ExpressionStatement
-    for stmt in &arrow.body.statements {
+    // Expression body `() => import('./path')`
+    if let Some(expression) = arrow.get_expression() {
+        return extract_dynamic_import_path(expression);
+    }
+    // Block body: check all statements
+    for stmt in arrow
+        .get_function_body()
+        .map_or(&[][..], |body| &body.statements[..])
+    {
         match stmt {
             Statement::ExpressionStatement(expr_stmt) => {
                 if let Some(path) = extract_dynamic_import_path(&expr_stmt.expression) {
@@ -1019,7 +1025,8 @@ pub fn extract_route_guards(content: &str, file_path: &str) -> Vec<RouteGuard> {
     } else {
         oxc_span::SourceType::mjs()
     };
-    let parser_ret = oxc_parser::Parser::new(&allocator, content, source_type).parse();
+    let parser_ret =
+        verter_parser::oxc_parse::Parser::new(&allocator, content, source_type).parse();
     let program = &parser_ret.program;
 
     let mut guards = Vec::new();

@@ -44,7 +44,6 @@ fn upsert_jsx(host: &VerterHost) {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "JSX foundations reducer complete: Verter resolves `JSX.IntrinsicElements[\"div\"]` against the `declare global { namespace JSX { interface IntrinsicElements { ... } } }` declaration to the declared shape `{ id?: string; className?: string }` (verified under --include-ignored). NOT oracle-liftable — the qualified-namespace indexed-access source body `JSX.IntrinsicElements[\"div\"]` lowers to a deferred construct at the oracle source-walk (oracle admission Reject(DeferredConstruct(\"indexed-access\"))); lift pending a qualified-namespace indexed-access source-walk carve-out"]
 fn jsx_intrinsic_div_resolves_to_declared_shape() {
     // TS7 contract: `DivIntrinsic = JSX.IntrinsicElements["div"]` =
     //   `{ id?: string; className?: string }`. Both members optional.
@@ -69,7 +68,6 @@ fn jsx_intrinsic_div_resolves_to_declared_shape() {
 }
 
 #[test]
-#[ignore = "JSX foundations reducer complete: Verter resolves `JSX.IntrinsicElements[\"span\"]` against the `declare global { namespace JSX { interface IntrinsicElements { ... } } }` declaration to the declared shape `{ title?: string }` (verified under --include-ignored). NOT oracle-liftable — the qualified-namespace indexed-access source body `JSX.IntrinsicElements[\"span\"]` lowers to a deferred construct at the oracle source-walk (oracle admission Reject(DeferredConstruct(\"indexed-access\"))); lift pending a qualified-namespace indexed-access source-walk carve-out"]
 fn jsx_intrinsic_span_resolves_to_declared_shape() {
     // TS7 contract: `SpanIntrinsic = JSX.IntrinsicElements["span"]` =
     //   `{ title?: string }`.
@@ -96,7 +94,6 @@ fn jsx_intrinsic_span_resolves_to_declared_shape() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "JSX namespace resolution is complete, but this row additionally needs a later-block mechanism U2 does not own: `Parameters<typeof createElement<{ label: string }>>[1]` requires `typeof createElement<{ label: string }>` — an explicit-type-argument instantiation of a generic FUNCTION VALUE — which dispatches `ResolveCall` / `InferTypeArgs` owned by U6.CALL_RESOLVE (U2.JSX_FOUNDATIONS precedes U6 and cannot consume ResolveCall). Verter therefore returns a clean `semanticMiss` (no hang) for the unreduced `Parameters<...>` object, so this row does NOT yet resolve under --include-ignored; the oracle preflight is correspondingly unclean (PreflightUnclean -> Reject(DeferredConstruct(\"indexed-access\")) over `IndexedAccess { object: Unknown(semanticMiss), index: 1 }`). Lift pending the U6 ResolveCall mechanism"]
 fn jsx_factory_inferred_props_for_component_resolves() {
     // TS7 contract: For
     //   `createElement<P>(component: (props: P) => JSX.Element, props: P): JSX.Element`
@@ -126,7 +123,6 @@ fn jsx_factory_inferred_props_for_component_resolves() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "JSX foundations reducer complete: Verter resolves `Parameters<LabelFC>[0]` (where `LabelFC = FC<{ label: string }>`, `FC<P> = (props: P & { children?: unknown }) => JSX.Element`) to the intersected props surface `{ children?: unknown; label: string }` (verified under --include-ignored). NOT oracle-liftable — the numeric indexed-access source body `Parameters<LabelFC>[0]` lowers to a deferred construct at the oracle source-walk (oracle admission Reject(DeferredConstruct(\"indexed-access\"))); lift pending a numeric-index source-walk carve-out"]
 fn jsx_fc_props_includes_children_optional() {
     // TS7 contract: `LabelFCProps = Parameters<LabelFC>[0]` where
     //   `LabelFC = FC<{ label: string }>` = `(props: { label: string } &
@@ -171,7 +167,6 @@ fn jsx_fc_props_includes_children_optional() {
 fn jsx_intrinsic_via_generic_lookup_div_resolves_to_div_shape() {}
 
 #[test]
-#[ignore = "JSX foundations reducer complete: Verter resolves `keyof JSX.IntrinsicElements` to the cross-block-merged string-literal union `\"customCard\" | \"div\" | \"span\"` (verified under --include-ignored). NOT oracle-liftable — the qualified-namespace keyof source body `keyof JSX.IntrinsicElements` lowers to a deferred construct at the oracle source-walk (oracle admission Reject(DeferredConstruct(\"keyof\"))); lift pending a qualified-namespace keyof source-walk carve-out"]
 fn jsx_intrinsic_keys_resolves_to_string_literal_union() {
     // TS7 contract: `IntrinsicKeys = keyof JSX.IntrinsicElements` =
     //   `"div" | "span" | "customCard"` — a three-arm string-literal union
@@ -215,7 +210,6 @@ fn jsx_intrinsic_via_generic_lookup_span_resolves_to_span_shape() {}
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "JSX foundations reducer complete: Verter merges the two `declare global { namespace JSX { interface IntrinsicElements { ... } } }` blocks via the shared MergedDecl peer-merge and resolves `JSX.IntrinsicElements[\"customCard\"]` to the augmented shape `{ variant?: \"primary\" | \"secondary\" }` (verified under --include-ignored). NOT oracle-liftable — the qualified-namespace indexed-access source body `JSX.IntrinsicElements[\"customCard\"]` lowers to a deferred construct at the oracle source-walk (oracle admission Reject(DeferredConstruct(\"indexed-access\"))); lift pending a qualified-namespace indexed-access source-walk carve-out"]
 fn jsx_intrinsic_augmented_custom_card_resolves_to_declared_shape() {
     // TS7 contract: A second `declare global { namespace JSX { interface
     //   IntrinsicElements { customCard: ... } } }` block merges with the
@@ -245,7 +239,6 @@ fn jsx_intrinsic_augmented_custom_card_resolves_to_declared_shape() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "JSX foundations reducer complete: Verter resolves `JSX.Element` against the `declare global { namespace JSX { interface Element { ... } } }` declaration to the declared interface shape `{ __element_brand__: true }` (verified under --include-ignored). NOT oracle-liftable — tsgo's Expanded hover prints the qualified alias name `JSX.Element` rather than the structural surface, and the oracle gate rejects a qualified-name ref (oracle admission Reject(EnumMemberOrQualified)); lift pending a qualified-name hover carve-out"]
 fn jsx_element_resolves_to_declared_interface_shape() {
     // TS7 contract: `ElementShape = JSX.Element` resolves to the declared
     //   `interface Element { __element_brand__: true }` — a single

@@ -216,6 +216,12 @@ impl ProjectSemanticDispatch<'_> {
                     node: *inner,
                     filter_unknown: item.filter_unknown,
                 }),
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                    work.push(RuntimeWork {
+                        node: *surface,
+                        filter_unknown: item.filter_unknown,
+                    })
+                }
                 SemanticNodeData::Union(arms) => {
                     for arm in arms.iter().rev() {
                         work.push(RuntimeWork {
@@ -246,6 +252,11 @@ impl ProjectSemanticDispatch<'_> {
                     | PrimitiveKind::Void
                     | PrimitiveKind::Never => push_unknown(&mut kinds),
                 },
+                // An enum member's runtime value is its base value.
+                SemanticNodeData::EnumLiteral(literal) => work.push(RuntimeWork {
+                    node: literal.base,
+                    filter_unknown: item.filter_unknown,
+                }),
                 SemanticNodeData::Literal(literal) => match literal {
                     LiteralValue::String(_) => kinds.push(BroadRuntimeKind::String),
                     LiteralValue::Number(_) => kinds.push(BroadRuntimeKind::Number),
@@ -258,8 +269,17 @@ impl ProjectSemanticDispatch<'_> {
                 }
                 SemanticNodeData::Signature { .. } => kinds.push(BroadRuntimeKind::Function),
                 SemanticNodeData::Object(surface) => {
-                    let callable = !surface.call_signatures.is_empty()
-                        || !surface.construct_signatures.is_empty();
+                    // Callability is a signature-discovery answer, never the
+                    // surface's own lists: a surface merged for presentation
+                    // carries lists the kernel did not produce.
+                    let (call, construct) = match self.shared_signature_buckets(item.node) {
+                        Ok(buckets) => buckets,
+                        Err(_) => {
+                            undecidable = true;
+                            continue;
+                        }
+                    };
+                    let callable = !call.is_empty() || !construct.is_empty();
                     if callable {
                         kinds.push(BroadRuntimeKind::Function);
                     }
@@ -749,7 +769,10 @@ impl ProjectSemanticDispatch<'_> {
 
 fn runtime_query_error_partial_reason(error: &QueryError) -> Option<PartialReasonSet> {
     match error {
-        QueryError::Miss | QueryError::DeclPlaceholder { .. } => None,
+        // The checker's recovered error type is a complete answer.
+        QueryError::Miss | QueryError::DeclPlaceholder { .. } | QueryError::CheckerRecovery(_) => {
+            None
+        }
         QueryError::BudgetExceeded(_) | QueryError::SignatureOverflow => {
             Some(PartialReasonSet::BUDGET_EXCEEDED)
         }

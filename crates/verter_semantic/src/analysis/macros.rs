@@ -432,7 +432,7 @@ impl<'program> RoleWalk<'program, '_> {
         match declaration {
             LocalTypeDecl::Interface { body, extends } => {
                 for heritage in extends.iter() {
-                    if let Some(parent) = heritage_name(&heritage.expression) {
+                    if let Some(parent) = heritage_name(&heritage.type_name) {
                         self.record(parent.clone(), MacroTypeDepUsage::Surface);
                         self.follow_local_surface_in(declaration_registry, &parent);
                     }
@@ -1381,10 +1381,9 @@ fn build_local_type_registries<'a>(
                     registry.insert(id.name.to_string(), LocalTypeDecl::Class);
                 }
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(ref decl) = export.declaration {
-                    insert_local_type_decl_from_declaration(registry, decl);
-                }
+            Statement::ExportDeclaration(export) => {
+                let decl = &export.declaration;
+                insert_local_type_decl_from_declaration(registry, decl);
             }
             _ => {}
         }
@@ -1513,7 +1512,7 @@ fn resolve_type_to_prop_fields(
                     let mut all_fields = Vec::new();
                     let mut seen_names = FxHashSet::default();
                     for heritage in *extends {
-                        let Some(parent_name) = heritage_name(&heritage.expression) else {
+                        let Some(parent_name) = heritage_name(&heritage.type_name) else {
                             continue;
                         };
                         let Some((parent_registry, parent_decl)) =
@@ -1689,10 +1688,10 @@ fn type_name_to_string(type_name: &TSTypeName<'_>) -> String {
     }
 }
 
-/// Extract an identifier name from an expression (for `extends` heritage).
-fn heritage_name(expr: &Expression<'_>) -> Option<String> {
-    match expr {
-        Expression::Identifier(id) => Some(id.name.to_string()),
+/// Extract an identifier name from an interface `extends` heritage type name.
+fn heritage_name(name: &TSTypeName<'_>) -> Option<String> {
+    match name {
+        TSTypeName::IdentifierReference(id) => Some(id.name.to_string()),
         _ => None,
     }
 }
@@ -2193,7 +2192,7 @@ fn resolve_interface_decl(
             // (In contrast, resolve_type_to_prop_fields is tolerant and skips
             // unresolvable heritage to preserve own fields.)
             for heritage in *extends {
-                let parent_name = heritage_name(&heritage.expression)?;
+                let parent_name = heritage_name(&heritage.type_name)?;
                 let (parent_registry, parent_decl) = registry.resolve(&parent_name)?;
                 let parent_fields = resolve_interface_decl(
                     &parent_name,
@@ -2328,7 +2327,7 @@ fn resolve_type_to_fields<T: NamedField + Clone, S>(
                     let mut seen_names = FxHashSet::default();
                     let mut heritage_fields = Vec::new();
                     for heritage in *extends {
-                        let Some(parent_name) = heritage_name(&heritage.expression) else {
+                        let Some(parent_name) = heritage_name(&heritage.type_name) else {
                             continue;
                         };
                         let Some((parent_registry, parent_decl)) =
@@ -2422,7 +2421,7 @@ fn resolve_interface_decl_generic<T: NamedField + Clone, S>(
             let mut seen_names = FxHashSet::default();
             let mut heritage_fields = Vec::new();
             for heritage in *extends {
-                let Some(parent_name) = heritage_name(&heritage.expression) else {
+                let Some(parent_name) = heritage_name(&heritage.type_name) else {
                     continue;
                 };
                 let Some((parent_registry, parent_decl)) = registry.resolve(&parent_name) else {

@@ -119,8 +119,8 @@ mod tests {
     use super::*;
     use crate::svelte::runtime::client_imports::UserImportSpecifier;
     use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use verter_parser::oxc_parse::Parser;
     use verter_span::Span;
 
     #[test]
@@ -152,9 +152,9 @@ mod tests {
         let alloc = Allocator::default();
         let parsed = Parser::new(&alloc, &out, SourceType::mjs()).parse();
         assert!(
-            !parsed.panicked && parsed.errors.is_empty(),
+            !parsed.fatal_error && parsed.diagnostics.is_empty(),
             "an import specifier containing a quote must emit parseable JS, got:\n{out}\nerrors: {:?}",
-            parsed.errors
+            parsed.diagnostics
         );
         // The specifier's quote + backslash are backslash-escaped (the JS serializer),
         // not raw bytes that close the string.

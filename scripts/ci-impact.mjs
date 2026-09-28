@@ -39,9 +39,14 @@
  * exists (the provider selectors, the compile-contract owners), so the test
  * authority and the selection authority cannot drift apart.
  *
- * Usage (CI):
- *   CI_IMPACT_CHANGED_FILES_JSON='[...]' CI_IMPACT_FILTER_OUTPUTS_JSON='{...}' \
- *     node scripts/ci-impact.mjs --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+ * Usage (CI; the file holds `toJSON(steps.filter.outputs)`, whose `any_files`
+ * is the changed-file list):
+ *   node scripts/ci-impact.mjs --filter-outputs "$RUNNER_TEMP/filter-outputs.json" \
+ *     --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+ * The file lists come from a file, never the environment or argv: on a large
+ * diff they exceed Linux's 128 KiB cap on one environment string and the
+ * process cannot be started at all. CI_IMPACT_CHANGED_FILES_JSON and
+ * CI_IMPACT_FILTER_OUTPUTS_JSON remain for small local runs.
  * Usage (local, impact lanes only; files no crate owns count as unowned):
  *   node scripts/ci-impact.mjs --range origin/main..HEAD
  */
@@ -426,14 +431,34 @@ export function main(argv = process.argv.slice(2), env = process.env, cwd = proc
   const githubOutput = argValue(argv, "--github-output");
   const summaryPath = argValue(argv, "--summary");
   const metadataPath = argValue(argv, "--metadata");
+  const filterOutputsPath = argValue(argv, "--filter-outputs");
+
+  let filterOutputs = null;
+  if (filterOutputsPath) {
+    filterOutputs = JSON.parse(readFileSync(resolve(cwd, filterOutputsPath), "utf8"));
+  } else if (env.CI_IMPACT_FILTER_OUTPUTS_JSON) {
+    filterOutputs = JSON.parse(env.CI_IMPACT_FILTER_OUTPUTS_JSON);
+  }
+  if (
+    filterOutputs !== null &&
+    (typeof filterOutputs !== "object" || Array.isArray(filterOutputs))
+  ) {
+    process.stderr.write("ci-impact: the paths-filter outputs must be a JSON object\n");
+    return 2;
+  }
 
   let changedFiles;
   if (range) {
     changedFiles = changedFilesFromRange(cwd, range);
   } else if (env.CI_IMPACT_CHANGED_FILES_JSON) {
     changedFiles = JSON.parse(env.CI_IMPACT_CHANGED_FILES_JSON);
+  } else if (filterOutputsPath && typeof filterOutputs.any_files === "string") {
+    // The catch-all `any: '**'` filter lists every changed file.
+    changedFiles = JSON.parse(filterOutputs.any_files);
   } else {
-    process.stderr.write("ci-impact: pass --range <rev>..<rev> or CI_IMPACT_CHANGED_FILES_JSON\n");
+    process.stderr.write(
+      "ci-impact: pass --range <rev>..<rev>, --filter-outputs <file> with an any_files list, or CI_IMPACT_CHANGED_FILES_JSON\n",
+    );
     return 2;
   }
   if (!Array.isArray(changedFiles) || !changedFiles.every((f) => typeof f === "string")) {
@@ -442,9 +467,6 @@ export function main(argv = process.argv.slice(2), env = process.env, cwd = proc
   }
   changedFiles = changedFiles.map((f) => f.replace(/\\/g, "/"));
 
-  const filterOutputs = env.CI_IMPACT_FILTER_OUTPUTS_JSON
-    ? JSON.parse(env.CI_IMPACT_FILTER_OUTPUTS_JSON)
-    : null;
   const ownedFiles = filterOutputs ? ownedFilesFromFilterOutputs(filterOutputs) : null;
 
   let impact;

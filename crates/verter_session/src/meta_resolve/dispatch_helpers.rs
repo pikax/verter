@@ -223,7 +223,9 @@ fn realize_callable_member_at(
                 )
             } else {
                 SemanticNodeData::Intersection(
-                    crate::semantic_query::composite::CompositeList::preserving_rebuild(realized),
+                    crate::semantic_query::composite::CompositeList::rebuilt_from(
+                        category, realized,
+                    ),
                 )
             };
             SurfaceResolution::resolved(
@@ -233,6 +235,16 @@ fn realize_callable_member_at(
                     .semantic_graph()
                     .intern_node(rebuilt),
             )
+        }
+
+        // A builtin runtime NOMINAL's application carrier (`Date`,
+        // `Promise<T>`, …) is not a residual: the demand settles on it
+        // because it IS the resolved type, and it carries no authored call
+        // signature to realize.
+        SemanticNodeData::InstantiationRef { base, .. }
+            if crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(base).is_some() =>
+        {
+            SurfaceResolution::no_surface()
         }
 
         // A residual carrier the shared demand stopped on without
