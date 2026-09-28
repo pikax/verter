@@ -1314,7 +1314,10 @@ pub(super) fn scan_magic_identifiers(source: &str) -> Option<UnsupportedSvelteRu
         found: None,
     };
     use oxc_ast_visit::Visit;
-    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
+    // A walk refused its stack scans nothing; the compile around it is
+    // refused with the refusal.
+    let _ =
+        verter_parser::oxc_parse::leased_program_walk(&program, || scan.visit_program(&program));
     scan.found
 }
 

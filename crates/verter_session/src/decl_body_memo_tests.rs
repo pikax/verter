@@ -2332,6 +2332,7 @@ fn function_program_index_builds_once_and_covers_every_function_position() {
             parsed
                 .unwrap()
                 .function_program_index(&owners, canonical, &parse_env_hash)
+                .expect("the lease is granted")
         })
         .unwrap();
     assert!(

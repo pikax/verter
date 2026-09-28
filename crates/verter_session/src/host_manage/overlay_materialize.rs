@@ -531,8 +531,15 @@ impl VerterHost {
                     });
                 }
             }
-            self.materialize_overlay_cold(&identity, canonical_id, view)
-                .ok_or(())
+            // The materialisation is one operation: a parse or walk-stack lease
+            // refused its stack anywhere inside it leaves some product read off
+            // an empty program, so the flight publishes nothing.
+            match verter_parser::oxc_parse::refusals_within(|| {
+                self.materialize_overlay_cold(&identity, canonical_id, view)
+            }) {
+                (materialized, None) => materialized.ok_or(()),
+                (_, Some(_)) => Err(()),
+            }
         };
         // Bounded re-validation loop — the same contract as the base
         // `ensure_indexed_ready_serve` retry loop: a PUBLISHED outcome is a
@@ -766,75 +773,61 @@ impl VerterHost {
         // stack, so the retained snapshot is pinned for the whole flight
         // and this cold-index job reuses it — the run cannot parse, per
         // the lease-only worker contract.
+        // The job runs on a declaration-lowering worker, so it records its
+        // own refusals: a refused one publishes nothing, as a refused parse.
         let outcome = self.decl_lowering.run_leased(
             &snapshot_key,
             move |program: Option<&crate::ParsedEvalProgram>| {
-                let owner_table = Arc::new(match program {
-                    Some(parsed) => crate::parse::top_level_owner_table(
-                        parsed.borrow_dependent(),
-                        job_framework_parse.as_deref(),
-                    )?,
-                    None => verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0),
-                });
-                let svelte_component_runes_mode = program.is_some_and(|parsed| {
-                    job_framework_parse.as_deref().is_some_and(|artifact| {
-                        crate::parse::svelte_component_runes_mode(
-                            artifact,
+                verter_parser::oxc_parse::refusals_within(|| {
+                    let owner_table = Arc::new(match program {
+                        Some(parsed) => crate::parse::top_level_owner_table(
                             parsed.borrow_dependent(),
-                        )
-                    })
-                });
-                let (header_index, route_inventory) = match program {
-                    Some(parsed) => {
-                        let body = parsed.borrow_dependent();
-                        let index = build_script_shallow_index_with_owners(
-                            body,
-                            parsed.source_str(),
-                            &owner_table,
-                        )
-                        .map_err(|error| {
-                            crate::parse::ScriptOwnerIndexError::ParserTable {
-                                statement_count: error.statement_count(),
-                                owner_count: error.owner_count(),
-                            }
-                        })?;
-                        (index.declaration_headers, index.routes)
-                    }
-                    None => Default::default(),
-                };
-                let vue_parsed = job_framework_parse
-                    .as_deref()
-                    .and_then(crate::typeinfo::adapters::vue::vue_parse);
-                let mut refused = false;
-                let snapshot = if let Some(parsed_sfc) = vue_parsed {
-                    let parse = crate::parse::build_vue_snapshot_from_parsed(
-                        &job_canonical,
-                        job_raw_source.as_ref(),
-                        job_scope,
-                        &parsed_sfc,
-                        job_framework_parse
-                            .as_deref()
-                            .expect("Vue parse came from this framework artifact"),
-                        &job_provenance,
-                        job_eval_source.as_ref(),
-                        VerterHost::vue_flight_script_program(eval_is_extracted_script, program),
-                        Some(&owner_table),
-                    );
-                    refused = parse.refused.is_some();
-                    (!refused).then(|| VerterHost::build_snapshot_from_parse(parse))
-                } else if is_carrier {
-                    // A non-Vue carrier (Svelte) overlay: the snapshot's script
-                    // program is the flight's retained eval program — walk it,
-                    // parse nothing.
-                    job_framework_parse.as_deref().and_then(|artifact| {
-                        let parse = crate::parse::build_carrier_snapshot_from_artifact_with_program(
+                            job_framework_parse.as_deref(),
+                        )?,
+                        None => verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0),
+                    });
+                    let svelte_component_runes_mode = program.is_some_and(|parsed| {
+                        job_framework_parse.as_deref().is_some_and(|artifact| {
+                            crate::parse::svelte_component_runes_mode(
+                                artifact,
+                                parsed.borrow_dependent(),
+                            )
+                        })
+                    });
+                    let (header_index, route_inventory) = match program {
+                        Some(parsed) => {
+                            let body = parsed.borrow_dependent();
+                            let index = build_script_shallow_index_with_owners(
+                                body,
+                                parsed.source_str(),
+                                &owner_table,
+                            )
+                            .map_err(|error| {
+                                crate::parse::ScriptOwnerIndexError::ParserTable {
+                                    statement_count: error.statement_count(),
+                                    owner_count: error.owner_count(),
+                                }
+                            })?;
+                            (index.declaration_headers, index.routes)
+                        }
+                        None => Default::default(),
+                    };
+                    let vue_parsed = job_framework_parse
+                        .as_deref()
+                        .and_then(crate::typeinfo::adapters::vue::vue_parse);
+                    let mut refused = false;
+                    let snapshot = if let Some(parsed_sfc) = vue_parsed {
+                        let parse = crate::parse::build_vue_snapshot_from_parsed(
                             &job_canonical,
                             job_raw_source.as_ref(),
                             job_scope,
-                            artifact,
+                            &parsed_sfc,
+                            job_framework_parse
+                                .as_deref()
+                                .expect("Vue parse came from this framework artifact"),
                             &job_provenance,
                             job_eval_source.as_ref(),
-                            VerterHost::framework_flight_script_program(
+                            VerterHost::vue_flight_script_program(
                                 eval_is_extracted_script,
                                 program,
                             ),
@@ -842,31 +835,53 @@ impl VerterHost {
                         );
                         refused = parse.refused.is_some();
                         (!refused).then(|| VerterHost::build_snapshot_from_parse(parse))
+                    } else if is_carrier {
+                        // A non-Vue carrier (Svelte) overlay: the snapshot's script
+                        // program is the flight's retained eval program — walk it,
+                        // parse nothing.
+                        job_framework_parse.as_deref().and_then(|artifact| {
+                            let parse =
+                                crate::parse::build_carrier_snapshot_from_artifact_with_program(
+                                    &job_canonical,
+                                    job_raw_source.as_ref(),
+                                    job_scope,
+                                    artifact,
+                                    &job_provenance,
+                                    job_eval_source.as_ref(),
+                                    VerterHost::framework_flight_script_program(
+                                        eval_is_extracted_script,
+                                        program,
+                                    ),
+                                    Some(&owner_table),
+                                );
+                            refused = parse.refused.is_some();
+                            (!refused).then(|| VerterHost::build_snapshot_from_parse(parse))
+                        })
+                    } else if let Some(parsed) = program {
+                        let parse = crate::parse::build_non_sfc_snapshot_from_program(
+                            &job_canonical,
+                            job_raw_source.as_ref(),
+                            source_type,
+                            parsed.borrow_dependent(),
+                            parsed.had_errors(),
+                        );
+                        refused = parse.refused.is_some();
+                        (!refused).then(|| VerterHost::build_snapshot_from_parse(parse))
+                    } else {
+                        // Fatal (panicked) eval-program parse on a non-carrier
+                        // overlay: a re-parse over the same bytes under the
+                        // same source type panics identically, so the
+                        // default-empty snapshot IS the parse outcome.
+                        Some(crate::types::FileAnalysisSnapshot::default())
+                    };
+                    Ok::<_, crate::parse::ScriptOwnerIndexError>(ColdIndexProducts {
+                        header_index,
+                        route_inventory,
+                        snapshot,
+                        svelte_component_runes_mode,
+                        owner_table,
+                        refused,
                     })
-                } else if let Some(parsed) = program {
-                    let parse = crate::parse::build_non_sfc_snapshot_from_program(
-                        &job_canonical,
-                        job_raw_source.as_ref(),
-                        source_type,
-                        parsed.borrow_dependent(),
-                        parsed.had_errors(),
-                    );
-                    refused = parse.refused.is_some();
-                    (!refused).then(|| VerterHost::build_snapshot_from_parse(parse))
-                } else {
-                    // Fatal (panicked) eval-program parse on a non-carrier
-                    // overlay: a re-parse over the same bytes under the
-                    // same source type panics identically, so the
-                    // default-empty snapshot IS the parse outcome.
-                    Some(crate::types::FileAnalysisSnapshot::default())
-                };
-                Ok::<_, crate::parse::ScriptOwnerIndexError>(ColdIndexProducts {
-                    header_index,
-                    route_inventory,
-                    snapshot,
-                    svelte_component_runes_mode,
-                    owner_table,
-                    refused,
                 })
             },
         );
@@ -885,8 +900,9 @@ impl VerterHost {
             return None;
         };
         let products = match products {
-            Ok(products) => products,
-            Err(error) => {
+            (_, Some(_)) => return None,
+            (Ok(products), None) => products,
+            (Err(error), None) => {
                 tracing::error!(
                     canonical = %snapshot_key.canonical,
                     error = %error,

@@ -9477,6 +9477,8 @@ enum Positional<T> {
 /// value of the child it asked for.
 enum Waiting<'e> {
     Erase,
+    /// A member read off a value-rooted object, waiting on the object.
+    MemberOf(&'e Arc<str>),
     Not {
         widen: bool,
     },
@@ -22201,6 +22203,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// The read of `member` off `object`, the value of a value-rooted
+    /// member read's object: the member's node, or an unmodeled position
+    /// when the object's surface has no modeled member of that name.
+    fn finish_member_of(
+        &mut self,
+        object: SemanticNodeId,
+        member: &Arc<str>,
+    ) -> Positional<SemanticNodeId> {
+        match self.project_segments_navigate(object, std::slice::from_ref(member)) {
+            Some(node)
+                if !matches!(
+                    self.dispatch.graph().node_data(node).as_deref(),
+                    Some(SemanticNodeData::Opaque(_))
+                ) =>
+            {
+                Positional::Value(node)
+            }
+            _ => {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::UnmodeledExpression,
+                ));
+                Positional::Unmodeled
+            }
+        }
+    }
+
     /// [`Self::eval_expr`] from `run`'s explicit stack, with `delivered` the
     /// value of the nested function value it suspended at. With `suspend`, a
     /// nested function value anywhere on the stack suspends the run
@@ -22249,6 +22277,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         run.waiting.push(Waiting::Awaited);
                         run.waiting.push(Waiting::Erase);
                         run.current = operand;
+                        continue;
+                    }
+                    // A member read waits on its object from this stack: a
+                    // chain of reads costs no native level.
+                    SliceExpr::MemberOf { object, member } => {
+                        run.waiting.push(Waiting::MemberOf(member));
+                        run.waiting.push(Waiting::Erase);
+                        run.current = object;
                         continue;
                     }
                     SliceExpr::Sequence {
@@ -22378,6 +22414,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         };
                     }
                     Some(Waiting::NonNull) => value = self.finish_non_null(value),
+                    Some(Waiting::MemberOf(member)) => {
+                        if let Positional::Value(object) = value {
+                            value = self.finish_member_of(object, member);
+                        }
+                    }
                     Some(Waiting::Awaited) => {
                         value = match value {
                             Positional::Value(node) => {
@@ -23007,25 +23048,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.eval_non_null(operand)
             }
             crate::flow_slice_content::SliceExpr::MemberOf { object, member } => {
-                let object = match self.eval_expr(object) {
-                    Positional::Value(node) => node,
-                    other => return other,
-                };
-                match self.project_segments_navigate(object, std::slice::from_ref(member)) {
-                    Some(node)
-                        if !matches!(
-                            self.dispatch.graph().node_data(node).as_deref(),
-                            Some(SemanticNodeData::Opaque(_))
-                        ) =>
-                    {
-                        Positional::Value(node)
-                    }
-                    _ => {
-                        self.record_degradation(FlowReturnDegradation::FlowGap(
-                            crate::semantic_query::FlowGap::UnmodeledExpression,
-                        ));
-                        Positional::Unmodeled
-                    }
+                match self.eval_expr(object) {
+                    Positional::Value(object) => self.finish_member_of(object, member),
+                    other => other,
                 }
             }
             crate::flow_slice_content::SliceExpr::ParamValue { ordinal } => {

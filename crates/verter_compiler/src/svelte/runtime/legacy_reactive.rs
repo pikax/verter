@@ -234,9 +234,12 @@ pub(super) fn reactive_statement_facts(
         assignments: Vec::new(),
         assignment_set: FxHashSet::default(),
     };
-    verter_parser::oxc_parse::with_span_stack(source, oxc_span::GetSpan::span(body), || {
-        scan.visit_statement(body)
-    });
+    // A walk refused its stack reads no facts; the compile around it is
+    // refused with the refusal.
+    let _ =
+        verter_parser::oxc_parse::leased_span_walk(source, oxc_span::GetSpan::span(body), || {
+            scan.visit_statement(body)
+        });
     ReactiveStatementFacts {
         deps: scan
             .mention_order
