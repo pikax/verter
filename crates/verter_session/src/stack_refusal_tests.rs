@@ -89,3 +89,122 @@ fn a_refused_parse_publishes_nothing_and_a_retry_publishes_the_module() {
 fn a_refused_walk_stack_lease_publishes_nothing_and_a_retry_publishes_the_module() {
     refused_once_then_retried("/src/refused_lease.ts", 3_337, Reservation::Lease);
 }
+
+/// The analysis read's rebuild lane parses a session overlay's source
+/// afresh: when that parse is refused, the read serves no analysis, never
+/// the empty file's; once the parse can have its stack, the same read
+/// serves the overlay's module.
+#[test]
+fn a_refused_overlay_rebuild_serves_no_analysis() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let id = "/src/refused_overlay.ts";
+    upsert(&host, id, "const base = 1;\n").expect("the base module parses");
+    let overlay = deep_module(3_343);
+    let needed = verter_parser::oxc_parse::parse_stack_bytes(&overlay, SourceType::ts());
+    let mut overlays = rustc_hash::FxHashMap::default();
+    overlays.insert(id.to_string(), Arc::<str>::from(overlay));
+    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+    fail_reservations_needing(Reservation::Parse, needed, 1);
+    let refused = host.get_analysis_via_view(id, &view);
+    fail_reservations_needing(Reservation::Parse, needed, 0);
+    assert!(
+        refused.is_none(),
+        "a refused parse serves no analysis, got bindings {:?}",
+        refused.map(|analysis| analysis
+            .bindings
+            .iter()
+            .map(|binding| binding.name.clone())
+            .collect::<Vec<_>>())
+    );
+    let served = host
+        .get_analysis_via_view(id, &view)
+        .expect("the overlay parses once its stack can be had");
+    let names: Vec<_> = served
+        .bindings
+        .iter()
+        .map(|binding| binding.name.clone())
+        .collect();
+    assert_eq!(names, ["v", "w"]);
+}
+
+/// The whole-function return of `pf` in `/src/<name>.ts`.
+fn flow_return_of_pf(
+    host: &VerterHost,
+    id: &str,
+) -> Result<
+    Option<crate::semantic_query::FlowReturnDegradation>,
+    crate::host_flow_return_audit::FlowReturnError,
+> {
+    let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(id),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from("pf"),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    host.get_flow_return_type_with_audit(
+        &identity,
+        crate::semantic_query::ReturnProjectionDemand::whole_return(),
+    )
+    .into_result()
+    .map(|result| result.degradation())
+}
+
+/// A declaration flight whose evaluation program is refused for want of
+/// stack publishes no artifact read off the refused (empty) program: the
+/// request that met the refusal parses the program again and answers `pf`'s
+/// return, where an artifact of the empty program answers `pf` missing.
+#[test]
+fn a_refused_evaluation_program_publishes_no_artifact() {
+    use verter_parser::oxc_parse::faults::reservations_needing;
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    let id = "/src/refused_program.ts";
+    let source = format!(
+        "{}export function pf() {{ return 1; }}\n",
+        deep_module(3_347)
+    );
+    let needed = verter_parser::oxc_parse::parse_stack_bytes(&source, SourceType::ts());
+    upsert(&host, id, &source).expect("the module parses");
+    let upserted = reservations_needing(Reservation::Parse, needed);
+    fail_reservations_needing(Reservation::Parse, needed, 1);
+    let answered = flow_return_of_pf(&host, id);
+    fail_reservations_needing(Reservation::Parse, needed, 0);
+    let parses = reservations_needing(Reservation::Parse, needed) - upserted;
+    assert_eq!(answered, Ok(None));
+    assert!(parses >= 2, "the refused parse and its retry: {parses}");
+}
+
+/// An overlay's cold materialisation whose evaluation program, or whose
+/// snapshot's walk-stack lease, is refused publishes no indexed artifact;
+/// once the stack can be had the same materialisation publishes it.
+#[test]
+fn a_refused_overlay_materialisation_publishes_no_artifact() {
+    for (purpose, depth) in [(Reservation::Parse, 3_349), (Reservation::Lease, 3_353)] {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let id = "/src/refused_materialisation.ts";
+        upsert(&host, id, "const base = 1;\n").expect("the base module parses");
+        let overlay = deep_module(depth);
+        let needed = verter_parser::oxc_parse::parse_stack_bytes(&overlay, SourceType::ts());
+        let mut overlays = rustc_hash::FxHashMap::default();
+        overlays.insert(id.to_string(), Arc::<str>::from(overlay));
+        let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+        fail_reservations_needing(purpose, needed, 1);
+        let refused = host.materialize_overlay_indexed_ready_with_view(id, &view);
+        fail_reservations_needing(purpose, needed, 0);
+        assert!(
+            refused.is_none(),
+            "{purpose:?}: a refused flight publishes nothing"
+        );
+        assert!(
+            host.materialize_overlay_indexed_ready_with_view(id, &view)
+                .is_some(),
+            "{purpose:?}: the flight publishes once its stack can be had"
+        );
+    }
+}

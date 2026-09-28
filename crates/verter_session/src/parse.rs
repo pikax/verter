@@ -2390,17 +2390,21 @@ pub(crate) fn build_script_analysis_from_parsed(
     source: &str,
     eval_source: &str,
     provenance: &crate::types::MetaProvenance,
-) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
-    build_vue_script_outputs(
+) -> Option<verter_semantic::analysis::ScriptAnalysisSnapshot> {
+    let outputs = build_vue_script_outputs(
         parsed,
         source,
         eval_source,
         /* needs_exports */ false,
         /* needs_script_analysis */ true,
         provenance,
-    )
-    .script_analysis
-    .unwrap_or_default()
+    );
+    // A script refused for want of stack has no analysis: typed operational
+    // incompleteness, never an empty file's.
+    if outputs.refused.is_some() {
+        return None;
+    }
+    Some(outputs.script_analysis.unwrap_or_default())
 }
 
 /// Compute style analyses on demand from SFC source. Used by get_analysis()
@@ -2434,12 +2438,7 @@ pub(crate) fn build_script_analysis_for_artifact(
     let artifact = framework_parse?;
     let eval_source = catalog_eval_source(artifact, source)?;
     let parsed = crate::typeinfo::adapters::vue::vue_parse(artifact)?;
-    Some(build_script_analysis_from_parsed(
-        &parsed,
-        source,
-        eval_source.as_ref(),
-        provenance,
-    ))
+    build_script_analysis_from_parsed(&parsed, source, eval_source.as_ref(), provenance)
 }
 
 /// Artifact-facing style-analysis builder (see

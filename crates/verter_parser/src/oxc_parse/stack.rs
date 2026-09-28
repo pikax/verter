@@ -221,8 +221,20 @@ pub mod faults {
         static RESERVED: Cell<usize> = const { Cell::new(0) };
     }
 
-    /// Reservations on any thread still to fail: purpose, bytes, count.
-    static TARGETED: Mutex<Vec<(Reservation, usize, usize)>> = Mutex::new(Vec::new());
+    /// Reservations on any thread to fail, keyed by purpose and bytes.
+    struct Target {
+        purpose: Reservation,
+        needed: usize,
+        /// Matching reservations still to let through first.
+        skip: usize,
+        /// Matching reservations then to fail.
+        fail: usize,
+    }
+
+    static TARGETED: Mutex<Vec<Target>> = Mutex::new(Vec::new());
+
+    /// Every reservation on any thread so far, by purpose and bytes.
+    static MADE: Mutex<Vec<(Reservation, usize, usize)>> = Mutex::new(Vec::new());
 
     /// Make the next `count` reservations on this thread fail.
     pub fn fail_next_reservations(count: usize) {
@@ -232,13 +244,40 @@ pub mod faults {
     /// Make the next `count` reservations for `purpose` of exactly `needed`
     /// bytes fail, on whichever thread makes them.
     pub fn fail_reservations_needing(purpose: Reservation, needed: usize, count: usize) {
+        fail_reservations_needing_after(purpose, needed, 0, count);
+    }
+
+    /// Let the next `skip` reservations for `purpose` of exactly `needed`
+    /// bytes through, then make the `count` after them fail, on whichever
+    /// thread makes them.
+    pub fn fail_reservations_needing_after(
+        purpose: Reservation,
+        needed: usize,
+        skip: usize,
+        count: usize,
+    ) {
         let mut targeted = TARGETED
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        targeted.retain(|&(held, bytes, _)| (held, bytes) != (purpose, needed));
+        targeted.retain(|target| (target.purpose, target.needed) != (purpose, needed));
         if count > 0 {
-            targeted.push((purpose, needed, count));
+            targeted.push(Target {
+                purpose,
+                needed,
+                skip,
+                fail: count,
+            });
         }
+    }
+
+    /// The reservations made so far, on any thread, for `purpose` of
+    /// exactly `needed` bytes.
+    pub fn reservations_needing(purpose: Reservation, needed: usize) -> usize {
+        MADE.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|&&(held, bytes, _)| (held, bytes) == (purpose, needed))
+            .map_or(0, |&(_, _, count)| count)
     }
 
     /// The reservations this thread attempted since the last call, failed
@@ -250,6 +289,16 @@ pub mod faults {
     /// Count one reservation; whether it is to fail.
     pub(super) fn reserving(needed: usize, purpose: Reservation) -> bool {
         RESERVED.with(|reserved| reserved.set(reserved.get() + 1));
+        {
+            let mut made = MADE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            match made
+                .iter_mut()
+                .find(|(held, bytes, _)| (*held, *bytes) == (purpose, needed))
+            {
+                Some(entry) => entry.2 += 1,
+                None => made.push((purpose, needed, 1)),
+            }
+        }
         let thread_fails = FAILING.with(|failing| {
             let left = failing.get();
             failing.set(left.saturating_sub(1));
@@ -263,12 +312,17 @@ pub mod faults {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(at) = targeted
             .iter()
-            .position(|&(held, bytes, _)| (held, bytes) == (purpose, needed))
+            .position(|target| (target.purpose, target.needed) == (purpose, needed))
         else {
             return false;
         };
-        targeted[at].2 -= 1;
-        if targeted[at].2 == 0 {
+        let target = &mut targeted[at];
+        if target.skip > 0 {
+            target.skip -= 1;
+            return false;
+        }
+        target.fail -= 1;
+        if target.fail == 0 {
             targeted.remove(at);
         }
         true

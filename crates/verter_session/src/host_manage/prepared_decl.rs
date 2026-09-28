@@ -2238,6 +2238,12 @@ impl VerterHost {
             let cold_lease =
                 self.decl_lowering
                     .acquire_lease(&snapshot_key, &eval_source, source_type);
+            // A program refused for want of stack is not retained: the flight
+            // publishes nothing for the source, never an artifact read off an
+            // empty program.
+            if cold_lease.refused.is_some() {
+                return None;
+            }
             if cold_lease.parsed_now {
                 self.provenance
                     .eval_program_parses
