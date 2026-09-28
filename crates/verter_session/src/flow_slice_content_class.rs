@@ -857,6 +857,8 @@ impl<'a> LeafCallScanner<'a> {
     /// [`Visit::visit_class`] without the `extends` value — the class
     /// lowering evaluates that one as a value of its own.
     fn visit_class_after_heritage(&mut self, it: &oxc_ast::ast::Class<'a>) {
+        #[cfg(test)]
+        super::lowering_probe::scanned_class();
         self.class_nesting += 1;
         self.visit_decorators(&it.decorators);
         self.nested_frame_nesting += 1;
