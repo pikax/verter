@@ -119,6 +119,8 @@ pub(crate) struct SemanticActivityGate {
     pending: parking_lot::Mutex<Vec<PendingRelease>>,
     has_pending: AtomicBool,
     stats: parking_lot::Mutex<SemanticReclaimStats>,
+    #[cfg(test)]
+    wait_observer: parking_lot::Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 /// A live computation on the semantic substrate. While any guard is alive,
@@ -148,6 +150,10 @@ impl SemanticActivityGate {
             // A reclaim saw `active == 0` before this increment and is
             // switching payloads now: step back out and wait for it.
             self.active.fetch_sub(1, Ordering::SeqCst);
+            #[cfg(test)]
+            if let Some(observer) = self.wait_observer.lock().as_ref() {
+                let _ = observer.send(());
+            }
             // Park on the reclaimer's serial lock rather than spinning. The
             // flag is only ever raised while that lock is held, and its
             // `Reset` lowers the flag before the lock drops, so acquiring
@@ -361,9 +367,11 @@ mod tests {
     /// finishes, without any further wake-up from the reclaimer.
     #[test]
     fn a_computation_arriving_mid_release_waits_for_it_then_enters() {
-        use std::sync::mpsc::{channel, RecvTimeoutError};
+        use std::sync::mpsc::{channel, TryRecvError};
 
         let gate = Arc::new(SemanticActivityGate::default());
+        let (wait_started_tx, wait_started_rx) = channel::<()>();
+        *gate.wait_observer.lock() = Some(wait_started_tx);
         gate.enqueue("/a.ts", u64::MAX);
         let (applying_tx, applying_rx) = channel::<()>();
         let (finish_tx, finish_rx) = channel::<()>();
@@ -389,9 +397,12 @@ mod tests {
                 entered_tx.send(()).unwrap();
             })
         };
+        wait_started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the computation reaches the reclaim barrier");
         assert_eq!(
-            entered_rx.recv_timeout(Duration::from_millis(100)),
-            Err(RecvTimeoutError::Timeout),
+            entered_rx.try_recv(),
+            Err(TryRecvError::Empty),
             "a computation must not enter while a release is switching payloads"
         );
 

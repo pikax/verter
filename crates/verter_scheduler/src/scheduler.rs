@@ -1096,7 +1096,7 @@ pub struct Scheduler {
     scoped_cache_gate: Mutex<()>,
     /// Process-local owner id source for aggregate job-liveness registrations.
     next_scoped_owner_id: AtomicU64,
-    /// Lock-free inbox for submissions.
+    /// Bounded inbox for submissions.
     pub(crate) inbox: SubmissionInbox,
     /// Current resolver snapshot (atomically swappable).
     pub(crate) overlay: Arc<OverlayMap>,
@@ -1714,7 +1714,7 @@ impl Scheduler {
             flight: Arc::clone(&flight),
             request_context: request.request_context.clone(),
         };
-        if self.inbox.sender.send(submission).is_err() {
+        if self.send_submission(submission).is_err() {
             self.terminalize_scoped_cache_flight(
                 &identity,
                 &flight,
@@ -1966,6 +1966,51 @@ impl Scheduler {
             .map_or(0, |flight| flight.owner_count())
     }
 
+    /// Enqueue without parking the sole driver (or a single-threaded inline
+    /// pump) behind its own full inbox. Other callers wait for bounded
+    /// capacity; the driver can consume one older submission to free a slot.
+    fn send_submission(&self, submission: Submission) -> Result<(), Box<Submission>> {
+        #[cfg(not(target_arch = "wasm32"))]
+        use crate::caller_kind::CallerKind;
+        let mut submission = submission;
+        loop {
+            submission = match self.inbox.sender.try_send(submission) {
+                Ok(()) => return Ok(()),
+                Err(crossbeam_channel::TrySendError::Full(submission)) => submission,
+                Err(crossbeam_channel::TrySendError::Disconnected(submission)) => {
+                    return Err(Box::new(submission))
+                }
+            };
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err(Box::new(submission));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if !matches!(
+                CallerKind::current(),
+                CallerKind::Driver | CallerKind::Inline
+            ) && self.driver_handle.lock().is_some()
+            {
+                return self
+                    .inbox
+                    .sender
+                    .send(submission)
+                    .map_err(|error| Box::new(error.0));
+            }
+            let mut select = crossbeam_channel::Select::new();
+            let send = select.send(&self.inbox.sender);
+            select.recv(&self.inbox.receiver);
+            let operation = select.select();
+            if operation.index() == send {
+                return operation
+                    .send(&self.inbox.sender, submission)
+                    .map_err(|error| Box::new(error.0));
+            }
+            if let Ok(older) = operation.recv(&self.inbox.receiver) {
+                self.process_submission(older);
+            }
+        }
+    }
+
     /// Submit a request. Returns a handle that resolves when the target stage is reached.
     pub fn submit_request(&self, request: Request) -> CompletionHandle<RequestResult> {
         verter_audit::attribute!(SchedulerSubmitRequest);
@@ -1990,7 +2035,7 @@ impl Scheduler {
             submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
             request_context: request.request_context,
         };
-        match self.inbox.sender.send(submission) {
+        match self.send_submission(submission) {
             Ok(()) => {
                 // Record the submission + update the peak inbox depth
                 // observed (contention instrumentation).
@@ -2069,11 +2114,7 @@ impl Scheduler {
             return BatchHandle { handles };
         }
 
-        match self
-            .inbox
-            .sender
-            .send(Submission::NewRequestBatch { requests: queued })
-        {
+        match self.send_submission(Submission::NewRequestBatch { requests: queued }) {
             Ok(()) => {
                 // ONE batch == ONE submission for contention accounting,
                 // regardless of how many items it carries.
@@ -2087,10 +2128,10 @@ impl Scheduler {
                         .fetch_max(depth, Ordering::Relaxed);
                 }
             }
-            Err(crossbeam_channel::SendError(submission)) => {
+            Err(submission) => {
                 // Inbox closed (scheduler shutting down): signal every
                 // handle so callers don't hang.
-                Self::shutdown_drained_submission(submission);
+                Self::shutdown_drained_submission(*submission);
             }
         }
         BatchHandle { handles }
@@ -2237,7 +2278,7 @@ impl Scheduler {
         //    is what guarantees a parked driver observes this.
         self.shutdown.store(true, Ordering::Release);
         let _ = self.driver_teardown.0.try_send(());
-        let _ = self.inbox.sender.send(Submission::Wake);
+        let _ = self.inbox.sender.try_send(Submission::Wake);
         #[cfg(any(test, feature = "test-support"))]
         self.reset_wake_posts.fetch_add(1, Ordering::Release);
         if let Some(handle) = self.driver_handle.lock().take() {
@@ -2539,7 +2580,7 @@ impl Scheduler {
                 });
             }
             if created_generation.is_some() {
-                let _ = self.inbox.sender.send(Submission::NewRequest {
+                let _ = self.send_submission(Submission::NewRequest {
                     file_id: dep_id.clone(),
                     target: TargetStage::Analysis,
                     priority: std::cmp::min(inherited_priority, Priority::Interactive),
@@ -3182,7 +3223,7 @@ impl Scheduler {
         // We re-trigger the dispatch by sending a Wake into the
         // inbox; the driver picks it up, re-runs the cooperative
         // pump, and the now-ungated artifact nodes go out.
-        let _ = self.inbox.sender.send(Submission::Wake);
+        let _ = self.inbox.sender.try_send(Submission::Wake);
     }
 
     /// Close a file: clear overlay + pending_source, keep node alive.
@@ -3215,7 +3256,7 @@ impl Scheduler {
         drop(dag);
 
         // Enqueue a Source job at Background priority to reload from disk
-        let _ = self.inbox.sender.send(Submission::NewRequest {
+        let _ = self.send_submission(Submission::NewRequest {
             file_id: id.to_string(),
             target: TargetStage::Analysis,
             priority: Priority::Background,
@@ -6412,7 +6453,7 @@ impl Scheduler {
         stranded: &[crate::dag::SubmissionToken],
     ) {
         if !stranded.is_empty() {
-            let _ = inbox_sender.send(Submission::Wake);
+            let _ = inbox_sender.try_send(Submission::Wake);
         }
     }
 
@@ -7369,7 +7410,7 @@ impl Drop for Scheduler {
         // by a cooperative pump before the driver parks on it.
         #[cfg(not(target_arch = "wasm32"))]
         let _ = self.driver_teardown.0.try_send(());
-        let _ = self.inbox.sender.send(Submission::Wake);
+        let _ = self.inbox.sender.try_send(Submission::Wake);
         self.shutdown_all_scoped_cache_flights();
 
         // Close inbox (causes driver recv to return Disconnected)
@@ -7838,6 +7879,31 @@ mod tests {
     }
 
     // ── Basic Pipeline ──
+
+    #[test]
+    fn driver_submission_makes_room_in_a_full_inbox() {
+        let loader = Arc::new(MemorySourceLoader::new());
+        loader.insert("/a.vue".to_string(), Arc::from("<template>hi</template>"));
+        let sched = test_scheduler_with_loader(loader);
+        for _ in 0..crate::driver::SUBMISSION_INBOX_CAPACITY {
+            sched.inbox.sender.try_send(Submission::Wake).unwrap();
+        }
+        let handle = {
+            let _driver = crate::caller_kind::CallerKindGuard::install(
+                crate::caller_kind::CallerKind::Driver,
+            );
+            sched.submit_request(Request {
+                file_id: "/a.vue".to_string(),
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                source: None,
+                file_language: None,
+                request_context: None,
+            })
+        };
+        sched.drive_all();
+        assert!(handle.try_get().unwrap().is_ready());
+    }
 
     #[test]
     fn submit_source_request_and_drive() {

@@ -290,6 +290,17 @@ the plan body.
 
 ## Driver park and teardown
 
+The submission inbox is bounded to 1024 items. Normal submitters wait for
+capacity; a driver or single-threaded inline submitter consumes older inbox
+items if the queue is full, then enqueues its own item. Batches still occupy
+one slot and are admitted atomically. Wake notifications use `try_send`:
+when the inbox is full, its existing items already cause another pump pass.
+The private teardown channel remains independent of inbox capacity.
+The pressure contract is `inbox_depth_max <= 1024`, with no dropped request
+or stage completion while the scheduler is live. A full inbox can delay a
+submitter but cannot park its own sole consumer. No parse or stage dispatch
+is duplicated on that path.
+
 The native driver loop (`driver_loop_native`) parks between wakes on three
 things at once, reported as `DriverPark`: its own private teardown channel
 (`Scheduler::driver_teardown`), the shared submission inbox, and an idle

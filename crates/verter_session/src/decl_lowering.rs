@@ -462,7 +462,9 @@ const DECL_WORKER_QUEUE_CAPACITY: usize = 32;
 /// lease releases waiting to be applied to its shard.
 #[cfg(not(target_arch = "wasm32"))]
 struct DeclWorker {
-    jobs: std::sync::mpsc::SyncSender<WorkerJob>,
+    jobs: crossbeam_channel::Sender<WorkerJob>,
+    /// A coalesced notification, separate from the bounded job queue.
+    wake: crossbeam_channel::Sender<()>,
     /// Lease releases not yet applied, coalesced per key. Dropping a lease
     /// must not block, so a release is recorded here instead of queued as
     /// a job; the worker applies every recorded release before it runs its
@@ -488,7 +490,8 @@ fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWor
     );
     let mut workers = Vec::with_capacity(worker_count);
     for index in 0..worker_count {
-        let (jobs, rx) = std::sync::mpsc::sync_channel::<WorkerJob>(queue_capacity);
+        let (jobs, rx) = crossbeam_channel::bounded::<WorkerJob>(queue_capacity);
+        let (wake, wake_rx) = crossbeam_channel::bounded::<()>(1);
         let releases = Arc::new(parking_lot::Mutex::new(FxHashMap::default()));
         let pending = Arc::clone(&releases);
         std::thread::Builder::new()
@@ -496,16 +499,31 @@ fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWor
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let mut shard = SnapshotShard::new();
-                while let Ok(job) = rx.recv() {
+                loop {
+                    let job = crossbeam_channel::select! {
+                        recv(rx) -> job => match job {
+                            Ok(job) => Some(job),
+                            Err(_) => break,
+                        },
+                        recv(wake_rx) -> _ => None,
+                    };
+                    // Drain after receiving a job: a release recorded
+                    // before that job was sent must take effect first.
                     let released = std::mem::take(&mut *pending.lock());
                     for (key, count) in released {
                         shard.release(&key, count);
                     }
-                    job(&mut shard);
+                    if let Some(job) = job {
+                        job(&mut shard);
+                    }
                 }
             })
             .expect("failed to spawn decl-lowering worker");
-        workers.push(DeclWorker { jobs, releases });
+        workers.push(DeclWorker {
+            jobs,
+            wake,
+            releases,
+        });
     }
     workers
 }
@@ -804,11 +822,9 @@ impl DeclLoweringService {
             let workers = self.workers();
             let worker = &workers[shard_index(key, workers.len())];
             *worker.releases.lock().entry(key.clone()).or_insert(0) += 1;
-            // Wake an idle worker so the release applies now rather than at
-            // its next job. A full queue needs no wake-up — the worker
-            // applies the release before the next job it dequeues — and a
-            // closed one means the worker and its shard are already gone.
-            let _ = worker.jobs.try_send(Box::new(|_| {}));
+            // Coalesce notifications without taking capacity from real jobs.
+            // A busy worker drains releases before its next job regardless.
+            let _ = worker.wake.try_send(());
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -1073,7 +1089,8 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_lease_drop_neither_waits_on_a_full_queue_nor_is_lost() {
-        use std::sync::mpsc::{channel, TrySendError};
+        use crossbeam_channel::TrySendError;
+        use std::sync::mpsc::channel;
         use std::time::Duration;
 
         let mut service = DeclLoweringService::new_with(/* lazy = */ true, 1);
@@ -1131,6 +1148,45 @@ mod tests {
             "a still-leased snapshot stays retained"
         );
         drop(busy_lease.lease);
+    }
+
+    /// Releasing a lease must not consume the one queued slot reserved for
+    /// real work while a worker is occupied.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_lease_release_does_not_enqueue_a_dummy_job() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        let mut service = DeclLoweringService::new_with(true, 1);
+        service.queue_capacity = 1;
+        let service = Arc::new(service);
+        let source: Arc<str> = Arc::from("type A = 1;\n");
+        let busy = key("/ws/busy.ts", 1);
+        let released = key("/ws/released.ts", 2);
+        let busy_lease = service.acquire_lease(&busy, &source, oxc_span::SourceType::ts());
+        let released_lease = service.acquire_lease(&released, &source, oxc_span::SourceType::ts());
+        let (started_tx, started_rx) = channel();
+        let (finish_tx, finish_rx) = channel();
+        let worker = {
+            let service = Arc::clone(&service);
+            std::thread::spawn(move || {
+                service.run_leased(&busy, move |_| {
+                    started_tx.send(()).unwrap();
+                    finish_rx.recv().unwrap();
+                })
+            })
+        };
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        drop(released_lease.lease);
+        let real_job_enqueued = service.workers()[0].jobs.try_send(Box::new(|_| {})).is_ok();
+        finish_tx.send(()).unwrap();
+        worker.join().unwrap();
+        drop(busy_lease.lease);
+        assert!(
+            real_job_enqueued,
+            "lease release consumed the real job slot"
+        );
     }
 
     /// `run_leased` NEVER parses: on a lease miss it returns `None` (the job
