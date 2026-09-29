@@ -43,6 +43,11 @@ impl VerterHost {
     /// configured extension list across LSP/test workspace swaps.
     pub fn set_workspace(&self, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) {
         workspace.set_default_resolve_extensions(self.config.resolve_extensions.clone());
+        workspace.install_resolution_retention(Arc::new(
+            crate::semantic_retention_account::ResolutionRetention(Arc::clone(
+                self.project_type_store.retention_account(),
+            )),
+        ));
         *self.workspace.write() = workspace;
         // SWAP-FIRST, then clear — the order is load-bearing. Clearing
         // before the swap would be unsound: a concurrent reader could
@@ -339,7 +344,11 @@ impl VerterHost {
             .overlay_canonicals()
             .into_iter()
             .filter_map(|canonical| view.source(&canonical).map(|source| (canonical, source)));
-        verter_workspace::ResolutionOverlaySnapshot::new(upserts, view.tombstoned_canonicals())
+        verter_workspace::ResolutionOverlaySnapshot::new_under(
+            view.resolution_authority().cloned(),
+            upserts,
+            view.tombstoned_canonicals(),
+        )
     }
 
     /// Compute the preferred alias-based import specifier for a target file.
@@ -799,7 +808,10 @@ impl VerterHost {
     pub fn retention_snapshot(&self) -> HostRetentionSnapshot {
         let indexed = self.project_type_store.indexed();
         let account = self.project_type_store.retention_account().snapshot();
+        let workspace = self.ws().resource_snapshot();
         HostRetentionSnapshot {
+            overlay_resolution_slots: workspace.overlay_resolution_slots,
+            overlay_value_versions: workspace.overlay_value_versions,
             live_artifacts: indexed.live_artifact_count(),
             retained_retired_versions: indexed.retained_retired_version_count(),
             live_roots: indexed.live_root_count(),

@@ -37,10 +37,22 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
         .expect("upsert must succeed");
 }
 
-/// One session request over `overlays` and `tombstones`: its store view and
-/// its context, built the way production builds them.
+/// One request over `overlays` and `tombstones`, with no session behind it:
+/// its store view and its context, built the way production builds them.
 fn with_session<T>(
     host: &Arc<VerterHost>,
+    overlays: &[(&str, &str)],
+    tombstones: &[&str],
+    request: impl FnOnce(&SessionResolverContext<'_>, &HostStoreView) -> T,
+) -> T {
+    with_session_under(host, None, overlays, tombstones, request)
+}
+
+/// [`with_session`] as a request of the session `authority` stands for
+/// (`None`: a request overlay of its own).
+fn with_session_under<T>(
+    host: &Arc<VerterHost>,
+    authority: Option<&verter_workspace::OverlayAuthority>,
     overlays: &[(&str, &str)],
     tombstones: &[&str],
     request: impl FnOnce(&SessionResolverContext<'_>, &HostStoreView) -> T,
@@ -59,6 +71,10 @@ fn with_session<T>(
         .map(|canonical| (*canonical).to_string())
         .collect();
     let view = OverlaidViewRef::new(host, &sources, &hashes, &deleted);
+    let view = match authority {
+        Some(authority) => view.with_resolution_authority(authority.clone()),
+        None => view,
+    };
     let store_view = host
         .resolver_store_view_read()
         .into_owned_view()
@@ -319,7 +335,7 @@ fn every_view_answers_the_same_whatever_was_read_first() {
     }
 }
 
-/// One warm host walked through create, body edit, export change, revert
+/// One warm session walked through create, body edit, export change, revert
 /// and reveal answers every step exactly as a cold host does — and a body
 /// edit that changes no resolution fact runs no resolver.
 #[test]
@@ -334,6 +350,7 @@ fn create_edit_revert_and_reveal_answer_as_cold() {
     ];
     let (_, warm) = make_host(&[]);
     upsert(&warm, BARREL, "export * from \"./helper\";\n");
+    let session = verter_workspace::OverlayAuthority::new();
     let mut runs_before_body_edit = None;
     for (index, overlays) in steps.iter().enumerate() {
         let (_, cold) = make_host(&[]);
@@ -343,7 +360,9 @@ fn create_edit_revert_and_reveal_answer_as_cold() {
             runs_before_body_edit = Some(producer_runs(&warm));
         }
         assert_eq!(
-            resolve_through_session(&warm, overlays, BARREL, "P"),
+            with_session_under(&warm, Some(&session), overlays, &[], |ctx, _| {
+                ctx.resolve_named_type_export_target_shallow(BARREL, "P")
+            }),
             expected,
             "step {index}: {overlays:?}"
         );
@@ -509,8 +528,10 @@ fn a_pinned_session_request_outlives_overlay_churn() {
 // ---------------------------------------------------------------------------
 
 /// U = the distinct complete resolution queries a request demands. Across
-/// repeated requests over the same overlay the resolver runs once per query
-/// the overlay reaches and never again; the queries it cannot reach reuse
+/// repeated requests of one session over the same overlay the resolver runs
+/// once per query the overlay reaches and never again (a request overlay
+/// with no session keeps its answers for its own request only); the
+/// queries it cannot reach reuse
 /// the workspace's answers; and the overlay-side work — root construction,
 /// probes, manifest parses — is counted apart so a relocated cost cannot
 /// pass for an eliminated one.
@@ -552,10 +573,11 @@ fn repeated_overlay_requests_run_each_resolution_producer_once() {
         assert!(type_route_through_host(&host, OWNER, specifier).is_some());
     }
     let warm_workspace = producer_runs(&host);
+    let session = verter_workspace::OverlayAuthority::new();
 
     for request in 0..4 {
         let before = producer_runs(&host);
-        let work = with_session(&host, overlay, &[], |ctx, store_view| {
+        let work = with_session_under(&host, Some(&session), overlay, &[], |ctx, store_view| {
             for _ in 0..3 {
                 for specifier in &specifiers {
                     let target = ctx.resolve_type_dependency_canonical(OWNER, specifier);
@@ -629,5 +651,158 @@ fn repeated_session_route_reads_rebuild_nothing() {
             replays,
             "request {request} replays no witness"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Residency: a session's overlay answers and overlay value versions go when
+// the session closes.
+// ---------------------------------------------------------------------------
+
+/// A retention account that admits every reservation and tracks the bytes
+/// its live charges hold.
+struct CountingAccount(Arc<std::sync::atomic::AtomicUsize>);
+
+struct CountingCharge {
+    bytes: usize,
+    charged: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for CountingCharge {
+    fn drop(&mut self) {
+        self.charged
+            .fetch_sub(self.bytes, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl verter_workspace::ResolutionRetentionAccount for CountingAccount {
+    fn reserve_retained(
+        &self,
+        bytes: usize,
+    ) -> Option<verter_workspace::ResolutionRetentionCharge> {
+        self.0.fetch_add(bytes, std::sync::atomic::Ordering::SeqCst);
+        Some(verter_workspace::ResolutionRetentionCharge::new(
+            CountingCharge {
+                bytes,
+                charged: Arc::clone(&self.0),
+            },
+        ))
+    }
+}
+
+/// The overlay-side resident state of `host`: lane slots, value versions.
+fn overlay_residency(host: &VerterHost) -> (usize, usize) {
+    let retention = host.retention_snapshot();
+    (
+        retention.overlay_resolution_slots,
+        retention.overlay_value_versions,
+    )
+}
+
+/// Open, edit and close a thousand overlay sessions whose overlays create
+/// the owner's dependency. While a session is open its overlay answers are
+/// resident and charged; when it closes they go — so the resident overlay
+/// state and the bytes charged for it return to zero after every session.
+#[test]
+fn a_thousand_overlay_sessions_open_edit_and_close_to_a_plateau() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let project = crate::meta::MetaProject::new(host);
+    project
+        .upsert_base(OWNER, "import type { P } from './helper'\n")
+        .expect("base owner");
+    let charged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    project
+        .host()
+        .ws()
+        .install_resolution_retention(Arc::new(CountingAccount(Arc::clone(&charged))));
+    let mut resident_while_open = (0, 0);
+    let mut charged_while_open = 0;
+    for cycle in 0..1000 {
+        let session = project.open_session().expect("open");
+        for edit in 0..2 {
+            session
+                .upsert(
+                    "/workspace/helper.ts",
+                    format!("export interface P {{ n{cycle}_{edit}: number }}\n"),
+                )
+                .expect("edit");
+            let target = session.with_overlay_view(|view| {
+                let store_view = project
+                    .host()
+                    .resolver_store_view_read()
+                    .into_owned_view()
+                    .with_session_overlay(project.host(), view);
+                let ctx = SessionResolverContext::new(
+                    project.host(),
+                    view,
+                    &store_view,
+                    Arc::new(CanonicalCompletionOverlay::new()),
+                );
+                ctx.resolve_type_dependency_canonical(OWNER, "./helper")
+            });
+            assert_eq!(target.as_deref(), Some(HELPER), "cycle {cycle} edit {edit}");
+        }
+        let open = overlay_residency(project.host());
+        resident_while_open = (
+            resident_while_open.0.max(open.0),
+            resident_while_open.1.max(open.1),
+        );
+        charged_while_open =
+            charged_while_open.max(charged.load(std::sync::atomic::Ordering::SeqCst));
+        session.close();
+        assert_eq!(
+            overlay_residency(project.host()),
+            (0, 0),
+            "cycle {cycle}: the closed session's overlay state is released"
+        );
+        assert_eq!(
+            charged.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "cycle {cycle}: and so are the bytes charged for it"
+        );
+    }
+    assert!(
+        resident_while_open.0 > 0 && resident_while_open.1 > 0 && charged_while_open > 0,
+        "an open session's overlay state is resident and charged: \
+         {resident_while_open:?} {charged_while_open}"
+    );
+}
+
+/// The component-meta path holds its overlay answers under the session's
+/// authority too: they serve the session's next request and go at close.
+#[test]
+fn a_session_component_meta_request_holds_its_overlay_state_until_close() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let project = crate::meta::MetaProject::new(host);
+    project
+        .upsert_base(
+            "/Comp.vue",
+            "<script setup lang=\"ts\">\nimport type { P } from './helper'\ndefineProps<P>()\n</script>\n",
+        )
+        .expect("base component");
+    for cycle in 0..3 {
+        let session = project.open_session().expect("open");
+        session
+            .upsert(
+                "/helper.ts",
+                format!("export interface P {{ value: string; cycle{cycle}: number }}\n"),
+            )
+            .expect("edit");
+        for _ in 0..2 {
+            let meta = session
+                .get_component_meta("/Comp.vue")
+                .expect("session alive")
+                .expect("the component resolves");
+            assert!(
+                meta.props.iter().any(|prop| prop.name == "value"),
+                "cycle {cycle}: the overlay-created helper supplies the props"
+            );
+            assert!(
+                overlay_residency(project.host()).0 > 0,
+                "cycle {cycle}: the open session holds its overlay answers"
+            );
+        }
+        session.close();
+        assert_eq!(overlay_residency(project.host()), (0, 0), "cycle {cycle}");
     }
 }

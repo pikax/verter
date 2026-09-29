@@ -527,6 +527,13 @@ impl VerterHost {
         let project_type_store = Arc::new(
             crate::project_type_store::ProjectTypeStore::with_provenance(Arc::clone(&provenance)),
         );
+        // The workspace's resident request-overlay resolution state charges
+        // the same aggregate account every host store charges.
+        workspace_lock.read().install_resolution_retention(Arc::new(
+            crate::semantic_retention_account::ResolutionRetention(Arc::clone(
+                project_type_store.retention_account(),
+            )),
+        ));
         // Pull RouteDb / ImportedRootDb handles from the project-type-store
         // BEFORE constructing the resolver runtime so the runtime borrows
         // the project-shared `Arc`s. This keeps

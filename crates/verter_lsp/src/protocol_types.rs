@@ -419,6 +419,11 @@ pub struct RetentionStatistics {
     /// is replaced at: the count is bounded by the cap, not flat.
     pub signature_records: usize,
     pub signature_record_cap: usize,
+    /// Overlay-lane resolution slots and overlay value versions the
+    /// workspace holds for live overlay authorities (sessions, request
+    /// overlays), released when the last authority holding them goes.
+    pub overlay_resolution_slots: usize,
+    pub overlay_value_versions: usize,
     /// Queued releases applied so far, the longest one waited for a
     /// zero-reader instant, and the slowest / summed release wall time.
     pub releases_applied: u64,
@@ -472,6 +477,8 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             registered_sources: snapshot.registered_sources,
             signature_records: snapshot.signature_records,
             signature_record_cap: snapshot.signature_record_cap,
+            overlay_resolution_slots: snapshot.overlay_resolution_slots,
+            overlay_value_versions: snapshot.overlay_value_versions,
             releases_applied: snapshot.reclaim.releases_applied,
             release_wait_max_micros: snapshot.reclaim.wait_max_micros,
             release_elapsed_max_micros: snapshot.reclaim.elapsed_max_micros,
