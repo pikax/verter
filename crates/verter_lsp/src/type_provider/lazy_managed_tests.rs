@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use verter_type_runtime::traits::TypeProvider;
 
-use super::lazy_managed::LazyManagedTypeProvider;
+use super::lazy_managed::new_lazy_managed;
 use super::mock::{MockCall, MockTypeProvider};
 
 /// Preflight for the real lazy-recovery test: node, a resolvable tsserver.js,
@@ -132,7 +132,7 @@ async fn build_source_plugin_probe(
 async fn lifecycle_is_cached_without_activation_and_replayed_once_on_first_query() {
     let spawn_count = Arc::new(AtomicUsize::new(0));
     let managed = Arc::new(MockTypeProvider::new());
-    let provider = LazyManagedTypeProvider::new({
+    let provider = new_lazy_managed({
         let spawn_count = Arc::clone(&spawn_count);
         let managed = Arc::clone(&managed);
         move || {
@@ -214,7 +214,7 @@ async fn lifecycle_is_cached_without_activation_and_replayed_once_on_first_query
 #[tokio::test]
 async fn activation_replays_live_files_in_first_open_order_with_latest_contents() {
     let managed = Arc::new(MockTypeProvider::new());
-    let provider = LazyManagedTypeProvider::new({
+    let provider = new_lazy_managed({
         let managed = Arc::clone(&managed);
         move || {
             let managed = Arc::clone(&managed);
@@ -414,7 +414,7 @@ async fn lazy_real_tsgo_quick_info_matches_the_eager_file_lifecycle() {
             .expect("eager real-tsgo QuickInfo");
         eager.shutdown().await.expect("shutdown eager real tsgo");
 
-        let lazy = LazyManagedTypeProvider::new({
+        let lazy = new_lazy_managed({
             let executable = executable.clone();
             let workspace = workspace.path().to_path_buf();
             move || {
@@ -455,7 +455,7 @@ async fn lazy_real_tsgo_quick_info_matches_the_eager_file_lifecycle() {
 async fn concurrent_first_queries_singleflight_the_managed_factory() {
     let spawn_count = Arc::new(AtomicUsize::new(0));
     let managed = Arc::new(MockTypeProvider::new());
-    let provider = Arc::new(LazyManagedTypeProvider::new({
+    let provider = Arc::new(new_lazy_managed({
         let spawn_count = Arc::clone(&spawn_count);
         let managed = Arc::clone(&managed);
         move || {
@@ -508,7 +508,7 @@ async fn failed_activation_retries_after_cooldown_and_recovers() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let managed = Arc::new(MockTypeProvider::new());
-    let provider = LazyManagedTypeProvider::new({
+    let provider = new_lazy_managed({
         let attempts = Arc::clone(&attempts);
         let fail = Arc::clone(&fail);
         let managed = Arc::clone(&managed);
@@ -775,7 +775,7 @@ async fn failed_activation_replays_real_vue_and_svelte_carriers_before_typed_que
     let carrier_store_dir = carrier_store_dir.to_string_lossy().into_owned();
 
     let attempts = Arc::new(AtomicUsize::new(0));
-    let provider = LazyManagedTypeProvider::new({
+    let provider = new_lazy_managed({
         let attempts = Arc::clone(&attempts);
         let node_path = node_path.clone();
         let tsserver_path = tsserver_path.clone();
@@ -889,18 +889,17 @@ async fn failed_activation_replays_real_vue_and_svelte_carriers_before_typed_que
     );
 }
 
-/// A CANCELLED activation must still arm the retry cooldown.
+/// A CANCELLED demand must never start another activation.
 ///
 /// Client cancellation (and every `tokio::time::timeout` around a test handler)
-/// DROPS the handler body, so an activation cancelled while the factory
-/// is still running never reaches its terminal outcome arm. Without a drop
-/// record, `last_activation_failure` stays unset, the cooldown never arms, the
-/// `OnceCell` stays unset — and the very next request spawns ANOTHER managed
-/// child, one per request, unbounded.
+/// DROPS the handler body while the factory is still running. The activation
+/// belongs to the hub, not to the demand that triggered it: a later demand
+/// joins the one in flight instead of spawning ANOTHER managed child, one per
+/// request, unbounded.
 #[tokio::test]
-async fn a_cancelled_activation_still_arms_the_retry_cooldown() {
+async fn a_cancelled_demand_never_starts_another_activation() {
     let attempts = Arc::new(AtomicUsize::new(0));
-    let provider = LazyManagedTypeProvider::new({
+    let provider = new_lazy_managed({
         let attempts = Arc::clone(&attempts);
         move || {
             let attempts = Arc::clone(&attempts);
@@ -930,7 +929,7 @@ async fn a_cancelled_activation_still_arms_the_retry_cooldown() {
         "the factory must have actually started once, else this test proves nothing"
     );
 
-    // The next request lands inside the cooldown window.
+    // The next request joins the activation that is still in flight.
     let _ = tokio::time::timeout(
         std::time::Duration::from_millis(150),
         provider.get_hover("/w/a.tsx", 0),
@@ -939,7 +938,7 @@ async fn a_cancelled_activation_still_arms_the_retry_cooldown() {
     assert_eq!(
         attempts.load(Ordering::SeqCst),
         1,
-        "a cancelled activation must arm the cooldown: the next request must not spawn \
-         another managed child"
+        "a cancelled demand must not start another activation: the next request must join \
+         the in-flight one instead of spawning another managed child"
     );
 }

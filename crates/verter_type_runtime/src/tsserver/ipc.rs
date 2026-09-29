@@ -325,12 +325,12 @@ struct TsserverTransport {
     /// drives hang detection. Shared with the read loop, which stamps every
     /// response OR event, and with the silence watchdog. When the counter
     /// reaches `HANG_THRESHOLD` the transport fires `crash_notify` so the
-    /// `ResilientProvider` restarts the wedged process — a wedged-but-alive
+    /// `ProviderHub` recovers the wedged process — a wedged-but-alive
     /// tsserver (accepts requests, never responds) must be detected and
     /// restarted, not silently time out every request for the rest of the
     /// session.
     liveness: Arc<EngineLiveness>,
-    /// Shared with `ResilientProvider` — signaled when the provider appears hung.
+    /// Shared with the `ProviderHub` crash monitor — signaled when the provider appears hung.
     crash_notify: Option<Arc<Notify>>,
     /// Singleflight + cooldown stamp for `reloadProjects` membership recovery.
     /// Under a hover/diagnostics storm, dozens of concurrent cold-miss retries would
@@ -345,7 +345,7 @@ struct TsserverTransport {
 
 /// Number of consecutive request timeouts before the transport signals a hang.
 /// Mirrors the tsgo transport's `HANG_THRESHOLD`: when reached, `crash_notify` is
-/// fired so the `ResilientProvider` restarts the wedged process (kill, backoff,
+/// fired so the `ProviderHub` recovers the wedged process (kill, backoff,
 /// re-spawn, replay desired state) instead of timing out forever.
 const HANG_THRESHOLD: u32 = 3;
 

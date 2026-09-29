@@ -681,7 +681,7 @@ impl TsgoSharedProvider {
     }
 
     /// Whether this SHARED attach is still LIVE — the transport-eviction signal the
-    /// composite's [`LazyTransport`](crate::tsgo::transport_cell::LazyTransport) reads
+    /// composite's [`LazyTransport`](verter_type_runtime::provider_hub::LazyTransport) reads
     /// to evict a dead `Live` transport. Dead when the control attach reported
     /// `verter/fatal` or its connection closed (the shim's relay/engine is gone), OR
     /// the `--api` checker connection closed. A dead attach fails closed to OWNED and

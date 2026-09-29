@@ -2,7 +2,7 @@
 //!
 //! Provider-neutral integration logic (traits, protocol, merging, auto-import,
 //! project sync, mock) lives in [`crate::type_provider`]. Only the TSGO IPC
-//! transport, the TSGO-specific resilient respawn wrapper, and the SHARED
+//! transport, the TSGO establishment strategy for its provider hub, and the SHARED
 //! editor-attach provider live here.
 
 pub mod composite;
@@ -12,4 +12,3 @@ pub mod project_binding;
 pub mod resilient;
 pub mod shared;
 mod shared_support;
-pub mod transport_cell;
