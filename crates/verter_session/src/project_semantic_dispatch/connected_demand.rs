@@ -31,19 +31,26 @@ use crate::semantic_query::PartialReasonSet;
 /// relation at most, on the shape its relation-complexity limit is reached
 /// by: a union arm scanning a union target of object types charges the
 /// alternative and its pair's worklist step (measured: 22,329 units for the
-/// 20,100 comparisons of 200 reversed arms).
+/// 20,100 comparisons of 200 reversed arms). Pinned by a test until the
+/// cap below is sized by it.
+#[cfg(test)]
 pub(super) const RELATION_UNITS_PER_COMPARISON: usize = 2;
 
 /// Work-unit cap for one connected semantic demand: the operational
-/// backstop, sized above the checker's own relation-complexity limit
+/// backstop.
+///
+/// It is NOT yet above the checker's relation-complexity envelope
 /// ([`checker_policy::RELATION_COMPARISONS`] structured comparisons at
-/// [`RELATION_UNITS_PER_COMPARISON`] units each), so a relation reaches the
-/// checker's TS2859 before the ledger refuses it.
+/// `RELATION_UNITS_PER_COMPARISON` units each, 4,000,000 units): work
+/// units do not bound memory, and a relation holds about 1.6 KB per
+/// structured pair it relates, so sized there a union scan of 1,800
+/// reversed object arms would hold gigabytes. Until construction bytes are
+/// charged beside work, the cap stays here, and a relation the checker
+/// completes between about 130,000 and 2,000,000 comparisons ends as typed
+/// incompleteness rather than the checker's answer.
 ///
 /// [`checker_policy::RELATION_COMPARISONS`]: crate::semantic_query::checker_policy::RELATION_COMPARISONS
-pub(super) const MAX_CONNECTED_PROJECTION_WORK: usize =
-    crate::semantic_query::checker_policy::RELATION_COMPARISONS as usize
-        * RELATION_UNITS_PER_COMPARISON;
+pub(super) const MAX_CONNECTED_PROJECTION_WORK: usize = 262_144;
 /// Nested query-boundary cap for one connected semantic demand.
 pub(super) const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
 
