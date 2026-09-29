@@ -305,13 +305,35 @@ impl DesiredState {
 
     /// Once replacement replay has finished, remove old-epoch generated state.
     /// Otherwise a later discovery load could be shadowed by an open overlay
-    /// that the replacement never received.
-    pub(super) fn discard_admitted(&mut self) {
-        for path in &self.admitted {
-            self.files.remove(path);
-            self.carriers.remove(path);
+    /// that the replacement never received. Returns exactly what was dropped
+    /// so the install can hand it to the issuing tier for a fresh-admission
+    /// re-arm — a replacement may not replay admitted state unproven.
+    pub(super) fn discard_admitted(&mut self) -> super::admission::DroppedAdmittedState {
+        let mut dropped = super::admission::DroppedAdmittedState::default();
+        let admitted = std::mem::take(&mut self.admitted);
+        let mut paths: Vec<&String> = admitted.iter().collect();
+        paths.sort();
+        for path in paths {
+            if let Some(carrier) = self.carriers.remove(path) {
+                dropped
+                    .carriers
+                    .push(super::admission::DroppedAdmittedCarrier {
+                        source_path: carrier.source_path,
+                        companion_path: path.clone(),
+                        content: carrier.content,
+                        project_file_name: carrier.project_file_name,
+                        script_kind: if carrier.active {
+                            carrier.script_kind
+                        } else {
+                            None
+                        },
+                    });
+            }
+            if self.files.remove(path).is_some() {
+                dropped.files.push(path.clone());
+            }
         }
-        self.admitted.clear();
+        dropped
     }
 
     fn activate(

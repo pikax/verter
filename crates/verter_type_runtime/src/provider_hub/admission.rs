@@ -76,6 +76,33 @@ impl ProjectBindingInput {
     }
 }
 
+/// One carrier registration dropped from the desired state at a replacement
+/// install, carrying everything its issuing tier needs to re-publish it through
+/// a fresh admission: the registration inputs plus the EXPLICIT parsing mode of
+/// its last explicit activation (`None` when it was registered without one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroppedAdmittedCarrier {
+    pub source_path: String,
+    pub companion_path: String,
+    pub content: String,
+    pub project_file_name: String,
+    pub script_kind: Option<CarrierScriptKind>,
+}
+
+/// The admitted generated state a replacement install dropped: the carrier
+/// registrations and file overlays the desired state will not replay. Emitted
+/// through [`super::ProviderNotifier::admitted_state_dropped`] after the
+/// replacement is installed, so the tier that minted the admissions can re-arm
+/// them against the fresh serving epoch.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DroppedAdmittedState {
+    /// The admitted carrier registrations, in companion-path order.
+    pub carriers: Vec<DroppedAdmittedCarrier>,
+    /// The admitted file-overlay paths (content-less: the re-arm re-derives
+    /// them from its own publication authority), in path order.
+    pub files: Vec<String>,
+}
+
 /// A refusal never carries a provider operation or an applied receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionRefusal {

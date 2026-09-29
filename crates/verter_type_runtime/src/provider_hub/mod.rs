@@ -75,8 +75,9 @@ mod quarantine;
 mod transport;
 
 pub use admission::{
-    AdmissionRefusal, AdmittedRequest, OverlayFileKind, OverlayMutation, OverlayPriority,
-    ProjectBasis, ProjectBindingInput, ProjectWitness,
+    AdmissionRefusal, AdmittedRequest, DroppedAdmittedCarrier, DroppedAdmittedState,
+    OverlayFileKind, OverlayMutation, OverlayPriority, ProjectBasis, ProjectBindingInput,
+    ProjectWitness,
 };
 use desired::{DesiredMutation, DesiredState, Disposition, Lane};
 use epoch::EpochMint;
@@ -126,6 +127,22 @@ pub trait ProviderNotifier: Send + Sync + 'static {
     /// Deliberately has no default body: a silent default is how a provider
     /// silently inherits behaviour it was supposed to override.
     fn provider_started(&self, pid: Option<u32>, start: EngineStart);
+
+    /// Admitted generated state was dropped because a replacement engine
+    /// installed: the recorded carriers and overlays exist in NO engine now,
+    /// and the desired state will not replay them — a replacement may only
+    /// receive them through a FRESH admission against its own serving epoch.
+    ///
+    /// This is the recovery re-arm signal: the tier that minted the dropped
+    /// admissions re-runs its publication (resolve → admit → apply) for the
+    /// named units, so a recovered engine is not left without its companion
+    /// registrations and overlays until the next ordinary publication. The hub
+    /// emits it AFTER the replacement is installed (a re-arm can bind a
+    /// witness to the new epoch). Defaulted: a tier without hub-issued
+    /// admissions never drops any.
+    fn admitted_state_dropped(&self, dropped: &admission::DroppedAdmittedState) {
+        let _ = dropped;
+    }
 }
 
 /// No-op notifier (logs via tracing only).
@@ -411,6 +428,7 @@ where
         tokio::spawn(run_actor(
             command_rx,
             Arc::clone(&shared),
+            Arc::clone(&notifier),
             log_name,
             demand_driven,
         ));
@@ -1002,6 +1020,7 @@ where
 async fn run_actor<P>(
     mut command_rx: mpsc::UnboundedReceiver<Command<P>>,
     shared: Arc<Shared<P>>,
+    notifier: Arc<dyn ProviderNotifier>,
     log_name: &'static str,
     demand_driven: bool,
 ) where
@@ -1267,7 +1286,7 @@ async fn run_actor<P>(
                     };
                 match outcome {
                     Ok(()) => {
-                        desired.discard_admitted();
+                        let dropped = desired.discard_admitted();
                         let epoch = shared.epochs.mint();
                         // Record the installed engine's tier BEFORE releasing
                         // it into the serving cell: from that instant
@@ -1293,6 +1312,13 @@ async fn run_actor<P>(
                             // torn down, not orphaned, and its monitor released.
                             let _ = previous.provider.shutdown().await;
                             previous.crash_signal.notify_one();
+                        }
+                        // A replacement dropped the OLD epoch's admitted state
+                        // (a first install never has any). Announce it AFTER the
+                        // serving cell is filled so a re-arm binds its fresh
+                        // admission to the epoch that now serves.
+                        if !dropped.carriers.is_empty() || !dropped.files.is_empty() {
+                            notifier.admitted_state_dropped(&dropped);
                         }
                         let _ = ack.send(Ok(epoch));
                     }

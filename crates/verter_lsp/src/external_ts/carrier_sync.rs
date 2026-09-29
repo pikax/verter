@@ -36,9 +36,12 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 
-use verter_session::external_ts::{CarrierOwnershipResolution, ScriptKind, SnapshotRole};
+use verter_session::external_ts::{
+    CarrierOwnershipResolution, ProjectBinding, ScriptKind, SnapshotRole,
+};
 use verter_session::{IdeResponse, VerterHost};
 use verter_workspace::FilesystemWorkspace;
+use verter_workspace::{decide_generated_unit_admission, CanonicalPath, GeneratedUnitAdmission};
 
 use crate::documents::DocumentRegistry;
 use crate::external_ts::{
@@ -233,11 +236,13 @@ enum NotOwnedReason {
     /// sole retryable owner-loss state — the coordinator requeues it. tsserver membership
     /// was deferred WITHOUT thrash (no retract).
     NotReady,
-    /// Ownership is authoritative but the carrier has NO usable owner — `NoProject` /
-    /// `Ambiguous`. TERMINAL: the gateway retracted any prior membership; the coordinator
-    /// advances the owner-loss barrier and settles terminal (never re-queued). The
-    /// user-visible `verter(project)` diagnostic is published separately from the same
-    /// resolution (see [`project_ownership_diagnostic`]).
+    /// Ownership is authoritative but the carrier has NO usable provider membership —
+    /// `NoProject` / `Ambiguous`, or the owning configured project EXCLUDES the
+    /// carrier's generated units (the membership proof the provider hub's admission
+    /// consumes refused them). TERMINAL: the gateway retracted any prior membership;
+    /// the coordinator advances the owner-loss barrier and settles terminal (never
+    /// re-queued). The user-visible `verter(project)` diagnostic is published
+    /// separately from the same resolution (see [`project_ownership_diagnostic`]).
     Unresolved,
     /// Nothing was COMMITTED this pass (compile-to-nothing with a SUCCESSFUL retract, a
     /// not-advertised reconcile, an unactivatable publish, or a fail-closed publish error):
@@ -807,6 +812,42 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         return CarrierSyncDecision::NotOwned(CarrierNotOwned::pending());
     }
 
+    // Generated-unit admission is a CONFIGURATION fact of the owning project, not
+    // a transient failure. The provider hub refuses the companion buffers
+    // (`AdmissionRefusal::GeneratedUnitExcluded`) for a set the workspace
+    // membership proof excludes, so an attempted advertisement can never
+    // complete: the provider-buffer transition fails and the carrier would stay
+    // queued — and provider-sync completion unannounced — for the rest of the
+    // session. Decide the SAME membership question the hub's admission consumes
+    // BEFORE any store or provider write, retract a prior advertisement, and
+    // settle TERMINAL (native analysis remains available). A config edit that
+    // admits the units re-drives reconciliation through its own change, exactly
+    // like a terminal owner-loss.
+    if generated_units_excluded(req.vfs, &binding, &companions) {
+        let retract = membership
+            .coordinator
+            .reconcile_membership_with_resolution(
+                req.canonical_id,
+                CarrierOwnershipResolution::Bound(binding.clone()),
+                companions,
+                ReconcileReason::GeneratedUnitsExcluded,
+            )
+            .await;
+        if classify_terminal_retract(&retract) == TerminalRetractDecision::RetryPending {
+            if let Err(error) = &retract {
+                tracing::warn!(
+                    "carrier-sync gateway: generated-units-excluded retract reconcile failed \
+                     for {}: {error} (external-TS degraded for this source; the stale \
+                     advertisement is still served cross-process and the carrier stays \
+                     queued for retry)",
+                    req.canonical_id
+                );
+            }
+            return CarrierSyncDecision::NotOwned(CarrierNotOwned::retract_failed());
+        }
+        return CarrierSyncDecision::NotOwned(CarrierNotOwned::unresolved());
+    }
+
     // Record EVERY companion surface (IDE + API) and stamp each version from its
     // freshly-recorded generation, so navigation span-classification carries both
     // roles' content/map identity AND the IDE companion's `getScriptVersion` advances
@@ -928,6 +969,36 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
 /// `NotReady` and no owned commit is minted).
 fn carrier_source_revision(host: &VerterHost, canonical_id: &str) -> u64 {
     host.last_content_transition_generation(canonical_id)
+}
+
+/// Whether the owning configured project EXCLUDES the carrier's generated units
+/// — the same workspace membership query (`decide_generated_unit_admission`)
+/// whose proof the provider hub's generated-unit admission consumes before any
+/// provider-visible write. Classification only: the hub remains the sole write
+/// authority; this answers whether an advertisement is even reachable so an
+/// excluded carrier settles terminally instead of retrying a refusal that the
+/// current configuration can never satisfy. `false` when no published snapshot
+/// is available (the transient bootstrap keeps its retry).
+fn generated_units_excluded(
+    vfs: Option<&FilesystemWorkspace>,
+    binding: &ProjectBinding,
+    companions: &[CarrierCompanion],
+) -> bool {
+    let Some(published) = vfs.and_then(|vfs| vfs.load_published()) else {
+        return false;
+    };
+    let units: Vec<CanonicalPath> = companions
+        .iter()
+        .map(|companion| CanonicalPath::new(companion.provider_uri.as_ref()))
+        .collect();
+    matches!(
+        decide_generated_unit_admission(
+            published.snapshot.as_ref(),
+            &CanonicalPath::new(binding.tsconfig_uri()),
+            &units,
+        ),
+        GeneratedUnitAdmission::NotAdmitted(_)
+    )
 }
 
 /// Build the carrier companion set (public-API + IDE) from the owner-resolved

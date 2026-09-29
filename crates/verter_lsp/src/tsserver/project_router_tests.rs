@@ -87,6 +87,7 @@ async fn batch_router_fixture_with_generated_membership(
         engine_specs: DashMap::new(),
         providers: DashMap::new(),
         routes: DashMap::new(),
+        admitted_state_rearm: parking_lot::RwLock::new(None),
     };
     let providers = [
         Arc::new(MockTypeProvider::new()),

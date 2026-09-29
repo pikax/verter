@@ -139,9 +139,18 @@ missing, stale or wrong-project proof refuses before a provider query or write.
 Generated writes use `apply_overlay`/`apply_overlay_batch` on the hub actor.
 Generated state is retained only after an applied receipt. Recovery discards
 the old epoch's generated overlays; the replacement requires fresh admission
-before receiving them. A discovery load shadowed by an editor open returns
+before receiving them, and the install announces exactly what it dropped
+(`ProviderNotifier::admitted_state_dropped`, after the replacement serves) so
+the router's re-arm hook re-registers and re-activates those carriers through
+FRESH admission instead of waiting for the next ordinary publication. A
+discovery load shadowed by an editor open returns
 `ShadowedMutation` without an applied receipt because no provider write occurred.
-Request answers are fenced again at settlement.
+Request answers are fenced again at settlement. A carrier whose owning
+configured project EXCLUDES its generated units is settled TERMINALLY by the
+carrier-sync gateway (membership retracted, never retried within the same
+configuration; a config edit re-drives reconciliation through its own change)
+— retrying the hub's `GeneratedUnitExcluded` refusal would keep provider-sync
+completion unannounced forever.
 
 The tsserver tier is served by `ProjectTsserverProvider`, NOT by one workspace-level engine. A pnpm monorepo routinely installs no TypeScript at the workspace root while each package pins its own (5.8 next to 6.0); one workspace-root resolution walks past every real install onto whatever ancestor or configured `tsdk` answers — including a library-less copy whose Program has NO default libs, so valid code reports `Cannot find name 'Math'`.
 

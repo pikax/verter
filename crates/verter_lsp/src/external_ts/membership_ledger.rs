@@ -157,6 +157,12 @@ pub enum AbsentReason {
     CompileFailed,
     /// A carrier-path / same-stem conflict removed the source from advertisement.
     ConflictRemoved,
+    /// The owning configured project does not admit the carrier's generated
+    /// units (the workspace membership proof refused them), so no engine may
+    /// be handed them. Terminal exactly like `NoProject`: retrying within the
+    /// same configuration can only reproduce the refusal; a config edit that
+    /// admits the units re-drives reconciliation through its own change.
+    GeneratedUnitsExcluded,
 }
 
 /// An advertised companion DESCRIPTOR as recorded in the ledger.

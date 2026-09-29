@@ -193,8 +193,17 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
         // re-syncing it. An open document whose last publication that outdated
         // — a complete receipt, or an owed one that landed incomplete because
         // this very commit had not happened yet — is re-armed here, since no
-        // publication is in flight to notice and no editor signal follows.
-        if matches!(outcome, SyncOutcome::FullyReconciled) {
+        // publication is in flight to notice and no editor signal follows. A
+        // TERMINAL settle (no usable provider membership: no owner, or the
+        // owning project excludes the generated units) owes the SAME re-arm:
+        // native analysis remains available and the `verter(project)`
+        // diagnostic for an unresolved owner is published from the same pass —
+        // without it, an open excluded carrier would never see ANY
+        // publishDiagnostics and level-2 clients wait forever.
+        if matches!(
+            outcome,
+            SyncOutcome::FullyReconciled | SyncOutcome::Terminal
+        ) {
             documents.refresh_owed_diagnostics(&canonical_id);
         }
     }

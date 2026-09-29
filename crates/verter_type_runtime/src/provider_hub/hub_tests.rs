@@ -370,6 +370,141 @@ async fn generated_unit_admission_is_exact_and_refusals_write_nothing() {
     assert!(harness.provider.is_serving(), "explicit hub recovers");
 }
 
+/// A replacement install DROPS the old epoch's admitted state — the desired
+/// state will not replay it unproven — and must ANNOUNCE exactly what it
+/// dropped, after the replacement serves, so the tier that minted the
+/// admissions can re-publish them through fresh admission. RED before the
+/// re-arm signal existed: the drop was silent, and a recovered engine stayed
+/// without its companion registrations until the next ordinary publication.
+#[tokio::test]
+async fn replacement_install_announces_dropped_admitted_state() {
+    use super::{
+        AdmissionRefusal, DroppedAdmittedCarrier, DroppedAdmittedState, OverlayMutation,
+        ProjectBasis, ProjectBindingInput,
+    };
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::{decide_generated_unit_admission, GeneratedUnitAdmission};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+    assert!(matches!(proof, GeneratedUnitAdmission::Admitted(_)));
+
+    let engine = MockProvider::new("tsserver");
+    let replacement = MockProvider::new("tsserver");
+    let harness = make_harness(engine.clone(), replacement.clone()).await;
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    let reader = Arc::new(move || Some(basis.clone()))
+        as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>;
+    let input = ProjectBindingInput::new(
+        source.into(),
+        project.into(),
+        Vec::new(),
+        ProjectBasis::new(Arc::clone(&publication), 1, 1),
+        Arc::clone(&reader),
+    );
+    let witness = harness.provider.bind_project(input).unwrap();
+    let admitted = harness
+        .provider
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+    harness
+        .provider
+        .apply_overlay(
+            &admitted,
+            OverlayMutation::RegisterCarrier {
+                source_path: source.into(),
+                companion_path: unit.as_str().into(),
+                content: "export const __ide = 1;".into(),
+                project_file_name: project.into(),
+            },
+        )
+        .await
+        .unwrap();
+    harness
+        .provider
+        .apply_overlay(
+            &admitted,
+            OverlayMutation::ActivateCarrier {
+                source_path: source.into(),
+                companion_path: unit.as_str().into(),
+                project_file_name: project.into(),
+                script_kind: crate::traits::CarrierScriptKind::Ts,
+            },
+        )
+        .await
+        .unwrap();
+    // The FIRST install carried no admitted state: nothing may have been
+    // announced as dropped so far.
+    assert!(
+        harness.notifier.dropped().is_empty(),
+        "a first install drops no admitted state: {:?}",
+        harness.notifier.dropped()
+    );
+
+    // The crash replacement drops the old epoch's admitted registration and
+    // announces it — content, project, and the recorded parsing mode included,
+    // everything a fresh-admission re-publish needs.
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    harness.notifier.await_dropped(1).await;
+    assert_eq!(
+        harness.notifier.dropped(),
+        vec![DroppedAdmittedState {
+            carriers: vec![DroppedAdmittedCarrier {
+                source_path: source.into(),
+                companion_path: unit.as_str().into(),
+                content: "export const __ide = 1;".into(),
+                project_file_name: project.into(),
+                script_kind: Some(crate::traits::CarrierScriptKind::Ts),
+            }],
+            files: Vec::new(),
+        }],
+        "the replacement must announce exactly the dropped admitted carrier"
+    );
+    // The announcement is not itself an admission: the old admission stays
+    // refused against the new epoch until a FRESH one is minted.
+    assert!(matches!(
+        harness.provider.check_admission(&admitted),
+        Err(AdmissionRefusal::StaleProvider)
+    ));
+    assert!(
+        replacement.calls().is_empty(),
+        "announcing the drop must not speculatively write the old state"
+    );
+}
+
 // @ai-generated
 #[test]
 fn project_bound_diagnostics_quarantine_is_scoped_to_the_configured_project() {
@@ -982,9 +1117,13 @@ async fn a_respawned_provider_is_announced_structurally() {
 struct RecordingNotifier {
     messages: parking_lot::Mutex<Vec<(NotifySeverity, String)>>,
     started: parking_lot::Mutex<Vec<(Option<u32>, EngineStart)>>,
+    /// Every admitted-state drop announcement, in announcement order.
+    dropped: parking_lot::Mutex<Vec<super::DroppedAdmittedState>>,
     /// Signalled on every structural start announcement — event-driven
     /// synchronization for tests awaiting a respawn.
     started_signal: Notify,
+    /// Signalled on every admitted-state drop announcement.
+    dropped_signal: Notify,
 }
 
 impl RecordingNotifier {
@@ -994,6 +1133,32 @@ impl RecordingNotifier {
 
     fn started(&self) -> Vec<(Option<u32>, EngineStart)> {
         self.started.lock().clone()
+    }
+
+    fn dropped(&self) -> Vec<super::DroppedAdmittedState> {
+        self.dropped.lock().clone()
+    }
+
+    /// Wait, driven by the announcement event itself, until `count`
+    /// admitted-state drops were announced. The bound is a failsafe that makes
+    /// a missing announcement fail loudly instead of hanging.
+    async fn await_dropped(&self, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if self.dropped().len() >= count {
+                    return;
+                }
+                self.dropped_signal.notified().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "only {} admitted-state drop(s) were announced within 30s: {:?}",
+                self.dropped().len(),
+                self.messages()
+            )
+        });
     }
 
     /// Wait, driven by the announcement event itself, until `count` engines
@@ -1027,6 +1192,11 @@ impl ProviderNotifier for RecordingNotifier {
     fn provider_started(&self, pid: Option<u32>, start: EngineStart) {
         self.started.lock().push((pid, start));
         self.started_signal.notify_one();
+    }
+
+    fn admitted_state_dropped(&self, dropped: &super::DroppedAdmittedState) {
+        self.dropped.lock().push(dropped.clone());
+        self.dropped_signal.notify_one();
     }
 }
 

@@ -456,6 +456,12 @@ pub enum ReconcileReason {
     CompileFailed,
     /// CALLER-AUTHORITATIVE terminal: a path conflict removed the source.
     ConflictRemoved,
+    /// CALLER-AUTHORITATIVE terminal: the owning configured project excludes
+    /// the carrier's generated units, so no engine may be handed them. Settled
+    /// by the carrier-sync gateway after the workspace membership proof (the
+    /// same `decide_generated_unit_admission` authority the provider hub's
+    /// admission consumes) refuses the companion set.
+    GeneratedUnitsExcluded,
 }
 
 impl ReconcileReason {
@@ -467,6 +473,7 @@ impl ReconcileReason {
             ReconcileReason::Deleted => Some(AbsentReason::Deleted),
             ReconcileReason::CompileFailed => Some(AbsentReason::CompileFailed),
             ReconcileReason::ConflictRemoved => Some(AbsentReason::ConflictRemoved),
+            ReconcileReason::GeneratedUnitsExcluded => Some(AbsentReason::GeneratedUnitsExcluded),
             ReconcileReason::SourceSynced
             | ReconcileReason::WorkspaceScan
             | ReconcileReason::ConfigChanged => None,

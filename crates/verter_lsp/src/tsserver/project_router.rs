@@ -32,7 +32,8 @@ use verter_type_runtime::discovery::{
     tsserver_serving_tier, ResolvedTsserver, TsserverSource,
 };
 use verter_type_runtime::provider_hub::{
-    AdmittedRequest, OverlayFileKind, OverlayMutation, OverlayPriority, ProjectWitness,
+    AdmittedRequest, DroppedAdmittedState, OverlayFileKind, OverlayMutation, OverlayPriority,
+    ProjectWitness,
 };
 use verter_workspace::{decide_generated_unit_admission, CanonicalPath};
 
@@ -158,6 +159,13 @@ pub struct ProjectTsserverProvider {
     engine_specs: DashMap<String, CachedEngineSpec>,
     providers: DashMap<ProjectEngineKey, Arc<ProviderHub<dyn TypeProvider>>>,
     routes: DashMap<String, RegisteredRoute>,
+    /// The recovery re-arm handed to every hub this router creates: a
+    /// replacement install drops the old epoch's admitted generated state, and
+    /// this hook re-publishes it through fresh admission. Installed after
+    /// construction (the hook needs this router behind its `Arc`), before the
+    /// first hub can exist — hubs are created lazily on first demand.
+    admitted_state_rearm:
+        parking_lot::RwLock<Option<crate::resilient_provider::AdmittedStateRearm>>,
 }
 
 impl ProjectTsserverProvider {
@@ -186,7 +194,91 @@ impl ProjectTsserverProvider {
             engine_specs: DashMap::new(),
             providers: DashMap::new(),
             routes: DashMap::new(),
+            admitted_state_rearm: parking_lot::RwLock::new(None),
         })
+    }
+
+    /// Install the recovery re-arm for every hub this router creates. Called
+    /// once, immediately after the router is put behind its `Arc` and before
+    /// any hub can have been created (hubs are lazy on first demand).
+    pub fn install_admitted_state_rearm(
+        &self,
+        rearm: Arc<dyn Fn(&DroppedAdmittedState) + Send + Sync>,
+    ) {
+        *self.admitted_state_rearm.write() = Some(rearm);
+    }
+
+    /// Re-publish admitted generated state a replacement engine dropped,
+    /// through FRESH admission against the epoch that now serves. Each carrier
+    /// re-registers its metadata and, when its last explicit activation was
+    /// recorded, re-activates with that exact parsing mode — mirroring the
+    /// desired-state replay order for non-admitted carriers. A refusal (the
+    /// configuration changed, the project moved, the publication raced) skips
+    /// that carrier fail-closed: the ordinary carrier-sync path owns its
+    /// re-drive, exactly as before the crash.
+    pub async fn rearm_admitted_state(&self, dropped: &DroppedAdmittedState) {
+        for carrier in &dropped.carriers {
+            let rearm = async {
+                let (binding, published) = self.binding_for_registered_with_publication(
+                    &carrier.source_path,
+                    &carrier.companion_path,
+                    &carrier.project_file_name,
+                )?;
+                let (hub, admitted) = self
+                    .admit_generated_write(
+                        &carrier.source_path,
+                        &binding,
+                        published,
+                        &[CanonicalPath::new(&carrier.companion_path)],
+                    )
+                    .await?;
+                hub.apply_overlay(
+                    &admitted,
+                    OverlayMutation::RegisterCarrierMetadata {
+                        source_path: carrier.source_path.clone(),
+                        companion_path: carrier.companion_path.clone(),
+                        content: carrier.content.clone(),
+                        project_file_name: carrier.project_file_name.clone(),
+                    },
+                )
+                .await
+                .map_err(|reason| {
+                    TypeProviderError::new(format!(
+                        "recovery re-arm registration refused: {reason:?}"
+                    ))
+                })?;
+                if let Some(script_kind) = carrier.script_kind {
+                    hub.apply_overlay(
+                        &admitted,
+                        OverlayMutation::ActivateCarrier {
+                            source_path: carrier.source_path.clone(),
+                            companion_path: carrier.companion_path.clone(),
+                            project_file_name: carrier.project_file_name.clone(),
+                            script_kind,
+                        },
+                    )
+                    .await
+                    .map_err(|reason| {
+                        TypeProviderError::new(format!(
+                            "recovery re-arm activation refused: {reason:?}"
+                        ))
+                    })?;
+                }
+                self.register_route(
+                    &carrier.source_path,
+                    &carrier.companion_path,
+                    &carrier.project_file_name,
+                );
+                Ok::<(), TypeProviderError>(())
+            };
+            if let Err(error) = rearm.await {
+                tracing::warn!(
+                    companion = %carrier.companion_path,
+                    "tsserver recovery re-arm skipped (fail-closed; the ordinary \
+                     carrier sync re-drives it): {error}"
+                );
+            }
+        }
     }
 
     fn normalized(path: &str) -> String {
@@ -335,6 +427,7 @@ impl ProjectTsserverProvider {
                     ),
                     Arc::clone(&self.client),
                     3,
+                    self.admitted_state_rearm.read().clone(),
                 ))
             })
             .clone();
