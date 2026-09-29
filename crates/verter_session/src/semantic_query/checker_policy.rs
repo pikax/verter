@@ -35,6 +35,11 @@ pub(crate) const INSTANTIATION_DEPTH: u32 = 100;
 /// Build<N, [...Acc, 0]>` (all four `strictNullChecks` × `noImplicitAny`
 /// settings agree): `Build<998>` is `998`, `Build<999>` is `999`, and
 /// `Build<1000>` is `any` under TS2589.
+///
+/// Known diagnostic gap: a generic alias whose body applies itself
+/// directly, `type Grow<T> = Grow<[T]>`, is circular to the checker (TS2456,
+/// and `any`); Verter reaches this tail limit instead and reports TS2589,
+/// with the same `any`.
 pub(crate) const CONDITIONAL_TAIL_STEPS: u32 = 1000;
 
 /// The checker's `checkCrossProductUnion` limit: an intersection
@@ -51,8 +56,9 @@ pub(crate) const CROSS_PRODUCT_UNION_SIZE: u64 = 100_000;
 /// cache, this, is the most the checker ever allows. The count lives on a
 /// relation chain's first frame, one chain per check, and skips memoized
 /// answers as the checker skips cached ones. The connected-work ledger is
-/// sized above it (two units per recorded comparison), so a relation
-/// reaches this fact before the ledger refuses it.
+/// to be sized above it (two units per recorded comparison) once it charges
+/// the bytes a relation holds; until then it can refuse a relation first,
+/// as typed incompleteness.
 ///
 /// Measured on TypeScript 7.0.2: a union of `M` single-property objects
 /// against the same objects in reverse order records about `M² / 2`

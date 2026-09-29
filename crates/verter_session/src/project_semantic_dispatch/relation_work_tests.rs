@@ -131,9 +131,9 @@ fn aligned_object_unions_relate_in_linear_work() {
 
 /// A structured comparison the relation records costs it at most
 /// `RELATION_UNITS_PER_COMPARISON` ledger units, the mapping the production
-/// ledger is sized by so a relation reaches the checker's TS2859 before the
-/// ledger refuses it: 200 reversed arms record about 200 × 201 / 2
-/// comparisons.
+/// ledger is to be sized by so a relation reaches the checker's TS2859
+/// before the ledger refuses it: 200 reversed arms record about 200 × 201 /
+/// 2 comparisons.
 #[test]
 fn a_recorded_comparison_costs_the_ledgers_mapped_units() {
     let count = 200usize;
