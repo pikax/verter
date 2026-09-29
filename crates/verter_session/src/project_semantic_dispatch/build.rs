@@ -13715,6 +13715,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         let (selection, infer) = self.conditional_branch_selection(check, extends);
+        if let Some(output) = self.absorb_named_error_operand(check, extends) {
+            return output;
+        }
         if matches!(
             selection,
             ConditionalBranchSelection::True | ConditionalBranchSelection::False
@@ -13832,6 +13835,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         let (selection, infer) = self.conditional_branch_selection(check, extends);
+        if let Some(output) = self.absorb_named_error_operand(check, extends) {
+            return output;
+        }
         if self.ctx.is_cancelled() {
             return self.cancelled_build_output();
         }
@@ -13861,8 +13867,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The lattice extreme a conditional operand is where the checker
     /// constructs it. The checker instantiates a conditional's check and
     /// extends types before it relates them, so:
-    /// - a name for its error type (the recovery from a diagnostic the
-    ///   name's own instantiation raised) IS that error type there;
     /// - a union or an intersection is the extreme its members reduce it to
     ///   (`getUnionType` / `getIntersectionType`): `never`, then the error
     ///   type, then `any` decide an intersection (`1 & any` is `any`, `1 &
@@ -13874,7 +13878,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The members are read as the types they name, whatever carrier the
     /// composite was built as: an intersection substituted into an
     /// instantiated body is still the intersection the checker constructs.
-    /// `None` for any other operand.
+    /// `None` for any other operand; an operand that is itself a name is
+    /// read once the conditional is related
+    /// ([`Self::absorb_named_error_operand`]), so the relation, not this
+    /// read, decides where its evaluation joins the demand.
     fn conditional_operand_extreme(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
         use super::absorb::SpecialKind;
         let graph = self.graph();
@@ -13887,11 +13894,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 | SemanticNodeData::BareRef(_)
                 | SemanticNodeData::ImportType(_)
                 | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }),
-            ) => {
-                let resolved = self.resolved_operand(operand)?;
-                return matches!(self.peek_special(resolved), Some((SpecialKind::Error, _)))
-                    .then_some(resolved);
-            }
+            ) => return None,
             Some(SemanticNodeData::Intersection(arms)) => (arms.members_arc(), false),
             Some(SemanticNodeData::Union(arms)) => (arms.members_arc(), true),
             _ => return None,
