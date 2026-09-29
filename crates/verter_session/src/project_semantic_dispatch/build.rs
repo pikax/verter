@@ -13526,6 +13526,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let extends = self
             .composite_over_resolved_arms(extends)
             .unwrap_or(extends);
+        // An operand that is itself an instantiated conditional is the type
+        // it reduces to (`unknown extends ThisParameterType<F>` relates to
+        // `ThisParameterType<F>`'s branch); one still open stays itself.
+        let check = self.reduced_conditional_operand(check);
+        let extends = self.reduced_conditional_operand(extends);
         let absorbed_check = self.indexed_access_where_written(check);
         if let Some(absorbed) =
             self.absorb_conditional(absorbed_check, extends, distributive, |take_true| {
@@ -13627,6 +13632,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let extends = self
             .composite_over_resolved_arms(extends)
             .unwrap_or(extends);
+        // An operand that is itself an instantiated conditional is the type
+        // it reduces to (`unknown extends ThisParameterType<F>` relates to
+        // `ThisParameterType<F>`'s branch); one still open stays itself.
+        let check = self.reduced_conditional_operand(check);
+        let extends = self.reduced_conditional_operand(extends);
         let absorbed_check = self.indexed_access_where_written(check);
         if let Some(output) =
             self.absorb_conditional(absorbed_check, extends, distributive, &mut *lower_branch)
@@ -14168,6 +14178,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match self.execute_relate_pair(check, permissive) {
             super::dispatch_txn::RelationStep::NotAssignable => ConditionalBranchSelection::False,
             _ => ConditionalBranchSelection::Deferred,
+        }
+    }
+
+    /// `node` reduced when it is a conditional the conditional query
+    /// decides, else `node` itself.
+    fn reduced_conditional_operand(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let key = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                distributive,
+                pending,
+            }) => SemanticQueryKey::Conditional {
+                check: *check,
+                extends: *extends,
+                true_branch: *true_branch_ref,
+                false_branch: *false_branch_ref,
+                distributive: *distributive,
+                pending: pending.clone(),
+            },
+            _ => return node,
+        };
+        match crate::semantic_query::SemanticQueryApi::execute_type_node(self, key) {
+            QueryResult::Value(output)
+                if !matches!(
+                    self.graph().node_data(output.value).as_deref(),
+                    Some(SemanticNodeData::Conditional { .. })
+                ) =>
+            {
+                output.value
+            }
+            _ => node,
         }
     }
 

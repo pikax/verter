@@ -4118,10 +4118,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// [`Self::relation_key_with_inference`] in place.
+    ///
+    /// A binding-disabled caller (a call's applicability recheck) still
+    /// upgrades: the pattern's session opens above the caller's barrier,
+    /// which keeps the caller's own session out of reach, and a relation
+    /// against an `infer` pattern decides the same wherever it is asked.
     fn upgrade_relation_key_with_inference(&self, key: &mut RelateMemoKey) {
-        if key.relation != RelationKind::Assignable
-            || self.dispatch_txn.borrow().binding_is_disabled()
-        {
+        if key.relation != RelationKind::Assignable {
             return;
         }
         // Only upgrade when a binding could actually occur: the pattern

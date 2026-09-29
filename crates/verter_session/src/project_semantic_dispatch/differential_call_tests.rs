@@ -1275,26 +1275,28 @@ fn function_call_apply_and_bind_are_any_without_strict_bind_call_apply() {
         ("methodCall2", "any"),
         ("methodBind2", "any"),
         ("localArrow", "any"),
+        ("nestedDecl", "any"),
+        ("idCall", "any"),
+        ("ovCall", "any"),
+        ("idBind", "any"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// TypeScript 7.0.2, under every setting (`strictBindCallApply` on):
-/// `bind` gives `(x: number) => string` over `f` and both methods (their
-/// `this` omitted), `(b: number) => number` for `add` partially applied,
-/// and its calls `string` and `number`; `call` / `apply` over the
-/// generic `id` are `unknown` and over the overloaded `ov` `number`,
-/// `bind` over them their own types; a nested function declaration's
-/// `call` is `boolean`.
+/// TypeScript 7.0.2, under every setting (`strictBindCallApply` on), with
+/// no diagnostics, through `CallableFunction`'s generic signatures: `bind`
+/// with no bound argument gives `(x: number) => string` over `f` and both
+/// methods (their `this` omitted, `OmitThisParameter`) and its call
+/// `string`; `call` / `apply` over the generic `id` are `unknown` (its
+/// base signature) and over the overloaded `ov` `number` (its last
+/// signature); `bind` over them is their own type; a nested function
+/// declaration's `call` is `boolean`.
 #[test]
-#[ignore = "Function bind, and call or apply over a generic, overloaded or nested-declared function, degrade as an unrepresentable callee"]
 fn function_bind_and_generic_calls_read_the_function_they_are_read_off() {
     let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND).lib(FUNCTION_LIB);
     let failures = matrix.returns(&[
         ("bound", "(x: number) => string"),
         ("boundCalled", "string"),
-        ("boundPartial", "(b: number) => number"),
-        ("boundPartialCalled", "number"),
         ("methodBind", "(x: number) => string"),
         ("methodBind2", "(x: number) => string"),
         ("idCall", "unknown"),
@@ -1304,6 +1306,21 @@ fn function_bind_and_generic_calls_read_the_function_they_are_read_off() {
         ("idBind", "<T>(x: T) => T"),
         ("ovBind", "{ (x: string): string; (x: number): number; }"),
         ("nestedDecl", "boolean"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// TypeScript 7.0.2, under every setting (`strictBindCallApply` on):
+/// `add.bind(undefined, 1)` is `(b: number) => number` (`bind`'s second
+/// overload splits `add`'s parameters as `[...A, ...B]` at the bound
+/// arguments' count) and its call `number`.
+#[test]
+#[ignore = "bind with bound arguments infers no [...A, ...B] parameter split, and degrades as an unrepresentable callee"]
+fn a_partially_applied_bind_reads_its_remaining_parameters() {
+    let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND).lib(FUNCTION_LIB);
+    let failures = matrix.returns(&[
+        ("boundPartial", "(b: number) => number"),
+        ("boundPartialCalled", "number"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
