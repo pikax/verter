@@ -48,7 +48,16 @@ pub(crate) const CROSS_PRODUCT_UNION_SIZE: u64 = 100_000;
 /// relation cache size) >> 3` and falls by one for each structured
 /// comparison result the check records; at zero the relation is false with
 /// TS2859. The cache term only lowers the start, so its value over an empty
-/// cache, this, is the most the checker ever allows.
+/// cache, this, is the most the checker ever allows. The count lives on a
+/// relation chain's first frame, one chain per check, and skips memoized
+/// answers as the checker skips cached ones. The connected-work ledger is
+/// sized above it (two units per recorded comparison), so a relation
+/// reaches this fact before the ledger refuses it.
+///
+/// Measured on TypeScript 7.0.2: a union of `M` single-property objects
+/// against the same objects in reverse order records about `M² / 2`
+/// comparisons; `[S] extends [T] ? 1 : 2` is `1` at 1,800 arms and `2` under
+/// TS2859 at 2,100.
 pub(crate) const RELATION_COMPARISONS: u32 = 16_000_000 >> 3;
 
 /// The checker's error type after `diagnostic`: the typed recovery carrier,
@@ -120,11 +129,37 @@ pub(crate) struct RelationComplexity {
     recorded: u32,
 }
 
+#[cfg(test)]
+thread_local! {
+    static RELATION_COMPARISONS_FOR_TESTS: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The allowance a relation check records against: the checker's, or a
+/// lower one a test installs on this thread to reach it quickly.
+fn relation_comparisons() -> u32 {
+    #[cfg(test)]
+    if let Some(allowance) = RELATION_COMPARISONS_FOR_TESTS.with(std::cell::Cell::get) {
+        return allowance;
+    }
+    RELATION_COMPARISONS
+}
+
+/// Run `run` with relation checks on this thread recording against
+/// `allowance` instead of the checker's, through the same code path.
+#[cfg(test)]
+pub(crate) fn with_relation_comparisons_for_tests<R>(allowance: u32, run: impl FnOnce() -> R) -> R {
+    let previous = RELATION_COMPARISONS_FOR_TESTS.with(|cell| cell.replace(Some(allowance)));
+    let result = run();
+    RELATION_COMPARISONS_FOR_TESTS.with(|cell| cell.set(previous));
+    result
+}
+
 impl RelationComplexity {
     /// Record one structured comparison: the TS2859 fact when the check
     /// has none left.
     pub(crate) fn record(&mut self) -> Result<(), CheckerDiagnostic> {
-        if self.recorded >= RELATION_COMPARISONS {
+        if self.recorded >= relation_comparisons() {
             return Err(CheckerDiagnostic {
                 code: CheckerDiagnosticCode::RelationTooComplex,
                 operation: CheckerDiagnosticOperation::Relation,

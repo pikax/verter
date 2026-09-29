@@ -2899,6 +2899,15 @@ pub(crate) struct CompletedSccMember {
 pub(crate) struct RelationDomainRuntime {
     /// The active inference-session stack.
     pub(crate) sessions: Vec<InferenceSession>,
+    /// The structured comparisons each open relation chain has entered,
+    /// keyed by the stack index of its first frame: the checker's
+    /// `relationCount` for its `checkTypeRelatedTo` call. An entry starts
+    /// when a chain starts at that index, and one whose chain has closed is
+    /// dropped when the next chain starts.
+    pub(crate) chain_comparisons: Vec<(
+        usize,
+        crate::semantic_query::checker_policy::RelationComplexity,
+    )>,
     /// Per-session deferred-admission ledger.
     pub(crate) session_admission: SessionAdmissionLedger,
     /// SCC-closed members queued for the root's batched publish drain.
