@@ -11774,6 +11774,26 @@ fn an_assertion_call_evidences_its_own_narrow() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A construction passed as a call argument is a call of its constructor:
+/// the frame evaluates it as it does any call argument, so the
+/// construction's own call is evidenced and the proof closes. TypeScript
+/// 7.0.2, all four settings: `cArg` is `Error0`.
+const CONSTRUCTED_ARGUMENTS: &str = r#"
+class Error0 {}
+declare function id<T>(x: T): T;
+export function cArg() { return id(new Error0()); }
+"#;
+
+#[test]
+fn a_constructed_call_argument_closes_its_proof() {
+    let mut failures = flow_reads_without_proof(CONSTRUCTED_ARGUMENTS, &["cArg"]);
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(CONSTRUCTED_ARGUMENTS)
+            .returns(&[("cArg", "Error0")]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Functions whose flow return is the checker's answer (TypeScript 7.0.2,
 /// all four settings) but whose evaluation CLOSES WITHOUT ITS PROOF: the
 /// finalizer's verdict is partial (an obligation left pending, or a typed
@@ -11794,8 +11814,7 @@ export function dpArrow(cb = () => 7) { return cb; }
 /// What the lane gives (each read `ReturnOnly`, `FLOW_RETURN_UNVERIFIED`):
 /// - `dpArrow` (`() => number`): verdict partial, `Gap(ClosureCapture)`.
 ///
-/// The same holds for `pReject` (`Promise<never>`, library-backed, in
-/// `differential_global_library_tests`) and `sig_classStaticBlockAssigns`.
+/// The same holds for `sig_classStaticBlockAssigns`.
 #[test]
 #[ignore = "a correct flow answer closes with its proof"]
 fn a_correct_flow_answer_closes_with_its_proof() {

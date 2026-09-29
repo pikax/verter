@@ -1809,7 +1809,8 @@ struct SideChannelMark {
 
 /// Whether a call argument lowers through the frame's own carriers
 /// ([`Lowerer::lower_call_arguments`]): a call that is no immediately
-/// invoked function, or a static member read (through parentheses).
+/// invoked function, a construction, or a static member read (through
+/// parentheses).
 fn lowers_in_frame(argument: &oxc_ast::ast::Argument<'_>) -> bool {
     argument
         .as_expression()
@@ -1819,6 +1820,9 @@ fn lowers_in_frame(argument: &oxc_ast::ast::Argument<'_>) -> bool {
                 unwrap_parenthesized(&call.callee),
                 Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)
             ),
+            // A construction is a call of its constructor: the frame
+            // evaluates it, as it does a call argument.
+            Expression::NewExpression(_) => true,
             Expression::StaticMemberExpression(_) => true,
             _ => false,
         })
