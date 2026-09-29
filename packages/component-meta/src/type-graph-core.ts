@@ -31,6 +31,7 @@ export const NODE_INTRINSIC_APPLICATION = 23;
 // operation — an unknown op must not decode as `Awaited`.
 export const INTRINSIC_OP_UNSPECIFIED = 0;
 export const INTRINSIC_OP_AWAITED = 1;
+export const INTRINSIC_OP_NO_INFER = 2;
 
 /**
  * Display spelling for a wire op code. Mirrors the Rust
@@ -38,7 +39,14 @@ export const INTRINSIC_OP_AWAITED = 1;
  * render as an explicit marker rather than silently becoming `Awaited`.
  */
 export function intrinsicOpDisplayName(op: number): string {
-  return op === INTRINSIC_OP_AWAITED ? "Awaited" : "unknown intrinsic";
+  switch (op) {
+    case INTRINSIC_OP_AWAITED:
+      return "Awaited";
+    case INTRINSIC_OP_NO_INFER:
+      return "NoInfer";
+    default:
+      return "unknown intrinsic";
+  }
 }
 
 export const SYNTHETIC_CARRIER_SURFACE_SLOT_BINDING = 0;

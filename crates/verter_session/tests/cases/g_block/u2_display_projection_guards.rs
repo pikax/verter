@@ -717,17 +717,17 @@ fn string_and_template_literals_are_escaped() {
     )));
     assert_eq!(render(&store, lit_ctrl), r"'a\u{0}b'");
 
-    // P2-C DISCRIMINATING: template quasis are stored as RAW source text (they
-    // already carry source-level escapes), so they must round-trip VERBATIM —
-    // re-escaping double-escapes them. A quasi holding a raw backslash and a
-    // raw backtick renders byte-for-byte unchanged inside the backticks.
+    // P2-C DISCRIMINATING: template quasis are stored COOKED (the checker
+    // reads a template literal type's cooked text), so the renderer escapes
+    // them back into template source as the checker prints them: tsc 7.0.2
+    // prints `` `a\`b${string}` `` and `` `x${string}\\` ``. A quasi holding a
+    // backtick and a backslash renders both escaped.
     let tmpl = store.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from([Arc::from(r"a\`b") as Arc<str>]),
+        quasis: Arc::from([Arc::from("a`b\\c") as Arc<str>]),
         expressions: Arc::from(Vec::new().into_boxed_slice()),
     });
-    // The double-escaping impl emits ``a\\\`b`` (backslash doubled, backtick
-    // escaped); verbatim keeps the source text intact.
-    assert_eq!(render(&store, tmpl), r"`a\`b`");
+    // The verbatim impl emits ``a`b\c`` (a backtick closing the template).
+    assert_eq!(render(&store, tmpl), r"`a\`b\\c`");
 }
 
 // ----------------------------------------------------------------------

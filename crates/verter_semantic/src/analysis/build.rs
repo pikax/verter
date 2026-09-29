@@ -1295,7 +1295,7 @@ fn evaluate_string_candidates(
                 let mut values = vec![String::new()];
                 for (idx, quasi) in tpl.quasis.iter().enumerate() {
                     for value in &mut values {
-                        value.push_str(quasi.value.raw.as_str());
+                        value.push_str(verter_type_expr_oxc::template_element_text(&quasi.value));
                     }
                     if let Some(expr_values) = expr_values.get(idx) {
                         values = combine_string_candidates(&values, expr_values)?;
@@ -1355,7 +1355,7 @@ fn static_prefix_from_expression(
         Expression::TemplateLiteral(tpl) => tpl
             .quasis
             .first()
-            .map(|quasi| quasi.value.raw.as_str().to_string())
+            .map(|quasi| verter_type_expr_oxc::template_element_text(&quasi.value).to_string())
             .filter(|prefix| !prefix.is_empty()),
         Expression::BinaryExpression(bin) if bin.operator.as_str() == "+" => {
             static_prefix_from_expression(&bin.left, const_string_values, None)

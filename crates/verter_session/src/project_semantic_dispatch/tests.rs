@@ -19791,25 +19791,28 @@ fn builtin_key_domain_verdict_is_route_independent() {
     );
 }
 
-/// The shared oracle owns the FULL branch-selection path, INCLUDING the
-/// pre-relation infer-pattern cases `build_conditional` selects before
-/// any relation query: `T extends infer X ? A : B` ALWAYS selects the
-/// TRUE branch (an infer pattern matches anything), with `X := check`.
-/// The classifiers must see the same selection — an open LOSING branch
-/// behind a bare-infer extends is dead and must not false-OPEN the key
-/// domain — and must bind the selected branch's infer name to the
-/// check's own identity/openness, so `? X : …` with an open check stays
-/// honestly OPEN.
+/// The shared oracle owns the FULL branch-selection path, the pre-relation
+/// infer-pattern cases `build_conditional` selects before any relation
+/// query included: a bare-infer extends (`C extends infer X ? A : B`)
+/// selects the TRUE branch with `X := C` for a check that is not generic,
+/// and — as the checker's `getConditionalType` defers any conditional whose
+/// check type is generic — stays deferred over a generic check. The
+/// classifiers see the same selection: a deferred conditional over the
+/// open `T` is OPEN, a selected one over a closed check is judged by its
+/// selected branch, with the branch's infer name bound to the check.
 ///
-/// **Discriminating.** An oracle without the pre-relation infer cases
-/// returns `Deferred` for an `Infer` extends, classifies the check
-/// value-sensitively (open `T` ⇒ OPEN) — the CLOSED assertions and the
-/// materialisation witness fail on that implementation. The
-/// closed-check/bound-branch assertion fails on any implementation that
-/// selects TRUE but leaves the branch's infer name unbound-open or
-/// blindly closed.
+/// Measured on tsc 7.0.2 (`--strict`): with `type InferSel<T> = T extends
+/// infer X ? { label: string } : T`, `Omit<InferSel<T>, "x">` over a
+/// function's own `T` prints as `Omit<InferSel<T>, "x">` (unresolved),
+/// `T extends infer X ? { label: string } : T` prints as written, and
+/// `string extends infer X ? X : 1` is `string`.
+///
+/// **Discriminating.** An oracle that selects TRUE for a bare-infer extends
+/// over a generic check judges `Omit<InferSel<T>, 'x'>` CLOSED and
+/// materialises `{ label }` for it; one without the pre-relation infer case
+/// leaves `Omit<InferSel<string>, 'x'>` unmaterialised.
 #[test]
-fn bare_infer_extends_selects_true_through_the_shared_oracle() {
+fn bare_infer_extends_defers_over_a_generic_check_through_the_shared_oracle() {
     use crate::semantic_query::{
         DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
         ResolvedDeclSlotIdentity,
@@ -19826,6 +19829,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let t_param = outer_type_param(&graph, "T");
+    let string_ty = primitive(&graph, PrimitiveKind::String);
     let x_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "x".to_string(),
     )));
@@ -19835,7 +19839,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Omit"),
     };
-    let inst = |name: &str| {
+    let inst = |name: &str, arg: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
                 canonical_id: Arc::from("/types.ts"),
@@ -19843,35 +19847,41 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
-            args: Arc::from(vec![t_param].into_boxed_slice()),
+            args: Arc::from(vec![arg].into_boxed_slice()),
         })
     };
 
-    // TypeExpr route: bare-infer extends selects TRUE — the open `T`
-    // false branch is dead, the key domain is `{ label }` ⇒ CLOSED.
-    assert!(
-        !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &dispatch,
-            &builtin_omit,
-            &[inst("InferSel"), x_lit],
-        ),
-        "Omit<InferSel<T>, 'x'> over `T extends infer X ? {{ label: string }} : T` must \
-         be CLOSED — the bare-infer pattern selects TRUE and the open false branch is dead"
-    );
-
-    // Control: the same pattern with the OPEN branch WINNING stays OPEN.
+    // TypeExpr route: over the generic `T` the conditional is deferred,
+    // so the key domain depends on `T` ⇒ OPEN (the checker keeps
+    // `Omit<InferSel<T>, "x">` unresolved).
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_omit,
-            &[inst("InferSelOpenWin"), x_lit],
+            &[inst("InferSel", t_param), x_lit],
         ),
-        "Omit<InferSelOpenWin<T>, 'x'> over `T extends infer X ? T : …` must stay OPEN — \
-         the selected TRUE branch is the open T"
+        "Omit<InferSel<T>, 'x'> over `T extends infer X ? {{ label: string }} : T` must \
+         stay OPEN — the conditional defers over the generic T"
+    );
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &dispatch,
+            &builtin_omit,
+            &[inst("InferSelOpenWin", t_param), x_lit],
+        ),
+        "Omit<InferSelOpenWin<T>, 'x'> must stay OPEN"
+    );
+    // Over the closed `string` the TRUE branch is selected ⇒ CLOSED.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &dispatch,
+            &builtin_omit,
+            &[inst("InferSel", string_ty), x_lit],
+        ),
+        "Omit<InferSel<string>, 'x'> must be CLOSED — the bare-infer pattern selects TRUE"
     );
 
     // Node route: the interned conditional with a bare `Infer` extends.
-    let string_ty = primitive(&graph, PrimitiveKind::String);
     let infer_x = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: graph.alloc_infer_binder_id(),
@@ -19886,12 +19896,12 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
         pending: None,
     });
     assert!(
-        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_omit,
             &[node_cond, x_lit],
         ),
-        "the node-route bare-infer conditional must be CLOSED — same selection as \
+        "the node-route bare-infer conditional over T must stay OPEN — same deferral as \
          build_conditional, route-independently"
     );
 
@@ -19914,8 +19924,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
         "`string extends infer X ? X : T` must be CLOSED — X binds the CLOSED check"
     );
 
-    // Control: `T extends infer X ? X : { label }` — TRUE selected with
-    // `X := T` (open) ⇒ the selected branch IS the open T ⇒ OPEN.
+    // Control: `T extends infer X ? X : { label }` stays OPEN.
     let bound_open = graph.intern_node(SemanticNodeData::Conditional {
         check: t_param,
         extends: infer_x,
@@ -19930,46 +19939,46 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
             &builtin_omit,
             &[bound_open, x_lit],
         ),
-        "`T extends infer X ? X : …` must stay OPEN — X binds the OPEN check"
+        "`T extends infer X ? X : …` must stay OPEN"
     );
 
-    // Dispatch-level witness (strict): the TRUE-selected source must
-    // MATERIALISE `label`, not the builtin carrier.
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+    // Dispatch-level witness: over `string` the TRUE-selected source
+    // MATERIALISES `label`; over `T` nothing materialises.
+    let omit = |arg: SemanticNodeId| match dispatch.execute_type_node(
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Omit"),
             ),
-            Arc::from(vec![inst("InferSel"), x_lit].into_boxed_slice()),
+            Arc::from(vec![inst("InferSel", arg), x_lit].into_boxed_slice()),
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
                 crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
-        ),
-    )) {
+        )),
+    ) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-        other => panic!("Omit<InferSel<T>, 'x'> must produce a Value, got {other:?}"),
+        other => panic!("Omit<InferSel<…>, 'x'> must produce a Value, got {other:?}"),
     };
-    match graph.node_data(result).as_deref() {
-        Some(SemanticNodeData::Object(view)) => {
-            let names: Vec<&str> = view
-                .positive_members()
-                .iter()
-                .map(|m| m.string_name().expect("string-key fixture"))
-                .collect();
-            assert!(
-                names.contains(&"label"),
-                "Omit<InferSel<T>, 'x'> must materialise `label`, got {names:?}"
-            );
-        }
-        other => panic!(
-            "Omit<InferSel<T>, 'x'> over a bare-infer TRUE-selected conditional must \
-             materialise an Object surface (NOT the builtin carrier), got {other:?}"
-        ),
-    }
+    let label_names = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Object(view)) => view
+            .positive_members()
+            .iter()
+            .filter_map(|m| m.string_name().map(str::to_owned))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    assert_eq!(
+        label_names(omit(string_ty)),
+        vec!["label".to_owned()],
+        "Omit<InferSel<string>, 'x'> materialises `label`"
+    );
+    assert!(
+        label_names(omit(t_param)).is_empty(),
+        "Omit<InferSel<T>, 'x'> over the deferred conditional materialises no surface"
+    );
 }
 
 /// VALUE-SENSITIVE operands judge VALUE openness, not just bare-argument

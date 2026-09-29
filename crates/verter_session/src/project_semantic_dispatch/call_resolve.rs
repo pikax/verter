@@ -96,6 +96,9 @@ struct CallArgument {
     /// The argument checked in its const context ([`CallArgKey::Eager`]),
     /// the source a candidate's `const` type parameter infers from.
     const_view: Option<SemanticNodeId>,
+    /// A context-sensitive literal as the first inference pass reads it
+    /// ([`CallArgKey::Eager`]).
+    first_pass: Option<SemanticNodeId>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -1572,14 +1575,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut result = Vec::new();
         for argument in key.args.iter() {
             let context_sensitive = argument.is_context_sensitive();
-            let (node, spread, literal_mode, const_view) = match argument {
+            let (node, spread, literal_mode, (const_view, first_pass)) = match argument {
                 CallArgKey::Eager {
                     ty,
                     spread,
                     literal_mode,
                     const_view,
+                    first_pass,
                     ..
-                } => (*ty, *spread, *literal_mode, *const_view),
+                } => (*ty, *spread, *literal_mode, (*const_view, *first_pass)),
                 CallArgKey::ProgramExpression {
                     point,
                     spread,
@@ -1609,7 +1613,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             expression.as_ref(),
                         )
                         .ok_or(ResolveCallFailure::Undecidable)?;
-                    (node, *spread, *literal_mode, None)
+                    (node, *spread, *literal_mode, (None, None))
                 }
             };
             let freshness_origin = node;
@@ -1622,6 +1626,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     indefinite_spread: false,
                     context_sensitive,
                     const_view: const_view
+                        .map(|view| self.substitute_canonical(view, &key.context.substitution)),
+                    first_pass: first_pass
                         .map(|view| self.substitute_canonical(view, &key.context.substitution)),
                 });
                 continue;
@@ -1654,6 +1660,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         indefinite_spread: false,
                         context_sensitive,
                         const_view: None,
+                        first_pass: None,
                     }));
                 }
                 _ => result.push(CallArgument {
@@ -1663,6 +1670,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     indefinite_spread: true,
                     context_sensitive,
                     const_view: None,
+                    first_pass: None,
                 }),
             }
         }
@@ -1982,6 +1990,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // substitution; the post-fixation pass below then checks this
             // argument's applicability under it.
             if argument.context_sensitive {
+                // A context-sensitive literal still infers from its other
+                // members (`SkipContextSensitive` reads the sensitive ones
+                // as the non-inferring `anyFunctionType`); what it deposits
+                // is kept only when that reading relates.
+                if let Some(view) = argument.first_pass {
+                    let checkpoint = self.relation_session_checkpoint();
+                    let deposits_before = self.accepted_inference_deposits();
+                    let step = self.call_argument_relation(
+                        view,
+                        target,
+                        argument.freshness_origin,
+                        budget,
+                        argument.literal_mode,
+                    );
+                    if !budget.charge_accepted_deposits(
+                        self.accepted_inference_deposits() - deposits_before,
+                    ) {
+                        self.abandon_session(session_id);
+                        return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
+                    }
+                    if !matches!(step, RelationStep::Assignable { .. }) {
+                        self.relation_session_rollback(&checkpoint);
+                    }
+                }
                 continue;
             }
             // Applicability relates the argument's ACTUAL type. Widening is
@@ -3481,8 +3513,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         candidate
                     }
                 };
-                let kept = return_structure
-                    .is_some_and(|structure| self.deposit_at_top_level(structure, *param));
+                // A parameter with a primitive constraint keeps its literal
+                // inference wherever it was made (`getCovariantInference`'s
+                // `hasPrimitiveConstraint`): `f<T extends string>(v: T[])`
+                // over `["x", "y"]` is `"x" | "y"`.
+                let kept = self.has_primitive_constraint(*param)
+                    || return_structure
+                        .is_some_and(|structure| self.deposit_at_top_level(structure, *param));
                 let widened = match graph.node_data(*bound).as_deref() {
                     _ if kept => *bound,
                     Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => {
@@ -3511,6 +3548,55 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
             .collect();
         any_widened.then(|| CanonicalTypeSubstitution::new(widened_bindings))
+    }
+
+    /// Whether the type parameter `param` has a constraint that may be a
+    /// primitive (the checker's `hasPrimitiveConstraint`: `maybeTypeOfKind`
+    /// over its constraint for a primitive, a literal, a template literal
+    /// or a `keyof`).
+    fn has_primitive_constraint(&self, param: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        let Some(constraint) = (match graph.node_data(param).as_deref() {
+            Some(SemanticNodeData::TypeParam { constraint, .. }) => *constraint,
+            _ => None,
+        }) else {
+            return false;
+        };
+        let mut stack = vec![constraint];
+        let mut seen = rustc_hash::FxHashSet::default();
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::Primitive(kind)) => {
+                    if !matches!(
+                        kind,
+                        PrimitiveKind::Any
+                            | PrimitiveKind::Unknown
+                            | PrimitiveKind::Never
+                            | PrimitiveKind::Object
+                    ) {
+                        return true;
+                    }
+                }
+                Some(
+                    SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_)
+                    | SemanticNodeData::TemplateLiteral { .. }
+                    | SemanticNodeData::KeyOf { .. },
+                ) => return true,
+                Some(SemanticNodeData::Alias(inner)) => stack.push(*inner),
+                Some(
+                    composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
+                ) => {
+                    let members = composite.composite_members().expect("composite arm");
+                    stack.extend(members.iter().copied());
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// A covariant inference as the checker widens it (`getWidenedType` in

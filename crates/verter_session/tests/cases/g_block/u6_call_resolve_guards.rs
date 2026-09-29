@@ -112,6 +112,7 @@ fn base_key() -> ResolveCallKey {
         receiver: None,
         args: Arc::from(
             vec![CallArgKey::Eager {
+                first_pass: None,
                 ty: SemanticNodeId(2),
                 spread: false,
                 literal_mode: ArgumentLiteralMode::Widened,
@@ -251,6 +252,7 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
             let mut k = base_key();
             k.args = Arc::from(
                 vec![CallArgKey::Eager {
+                    first_pass: None,
                     ty: SemanticNodeId(8),
                     spread: false,
                     literal_mode: ArgumentLiteralMode::Widened,
@@ -269,6 +271,7 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
             let mut k = base_key();
             k.args = Arc::from(
                 vec![CallArgKey::Eager {
+                    first_pass: None,
                     ty: SemanticNodeId(2),
                     spread: true,
                     literal_mode: ArgumentLiteralMode::Widened,
@@ -287,6 +290,7 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
             let mut k = base_key();
             k.args = Arc::from(
                 vec![CallArgKey::Eager {
+                    first_pass: None,
                     ty: SemanticNodeId(2),
                     spread: false,
                     literal_mode: ArgumentLiteralMode::Literal,

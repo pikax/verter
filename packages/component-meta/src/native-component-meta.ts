@@ -552,7 +552,8 @@ export type NativeSurfacePartialReason =
   | "missingDependency"
   | "flowReturnUninferred"
   | "flowReturnUnverified"
-  | "flowReturnNoSurface";
+  | "flowReturnNoSurface"
+  | "undecidedConditional";
 
 /**
  * Typed completeness of a published component surface. Without it an

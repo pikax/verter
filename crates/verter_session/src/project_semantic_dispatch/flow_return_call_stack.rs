@@ -332,7 +332,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }));
                 }
                 ResolveCallProgress::Done(step) => {
-                    let answer = self.fold_resolve_call_step(step, flight.site);
+                    let answer = self.fold_resolve_call_step(step, callee, flight.site);
                     flight.drive.answers.push((callee, answer));
                     return self.drive_call(flight);
                 }
@@ -676,11 +676,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 },
                 _ => false,
             };
+            // A context-sensitive object literal also rides as the first
+            // inference pass reads it: its context-sensitive members as the
+            // non-inferring `any`.
+            let first_pass = match route
+                .function_arguments
+                .get(ordinal)
+                .and_then(Option::as_ref)
+            {
+                Some(SliceExpr::Object { entries, offset }) if argument.context_sensitive => {
+                    match self.eval_object_literal_first_pass(entries, *offset) {
+                        Positional::Value(node) => Some(node),
+                        Positional::Hold | Positional::Unmodeled => None,
+                    }
+                }
+                _ => None,
+            };
             route.args.push(crate::semantic_query::CallArgKey::Eager {
                 ty,
                 spread: argument.spread,
                 context_sensitive: argument.context_sensitive,
                 const_view: typed.const_view,
+                first_pass,
                 literal_mode: indexed_argument_literal_mode(
                     argument.literal_mode,
                     reads_widening_local || typed.fresh_call,
@@ -847,6 +864,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 spread,
                 context_sensitive: false,
                 const_view: None,
+                first_pass: None,
                 literal_mode: crate::semantic_query::ArgumentLiteralMode::Literal,
             };
             finish.function_arguments[position] = None;

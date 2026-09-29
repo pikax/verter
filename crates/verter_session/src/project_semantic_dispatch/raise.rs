@@ -1043,9 +1043,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   `node` unchanged. Child reductions only land in `mapping`
     ///   under whole-surface `Published(Expanded)` (demand rule)
     ///   — so non-whole-surface contexts return the parent verbatim.
-    /// - `TemplateLiteral` / `Infer` hard-stops have no dispatch
-    ///   variant and become `TypeExpr::Unknown(UnknownValue)` (raw text
-    ///   payload carries the hard-stop message).
+    /// - A `TemplateLiteral` hard-stop has no dispatch variant and
+    ///   becomes `TypeExpr::Unknown(UnknownValue)` (raw text payload
+    ///   carries the hard-stop message).
+    /// - An `infer` declaration or reference is a binder of the deferred
+    ///   conditional it sits in (a selected conditional substitutes it
+    ///   away), kept as written: `T extends infer S ? S : never`.
     /// - Terminals (`Primitive` / `Literal` / `TypeParam` / `Opaque(…)`)
     ///   return `node` as-is.
     fn reduce_one(
@@ -1176,9 +1179,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::TemplateLiteral { .. } => {
                 self.opaque_unknown_with(node, "<unresolved template literal type>")
             }
-            SemanticNodeData::Infer { .. } | SemanticNodeData::InferRef { .. } => {
-                self.opaque_unknown_with(node, "<unresolved infer type>")
-            }
+            SemanticNodeData::Infer { .. } | SemanticNodeData::InferRef { .. } => node,
 
             // --- alias unwrap: follow target's reduction ---
             SemanticNodeData::Alias(target) => state
@@ -4241,7 +4242,8 @@ impl<'a> OpenWalk<'a> {
                 None => self.node_is_open(ctx, true_branch()),
             },
             super::ConditionalBranchSelection::False => self.node_is_open(ctx, false_branch()),
-            super::ConditionalBranchSelection::Deferred => {
+            super::ConditionalBranchSelection::Deferred
+            | super::ConditionalBranchSelection::Undecided => {
                 self.node_is_open_at(ctx, check, OperandPosition::ValueSensitive)
                     || self.node_is_open_at(ctx, extends, OperandPosition::ValueSensitive)
                     || self.node_is_open(ctx, true_branch())

@@ -537,8 +537,12 @@ fn intrinsic_applications_key_by_the_frozen_op_tag() {
     // pinned tag, and it joins `every_op`, which `ALL` must cover.
     let pinned = |op: CompilerIntrinsicTypeOp| match op {
         CompilerIntrinsicTypeOp::Awaited => 0u8,
+        CompilerIntrinsicTypeOp::NoInfer => 1u8,
     };
-    let every_op = [CompilerIntrinsicTypeOp::Awaited];
+    let every_op = [
+        CompilerIntrinsicTypeOp::Awaited,
+        CompilerIntrinsicTypeOp::NoInfer,
+    ];
     assert!(
         every_op
             .iter()

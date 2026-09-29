@@ -1880,6 +1880,8 @@ enum ObjectAwait<'e, 'x> {
         method_kind: Option<verter_type_expr::ObjectMethodKind>,
         spans: verter_type_expr::MemberSpans,
         widen_member: bool,
+        /// The value's syntax, whose context sensitivity the member takes.
+        syntax: &'e Expression<'x>,
     },
 }
 
@@ -3163,6 +3165,12 @@ pub struct SliceObjectMember {
     /// annotation, a setter's parameter annotation. `false` for every
     /// other member.
     pub accessor_annotated: bool,
+    /// Whether the member is context sensitive (the checker's
+    /// `isContextSensitive` of a property assignment or method): a function
+    /// value its context types, or a literal holding one. A call's first
+    /// inference pass reads such a member as the non-inferring
+    /// `anyFunctionType` (`SkipContextSensitive`).
+    pub context_sensitive: bool,
 }
 
 /// The unsupported-construct classification.
@@ -16159,7 +16167,7 @@ impl<'a> Lowerer<'a> {
     /// (TypeScript's `isConstContext`), and every other form lowers as it
     /// would anywhere else.
     /// A template literal with holes in a const context: its holes lowered
-    /// as values of this frame, the text around them kept raw. `None` for
+    /// as values of this frame, the text around them cooked. `None` for
     /// any other expression.
     fn lower_const_template(&mut self, expression: &Expression<'_>) -> Option<SliceExpr> {
         let Expression::TemplateLiteral(template) = unwrap_parenthesized(expression) else {
@@ -16171,7 +16179,7 @@ impl<'a> Lowerer<'a> {
         let quasis: Arc<[Arc<str>]> = template
             .quasis
             .iter()
-            .map(|quasi| Arc::from(quasi.value.raw.as_str()))
+            .map(|quasi| Arc::from(verter_type_expr_oxc::template_element_text(&quasi.value)))
             .collect();
         let holes: Arc<[SliceExpr]> = template
             .expressions
@@ -16428,7 +16436,18 @@ impl<'a> Lowerer<'a> {
                     method_kind,
                     spans,
                     widen_member,
-                } => self.push_object_value(frame, key, method_kind, spans, widen_member, value),
+                    syntax,
+                } => {
+                    let context_sensitive = member_context_sensitive(syntax, &value);
+                    self.push_object_value(
+                        frame,
+                        key,
+                        (method_kind, spans),
+                        widen_member,
+                        context_sensitive,
+                        value,
+                    )
+                }
             }
         }
         while let Some(property) = frame.object.properties.get(frame.next) {
@@ -16537,6 +16556,10 @@ impl<'a> Lowerer<'a> {
                     readonly: policy.readonly(),
                     spans,
                     accessor_annotated: false,
+                    context_sensitive: !is_accessor(method_kind)
+                        && verter_semantic::analysis::type_eval_build::indexed_context_sensitive(
+                            Some(value_expression),
+                        ),
                 })));
             return None;
         }
@@ -16594,6 +16617,11 @@ impl<'a> Lowerer<'a> {
                     readonly: false,
                     spans,
                     accessor_annotated,
+                    // An accessor is no context-sensitive member.
+                    context_sensitive: !is_accessor(method_kind)
+                        && verter_semantic::analysis::type_eval_build::indexed_context_sensitive(
+                            Some(value_expression),
+                        ),
                 })));
             return None;
         }
@@ -16629,6 +16657,7 @@ impl<'a> Lowerer<'a> {
                     readonly: policy.readonly(),
                     spans,
                     accessor_annotated: false,
+                    context_sensitive: false,
                 })));
             return None;
         }
@@ -16653,7 +16682,14 @@ impl<'a> Lowerer<'a> {
             {
                 let name = Arc::clone(name);
                 let value = self.lower_assigned_value(value_expression, &name, frame.mode);
-                self.push_object_value(frame, key, method_kind, spans, widen_member, value);
+                self.push_object_value(
+                    frame,
+                    key,
+                    (method_kind, spans),
+                    widen_member,
+                    false,
+                    value,
+                );
                 None
             }
             // A const-asserted member keeps its literal in every
@@ -16664,6 +16700,7 @@ impl<'a> Lowerer<'a> {
                     method_kind,
                     spans,
                     widen_member,
+                    syntax: value_expression,
                 };
                 Some(ObjectStep::Descend(
                     value_expression,
@@ -16679,6 +16716,7 @@ impl<'a> Lowerer<'a> {
                     method_kind,
                     spans,
                     widen_member,
+                    syntax: value_expression,
                 };
                 Some(ObjectStep::Descend(value_expression, frame.mode, false))
             }
@@ -16691,9 +16729,12 @@ impl<'a> Lowerer<'a> {
         &mut self,
         frame: &mut ObjectFrame<'_, '_>,
         key: SliceObjectKey,
-        method_kind: Option<verter_type_expr::ObjectMethodKind>,
-        spans: verter_type_expr::MemberSpans,
+        (method_kind, spans): (
+            Option<verter_type_expr::ObjectMethodKind>,
+            verter_type_expr::MemberSpans,
+        ),
         widen_member: bool,
+        context_sensitive: bool,
         value: SliceExpr,
     ) {
         let (value, assignment_value) = if widen_member && widens_mutable_slot_literals(&value) {
@@ -16713,6 +16754,7 @@ impl<'a> Lowerer<'a> {
                 readonly: frame.policy.readonly(),
                 spans,
                 accessor_annotated: false,
+                context_sensitive,
             })));
     }
 
@@ -19721,4 +19763,25 @@ fn leaf_answer_is_fabricated_at_a_call_position(ty: &TypeExpr, expr: &Expression
     }
     verter_type_expr::referenced_names(ty).embeds_any
         && verter_semantic::analysis::flow::value_composes_unmodeled_call(expr)
+}
+
+/// Whether an object literal member of kind `method_kind` is an accessor.
+fn is_accessor(method_kind: Option<verter_type_expr::ObjectMethodKind>) -> bool {
+    matches!(
+        method_kind,
+        Some(verter_type_expr::ObjectMethodKind::Get | verter_type_expr::ObjectMethodKind::Set)
+    )
+}
+
+/// Whether a data member whose value is `syntax`, lowered to `value`, is
+/// context sensitive: a nested object literal is when one of its members
+/// is (each lowered with its own flag, so the literal is not scanned
+/// again), any other value as its syntax is.
+fn member_context_sensitive(syntax: &Expression<'_>, value: &SliceExpr) -> bool {
+    match value {
+        SliceExpr::Object { entries, .. } => entries.iter().any(
+            |entry| matches!(entry, SliceObjectEntry::Member(member) if member.context_sensitive),
+        ),
+        _ => verter_semantic::analysis::type_eval_build::indexed_context_sensitive(Some(syntax)),
+    }
 }

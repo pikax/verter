@@ -58,6 +58,13 @@ fn generic_functions() {
             r#"1"#,
         ),
         (
+            Read::Type(r#"[(x: string) => string] extends [<T>(x: T) => T] ? 1 : 2"#),
+            r#"2"#,
+            r#"2"#,
+            r#"2"#,
+            r#"2"#,
+        ),
+        (
             Read::Type(r#"[<T>(x: T) => T] extends [<U>(x: U) => U] ? 1 : 2"#),
             r#"1"#,
             r#"1"#,
@@ -1074,6 +1081,13 @@ fn symbol_keys() {
             r#"number"#,
         ),
         (
+            Read::Type(r#"[keyof HasSym] extends ["x" | typeof sym] ? (["x" | typeof sym] extends [keyof HasSym] ? 1 : 3) : 2"#),
+            r#"1"#,
+            r#"1"#,
+            r#"1"#,
+            r#"1"#,
+        ),
+        (
             Read::Type(r#"[{ [sym]: 1 }] extends [{ [sym]: number }] ? 1 : 2"#),
             r#"1"#,
             r#"1"#,
@@ -1116,6 +1130,13 @@ fn symbol_keys() {
             r#"string"#,
         ),
         (
+            Read::Type(r#"[Ex<keyof HasSym, symbol>] extends [typeof sym] ? ([typeof sym] extends [Ex<keyof HasSym, symbol>] ? 1 : 3) : 2"#),
+            r#"1"#,
+            r#"1"#,
+            r#"1"#,
+            r#"1"#,
+        ),
+        (
             Read::Type(r#"[typeof sym] extends [symbol] ? 1 : 2"#),
             r#"1"#,
             r#"1"#,
@@ -1128,6 +1149,13 @@ fn symbol_keys() {
             r#"2"#,
             r#"2"#,
             r#"2"#,
+        ),
+        (
+            Read::Type(r#"Ex<{ [K in keyof HasSym]: K }[keyof HasSym], string>"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
         ),
         (
             Read::Return(r#"sy1"#),
@@ -1383,6 +1411,13 @@ fn contextual_methods() {
             r#"1 | 2"#,
         ),
         (
+            Read::Return(r#"c5"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
             Read::Return(r#"c6"#),
             r#"number"#,
             r#"number"#,
@@ -1517,75 +1552,6 @@ fn keyof_unions_intersections() {
             r#"1"#,
         ),
     ]);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-/// A signature relates to a generic target signature with the target's type
-/// parameters rigid (`compareSignaturesRelated`): `string` is not below
-/// the target's `T`, whose constraint is `unknown`. Outside an inference
-/// session the lane leaves a relation with a type parameter undecided.
-#[test]
-#[ignore = "a type parameter relation outside an inference session stays undecided"]
-fn a_signature_relates_to_a_generic_target_signature() {
-    let failures = Matrix::new(GENERIC_FUNCTIONS).four(&[(
-        Read::Type(r#"[(x: string) => string] extends [<T>(x: T) => T] ? 1 : 2"#),
-        r#"2"#,
-        r#"2"#,
-        r#"2"#,
-        r#"2"#,
-    )]);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-/// `keyof` over a surface with a `unique symbol` key holds that symbol's type
-/// beside the property names. The semantic graph has no key-type leaf for a
-/// `unique symbol` property key (a nominal `typeof` carrier needs the value
-/// root the key does not carry), so `keyof` keeps its deferred carrier.
-#[test]
-#[ignore = "keyof has no key-type leaf for a unique symbol property key"]
-fn keyof_reads_unique_symbol_keys() {
-    let failures = Matrix::new(SYMBOL_KEYS).four(&[
-        (
-            Read::Type(r#"[keyof HasSym] extends ["x" | typeof sym] ? (["x" | typeof sym] extends [keyof HasSym] ? 1 : 3) : 2"#),
-            r#"1"#,
-            r#"1"#,
-            r#"1"#,
-            r#"1"#,
-        ),
-        (
-            Read::Type(r#"[Ex<keyof HasSym, symbol>] extends [typeof sym] ? ([typeof sym] extends [Ex<keyof HasSym, symbol>] ? 1 : 3) : 2"#),
-            r#"1"#,
-            r#"1"#,
-            r#"1"#,
-            r#"1"#,
-        ),
-        (
-            Read::Type(r#"Ex<{ [K in keyof HasSym]: K }[keyof HasSym], string>"#),
-            r#""x""#,
-            r#""x""#,
-            r#""x""#,
-            r#""x""#,
-        ),
-    ]);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-/// An object literal argument holding a context-sensitive method infers from its
-/// other properties in the checker's first pass, where the method is the
-/// non-inferring `anyFunctionType` (`SkipContextSensitive`); the method is
-/// then typed under the parameters those properties inferred. The lane
-/// withholds the whole literal from its first pass, so nothing fixes `T`
-/// before the method is typed, and the method's parameter reads `T` itself.
-#[test]
-#[ignore = "a context-sensitive literal is withheld whole from the first inference pass"]
-fn a_context_sensitive_literal_infers_from_its_other_properties_first() {
-    let failures = Matrix::new(CONTEXTUAL_METHODS).four(&[(
-        Read::Return(r#"c5"#),
-        r#"string"#,
-        r#"string"#,
-        r#"string"#,
-        r#"string"#,
-    )]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

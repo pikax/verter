@@ -1144,6 +1144,9 @@ fn result_completeness_to_ffi(
                     FfiSurfacePartialReason::FlowReturnUnverified
                 }
                 PartialReason::FlowReturnNoSurface => FfiSurfacePartialReason::FlowReturnNoSurface,
+                PartialReason::UndecidedConditional => {
+                    FfiSurfacePartialReason::UndecidedConditional
+                }
             })
             .collect(),
         },

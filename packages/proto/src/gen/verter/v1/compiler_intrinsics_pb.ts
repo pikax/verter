@@ -9,7 +9,7 @@ import { enumDesc, fileDesc } from "@bufbuild/protobuf/codegenv2";
  * Describes the file verter/v1/compiler_intrinsics.proto.
  */
 export const file_verter_v1_compiler_intrinsics: GenFile /*@__PURE__*/ = fileDesc(
-  "CiN2ZXJ0ZXIvdjEvY29tcGlsZXJfaW50cmluc2ljcy5wcm90bxIJdmVydGVyLnYxKm0KF0NvbXBpbGVySW50cmluc2ljVHlwZU9wEioKJkNPTVBJTEVSX0lOVFJJTlNJQ19UWVBFX09QX1VOU1BFQ0lGSUVEEAASJgoiQ09NUElMRVJfSU5UUklOU0lDX1RZUEVfT1BfQVdBSVRFRBABYgZwcm90bzM",
+  "CiN2ZXJ0ZXIvdjEvY29tcGlsZXJfaW50cmluc2ljcy5wcm90bxIJdmVydGVyLnYxKpYBChdDb21waWxlckludHJpbnNpY1R5cGVPcBIqCiZDT01QSUxFUl9JTlRSSU5TSUNfVFlQRV9PUF9VTlNQRUNJRklFRBAAEiYKIkNPTVBJTEVSX0lOVFJJTlNJQ19UWVBFX09QX0FXQUlURUQQARInCiNDT01QSUxFUl9JTlRSSU5TSUNfVFlQRV9PUF9OT19JTkZFUhACYgZwcm90bzM",
 );
 
 /**
@@ -31,6 +31,11 @@ export enum CompilerIntrinsicTypeOp {
    * @generated from enum value: COMPILER_INTRINSIC_TYPE_OP_AWAITED = 1;
    */
   AWAITED = 1,
+
+  /**
+   * @generated from enum value: COMPILER_INTRINSIC_TYPE_OP_NO_INFER = 2;
+   */
+  NO_INFER = 2,
 }
 
 /**
